@@ -1,0 +1,84 @@
+# 附录 C. 数据库 Schema 草案
+
+版本：v0.1  
+日期：2026-04-30
+
+> 本附录为开发初稿，正式建表脚本应通过 migration 工具管理。
+
+## 1. Schema 创建
+
+```sql
+CREATE SCHEMA IF NOT EXISTS core;
+CREATE SCHEMA IF NOT EXISTS met;
+CREATE SCHEMA IF NOT EXISTS hydro;
+CREATE SCHEMA IF NOT EXISTS flood;
+CREATE SCHEMA IF NOT EXISTS map;
+CREATE SCHEMA IF NOT EXISTS ops;
+```
+
+## 2. 时序表建议
+
+```sql
+CREATE TABLE met.forcing_station_timeseries (
+  forcing_version_id TEXT NOT NULL,
+  basin_version_id TEXT NOT NULL,
+  station_id TEXT NOT NULL,
+  valid_time TIMESTAMPTZ NOT NULL,
+  source_id TEXT NOT NULL,
+  variable TEXT NOT NULL,
+  value DOUBLE PRECISION NOT NULL,
+  unit TEXT NOT NULL,
+  native_resolution TEXT,
+  quality_flag TEXT NOT NULL DEFAULT 'ok',
+  PRIMARY KEY (forcing_version_id, station_id, variable, valid_time)
+);
+SELECT create_hypertable('met.forcing_station_timeseries', 'valid_time', if_not_exists => TRUE);
+```
+
+```sql
+CREATE TABLE flood.return_period_result (
+  run_id TEXT NOT NULL,
+  scenario_id TEXT NOT NULL,
+  river_segment_id TEXT NOT NULL,
+  valid_time TIMESTAMPTZ NOT NULL,
+  duration TEXT NOT NULL,
+  q_value DOUBLE PRECISION NOT NULL,
+  q_unit TEXT NOT NULL DEFAULT 'm3/s',
+  return_period DOUBLE PRECISION,
+  warning_level TEXT,
+  quality_flag TEXT NOT NULL DEFAULT 'ok',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+);
+SELECT create_hypertable('flood.return_period_result', 'valid_time', if_not_exists => TRUE);
+```
+
+## 3. 运维表建议
+
+```sql
+CREATE TABLE ops.pipeline_event (
+  event_id BIGSERIAL PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  status_from TEXT,
+  status_to TEXT,
+  message TEXT,
+  details JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+```sql
+CREATE TABLE ops.quality_check (
+  qc_id BIGSERIAL PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  check_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  metrics JSONB NOT NULL DEFAULT '{}',
+  message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
