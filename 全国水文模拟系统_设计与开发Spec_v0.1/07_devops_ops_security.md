@@ -84,7 +84,71 @@ river_timeseries_ingest_rows_per_sec
 - 样本年数满足最小阈值。
 - 拟合参数有效。
 - Q2 < Q5 < Q10 < Q20 < Q50 < Q100。
-- 不满足时标记 `quality_flag`，前端显示“不可靠”或“不展示”。
+- 不满足时标记 `quality_flag`，前端显示”不可靠”或”不展示”。
+
+### 6.4 QC 流水线集成规范
+
+#### 6.4.1 QC 触发时机
+
+| QC 检查点 | 触发阶段 | 触发条件 | 对应数据流转图位置 |
+|---|---|---|---|
+| 原始资料完整性 QC | download 完成后 | raw data 落盘成功 | 数据接入与标准化阶段 |
+| Canonical 转换 QC | canonical convert 完成后 | 变量名/单位/时间轴合规检查 | 数据接入与标准化阶段 |
+| Forcing QC | forcing production 完成后 | 6.1 中全部检查项 | Forcing 生产阶段 |
+| SHUD 输出 QC | output parser 完成后 | 6.2 中全部检查项 | 输出解析阶段 |
+| 洪水频率 QC | frequency 计算完成后 | 6.3 中全部检查项 | 输出解析阶段 |
+
+#### 6.4.2 阻断规则
+
+| QC 失败类型 | 阻断行为 | 说明 |
+|---|---|---|
+| 原始资料文件数不足 | 阻断该 cycle 的 canonical 转换 | 可配置最小文件数阈值 |
+| Canonical 变量缺失 | 阻断该 cycle 的 forcing 生产 | 按必选/可选变量分级 |
+| Forcing 时间轴不连续 | 阻断该 basin 的 SHUD 运行 | 不阻断其他 basin |
+| SHUD 输出列数不一致 | 阻断该 run 的入库和频率计算 | 保留原始输出 |
+| 频率曲线非单调 | 该河段频率曲线标记为 unreliable，不阻断发布 | 前端显示质量标记 |
+
+对于非阻断型失败，标记 quality_flag 但继续下游流程。
+
+#### 6.4.3 QC 结果存储
+
+```sql
+CREATE TABLE ops.qc_result (
+  qc_id BIGSERIAL PRIMARY KEY,
+  qc_checkpoint TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  run_id TEXT,
+  cycle_id TEXT,
+  passed BOOLEAN NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'info',
+  checks_json JSONB NOT NULL,
+  message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX qc_result_target_idx ON ops.qc_result (target_type, target_id, created_at DESC);
+```
+
+checks_json 示例：
+
+```json
+{
+  “checks”: [
+    {“name”: “prcp_non_negative”, “passed”: true},
+    {“name”: “temp_range”, “passed”: true},
+    {“name”: “rh_range”, “passed”: false, “detail”: “station HMT-Y2-0234: RH=1.05 at 2026-05-01T06:00Z”},
+    {“name”: “time_continuity”, “passed”: true}
+  ],
+  “summary”: “3/4 passed”
+}
+```
+
+#### 6.4.4 QC 告警与人工复核
+
+- severity 为 error 的 QC 失败自动触发告警（邮件/webhook）。
+- severity 为 warning 的记录到 qc_result，运维仪表盘可见。
+- 人工复核通过运维监控页面，operator 可查看 QC 详情并决定是否手动放行。
+- 手动放行接口：`POST /api/v1/qc/{qc_id}/override`，需 operator 角色，记录操作审计。
 
 ## 7. 权限控制
 

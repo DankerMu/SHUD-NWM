@@ -201,6 +201,149 @@ CREATE TABLE flood.flood_frequency_curve (
 );
 ```
 
+### 4.9 `core.river_network_version`
+
+```sql
+CREATE TABLE core.river_network_version (
+  river_network_version_id TEXT PRIMARY KEY,
+  basin_version_id TEXT NOT NULL REFERENCES core.basin_version(basin_version_id),
+  version_label TEXT NOT NULL,
+  segment_count INT NOT NULL,
+  source_uri TEXT,
+  checksum TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### 4.10 `core.river_segment`
+
+```sql
+CREATE TABLE core.river_segment (
+  river_segment_id TEXT NOT NULL,
+  river_network_version_id TEXT NOT NULL REFERENCES core.river_network_version(river_network_version_id),
+  segment_order INT,
+  downstream_segment_id TEXT,
+  length_m DOUBLE PRECISION,
+  geom geometry(LineString, 4490),
+  properties_json JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (river_segment_id, river_network_version_id)
+);
+CREATE INDEX river_segment_geom_gix ON core.river_segment USING gist (geom);
+```
+
+### 4.11 `hydro.state_snapshot`
+
+```sql
+CREATE TABLE hydro.state_snapshot (
+  state_id TEXT PRIMARY KEY,
+  model_id TEXT NOT NULL REFERENCES core.model_instance(model_id),
+  run_id TEXT NOT NULL REFERENCES hydro.hydro_run(run_id),
+  valid_time TIMESTAMPTZ NOT NULL,
+  state_uri TEXT NOT NULL,
+  checksum TEXT NOT NULL,
+  usable_flag BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (model_id, valid_time)
+);
+```
+
+### 4.12 `met.forcing_version`
+
+```sql
+CREATE TABLE met.forcing_version (
+  forcing_version_id TEXT PRIMARY KEY,
+  model_id TEXT NOT NULL REFERENCES core.model_instance(model_id),
+  source_id TEXT NOT NULL REFERENCES met.data_source(source_id),
+  cycle_time TIMESTAMPTZ,
+  start_time TIMESTAMPTZ NOT NULL,
+  end_time TIMESTAMPTZ NOT NULL,
+  station_count INT NOT NULL,
+  forcing_package_uri TEXT NOT NULL,
+  checksum TEXT,
+  lineage_json JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### 4.13 `met.canonical_met_product`
+
+```sql
+CREATE TABLE met.canonical_met_product (
+  canonical_product_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES met.data_source(source_id),
+  source_version TEXT,
+  cycle_time TIMESTAMPTZ NOT NULL,
+  valid_time TIMESTAMPTZ NOT NULL,
+  lead_time_hours INT,
+  variable TEXT NOT NULL,
+  unit TEXT NOT NULL,
+  grid_id TEXT NOT NULL,
+  native_time_resolution TEXT,
+  native_spatial_resolution TEXT,
+  object_uri TEXT NOT NULL,
+  checksum TEXT NOT NULL,
+  quality_flag TEXT NOT NULL DEFAULT 'ok',
+  lineage_json JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX canonical_met_source_cycle_idx ON met.canonical_met_product (source_id, cycle_time, variable);
+```
+
+### 4.14 `met.best_available_selection`
+
+```sql
+CREATE TABLE met.best_available_selection (
+  selection_id BIGSERIAL PRIMARY KEY,
+  valid_time TIMESTAMPTZ NOT NULL,
+  variable TEXT NOT NULL,
+  selected_source TEXT NOT NULL,
+  source_cycle_time TIMESTAMPTZ NOT NULL,
+  fallback_order TEXT[] NOT NULL,
+  quality_flag TEXT NOT NULL DEFAULT 'best_available_realtime',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (valid_time, variable)
+);
+SELECT create_hypertable('met.best_available_selection', 'valid_time', if_not_exists => TRUE);
+```
+
+### 4.15 `map.tile_layer`
+
+```sql
+CREATE TABLE map.tile_layer (
+  layer_id TEXT PRIMARY KEY,
+  layer_type TEXT NOT NULL,
+  source_run_id TEXT,
+  source_product_id TEXT,
+  variable TEXT,
+  valid_time TIMESTAMPTZ,
+  tile_format TEXT NOT NULL,
+  tile_uri_template TEXT NOT NULL,
+  min_zoom INT NOT NULL DEFAULT 0,
+  max_zoom INT NOT NULL DEFAULT 14,
+  style_json JSONB,
+  published_flag BOOLEAN NOT NULL DEFAULT false,
+  publish_time TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### 4.16 `map.tile_cache`
+
+```sql
+CREATE TABLE map.tile_cache (
+  layer_id TEXT NOT NULL REFERENCES map.tile_layer(layer_id),
+  z INT NOT NULL,
+  x INT NOT NULL,
+  y INT NOT NULL,
+  tile_data BYTEA,
+  tile_uri TEXT,
+  etag TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (layer_id, z, x, y)
+);
+```
+
 ## 5. 查询模式
 
 ### 5.1 点击河段曲线

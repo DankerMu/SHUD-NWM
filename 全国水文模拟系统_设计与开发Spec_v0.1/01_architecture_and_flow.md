@@ -14,7 +14,25 @@
 4. 前端展示平面：全国地图、时间轴、图层控制、曲线展示。
 ```
 
-这种分层的核心价值是让“业务状态”和“重计算作业”解耦：控制平面可以轻量、高可用；HPC 平面可以重计算、可重试、可水平扩展。
+这种分层的核心价值是让”业务状态”和”重计算作业”解耦：控制平面可以轻量、高可用；HPC 平面可以重计算、可重试、可水平扩展。
+
+### 1.1 架构分层与系统架构图映射
+
+上述四平面是**逻辑视角**的划分，侧重于职责解耦与部署策略。系统架构图（`系统架构图.png`）则采用**六层物理视角**，自顶向下为：前端应用层、服务与接口层、数据与产品存储层、调度与计算层、模型与数据资产层、基础设施层，另有运维与安全作为横切面贯穿全栈。
+
+两套体系的对照映射如下：
+
+| 架构图六层（物理视角） | 四平面（逻辑视角） | 说明 |
+|---|---|---|
+| 前端应用层 | 前端展示平面 | 地图、时间轴、图层控制等用户交互界面 |
+| 服务与接口层（API Gateway、地图服务、瓦片服务等） | 业务控制平面 | 资料源管理、任务状态机、元数据与 API 发布 |
+| 数据与产品存储层（PostgreSQL/PostGIS、TimescaleDB、对象存储） | 存储平面 | 时序数据、空间数据、原始/派生产品持久化 |
+| 调度与计算层（Slurm、Airflow/Prefect、HPC 计算） | HPC 计算平面 | 资料下载、forcing 生产、SHUD 运行、结果解析 |
+| 模型与数据资产层（SHUD 模型库、流域/河网/率定版本） | 业务控制平面 + 存储平面 | 模型注册与版本管理属业务控制，模型文件与数据集属存储 |
+| 基础设施层（HPC 集群、网络存储等） | HPC 计算平面（底层支撑） | 为调度与计算层提供硬件资源与网络互联 |
+| 运维与安全（横切面） | 贯穿全部四平面 | 监控、日志、告警、权限、审计等跨层关注点 |
+
+阅读本文档时，以四平面为主线理解职责边界；参照架构图时，以六层为主线理解部署拓扑与技术选型。
 
 ## 2. 核心组件
 
@@ -108,6 +126,31 @@ created → staged → submitted → running → succeeded → parsed → freque
 ```
 
 异常状态：`failed`、`cancelled`、`superseded`。
+
+### 5.3 状态机与监控 UI 阶段映射
+
+前端产品监控页面将 forecast_cycle 状态机映射为七个流水线阶段卡片。映射关系如下：
+
+| 监控 UI 阶段 | forecast_cycle 状态 | hydro_run 状态 | 失败状态 |
+|---|---|---|---|
+| 资料下载 | discovered, downloading, raw_complete | — | failed_download |
+| 标准化转换 | canonical_ready | — | failed_convert |
+| Forcing 生产 | forcing_ready_partial, forcing_ready | — | failed_forcing |
+| 模型运行 | forecast_running | created, staged, submitted, running, succeeded | failed_run |
+| 输出解析 | parsed_partial | parsed | failed_parse |
+| 频率计算 | complete | frequency_done | — |
+| 产品发布 | published | published | failed_publish |
+
+映射规则：
+- 监控 UI 阶段的状态取所有关联流域的最差状态（任一流域失败则该阶段显示"部分失败"）
+- 阶段进度以"已完成流域数/总流域数"展示
+- 阶段耗时从该阶段首个作业 submitted_at 到最后一个作业 finished_at
+- 点击失败状态阶段卡片展开失败流域列表和错误详情
+
+异常状态展示规则：
+- failed_* 状态在对应阶段卡片上标红，显示失败流域数
+- cancelled 状态灰色显示
+- superseded 状态不在监控 UI 展示（已被新 run 替代）
 
 ## 6. Manifest 驱动
 

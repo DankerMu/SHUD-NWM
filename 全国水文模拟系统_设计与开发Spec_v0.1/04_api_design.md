@@ -95,7 +95,106 @@ GET /api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{
 GET /api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png
 ```
 
-## 6. 权限策略
+## 6. 模型资产管理接口
+
+```http
+GET /api/v1/models/{model_id}
+GET /api/v1/models/{model_id}/versions
+GET /api/v1/models/{model_id}/states?limit=&offset=
+GET /api/v1/models/{model_id}/flood-frequency-curves
+GET /api/v1/basin-versions/{basin_version_id}/river-network-versions
+PUT /api/v1/models/{model_id}/active
+```
+
+model 详情响应示例：
+
+```json
+{
+  "model_id": "yangtze_shud_v12",
+  "basin_version_id": "yangtze_v2026_01",
+  "river_network_version_id": "yangtze_rivnet_v2026_01",
+  "mesh_version_id": "yangtze_mesh_v2026_01",
+  "calibration_version_id": "yangtze_calib_v5",
+  "shud_code_version": "2.0.1",
+  "active_flag": true,
+  "river_segment_count": 1248,
+  "node_count": 2865,
+  "basin_area_km2": 186500,
+  "created_at": "2026-03-15T10:00:00Z"
+}
+```
+
+## 7. 运维监控接口
+
+```http
+GET /api/v1/pipeline/status?source=&cycle_time=
+GET /api/v1/pipeline/stages?source=&cycle_time=
+GET /api/v1/jobs?source=&cycle_time=&status=&model_id=&limit=&offset=
+GET /api/v1/jobs/{slurm_job_id}/logs
+POST /api/v1/jobs/{run_id}/retry
+POST /api/v1/jobs/{run_id}/cancel
+GET /api/v1/metrics/stage-duration?source=&days=7
+GET /api/v1/metrics/success-rate?source=&days=7
+GET /api/v1/queue/depth
+```
+
+pipeline stages 响应示例：
+
+```json
+{
+  "source": "GFS",
+  "cycle_time": "2026-05-03T00:00:00Z",
+  "stages": [
+    {
+      "stage": "download",
+      "status": "completed",
+      "started_at": "2026-05-03T04:20:00Z",
+      "finished_at": "2026-05-03T04:35:00Z",
+      "duration_seconds": 900,
+      "basin_progress": "30/30"
+    },
+    {
+      "stage": "shud_forecast",
+      "status": "running",
+      "started_at": "2026-05-03T05:10:00Z",
+      "finished_at": null,
+      "duration_seconds": null,
+      "basin_progress": "18/30"
+    }
+  ]
+}
+```
+
+## 8. 洪水预警聚合接口
+
+```http
+GET /api/v1/flood-alerts/summary?run_id=&threshold=Q5
+GET /api/v1/flood-alerts/ranking?run_id=&limit=20
+GET /api/v1/flood-alerts/segments?run_id=&min_return_period=5&valid_time=
+GET /api/v1/flood-alerts/timeline?run_id=&segment_id=
+```
+
+alerts summary 响应示例：
+
+```json
+{
+  "run_id": "fcst_gfs_2026050300_all",
+  "threshold": "Q5",
+  "total_segments": 12500,
+  "alert_counts": {
+    "normal": 12200,
+    "elevated": 180,
+    "watch": 72,
+    "warning": 31,
+    "high_risk": 12,
+    "severe": 4,
+    "extreme": 1
+  },
+  "updated_at": "2026-05-03T08:00:00Z"
+}
+```
+
+## 9. 权限策略
 
 ```text
 viewer       查看已发布产品
@@ -105,7 +204,7 @@ operator     触发重跑、切换 active model
 admin        管理资料源、权限、系统配置
 ```
 
-## 7. API 非功能要求
+## 10. API 非功能要求
 
 | 指标 | 要求 |
 |---|---|

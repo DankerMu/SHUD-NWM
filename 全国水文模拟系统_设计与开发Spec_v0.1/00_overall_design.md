@@ -168,7 +168,52 @@ GFS/IFS 周期发布
 
 ### 6.3 Hindcast / Replay
 
-用于历史回放、模型校准复核、洪水事件复盘、统计样本生产。Hindcast 与 forecast 共用运行引擎，但 run_type 不同，且不覆盖业务预报产品。
+**用途**：用于历史回放、模型校准复核、洪水事件复盘、统计样本生产。Hindcast 与 forecast 共用运行引擎，但 run_type 不同，且不覆盖业务预报产品。
+
+**触发方式**：
+
+Hindcast 不由 Cycle Discovery 自动触发，由 operator 或 model_admin 通过管理接口手动提交：
+
+```http
+POST /api/v1/hindcast/submit
+{
+  "model_id": "yangtze_shud_v12",
+  "source_id": "ERA5",
+  "start_time": "2020-06-01T00:00:00Z",
+  "end_time": "2020-08-31T23:00:00Z",
+  "purpose": "flood_frequency_sample",
+  "init_state_id": null
+}
+```
+
+**Manifest 示例**：
+
+```json
+{
+  "run_id": "hindcast_era5_yangtze_v12_202006_202008",
+  "run_type": "hindcast",
+  "scenario_id": "hindcast_replay",
+  "model_id": "yangtze_shud_v12",
+  "basin_version_id": "yangtze_v2026_01",
+  "source_id": "ERA5",
+  "start_time": "2020-06-01T00:00:00Z",
+  "end_time": "2020-08-31T23:00:00Z",
+  "init_state_uri": null,
+  "forcing_uri": "s3://nhms/forcing/era5/yangtze_v2026_01/202006_202008/",
+  "output_uri": "s3://nhms/runs/hindcast_era5_yangtze_v12_202006_202008/output/",
+  "threads": 32
+}
+```
+
+**数据隔离规则**：
+
+- Hindcast 结果的 run_type = "hindcast"，scenario_id = "hindcast_replay"
+- Hindcast 入库到同一 river_timeseries 表，但不自动发布到前端业务产品
+- Hindcast 结果可被 Flood Frequency Engine 作为历史样本使用
+- 前端默认不展示 hindcast 数据；analyst 角色可在高级查询中按 run_type 筛选 hindcast 结果
+- Hindcast 不产生 StateSnapshot（不参与业务 warm-start 链路），除非显式配置
+
+**与阶段路线的关系**：Hindcast 能力在阶段 5（洪水频率/重现期产品）前完成，作为历史样本生产的前置依赖。
 
 ## 7. 数据产品
 
