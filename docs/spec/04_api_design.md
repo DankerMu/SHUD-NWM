@@ -47,8 +47,8 @@ GET /api/v1/data-sources
 GET /api/v1/data-sources/{source_id}/cycles?from=&to=&status=
 GET /api/v1/layers
 GET /api/v1/layers/{layer_id}/valid-times
-GET /api/v1/river-segments/{segment_id}
-GET /api/v1/river-segments/{segment_id}/forecast-series?issue_time=latest&variables=q_down,stage&scenarios=GFS,IFS
+GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}
+GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series?issue_time=latest&variables=q_down,stage&scenarios=GFS,IFS
 GET /api/v1/met/stations?basin_version_id=&model_id=
 GET /api/v1/met/stations/{station_id}/series?forcing_version_id=&variables=PRCP,TEMP,RH,wind,Rn,Press
 GET /api/v1/runs/{run_id}
@@ -194,7 +194,39 @@ alerts summary 响应示例：
 }
 ```
 
-## 9. 权限策略
+## 9. 数据血缘接口
+
+系统核心卖点之一是可追溯。以下接口支持从任意前端曲线点反查完整数据链路，满足路线图"任意曲线点可追溯到 run_id、forcing_version、source cycle"的验收要求。
+
+```http
+GET /api/v1/lineage/river-point?run_id=&segment_id=&valid_time=&variable=
+GET /api/v1/lineage/forcing-point?forcing_version_id=&station_id=&valid_time=&variable=
+GET /api/v1/lineage/product/{product_id}
+```
+
+river-point 响应示例：
+
+```json
+{
+  "segment_id": "yangtze_v12_riv_000123",
+  "valid_time": "2026-05-01T06:00:00Z",
+  "variable": "q_down",
+  "lineage": {
+    "run_id": "fcst_gfs_2026043000_yangtze_v12",
+    "model_id": "yangtze_shud_v12",
+    "init_state_id": "state_yangtze_v12_2026042918",
+    "forcing_version_id": "forc_gfs_2026043000_yangtze_v12",
+    "source_id": "GFS",
+    "cycle_time": "2026-04-30T00:00:00Z",
+    "canonical_product_ids": ["can_gfs_2026043000_prcp_030", "can_gfs_2026043000_temp_030"],
+    "parser_job_id": "parse_fcst_gfs_2026043000_yangtze_v12",
+    "qc_result_ids": ["qc_001", "qc_002"],
+    "published_layer_id": "hydro_q_fcst_gfs_2026043000"
+  }
+}
+```
+
+## 10. 权限策略
 
 ```text
 viewer       查看已发布产品
@@ -204,7 +236,7 @@ operator     触发重跑、切换 active model
 admin        管理资料源、权限、系统配置
 ```
 
-## 10. API 非功能要求
+## 11. API 非功能要求
 
 | 指标 | 要求 |
 |---|---|

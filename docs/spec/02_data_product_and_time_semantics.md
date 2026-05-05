@@ -82,7 +82,76 @@ lineage_json
 | `net_radiation` | `Rn` | `W/m2` | 可由短波/长波及地表参数估算。 |
 | `surface_pressure` | `Press` | `Pa` | 可缺省，但生产建议尽量提供。 |
 
-## 7. Scenario 语义
+## 7. Forcing 变量转换规则
+
+### 7.1 降水 PRCP
+
+系统内部 canonical 标准为 `prcp_amount_mm_per_step`（时段降水量 mm），forcing 输出为 `mm/day`。
+
+GFS APCP 转换流程：
+
+```text
+1. GFS APCP 是自起报时刻累计值（mm）。
+2. 相邻 forecast hour 做差分得到时段降水量。
+3. 负差分处理：
+   a. |负值| < 0.01 mm → 置零，quality_flag = 'ok'
+   b. |负值| ≥ 0.01 mm → 置零，quality_flag = 'warning_negative_precip'
+   c. 连续 ≥3 步负差分 → quality_flag = 'error_precip_accumulation'，阻断该站该变量
+4. 时段降水量（mm/step）→ SHUD PRCP（mm/day）：
+   PRCP_mm_day = prcp_mm_per_step × (24 / step_hours)
+```
+
+ERA5 转换流程：ERA5 降水同样为累计量，按相同差分逻辑处理。
+
+CLDAS 转换流程：CLDAS 提供小时降水率（mm/h），直接累加为时段量再转 mm/day。
+
+### 7.2 净辐射 Rn
+
+不同数据源对 Rn 的支持程度不同，按以下优先级降级：
+
+```text
+Level 1：数据源直接提供 net_radiation
+  适用：ERA5 提供 ssr + str（短波净 + 长波净）
+  Rn = ssr + str
+  lineage_json.radiation_method = 'direct_net'
+
+Level 2：用下行辐射分量推算
+  适用：GFS 提供 dswrf（短波下行）+ dlwrf（长波下行）
+  Rn = dswrf × (1 - albedo) + dlwrf - σ × T⁴
+  albedo 取模型 mesh 属性或默认 0.23
+  lineage_json.radiation_method = 'downward_components'
+  quality_flag = 'estimated_radiation'
+
+Level 3：仅有短波辐射，用经验公式近似
+  Rn = dswrf × 0.77 - σ × T⁴ × (0.34 - 0.14 × √e_a)
+  lineage_json.radiation_method = 'empirical_fao56'
+  quality_flag = 'empirical_radiation'
+```
+
+所有 forcing 输出必须在 `lineage_json` 中记录 `radiation_method`。
+
+### 7.3 相对湿度 RH
+
+```text
+情况 1：数据源提供 relative_humidity（%）
+  RH = rh_percent / 100，范围 [0, 1]
+
+情况 2：数据源提供 specific_humidity（kg/kg）
+  需要 air_temperature 和 surface_pressure
+  e_s = 6.112 × exp(17.67 × T / (T + 243.5))   (hPa, T in ℃)
+  w_s = 0.622 × e_s / (P_hPa - e_s)
+  RH = min(q / w_s, 1.0)
+
+  如果 surface_pressure 缺失：
+    使用站点高程的标准大气近似：P = 1013.25 × (1 - 2.25577e-5 × elev)^5.25588
+    quality_flag = 'estimated_pressure'
+
+情况 3：湿度变量完全缺失
+  quality_flag = 'error_missing_humidity'
+  该站该变量阻断，forcing_version 不得进入 ready 状态
+```
+
+## 8. Scenario 语义
 
 | Scenario | 含义 |
 |---|---|
@@ -93,7 +162,7 @@ lineage_json
 | `forecast_gfs_ifs_compare` | 前端对比展示，不一定需要实体派生表。 |
 | `hindcast_replay` | 历史回放或复盘。 |
 
-## 8. Best available 产品规则
+## 9. Best available 产品规则
 
 `best_available` 不应覆盖 GFS/IFS 原始 scenario，而是一个派生层。每个时间点记录来源：
 
@@ -108,7 +177,7 @@ lineage_json
 }
 ```
 
-## 9. 前端时间列表
+## 10. 前端时间列表
 
 后端每个图层返回：
 
@@ -126,7 +195,7 @@ lineage_json
 
 前端时间滑块只在 `valid_times[]` 上移动，不自行推断缺失时刻。
 
-## 10. Analysis + Forecast 曲线拼接
+## 11. Analysis + Forecast 曲线拼接
 
 ```text
 past_segment:

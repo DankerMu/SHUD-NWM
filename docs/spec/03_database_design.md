@@ -156,10 +156,13 @@ CREATE TABLE hydro.hydro_run (
 
 ### 4.7 `hydro.river_timeseries`
 
+> `river_segment` 的主键是 `(river_segment_id, river_network_version_id)` 复合键，因此 `river_timeseries` 必须同时保存 `river_network_version_id`，否则跨河网版本升级后会产生歧义。
+
 ```sql
 CREATE TABLE hydro.river_timeseries (
   run_id TEXT NOT NULL,
   basin_version_id TEXT NOT NULL,
+  river_network_version_id TEXT NOT NULL,
   river_segment_id TEXT NOT NULL,
   valid_time TIMESTAMPTZ NOT NULL,
   lead_time_hours INT,
@@ -168,13 +171,53 @@ CREATE TABLE hydro.river_timeseries (
   unit TEXT NOT NULL,
   quality_flag TEXT NOT NULL DEFAULT 'ok',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (run_id, river_segment_id, variable, valid_time)
+  PRIMARY KEY (run_id, river_segment_id, variable, valid_time),
+  FOREIGN KEY (river_segment_id, river_network_version_id)
+    REFERENCES core.river_segment(river_segment_id, river_network_version_id)
 );
 SELECT create_hypertable('hydro.river_timeseries', 'valid_time', if_not_exists => TRUE);
 CREATE INDEX river_ts_segment_time_idx ON hydro.river_timeseries (river_segment_id, variable, valid_time DESC);
 ```
 
-### 4.8 `flood.flood_frequency_curve`
+### 4.8 `met.met_station`
+
+> 气象代站是流域地理实体，与 `basin_version` 绑定，不与单个 `model_instance` 耦合。多个模型版本可共享同一组代站。模型-特定的格点权重通过 `met.interp_weight` 关联。
+
+```sql
+CREATE TABLE met.met_station (
+  station_id TEXT PRIMARY KEY,
+  basin_version_id TEXT NOT NULL REFERENCES core.basin_version(basin_version_id),
+  station_name TEXT,
+  geom geometry(Point, 4490) NOT NULL,
+  elevation_m DOUBLE PRECISION,
+  station_role TEXT NOT NULL DEFAULT 'forcing_proxy',
+  active_flag BOOLEAN NOT NULL DEFAULT true,
+  properties_json JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX met_station_geom_gix ON met.met_station USING gist (geom);
+CREATE INDEX met_station_basin_idx ON met.met_station (basin_version_id);
+```
+
+### 4.9 `met.interp_weight`
+
+```sql
+CREATE TABLE met.interp_weight (
+  weight_id BIGSERIAL PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES met.data_source(source_id),
+  grid_id TEXT NOT NULL,
+  model_id TEXT NOT NULL REFERENCES core.model_instance(model_id),
+  station_id TEXT NOT NULL REFERENCES met.met_station(station_id),
+  variable TEXT NOT NULL,
+  grid_cell_id TEXT NOT NULL,
+  weight DOUBLE PRECISION NOT NULL,
+  method TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (source_id, grid_id, model_id, station_id, variable, grid_cell_id)
+);
+```
+
+### 4.10 `flood.flood_frequency_curve`
 
 ```sql
 CREATE TABLE flood.flood_frequency_curve (
@@ -344,7 +387,62 @@ CREATE TABLE map.tile_cache (
 );
 ```
 
-## 5. 查询模式
+## 5. 状态枚举类型
+
+> 关键状态字段必须使用 ENUM 或 lookup 表约束，避免业务运行后出现 `success`/`succeeded`/`done`/`complete` 等混用。
+
+```sql
+CREATE TYPE hydro.run_type AS ENUM (
+  'analysis',
+  'forecast',
+  'hindcast'
+);
+
+CREATE TYPE hydro.run_status AS ENUM (
+  'created',
+  'staged',
+  'submitted',
+  'running',
+  'succeeded',
+  'parsed',
+  'frequency_done',
+  'published',
+  'failed',
+  'cancelled',
+  'superseded'
+);
+
+CREATE TYPE met.source_status AS ENUM (
+  'enabled',
+  'restricted',
+  'planned',
+  'mock',
+  'deprecated'
+);
+
+CREATE TYPE met.cycle_status AS ENUM (
+  'discovered',
+  'downloading',
+  'raw_complete',
+  'canonical_ready',
+  'forcing_ready_partial',
+  'forcing_ready',
+  'forecast_running',
+  'parsed_partial',
+  'complete',
+  'published',
+  'failed_download',
+  'failed_convert',
+  'failed_forcing',
+  'failed_run',
+  'failed_parse',
+  'failed_publish'
+);
+```
+
+使用这些 ENUM 后，`hydro.hydro_run.run_type` 改为 `hydro.run_type NOT NULL`，`hydro.hydro_run.status` 改为 `hydro.run_status NOT NULL`，`met.data_source.status` 改为 `met.source_status NOT NULL`，`met.forecast_cycle.status` 改为 `met.cycle_status NOT NULL`。
+
+## 6. 查询模式
 
 ### 5.1 点击河段曲线
 
@@ -368,7 +466,7 @@ WHERE run_id = :run_id
 GROUP BY river_segment_id;
 ```
 
-## 6. 版本切换规则
+## 7. 版本切换规则
 
 - 新 model_instance 上线后，必须先 `active_flag=false`。
 - 完成 smoke test、历史样本、频率曲线后，才可设为 active。

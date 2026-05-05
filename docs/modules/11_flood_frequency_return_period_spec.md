@@ -62,7 +62,81 @@
 - `CLI nhms-flood compute-return-period --run-id`
 - `GET /api/v1/river-segments/{id}/frequency-thresholds`
 
-## 7. 配置项
+## 7. 频率分析方法学规范
+
+### 7.1 默认方法与可选方法
+
+```text
+默认方法：P-III（皮尔逊 III 型）年最大值法
+可选方法：
+  - GEV（广义极值）年最大值法
+  - POT（超阈值）+ GPD（广义 Pareto）
+```
+
+方法选择记录在 `flood_frequency_curve.method` 字段。
+
+### 7.2 Duration 提取规则
+
+`duration` 定义了从连续时间序列中提取极值样本的时间窗口：
+
+```text
+duration = 1h   → 取每年逐小时流量序列的最大值
+duration = 3h   → 取每年 3 小时滑动平均流量的最大值
+duration = 6h   → 取每年 6 小时滑动平均流量的最大值
+duration = 24h  → 取每年 24 小时滑动平均流量的最大值
+duration = 72h  → 取每年 72 小时滑动平均流量的最大值
+duration = 7d   → 取每年 7 天滑动平均流量的最大值
+```
+
+滑动窗口步长等于模型输出步长（`model_output_interval`）。窗口内缺测率 > 10% 的年份不纳入样本，计入 `parameters_json.excluded_years`。
+
+### 7.3 样本要求
+
+```text
+最小样本年数（按重现期等级）：
+  Q2 / Q5   → ≥ 10 年
+  Q10       → ≥ 15 年
+  Q20       → ≥ 20 年
+  Q50       → ≥ 30 年
+  Q100      → ≥ 40 年
+
+不满足最小样本量时：
+  - 该等级的 Q 值仍可计算但 quality_flag = 'insufficient_sample'
+  - 前端展示时标注"样本不足，仅供参考"
+  - 不参与 warning_level 判定
+```
+
+### 7.4 汛期与全年样本选择
+
+```text
+默认：全年样本（annual maximum）
+可选：汛期样本（flood_season_only）
+  - 汛期定义按流域配置，如南方 4-10 月、北方 6-9 月
+  - 记录在 parameters_json.season_filter
+```
+
+### 7.5 单调性与外推约束
+
+```text
+1. 必须满足 Q2 < Q5 < Q10 < Q20 < Q50 < Q100
+2. 如果拟合结果违反单调性：
+   a. 尝试其他方法（P-III → GEV）
+   b. 如仍违反，取相邻有效值的线性插值修正
+   c. 修正后 quality_flag = 'monotonicity_corrected'
+3. 超出 Q100 的外推：不提供点估计，仅返回 return_period > 100
+4. return_period 插值方法：对数线性插值（log T vs Q）
+```
+
+### 7.6 模型版本更新规则
+
+```text
+新 model_instance 上线后，必须重算所有关联河段的频率曲线：
+  - 新曲线绑定新 model_id
+  - 旧曲线保留但 quality_flag 改为 'superseded_by_model_upgrade'
+  - 旧曲线不删除，保留审计和对比用途
+```
+
+## 8. 配置项
 
 ```yaml
 flood_frequency_return_period:
@@ -75,7 +149,7 @@ flood_frequency_return_period:
   object_store_prefix: s3://nhms
 ```
 
-## 8. 测试要求
+## 9. 测试要求
 
 ### 8.1 单元测试
 
@@ -96,28 +170,28 @@ flood_frequency_return_period:
 - 固定一个历史周期和测试流域，比较输出行数、时间轴、关键统计值。
 - 新版本不得破坏已发布 API 字段。
 
-## 9. 性能要求
+## 10. 性能要求
 
 - 支持按流域/周期并发运行。
 - 不在内存中一次性加载全国全部河段时序。
 - 大文件以流式处理或分块处理为主。
 - 指标和日志写入不应成为主流程瓶颈。
 
-## 10. 安全要求
+## 11. 安全要求
 
 - 禁止把 token、密码、下载凭证写入日志。
 - 所有外部输入必须校验。
 - 文件路径必须限制在配置的 workspace/object prefix 内。
 - 对外 API 必须执行鉴权和授权。
 
-## 11. 验收清单
+## 12. 验收清单
 
 - [ ] 频率曲线与 model_id/river_segment_id 强绑定。
 - [ ] Q2<Q5<Q10<Q20<Q50<Q100。
 - [ ] 样本不足时 quality_flag 明确。
 - [ ] 预报 run 完成后能自动计算未来 7 天最大重现期。
 
-## 12. Definition of Done
+## 13. Definition of Done
 
 - 代码合并到主分支。
 - 单元测试和集成测试通过。
