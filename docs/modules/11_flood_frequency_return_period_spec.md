@@ -1,7 +1,7 @@
 # 11. 洪水频率与重现期模块：开发 Spec
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
 ## 1. 开发目标
 
@@ -136,6 +136,23 @@ duration = 7d   → 取每年 7 天滑动平均流量的最大值
   - 旧曲线不删除，保留审计和对比用途
 ```
 
+### 7.7 Warning level 映射规则
+
+```text
+return_period < 2           → normal
+2 ≤ return_period < 5       → elevated
+5 ≤ return_period < 10      → watch
+10 ≤ return_period < 20     → warning
+20 ≤ return_period < 50     → high_risk
+50 ≤ return_period < 100    → severe
+return_period ≥ 100         → extreme
+```
+
+约束条件：
+- `warning_level` 只在对应 Q 阈值的 `quality_flag = 'ok'` 时计算。
+- `quality_flag = 'insufficient_sample'` 的等级不参与正式预警，仅做辅助展示，`warning_level` 置为 `null`。
+- 前端预警聚合 API（`/api/v1/flood-alerts/*`）的 `alert_counts` 分组与上述等级一一对应。
+
 ## 8. 配置项
 
 ```yaml
@@ -151,21 +168,21 @@ flood_frequency_return_period:
 
 ## 9. 测试要求
 
-### 8.1 单元测试
+### 9.1 单元测试
 
 - manifest schema 校验。
 - 参数校验。
 - 错误码映射。
 - 幂等逻辑。
 
-### 8.2 集成测试
+### 9.2 集成测试
 
 - 使用 mock 数据源或小流域样例完成一次端到端调用。
 - 验证数据库状态转移。
 - 验证对象存储路径和 checksum。
 - 验证失败重试和失败终态。
 
-### 8.3 回归测试
+### 9.3 回归测试
 
 - 固定一个历史周期和测试流域，比较输出行数、时间轴、关键统计值。
 - 新版本不得破坏已发布 API 字段。

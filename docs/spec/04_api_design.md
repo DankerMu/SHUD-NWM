@@ -1,7 +1,7 @@
 # 04. API 设计
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
 ## 1. API 风格
 
@@ -50,6 +50,8 @@ GET /api/v1/layers/{layer_id}/valid-times
 GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}
 GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series?issue_time=latest&variables=q_down,stage&scenarios=GFS,IFS
 GET /api/v1/met/stations?basin_version_id=&model_id=
+# 当传入 model_id 时，返回该 model 通过 interp_weight 实际使用的代站集合；
+# met_station 表本身不含 model_id 字段，关联通过 interp_weight 表实现。
 GET /api/v1/met/stations/{station_id}/series?forcing_version_id=&variables=PRCP,TEMP,RH,wind,Rn,Press
 GET /api/v1/runs/{run_id}
 GET /api/v1/runs?basin_id=&source=&cycle_time=&status=
@@ -147,7 +149,7 @@ pipeline stages 响应示例：
   "stages": [
     {
       "stage": "download",
-      "status": "completed",
+      "status": "succeeded",
       "started_at": "2026-05-03T04:20:00Z",
       "finished_at": "2026-05-03T04:35:00Z",
       "duration_seconds": 900,
@@ -236,7 +238,22 @@ operator     触发重跑、切换 active model
 admin        管理资料源、权限、系统配置
 ```
 
-## 11. API 非功能要求
+## 11. Pipeline 阶段展示状态
+
+API 返回的 pipeline stages `status` 字段使用**前端展示状态**，与数据库 ENUM 状态（`hydro.run_status`、`met.cycle_status`）区分：
+
+```text
+pending             尚未开始
+running             执行中
+succeeded           全部成功
+partially_failed    部分流域失败
+failed              全部失败
+skipped             跳过（如 IFS 未接入时）
+```
+
+> 当前 `04_api_design.md` 是设计性接口清单，不作为代码生成源。OpenAPI 完整契约（含 `components.schemas`、`parameters`、`responses`、`securitySchemes`）属于 M0 工程初始化交付物，将在 `openapi/nhms.v1.yaml` 中实现。
+
+## 12. API 非功能要求
 
 | 指标 | 要求 |
 |---|---|

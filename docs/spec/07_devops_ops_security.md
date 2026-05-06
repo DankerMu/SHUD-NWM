@@ -1,7 +1,7 @@
 # 07. 部署、运维、安全与质量控制
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
 ## 1. 环境划分
 
@@ -149,6 +149,8 @@ checks_json 示例：
 - severity 为 warning 的记录到 qc_result，运维仪表盘可见。
 - 人工复核通过运维监控页面，operator 可查看 QC 详情并决定是否手动放行。
 - 手动放行接口：`POST /api/v1/qc/{qc_id}/override`，需 operator 角色，记录操作审计。
+
+> **可执行 QC 规则的落地计划**：当前本节定义了 QC 的触发时机、阻断逻辑、结果存储和人工复核流程。具体的可执行 QC 规则（变量范围阈值、缺测比例上限、列数校验等）和 QC CLI 工具（`nhms-qc check-canonical`、`nhms-qc check-forcing` 等）将在 M0/M1 工程落地阶段以 YAML 配置文件形式补充。
 
 ## 7. 权限控制
 

@@ -1,7 +1,7 @@
 # 全国水文模拟系统：总体设计与模块开发 Spec
 
 版本：v0.2  
-更新日期：2026-05-04  
+更新日期：2026-05-06  
 文档格式：Markdown  
 目标系统名称：**全国水文模拟系统**
 
@@ -55,8 +55,8 @@ docs/spec/
 ├── 00_overall_design.md                   ← 总体设计：目标、范围、核心对象、架构决策、Hindcast 设计
 ├── 01_architecture_and_flow.md            ← 系统架构：四平面/六层映射、流程、状态机、监控 UI 映射
 ├── 02_data_product_and_time_semantics.md  ← 数据产品：时间语义、Scenario、best_available 规则
-├── 03_database_design.md                  ← 数据库：16 张核心表（含 river_segment、state_snapshot 等）
-├── 04_api_design.md                       ← API：GIS 查询 + 模型资产 + 运维监控 + 预警聚合（10 节）
+├── 03_database_design.md                  ← 数据库：20 张核心表 + 4 组 ENUM + 职责分工说明
+├── 04_api_design.md                       ← API：GIS 查询 + 模型资产 + 运维监控 + 预警聚合 + 血缘 + 阶段状态（12 节）
 ├── 05_slurm_hpc_design.md                 ← HPC 调度：Slurm 作业体系、依赖链、失败处理
 ├── 06_frontend_gis_design.md              ← 前端功能规格：全部 8 个页面的布局/交互/字段/API（859 行）
 ├── 06B_frontend_ui_design_spec.md         ← 前端 UI 规范：设计 Token/组件/图表配置/动效/状态/响应式（676 行）
@@ -126,8 +126,8 @@ docs/spec/
 
 ### 工程设计（按需阅读）
 
-7. **`03_database_design.md`** — 6 个 Schema、16 张核心表定义、查询模式、版本切换规则
-8. **`04_api_design.md`** — 10 节 API 定义（GIS 查询 + 瓦片 + 模型资产 + 运维监控 + 预警聚合 + 权限 + 性能要求）
+7. **`03_database_design.md`** — 6 个 Schema、20 张核心表定义（含 met_station/interp_weight/forcing_station_timeseries/return_period_result）、4 组状态 ENUM、查询模式、版本切换规则、与附录 C 的职责分工
+8. **`04_api_design.md`** — 12 节 API 定义（GIS 查询 + 瓦片 + 模型资产 + 运维监控 + 预警聚合 + 数据血缘 + 权限 + 阶段展示状态 + 性能要求）
 9. **`05_slurm_hpc_design.md`** — 8 类 Slurm 作业、Job Array 策略、依赖链编排、失败处理、幂等性、安全
 10. **`06_frontend_gis_design.md`** — 全部 8 个页面的功能规格（搭配 `../../design/ui/前端效果图*.png` 对照阅读）
 11. **`06B_frontend_ui_design_spec.md`** — 设计 Token（色彩/字体/间距）、11 个组件样式规范、8 套 ECharts 图表配置、图标/动效/状态设计/响应式

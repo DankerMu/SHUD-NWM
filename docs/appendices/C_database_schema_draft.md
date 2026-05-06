@@ -1,9 +1,9 @@
 # 附录 C. 数据库 Schema 草案
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
-> 本附录为开发初稿，正式建表脚本应通过 migration 工具管理。
+> 本附录为接近 migration 的 SQL 草案，可包含索引优化、分区策略等实施细节。当本附录与 `03_database_design.md`（主数据库设计）不一致时，以主设计文档为准。正式建表脚本应通过 migration 工具管理。
 
 ## 1. Schema 创建
 
@@ -79,9 +79,9 @@ CREATE TABLE met.interp_weight (
 
 ```sql
 CREATE TABLE met.forcing_station_timeseries (
-  forcing_version_id TEXT NOT NULL,
+  forcing_version_id TEXT NOT NULL REFERENCES met.forcing_version(forcing_version_id),
   basin_version_id TEXT NOT NULL,
-  station_id TEXT NOT NULL,
+  station_id TEXT NOT NULL REFERENCES met.met_station(station_id),
   valid_time TIMESTAMPTZ NOT NULL,
   source_id TEXT NOT NULL,
   variable TEXT NOT NULL,
@@ -96,8 +96,11 @@ SELECT create_hypertable('met.forcing_station_timeseries', 'valid_time', if_not_
 
 ```sql
 CREATE TABLE flood.return_period_result (
-  run_id TEXT NOT NULL,
+  run_id TEXT NOT NULL REFERENCES hydro.hydro_run(run_id),
   scenario_id TEXT NOT NULL,
+  basin_version_id TEXT NOT NULL,
+  river_network_version_id TEXT NOT NULL,
+  model_id TEXT NOT NULL,
   river_segment_id TEXT NOT NULL,
   valid_time TIMESTAMPTZ NOT NULL,
   duration TEXT NOT NULL,
@@ -105,6 +108,9 @@ CREATE TABLE flood.return_period_result (
   q_unit TEXT NOT NULL DEFAULT 'm3/s',
   return_period DOUBLE PRECISION,
   warning_level TEXT,
+  source_id TEXT,
+  cycle_time TIMESTAMPTZ,
+  max_over_window BOOLEAN DEFAULT false,
   quality_flag TEXT NOT NULL DEFAULT 'ok',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
