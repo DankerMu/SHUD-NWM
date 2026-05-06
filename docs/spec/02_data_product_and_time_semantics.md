@@ -194,6 +194,19 @@ Level 3：仅有短波辐射，用经验公式近似
 }
 ```
 
+### 9.1 Best available 时间窗策略
+
+不同时间窗口的数据源优先级不同：
+
+| 时间窗口 | 优先源 | 备选 | 说明 |
+|---|---|---|---|
+| 过去 0–1 天 | CLDAS（若可用） | GDAS / GFS analysis / short forecast | 近实时，CLDAS 分辨率最高 |
+| 过去 1–5 天 | CLDAS | ERA5（若已可用）、GDAS / GFS 补齐 | ERA5 约 5 天迟滞，此窗口内可能不可用 |
+| 过去 5 天以前 | ERA5 / ERA5 final | CLDAS 历史 | ERA5 已完成 QC，质量最高 |
+| 未来 0–7 天 | GFS scenario / IFS scenario | — | 各 scenario 独立保存，不合并 |
+
+`best_available` 产品的 `selected_source` 字段记录实际选中的数据源，`fallback_order` 记录当时的优先级链路。CLDAS 权限未解决期间，过去 0–5 天降级为 ERA5 + GDAS/GFS 组合。
+
 ## 10. 前端时间列表
 
 后端每个图层返回：

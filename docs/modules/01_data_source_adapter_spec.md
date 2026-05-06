@@ -1,7 +1,7 @@
 # 01. 数据源适配器模块：开发 Spec
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
 ## 1. 开发目标
 
@@ -74,6 +74,101 @@ data_source_adapter:
   workspace_root: /work/nhms
   object_store_prefix: s3://nhms
 ```
+
+### 7b. 每源 Adapter 配置模板
+
+#### GFS
+
+```yaml
+GFS:
+  account_required: false
+  status: enabled
+  cycle_hours_utc: [0, 6, 12, 18]
+  forecast_hours:
+    start: 0
+    end: 168
+  preferred_channel: aws_open_data
+  fallback_channels:
+    - nomads
+    - ncep_product_server
+    - ncei_archive
+  poll_interval_minutes: 10
+  max_wait_minutes: 180
+  mirror_required: true
+```
+
+#### IFS Open Data
+
+```yaml
+IFS_OPEN_DATA:
+  account_required: false
+  status: enabled
+  license_required: true
+  license_note: "ECMWF Open Data ToU / CC-BY-4.0"
+  cycle_hours_utc: [0, 6, 12, 18]
+  lead_time_policy:
+    "00": "0-168h"
+    "12": "0-168h"
+    "06": "0-144h"
+    "18": "0-144h"
+  preferred_client: ecmwf-opendata
+  preferred_source: ecmwf
+  fallback_sources:
+    - aws
+    - azure
+    - google
+  mirror_required: true
+  max_wait_minutes: 240
+```
+
+#### ERA5
+
+```yaml
+ERA5:
+  account_required: true
+  credential_type: cds_api_token
+  status: enabled
+  latency_days: 5
+  product:
+    dataset: reanalysis-era5-single-levels
+    format: grib
+  request_split:
+    by: [year, month, variable_group, area]
+  retry_policy:
+    max_retries: 5
+    backoff_minutes: [10, 30, 60, 180, 360]
+  mirror_required: true
+  era5t_replacement_policy: true
+```
+
+#### CLDAS
+
+```yaml
+CLDAS:
+  account_required: true
+  status: restricted
+  resolution: "0.0625°"
+  temporal: "1h"
+  preferred_channel: cma_data_platform
+  mirror_required: true
+```
+
+### 7c. 下载轮询与完整性检查
+
+周期发现不依赖固定可用时间假设。Adapter 通过轮询确认文件完整性：
+
+```text
+1. discover_cycle → 检测是否存在新周期
+2. poll file availability → 逐文件检查 f000/f003/.../f168
+3. check required variables → 确认 PRCP/TEMP/RH/wind/Rn/Press 存在
+4. check file integrity → 文件大小 > 最小阈值、GRIB message count 合理
+5. build manifest → 文件列表、变量、时间范围、checksum
+6. download → 写入 raw object store
+7. verify → checksum/etag 校验
+8. mark raw_complete
+```
+
+多通道 fallback 策略：主通道失败时自动切换备用通道，按 `fallback_channels` 顺序尝试。同一周期所有文件应尽量从同一通道下载以保证一致性；仅在主通道超时或不可用时切换。
 
 ## 8. 测试要求
 

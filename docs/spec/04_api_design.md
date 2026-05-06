@@ -132,9 +132,9 @@ model 详情响应示例：
 GET /api/v1/pipeline/status?source=&cycle_time=
 GET /api/v1/pipeline/stages?source=&cycle_time=
 GET /api/v1/jobs?source=&cycle_time=&status=&model_id=&limit=&offset=
-GET /api/v1/jobs/{slurm_job_id}/logs
-POST /api/v1/jobs/{run_id}/retry
-POST /api/v1/jobs/{run_id}/cancel
+GET /api/v1/jobs/{job_id}/logs
+POST /api/v1/runs/{run_id}/retry
+POST /api/v1/runs/{run_id}/cancel
 GET /api/v1/metrics/stage-duration?source=&days=7
 GET /api/v1/metrics/success-rate?source=&days=7
 GET /api/v1/queue/depth
@@ -231,11 +231,12 @@ river-point 响应示例：
 ## 10. 权限策略
 
 ```text
-viewer       查看已发布产品
-analyst      查看中间结果和质量标识
-developer    查看作业日志、重跑任务
-operator     触发重跑、切换 active model
-admin        管理资料源、权限、系统配置
+viewer       查看已发布地图和曲线
+analyst      查看 QC 标识、历史版本、下载结果
+operator     触发重跑、取消作业、重新发布产品
+model_admin  注册模型版本、切换 active model
+sys_admin    管理数据源、用户、系统配置
+developer    开发/调试环境角色，可看日志、Mock、debug 接口（生产默认不可分配）
 ```
 
 ## 11. Pipeline 阶段展示状态

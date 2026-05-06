@@ -1,7 +1,7 @@
 # 04. SHUD forcing 生产模块：模块设计
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
 ## 1. 模块目标
 
@@ -13,7 +13,7 @@
 |---|---|
 | 上游 | Canonical Meteorological Product、Model Registry、预计算空间权重。 |
 | 下游 | SHUD Analysis/Forecast Run。 |
-| 主要数据表/存储 | `met.forcing_version`, `met.forcing_station`, `met.forcing_station_timeseries`, `met.interp_weight` |
+| 主要数据表/存储 | `met.forcing_version`, `met.met_station`, `met.forcing_station_timeseries`, `met.interp_weight` |
 
 ## 3. 职责边界
 

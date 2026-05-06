@@ -41,6 +41,8 @@ erDiagram
   canonical_met_product ||--o{ forcing_version : derives
   forcing_version ||--o{ hydro_run : drives
   forcing_version ||--o{ forcing_station_timeseries : contains
+  forcing_version ||--o{ forcing_version_component : composed_of
+  canonical_met_product ||--o{ forcing_version_component : used_in
   met_station ||--o{ interp_weight : weighted_by
   met_station ||--o{ forcing_station_timeseries : records
 ```
@@ -230,6 +232,7 @@ CREATE TABLE met.canonical_met_product (
   variable TEXT NOT NULL,
   unit TEXT NOT NULL,
   grid_id TEXT NOT NULL,
+  grid_definition_uri TEXT,
   native_time_resolution TEXT,
   native_spatial_resolution TEXT,
   object_uri TEXT NOT NULL,
@@ -294,6 +297,23 @@ CREATE TABLE met.forcing_version (
   checksum TEXT,
   lineage_json JSONB NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### 5.11b `met.forcing_version_component`
+
+> 显式记录每个 forcing_version 由哪些 canonical_met_product 组成，用于血缘查询和审计，避免依赖 JSON 解析。
+
+```sql
+CREATE TABLE met.forcing_version_component (
+  forcing_version_id TEXT NOT NULL REFERENCES met.forcing_version(forcing_version_id),
+  canonical_product_id TEXT NOT NULL REFERENCES met.canonical_met_product(canonical_product_id),
+  variable TEXT NOT NULL,
+  valid_time_start TIMESTAMPTZ,
+  valid_time_end TIMESTAMPTZ,
+  role TEXT NOT NULL DEFAULT 'forcing_input',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (forcing_version_id, canonical_product_id, variable)
 );
 ```
 
@@ -413,6 +433,7 @@ CREATE INDEX river_ts_segment_time_idx ON hydro.river_timeseries (river_segment_
 CREATE TABLE flood.flood_frequency_curve (
   curve_id TEXT PRIMARY KEY,
   model_id TEXT NOT NULL REFERENCES core.model_instance(model_id),
+  river_network_version_id TEXT NOT NULL,
   basin_version_id TEXT NOT NULL,
   river_segment_id TEXT NOT NULL,
   duration TEXT NOT NULL,
@@ -430,7 +451,7 @@ CREATE TABLE flood.flood_frequency_curve (
   unit TEXT NOT NULL DEFAULT 'm3/s',
   quality_flag TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (model_id, river_segment_id, duration, method, sample_period_start, sample_period_end)
+  UNIQUE (model_id, river_network_version_id, river_segment_id, duration, method, sample_period_start, sample_period_end)
 );
 ```
 

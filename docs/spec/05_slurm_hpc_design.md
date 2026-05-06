@@ -107,7 +107,7 @@ HPC 作业有两种回写方式：
 | 转换失败 | canonical 缺变量或单位异常 | 标记 failed_convert，写变量级错误。 |
 | forcing 失败 | 缺站点文件或时间轴不连续 | 标记 failed_forcing。 |
 | SHUD 非零退出 | exit code != 0 | 保存 stdout/stderr，标记 failed_run。 |
-| SHUD 输出缺失 | `.rivqdown` 或 `.rivystage` 缺失 | 标记 failed_output_check。 |
+| SHUD 输出缺失 | `.rivqdown` 或 `.rivystage` 缺失 | 标记 failed_parse（error_code=OUTPUT_REQUIRED_FILE_MISSING）。 |
 | 解析失败 | 输出格式不匹配 | 原始输出保留，解析作业可单独重跑。 |
 
 ## 10. SHUD 调用

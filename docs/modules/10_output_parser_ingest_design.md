@@ -1,7 +1,7 @@
 # 10. SHUD 输出解析与入库模块：模块设计
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
 ## 1. 模块目标
 
@@ -13,14 +13,14 @@
 |---|---|
 | 上游 | SHUD Runtime 输出。 |
 | 下游 | TimescaleDB、Flood Frequency Engine、API、瓦片服务。 |
-| 主要数据表/存储 | `hydro.river_timeseries`, `hydro.hydro_run`, `ops.quality_check` |
+| 主要数据表/存储 | `hydro.river_timeseries`, `hydro.hydro_run`, `ops.qc_result` |
 
 ## 3. 职责边界
 
 - 解析 CSV 或 DAT 输出。
 - 把 `.rivqdown` 从 m3/d 转为 m3/s。
 - 检查列数与河段数一致。
-- 按 run_id/segment_id/valid_time 入库。
+- 按 run_id/river_network_version_id/segment_id/valid_time 入库。
 - 支持解析作业单独重跑。
 
 ## 4. 不负责事项

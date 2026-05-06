@@ -7,7 +7,7 @@
 ## 目录结构
 
 ```text
-NWM/
+SHUD-NWM/
 ├── README.md                      ← 本文件，项目入口
 │
 ├── docs/                          ← 全部文档
@@ -34,7 +34,8 @@ NWM/
 │   ├── report/                    ← 汇报材料（面向甲方）
 │   │   └── 建设汇报稿.md
 │   └── research/                  ← 调研与决策跟踪
-│       └── 气象数据梳理与决策跟踪.md
+│       ├── 气象数据梳理与决策跟踪.md
+│       └── 数据下载账号与稳定性策略.md
 │
 └── design/                        ← 全部设计图
     ├── architecture/              ← 架构与数据设计图
@@ -58,6 +59,7 @@ NWM/
 | 查看前端 UI 样式/组件/图表 | [`docs/spec/06B_frontend_ui_design_spec.md`](docs/spec/06B_frontend_ui_design_spec.md) |
 | 查看气象数据源详情 | [`docs/research/气象数据梳理与决策跟踪.md`](docs/research/气象数据梳理与决策跟踪.md) |
 | 查看开发路线图 | [`docs/spec/08_roadmap_acceptance.md`](docs/spec/08_roadmap_acceptance.md) |
+| 查看实施计划与阅读清单 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) |
 | 查看设计图 | [`design/`](design/) |
 
 ## 设计图与文档对照

@@ -1,7 +1,7 @@
 # 10. SHUD 输出解析与入库模块：开发 Spec
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
 ## 1. 开发目标
 
@@ -14,7 +14,7 @@
 - 解析 CSV 或 DAT 输出。
 - 把 `.rivqdown` 从 m3/d 转为 m3/s。
 - 检查列数与河段数一致。
-- 按 run_id/segment_id/valid_time 入库。
+- 按 run_id/river_network_version_id/segment_id/valid_time 入库。
 - 支持解析作业单独重跑。
 
 ### 2.2 应实现
@@ -52,7 +52,7 @@
 
 - `hydro.river_timeseries`
 - `hydro.hydro_run`
-- `ops.quality_check`
+- `ops.qc_result`
 
 实现要求：写数据库必须在事务中完成；大文件写入成功后再更新对象 URI；时序数据写入必须支持 upsert 或先删后写，但禁止产生重复主键；对象存储写入必须记录 checksum/etag。
 

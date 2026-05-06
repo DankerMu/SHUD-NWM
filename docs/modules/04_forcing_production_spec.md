@@ -1,7 +1,7 @@
 # 04. SHUD forcing 生产模块：开发 Spec
 
-版本：v0.1  
-日期：2026-04-30
+版本：v0.2  
+日期：2026-05-06
 
 ## 1. 开发目标
 
@@ -51,7 +51,7 @@
 ## 5. 数据库/存储影响
 
 - `met.forcing_version`
-- `met.forcing_station`
+- `met.met_station`
 - `met.forcing_station_timeseries`
 - `met.interp_weight`
 
