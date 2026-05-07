@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,8 @@ import httpx
 
 from packages.common.object_store import LocalObjectStore
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running", "succeeded"}
@@ -528,6 +531,17 @@ class ForecastOrchestrator:
         template_path = Path(self.config.templates_dir) / stage.template_name
         if not template_path.exists():
             raise OrchestratorError("SBATCH_TEMPLATE_MISSING", f"Missing sbatch template: {template_path.name}")
+        for label, val in [
+            ("source_id", context.source_id),
+            ("model_id", context.model_id),
+            ("run_id", context.run_id),
+            ("basin_version_id", context.basin_version_id),
+            ("river_network_version_id", context.river_network_version_id),
+        ]:
+            if not _SAFE_ID_RE.match(val):
+                raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"{label} contains unsafe characters: {val!r}")
+        if context.basin_id and not _SAFE_ID_RE.match(context.basin_id):
+            raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"basin_id unsafe: {context.basin_id!r}")
         run_manifest_path = Path(self.config.workspace_root) / "runs" / context.run_id / "input" / "manifest.json"
         return template_path.read_text(encoding="utf-8").format(
             source_id=context.source_id,
