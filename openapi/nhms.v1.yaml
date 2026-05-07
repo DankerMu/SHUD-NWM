@@ -1,0 +1,1987 @@
+openapi: "3.0.3"
+info:
+  title: "National Hydrological Simulation System API"
+  version: "1.0.0"
+  license:
+    name: "Proprietary"
+    url: "https://example.com/proprietary-license"
+  description: |
+    NHMS API - 全国水文模拟系统。Auth implementation deferred to M1+.
+
+    ## Roles
+    - viewer: read-only access to public dashboards
+    - analyst: read access to detailed data, timeseries, lineage
+    - operator: trigger retries, cancel runs, manage pipeline
+    - model_admin: create/update models, basin versions, calibration
+    - sys_admin: full system administration
+    - developer: development/debugging endpoints
+
+    ## Non-Functional Requirements
+    - List/query endpoints: P95 <= 200ms
+    - Detail endpoints: P95 <= 100ms
+    - Timeseries endpoints: P95 <= 500ms
+    - Tile endpoints: P95 <= 300ms
+    - Pipeline status: P95 <= 200ms
+    - Flood alerts: P95 <= 300ms
+
+    ## Conventions
+    - All timestamps: ISO 8601 UTC
+    - Pagination: limit/offset query parameters
+    - Rate limiting: placeholder (not enforced in M0)
+servers:
+  - url: /api/v1
+security:
+  - BearerAuth: []
+tags:
+  - name: basins
+    description: Basin, basin version, and river segment discovery.
+  - name: models
+    description: Model registry, active model, and flood-frequency metadata.
+  - name: data-sources
+    description: External data sources and forecast cycles.
+  - name: met
+    description: Meteorological station and forcing time series access.
+  - name: runs
+    description: Hydrological run query and lifecycle operations.
+  - name: tiles
+    description: Raw vector and raster map tile delivery.
+  - name: pipeline
+    description: Forecast pipeline monitoring, jobs, logs, and queue state.
+  - name: flood-alerts
+    description: Flood alert summaries, rankings, segments, and timelines.
+  - name: lineage
+    description: Product and point lineage traceability.
+  - name: layers
+    description: Map layer discovery and valid-time navigation.
+paths:
+  /api/v1/basins:
+    get:
+      operationId: listBasins
+      summary: List basins
+      tags: [basins]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Basin list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Basin"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/basins/{basin_id}/versions:
+    get:
+      operationId: listBasinVersions
+      summary: List versions for a basin
+      tags: [basins]
+      parameters:
+        - $ref: "#/components/parameters/BasinId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Basin version list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/BasinVersion"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/data-sources:
+    get:
+      operationId: listDataSources
+      summary: List data sources
+      tags: [data-sources]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Data source list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/DataSource"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/data-sources/{source_id}/cycles:
+    get:
+      operationId: listForecastCycles
+      summary: List forecast cycles for a data source
+      tags: [data-sources]
+      parameters:
+        - $ref: "#/components/parameters/SourceId"
+        - $ref: "#/components/parameters/FromTime"
+        - $ref: "#/components/parameters/ToTime"
+        - $ref: "#/components/parameters/CycleStatus"
+      responses:
+        "200":
+          description: Forecast cycle list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ForecastCycle"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/models:
+    get:
+      operationId: listModels
+      summary: List model instances
+      tags: [models]
+      parameters:
+        - $ref: "#/components/parameters/BasinVersionIdQuery"
+        - name: active
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Filter by active model flag.
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Model instance list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ModelInstance"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/models/{model_id}:
+    get:
+      operationId: getModel
+      summary: Get model instance detail
+      tags: [models]
+      parameters:
+        - $ref: "#/components/parameters/ModelId"
+      responses:
+        "200":
+          description: Model instance detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ModelInstance"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/models/{model_id}/flood-frequency-curves:
+    get:
+      operationId: listFloodFrequencyCurves
+      summary: List flood frequency curves for a model
+      tags: [models]
+      parameters:
+        - $ref: "#/components/parameters/ModelId"
+      responses:
+        "200":
+          description: Flood frequency curves
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/FloodFrequencyCurve"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/basin-versions/{basin_version_id}/river-network-versions:
+    get:
+      operationId: listRiverNetworkVersions
+      summary: List river network versions for a basin version
+      tags: [models]
+      parameters:
+        - $ref: "#/components/parameters/BasinVersionId"
+      responses:
+        "200":
+          description: River network versions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/RiverNetworkVersion"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/models/{model_id}/active:
+    put:
+      operationId: setModelActive
+      summary: Set active model flag
+      tags: [models]
+      parameters:
+        - $ref: "#/components/parameters/ModelId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [active_flag]
+              properties:
+                active_flag:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated model instance
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ModelInstance"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}:
+    get:
+      operationId: getRiverSegment
+      summary: Get river segment detail
+      tags: [basins]
+      parameters:
+        - $ref: "#/components/parameters/BasinVersionId"
+        - $ref: "#/components/parameters/SegmentId"
+      responses:
+        "200":
+          description: River segment detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RiverSegment"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series:
+    get:
+      operationId: getRiverSegmentForecastSeries
+      summary: Get river segment forecast series
+      tags: [basins]
+      parameters:
+        - $ref: "#/components/parameters/BasinVersionId"
+        - $ref: "#/components/parameters/SegmentId"
+        - $ref: "#/components/parameters/IssueTime"
+        - name: variables
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated hydrological variables.
+        - name: scenarios
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated scenario identifiers.
+      responses:
+        "200":
+          description: River forecast time series
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RiverSeriesResponse"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/met/stations:
+    get:
+      operationId: listMetStations
+      summary: List meteorological stations
+      tags: [met]
+      parameters:
+        - $ref: "#/components/parameters/BasinVersionIdQuery"
+        - $ref: "#/components/parameters/ModelIdQuery"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Meteorological station list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/MetStation"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/met/stations/{station_id}/series:
+    get:
+      operationId: getMetStationSeries
+      summary: Get station forcing time series
+      tags: [met]
+      parameters:
+        - $ref: "#/components/parameters/StationId"
+        - name: forcing_version_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: variables
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated meteorological variables.
+      responses:
+        "200":
+          description: Station time series
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/TimeseriesResponse"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/runs:
+    get:
+      operationId: listRuns
+      summary: List hydrological runs
+      tags: [runs]
+      parameters:
+        - name: basin_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: source
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: cycle_time
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/RunStatus"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Run list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/HydroRun"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/runs/{run_id}:
+    get:
+      operationId: getRun
+      summary: Get hydrological run detail
+      tags: [runs]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HydroRun"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/runs/{run_id}/retry:
+    post:
+      operationId: retryRun
+      summary: Retry a failed or cancelled run
+      tags: [runs]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Retry request accepted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HydroRun"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/runs/{run_id}/cancel:
+    post:
+      operationId: cancelRun
+      summary: Cancel an active run
+      tags: [runs]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Cancel request accepted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HydroRun"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf:
+    get:
+      operationId: getRiverNetworkTile
+      summary: Get river network vector tile
+      tags: [tiles]
+      parameters:
+        - $ref: "#/components/parameters/BasinVersionId"
+        - $ref: "#/components/parameters/TileZ"
+        - $ref: "#/components/parameters/TileX"
+        - $ref: "#/components/parameters/TileY"
+      responses:
+        "200":
+          description: Raw Mapbox vector tile
+          content:
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf:
+    get:
+      operationId: getHydroTile
+      summary: Get hydrological output vector tile
+      tags: [tiles]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/Variable"
+        - $ref: "#/components/parameters/ValidTimePath"
+        - $ref: "#/components/parameters/TileZ"
+        - $ref: "#/components/parameters/TileX"
+        - $ref: "#/components/parameters/TileY"
+      responses:
+        "200":
+          description: Raw Mapbox vector tile
+          content:
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf:
+    get:
+      operationId: getFloodReturnPeriodTile
+      summary: Get flood return period vector tile
+      tags: [tiles]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: duration
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Aggregation duration such as 1h, 3h, or 24h.
+        - $ref: "#/components/parameters/ValidTimePath"
+        - $ref: "#/components/parameters/TileZ"
+        - $ref: "#/components/parameters/TileX"
+        - $ref: "#/components/parameters/TileY"
+      responses:
+        "200":
+          description: Raw Mapbox vector tile
+          content:
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png:
+    get:
+      operationId: getMetTile
+      summary: Get meteorological raster tile
+      tags: [tiles]
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+        - $ref: "#/components/parameters/Variable"
+        - $ref: "#/components/parameters/ValidTimePath"
+        - $ref: "#/components/parameters/TileZ"
+        - $ref: "#/components/parameters/TileX"
+        - $ref: "#/components/parameters/TileY"
+      responses:
+        "200":
+          description: Raw PNG raster tile
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/pipeline/status:
+    get:
+      operationId: getPipelineStatus
+      summary: Get pipeline status for a cycle
+      tags: [pipeline]
+      parameters:
+        - $ref: "#/components/parameters/SourceQuery"
+        - $ref: "#/components/parameters/CycleTimeQuery"
+      responses:
+        "200":
+          description: Pipeline status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PipelineStatus"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/pipeline/stages:
+    get:
+      operationId: listPipelineStages
+      summary: List pipeline stages for a cycle
+      tags: [pipeline]
+      parameters:
+        - $ref: "#/components/parameters/SourceQuery"
+        - $ref: "#/components/parameters/CycleTimeQuery"
+      responses:
+        "200":
+          description: Pipeline stage list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PipelineStage"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/jobs:
+    get:
+      operationId: listPipelineJobs
+      summary: List pipeline jobs
+      tags: [pipeline]
+      parameters:
+        - $ref: "#/components/parameters/SourceQuery"
+        - $ref: "#/components/parameters/CycleTimeQuery"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - $ref: "#/components/parameters/ModelIdQuery"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Pipeline job list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PipelineJob"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/jobs/{job_id}/logs:
+    get:
+      operationId: getPipelineJobLogs
+      summary: Get pipeline job logs
+      tags: [pipeline]
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Pipeline job logs
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/JobLogs"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/queue/depth:
+    get:
+      operationId: getQueueDepth
+      summary: Get queue depth by priority and state
+      tags: [pipeline]
+      parameters:
+        - $ref: "#/components/parameters/SourceQuery"
+      responses:
+        "200":
+          description: Queue depth
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/QueueDepth"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/flood-alerts/summary:
+    get:
+      operationId: getFloodAlertSummary
+      summary: Get flood alert summary
+      tags: [flood-alerts]
+      parameters:
+        - $ref: "#/components/parameters/RunIdQuery"
+        - name: threshold
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Flood alert summary
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/FloodAlertSummary"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/flood-alerts/ranking:
+    get:
+      operationId: listFloodAlertRanking
+      summary: Rank segments by flood alert severity
+      tags: [flood-alerts]
+      parameters:
+        - $ref: "#/components/parameters/RunIdQuery"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Flood alert ranking
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/FloodAlertRankingItem"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/flood-alerts/segments:
+    get:
+      operationId: listFloodAlertSegments
+      summary: List flood alert segments
+      tags: [flood-alerts]
+      parameters:
+        - $ref: "#/components/parameters/RunIdQuery"
+        - name: min_return_period
+          in: query
+          required: false
+          schema:
+            type: number
+            minimum: 0
+        - $ref: "#/components/parameters/ValidTimeQuery"
+      responses:
+        "200":
+          description: Flood alert segment list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/FloodAlertSegment"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/flood-alerts/timeline:
+    get:
+      operationId: getFloodAlertTimeline
+      summary: Get flood alert timeline for a segment
+      tags: [flood-alerts]
+      parameters:
+        - $ref: "#/components/parameters/RunIdQuery"
+        - $ref: "#/components/parameters/SegmentIdQuery"
+      responses:
+        "200":
+          description: Flood alert timeline
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/FloodAlertTimeline"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/lineage/river-point:
+    get:
+      operationId: getRiverPointLineage
+      summary: Get lineage for a river point value
+      tags: [lineage]
+      parameters:
+        - $ref: "#/components/parameters/RunIdQuery"
+        - $ref: "#/components/parameters/SegmentIdQuery"
+        - $ref: "#/components/parameters/ValidTimeQuery"
+        - $ref: "#/components/parameters/VariableQuery"
+      responses:
+        "200":
+          description: River point lineage
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/LineageResponse"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/lineage/forcing-point:
+    get:
+      operationId: getForcingPointLineage
+      summary: Get lineage for a forcing point value
+      tags: [lineage]
+      parameters:
+        - name: forcing_version_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/StationIdQuery"
+        - $ref: "#/components/parameters/ValidTimeQuery"
+        - $ref: "#/components/parameters/VariableQuery"
+      responses:
+        "200":
+          description: Forcing point lineage
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/LineageResponse"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/lineage/product/{product_id}:
+    get:
+      operationId: getProductLineage
+      summary: Get lineage for a product
+      tags: [lineage]
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      responses:
+        "200":
+          description: Product lineage
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/LineageResponse"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/layers:
+    get:
+      operationId: listLayers
+      summary: List available map layers
+      tags: [layers]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Layer list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Layer"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/layers/{layer_id}/valid-times:
+    get:
+      operationId: listLayerValidTimes
+      summary: List valid times for a map layer
+      tags: [layers]
+      parameters:
+        - name: layer_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Layer valid times
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: string
+                          format: date-time
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "JWT Bearer token. Auth implementation deferred to M1+."
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  parameters:
+    BasinId:
+      name: basin_id
+      in: path
+      required: true
+      schema:
+        type: string
+    BasinVersionId:
+      name: basin_version_id
+      in: path
+      required: true
+      schema:
+        type: string
+    BasinVersionIdQuery:
+      name: basin_version_id
+      in: query
+      required: false
+      schema:
+        type: string
+    CycleStatus:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+    CycleTimeQuery:
+      name: cycle_time
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    FromTime:
+      name: from
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    IssueTime:
+      name: issue_time
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 100
+    ModelId:
+      name: model_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ModelIdQuery:
+      name: model_id
+      in: query
+      required: false
+      schema:
+        type: string
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    ProductId:
+      name: product_id
+      in: path
+      required: true
+      schema:
+        type: string
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+    RunIdQuery:
+      name: run_id
+      in: query
+      required: true
+      schema:
+        type: string
+    SegmentId:
+      name: segment_id
+      in: path
+      required: true
+      schema:
+        type: string
+    SegmentIdQuery:
+      name: segment_id
+      in: query
+      required: true
+      schema:
+        type: string
+    SourceId:
+      name: source_id
+      in: path
+      required: true
+      schema:
+        type: string
+    SourceQuery:
+      name: source
+      in: query
+      required: false
+      schema:
+        type: string
+    StationId:
+      name: station_id
+      in: path
+      required: true
+      schema:
+        type: string
+    StationIdQuery:
+      name: station_id
+      in: query
+      required: true
+      schema:
+        type: string
+    TileX:
+      name: x
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+    TileY:
+      name: y
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+    TileZ:
+      name: z
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 24
+    ToTime:
+      name: to
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    ValidTimePath:
+      name: valid_time
+      in: path
+      required: true
+      schema:
+        type: string
+        format: date-time
+    ValidTimeQuery:
+      name: valid_time
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    Variable:
+      name: variable
+      in: path
+      required: true
+      schema:
+        type: string
+    VariableQuery:
+      name: variable
+      in: query
+      required: true
+      schema:
+        type: string
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [request_id, status, data]
+      properties:
+        request_id:
+          type: string
+          example: req_01J0NHMS
+        status:
+          type: string
+          example: ok
+        data:
+          type: object
+          additionalProperties: true
+    ErrorResponse:
+      type: object
+      required: [request_id, status, error]
+      properties:
+        request_id:
+          type: string
+          example: req_01J0NHMS
+        status:
+          type: string
+          enum: [error]
+          example: error
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: NOT_FOUND
+            message:
+              type: string
+              example: Requested resource was not found.
+            details:
+              type: object
+              nullable: true
+              additionalProperties: true
+    Basin:
+      type: object
+      required: [basin_id, basin_name, created_at]
+      properties:
+        basin_id:
+          type: string
+        basin_name:
+          type: string
+        basin_group:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    BasinVersion:
+      type: object
+      required: [basin_version_id, basin_id, version_label, geom, active_flag, created_at]
+      properties:
+        basin_version_id:
+          type: string
+        basin_id:
+          type: string
+        version_label:
+          type: string
+        geom:
+          $ref: "#/components/schemas/GeoJsonMultiPolygon"
+        active_flag:
+          type: boolean
+        valid_from:
+          type: string
+          format: date-time
+          nullable: true
+        valid_to:
+          type: string
+          format: date-time
+          nullable: true
+        source_uri:
+          type: string
+          nullable: true
+        checksum:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    ModelInstance:
+      type: object
+      required:
+        - model_id
+        - basin_version_id
+        - river_network_version_id
+        - mesh_version_id
+        - calibration_version_id
+        - shud_code_version
+        - active_flag
+        - model_package_uri
+        - resource_profile
+        - created_at
+      properties:
+        model_id:
+          type: string
+        basin_version_id:
+          type: string
+        river_network_version_id:
+          type: string
+        mesh_version_id:
+          type: string
+        calibration_version_id:
+          type: string
+        shud_code_version:
+          type: string
+        rshud_code_version:
+          type: string
+          nullable: true
+        autoshud_code_version:
+          type: string
+          nullable: true
+        active_flag:
+          type: boolean
+        container_image:
+          type: string
+          nullable: true
+        model_package_uri:
+          type: string
+        resource_profile:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    RiverSegment:
+      type: object
+      required: [river_segment_id, river_network_version_id, geom, properties_json, created_at]
+      properties:
+        river_segment_id:
+          type: string
+        river_network_version_id:
+          type: string
+        segment_order:
+          type: integer
+          nullable: true
+        downstream_segment_id:
+          type: string
+          nullable: true
+        length_m:
+          type: number
+          nullable: true
+        geom:
+          $ref: "#/components/schemas/GeoJsonLineString"
+        properties_json:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    MetStation:
+      type: object
+      required: [station_id, basin_version_id, geom, station_role, active_flag, created_at]
+      properties:
+        station_id:
+          type: string
+        basin_version_id:
+          type: string
+        station_name:
+          type: string
+          nullable: true
+        geom:
+          $ref: "#/components/schemas/GeoJsonPoint"
+        elevation_m:
+          type: number
+          nullable: true
+        station_role:
+          type: string
+        active_flag:
+          type: boolean
+        properties_json:
+          type: object
+          nullable: true
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    DataSource:
+      type: object
+      required: [source_id, source_name, source_type, status, adapter_name, config_json, created_at]
+      properties:
+        source_id:
+          type: string
+        source_name:
+          type: string
+        source_type:
+          type: string
+        status:
+          type: string
+        adapter_name:
+          type: string
+        config_json:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    ForecastCycle:
+      type: object
+      required: [cycle_id, source_id, cycle_time, issue_time, status, created_at]
+      properties:
+        cycle_id:
+          type: string
+        source_id:
+          type: string
+        cycle_time:
+          type: string
+          format: date-time
+        issue_time:
+          type: string
+          format: date-time
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    ForcingVersion:
+      type: object
+      required:
+        - forcing_version_id
+        - model_id
+        - source_id
+        - start_time
+        - end_time
+        - station_count
+        - forcing_package_uri
+        - created_at
+      properties:
+        forcing_version_id:
+          type: string
+        model_id:
+          type: string
+        source_id:
+          type: string
+        cycle_time:
+          type: string
+          format: date-time
+          nullable: true
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        station_count:
+          type: integer
+        forcing_package_uri:
+          type: string
+        checksum:
+          type: string
+          nullable: true
+        lineage_json:
+          type: object
+          nullable: true
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    RunType:
+      type: string
+      enum: [analysis, forecast, hindcast]
+    RunStatus:
+      type: string
+      enum:
+        - created
+        - staged
+        - submitted
+        - running
+        - succeeded
+        - parsed
+        - frequency_done
+        - published
+        - failed
+        - cancelled
+        - superseded
+    HydroRun:
+      type: object
+      required:
+        - run_id
+        - run_type
+        - scenario_id
+        - model_id
+        - basin_version_id
+        - status
+        - start_time
+        - end_time
+        - created_at
+        - updated_at
+      properties:
+        run_id:
+          type: string
+        run_type:
+          $ref: "#/components/schemas/RunType"
+        scenario_id:
+          type: string
+        model_id:
+          type: string
+        basin_version_id:
+          type: string
+        forcing_version_id:
+          type: string
+          nullable: true
+        init_state_id:
+          type: string
+          nullable: true
+        source_id:
+          type: string
+          nullable: true
+        cycle_time:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        slurm_job_id:
+          type: string
+          nullable: true
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        run_manifest_uri:
+          type: string
+          nullable: true
+        output_uri:
+          type: string
+          nullable: true
+        log_uri:
+          type: string
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RiverSeriesResponse:
+      type: object
+      required: [segment_id, issue_time, unit, series, frequency_thresholds]
+      properties:
+        segment_id:
+          type: string
+        issue_time:
+          type: string
+          format: date-time
+        unit:
+          type: string
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/SeriesSegment"
+        frequency_thresholds:
+          type: object
+          required: [q2, q5, q10, q20, q50, q100]
+          properties:
+            q2:
+              type: number
+            q5:
+              type: number
+            q10:
+              type: number
+            q20:
+              type: number
+            q50:
+              type: number
+            q100:
+              type: number
+    SeriesSegment:
+      type: object
+      required: [scenario_id, segment_role, points]
+      properties:
+        scenario_id:
+          type: string
+        segment_role:
+          type: string
+        points:
+          type: array
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items:
+              oneOf:
+                - type: string
+                  format: date-time
+                - type: number
+    FloodAlertSummary:
+      type: object
+      required: [run_id, threshold, total_segments, alert_counts, updated_at]
+      properties:
+        run_id:
+          type: string
+        threshold:
+          type: string
+        total_segments:
+          type: integer
+        alert_counts:
+          type: object
+          required: [normal, elevated, watch, warning, high_risk, severe, extreme]
+          properties:
+            normal:
+              type: integer
+            elevated:
+              type: integer
+            watch:
+              type: integer
+            warning:
+              type: integer
+            high_risk:
+              type: integer
+            severe:
+              type: integer
+            extreme:
+              type: integer
+        updated_at:
+          type: string
+          format: date-time
+    PipelineStage:
+      type: object
+      required: [stage, status, basin_progress]
+      properties:
+        stage:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, succeeded, partially_failed, failed, skipped]
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_seconds:
+          type: integer
+          nullable: true
+        basin_progress:
+          type: string
+    PipelineJob:
+      type: object
+      required: [job_id, job_type, source, cycle_time, status, submitted_at]
+      properties:
+        job_id:
+          type: string
+        job_type:
+          type: string
+        source:
+          type: string
+        cycle_time:
+          type: string
+          format: date-time
+        model_id:
+          type: string
+          nullable: true
+        status:
+          type: string
+        slurm_job_id:
+          type: string
+          nullable: true
+        submitted_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+    QcResult:
+      type: object
+      required: [qc_id, qc_checkpoint, target_type, target_id, passed, severity, checks_json, created_at]
+      properties:
+        qc_id:
+          type: integer
+        qc_checkpoint:
+          type: string
+        target_type:
+          type: string
+        target_id:
+          type: string
+        run_id:
+          type: string
+          nullable: true
+        passed:
+          type: boolean
+        severity:
+          type: string
+        checks_json:
+          type: object
+          additionalProperties: true
+        message:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    GeoJsonPoint:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [Point]
+        coordinates:
+          type: array
+          minItems: 2
+          maxItems: 3
+          items:
+            type: number
+    GeoJsonLineString:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [LineString]
+        coordinates:
+          type: array
+          minItems: 2
+          items:
+            type: array
+            minItems: 2
+            maxItems: 3
+            items:
+              type: number
+    GeoJsonMultiPolygon:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [MultiPolygon]
+        coordinates:
+          type: array
+          items:
+            type: array
+            items:
+              type: array
+              items:
+                type: array
+                minItems: 2
+                maxItems: 3
+                items:
+                  type: number
+    RiverNetworkVersion:
+      type: object
+      required: [river_network_version_id, basin_version_id, version_label, created_at]
+      properties:
+        river_network_version_id:
+          type: string
+        basin_version_id:
+          type: string
+        version_label:
+          type: string
+        source_uri:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    FloodFrequencyCurve:
+      type: object
+      required: [model_id, segment_id, thresholds]
+      properties:
+        model_id:
+          type: string
+        segment_id:
+          type: string
+        thresholds:
+          type: object
+          additionalProperties:
+            type: number
+    TimeseriesResponse:
+      type: object
+      required: [target_id, unit, variables]
+      properties:
+        target_id:
+          type: string
+        unit:
+          type: string
+        variables:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: array
+              minItems: 2
+              maxItems: 2
+              items:
+                oneOf:
+                  - type: string
+                    format: date-time
+                  - type: number
+    PipelineStatus:
+      type: object
+      required: [source, cycle_time, status, updated_at]
+      properties:
+        source:
+          type: string
+        cycle_time:
+          type: string
+          format: date-time
+        status:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/PipelineStage"
+    JobLogs:
+      type: object
+      required: [job_id, logs, complete]
+      properties:
+        job_id:
+          type: string
+        logs:
+          type: string
+        complete:
+          type: boolean
+    QueueDepth:
+      type: object
+      required: [pending, running, by_priority]
+      properties:
+        pending:
+          type: integer
+        running:
+          type: integer
+        by_priority:
+          type: object
+          additionalProperties:
+            type: integer
+    FloodAlertRankingItem:
+      type: object
+      required: [segment_id, max_return_period, severity, rank]
+      properties:
+        segment_id:
+          type: string
+        max_return_period:
+          type: number
+        severity:
+          type: string
+        rank:
+          type: integer
+    FloodAlertSegment:
+      type: object
+      required: [segment_id, valid_time, return_period, severity]
+      properties:
+        segment_id:
+          type: string
+        valid_time:
+          type: string
+          format: date-time
+        return_period:
+          type: number
+        severity:
+          type: string
+    FloodAlertTimeline:
+      type: object
+      required: [run_id, segment_id, points]
+      properties:
+        run_id:
+          type: string
+        segment_id:
+          type: string
+        points:
+          type: array
+          items:
+            type: object
+            required: [valid_time, return_period, severity]
+            properties:
+              valid_time:
+                type: string
+                format: date-time
+              return_period:
+                type: number
+              severity:
+                type: string
+    LineageResponse:
+      type: object
+      required: [target_type, target_id, nodes, edges]
+      properties:
+        target_type:
+          type: string
+        target_id:
+          type: string
+        nodes:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        edges:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        forcing_versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ForcingVersion"
+        qc_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/QcResult"
+    Layer:
+      type: object
+      required: [layer_id, layer_name, layer_type, variables]
+      properties:
+        layer_id:
+          type: string
+        layer_name:
+          type: string
+        layer_type:
+          type: string
+        variables:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true

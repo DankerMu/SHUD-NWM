@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Run Status",
+  "description": "Status update document reported by NHMS hydrological jobs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "status", "timestamp"],
+  "properties": {
+    "run_id": {
+      "description": "Unique hydrological run identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "description": "Hydrological run status.",
+      "type": "string",
+      "enum": [
+        "created",
+        "staged",
+        "submitted",
+        "running",
+        "succeeded",
+        "parsed",
+        "frequency_done",
+        "published",
+        "failed",
+        "cancelled",
+        "superseded"
+      ]
+    },
+    "timestamp": {
+      "description": "Status observation time in ISO 8601 UTC.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "error_code": {
+      "type": "string"
+    },
+    "error_message": {
+      "type": "string"
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "progress_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "current_step": {
+      "type": "string"
+    },
+    "log_uri": {
+      "type": "string",
+      "format": "uri"
+    }
+  }
+}

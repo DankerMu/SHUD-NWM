@@ -1,0 +1,179 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Run Manifest",
+  "description": "HPC job input manifest for NHMS hydrological runs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "run_type",
+    "scenario_id",
+    "start_time",
+    "end_time",
+    "model",
+    "forcing",
+    "outputs"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Manifest schema version.",
+      "type": "string"
+    },
+    "run_id": {
+      "description": "Unique hydrological run identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "run_type": {
+      "description": "Hydrological run type.",
+      "type": "string",
+      "enum": ["analysis", "forecast", "hindcast"]
+    },
+    "scenario_id": {
+      "description": "Scenario identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "source_id": {
+      "description": "Forecast source identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "cycle_time": {
+      "description": "Forecast cycle time in ISO 8601 UTC.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "issue_time": {
+      "description": "Forecast issue time in ISO 8601 UTC.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "start_time": {
+      "description": "Run start time in ISO 8601 UTC.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "end_time": {
+      "description": "Run end time in ISO 8601 UTC.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "model": {
+      "description": "Model package and version metadata.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["model_id", "model_package_uri"],
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "basin_version_id": {
+          "type": "string"
+        },
+        "model_package_uri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "project_name": {
+          "type": "string"
+        }
+      }
+    },
+    "initial_state": {
+      "description": "Initial condition state metadata.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "state_id": {
+          "type": "string"
+        },
+        "ic_file_uri": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "forcing": {
+      "description": "Forcing package metadata.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["forcing_uri"],
+      "properties": {
+        "forcing_version_id": {
+          "type": "string"
+        },
+        "forcing_uri": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "runtime": {
+      "description": "Runtime launch settings.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["executable"],
+      "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "threads": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "init_mode": {
+          "type": "integer"
+        },
+        "ascii_output": {
+          "type": "integer"
+        },
+        "binary_output": {
+          "type": "integer"
+        }
+      }
+    },
+    "outputs": {
+      "description": "Output object-storage targets.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["output_uri"],
+      "properties": {
+        "output_uri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "log_uri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "required_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "run_type": {
+        "const": "forecast"
+      }
+    },
+    "required": ["run_type"]
+  },
+  "then": {
+    "required": ["source_id", "cycle_time", "initial_state"],
+    "properties": {
+      "initial_state": {
+        "type": "object",
+        "required": ["ic_file_uri"]
+      }
+    }
+  }
+}

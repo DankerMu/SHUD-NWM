@@ -1,0 +1,13 @@
+{
+  "job_id": "job_download_gfs_2026043000",
+  "job_type": "download",
+  "status": "succeeded",
+  "cycle_id": "cycle_gfs_2026043000",
+  "stage": "raw_download",
+  "submitted_at": "2026-04-30T00:05:00Z",
+  "started_at": "2026-04-30T00:05:02Z",
+  "finished_at": "2026-04-30T00:45:00Z",
+  "exit_code": 0,
+  "retry_count": 0,
+  "log_uri": "s3://nhms/pipeline/gfs/2026043000/download.log"
+}
