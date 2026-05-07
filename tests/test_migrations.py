@@ -22,6 +22,8 @@ EXPECTED_TABLES = {
     "core.basin_version",
     "core.river_network_version",
     "core.river_segment",
+    "core.mesh_version",
+    "core.river_segment_crosswalk",
     "core.model_instance",
     "met.data_source",
     "met.forecast_cycle",

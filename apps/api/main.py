@@ -2,6 +2,7 @@ import os
 
 from fastapi import FastAPI
 
+from apps.api.routes.models import router as models_router
 from services.slurm_gateway.routes import router as slurm_router
 
 app = FastAPI(
@@ -10,6 +11,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.include_router(models_router)
 app.include_router(slurm_router)
 
 

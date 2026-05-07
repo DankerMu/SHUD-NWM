@@ -43,6 +43,31 @@ CREATE TABLE IF NOT EXISTS core.river_segment (
 );
 CREATE INDEX IF NOT EXISTS river_segment_geom_gix ON core.river_segment USING gist (geom);
 
+CREATE TABLE IF NOT EXISTS core.mesh_version (
+  mesh_version_id TEXT PRIMARY KEY,
+  basin_version_id TEXT NOT NULL REFERENCES core.basin_version(basin_version_id),
+  version_label TEXT NOT NULL,
+  mesh_uri TEXT NOT NULL,
+  checksum TEXT,
+  properties_json JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS core.river_segment_crosswalk (
+  crosswalk_id BIGSERIAL PRIMARY KEY,
+  river_network_version_id TEXT NOT NULL,
+  river_segment_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  properties_json JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (river_segment_id, river_network_version_id)
+    REFERENCES core.river_segment(river_segment_id, river_network_version_id),
+  UNIQUE (river_network_version_id, river_segment_id, source)
+);
+CREATE INDEX IF NOT EXISTS river_segment_crosswalk_lookup_idx
+  ON core.river_segment_crosswalk (river_network_version_id, source, river_segment_id);
+
 CREATE TABLE IF NOT EXISTS core.model_instance (
   model_id TEXT PRIMARY KEY,
   basin_version_id TEXT NOT NULL REFERENCES core.basin_version(basin_version_id),

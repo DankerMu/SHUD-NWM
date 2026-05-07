@@ -30,6 +30,8 @@ dependencies = [
 [project.scripts]
 nhms-gfs = "workers.data_adapters.cli:main"
 nhms-canonical = "workers.canonical_converter.cli:main"
+nhms-model = "workers.model_registry.cli:main"
+nhms-shud-runtime = "workers.shud_runtime.cli:main"
 
 [project.optional-dependencies]
 dev = [
