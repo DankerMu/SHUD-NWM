@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NHMS 预报</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+    />
+    <style>
+      :root {
+        --bg: #f7f9fb;
+        --panel: #ffffff;
+        --text: #1f2937;
+        --muted: #64748b;
+        --line: #d7dee8;
+        --river: #0f8fbf;
+        --river-strong: #ef7d22;
+        --accent: #2266cc;
+        --danger: #b42318;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 400px;
+        height: 100vh;
+        min-height: 560px;
+      }
+
+      #map {
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .panel {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        border-left: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .panel__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .panel__title {
+        min-width: 0;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 650;
+        line-height: 1.35;
+      }
+
+      .meta {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+      }
+
+      button {
+        min-width: 36px;
+        height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        cursor: pointer;
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .panel__body {
+        display: flex;
+        min-height: 0;
+        flex: 1;
+        flex-direction: column;
+        gap: 14px;
+        padding: 16px 18px 18px;
+      }
+
+      #chart {
+        width: 100%;
+        min-height: 320px;
+        flex: 1;
+      }
+
+      .state {
+        display: grid;
+        min-height: 220px;
+        place-items: center;
+        border: 1px dashed var(--line);
+        border-radius: 8px;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .state--error {
+        color: var(--danger);
+      }
+
+      .banner {
+        position: absolute;
+        z-index: 2;
+        top: 12px;
+        left: 12px;
+        display: none;
+        max-width: min(420px, calc(100vw - 24px));
+        border: 1px solid #f2b8ad;
+        border-radius: 6px;
+        background: #fff4f2;
+        color: var(--danger);
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+
+      .banner.is-visible {
+        display: block;
+      }
+
+      .tooltip {
+        position: absolute;
+        z-index: 3;
+        display: none;
+        max-width: 280px;
+        border: 1px solid rgba(31, 41, 55, 0.18);
+        border-radius: 6px;
+        background: #fff;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+        padding: 8px 10px;
+        pointer-events: none;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .tooltip.is-visible {
+        display: block;
+      }
+
+      .retry {
+        width: auto;
+        margin-top: 10px;
+        padding: 0 12px;
+        font-size: 14px;
+      }
+
+      @media (max-width: 820px) {
+        .app {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(360px, 58vh) minmax(320px, 42vh);
+          height: auto;
+          min-height: 100vh;
+        }
+
+        .panel {
+          border-top: 1px solid var(--line);
+          border-left: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <section id="map" aria-label="河网地图">
+        <div id="map-error" class="banner">河网数据加载失败</div>
+        <div id="tooltip" class="tooltip"></div>
+      </section>
+      <aside id="panel" class="panel">
+        <div class="panel__header">
+          <div class="panel__title">
+            <h1 id="segment-title">请选择河段</h1>
+            <div id="segment-meta" class="meta">点击地图中的河段查看预报曲线</div>
+          </div>
+          <button id="close-panel" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="panel__body">
+          <div id="state" class="state">暂无预报数据</div>
+          <div id="chart" hidden></div>
+        </div>
+      </aside>
+    </main>
+
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+    <script>
+      const riverSourceId = "demo-rivers";
+      const riverLayerId = "demo-rivers-line";
+      const hoverLayerId = "demo-rivers-hover";
+      const selectedLayerId = "demo-rivers-selected";
+      const emptyState = document.getElementById("state");
+      const chartNode = document.getElementById("chart");
+      const titleNode = document.getElementById("segment-title");
+      const metaNode = document.getElementById("segment-meta");
+      const tooltipNode = document.getElementById("tooltip");
+      const mapErrorNode = document.getElementById("map-error");
+      let chart = null;
+      let hoveredSegment = "";
+      let selectedFeature = null;
+
+      const demoRivers = {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: {
+              segment_id: "yangtze_v12_riv_000001",
+              name: "长江干流上段",
+              stream_order: 5,
+              basin_version_id: "yangtze_v12",
+              river_network_version_id: "yangtze_v12_rivnet",
+            },
+            geometry: {
+              type: "LineString",
+              coordinates: [
+                [104.1, 30.7],
+                [106.2, 30.5],
+                [108.4, 30.7],
+              ],
+            },
+          },
+          {
+            type: "Feature",
+            properties: {
+              segment_id: "yangtze_v12_riv_000002",
+              name: "长江干流中段",
+              stream_order: 6,
+              basin_version_id: "yangtze_v12",
+              river_network_version_id: "yangtze_v12_rivnet",
+            },
+            geometry: {
+              type: "LineString",
+              coordinates: [
+                [108.4, 30.7],
+                [111.0, 30.4],
+                [113.4, 30.6],
+              ],
+            },
+          },
+          {
+            type: "Feature",
+            properties: {
+              segment_id: "yangtze_v12_riv_000003",
+              name: "汉江支流",
+              stream_order: 4,
+              basin_version_id: "yangtze_v12",
+              river_network_version_id: "yangtze_v12_rivnet",
+            },
+            geometry: {
+              type: "LineString",
+              coordinates: [
+                [110.0, 32.6],
+                [111.2, 31.8],
+                [112.4, 30.8],
+              ],
+            },
+          },
+        ],
+      };
+
+      const map = new maplibregl.Map({
+        container: "map",
+        style: {
+          version: 8,
+          sources: {
+            osm: {
+              type: "raster",
+              tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+              tileSize: 256,
+              attribution: "© OpenStreetMap contributors",
+            },
+          },
+          layers: [{ id: "osm", type: "raster", source: "osm" }],
+        },
+        center: [109.4, 30.9],
+        zoom: 5.2,
+      });
+
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-left");
+      map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
+
+      map.on("load", () => {
+        try {
+          map.addSource(riverSourceId, {
+            type: "geojson",
+            data: demoRivers,
+            promoteId: "segment_id",
+          });
+
+          map.addLayer({
+            id: riverLayerId,
+            type: "line",
+            source: riverSourceId,
+            paint: {
+              "line-color": "#0f8fbf",
+              "line-width": ["interpolate", ["linear"], ["get", "stream_order"], 1, 2, 6, 6],
+              "line-opacity": 0.86,
+            },
+          });
+
+          map.addLayer({
+            id: hoverLayerId,
+            type: "line",
+            source: riverSourceId,
+            filter: ["==", ["get", "segment_id"], ""],
+            paint: {
+              "line-color": "#ef7d22",
+              "line-width": 8,
+              "line-opacity": 0.92,
+            },
+          });
+
+          map.addLayer({
+            id: selectedLayerId,
+            type: "line",
+            source: riverSourceId,
+            filter: ["==", ["get", "segment_id"], ""],
+            paint: {
+              "line-color": "#2266cc",
+              "line-width": 7,
+              "line-opacity": 0.96,
+            },
+          });
+        } catch (error) {
+          mapErrorNode.classList.add("is-visible");
+        }
+      });
+
+      map.on("mousemove", riverLayerId, (event) => {
+        const feature = event.features && event.features[0];
+        if (!feature) return;
+        hoveredSegment = feature.properties.segment_id;
+        map.setFilter(hoverLayerId, ["==", ["get", "segment_id"], hoveredSegment]);
+        map.getCanvas().style.cursor = "pointer";
+        tooltipNode.innerHTML = `<strong>河段：</strong>${feature.properties.segment_id}<br><strong>名称：</strong>${feature.properties.name}`;
+        tooltipNode.style.left = `${event.point.x + 14}px`;
+        tooltipNode.style.top = `${event.point.y + 14}px`;
+        tooltipNode.classList.add("is-visible");
+      });
+
+      map.on("mouseleave", riverLayerId, () => {
+        hoveredSegment = "";
+        map.setFilter(hoverLayerId, ["==", ["get", "segment_id"], ""]);
+        map.getCanvas().style.cursor = "";
+        tooltipNode.classList.remove("is-visible");
+      });
+
+      map.on("click", riverLayerId, (event) => {
+        const feature = event.features && event.features[0];
+        if (!feature) return;
+        selectedFeature = feature;
+        map.setFilter(selectedLayerId, ["==", ["get", "segment_id"], feature.properties.segment_id]);
+        loadForecast(feature);
+      });
+
+      map.on("click", (event) => {
+        const features = map.queryRenderedFeatures(event.point, { layers: [riverLayerId] });
+        if (features.length === 0) {
+          selectedFeature = null;
+          map.setFilter(selectedLayerId, ["==", ["get", "segment_id"], ""]);
+        }
+      });
+
+      document.getElementById("close-panel").addEventListener("click", () => {
+        selectedFeature = null;
+        titleNode.textContent = "请选择河段";
+        metaNode.textContent = "点击地图中的河段查看预报曲线";
+        setState("暂无预报数据");
+        map.setFilter(selectedLayerId, ["==", ["get", "segment_id"], ""]);
+      });
+
+      async function loadForecast(feature) {
+        const { basin_version_id, segment_id, name } = feature.properties;
+        titleNode.textContent = name || segment_id;
+        metaNode.textContent = segment_id;
+        setState("加载中...");
+        const path = `/api/v1/basin-versions/${encodeURIComponent(basin_version_id)}/river-segments/${encodeURIComponent(segment_id)}/forecast-series?issue_time=latest&variables=q_down`;
+
+        try {
+          const response = await fetch(path, { headers: { Accept: "application/json" } });
+          const payload = await response.json();
+          if (!response.ok) {
+            const requestId = payload.request_id ? `（${payload.request_id}）` : "";
+            setState(`数据加载失败，请稍后重试${requestId}`, "error", () => loadForecast(feature));
+            return;
+          }
+          renderForecast(payload, name || segment_id);
+        } catch (error) {
+          setState("网络连接失败", "error", () => loadForecast(feature));
+        }
+      }
+
+      function renderForecast(payload, segmentName) {
+        const series = payload.series && payload.series[0];
+        const points = series && Array.isArray(series.points) ? series.points : [];
+        if (points.length === 0) {
+          setState("暂无预报数据");
+          return;
+        }
+
+        emptyState.hidden = true;
+        chartNode.hidden = false;
+        chart = chart || echarts.init(chartNode);
+        const data = points.map(([time, value]) => [Number.isFinite(Number(time)) ? Number(time) : Date.parse(time), value]);
+        chart.setOption({
+          color: ["#2266cc"],
+          title: {
+            text: `${segmentName} 预报曲线`,
+            subtext: `起报时间 ${payload.issue_time || "latest"}`,
+            left: 0,
+            textStyle: { fontSize: 15, fontWeight: 650 },
+            subtextStyle: { color: "#64748b" },
+          },
+          grid: { left: 52, right: 18, top: 72, bottom: 52 },
+          tooltip: {
+            trigger: "axis",
+            valueFormatter: (value) => `${Number(value).toFixed(2)} ${payload.unit || "m3/s"}`,
+          },
+          xAxis: {
+            type: "time",
+            axisLabel: {
+              formatter: (value) => {
+                const date = new Date(value);
+                return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:00`;
+              },
+            },
+          },
+          yAxis: {
+            type: "value",
+            name: "流量 (m³/s)",
+            nameGap: 32,
+            scale: true,
+          },
+          series: [
+            {
+              type: "line",
+              name: series.scenario_id || "GFS",
+              smooth: true,
+              symbolSize: 6,
+              data,
+            },
+          ],
+        });
+        chart.resize();
+      }
+
+      function setState(message, kind = "", retry = null) {
+        if (chart) chart.clear();
+        chartNode.hidden = true;
+        emptyState.hidden = false;
+        emptyState.className = kind === "error" ? "state state--error" : "state";
+        emptyState.innerHTML = "";
+        const text = document.createElement("div");
+        text.textContent = message;
+        emptyState.appendChild(text);
+        if (retry) {
+          const button = document.createElement("button");
+          button.className = "retry";
+          button.type = "button";
+          button.textContent = "重试";
+          button.addEventListener("click", retry);
+          emptyState.appendChild(button);
+        }
+      }
+
+      window.addEventListener("resize", () => {
+        map.resize();
+        if (chart) chart.resize();
+      });
+    </script>
+  </body>
+</html>
