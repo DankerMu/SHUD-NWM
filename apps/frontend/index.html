@@ -359,7 +359,11 @@
         hoveredSegment = feature.properties.segment_id;
         map.setFilter(hoverLayerId, ["==", ["get", "segment_id"], hoveredSegment]);
         map.getCanvas().style.cursor = "pointer";
-        tooltipNode.innerHTML = `<strong>河段：</strong>${feature.properties.segment_id}<br><strong>名称：</strong>${feature.properties.name}`;
+        tooltipNode.textContent = "";
+        const b1 = document.createElement("strong"); b1.textContent = "河段：";
+        const b2 = document.createElement("strong"); b2.textContent = "名称：";
+        tooltipNode.append(b1, document.createTextNode(feature.properties.segment_id || ""),
+          document.createElement("br"), b2, document.createTextNode(feature.properties.name || ""));
         tooltipNode.style.left = `${event.point.x + 14}px`;
         tooltipNode.style.top = `${event.point.y + 14}px`;
         tooltipNode.classList.add("is-visible");
