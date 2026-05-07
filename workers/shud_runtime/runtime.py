@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import time
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,25 +29,30 @@ class SHUDRuntimeConfig:
     workspace_root: Path | str
     object_store_root: Path | str
     object_store_prefix: str = ""
-    executable: str = "shud_omp"
+    shud_executable: str = "shud_omp"
     output_interval_minutes: int = 1440
     timeout_seconds: int = 3600
     upload_retries: int = 3
+    dry_run: bool = False
+    executable: InitVar[str | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, executable: str | None) -> None:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
         object.__setattr__(self, "object_store_root", Path(self.object_store_root).expanduser().resolve())
+        if executable is not None and self.shud_executable == "shud_omp":
+            object.__setattr__(self, "shud_executable", executable)
 
     @classmethod
-    def from_env(cls) -> SHUDRuntimeConfig:
+    def from_env(cls, *, dry_run: bool = False) -> SHUDRuntimeConfig:
         workspace_root = os.getenv("WORKSPACE_ROOT", ".")
         return cls(
             workspace_root=workspace_root,
             object_store_root=os.getenv("OBJECT_STORE_ROOT", workspace_root),
             object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
-            executable=os.getenv("SHUD_EXECUTABLE", "shud_omp"),
+            shud_executable=os.getenv("SHUD_EXECUTABLE", "shud_omp"),
             output_interval_minutes=int(os.getenv("MODEL_OUTPUT_INTERVAL", "1440")),
             timeout_seconds=int(os.getenv("SHUD_TIMEOUT_SECONDS", "3600")),
+            dry_run=dry_run,
         )
 
 
@@ -59,8 +65,8 @@ class SHUDExecutionResult:
     rivqdown_file: str | None
 
 
-class NullHydroRunRepository:
-    """Repository used by unit tests and local dry runs when no DB is injected."""
+class DryRunHydroRunRepository:
+    """Repository used only when the CLI is invoked with --dry-run."""
 
     def create_run(self, _manifest: dict[str, Any], _run_manifest_uri: str) -> dict[str, Any]:
         return {}
@@ -109,6 +115,7 @@ class PsycopgHydroRunRepository:
                 output_uri = NULL,
                 log_uri = NULL,
                 updated_at = now()
+            WHERE hydro.hydro_run.status IN ('failed', 'cancelled')
             RETURNING *
             """,
             (
@@ -124,6 +131,8 @@ class PsycopgHydroRunRepository:
                 _parse_time(manifest["end_time"]),
                 run_manifest_uri,
             ),
+            missing_error_code="HYDRO_RUN_NOT_RETRIABLE",
+            missing_message="hydro_run already exists with a non-retriable status.",
         )
 
     def update_status(self, run_id: str, status: str, **fields: Any) -> dict[str, Any]:
@@ -160,7 +169,14 @@ class PsycopgHydroRunRepository:
             (error_code, error_message, fields.get("output_uri"), fields.get("log_uri"), run_id),
         )
 
-    def _fetch_one(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any]:
+    def _fetch_one(
+        self,
+        statement: str,
+        parameters: tuple[Any, ...],
+        *,
+        missing_error_code: str = "HYDRO_RUN_NOT_FOUND",
+        missing_message: str = "hydro_run update did not return a row.",
+    ) -> dict[str, Any]:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
@@ -176,7 +192,7 @@ class PsycopgHydroRunRepository:
                 row = cursor.fetchone()
                 connection.commit()
                 if row is None:
-                    raise SHUDRuntimeError("HYDRO_RUN_NOT_FOUND", "hydro_run update did not return a row.")
+                    raise SHUDRuntimeError(missing_error_code, missing_message)
                 return dict(row)
         except psycopg2.Error as error:
             if connection is not None:
@@ -196,25 +212,26 @@ class SHUDRuntime:
         object_store: LocalObjectStore | None = None,
     ) -> None:
         self.config = config
-        self.repository = repository or NullHydroRunRepository()
+        if repository is not None:
+            self.repository = repository
+        elif config.dry_run:
+            self.repository = DryRunHydroRunRepository()
+        else:
+            self.repository = PsycopgHydroRunRepository.from_env()
         self.object_store = object_store or LocalObjectStore(config.object_store_root, config.object_store_prefix)
 
     @classmethod
-    def from_env(cls) -> SHUDRuntime:
-        config = SHUDRuntimeConfig.from_env()
-        repository: Any
-        if os.getenv("DATABASE_URL", "").strip():
-            repository = PsycopgHydroRunRepository.from_env()
-        else:
-            repository = NullHydroRunRepository()
-        return cls(config=config, repository=repository)
+    def from_env(cls, *, dry_run: bool = False) -> SHUDRuntime:
+        config = SHUDRuntimeConfig.from_env(dry_run=dry_run)
+        return cls(config=config)
 
     def execute_manifest_path(self, manifest_path: str | Path) -> SHUDExecutionResult:
         manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
         return self.execute(manifest)
 
     def execute(self, manifest: dict[str, Any]) -> SHUDExecutionResult:
-        run_id = manifest["run_id"]
+        _validate_manifest_path_components(manifest)
+        run_id = _safe_path_component(manifest["run_id"])
         run_manifest_uri = _run_manifest_uri(manifest)
         self.repository.create_run(manifest, run_manifest_uri)
 
@@ -296,7 +313,7 @@ class SHUDRuntime:
         output_dir: Path,
         log_dir: Path,
     ) -> None:
-        command = _runtime_command(manifest, self.config.executable, cfg_path)
+        command = _runtime_command(self.config.shud_executable, cfg_path)
         try:
             completed = subprocess.run(
                 command,
@@ -307,8 +324,8 @@ class SHUDRuntime:
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
-            (log_dir / "shud_stdout.log").write_text(error.stdout or "", encoding="utf-8")
-            (log_dir / "shud_stderr.log").write_text(error.stderr or "", encoding="utf-8")
+            (log_dir / "shud_stdout.log").write_text(_subprocess_output_text(error.stdout), encoding="utf-8")
+            (log_dir / "shud_stderr.log").write_text(_subprocess_output_text(error.stderr), encoding="utf-8")
             message = f"shud_omp timed out after {self.config.timeout_seconds}s"
             raise SHUDRuntimeError("SHUD_TIMEOUT", message) from error
 
@@ -355,6 +372,7 @@ class SHUDRuntime:
         return rivqdown
 
     def upload_results(self, run_id: str, output_dir: Path, log_dir: Path) -> dict[str, str]:
+        run_id = _safe_path_component(run_id)
         self._upload_directory(output_dir, f"runs/{run_id}/output")
         log_uri = self.upload_logs(run_id, log_dir)
         return {
@@ -363,6 +381,7 @@ class SHUDRuntime:
         }
 
     def upload_logs(self, run_id: str, log_dir: Path) -> str:
+        run_id = _safe_path_component(run_id)
         self._upload_directory(log_dir, f"runs/{run_id}/logs")
         return self._directory_uri(f"runs/{run_id}/logs")
 
@@ -429,13 +448,35 @@ class SHUDRuntime:
         (log_dir / "runtime_error.log").write_text(f"{error.error_code}: {error.message}\n", encoding="utf-8")
 
 
-def _runtime_command(manifest: dict[str, Any], default_executable: str, cfg_path: Path) -> list[str]:
-    runtime = manifest.get("runtime") or {}
-    command = runtime.get("command")
-    if command:
-        return [str(part) for part in command]
+_SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
-    executable = str(runtime.get("executable") or default_executable)
+
+def _safe_path_component(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Path component must be a string.")
+    if not value or value.startswith("-"):
+        raise ValueError("Invalid path component.")
+    if "\x00" in value or "/" in value or "\\" in value or ".." in value:
+        raise ValueError("Invalid path component.")
+    if _SAFE_PATH_COMPONENT.fullmatch(value) is None:
+        raise ValueError("Invalid path component.")
+    return value
+
+
+def _validate_manifest_path_components(manifest: dict[str, Any]) -> None:
+    _safe_path_component(manifest["run_id"])
+    model = manifest.get("model") or {}
+    forcing = manifest.get("forcing") or {}
+    for section in (model, forcing):
+        for key, value in section.items():
+            if value is not None and key.endswith("_id"):
+                _safe_path_component(value)
+    if model.get("project_name") is not None:
+        _safe_path_component(model["project_name"])
+
+
+def _runtime_command(shud_executable: str, cfg_path: Path) -> list[str]:
+    executable = str(shud_executable)
     args = [str(cfg_path)]
     if executable.endswith(".py"):
         return [sys.executable, executable, *args]
@@ -526,7 +567,7 @@ def _segment_count(manifest: dict[str, Any]) -> int:
 
 
 def _project_name(manifest: dict[str, Any]) -> str:
-    return str(manifest.get("model", {}).get("project_name") or manifest["model"]["model_id"])
+    return _safe_path_component(str(manifest.get("model", {}).get("project_name") or manifest["model"]["model_id"]))
 
 
 def _object_key(uri_or_key: str, object_store_prefix: str) -> str:
@@ -543,7 +584,7 @@ def _run_manifest_uri(manifest: dict[str, Any]) -> str:
     return (
         manifest.get("run_manifest_uri")
         or manifest.get("outputs", {}).get("run_manifest_uri")
-        or f"runs/{manifest['run_id']}/input/manifest.json"
+        or f"runs/{_safe_path_component(manifest['run_id'])}/input/manifest.json"
     )
 
 
@@ -563,6 +604,14 @@ def _is_number(value: str) -> bool:
 
 def _last_lines(text: str, count: int) -> str:
     return "\n".join(text.splitlines()[-count:])
+
+
+def _subprocess_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def _as_runtime_error(error: Exception) -> SHUDRuntimeError:

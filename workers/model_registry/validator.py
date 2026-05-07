@@ -56,8 +56,17 @@ def validate_model_package_uri(model_package_uri: str) -> ModelPackageValidation
     if not object_store_root:
         return None
 
+    root = Path(object_store_root).expanduser().resolve()
     key = _object_key(model_package_uri, os.getenv("OBJECT_STORE_PREFIX", ""))
-    return validate_model_package_path(Path(object_store_root).expanduser() / key)
+    resolved_path = (root / key).resolve()
+    if not resolved_path.is_relative_to(root):
+        raise ModelPackageValidationError("model_package_uri escapes object store root")
+    if not resolved_path.exists():
+        raise ModelPackageValidationError("Model package does not exist for model_package_uri.")
+    try:
+        return validate_model_package_path(resolved_path)
+    except ModelPackageValidationError as error:
+        raise ModelPackageValidationError(_redact_local_paths(str(error), root, resolved_path)) from error
 
 
 def _object_key(uri_or_key: str, object_store_prefix: str) -> str:
@@ -71,3 +80,10 @@ def _object_key(uri_or_key: str, object_store_prefix: str) -> str:
     elif candidate.startswith("s3://"):
         candidate = urlparse(candidate).path.strip("/")
     return candidate.strip("/")
+
+
+def _redact_local_paths(message: str, *paths: Path) -> str:
+    redacted = message
+    for path in paths:
+        redacted = redacted.replace(str(path), "[redacted path]")
+    return redacted

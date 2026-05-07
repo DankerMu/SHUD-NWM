@@ -277,8 +277,19 @@ class PsycopgModelRegistryStore:
                 )
             if network["basin_version_id"] != payload["basin_version_id"]:
                 raise InvalidReferenceError("river_network_version_id does not belong to basin_version_id.")
-            if not self._exists(cursor, "core.mesh_version", "mesh_version_id", payload["mesh_version_id"]):
+            mesh = self._fetch_optional(
+                cursor,
+                """
+                SELECT basin_version_id
+                FROM core.mesh_version
+                WHERE mesh_version_id = %s
+                """,
+                (payload["mesh_version_id"],),
+            )
+            if mesh is None:
                 raise InvalidReferenceError(f"mesh_version_id does not exist: {payload['mesh_version_id']}")
+            if mesh["basin_version_id"] != payload["basin_version_id"]:
+                raise InvalidReferenceError("mesh_version_id does not belong to basin_version_id.")
 
             cursor.execute(
                 """

@@ -8,9 +8,18 @@ from httpx import ASGITransport, AsyncClient
 
 from apps.api.main import app
 from apps.api.routes.models import get_model_registry_store
-from packages.common.model_registry import DuplicateResourceError, InvalidReferenceError, geometry_to_wkt
+from packages.common.model_registry import (
+    DuplicateResourceError,
+    InvalidReferenceError,
+    PsycopgModelRegistryStore,
+    geometry_to_wkt,
+)
 from workers.model_registry.cli import _argparse_main
-from workers.model_registry.validator import ModelPackageValidationError, validate_model_package_path
+from workers.model_registry.validator import (
+    ModelPackageValidationError,
+    validate_model_package_path,
+    validate_model_package_uri,
+)
 
 
 class FakeModelRegistryStore:
@@ -200,3 +209,83 @@ def test_model_package_validator_reports_missing_files(tmp_path: Path) -> None:
 
     with pytest.raises(ModelPackageValidationError, match=r"\*\.para"):
         validate_model_package_path(package)
+
+
+def test_model_package_uri_rejects_paths_outside_object_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "object-store"
+    object_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    with pytest.raises(ModelPackageValidationError) as exc_info:
+        validate_model_package_uri("s3://nhms/../outside/package")
+
+    assert "escapes object store root" in str(exc_info.value)
+    assert str(tmp_path) not in str(exc_info.value)
+
+
+def test_model_package_uri_missing_package_error_redacts_local_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "object-store"
+    object_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    with pytest.raises(ModelPackageValidationError) as exc_info:
+        validate_model_package_uri("s3://nhms/models/missing/package")
+
+    assert "model_package_uri" in str(exc_info.value)
+    assert str(tmp_path) not in str(exc_info.value)
+
+
+def test_create_model_rejects_mesh_version_from_different_basin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any] | None] = [
+                {"exists": 1},
+                {"basin_version_id": "basin_v01"},
+                {"basin_version_id": "basin_v02"},
+            ]
+            self.statements: list[str] = []
+
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            self.statements.append(statement)
+
+        def fetchone(self) -> dict[str, Any] | None:
+            return self.rows.pop(0)
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(InvalidReferenceError, match="mesh_version_id"):
+        store.create_model(
+            {
+                "model_id": "demo_model",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "rivnet_v01",
+                "mesh_version_id": "mesh_v02",
+                "calibration_version_id": "cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/demo/package/",
+            }
+        )
+
+    assert not any("INSERT INTO core.model_instance" in statement for statement in cursor.statements)
