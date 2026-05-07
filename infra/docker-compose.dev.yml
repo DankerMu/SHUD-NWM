@@ -51,6 +51,32 @@ services:
         echo 'Bucket nhms created or already exists'
       "
 
+  m1-worker:
+    image: python:3.11-slim
+    container_name: nhms-m1-worker
+    working_dir: /app
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://nhms:nhms_dev@db:5432/nhms
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET_NAME: nhms
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      GFS_NOMADS_BASE_URL: https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod
+      WORKSPACE_ROOT: /work/nhms
+      OBJECT_STORE_PREFIX: s3://nhms
+    volumes:
+      - ..:/app
+      - worker-workspace:/work/nhms
+    command: ["sleep", "infinity"]
+
 volumes:
   pgdata:
   minio-data:
+  worker-workspace:
