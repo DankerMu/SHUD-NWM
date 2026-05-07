@@ -1,4 +1,4 @@
-.PHONY: dev migrate reset-db seed-demo test lint
+.PHONY: dev migrate reset-db seed-demo seed-m1-model test lint
 
 dev:
 	@echo "Starting infrastructure services..."
@@ -32,6 +32,11 @@ seed-demo:
 	@echo "Seeding demo data..."
 	python -m db.seeds.seed_demo
 	@echo "Seed complete."
+
+seed-m1-model:
+	@echo "Seeding M1 model registry assets..."
+	python -m db.seeds.seed_m1_model
+	@echo "M1 model seed complete."
 
 test:
 	python -m pytest tests/ -v

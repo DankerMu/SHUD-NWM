@@ -21,6 +21,7 @@ BASIN_ID = "yangtze"
 BASIN_VERSION_ID = "yangtze_v2026_01"
 RIVER_NETWORK_VERSION_ID = "yangtze_rivnet_v01"
 MODEL_ID = "yangtze_shud_v12"
+MESH_VERSION_ID = "yangtze_mesh_v01"
 SOURCE_ID = "GFS"
 SOURCE_ID_IN_IDS = "gfs"
 CYCLE_ID = "gfs_2026050100"
@@ -295,6 +296,20 @@ def seed_core(cursor: Any, json_adapter: Any, execute_values: Any) -> None:
     )
     cursor.execute(
         """
+        INSERT INTO core.mesh_version (mesh_version_id, basin_version_id, version_label, mesh_uri, properties_json)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (
+            MESH_VERSION_ID,
+            BASIN_VERSION_ID,
+            "v01",
+            f"s3://nhms/models/{MODEL_ID}/mesh/",
+            json_adapter({"demo_mesh": True}),
+        ),
+    )
+    cursor.execute(
+        """
         INSERT INTO core.model_instance (
             model_id,
             basin_version_id,
@@ -313,7 +328,7 @@ def seed_core(cursor: Any, json_adapter: Any, execute_values: Any) -> None:
             MODEL_ID,
             BASIN_VERSION_ID,
             RIVER_NETWORK_VERSION_ID,
-            "yangtze_mesh_v01",
+            MESH_VERSION_ID,
             "yangtze_cal_v01",
             "2.0",
             MODEL_PACKAGE_URI,
@@ -789,6 +804,7 @@ def collect_counts(cursor: Any) -> dict[str, int]:
             "SELECT COUNT(*) FROM core.river_segment WHERE river_network_version_id = %s",
             (RIVER_NETWORK_VERSION_ID,),
         ),
+        ("core.mesh_version", "SELECT COUNT(*) FROM core.mesh_version WHERE mesh_version_id = %s", (MESH_VERSION_ID,)),
         ("core.model_instance", "SELECT COUNT(*) FROM core.model_instance WHERE model_id = %s", (MODEL_ID,)),
         ("met.data_source", "SELECT COUNT(*) FROM met.data_source WHERE source_id = %s", (SOURCE_ID,)),
         ("met.forecast_cycle", "SELECT COUNT(*) FROM met.forecast_cycle WHERE cycle_id = %s", (CYCLE_ID,)),
