@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  markdown-lint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: "docs/**/*.md"
+
+  openapi-validate:
+    name: OpenAPI Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npx --yes @redocly/cli@1.25.13 lint openapi/nhms.v1.yaml --skip-rule no-unused-components
+        if: hashFiles('openapi/nhms.v1.yaml') != ''
+      - run: echo "openapi/nhms.v1.yaml not found — skipping validation"
+        if: hashFiles('openapi/nhms.v1.yaml') == ''
+
+  json-schema-validate:
+    name: JSON Schema Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install check-jsonschema
+        run: pip install check-jsonschema>=0.29.0
+      - name: Meta-validate schemas
+        run: |
+          SCHEMAS=$(find schemas/ -name '*.schema.json' 2>/dev/null)
+          if [ -z "$SCHEMAS" ]; then
+            echo "No schema files found — skipping"
+            exit 0
+          fi
+          for schema in $SCHEMAS; do
+            echo "Validating $schema ..."
+            check-jsonschema --check-metaschema "$schema"
+          done
+      - name: Validate examples against schemas
+        run: |
+          for example in schemas/examples/*.json; do
+            [ -f "$example" ] || { echo "No example files — skipping"; exit 0; }
+            base=$(basename "$example" .example.json)
+            schema="schemas/${base}.schema.json"
+            if [ -f "$schema" ]; then
+              echo "Validating $example against $schema ..."
+              check-jsonschema --schemafile "$schema" "$example"
+            else
+              echo "WARNING: No schema found for $example (expected $schema)"
+            fi
+          done
+
+  sql-migration-dry-run:
+    name: SQL Migration Dry Run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      db:
+        image: timescale/timescaledb-ha:pg15-latest
+        env:
+          POSTGRES_DB: nhms
+          POSTGRES_USER: nhms
+          POSTGRES_PASSWORD: nhms_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nhms -d nhms"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 15s
+    env:
+      DATABASE_URL: postgresql://nhms:nhms_dev@localhost:5432/nhms
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install psycopg2-binary python-dotenv
+      - name: Run migrations (first pass)
+        run: python -m packages.common.migrate
+      - name: Run migrations (idempotency check)
+        run: python -m packages.common.migrate
+      - name: Run seed-demo
+        run: python -m db.seeds.seed_demo
+        env:
+          S3_ENDPOINT_URL: http://localhost:9000
+          S3_BUCKET_NAME: nhms
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run tests with coverage
+        run: pytest tests/ -v --tb=short --co -q 2>/dev/null; pytest tests/ -v --tb=short
