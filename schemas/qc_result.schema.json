@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS QC Result",
+  "description": "Quality-control result document for NHMS pipeline checkpoints.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "qc_checkpoint",
+    "target_type",
+    "target_id",
+    "passed",
+    "severity",
+    "checks_json"
+  ],
+  "properties": {
+    "qc_id": {
+      "type": "integer"
+    },
+    "qc_checkpoint": {
+      "description": "QC checkpoint name.",
+      "type": "string",
+      "minLength": 1
+    },
+    "target_type": {
+      "description": "Type of target being checked.",
+      "type": "string",
+      "minLength": 1
+    },
+    "target_id": {
+      "description": "Identifier of target being checked.",
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "cycle_id": {
+      "type": "string"
+    },
+    "passed": {
+      "description": "Overall QC pass/fail result.",
+      "type": "boolean"
+    },
+    "severity": {
+      "description": "Severity assigned when QC fails or warns.",
+      "type": "string",
+      "enum": ["info", "warning", "error"]
+    },
+    "checks_json": {
+      "description": "Structured check details.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checks"],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["name", "passed"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "message": {
+      "type": "string"
+    }
+  }
+}

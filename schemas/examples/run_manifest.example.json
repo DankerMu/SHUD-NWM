@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
+  "run_type": "forecast",
+  "scenario_id": "forecast_gfs_deterministic",
+  "source_id": "GFS",
+  "cycle_time": "2026-04-30T00:00:00Z",
+  "issue_time": "2026-04-30T04:00:00Z",
+  "start_time": "2026-04-30T00:00:00Z",
+  "end_time": "2026-05-07T00:00:00Z",
+  "model": {
+    "model_id": "yangtze_shud_v12",
+    "basin_version_id": "yangtze_v2026_01",
+    "model_package_uri": "s3://nhms/models/yangtze_shud_v12/model_package.tar.gz",
+    "project_name": "yangtze_v12"
+  },
+  "initial_state": {
+    "state_id": "state_yangtze_shud_v12_2026043000",
+    "ic_file_uri": "s3://nhms/states/yangtze_shud_v12/2026043000/yangtze_v12.cfg.ic"
+  },
+  "forcing": {
+    "forcing_version_id": "forc_gfs_2026043000_yangtze_shud_v12",
+    "forcing_uri": "s3://nhms/forcing/gfs/2026043000/yangtze_shud_v12/"
+  },
+  "runtime": {
+    "executable": "shud_omp",
+    "threads": 32,
+    "init_mode": 3,
+    "ascii_output": 1,
+    "binary_output": 0
+  },
+  "outputs": {
+    "output_uri": "s3://nhms/runs/fcst_gfs_2026043000_yangtze_shud_v12/output/",
+    "log_uri": "s3://nhms/runs/fcst_gfs_2026043000_yangtze_shud_v12/logs/",
+    "required_files": ["*.rivqdown.csv", "*.rivystage.csv"]
+  }
+}

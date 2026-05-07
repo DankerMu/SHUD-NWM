@@ -1,0 +1,29 @@
+{
+  "qc_checkpoint": "forcing_package_ready",
+  "target_type": "forcing_version",
+  "target_id": "forc_gfs_2026043000_yangtze_shud_v12",
+  "run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
+  "passed": true,
+  "severity": "info",
+  "checks_json": {
+    "summary": "All forcing package checks passed.",
+    "checks": [
+      {
+        "name": "station_count",
+        "passed": true,
+        "detail": "213 stations available"
+      },
+      {
+        "name": "time_coverage",
+        "passed": true,
+        "detail": "2026-04-30T00:00:00Z through 2026-05-07T00:00:00Z"
+      },
+      {
+        "name": "object_prefix",
+        "passed": true,
+        "detail": "forcing package stored below approved s3 prefix"
+      }
+    ]
+  },
+  "message": "Yangtze GFS forcing package passed M0 QC."
+}

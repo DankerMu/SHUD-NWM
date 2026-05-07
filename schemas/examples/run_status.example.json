@@ -1,0 +1,8 @@
+{
+  "run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
+  "status": "running",
+  "timestamp": "2026-04-30T05:15:00Z",
+  "progress_pct": 42.5,
+  "current_step": "shud_solver",
+  "log_uri": "s3://nhms/runs/fcst_gfs_2026043000_yangtze_shud_v12/logs/slurm.out"
+}
