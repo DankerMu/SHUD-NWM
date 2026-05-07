@@ -15,7 +15,11 @@ MD033:
     - sup
     - sub
 
+MD009: false
+MD012: false
 MD029: false
 MD032: false
 MD034: false
+MD040: false
 MD041: false
+MD047: false
