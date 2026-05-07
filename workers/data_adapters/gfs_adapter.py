@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -117,6 +118,17 @@ class ChecksumMismatchError(GFSAdapterError):
     error_code = "CHECKSUM_MISMATCH"
 
 
+class FileTooLargeError(GFSAdapterError):
+    error_code = "FILE_TOO_LARGE"
+
+
+@dataclass(frozen=True)
+class DownloadedPayload:
+    content: bytes
+    checksum: str
+    bytes_written: int
+
+
 @dataclass(frozen=True)
 class GFSAdapterConfig:
     source_id: str = "gfs"
@@ -144,6 +156,12 @@ class GFSAdapterConfig:
     retry_backoff_seconds: tuple[float, ...] = (1.0, 2.0, 4.0)
     request_timeout_seconds: float = 30.0
     min_file_size_bytes: int = 1
+    download_chunk_size_bytes: int = field(
+        default_factory=lambda: int(os.getenv("GFS_DOWNLOAD_CHUNK_SIZE_BYTES", str(8 * 1024 * 1024)))
+    )
+    max_file_size_bytes: int = field(
+        default_factory=lambda: int(os.getenv("GFS_MAX_FILE_SIZE_BYTES", str(500 * 1024 * 1024)))
+    )
 
     def forecast_hours(self) -> list[int]:
         return list(range(self.forecast_start_hour, self.forecast_end_hour + 1, self.forecast_step_hours))
@@ -161,6 +179,8 @@ class GFSAdapterConfig:
             "poll_interval_seconds": self.poll_interval_seconds,
             "max_wait_seconds": self.max_wait_seconds,
             "max_retries": self.max_retries,
+            "download_chunk_size_bytes": self.download_chunk_size_bytes,
+            "max_file_size_bytes": self.max_file_size_bytes,
         }
 
 
@@ -171,7 +191,7 @@ class GFSAdapter(DataSourceAdapter):
         config: GFSAdapterConfig | None = None,
         repository: ForecastCycleRepository | None = None,
         object_store: LocalObjectStore | None = None,
-        downloader: Callable[[str], bytes] | None = None,
+        downloader: Callable[[str], bytes | DownloadedPayload] | None = None,
         availability_checker: Callable[[str], bool] | None = None,
         sleeper: Callable[[float], None] | None = None,
         clock: Callable[[], float] | None = None,
@@ -333,12 +353,45 @@ class GFSAdapter(DataSourceAdapter):
 
     def download_plan(self, manifest: DownloadManifest) -> DownloadPlanResult:
         cycle_time = manifest.cycle_time
-        self._update_cycle(
-            cycle_time=cycle_time,
-            status="downloading",
-            error_code="",
-            error_message="",
-        )
+        existing_cycle = self._get_cycle(cycle_time)
+        already_done_by_key: dict[str, DownloadFileResult] = {}
+        needs_download = False
+
+        for entry in manifest.entries:
+            already_done = self._already_done_result(entry)
+            if already_done is None:
+                needs_download = True
+            else:
+                already_done_by_key[entry.local_key] = already_done
+
+        if not needs_download:
+            results = tuple(already_done_by_key[entry.local_key] for entry in manifest.entries)
+            if existing_cycle is not None and existing_cycle.get("status") == "raw_complete":
+                return DownloadPlanResult(
+                    status="already_done",
+                    files=results,
+                    total_bytes_written=0,
+                    retry_count=0,
+                )
+
+            verification = self.verify_manifest(manifest)
+            if not verification.passed:
+                message = "; ".join(failure.error_message for failure in verification.failures)
+                self._record_download_failure(cycle_time, "VERIFY_FAILED", message, retry_count=0)
+                return DownloadPlanResult(
+                    status="failed_download",
+                    files=results,
+                    total_bytes_written=0,
+                    retry_count=0,
+                )
+            return DownloadPlanResult(
+                status="raw_complete",
+                files=results,
+                total_bytes_written=0,
+                retry_count=0,
+            )
+
+        self._update_cycle(cycle_time=cycle_time, status="downloading", error_code="", error_message="")
 
         results: list[DownloadFileResult] = []
         retry_count = 0
@@ -346,18 +399,12 @@ class GFSAdapter(DataSourceAdapter):
 
         for entry in manifest.entries:
             try:
-                if self._entry_already_done(entry):
-                    results.append(
-                        DownloadFileResult(
-                            local_key=entry.local_key,
-                            status="already_done",
-                            checksum=self.object_store.checksum(entry.local_key),
-                        )
-                    )
+                if entry.local_key in already_done_by_key:
+                    results.append(already_done_by_key[entry.local_key])
                     continue
 
-                result, attempts = self._download_entry(entry)
-                retry_count += attempts
+                result, retries = self._download_entry(entry)
+                retry_count += retries
                 total_bytes_written += result.bytes_written
                 results.append(result)
             except GFSAdapterError as error:
@@ -377,7 +424,6 @@ class GFSAdapter(DataSourceAdapter):
                     retry_count=retry_count,
                 )
             except Exception as error:
-                retry_count += 1
                 LOGGER.exception("Unexpected download failure for %s", entry.local_key)
                 self._record_download_failure(cycle_time, "UNEXPECTED_DOWNLOAD_ERROR", str(error), retry_count)
                 results.append(
@@ -476,65 +522,72 @@ class GFSAdapter(DataSourceAdapter):
 
     def _download_entry(self, entry: ManifestEntry) -> tuple[DownloadFileResult, int]:
         deadline = self.clock() + self.config.max_wait_seconds
-        total_attempts = 0
+        total_retries = 0
 
         while True:
             try:
-                content, attempts = self._download_with_retries(entry.remote_url)
-                total_attempts += attempts
-                checksum = sha256_bytes(content)
+                payload, retries = self._download_with_retries(entry.remote_url)
+                total_retries += retries
+                checksum = payload.checksum
                 if entry.expected_checksum and checksum != entry.expected_checksum:
                     raise ChecksumMismatchError(
                         (
                             f"Downloaded checksum mismatch for {entry.local_key}: "
                             f"expected {entry.expected_checksum}, actual {checksum}"
                         ),
-                        attempts=total_attempts,
+                        attempts=total_retries,
                     )
 
-                self.object_store.write_bytes_atomic(entry.local_key, content)
+                self.object_store.write_bytes_atomic(entry.local_key, payload.content)
                 return (
                     DownloadFileResult(
                         local_key=entry.local_key,
                         status="downloaded",
                         checksum=checksum,
-                        bytes_written=len(content),
+                        bytes_written=payload.bytes_written,
                     ),
-                    total_attempts,
+                    total_retries,
                 )
             except FileUnavailableError as error:
-                total_attempts += error.attempts
+                total_retries += max(0, error.attempts - 1)
                 if self.clock() >= deadline:
                     raise PollingTimeoutError(
                         f"Timed out waiting for {entry.remote_url}",
-                        attempts=total_attempts,
+                        attempts=total_retries,
                     ) from error
                 self.sleeper(self.config.poll_interval_seconds)
-            except (NetworkDownloadError, ChecksumMismatchError):
+            except (NetworkDownloadError, ChecksumMismatchError, FileTooLargeError):
                 self._delete_partial(entry.local_key)
                 raise
             except (OSError, ObjectStoreError, ValueError) as error:
                 self._delete_partial(entry.local_key)
-                raise GFSAdapterError(f"Failed to store {entry.local_key}: {error}", attempts=total_attempts) from error
+                raise GFSAdapterError(f"Failed to store {entry.local_key}: {error}", attempts=total_retries) from error
 
-    def _download_with_retries(self, remote_url: str) -> tuple[bytes, int]:
+    def _download_with_retries(self, remote_url: str) -> tuple[DownloadedPayload, int]:
         last_error: Exception | None = None
-        for attempt in range(1, self.config.max_retries + 1):
+        max_attempts = max(1, self.config.max_retries)
+        for attempt in range(1, max_attempts + 1):
             try:
-                return self.downloader(remote_url), attempt
-            except FileUnavailableError:
+                return self._normalize_payload(self.downloader(remote_url)), attempt - 1
+            except (FileUnavailableError, FileTooLargeError):
                 raise
             except Exception as error:
                 last_error = error
-                if attempt >= self.config.max_retries:
+                if attempt >= max_attempts:
                     break
                 backoff = self._backoff_for(attempt)
                 self.sleeper(backoff)
 
         raise NetworkDownloadError(
-            f"Failed to download {remote_url} after {self.config.max_retries} attempts: {last_error}",
-            attempts=self.config.max_retries,
+            f"Failed to download {remote_url} after {max_attempts} attempts: {last_error}",
+            attempts=max_attempts - 1,
         )
+
+    def _normalize_payload(self, payload: bytes | DownloadedPayload) -> DownloadedPayload:
+        if isinstance(payload, DownloadedPayload):
+            return payload
+        content = bytes(payload)
+        return DownloadedPayload(content=content, checksum=sha256_bytes(content), bytes_written=len(content))
 
     def _entry_already_done(self, entry: ManifestEntry) -> bool:
         try:
@@ -550,7 +603,17 @@ class GFSAdapter(DataSourceAdapter):
             LOGGER.exception("Failed to check idempotency for %s", entry.local_key)
             return False
 
-    def _download_url(self, remote_url: str) -> bytes:
+    def _already_done_result(self, entry: ManifestEntry) -> DownloadFileResult | None:
+        if not self._entry_already_done(entry):
+            return None
+        try:
+            checksum = self.object_store.checksum(entry.local_key)
+        except (OSError, ObjectStoreError, ValueError):
+            LOGGER.exception("Failed to checksum existing raw object %s", entry.local_key)
+            return None
+        return DownloadFileResult(local_key=entry.local_key, status="already_done", checksum=checksum)
+
+    def _download_url(self, remote_url: str) -> DownloadedPayload:
         request = Request(remote_url, method="GET")
         try:
             with urlopen(request, timeout=self.config.request_timeout_seconds) as response:
@@ -559,7 +622,39 @@ class GFSAdapter(DataSourceAdapter):
                     raise FileUnavailableError(f"Remote file is unavailable: {remote_url}", attempts=1)
                 if status >= 400:
                     raise NetworkDownloadError(f"HTTP {status} while downloading {remote_url}", attempts=1)
-                return response.read()
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None and int(content_length) > self.config.max_file_size_bytes:
+                    raise FileTooLargeError(
+                        (
+                            f"Remote file {remote_url} is {content_length} bytes; "
+                            f"maximum allowed is {self.config.max_file_size_bytes}"
+                        )
+                    )
+
+                content = bytearray()
+                checksum = hashlib.sha256()
+                chunk_size = max(1, self.config.download_chunk_size_bytes)
+                total_bytes = 0
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > self.config.max_file_size_bytes:
+                        raise FileTooLargeError(
+                            (
+                                f"Remote file {remote_url} exceeded maximum size "
+                                f"{self.config.max_file_size_bytes} bytes"
+                            )
+                        )
+                    checksum.update(chunk)
+                    content.extend(chunk)
+
+                return DownloadedPayload(
+                    content=bytes(content),
+                    checksum=checksum.hexdigest(),
+                    bytes_written=total_bytes,
+                )
         except HTTPError as error:
             if error.code == 404:
                 raise FileUnavailableError(f"Remote file is unavailable: {remote_url}", attempts=1) from error
@@ -596,6 +691,15 @@ class GFSAdapter(DataSourceAdapter):
             error_code=error_code,
             error_message=error_message,
         )
+
+    def _get_cycle(self, cycle_time: datetime) -> dict[str, Any] | None:
+        if self.repository is None:
+            return None
+        try:
+            return self.repository.get_forecast_cycle(source_id=self.config.source_id, cycle_time=cycle_time)
+        except Exception:
+            LOGGER.exception("Failed to read forecast cycle %s", format_cycle_time(cycle_time))
+            raise
 
     def _update_cycle(
         self,

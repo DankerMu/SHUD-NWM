@@ -68,5 +68,5 @@ def build_mock_payload(cycle_time: datetime, variable: str, forecast_hour: int) 
         "forecast_hour": forecast_hour,
         "values": [default_mock_value(variable, forecast_hour)],
         "shape": [1],
-        "created_by": "workers.data-adapters.mock_gfs",
+        "created_by": "workers.data_adapters.mock_gfs",
     }

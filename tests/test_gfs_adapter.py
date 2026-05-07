@@ -5,15 +5,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 
-base = importlib.import_module("workers.data-adapters.base")
-gfs_module = importlib.import_module("workers.data-adapters.gfs_adapter")
+base = importlib.import_module("workers.data_adapters.base")
+cli_module = importlib.import_module("workers.data_adapters.cli")
+gfs_module = importlib.import_module("workers.data_adapters.gfs_adapter")
 
 DownloadManifest = base.DownloadManifest
 ManifestEntry = base.ManifestEntry
 parse_cycle_time = base.parse_cycle_time
 FileUnavailableError = gfs_module.FileUnavailableError
+FileTooLargeError = gfs_module.FileTooLargeError
 GFSAdapter = gfs_module.GFSAdapter
 GFSAdapterConfig = gfs_module.GFSAdapterConfig
 
@@ -24,6 +28,7 @@ class FakeMetRepository:
         self.cycles: dict[tuple[str, datetime], dict[str, Any]] = {}
         self.ensure_calls = 0
         self.cycle_upsert_calls = 0
+        self.update_calls = 0
 
     def ensure_data_source(self, **kwargs: Any) -> dict[str, Any]:
         self.ensure_calls += 1
@@ -39,6 +44,7 @@ class FakeMetRepository:
         return existing
 
     def update_forecast_cycle(self, **kwargs: Any) -> dict[str, Any] | None:
+        self.update_calls += 1
         key = (kwargs["source_id"], kwargs["cycle_time"])
         cycle = self.cycles.setdefault(key, {"source_id": kwargs["source_id"], "cycle_time": kwargs["cycle_time"]})
         for field in ("status", "manifest_uri", "retry_count", "error_code", "error_message"):
@@ -58,6 +64,8 @@ def build_adapter(
     availability_checker: Any | None = None,
     max_retries: int = 1,
     max_wait_seconds: float = 0,
+    download_chunk_size_bytes: int = 8 * 1024 * 1024,
+    max_file_size_bytes: int = 500 * 1024 * 1024,
 ) -> GFSAdapter:
     config = GFSAdapterConfig(
         workspace_root=tmp_path,
@@ -65,6 +73,8 @@ def build_adapter(
         max_wait_seconds=max_wait_seconds,
         max_retries=max_retries,
         retry_backoff_seconds=(0,),
+        download_chunk_size_bytes=download_chunk_size_bytes,
+        max_file_size_bytes=max_file_size_bytes,
     )
     return GFSAdapter(
         config=config,
@@ -194,6 +204,28 @@ def test_download_plan_is_idempotent_when_checksum_matches(tmp_path: Path) -> No
     assert calls["download"] == 0
 
 
+def test_download_plan_raw_complete_idempotency_does_not_modify_cycle(tmp_path: Path) -> None:
+    content = b"GRIB already downloaded 7777"
+    checksum = sha256_bytes(content)
+    adapter, manifest = one_entry_manifest(tmp_path, expected_checksum=checksum)
+    repository = adapter.repository
+    adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, content)
+    repository.cycles[("gfs", manifest.cycle_time)] = {
+        "source_id": "gfs",
+        "cycle_time": manifest.cycle_time,
+        "status": "raw_complete",
+        "retry_count": 7,
+    }
+    updates_before = repository.update_calls
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "already_done"
+    assert result.files[0].status == "already_done"
+    assert repository.update_calls == updates_before
+    assert repository.cycles[("gfs", manifest.cycle_time)]["retry_count"] == 7
+
+
 def test_data_source_initialization_is_upserted_not_duplicated(tmp_path: Path) -> None:
     repository = FakeMetRepository()
     adapter = build_adapter(tmp_path, repository=repository)
@@ -230,5 +262,56 @@ def test_network_failure_records_error_code_and_retry_count(tmp_path: Path) -> N
     assert result.status == "failed_download"
     assert cycle["status"] == "failed_download"
     assert cycle["error_code"] == "NETWORK_ERROR"
-    assert cycle["retry_count"] == 2
+    assert result.retry_count == 1
+    assert cycle["retry_count"] == 1
     assert "connection refused" in cycle["error_message"]
+
+
+def test_url_download_reads_bounded_chunks_and_enforces_max_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ChunkedResponse:
+        status = 200
+        headers: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.chunks = [b"ab", b"cd"]
+            self.read_sizes: list[int] = []
+
+        def __enter__(self) -> ChunkedResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            self.read_sizes.append(size)
+            return self.chunks.pop(0) if self.chunks else b""
+
+    response = ChunkedResponse()
+    adapter = build_adapter(tmp_path, download_chunk_size_bytes=2, max_file_size_bytes=3)
+    monkeypatch.setattr(gfs_module, "urlopen", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(FileTooLargeError):
+        adapter._download_url("https://example.test/gfs.grib2")
+
+    assert response.read_sizes == [2, 2]
+
+
+def test_cli_download_exits_nonzero_on_failed_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def failing_downloader(_url: str) -> bytes:
+        raise RuntimeError("connection refused")
+
+    adapter = build_adapter(tmp_path, downloader=failing_downloader, max_retries=1, max_wait_seconds=0)
+    monkeypatch.setattr(cli_module.GFSAdapter, "from_env", staticmethod(lambda: adapter))
+
+    with pytest.raises(SystemExit) as error:
+        cli_module._download("gfs", "2026050700")
+
+    assert error.value.code == 1
+    assert "Download failed for gfs 2026050700: NETWORK_ERROR" in capsys.readouterr().err

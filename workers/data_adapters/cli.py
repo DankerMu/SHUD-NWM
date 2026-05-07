@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Sequence
 
 from .base import parse_cycle_time
@@ -17,6 +18,13 @@ def _download(source_id: str, cycle_time: str) -> dict[str, object]:
 
     manifest = adapter.build_manifest(parse_cycle_time(cycle_time))
     result = adapter.download_plan(manifest)
+    if result.status == "failed_download":
+        failure = next((file for file in result.files if file.status == "failed"), None)
+        detail = ""
+        if failure is not None:
+            detail = f": {failure.error_code or 'UNKNOWN'} {failure.error_message or ''}".rstrip()
+        print(f"Download failed for {source_id} {cycle_time}{detail}", file=sys.stderr)
+        raise SystemExit(1)
     return {
         "status": result.status,
         "total_bytes_written": result.total_bytes_written,

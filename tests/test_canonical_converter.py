@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import importlib
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 from packages.common.mock_grib import build_mock_payload, encode_mock_grib2
 from packages.common.object_store import LocalObjectStore
 
-converter_module = importlib.import_module("workers.canonical-converter.converter")
+converter_module = importlib.import_module("workers.canonical_converter.converter")
 
 CanonicalConversionError = converter_module.CanonicalConversionError
 CanonicalConverter = converter_module.CanonicalConverter
@@ -52,16 +53,18 @@ def build_raw_manifest(
     forecast_hours: tuple[int, ...] = (0, 3),
     include_unmapped: bool = False,
     omitted_variables: set[str] | None = None,
+    omitted_pairs: set[tuple[str, int]] | None = None,
 ) -> tuple[LocalObjectStore, dict[str, Any]]:
     cycle_time = parse_cycle_time("2026050700")
     compact_cycle = "2026050700"
     store = LocalObjectStore(tmp_path)
     entries: list[dict[str, Any]] = []
     omitted_variables = omitted_variables or set()
+    omitted_pairs = omitted_pairs or set()
 
     for forecast_hour in forecast_hours:
         for variable in VARIABLE_MAPPING:
-            if variable in omitted_variables:
+            if variable in omitted_variables or (variable, forecast_hour) in omitted_pairs:
                 continue
             local_key = f"raw/gfs/{compact_cycle}/gfs.t00z.pgrb2.0p25.f{forecast_hour:03d}.{variable}.grib2"
             payload = build_mock_payload(cycle_time, variable, forecast_hour)
@@ -189,7 +192,34 @@ def test_quality_flag_fail_triggers_reconversion(tmp_path: Path) -> None:
     assert repository.upsert_count == upserts_before_rerun + 1
 
 
-def test_missing_required_variable_marks_cycle_failed(tmp_path: Path) -> None:
+def test_negative_apcp_delta_marks_product_warn(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    store, manifest = build_raw_manifest(tmp_path)
+    cycle_time = parse_cycle_time("2026050700")
+    compact_cycle = "2026050700"
+    for forecast_hour, value in ((0, 5.0), (3, 3.0)):
+        local_key = f"raw/gfs/{compact_cycle}/gfs.t00z.pgrb2.0p25.f{forecast_hour:03d}.apcp.grib2"
+        payload = build_mock_payload(cycle_time, "apcp", forecast_hour)
+        payload["values"] = [value]
+        store.write_bytes_atomic(local_key, encode_mock_grib2(payload))
+    converter = build_converter(tmp_path, repository=repository)
+
+    result = converter.convert_manifest(manifest)
+
+    prcp_f003 = repository.products["gfs_2026050700_prcp_rate_or_amount_f003"]
+    result_prcp_f003 = [
+        product
+        for product in result.products
+        if product.canonical_product_id == "gfs_2026050700_prcp_rate_or_amount_f003"
+    ][0]
+    assert prcp_f003["quality_flag"] == "warn"
+    assert result_prcp_f003.quality_flag == "warn"
+    conversion_params = prcp_f003["lineage_json"]["conversion_params"]
+    assert conversion_params["negative_delta_forecast_hours"] == [3]
+    assert conversion_params["anomalies"][0]["min_delta"] == -2.0
+
+
+def test_missing_required_variable_marks_cycle_failed_and_records_fail_product(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     _, manifest = build_raw_manifest(tmp_path, omitted_variables={"dswrf"})
     converter = build_converter(tmp_path, repository=repository)
@@ -200,3 +230,61 @@ def test_missing_required_variable_marks_cycle_failed(tmp_path: Path) -> None:
     cycle = repository.cycles[("gfs", parse_cycle_time("2026050700"))]
     assert cycle["status"] == "failed_convert"
     assert cycle["error_code"] == "CONVERT_FAILED"
+    fail_product = repository.products["gfs_2026050700_shortwave_down_f000"]
+    assert fail_product["quality_flag"] == "fail"
+    assert fail_product["lineage_json"]["conversion_params"]["missing_native_variable"] == "dswrf"
+
+
+def test_missing_variable_for_one_forecast_hour_records_specific_fail_product(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_raw_manifest(tmp_path, omitted_pairs={("dswrf", 3)})
+    converter = build_converter(tmp_path, repository=repository)
+
+    with pytest.raises(CanonicalConversionError, match="dswrf->shortwave_down f003"):
+        converter.convert_manifest(manifest)
+
+    assert "gfs_2026050700_shortwave_down_f003" in repository.products
+    assert "gfs_2026050700_shortwave_down_f000" not in repository.products
+    assert repository.products["gfs_2026050700_shortwave_down_f003"]["quality_flag"] == "fail"
+
+
+def test_cfgrib_variable_mismatch_does_not_fallback_to_first_data_var(tmp_path: Path) -> None:
+    class FakeDataArray:
+        attrs = {"GRIB_shortName": "v10"}
+
+    class FakeDataset:
+        data_vars = {"v10": FakeDataArray()}
+
+        def __getitem__(self, key: str) -> FakeDataArray:
+            return self.data_vars[key]
+
+    converter = build_converter(tmp_path)
+
+    with pytest.raises(CanonicalConversionError, match="cfgrib variable mismatch"):
+        converter._select_cfgrib_data_variable(FakeDataset(), "u10m", "raw/gfs/file.grib2")
+
+
+def test_netcdf4_missing_raises_without_json_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "netCDF4":
+            raise ImportError("missing netCDF4")
+        return real_import(name, *args, **kwargs)
+
+    converter = build_converter(tmp_path)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(CanonicalConversionError, match="NetCDF4 serialization requires"):
+        converter._serialize_product(
+            variable="air_temperature_2m",
+            values=(1.0,),
+            cycle_time=parse_cycle_time("2026050700"),
+            valid_time=parse_cycle_time("2026050700"),
+            lead_time_hours=0,
+            unit="degC",
+            lineage_json={},
+        )

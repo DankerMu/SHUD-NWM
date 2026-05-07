@@ -43,6 +43,15 @@ CONVERSION_PARAMS: dict[str, str] = {
     "pressfc": "pass_through",
     "dswrf": "pass_through",
 }
+CFGRIB_VARIABLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "tmp2m": ("tmp2m", "t2m", "2t"),
+    "apcp": ("apcp", "tp", "total_precipitation"),
+    "rh2m": ("rh2m", "r2", "2r"),
+    "u10m": ("u10m", "u10", "10u"),
+    "v10m": ("v10m", "v10", "10v"),
+    "pressfc": ("pressfc", "sp", "pres"),
+    "dswrf": ("dswrf", "ssrd"),
+}
 
 
 class CanonicalRepository(Protocol):
@@ -81,6 +90,9 @@ class CanonicalConverterConfig:
     native_time_resolution: str = "3h"
     native_spatial_resolution: str = "0.25deg"
     variable_mapping: Mapping[str, str] = field(default_factory=lambda: dict(VARIABLE_MAPPING))
+    cfgrib_variable_aliases: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: dict(CFGRIB_VARIABLE_ALIASES)
+    )
 
 
 @dataclass(frozen=True)
@@ -89,6 +101,20 @@ class RawRecord:
     native_variable: str
     forecast_hour: int
     values: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class MissingForecastVariable:
+    native_variable: str
+    standard_variable: str
+    forecast_hour: int
+
+
+@dataclass(frozen=True)
+class UnitConversionResult:
+    values: tuple[float, ...]
+    quality_flag: str = "ok"
+    anomalies: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -146,9 +172,20 @@ def convert_units(
     values: tuple[float, ...] | list[float],
     previous_values: tuple[float, ...] | list[float] | None = None,
 ) -> tuple[float, ...]:
+    return convert_units_with_metadata(native_variable, values, previous_values).values
+
+
+def convert_units_with_metadata(
+    native_variable: str,
+    values: tuple[float, ...] | list[float],
+    previous_values: tuple[float, ...] | list[float] | None = None,
+    *,
+    forecast_hour: int | None = None,
+    previous_forecast_hour: int | None = None,
+) -> UnitConversionResult:
     current = tuple(float(value) for value in values)
     if native_variable == "tmp2m":
-        return tuple(value - 273.15 for value in current)
+        return UnitConversionResult(tuple(value - 273.15 for value in current))
     if native_variable == "apcp":
         previous = (
             tuple(float(value) for value in previous_values)
@@ -157,13 +194,25 @@ def convert_units(
         )
         if len(previous) != len(current):
             raise CanonicalConversionError("APCP previous/current value arrays must have the same length.")
-        return tuple(
-            max(0.0, current_value - previous_value)
-            for current_value, previous_value in zip(current, previous)
-        )
+        deltas = tuple(current_value - previous_value for current_value, previous_value in zip(current, previous))
+        negative_deltas = tuple(delta for delta in deltas if delta < 0.0)
+        anomalies: tuple[dict[str, Any], ...] = ()
+        quality_flag = "ok"
+        if negative_deltas:
+            quality_flag = "warn"
+            anomalies = (
+                {
+                    "type": "negative_apcp_delta",
+                    "forecast_hour": forecast_hour,
+                    "previous_forecast_hour": previous_forecast_hour,
+                    "negative_count": len(negative_deltas),
+                    "min_delta": min(negative_deltas),
+                },
+            )
+        return UnitConversionResult(tuple(max(0.0, delta) for delta in deltas), quality_flag, anomalies)
     if native_variable == "rh2m":
-        return tuple(value / 100.0 for value in current)
-    return current
+        return UnitConversionResult(tuple(value / 100.0 for value in current))
+    return UnitConversionResult(current)
 
 
 def compute_time_axis(cycle_time: str | datetime, forecast_hours: list[int]) -> list[dict[str, Any]]:
@@ -212,7 +261,13 @@ class CanonicalConverter:
             )
 
         try:
-            raw_records = self._read_records(manifest)
+            entries = _manifest_entries(manifest)
+            raw_records = self._read_records(entries)
+            missing_pairs = self._missing_required_pairs(manifest, entries, raw_records)
+            if missing_pairs:
+                self._record_missing_products(source_id, cycle_time, missing_pairs)
+                raise CanonicalConversionError(self._missing_pairs_message(missing_pairs))
+
             grouped = self._group_records(raw_records)
             missing_variables = sorted(set(self.config.variable_mapping.values()) - set(grouped))
             if missing_variables:
@@ -223,6 +278,7 @@ class CanonicalConverter:
                 native_records = sorted(grouped[standard_variable], key=lambda record: record.forecast_hour)
                 previous_values: tuple[float, ...] | None = None
                 previous_source_file: str | None = None
+                previous_forecast_hour: int | None = None
                 for record in native_records:
                     product = self._convert_record(
                         source_id=source_id,
@@ -231,10 +287,12 @@ class CanonicalConverter:
                         record=record,
                         previous_values=previous_values,
                         previous_source_file=previous_source_file,
+                        previous_forecast_hour=previous_forecast_hour,
                     )
                     products.append(product)
                     previous_values = record.values
                     previous_source_file = record.source_file
+                    previous_forecast_hour = record.forecast_hour
 
             self._update_cycle_status(cycle_time, status="canonical_ready", error_code="", error_message="")
             return ConversionResult(status="canonical_ready", products=tuple(products))
@@ -250,9 +308,9 @@ class CanonicalConverter:
     def convert_manifest_uri(self, manifest_uri: str) -> ConversionResult:
         return self.convert_manifest(self.load_manifest(manifest_uri))
 
-    def _read_records(self, manifest: Any) -> list[RawRecord]:
+    def _read_records(self, entries: list[dict[str, Any]]) -> list[RawRecord]:
         records: list[RawRecord] = []
-        for entry in _manifest_entries(manifest):
+        for entry in entries:
             native_variable = entry["variable"]
             standard_variable = map_variable(native_variable, self.config.variable_mapping)
             if standard_variable is None:
@@ -270,10 +328,13 @@ class CanonicalConverter:
 
         try:
             payload = decode_mock_grib2(content)
+            native_variable = str(payload["variable"])
+            forecast_hour = int(payload["forecast_hour"])
+            self._validate_mock_record(entry, native_variable, forecast_hour, local_key)
             return RawRecord(
                 source_file=self.object_store.uri_for_key(local_key),
-                native_variable=str(payload["variable"]),
-                forecast_hour=int(payload["forecast_hour"]),
+                native_variable=native_variable,
+                forecast_hour=forecast_hour,
                 values=tuple(float(value) for value in payload["values"]),
             )
         except (KeyError, TypeError, ValueError, MockGribError):
@@ -293,13 +354,12 @@ class CanonicalConverter:
         dataset = None
         try:
             dataset = xr.open_dataset(self.object_store.resolve_path(local_key), engine="cfgrib")
-            data_variable = str(entry["variable"])
-            if data_variable not in dataset.data_vars:
-                data_variable = next(iter(dataset.data_vars))
+            expected_native_variable = str(entry["variable"])
+            data_variable = self._select_cfgrib_data_variable(dataset, expected_native_variable, local_key)
             values = tuple(float(value) for value in dataset[data_variable].values.ravel().tolist())
             return RawRecord(
                 source_file=self.object_store.uri_for_key(local_key),
-                native_variable=str(entry["variable"]),
+                native_variable=expected_native_variable,
                 forecast_hour=int(entry["forecast_hour"]),
                 values=values,
             )
@@ -308,6 +368,62 @@ class CanonicalConverter:
         finally:
             if dataset is not None:
                 dataset.close()
+
+    def _validate_mock_record(
+        self,
+        entry: Mapping[str, Any],
+        native_variable: str,
+        forecast_hour: int,
+        local_key: str,
+    ) -> None:
+        expected_variable = str(entry["variable"])
+        expected_forecast_hour = int(entry["forecast_hour"])
+        if native_variable != expected_variable:
+            raise CanonicalConversionError(
+                (
+                    f"GRIB variable mismatch for {local_key}: manifest expected {expected_variable}, "
+                    f"payload contains {native_variable}."
+                )
+            )
+        if forecast_hour != expected_forecast_hour:
+            raise CanonicalConversionError(
+                (
+                    f"GRIB forecast hour mismatch for {local_key}: manifest expected f{expected_forecast_hour:03d}, "
+                    f"payload contains f{forecast_hour:03d}."
+                )
+            )
+
+    def _select_cfgrib_data_variable(self, dataset: Any, expected_native_variable: str, local_key: str) -> str:
+        expected_names = set(self.config.cfgrib_variable_aliases.get(expected_native_variable, ()))
+        expected_names.add(expected_native_variable)
+        matches: list[str] = []
+        available: list[str] = []
+        for data_variable in dataset.data_vars:
+            variable_attrs = dataset[data_variable].attrs
+            candidates = {
+                str(data_variable),
+                str(variable_attrs.get("GRIB_shortName", "")),
+                str(variable_attrs.get("shortName", "")),
+            }
+            available.append("/".join(sorted(candidate for candidate in candidates if candidate)))
+            if candidates & expected_names:
+                matches.append(str(data_variable))
+
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            raise CanonicalConversionError(
+                (
+                    f"cfgrib variable mismatch for {local_key}: manifest expected {expected_native_variable} "
+                    f"(aliases: {sorted(expected_names)}); dataset variables: {available}."
+                )
+            )
+        raise CanonicalConversionError(
+            (
+                f"cfgrib variable mapping for {local_key} is ambiguous: manifest expected "
+                f"{expected_native_variable}, matched {matches}."
+            )
+        )
 
     def _group_records(self, records: list[RawRecord]) -> dict[str, list[RawRecord]]:
         grouped: dict[str, list[RawRecord]] = {}
@@ -319,6 +435,104 @@ class CanonicalConverter:
             grouped.setdefault(standard_variable, []).append(record)
         return grouped
 
+    def _missing_required_pairs(
+        self,
+        manifest: Any,
+        entries: list[dict[str, Any]],
+        records: list[RawRecord],
+    ) -> tuple[MissingForecastVariable, ...]:
+        forecast_hours = self._configured_forecast_hours(manifest, entries)
+        covered = {(record.native_variable, record.forecast_hour) for record in records}
+        missing: list[MissingForecastVariable] = []
+        for forecast_hour in forecast_hours:
+            for native_variable, standard_variable in sorted(self.config.variable_mapping.items()):
+                if (native_variable, forecast_hour) not in covered:
+                    missing.append(
+                        MissingForecastVariable(
+                            native_variable=native_variable,
+                            standard_variable=standard_variable,
+                            forecast_hour=forecast_hour,
+                        )
+                    )
+        return tuple(missing)
+
+    def _configured_forecast_hours(self, manifest: Any, entries: list[dict[str, Any]]) -> list[int]:
+        metadata = _manifest_metadata(manifest)
+        if isinstance(metadata.get("forecast_hours"), list):
+            return sorted({int(forecast_hour) for forecast_hour in metadata["forecast_hours"]})
+
+        first_hour = metadata.get("first_forecast_hour")
+        last_hour = metadata.get("last_forecast_hour")
+        step_hours = self._native_time_resolution_hours()
+        if first_hour is not None and last_hour is not None and step_hours is not None:
+            return list(range(int(first_hour), int(last_hour) + 1, step_hours))
+
+        return sorted({int(entry["forecast_hour"]) for entry in entries})
+
+    def _native_time_resolution_hours(self) -> int | None:
+        resolution = self.config.native_time_resolution.strip().lower()
+        if not resolution.endswith("h"):
+            return None
+        try:
+            step_hours = int(resolution[:-1])
+        except ValueError:
+            return None
+        return step_hours if step_hours > 0 else None
+
+    def _missing_pairs_message(self, missing_pairs: tuple[MissingForecastVariable, ...]) -> str:
+        details = ", ".join(
+            f"{pair.native_variable}->{pair.standard_variable} f{pair.forecast_hour:03d}"
+            for pair in missing_pairs[:20]
+        )
+        suffix = ""
+        if len(missing_pairs) > 20:
+            suffix = f", ... ({len(missing_pairs)} total missing pairs)"
+        return f"Missing required canonical variables forecast-hour coverage: {details}{suffix}"
+
+    def _record_missing_products(
+        self,
+        source_id: str,
+        cycle_time: datetime,
+        missing_pairs: tuple[MissingForecastVariable, ...],
+    ) -> None:
+        compact_cycle = format_cycle_time(cycle_time)
+        for pair in missing_pairs:
+            canonical_product_id = f"{source_id}_{compact_cycle}_{pair.standard_variable}_f{pair.forecast_hour:03d}"
+            object_key = (
+                f"canonical/{source_id}/{compact_cycle}/{pair.standard_variable}/{canonical_product_id}.missing"
+            )
+            lineage_json = {
+                "source_files": [],
+                "source_cycle_id": f"{source_id}_{compact_cycle}",
+                "conversion_params": {
+                    "operation": "coverage_validation",
+                    "missing_native_variable": pair.native_variable,
+                    "missing_standard_variable": pair.standard_variable,
+                    "missing_forecast_hour": pair.forecast_hour,
+                },
+                "converter_version": self.config.converter_version,
+            }
+            self._upsert_product(
+                {
+                    "canonical_product_id": canonical_product_id,
+                    "source_id": source_id,
+                    "source_version": compact_cycle,
+                    "cycle_time": cycle_time,
+                    "valid_time": cycle_time + timedelta(hours=pair.forecast_hour),
+                    "lead_time_hours": pair.forecast_hour,
+                    "variable": pair.standard_variable,
+                    "unit": unit_for_standard_variable(pair.standard_variable),
+                    "grid_id": self.config.grid_id,
+                    "grid_definition_uri": self.config.grid_definition_uri,
+                    "native_time_resolution": self.config.native_time_resolution,
+                    "native_spatial_resolution": self.config.native_spatial_resolution,
+                    "object_uri": self.object_store.uri_for_key(object_key),
+                    "checksum": "",
+                    "quality_flag": "fail",
+                    "lineage_json": lineage_json,
+                }
+            )
+
     def _convert_record(
         self,
         *,
@@ -328,8 +542,15 @@ class CanonicalConverter:
         record: RawRecord,
         previous_values: tuple[float, ...] | None,
         previous_source_file: str | None,
+        previous_forecast_hour: int | None,
     ) -> CanonicalProductResult:
-        converted_values = convert_units(record.native_variable, record.values, previous_values)
+        conversion = convert_units_with_metadata(
+            record.native_variable,
+            record.values,
+            previous_values,
+            forecast_hour=record.forecast_hour,
+            previous_forecast_hour=previous_forecast_hour,
+        )
         valid_time = cycle_time + timedelta(hours=record.forecast_hour)
         compact_cycle = format_cycle_time(cycle_time)
         canonical_product_id = f"{source_id}_{compact_cycle}_{standard_variable}_f{record.forecast_hour:03d}"
@@ -337,18 +558,26 @@ class CanonicalConverter:
         source_files = [record.source_file]
         if record.native_variable == "apcp" and previous_source_file is not None:
             source_files = [previous_source_file, record.source_file]
+        conversion_params: dict[str, Any] = {
+            "native_variable": record.native_variable,
+            "operation": CONVERSION_PARAMS.get(record.native_variable, "pass_through"),
+        }
+        if conversion.anomalies:
+            conversion_params["anomalies"] = list(conversion.anomalies)
+            conversion_params["negative_delta_forecast_hours"] = [
+                anomaly["forecast_hour"]
+                for anomaly in conversion.anomalies
+                if anomaly.get("type") == "negative_apcp_delta"
+            ]
         lineage_json = {
             "source_files": source_files,
             "source_cycle_id": f"{source_id}_{compact_cycle}",
-            "conversion_params": {
-                "native_variable": record.native_variable,
-                "operation": CONVERSION_PARAMS.get(record.native_variable, "pass_through"),
-            },
+            "conversion_params": conversion_params,
             "converter_version": self.config.converter_version,
         }
         content = self._serialize_product(
             variable=standard_variable,
-            values=converted_values,
+            values=conversion.values,
             cycle_time=cycle_time,
             valid_time=valid_time,
             lead_time_hours=record.forecast_hour,
@@ -390,7 +619,7 @@ class CanonicalConverter:
             "native_spatial_resolution": self.config.native_spatial_resolution,
             "object_uri": object_uri,
             "checksum": checksum,
-            "quality_flag": "ok",
+            "quality_flag": conversion.quality_flag,
             "lineage_json": lineage_json,
         }
         self._upsert_product(record_payload)
@@ -402,6 +631,7 @@ class CanonicalConverter:
             object_uri=object_uri,
             checksum=checksum,
             status="updated" if existing else "created",
+            quality_flag=conversion.quality_flag,
         )
 
     def _serialize_product(
@@ -416,41 +646,34 @@ class CanonicalConverter:
         lineage_json: Mapping[str, Any],
     ) -> bytes:
         try:
+            import netCDF4  # noqa: F401
             import xarray as xr
+        except ImportError as error:
+            raise CanonicalConversionError(
+                "NetCDF4 serialization requires xarray and netCDF4; install both dependencies."
+            ) from error
 
-            dataset = xr.Dataset(
-                data_vars={variable: ("point", list(values))},
-                coords={"point": list(range(len(values)))},
-                attrs={
-                    "cycle_time": cycle_time.isoformat(),
-                    "valid_time": valid_time.isoformat(),
-                    "lead_time_hours": lead_time_hours,
-                    "unit": unit,
-                    "grid_id": self.config.grid_id,
-                    "lineage_json": json.dumps(dict(lineage_json), sort_keys=True),
-                },
-            )
+        dataset = xr.Dataset(
+            data_vars={variable: ("point", list(values))},
+            coords={"point": list(range(len(values)))},
+            attrs={
+                "cycle_time": cycle_time.isoformat(),
+                "valid_time": valid_time.isoformat(),
+                "lead_time_hours": lead_time_hours,
+                "unit": unit,
+                "grid_id": self.config.grid_id,
+                "lineage_json": json.dumps(dict(lineage_json), sort_keys=True),
+            },
+        )
+        try:
             with tempfile.NamedTemporaryFile(suffix=".nc") as temp_file:
-                dataset.to_netcdf(temp_file.name, format="NETCDF4")
+                dataset.to_netcdf(temp_file.name, engine="netcdf4", format="NETCDF4")
                 temp_file.seek(0)
                 return temp_file.read()
-        except ImportError:
-            pass
         except (OSError, ValueError, RuntimeError) as error:
-            LOGGER.warning("Falling back to JSON-backed .nc payload for %s: %s", variable, error)
-
-        fallback_payload = {
-            "format": "netcdf4-json-fallback",
-            "variable": variable,
-            "values": list(values),
-            "unit": unit,
-            "cycle_time": cycle_time.isoformat(),
-            "valid_time": valid_time.isoformat(),
-            "lead_time_hours": lead_time_hours,
-            "grid_id": self.config.grid_id,
-            "lineage_json": dict(lineage_json),
-        }
-        return json.dumps(fallback_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            raise CanonicalConversionError(f"Failed to serialize NetCDF4 product {variable}: {error}") from error
+        finally:
+            dataset.close()
 
     def _get_existing_product(self, canonical_product_id: str) -> dict[str, Any] | None:
         if self.repository is None:
@@ -514,6 +737,12 @@ def _manifest_value(manifest: Any, key: str) -> Any:
     if isinstance(manifest, Mapping):
         return manifest[key]
     return getattr(manifest, key)
+
+
+def _manifest_metadata(manifest: Any) -> dict[str, Any]:
+    if isinstance(manifest, Mapping):
+        return dict(manifest.get("metadata") or {})
+    return dict(getattr(manifest, "metadata", {}) or {})
 
 
 def _manifest_entries(manifest: Any) -> list[dict[str, Any]]:

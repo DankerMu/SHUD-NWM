@@ -28,8 +28,8 @@ dependencies = [
 ]
 
 [project.scripts]
-nhms-gfs = "workers.data-adapters.cli:main"
-nhms-canonical = "workers.canonical-converter.cli:main"
+nhms-gfs = "workers.data_adapters.cli:main"
+nhms-canonical = "workers.canonical_converter.cli:main"
 
 [project.optional-dependencies]
 dev = [
