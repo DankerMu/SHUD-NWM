@@ -1,0 +1,44 @@
+data_source_adapter:
+  enabled: true
+  dry_run: false
+  max_retries: 3
+  retry_backoff_seconds: [1, 2, 4]
+  workspace_root: ${WORKSPACE_ROOT:-/work/nhms}
+  object_store_prefix: ${OBJECT_STORE_PREFIX:-s3://nhms}
+
+gfs_adapter:
+  source_id: gfs
+  source_name: gfs
+  source_type: forecast
+  status: enabled
+  native_format: GRIB2
+  adapter_name: gfs_adapter
+  base_url: ${GFS_NOMADS_BASE_URL:-https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod}
+  cycle_hours_utc: [0, 6, 12, 18]
+  forecast_hours:
+    start: 0
+    end: 168
+    step: 3
+  variables: [tmp2m, apcp, rh2m, u10m, v10m, pressfc, dswrf]
+  poll_interval_seconds: 300
+  max_wait_seconds: 21600
+  min_file_size_bytes: 1
+
+canonical_converter:
+  enabled: true
+  source_id: gfs
+  converter_version: m1.0
+  grid_id: gfs_0p25
+  grid_definition_uri: grids/gfs_0p25.json
+  native_time_resolution: 3h
+  native_spatial_resolution: 0.25deg
+  workspace_root: ${WORKSPACE_ROOT:-/work/nhms}
+  object_store_prefix: ${OBJECT_STORE_PREFIX:-s3://nhms}
+  variable_mapping:
+    tmp2m: air_temperature_2m
+    apcp: prcp_rate_or_amount
+    rh2m: relative_humidity_2m
+    u10m: wind_u_10m
+    v10m: wind_v_10m
+    pressfc: pressure_surface
+    dswrf: shortwave_down
