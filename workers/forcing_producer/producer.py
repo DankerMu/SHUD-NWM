@@ -172,6 +172,9 @@ class ForcingRepository(Protocol):
     def upsert_forcing_version(self, record: Mapping[str, Any]) -> dict[str, Any]:
         ...
 
+    def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]:
+        ...
+
     def replace_forcing_components(self, forcing_version_id: str, components: Sequence[ForcingComponent]) -> None:
         ...
 
@@ -429,6 +432,8 @@ class ForcingProducer:
                     f"Canonical product {product.canonical_product_id} has {len(values)} values but "
                     f"{len(grid_points)} grid points."
                 )
+            _validate_grid_points(grid_points, product.canonical_product_id)
+            _validate_field_values(values, grid_points, product.canonical_product_id)
             return CanonicalField(
                 product=product,
                 grid_points=grid_points,
@@ -436,7 +441,7 @@ class ForcingProducer:
                     point.grid_cell_id: value for point, value in zip(grid_points, values, strict=True)
                 },
             )
-        except (OSError, ObjectStoreError, ValueError) as error:
+        except (OSError, ObjectStoreError, TypeError, ValueError) as error:
             raise ForcingProductionError(
                 f"Failed to read canonical product {product.canonical_product_id}: {error}"
             ) from error
@@ -473,9 +478,10 @@ class ForcingProducer:
                 for grid_cell_id, (longitude, latitude) in zip(grid_cell_ids, rectilinear_coords, strict=True)
             )
 
-        return tuple(
-            GridPoint(grid_cell_id=grid_cell_ids[index], longitude=float(index), latitude=0.0)
-            for index in range(expected_count)
+        raise ForcingProductionError(
+            f"Canonical product {product.canonical_product_id} does not provide usable geographic grid "
+            "coordinates. Provide a readable grid_definition_uri with finite lon/lat cells or NetCDF "
+            "longitude/latitude coordinates."
         )
 
     def _grid_points_from_definition(
@@ -492,16 +498,25 @@ class ForcingProducer:
 
         cells = definition.get("cells") or definition.get("points")
         if isinstance(cells, list):
-            points = tuple(
-                GridPoint(
-                    grid_cell_id=str(cell.get("grid_cell_id", cell.get("id", index))),
-                    longitude=float(cell.get("lon", cell.get("longitude"))),
-                    latitude=float(cell.get("lat", cell.get("latitude"))),
+            points: list[GridPoint] = []
+            for index, cell in enumerate(cells):
+                if not isinstance(cell, Mapping):
+                    continue
+                try:
+                    longitude = float(cell.get("lon", cell.get("longitude")))
+                    latitude = float(cell.get("lat", cell.get("latitude")))
+                except (TypeError, ValueError):
+                    return None
+                if not _valid_geographic_coordinate(longitude, latitude):
+                    return None
+                points.append(
+                    GridPoint(
+                        grid_cell_id=str(cell.get("grid_cell_id", cell.get("id", index))),
+                        longitude=longitude,
+                        latitude=latitude,
+                    )
                 )
-                for index, cell in enumerate(cells)
-                if isinstance(cell, Mapping)
-            )
-            return points if len(points) == expected_count else None
+            return tuple(points) if len(points) == expected_count else None
         return None
 
     def _generate_timeseries(
@@ -575,6 +590,12 @@ class ForcingProducer:
             for variable in self.config.output_variables:
                 native_resolution = _native_resolution_for_output(variable, products_by_variable, valid_time)
                 for station in stations:
+                    value = station_values[variable][station.station_id]
+                    if not math.isfinite(value):
+                        raise ForcingProductionError(
+                            f"Interpolated forcing value is not finite for station {station.station_id} "
+                            f"variable {variable} at {_format_time(valid_time)}."
+                        )
                     rows.append(
                         ForcingTimeseriesRow(
                             forcing_version_id=forcing_version_id,
@@ -583,7 +604,7 @@ class ForcingProducer:
                             valid_time=valid_time,
                             source_id=source_id,
                             variable=variable,
-                            value=station_values[variable][station.station_id],
+                            value=value,
                             unit=OUTPUT_UNITS[variable],
                             native_resolution=native_resolution,
                         )
@@ -701,7 +722,7 @@ class ForcingProducer:
             "end_time": valid_times[-1],
             "station_count": len(stations),
             "forcing_package_uri": package_uri,
-            "checksum": package_checksum,
+            "checksum": None,
             "lineage_json": {
                 **lineage_json,
                 "forcing_package_manifest_uri": package_manifest_uri,
@@ -711,6 +732,7 @@ class ForcingProducer:
         self.repository.upsert_forcing_version(record)
         self.repository.replace_forcing_components(forcing_version_id, components)
         self.repository.replace_forcing_timeseries(forcing_version_id, rows)
+        self.repository.finalize_forcing_version(forcing_version_id, package_checksum)
         return ForcingProductionResult(
             status="forcing_ready",
             forcing_version_id=forcing_version_id,
@@ -728,9 +750,9 @@ class ForcingProducer:
     def _existing_forcing_version_is_current(self, existing: Mapping[str, Any] | None) -> bool:
         if not existing:
             return False
-        checksum = str(existing.get("checksum") or "")
+        checksum = str(existing.get("checksum") or "").strip()
         package_uri = str(existing.get("forcing_package_uri") or "")
-        if not checksum or not package_uri:
+        if not checksum or checksum.lower() == "pending" or not package_uri:
             return False
         try:
             manifest_uri = _package_manifest_uri(package_uri, self.config.package_manifest_filename)
@@ -774,6 +796,12 @@ def compute_idw_weights(
         raise ForcingProductionError("IDW neighbor count must be at least 1.")
     if power <= 0.0:
         raise ForcingProductionError("IDW power must be positive.")
+    for station in stations:
+        if not _valid_station(station):
+            raise ForcingProductionError(f"Station {station.station_id} has invalid geographic coordinates.")
+    for point in grid_points:
+        if not _valid_geographic_coordinate(point.longitude, point.latitude):
+            raise ForcingProductionError(f"Grid point {point.grid_cell_id} has invalid geographic coordinates.")
 
     weights: list[InterpolationWeight] = []
     neighbor_count = min(neighbors, len(grid_points))
@@ -895,10 +923,48 @@ def _json_default(value: Any) -> str:
 
 def _valid_station(station: MetStation) -> bool:
     return (
-        -180.0 <= station.longitude <= 180.0
+        math.isfinite(station.longitude)
+        and math.isfinite(station.latitude)
+        and -180.0 <= station.longitude <= 180.0
         and -90.0 <= station.latitude <= 90.0
         and math.isfinite(station.elevation_m)
     )
+
+
+def _valid_geographic_coordinate(longitude: float, latitude: float) -> bool:
+    return (
+        math.isfinite(longitude)
+        and math.isfinite(latitude)
+        and -180.0 <= longitude <= 180.0
+        and -90.0 <= latitude <= 90.0
+    )
+
+
+def _validate_grid_points(grid_points: Sequence[GridPoint], canonical_product_id: str) -> None:
+    for point in grid_points:
+        if not math.isfinite(point.longitude) or not math.isfinite(point.latitude):
+            raise ForcingProductionError(
+                f"Canonical product {canonical_product_id} has non-finite grid coordinates "
+                f"for grid cell {point.grid_cell_id}."
+            )
+        if not _valid_geographic_coordinate(point.longitude, point.latitude):
+            raise ForcingProductionError(
+                f"Canonical product {canonical_product_id} has grid coordinates outside geographic bounds "
+                f"for grid cell {point.grid_cell_id}."
+            )
+
+
+def _validate_field_values(
+    values: Sequence[float],
+    grid_points: Sequence[GridPoint],
+    canonical_product_id: str,
+) -> None:
+    for point, value in zip(grid_points, values, strict=True):
+        if not math.isfinite(value):
+            raise ForcingProductionError(
+                f"Canonical product {canonical_product_id} has non-finite field value "
+                f"for grid cell {point.grid_cell_id}."
+            )
 
 
 def _missing_product_details(
@@ -956,6 +1022,10 @@ def _validate_weight_sums(weights: Sequence[InterpolationWeight]) -> None:
 
 
 def _assert_normalized(weights: Sequence[InterpolationWeight], station_id: str, variable: str) -> None:
+    if any(not math.isfinite(weight.weight) for weight in weights):
+        raise ForcingProductionError(
+            f"IDW weights for station {station_id} variable {variable} include non-finite values."
+        )
     total = sum(weight.weight for weight in weights)
     if abs(total - 1.0) > 1e-6:
         raise ForcingProductionError(
@@ -1020,8 +1090,8 @@ def _grid_cell_ids(dataset: Any, expected_count: int) -> tuple[str, ...]:
 
 
 def _direct_lon_lat_coords(dataset: Any, expected_count: int) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
-    longitudes = _flat_coord(dataset, ("lon", "longitude", "x"), expected_count)
-    latitudes = _flat_coord(dataset, ("lat", "latitude", "y"), expected_count)
+    longitudes = _flat_coord(dataset, ("lon", "longitude"), expected_count)
+    latitudes = _flat_coord(dataset, ("lat", "latitude"), expected_count)
     if longitudes is None or latitudes is None:
         return None
     return longitudes, latitudes
@@ -1040,8 +1110,8 @@ def _rectilinear_lon_lat_coords(dataset: Any, shape: tuple[int, ...]) -> tuple[t
     if len(shape) != 2:
         return None
     y_count, x_count = shape
-    longitudes = _coord_by_length(dataset, ("lon", "longitude", "x"), x_count)
-    latitudes = _coord_by_length(dataset, ("lat", "latitude", "y"), y_count)
+    longitudes = _coord_by_length(dataset, ("lon", "longitude"), x_count)
+    latitudes = _coord_by_length(dataset, ("lat", "latitude"), y_count)
     if longitudes is None or latitudes is None:
         return None
     return tuple((longitude, latitude) for latitude in latitudes for longitude in longitudes)

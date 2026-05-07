@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import tempfile
+from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -20,11 +22,17 @@ from workers.forcing_producer import (
     parse_cycle_time,
     wind_speed,
 )
-from workers.forcing_producer.producer import ForcingComponent, ForcingTimeseriesRow
+from workers.forcing_producer.producer import FORCING_VARIABLES, ForcingComponent, ForcingTimeseriesRow
 
 
 class FakeForcingRepository:
-    def __init__(self, *, stations: tuple[MetStation, ...], products: tuple[CanonicalProduct, ...]) -> None:
+    def __init__(
+        self,
+        *,
+        stations: tuple[MetStation, ...],
+        products: tuple[CanonicalProduct, ...],
+        fail_next_timeseries_replace: bool = False,
+    ) -> None:
         self.basin_by_model = {"demo_model": "basin_v1"}
         self.stations = stations
         self.products = products
@@ -33,6 +41,8 @@ class FakeForcingRepository:
         self.components: list[ForcingComponent] = []
         self.timeseries: list[ForcingTimeseriesRow] = []
         self.cycle_updates: list[dict[str, Any]] = []
+        self.events: list[tuple[str, Any]] = []
+        self.fail_next_timeseries_replace = fail_next_timeseries_replace
         self.upsert_count = 0
 
     def resolve_model_basin_version(self, *, model_id: str) -> str:
@@ -92,7 +102,13 @@ class FakeForcingRepository:
     def upsert_forcing_version(self, record: dict[str, Any]) -> dict[str, Any]:
         self.upsert_count += 1
         self.forcing_versions[record["forcing_version_id"]] = dict(record)
+        self.events.append(("upsert_forcing_version", record["checksum"]))
         return self.forcing_versions[record["forcing_version_id"]]
+
+    def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]:
+        self.forcing_versions[forcing_version_id]["checksum"] = checksum
+        self.events.append(("finalize_forcing_version", checksum))
+        return dict(self.forcing_versions[forcing_version_id])
 
     def replace_forcing_components(
         self,
@@ -103,14 +119,19 @@ class FakeForcingRepository:
             component for component in self.components if component.forcing_version_id != forcing_version_id
         ]
         self.components.extend(components)
+        self.events.append(("replace_forcing_components", forcing_version_id))
 
     def replace_forcing_timeseries(
         self,
         forcing_version_id: str,
         rows: list[ForcingTimeseriesRow] | tuple[ForcingTimeseriesRow, ...],
     ) -> None:
+        if self.fail_next_timeseries_replace:
+            self.fail_next_timeseries_replace = False
+            raise RuntimeError("timeseries write failed")
         self.timeseries = [row for row in self.timeseries if row.forcing_version_id != forcing_version_id]
         self.timeseries.extend(rows)
+        self.events.append(("replace_forcing_timeseries", forcing_version_id))
 
     def update_forecast_cycle(self, **kwargs: Any) -> dict[str, Any]:
         self.cycle_updates.append(dict(kwargs))
@@ -194,6 +215,41 @@ def test_produce_is_idempotent_when_existing_checksum_is_valid(tmp_path: Path) -
     assert len(repository.timeseries) == row_count
 
 
+def test_forcing_version_checksum_is_finalized_after_child_rows(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.checksum is not None
+    assert repository.forcing_versions[result.forcing_version_id]["checksum"] == result.checksum
+    assert repository.events[:4] == [
+        ("upsert_forcing_version", None),
+        ("replace_forcing_components", result.forcing_version_id),
+        ("replace_forcing_timeseries", result.forcing_version_id),
+        ("finalize_forcing_version", result.checksum),
+    ]
+
+
+def test_failed_child_write_leaves_forcing_version_incomplete_and_retry_finalizes(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path, fail_next_timeseries_replace=True)
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="timeseries write failed"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    forcing_version_id = next(iter(repository.forcing_versions))
+    assert repository.forcing_versions[forcing_version_id]["checksum"] is None
+    assert not any(event[0] == "finalize_forcing_version" for event in repository.events)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    assert result.forcing_version_id == forcing_version_id
+    assert repository.forcing_versions[forcing_version_id]["checksum"] == result.checksum
+    assert repository.upsert_count == 2
+
+
 def test_invalid_existing_forcing_version_is_replaced_not_duplicated(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path)
     producer = _build_producer(tmp_path, repository, store)
@@ -216,7 +272,23 @@ def test_invalid_existing_forcing_version_is_replaced_not_duplicated(tmp_path: P
     assert result.status == "forcing_ready"
     assert result.forcing_version_id == "stale_forcing_version"
     assert list(repository.forcing_versions) == ["stale_forcing_version"]
+    assert repository.forcing_versions["stale_forcing_version"]["checksum"] == result.checksum
     assert {row.forcing_version_id for row in repository.timeseries} == {"stale_forcing_version"}
+
+
+def test_pending_existing_forcing_version_is_replaced_not_skipped(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    repository.forcing_versions[first.forcing_version_id]["checksum"] = "pending"
+    repository.timeseries.clear()
+
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert second.status == "forcing_ready"
+    assert second.forcing_version_id == first.forcing_version_id
+    assert repository.forcing_versions[first.forcing_version_id]["checksum"] == second.checksum
+    assert len(repository.timeseries) == 1 * 6 * 2
 
 
 def test_missing_canonical_product_blocks_generation(tmp_path: Path) -> None:
@@ -242,6 +314,48 @@ def test_no_stations_raises_error_before_forcing_records(tmp_path: Path) -> None
     assert repository.timeseries == []
 
 
+def test_missing_geographic_grid_coordinates_raise_before_weight_generation(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path, include_geographic_coords=False)
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="usable geographic grid coordinates"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.interp_weights == []
+    assert repository.forcing_versions == {}
+
+
+def test_nonfinite_grid_coordinates_are_rejected(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path, longitudes=(math.nan, -74.5, -74.0))
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="non-finite grid coordinates"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+
+def test_nonfinite_field_values_are_rejected(tmp_path: Path) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        values_by_variable={"prcp_rate_or_amount": (math.nan, 2.0, 3.0)},
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="non-finite field value"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+
+def test_nonfinite_interp_weights_are_rejected(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    repository.interp_weights = [
+        InterpolationWeight("gfs", "grid_a", "demo_model", "station_1", variable, "0", math.nan)
+        for variable in FORCING_VARIABLES
+    ]
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="non-finite values"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+
 def _build_producer(
     tmp_path: Path,
     repository: FakeForcingRepository,
@@ -256,14 +370,27 @@ def _build_repository(
     *,
     omitted_variables: set[str] | None = None,
     stations: tuple[MetStation, ...] | None = None,
+    fail_next_timeseries_replace: bool = False,
+    include_geographic_coords: bool = True,
+    values_by_variable: Mapping[str, tuple[float, float, float]] | None = None,
+    longitudes: tuple[float, float, float] = (-75.0, -74.5, -74.0),
+    latitudes: tuple[float, float, float] = (40.0, 40.2, 40.4),
 ) -> tuple[LocalObjectStore, FakeForcingRepository]:
     store = LocalObjectStore(tmp_path)
-    products = _write_canonical_products(store, omitted_variables=omitted_variables or set())
+    products = _write_canonical_products(
+        store,
+        omitted_variables=omitted_variables or set(),
+        include_geographic_coords=include_geographic_coords,
+        values_by_variable=values_by_variable or {},
+        longitudes=longitudes,
+        latitudes=latitudes,
+    )
     repository = FakeForcingRepository(
         stations=stations
         if stations is not None
-        else (MetStation("station_1", "basin_v1", 1.0, 0.0, 50.0, "forcing_proxy"),),
+        else (MetStation("station_1", "basin_v1", -74.7, 40.1, 50.0, "forcing_proxy"),),
         products=products,
+        fail_next_timeseries_replace=fail_next_timeseries_replace,
     )
     return store, repository
 
@@ -272,6 +399,10 @@ def _write_canonical_products(
     store: LocalObjectStore,
     *,
     omitted_variables: set[str],
+    include_geographic_coords: bool,
+    values_by_variable: Mapping[str, tuple[float, float, float]],
+    longitudes: tuple[float, float, float],
+    latitudes: tuple[float, float, float],
 ) -> tuple[CanonicalProduct, ...]:
     cycle_time = parse_cycle_time("2026050700")
     products: list[CanonicalProduct] = []
@@ -291,9 +422,16 @@ def _write_canonical_products(
                 continue
             product_id = f"gfs_2026050700_{variable}_f{forecast_hour:03d}"
             key = f"canonical/gfs/2026050700/{variable}/{product_id}.nc"
+            values = values_by_variable.get(
+                variable,
+                (base_value + forecast_hour, base_value + forecast_hour + 1.0, base_value + forecast_hour + 2.0),
+            )
             content = _netcdf_bytes(
                 variable,
-                values=(base_value + forecast_hour, base_value + forecast_hour + 1.0, base_value + forecast_hour + 2.0),
+                values=values,
+                include_geographic_coords=include_geographic_coords,
+                longitudes=longitudes,
+                latitudes=latitudes,
             )
             object_uri = store.write_bytes_atomic(key, content)
             products.append(
@@ -314,16 +452,25 @@ def _write_canonical_products(
     return tuple(products)
 
 
-def _netcdf_bytes(variable: str, *, values: tuple[float, float, float]) -> bytes:
+def _netcdf_bytes(
+    variable: str,
+    *,
+    values: tuple[float, float, float],
+    include_geographic_coords: bool = True,
+    longitudes: tuple[float, float, float] = (-75.0, -74.5, -74.0),
+    latitudes: tuple[float, float, float] = (40.0, 40.2, 40.4),
+) -> bytes:
     import xarray as xr
 
+    coords: dict[str, Any] = {"point": [0, 1, 2]}
+    if include_geographic_coords:
+        coords.update({
+            "longitude": ("point", list(longitudes)),
+            "latitude": ("point", list(latitudes)),
+        })
     dataset = xr.Dataset(
         data_vars={variable: ("point", list(values))},
-        coords={
-            "point": [0, 1, 2],
-            "longitude": ("point", [0.0, 1.0, 2.0]),
-            "latitude": ("point", [0.0, 0.0, 0.0]),
-        },
+        coords=coords,
     )
     try:
         with tempfile.NamedTemporaryFile(suffix=".nc") as temp_file:

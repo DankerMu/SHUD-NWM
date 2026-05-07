@@ -243,6 +243,17 @@ class PsycopgForcingRepository:
             ),
         )
 
+    def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]:
+        return self._fetch_one(
+            """
+            UPDATE met.forcing_version
+            SET checksum = %s
+            WHERE forcing_version_id = %s
+            RETURNING *
+            """,
+            (checksum, forcing_version_id),
+        )
+
     def replace_forcing_components(self, forcing_version_id: str, components: Sequence[ForcingComponent]) -> None:
         rows = [
             (
