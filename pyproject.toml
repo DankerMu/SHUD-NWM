@@ -33,6 +33,7 @@ nhms-canonical = "workers.canonical_converter.cli:main"
 nhms-forcing = "workers.forcing_producer.cli:main"
 nhms-model = "workers.model_registry.cli:main"
 nhms-shud-runtime = "workers.shud_runtime.cli:main"
+nhms-parse = "workers.output_parser.cli:main"
 
 [project.optional-dependencies]
 dev = [
