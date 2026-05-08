@@ -69,6 +69,38 @@ class MockSlurmGateway(SlurmGateway):
             self._refresh_job_locked(job, now)
             return job.model_copy(deep=True)
 
+    def submit_job_array(self, request: dict | SubmitJobRequest) -> SlurmJobRecord:
+        if isinstance(request, SubmitJobRequest):
+            manifest = request.normalized_manifest()
+        else:
+            manifest = dict(request.get("manifest") or request)
+            if "job_type" in request:
+                manifest["job_type"] = request["job_type"]
+            if "stage_name" in request:
+                manifest["stage_name"] = request["stage_name"]
+            if "tasks" in request:
+                manifest["tasks"] = request["tasks"]
+
+        tasks = list(manifest.get("tasks") or manifest.get("basins") or [])
+        if not tasks:
+            raise SlurmGatewayError(
+                422,
+                "VALIDATION_ERROR",
+                "Cannot submit array job with 0 tasks",
+                {"missing_fields": ["tasks"]},
+            )
+        first_task = dict(tasks[0])
+        run_id = str(manifest.get("run_id") or first_task.get("run_id") or "")
+        model_id = str(manifest.get("model_id") or first_task.get("model_id") or "")
+        return self.submit_job(
+            SubmitJobRequest(
+                run_id=run_id,
+                model_id=model_id,
+                job_type=str(manifest.get("job_type") or manifest.get("stage_name") or "array"),
+                manifest=manifest,
+            )
+        )
+
     def cancel_job(self, job_id: str) -> SlurmJobRecord:
         now = self._now()
         with self._lock:
@@ -90,6 +122,22 @@ class MockSlurmGateway(SlurmGateway):
         now = self._now()
         with self._lock:
             return self._get_job_locked(job_id, now).model_copy(deep=True)
+
+    def get_array_task_results(self, job_id: str) -> list[dict[str, int | str | None]]:
+        now = self._now()
+        with self._lock:
+            job = self._get_job_locked(job_id, now)
+            tasks = list(job.manifest.get("tasks") or job.manifest.get("basins") or [])
+            exit_code = job.exit_code
+            return [
+                {
+                    "task_id": index,
+                    "job_id": f"{job_id}_{index}",
+                    "status": job.status.value,
+                    "exit_code": exit_code,
+                }
+                for index, _task in enumerate(tasks)
+            ]
 
     def list_jobs(
         self,
@@ -216,4 +264,3 @@ class MockSlurmGateway(SlurmGateway):
         else:
             lines.append(f"Current state: {job.status.value}")
         return "\n".join(lines)
-

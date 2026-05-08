@@ -4,8 +4,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from packages.common.object_store import LocalObjectStore
-from services.orchestrator.chain import M3_STAGES, ForecastOrchestrator, OrchestratorConfig
+from services.orchestrator.chain import M3_STAGES, ForecastOrchestrator, OrchestratorConfig, OrchestratorError
 
 
 class FakeCycleSlurmClient:
@@ -103,10 +105,15 @@ class FakeCycleSlurmClient:
 
 
 class FakeCycleRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, active: bool = False) -> None:
+        self.active = active
         self.jobs: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.cycle_statuses: list[str] = []
+
+    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+        del source_id, cycle_time
+        return self.active
 
     def ensure_forecast_cycle(self, *, source_id: str, cycle_time: datetime) -> dict[str, Any]:
         return {"cycle_id": f"{source_id}_{cycle_time:%Y%m%d%H}", "status": "discovered"}
@@ -191,11 +198,41 @@ def test_m3_cycle_orchestration_submits_all_seven_stages_lazily(tmp_path: Path) 
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
 
-    assert result.status == "published"
+    assert result.status == "complete"
     assert [submission["stage"] for submission in client.submissions] == [stage.stage for stage in M3_STAGES]
     assert [stage.status for stage in result.stages] == ["succeeded"] * 7
-    assert repository.cycle_statuses[-1] == "published"
+    assert repository.cycle_statuses[-1] == "complete"
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
+
+
+def test_cycle_orchestration_rejects_db_active_duplicate(tmp_path: Path) -> None:
+    repository = FakeCycleRepository(active=True)
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert exc_info.value.error_code == "PIPELINE_ALREADY_ACTIVE"
+    assert client.submissions == []
+
+
+def test_cycle_orchestration_rejects_unsafe_source_and_basin_ids(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    with pytest.raises(OrchestratorError) as source_exc:
+        orchestrator.orchestrate_cycle("../gfs", "2026050100", _basins(1))
+
+    unsafe_basins = _basins(1)
+    unsafe_basins[0]["basin_id"] = "../basin"
+    with pytest.raises(OrchestratorError) as basin_exc:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", unsafe_basins)
+
+    assert source_exc.value.error_code == "UNSAFE_IDENTIFIER"
+    assert basin_exc.value.error_code == "UNSAFE_IDENTIFIER"
+    assert client.submissions == []
 
 
 def test_stage_three_failure_blocks_downstream_stages(tmp_path: Path) -> None:
@@ -237,7 +274,7 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
-    assert result.status == "published"
+    assert result.status == "complete"
     assert [submission["stage"] for submission in client.submissions] == ["parse", "frequency", "publish"]
 
 

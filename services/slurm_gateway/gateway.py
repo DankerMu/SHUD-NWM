@@ -96,6 +96,10 @@ class SlurmGateway(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_jobs(
         self,
         limit: int,

@@ -8,6 +8,7 @@ import pytest
 
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.chain import (
+    LEGACY_FORECAST_STAGES,
     STAGES,
     ForcingContext,
     ForecastOrchestrator,
@@ -94,6 +95,10 @@ class FakeOrchestratorRepository:
         self.cycle_statuses: list[str] = []
         self.hydro_statuses: list[str] = []
         self.created_runs: list[Any] = []
+
+    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+        del source_id, cycle_time
+        return False
 
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         assert source_id == "gfs"
@@ -214,7 +219,7 @@ class FakeOrchestratorRepository:
         assert source_id == "gfs"
         assert cycle_time == _dt("2026-05-01T00:00:00Z")
         assert model_id == "demo_model"
-        order = {stage.stage: index for index, stage in enumerate(STAGES)}
+        order = {stage.stage: index for index, stage in enumerate(LEGACY_FORECAST_STAGES)}
         return sorted(self.jobs.values(), key=lambda job: order[job["stage"]])
 
 
@@ -225,13 +230,15 @@ def test_lazy_chain_submits_all_stages_and_records_statuses(tmp_path: Path) -> N
 
     result = orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
-    assert result.status == "published"
-    assert [payload["manifest"]["stage"] for payload in client.submissions] == [stage.stage for stage in STAGES]
+    assert result.status == "complete"
+    assert [payload["manifest"]["stage"] for payload in client.submissions] == [
+        stage.stage for stage in LEGACY_FORECAST_STAGES
+    ]
     assert all(stage.status == "succeeded" for stage in result.stages)
     assert repository.hydro_statuses == ["created", "staged", "submitted", "succeeded", "parsed"]
-    assert repository.cycle_statuses[-1] == "published"
+    assert repository.cycle_statuses[-1] == "complete"
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
-    assert len(repository.events) == len(STAGES) * 3
+    assert len(repository.events) == len(LEGACY_FORECAST_STAGES) * 3
     run_manifest = tmp_path / "workspace" / "runs" / "fcst_gfs_2026050100_demo_model" / "input" / "manifest.json"
     assert run_manifest.exists()
     assert '"run_id": "fcst_gfs_2026050100_demo_model"' in run_manifest.read_text(encoding="utf-8")
@@ -239,13 +246,13 @@ def test_lazy_chain_submits_all_stages_and_records_statuses(tmp_path: Path) -> N
 
 def test_stage_failure_aborts_later_submissions_and_marks_run_failed(tmp_path: Path) -> None:
     repository = FakeOrchestratorRepository()
-    client = FakeSlurmClient(fail_stage="convert")
+    client = FakeSlurmClient(fail_stage="convert_canonical")
     orchestrator = _build_orchestrator(tmp_path, repository, client)
 
     result = orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert result.status == "failed"
-    assert [payload["manifest"]["stage"] for payload in client.submissions] == ["download", "convert"]
+    assert [payload["manifest"]["stage"] for payload in client.submissions] == ["download_gfs", "convert_canonical"]
     assert repository.hydro_statuses[-1] == "failed"
     assert repository.cycle_statuses[-1] == "failed_convert"
     failed_events = [event for event in repository.events if event["status_to"] == "failed"]
@@ -273,8 +280,8 @@ def test_stage_status_query_returns_ordered_stage_records(tmp_path: Path) -> Non
 
     statuses = orchestrator.stage_statuses(cycle_time="2026050100", source_id="gfs", model_id="demo_model")
 
-    assert [status["stage"] for status in statuses] == [stage.stage for stage in STAGES]
-    assert [status["status"] for status in statuses] == ["succeeded"] * len(STAGES)
+    assert [status["stage"] for status in statuses] == [stage.stage for stage in LEGACY_FORECAST_STAGES]
+    assert [status["status"] for status in statuses] == ["succeeded"] * len(LEGACY_FORECAST_STAGES)
 
 
 def test_sbatch_templates_are_seven_lazy_submit_scripts() -> None:

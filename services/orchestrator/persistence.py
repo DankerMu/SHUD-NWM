@@ -6,6 +6,9 @@ from typing import Any
 from sqlalchemy import JSON, BigInteger, DateTime, Integer, MetaData, Text, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
+TERMINAL_STATUS_GUARD = {"succeeded", "failed", "cancelled"}
+TERMINAL_STATUS_OVERRIDES = {"partially_failed"}
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -109,6 +112,9 @@ class PipelineStore:
         job = self.get_job(job_id)
         if job is None:
             raise KeyError(f"pipeline_job not found: {job_id}")
+
+        if job.status in TERMINAL_STATUS_GUARD and status not in TERMINAL_STATUS_OVERRIDES:
+            return job
 
         job.status = status
         if started_at is not None:
