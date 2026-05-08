@@ -6,7 +6,8 @@ import os
 import re
 import subprocess
 import tempfile
-from datetime import UTC, datetime
+import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -42,9 +43,17 @@ from services.slurm_gateway.models import (
 LOGGER = logging.getLogger(__name__)
 
 SBATCH_JOB_ID_RE = re.compile(r"Submitted batch job (\d+)")
+SLURM_JOB_ID_RE = re.compile(r"^\d+(_\d+)?$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
+DEFAULT_LIST_LOOKBACK_HOURS = 24
+MAX_LOG_BYTES = 10 * 1024 * 1024
+LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
+
+FREEFORM_STRING_FIELDS = {
+    "script",
+}
 
 STRICT_IDENTIFIER_FIELDS = {
     "basin_id",
@@ -74,12 +83,17 @@ REQUIRED_RESOURCE_FIELDS = {
 SLURM_STATE_MAP = {
     "PENDING": SlurmJobStatus.SUBMITTED,
     "REQUEUED": SlurmJobStatus.SUBMITTED,
+    "CONFIGURING": SlurmJobStatus.SUBMITTED,
     "RUNNING": SlurmJobStatus.RUNNING,
+    "COMPLETING": SlurmJobStatus.RUNNING,
+    "SUSPENDED": SlurmJobStatus.RUNNING,
     "COMPLETED": SlurmJobStatus.SUCCEEDED,
     "FAILED": SlurmJobStatus.FAILED,
     "TIMEOUT": SlurmJobStatus.FAILED,
     "NODE_FAIL": SlurmJobStatus.FAILED,
     "OUT_OF_MEMORY": SlurmJobStatus.FAILED,
+    "PREEMPTED": SlurmJobStatus.FAILED,
+    "DEADLINE": SlurmJobStatus.FAILED,
     "CANCELLED": SlurmJobStatus.CANCELLED,
 }
 
@@ -87,11 +101,18 @@ SLURM_STATE_MAP = {
 class RealSlurmGateway(SlurmGateway):
     def __init__(self, settings: SlurmGatewaySettings) -> None:
         self.settings = settings
+        self._lock = threading.Lock()
         self._jobs: dict[str, SlurmJobRecord] = {}
 
     def submit_job(self, request: SubmitJobRequest) -> SlurmJobRecord:
         manifest = request.normalized_manifest()
+        run_id = request.resolved_run_id()
+        model_id = request.resolved_model_id()
         job_type = request.resolved_job_type()
+        if run_id:
+            manifest["run_id"] = run_id
+        if model_id:
+            manifest["model_id"] = model_id
         if job_type:
             manifest["job_type"] = job_type
         self._require_manifest_fields(manifest, ["run_id", "model_id", "job_type"])
@@ -178,6 +199,7 @@ class RealSlurmGateway(SlurmGateway):
         return record.model_copy(deep=True)
 
     def get_job_status(self, job_id: str) -> SlurmJobRecord:
+        self._validate_job_id(job_id)
         result = self._run_command(
             [
                 self._slurm_command("sacct"),
@@ -192,6 +214,7 @@ class RealSlurmGateway(SlurmGateway):
         return record.model_copy(deep=True)
 
     def cancel_job(self, job_id: str) -> SlurmJobRecord:
+        self._validate_job_id(job_id)
         try:
             self._run_command([self._slurm_command("scancel"), job_id])
         except SlurmCommandError as exc:
@@ -239,8 +262,9 @@ class RealSlurmGateway(SlurmGateway):
             "--noheader",
             "--format=JobID,JobName,State,ExitCode,Start,End",
         ]
-        if start_time:
-            command.append(f"--starttime={start_time}")
+        if not start_time:
+            start_time = (self._now() - timedelta(hours=DEFAULT_LIST_LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
+        command.append(f"--starttime={start_time}")
         if end_time:
             command.append(f"--endtime={end_time}")
         result = self._run_command(command)
@@ -248,6 +272,7 @@ class RealSlurmGateway(SlurmGateway):
         return [record.model_copy(deep=True) for record in records[offset : offset + limit]]
 
     def fetch_logs(self, job_id: str) -> SlurmLogsResponse:
+        self._validate_job_id(job_id)
         record = self._jobs.get(job_id)
         if record is None:
             try:
@@ -258,11 +283,12 @@ class RealSlurmGateway(SlurmGateway):
         run_id = record.run_id if record and record.run_id else job_id
         log_path = Path(self.settings.workspace_dir) / run_id / "logs" / f"{job_id}.out"
         logs = ""
+        truncated = False
         if log_path.exists():
-            logs = log_path.read_text(encoding="utf-8")
+            logs, truncated = self._read_log_file(log_path)
 
         complete = bool(record and record.status in TERMINAL_STATUSES)
-        return SlurmLogsResponse(job_id=job_id, run_id=run_id, logs=logs, complete=complete)
+        return SlurmLogsResponse(job_id=job_id, run_id=run_id, logs=logs, complete=complete, truncated=truncated)
 
     def reset(self, request: ResetRequest | None = None) -> ResetResponse:
         del request
@@ -274,7 +300,7 @@ class RealSlurmGateway(SlurmGateway):
         try:
             result = self._run_command([self._slurm_command("sinfo"), "--version"])
         except SlurmGatewayError as exc:
-            return SlurmHealthResponse(backend="slurm", version=exc.message, status="unhealthy")
+            return SlurmHealthResponse(backend="slurm", version="", status="unhealthy", error=exc.message)
         version = result.stdout.strip() or self.settings.version
         return SlurmHealthResponse(backend="slurm", version=version, status="healthy")
 
@@ -331,10 +357,24 @@ class RealSlurmGateway(SlurmGateway):
             entries.append(entry)
 
         output_dir = Path(self.settings.workspace_dir) / cycle_id / "manifests"
+        self._ensure_within_workspace(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{stage_name}_index.json"
-        output_path.write_text(json.dumps(entries, indent=2, sort_keys=True), encoding="utf-8")
-        return output_path
+        self._ensure_within_workspace(output_dir)
+
+        for _ in range(10):
+            timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+            output_path = output_dir / f"{stage_name}_index_{timestamp}.json"
+            try:
+                with output_path.open("x", encoding="utf-8") as handle:
+                    handle.write(json.dumps(entries, indent=2, sort_keys=True))
+                return output_path
+            except FileExistsError:
+                continue
+
+        raise SlurmValidationError(
+            "Unable to create a unique manifest index path.",
+            {"cycle_id": cycle_id, "stage_name": stage_name},
+        )
 
     def render_template(
         self,
@@ -563,8 +603,8 @@ class RealSlurmGateway(SlurmGateway):
         normalized = raw_state.strip().upper().split()[0].rstrip("+")
         status = SLURM_STATE_MAP.get(normalized)
         if status is None:
-            LOGGER.error("Unsupported Slurm state: %r", raw_state)
-            raise SlurmParseError("Unsupported Slurm state in sacct output.", {"state": raw_state})
+            LOGGER.warning("Unmapped Slurm state: %r, treating as RUNNING", raw_state)
+            return SlurmJobStatus.RUNNING
         return status
 
     def _parse_exit_code(self, raw_exit_code: str) -> int | None:
@@ -581,8 +621,8 @@ class RealSlurmGateway(SlurmGateway):
             return None
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
+        except ValueError as exc:
+            raise SlurmParseError("Unable to parse Slurm timestamp.", {"timestamp": raw_value}) from exc
 
     def _slurm_command(self, name: str) -> str:
         if not self.settings.slurm_bin_path:
@@ -598,35 +638,85 @@ class RealSlurmGateway(SlurmGateway):
             )
 
     def _validate_manifest(self, value: Any, path: str = "manifest") -> None:
-        if isinstance(value, Mapping):
-            for key, nested in value.items():
-                if not isinstance(key, str) or not SAFE_KEY_RE.fullmatch(key):
-                    raise ManifestValidationError("Manifest contains an unsafe field name.", {"field": str(key)})
-                self._validate_manifest(nested, f"{path}.{key}")
-            return
-        if isinstance(value, list):
-            for index, nested in enumerate(value):
-                self._validate_manifest(nested, f"{path}[{index}]")
-            return
-        if isinstance(value, str):
-            if SHELL_META_RE.search(value):
-                raise ManifestValidationError(
-                    "Manifest field contains shell metacharacters.",
-                    {"field": path, "value": value},
-                )
-            field_name = path.rsplit(".", maxsplit=1)[-1]
-            if field_name in STRICT_IDENTIFIER_FIELDS and not SAFE_IDENTIFIER_RE.fullmatch(value):
-                raise ManifestValidationError(
-                    "Manifest identifier fields may contain only alphanumeric characters, underscores, and hyphens.",
-                    {"field": path, "value": value},
-                )
-            return
+        if not isinstance(value, Mapping):
+            raise ManifestValidationError(
+                "Manifest must be a mapping.",
+                {"field": path, "type": type(value).__name__},
+            )
+
+        for key, nested in value.items():
+            if not isinstance(key, str) or not SAFE_KEY_RE.fullmatch(key):
+                raise ManifestValidationError("Manifest contains an unsafe field name.", {"field": str(key)})
+
+            field_path = f"{path}.{key}"
+            if key in STRICT_IDENTIFIER_FIELDS:
+                self._validate_identifier_field(nested, field_path)
+            elif isinstance(nested, str) and key not in FREEFORM_STRING_FIELDS:
+                self._validate_rendered_string(nested, field_path)
+
+    def _validate_identifier_field(self, value: Any, path: str) -> None:
         if value is None or isinstance(value, bool | int | float):
             return
-        raise ManifestValidationError(
-            "Manifest contains an unsupported value type.",
-            {"field": path, "type": type(value).__name__},
+        if not isinstance(value, str):
+            raise ManifestValidationError(
+                "Manifest identifier field contains an unsupported value type.",
+                {"field": path, "type": type(value).__name__},
+            )
+        if SHELL_META_RE.search(value) or not SAFE_IDENTIFIER_RE.fullmatch(value):
+            raise ManifestValidationError(
+                "Manifest identifier fields may contain only alphanumeric characters, underscores, and hyphens.",
+                {"field": path, "value": value},
+            )
+
+    def _validate_rendered_string(self, value: str, path: str) -> None:
+        if SHELL_META_RE.search(value):
+            raise ManifestValidationError(
+                "Manifest field contains shell metacharacters.",
+                {"field": path, "value": value},
+            )
+
+    def _validate_job_id(self, job_id: str) -> None:
+        if SLURM_JOB_ID_RE.fullmatch(job_id):
+            return
+        raise SlurmGatewayError(
+            400,
+            "INVALID_JOB_ID",
+            "Slurm job_id must be a numeric job id optionally followed by an array task suffix.",
+            {"job_id": job_id},
         )
+
+    def _read_log_file(self, log_path: Path) -> tuple[str, bool]:
+        if log_path.is_symlink():
+            LOGGER.warning("Refusing to read symlinked Slurm log path: %s", log_path)
+            return "", False
+
+        try:
+            resolved_log_path = log_path.resolve(strict=True)
+            self._ensure_within_workspace(resolved_log_path)
+        except (FileNotFoundError, SlurmGatewayError):
+            LOGGER.warning("Refusing to read Slurm log path outside workspace: %s", log_path)
+            return "", False
+
+        with resolved_log_path.open("rb") as handle:
+            data = handle.read(MAX_LOG_BYTES + 1)
+        truncated = len(data) > MAX_LOG_BYTES
+        if truncated:
+            data = data[:MAX_LOG_BYTES]
+        logs = data.decode("utf-8", errors="replace")
+        if truncated:
+            logs += LOG_TRUNCATION_MARKER
+        return logs, truncated
+
+    def _ensure_within_workspace(self, path: Path) -> None:
+        workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
+        resolved_path = path.expanduser().resolve()
+        try:
+            resolved_path.relative_to(workspace_dir)
+        except ValueError as exc:
+            raise SlurmValidationError(
+                "Resolved Slurm gateway path is outside the configured workspace directory.",
+                {"path": str(path), "workspace_dir": str(workspace_dir)},
+            ) from exc
 
     @staticmethod
     def _now() -> datetime:

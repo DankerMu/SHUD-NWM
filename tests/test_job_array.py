@@ -87,13 +87,26 @@ def test_manifest_index_generation(tmp_path):
 
     path = gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(2))
 
-    assert path == tmp_path / "workspace" / "cycle_001" / "manifests" / "run_shud_forecast_array_index.json"
+    assert path.parent == tmp_path / "workspace" / "cycle_001" / "manifests"
+    assert path.name.startswith("run_shud_forecast_array_index_")
+    assert path.name.endswith(".json")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert [entry["task_id"] for entry in data] == [0, 1]
     assert data[0]["model_id"] == "model_001"
     assert data[0]["basin_version_id"] == "basin_0"
     assert data[0]["run_id"] == "run_0"
     assert data[0]["workspace_dir"] == str(tmp_path / "workspace")
+
+
+def test_manifest_index_generation_uses_versioned_paths(tmp_path):
+    gateway = _gateway(tmp_path)
+
+    first = gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(1))
+    second = gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(1))
+
+    assert first != second
+    assert first.exists()
+    assert second.exists()
 
 
 def test_resource_profile_loading_default_and_override(tmp_path):

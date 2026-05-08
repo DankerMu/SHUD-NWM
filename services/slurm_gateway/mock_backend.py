@@ -91,7 +91,13 @@ class MockSlurmGateway(SlurmGateway):
         with self._lock:
             return self._get_job_locked(job_id, now).model_copy(deep=True)
 
-    def list_jobs(self, limit: int, offset: int) -> list[SlurmJobRecord]:
+    def list_jobs(
+        self,
+        limit: int,
+        offset: int,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> list[SlurmJobRecord]:
         now = self._now()
         with self._lock:
             self._refresh_all_locked(now)

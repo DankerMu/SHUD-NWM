@@ -96,7 +96,13 @@ class SlurmGateway(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_jobs(self, limit: int, offset: int) -> list[SlurmJobRecord]:
+    def list_jobs(
+        self,
+        limit: int,
+        offset: int,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> list[SlurmJobRecord]:
         raise NotImplementedError
 
     @abstractmethod

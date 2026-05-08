@@ -120,12 +120,14 @@ class SlurmLogsResponse(BaseModel):
     run_id: str
     logs: str
     complete: bool
+    truncated: bool = False
 
 
 class SlurmHealthResponse(BaseModel):
     backend: str
     version: str
     status: str
+    error: str | None = None
 
 
 class ResetRequest(BaseModel):

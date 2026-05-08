@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,13 @@ from jinja2.exceptions import SecurityError
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ManifestValidationError,
+    SlurmGatewayError,
+    SlurmParseError,
     SlurmTimeoutError,
     TemplateSecurityError,
     create_gateway,
 )
-from services.slurm_gateway.models import SlurmJobStatus, SubmitJobRequest
+from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import RealSlurmGateway
 
 
@@ -86,6 +89,31 @@ def test_submit_job_parses_sbatch_stdout(monkeypatch, tmp_path):
     assert calls[0][1]["shell"] is False
 
 
+def test_submit_job_accepts_nested_model_id_and_script_manifest(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        return subprocess.CompletedProcess([], 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job(
+        SubmitJobRequest(
+            manifest={
+                "run_id": "run_001",
+                "stage": "run_shud_forecast_array",
+                "model": {"model_id": "model_001"},
+                "script": "#!/usr/bin/env bash\necho ok\n",
+            }
+        )
+    )
+
+    assert record.job_id == "12345"
+    assert record.model_id == "model_001"
+    assert record.manifest["model"]["model_id"] == "model_001"
+
+
 @pytest.mark.parametrize(
     ("slurm_state", "expected"),
     [
@@ -131,6 +159,23 @@ def test_scancel_invocation(monkeypatch, tmp_path):
 
     assert calls == [["scancel", "12345"]]
     assert record.status == SlurmJobStatus.CANCELLED
+
+
+@pytest.mark.parametrize("operation", ["cancel_job", "get_job_status"])
+def test_job_id_option_injection_rejected(monkeypatch, tmp_path, operation):
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for invalid job_id")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(SlurmGatewayError) as exc_info:
+        getattr(gateway, operation)("--user=root")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.code == "INVALID_JOB_ID"
 
 
 def test_template_whitelist_rejects_path_traversal(tmp_path):
@@ -219,7 +264,12 @@ def test_health_check_success_and_failure(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(command, 0, stdout="slurm 24.05.1\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", success)
-    assert gateway.health().model_dump() == {"backend": "slurm", "version": "slurm 24.05.1", "status": "healthy"}
+    assert gateway.health().model_dump() == {
+        "backend": "slurm",
+        "version": "slurm 24.05.1",
+        "status": "healthy",
+        "error": None,
+    }
 
     def failure(command, **kwargs):
         del kwargs
@@ -229,3 +279,52 @@ def test_health_check_success_and_failure(monkeypatch, tmp_path):
     response = gateway.health()
     assert response.backend == "slurm"
     assert response.status == "unhealthy"
+    assert response.version == ""
+    assert response.error
+
+
+def test_fetch_logs_refuses_symlink(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_001",
+        model_id="model_001",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+    )
+    secret_path = tmp_path / "secret.txt"
+    secret_path.write_text("secret", encoding="utf-8")
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345.out").symlink_to(secret_path)
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.logs == ""
+    assert response.truncated is False
+
+
+def test_parse_slurm_datetime_rejects_garbage(tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with pytest.raises(SlurmParseError):
+        gateway._parse_slurm_datetime("definitely-not-a-time")
+
+
+def test_list_jobs_defaults_to_lookback_start_time(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert gateway.list_jobs(limit=100, offset=0) == []
+    assert any(arg.startswith("--starttime=") for arg in calls[0])
