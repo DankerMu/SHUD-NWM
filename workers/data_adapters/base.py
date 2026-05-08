@@ -55,6 +55,7 @@ class CycleDiscovery:
     cycle_time: datetime
     cycle_hour: int
     available: bool
+    status: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +64,7 @@ class CycleDiscovery:
             "cycle_time": self.cycle_time.isoformat(),
             "cycle_hour": self.cycle_hour,
             "available": self.available,
+            "status": self.status,
         }
 
 
