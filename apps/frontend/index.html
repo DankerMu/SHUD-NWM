@@ -405,7 +405,7 @@
         titleNode.textContent = name || segment_id;
         metaNode.textContent = segment_id;
         setState("加载中...");
-        const path = `/api/v1/basin-versions/${encodeURIComponent(basin_version_id)}/river-segments/${encodeURIComponent(segment_id)}/forecast-series?issue_time=latest&variables=q_down`;
+        const path = `/api/v1/basin-versions/${encodeURIComponent(basin_version_id)}/river-segments/${encodeURIComponent(segment_id)}/forecast-series?issue_time=latest&variables=q_down&include_analysis=true`;
 
         try {
           const response = await fetch(path, { headers: { Accept: "application/json" } });
@@ -422,9 +422,8 @@
       }
 
       function renderForecast(payload, segmentName) {
-        const series = payload.series && payload.series[0];
-        const points = series && Array.isArray(series.points) ? series.points : [];
-        if (points.length === 0) {
+        const segments = normalizeForecastSegments(payload);
+        if (segments.every((segment) => segment.data.length === 0)) {
           setState("暂无预报数据");
           return;
         }
@@ -432,17 +431,32 @@
         emptyState.hidden = true;
         chartNode.hidden = false;
         chart = chart || echarts.init(chartNode);
-        const data = points.map(([time, value]) => [Number.isFinite(Number(time)) ? Number(time) : Date.parse(time), value]);
+        const issueTimeMs = payload.issue_time ? Date.parse(payload.issue_time) : null;
+        const showIssueDivider = Number.isFinite(issueTimeMs) && segments.some((segment) => segment.isAnalysis);
+        const sourceText = buildSourceText(segments);
+        const chartSeries = segments
+          .filter((segment) => segment.data.length > 0)
+          .map((segment, index) => ({
+            type: "line",
+            name: segment.name,
+            smooth: true,
+            symbolSize: 6,
+            data: segment.data,
+            lineStyle: { width: 2.5, color: segment.color },
+            itemStyle: { color: segment.color },
+            markLine: index === 0 && showIssueDivider ? issueTimeMarkLine(issueTimeMs, payload.issue_time) : undefined,
+          }));
         chart.setOption({
-          color: ["#2266cc"],
+          color: segments.map((segment) => segment.color),
           title: {
             text: `${segmentName} 预报曲线`,
-            subtext: `起报时间 ${payload.issue_time || "latest"}`,
+            subtext: `起报时间 ${payload.issue_time || "latest"}${sourceText ? `\n资料来源 ${sourceText}` : ""}`,
             left: 0,
             textStyle: { fontSize: 15, fontWeight: 650 },
-            subtextStyle: { color: "#64748b" },
+            subtextStyle: { color: "#64748b", lineHeight: 18 },
           },
-          grid: { left: 52, right: 18, top: 72, bottom: 52 },
+          legend: { top: 48, left: 0, itemWidth: 18, itemHeight: 8 },
+          grid: { left: 52, right: 18, top: 98, bottom: 52 },
           tooltip: {
             trigger: "axis",
             valueFormatter: (value) => `${Number(value).toFixed(2)} ${payload.unit || "m3/s"}`,
@@ -462,17 +476,67 @@
             nameGap: 32,
             scale: true,
           },
-          series: [
-            {
-              type: "line",
-              name: series.scenario_id || "GFS",
-              smooth: true,
-              symbolSize: 6,
-              data,
-            },
-          ],
+          series: chartSeries,
         });
         chart.resize();
+      }
+
+      function normalizeForecastSegments(payload) {
+        if (Array.isArray(payload.segments)) {
+          return payload.segments.map((segment) => {
+            const scenario = segment.scenario || segment.scenario_id || "";
+            const isAnalysis = scenario === "analysis_true_field";
+            const source = segment.source || "";
+            return {
+              scenario,
+              source,
+              isAnalysis,
+              color: isAnalysis ? "#2266cc" : "#ef7d22",
+              name: `${isAnalysis ? "真实场" : "预报"}${source ? ` (${source})` : ""}`,
+              data: (Array.isArray(segment.data) ? segment.data : []).map((point) => [
+                Date.parse(point.valid_time),
+                point.value,
+              ]),
+            };
+          });
+        }
+
+        return (Array.isArray(payload.series) ? payload.series : []).map((series) => ({
+          scenario: series.scenario_id || "forecast_gfs_deterministic",
+          source: "GFS",
+          isAnalysis: false,
+          color: "#ef7d22",
+          name: series.scenario_id || "GFS",
+          data: (Array.isArray(series.points) ? series.points : []).map(([time, value]) => [
+            Number.isFinite(Number(time)) ? Number(time) : Date.parse(time),
+            value,
+          ]),
+        }));
+      }
+
+      function issueTimeMarkLine(issueTimeMs, issueTimeLabel) {
+        return {
+          silent: false,
+          symbol: "none",
+          lineStyle: { color: "#64748b", type: "dashed", width: 1.5 },
+          label: {
+            formatter: "起报时间",
+            color: "#1f2937",
+            backgroundColor: "#ffffff",
+            padding: [2, 4],
+          },
+          tooltip: {
+            formatter: () => `起报时间 ${issueTimeLabel}<br/>左侧为真实场 analysis，右侧为预报`,
+          },
+          data: [{ name: "起报时间", xAxis: issueTimeMs }],
+        };
+      }
+
+      function buildSourceText(segments) {
+        const sources = segments
+          .filter((segment) => segment.source)
+          .map((segment) => `${segment.isAnalysis ? "analysis" : "forecast"}: ${segment.source}`);
+        return [...new Set(sources)].join("；");
       }
 
       function setState(message, kind = "", retry = null) {
