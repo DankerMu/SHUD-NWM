@@ -155,16 +155,19 @@ class GCSZarrClient:
         return self._dataset
 
     def is_available(self, request: Mapping[str, Any]) -> bool:
-        try:
-            import numpy as np
+        import numpy as np
 
+        try:
             ds = self._open_dataset()
+        except Exception:
+            raise
+
+        try:
             target_date = _date_from_request(request)
             target_np = np.datetime64(f"{target_date.isoformat()}T00:00:00")
             time_vals = ds.time.values
             return bool(time_vals[0] <= target_np <= time_vals[-1])
-        except Exception:
-            LOGGER.debug("GCS Zarr availability check failed", exc_info=True)
+        except (KeyError, IndexError, ValueError):
             return False
 
     def retrieve(
@@ -176,7 +179,32 @@ class GCSZarrClient:
         timeout_seconds: float,
     ) -> None:
         import numpy as np
-        import xarray as xr
+
+        outcome: queue.Queue[BaseException | None] = queue.Queue(maxsize=1)
+
+        def _do_retrieve() -> None:
+            try:
+                self._retrieve_inner(request, target)
+            except BaseException as error:
+                outcome.put(error)
+            else:
+                outcome.put(None)
+
+        thread = threading.Thread(target=_do_retrieve, name="era5-gcs-retrieve", daemon=True)
+        thread.start()
+        thread.join(float(timeout_seconds))
+        if thread.is_alive():
+            raise TimeoutError(f"GCS Zarr retrieve timed out after {timeout_seconds:g} seconds.")
+
+        try:
+            error = outcome.get(timeout=1)
+        except queue.Empty:
+            return
+        if error is not None:
+            raise error
+
+    def _retrieve_inner(self, request: Mapping[str, Any], target: Path) -> None:
+        import numpy as np
 
         ds = self._open_dataset()
         variable = str(request["variable"])
@@ -208,11 +236,25 @@ class GCSZarrClient:
             da = da.sel({lat_dim: slice(south, north)})
 
         lon_vals = da[lon_dim].values
-        if lon_vals.max() > 180.0 and west < 0:
-            west_adj, east_adj = west % 360.0, east % 360.0
+        lon_is_360 = float(lon_vals.max()) > 180.0
+        if lon_is_360:
+            west_adj = west % 360.0 if west < 0 else west
+            east_adj = east % 360.0 if east < 0 else east
+            if west_adj > east_adj:
+                part_a = da.sel({lon_dim: slice(west_adj, 360.0)})
+                part_b = da.sel({lon_dim: slice(0.0, east_adj)})
+                import xarray as xr
+                da = xr.concat([part_a, part_b], dim=lon_dim)
+            else:
+                da = da.sel({lon_dim: slice(west_adj, east_adj)})
         else:
-            west_adj, east_adj = west, east
-        da = da.sel({lon_dim: slice(west_adj, east_adj)})
+            da = da.sel({lon_dim: slice(west, east)})
+
+        if da.size == 0:
+            raise ERA5AdapterError(
+                f"GCS Zarr selection returned empty data for {variable} "
+                f"area=[{north},{west},{south},{east}]"
+            )
 
         slice_ds = da.to_dataset(name=zarr_var)
         slice_ds.attrs["source"] = "ARCO-ERA5-GCS"
