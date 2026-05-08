@@ -1,0 +1,16 @@
+resource_profiles:
+  default:
+    partition: compute
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 32
+    memory_gb: 128
+    walltime: "06:00:00"
+    max_concurrent: 4
+    shud_threads: 32
+  overrides:
+    yangtze_shud_v12:
+      cpus_per_task: 64
+      memory_gb: 256
+      walltime: "12:00:00"
+      shud_threads: 64
