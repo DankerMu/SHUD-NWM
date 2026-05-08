@@ -225,13 +225,13 @@ def test_lazy_chain_submits_all_stages_and_records_statuses(tmp_path: Path) -> N
 
     result = orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
-    assert result.status == "parsed"
+    assert result.status == "published"
     assert [payload["manifest"]["stage"] for payload in client.submissions] == [stage.stage for stage in STAGES]
     assert all(stage.status == "succeeded" for stage in result.stages)
     assert repository.hydro_statuses == ["created", "staged", "submitted", "succeeded", "parsed"]
-    assert repository.cycle_statuses[-1] == "complete"
+    assert repository.cycle_statuses[-1] == "published"
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
-    assert len(repository.events) == 15
+    assert len(repository.events) == len(STAGES) * 3
     run_manifest = tmp_path / "workspace" / "runs" / "fcst_gfs_2026050100_demo_model" / "input" / "manifest.json"
     assert run_manifest.exists()
     assert '"run_id": "fcst_gfs_2026050100_demo_model"' in run_manifest.read_text(encoding="utf-8")
@@ -239,13 +239,13 @@ def test_lazy_chain_submits_all_stages_and_records_statuses(tmp_path: Path) -> N
 
 def test_stage_failure_aborts_later_submissions_and_marks_run_failed(tmp_path: Path) -> None:
     repository = FakeOrchestratorRepository()
-    client = FakeSlurmClient(fail_stage="convert_canonical")
+    client = FakeSlurmClient(fail_stage="convert")
     orchestrator = _build_orchestrator(tmp_path, repository, client)
 
     result = orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert result.status == "failed"
-    assert [payload["manifest"]["stage"] for payload in client.submissions] == ["download_gfs", "convert_canonical"]
+    assert [payload["manifest"]["stage"] for payload in client.submissions] == ["download", "convert"]
     assert repository.hydro_statuses[-1] == "failed"
     assert repository.cycle_statuses[-1] == "failed_convert"
     failed_events = [event for event in repository.events if event["status_to"] == "failed"]
@@ -274,18 +274,18 @@ def test_stage_status_query_returns_ordered_stage_records(tmp_path: Path) -> Non
     statuses = orchestrator.stage_statuses(cycle_time="2026050100", source_id="gfs", model_id="demo_model")
 
     assert [status["stage"] for status in statuses] == [stage.stage for stage in STAGES]
-    assert [status["status"] for status in statuses] == ["succeeded"] * 5
+    assert [status["status"] for status in statuses] == ["succeeded"] * len(STAGES)
 
 
-def test_sbatch_templates_are_five_linear_non_array_scripts() -> None:
-    template_dir = Path("workers/sbatch_templates")
+def test_sbatch_templates_are_seven_lazy_submit_scripts() -> None:
+    template_dir = Path("infra/sbatch")
     names = sorted(path.name for path in template_dir.glob("*.sbatch"))
 
     forecast_templates = {stage.template_name for stage in STAGES}
     assert forecast_templates.issubset(set(names))
     for path in (template_dir / name for name in forecast_templates):
         content = path.read_text(encoding="utf-8")
-        assert content.startswith("#!/bin/bash")
+        assert content.startswith("#!/usr/bin/env bash")
         assert "#SBATCH --job-name=" in content
         assert "#SBATCH --output=" in content
         assert "--dependency=afterok" not in content
