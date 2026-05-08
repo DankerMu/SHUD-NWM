@@ -90,7 +90,7 @@ class PsycopgHydroRunRepository:
         return cls(database_url)
 
     def create_run(self, manifest: dict[str, Any], run_manifest_uri: str) -> dict[str, Any]:
-        return self._fetch_one(
+        inserted = self._fetch_optional(
             """
             INSERT INTO hydro.hydro_run (
                 run_id,
@@ -107,7 +107,7 @@ class PsycopgHydroRunRepository:
                 status,
                 run_manifest_uri
             )
-            VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, %s, 'created', %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'created', %s)
             ON CONFLICT (run_id) DO UPDATE SET
                 status = 'created',
                 error_code = NULL,
@@ -125,15 +125,29 @@ class PsycopgHydroRunRepository:
                 manifest["model"]["model_id"],
                 manifest["model"]["basin_version_id"],
                 manifest.get("forcing", {}).get("forcing_version_id"),
+                _initial_state_id(manifest),
                 manifest.get("source_id"),
                 _parse_time_or_none(manifest.get("cycle_time")),
                 _parse_time(manifest["start_time"]),
                 _parse_time(manifest["end_time"]),
                 run_manifest_uri,
             ),
-            missing_error_code="HYDRO_RUN_NOT_RETRIABLE",
-            missing_message="hydro_run already exists with a non-retriable status.",
         )
+        if inserted is not None:
+            return inserted
+
+        existing = self._fetch_optional(
+            """
+            SELECT *
+            FROM hydro.hydro_run
+            WHERE run_id = %s
+              AND status IN ('created', 'staged', 'submitted', 'running')
+            """,
+            (manifest["run_id"],),
+        )
+        if existing is not None:
+            return existing
+        raise SHUDRuntimeError("HYDRO_RUN_NOT_RETRIABLE", "hydro_run already exists with a non-retriable status.")
 
     def update_status(self, run_id: str, status: str, **fields: Any) -> dict[str, Any]:
         assignments = ["status = %s", "updated_at = now()"]
@@ -177,6 +191,12 @@ class PsycopgHydroRunRepository:
         missing_error_code: str = "HYDRO_RUN_NOT_FOUND",
         missing_message: str = "hydro_run update did not return a row.",
     ) -> dict[str, Any]:
+        row = self._fetch_optional(statement, parameters)
+        if row is None:
+            raise SHUDRuntimeError(missing_error_code, missing_message)
+        return row
+
+    def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
@@ -191,9 +211,7 @@ class PsycopgHydroRunRepository:
                 cursor.execute(statement, parameters)
                 row = cursor.fetchone()
                 connection.commit()
-                if row is None:
-                    raise SHUDRuntimeError(missing_error_code, missing_message)
-                return dict(row)
+                return dict(row) if row is not None else None
         except psycopg2.Error as error:
             if connection is not None:
                 connection.rollback()
@@ -277,11 +295,21 @@ class SHUDRuntime:
     def prepare_workspace(self, manifest: dict[str, Any], input_dir: Path) -> None:
         self._stage_artifact(manifest["model"]["model_package_uri"], input_dir)
         self._stage_artifact(manifest["forcing"]["forcing_uri"], input_dir)
+        initial_state_uri = _initial_state_uri(manifest)
+        if initial_state_uri:
+            self._stage_artifact(initial_state_uri, input_dir)
 
         for suffix in (".mesh", ".para", ".calib", ".tsd.forc"):
             matches = [path for path in input_dir.rglob(f"*{suffix}") if path.is_file() and path.stat().st_size > 0]
             if not matches:
                 raise SHUDRuntimeError("WORKSPACE_INCOMPLETE", f"Missing required staged file: *{suffix}")
+        if initial_state_uri:
+            matches = [path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0]
+            if not matches:
+                raise SHUDRuntimeError(
+                    "INIT_STATE_INCOMPLETE",
+                    "Initial state URI did not stage a non-empty *.cfg.ic file.",
+                )
 
     def generate_cfg_para(self, manifest: dict[str, Any], input_dir: Path, output_dir: Path) -> Path:
         template_path = _first_file(input_dir, "*.cfg.para") or _first_file(input_dir, "*.para")
@@ -292,12 +320,13 @@ class SHUDRuntime:
         content = template_path.read_text(encoding="utf-8")
         content = "\n".join(line for line in content.splitlines() if ".cfg.ic" not in line)
 
+        init_mode = _init_mode(manifest)
         replacements = {
             "START_TIME": _format_time(_parse_time(manifest["start_time"])),
             "END_TIME": _format_time(_parse_time(manifest["end_time"])),
             "OUTPUT_DIR": str(output_dir),
             "MODEL_OUTPUT_INTERVAL": str(_output_interval_minutes(manifest, self.config.output_interval_minutes)),
-            "INIT_MODE": "cold-start",
+            "INIT_MODE": init_mode,
             "SEGMENT_COUNT": str(_segment_count(manifest)),
         }
         for key, value in replacements.items():
@@ -568,6 +597,27 @@ def _segment_count(manifest: dict[str, Any]) -> int:
 
 def _project_name(manifest: dict[str, Any]) -> str:
     return _safe_path_component(str(manifest.get("model", {}).get("project_name") or manifest["model"]["model_id"]))
+
+
+def _initial_state_uri(manifest: dict[str, Any]) -> str | None:
+    initial_state = manifest.get("initial_state") or {}
+    return initial_state.get("ic_file_uri") or initial_state.get("state_uri")
+
+
+def _initial_state_id(manifest: dict[str, Any]) -> str | None:
+    initial_state = manifest.get("initial_state") or {}
+    return initial_state.get("state_id") or manifest.get("init_state_id")
+
+
+def _init_mode(manifest: dict[str, Any]) -> str:
+    runtime = manifest.get("runtime") or {}
+    if runtime.get("init_mode") is not None:
+        return str(runtime["init_mode"])
+    if _initial_state_id(manifest) or _initial_state_uri(manifest):
+        return "3"
+    if manifest.get("run_type") == "analysis":
+        return "1"
+    return "cold-start"
 
 
 def _object_key(uri_or_key: str, object_store_prefix: str) -> str:

@@ -51,9 +51,11 @@ class HydroRunContext:
     river_network_version_id: str
     source_id: str | None
     cycle_id: str | None
-    cycle_time: datetime
+    cycle_time: datetime | None
     start_time: datetime
     output_uri: str | None = None
+    run_type: str = "forecast"
+    scenario_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,7 +72,7 @@ class RiverTimeseriesRow:
     river_network_version_id: str
     river_segment_id: str
     valid_time: datetime
-    lead_time_hours: int
+    lead_time_hours: int | None
     variable: str
     value: float
     unit: str
@@ -233,7 +235,7 @@ def parse_rivqdown_file(
             raise OutputParsingError("MALFORMED_ROW", f"Row {line_number} must contain time plus data columns")
 
         valid_time = _parse_valid_time(tokens[0], context.start_time, line_number)
-        lead_time_hours = _lead_time_hours(valid_time, context.cycle_time)
+        lead_time_hours = None if context.run_type == "analysis" else _lead_time_hours(valid_time, context.cycle_time)
         for segment, value_token in zip(segments, tokens[1:], strict=True):
             try:
                 value_m3d = float(value_token)
@@ -318,6 +320,8 @@ class PsycopgOutputParserRepository:
                 h.cycle_time,
                 h.start_time,
                 h.output_uri,
+                h.run_type,
+                h.scenario_id,
                 mi.river_network_version_id,
                 fc.cycle_id
             FROM hydro.hydro_run h
@@ -332,7 +336,8 @@ class PsycopgOutputParserRepository:
             missing_message=f"hydro_run not found: {run_id}",
         )
         cycle_time = row["cycle_time"]
-        if cycle_time is None:
+        run_type = str(row.get("run_type") or "forecast")
+        if cycle_time is None and run_type != "analysis":
             raise OutputParsingError("CYCLE_TIME_MISSING", f"hydro_run {run_id} has no cycle_time.")
         return HydroRunContext(
             run_id=str(row["run_id"]),
@@ -341,9 +346,11 @@ class PsycopgOutputParserRepository:
             river_network_version_id=str(row["river_network_version_id"]),
             source_id=row.get("source_id"),
             cycle_id=row.get("cycle_id"),
-            cycle_time=_ensure_utc(cycle_time),
+            cycle_time=_ensure_utc(cycle_time) if cycle_time is not None else None,
             start_time=_ensure_utc(row["start_time"]),
             output_uri=row.get("output_uri"),
+            run_type=run_type,
+            scenario_id=row.get("scenario_id"),
         )
 
     def load_river_segments(self, river_network_version_id: str) -> tuple[RiverSegmentOrder, ...]:
@@ -583,7 +590,9 @@ def _parse_time_token(token: str, start_time: datetime) -> datetime:
     return _ensure_utc(parsed)
 
 
-def _lead_time_hours(valid_time: datetime, cycle_time: datetime) -> int:
+def _lead_time_hours(valid_time: datetime, cycle_time: datetime | None) -> int:
+    if cycle_time is None:
+        raise OutputParsingError("CYCLE_TIME_MISSING", "cycle_time is required for forecast lead_time_hours.")
     hours = (_ensure_utc(valid_time) - _ensure_utc(cycle_time)).total_seconds() / 3600.0
     rounded = round(hours)
     if abs(hours - rounded) < 1e-9:

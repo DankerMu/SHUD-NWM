@@ -238,6 +238,7 @@ def test_create_run_conflict_only_resets_retriable_statuses(monkeypatch: pytest.
     class FakeCursor:
         def __init__(self) -> None:
             self.statement = ""
+            self.statements: list[str] = []
 
         def __enter__(self) -> FakeCursor:
             return self
@@ -247,6 +248,7 @@ def test_create_run_conflict_only_resets_retriable_statuses(monkeypatch: pytest.
 
         def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
             self.statement = statement
+            self.statements.append(statement)
 
         def fetchone(self) -> None:
             return None
@@ -282,4 +284,5 @@ def test_create_run_conflict_only_resets_retriable_statuses(monkeypatch: pytest.
         PsycopgHydroRunRepository("postgresql://example").create_run(_manifest(), "runs/demo/input/manifest.json")
 
     assert exc_info.value.error_code == "HYDRO_RUN_NOT_RETRIABLE"
-    assert "WHERE hydro.hydro_run.status IN ('failed', 'cancelled')" in cursor.statement
+    retriable_conflict_clause = "WHERE hydro.hydro_run.status IN ('failed', 'cancelled')"
+    assert any(retriable_conflict_clause in statement for statement in cursor.statements)
