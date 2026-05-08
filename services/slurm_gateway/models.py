@@ -31,6 +31,7 @@ class SubmitJobRequest(BaseModel):
 
     run_id: str | None = None
     model_id: str | None = None
+    job_type: str | None = None
     manifest: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="allow")
@@ -69,6 +70,21 @@ class SubmitJobRequest(BaseModel):
                 return candidate
         return None
 
+    def resolved_job_type(self) -> str | None:
+        if self.job_type:
+            return self.job_type
+        if self.manifest:
+            manifest_job_type = self.manifest.get("job_type")
+            if isinstance(manifest_job_type, str) and manifest_job_type:
+                return manifest_job_type
+            manifest_stage = self.manifest.get("stage_name") or self.manifest.get("stage")
+            if isinstance(manifest_stage, str) and manifest_stage:
+                return manifest_stage
+        extra_job_type = (self.model_extra or {}).get("job_type")
+        if isinstance(extra_job_type, str) and extra_job_type:
+            return extra_job_type
+        return None
+
     def normalized_manifest(self) -> dict[str, Any]:
         if self.manifest:
             payload = dict(self.manifest)
@@ -79,6 +95,8 @@ class SubmitJobRequest(BaseModel):
             payload["run_id"] = self.run_id
         if self.model_id is not None:
             payload["model_id"] = self.model_id
+        if self.job_type is not None:
+            payload["job_type"] = self.job_type
         return payload
 
 
@@ -102,12 +120,14 @@ class SlurmLogsResponse(BaseModel):
     run_id: str
     logs: str
     complete: bool
+    truncated: bool = False
 
 
 class SlurmHealthResponse(BaseModel):
     backend: str
     version: str
     status: str
+    error: str | None = None
 
 
 class ResetRequest(BaseModel):
@@ -135,4 +155,3 @@ class ErrorResponse(BaseModel):
     request_id: str
     status: str = "error"
     error: ErrorBody
-

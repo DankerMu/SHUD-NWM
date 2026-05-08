@@ -29,6 +29,59 @@ class SlurmGatewayError(Exception):
         self.details = details
 
 
+class SlurmParseError(SlurmGatewayError):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(502, "SLURM_PARSE_ERROR", message, details)
+
+
+class SlurmTimeoutError(SlurmGatewayError):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(504, "SLURM_TIMEOUT", message, details)
+
+
+class SlurmCommandError(SlurmGatewayError):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(502, "SLURM_COMMAND_ERROR", message, details)
+
+
+class SlurmJobNotFoundError(SlurmGatewayError):
+    def __init__(self, job_id: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(404, "JOB_NOT_FOUND", f"Job {job_id} was not found.", details or {"job_id": job_id})
+
+
+class TemplateSecurityError(SlurmGatewayError):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(400, "TEMPLATE_SECURITY_ERROR", message, details)
+
+
+class TemplateNotFoundError(SlurmGatewayError):
+    def __init__(self, job_type: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(
+            404,
+            "TEMPLATE_NOT_FOUND",
+            f"No sbatch template is available for job_type {job_type}.",
+            details or {"job_type": job_type},
+        )
+
+
+class ManifestValidationError(SlurmGatewayError):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(422, "MANIFEST_VALIDATION_ERROR", message, details)
+
+
+class ConfigurationError(SlurmGatewayError):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(500, "CONFIGURATION_ERROR", message, details)
+
+
+class SlurmValidationError(SlurmGatewayError, ValueError):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(422, "VALIDATION_ERROR", message, details)
+
+
+ValidationError = SlurmValidationError
+
+
 class SlurmGateway(ABC):
     @abstractmethod
     def submit_job(self, request: SubmitJobRequest) -> SlurmJobRecord:
@@ -43,7 +96,13 @@ class SlurmGateway(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_jobs(self, limit: int, offset: int) -> list[SlurmJobRecord]:
+    def list_jobs(
+        self,
+        limit: int,
+        offset: int,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> list[SlurmJobRecord]:
         raise NotImplementedError
 
     @abstractmethod
@@ -66,6 +125,7 @@ def create_gateway(settings: SlurmGatewaySettings | None = None) -> SlurmGateway
 
         return MockSlurmGateway(settings)
     if settings.backend == "slurm":
-        raise NotImplementedError("Real Slurm backend is not implemented; available in M3")
-    raise ValueError(f"Unsupported Slurm gateway backend: {settings.backend}")
+        from services.slurm_gateway.real_backend import RealSlurmGateway
 
+        return RealSlurmGateway(settings)
+    raise ValueError(f"Unsupported Slurm gateway backend: {settings.backend}")

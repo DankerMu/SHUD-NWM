@@ -37,7 +37,10 @@ async def list_jobs(
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
-    return slurm_gateway.list_jobs(limit=limit, offset=offset)
+    try:
+        return slurm_gateway.list_jobs(limit=limit, offset=offset)
+    except SlurmGatewayError as exc:
+        return _gateway_error_response(exc)
 
 
 @router.get("/jobs/{job_id}")
@@ -67,4 +70,3 @@ async def fetch_logs(job_id: str):
 @router.post("/internal/reset")
 async def reset_registry(request: Annotated[ResetRequest | None, Body()] = None):
     return slurm_gateway.reset(request)
-
