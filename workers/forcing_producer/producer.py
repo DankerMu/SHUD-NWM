@@ -9,7 +9,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -27,6 +27,15 @@ REQUIRED_CANONICAL_VARIABLES: tuple[str, ...] = (
     "pressure_surface",
     "shortwave_down",
 )
+ERA5_REQUIRED_CANONICAL_VARIABLES: tuple[str, ...] = (
+    "prcp_rate_or_amount",
+    "air_temperature_2m",
+    "relative_humidity_2m",
+    "wind_u_10m",
+    "wind_v_10m",
+    "pressure_surface",
+    "net_radiation",
+)
 FORCING_VARIABLES: tuple[str, ...] = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 OUTPUT_UNITS: dict[str, str] = {
     "PRCP": "mm",
@@ -43,6 +52,15 @@ CANONICAL_TO_FORCING: dict[str, str] = {
     "shortwave_down": "Rn",
     "pressure_surface": "Press",
 }
+ERA5_CANONICAL_TO_FORCING: dict[str, str] = {
+    "prcp_rate_or_amount": "PRCP",
+    "air_temperature_2m": "TEMP",
+    "relative_humidity_2m": "RH",
+    "net_radiation": "Rn",
+    "pressure_surface": "Press",
+}
+ERA5_FALLBACK_SOURCE_ID = "GFS"
+ERA5_LATENCY_FALLBACK_REASON = "era5_latency"
 
 
 class ForcingProductionError(RuntimeError):
@@ -94,6 +112,7 @@ class CanonicalProduct:
     native_time_resolution: str | None = None
     native_spatial_resolution: str | None = None
     quality_flag: str = "ok"
+    lead_time_hours: int | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +157,13 @@ class ForcingProductionResult:
     file_uris: Mapping[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class FallbackLineage:
+    fallback_reason: str
+    fallback_source_id: str
+    fallback_valid_times: tuple[datetime, ...]
+
+
 class ForcingRepository(Protocol):
     def resolve_model_basin_version(self, *, model_id: str) -> str:
         ...
@@ -146,6 +172,16 @@ class ForcingRepository(Protocol):
         ...
 
     def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> tuple[CanonicalProduct, ...]:
+        ...
+
+    def list_fallback_canonical_products(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        variables: Sequence[str],
+    ) -> tuple[CanonicalProduct, ...]:
         ...
 
     def load_interp_weights(
@@ -211,6 +247,7 @@ class ForcingProducerConfig:
     package_manifest_filename: str = "forcing_package.json"
     output_variables: tuple[str, ...] = FORCING_VARIABLES
     required_canonical_variables: tuple[str, ...] = REQUIRED_CANONICAL_VARIABLES
+    era5_latency_fallback_hours: int = 23
 
 
 class ForcingProducer:
@@ -270,35 +307,47 @@ class ForcingProducer:
 
             basin_version_id = self.repository.resolve_model_basin_version(model_id=model_id)
             stations = self._load_valid_stations(basin_version_id=basin_version_id)
+            required_variables = self._required_canonical_variables(resolved_source_id)
+            canonical_to_forcing = self._canonical_to_forcing(resolved_source_id)
             products_by_variable = self._load_canonical_products(
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
+                required_variables=required_variables,
+                require_complete=not _uses_era5_latency_fallback(resolved_source_id),
+            )
+            fallback_lineage = self._apply_era5_latency_fallback(
+                source_id=resolved_source_id,
+                cycle_time=parsed_cycle_time,
+                products_by_variable=products_by_variable,
+                required_variables=required_variables,
+            )
+            self._validate_canonical_products(
+                products_by_variable=products_by_variable,
+                required_variables=required_variables,
             )
 
-            sample_field = self._read_canonical_field(_first_product(products_by_variable))
-            grid_id = sample_field.product.grid_id
-            grid_points = sample_field.grid_points
+            fields = self._read_fields(products_by_variable)
+            grid_points_by_source_grid = _grid_points_by_source_grid(fields)
+            grid_ids = tuple(sorted({grid_id for _, grid_id in grid_points_by_source_grid}))
+            grid_id = grid_ids[0] if len(grid_ids) == 1 else "mixed"
             weights = self._load_or_create_weights(
-                source_id=resolved_source_id,
-                grid_id=grid_id,
                 model_id=model_id,
                 stations=stations,
-                grid_points=grid_points,
+                grid_points_by_source_grid=grid_points_by_source_grid,
             )
             forcing_version_id = (
                 str(existing["forcing_version_id"])
                 if existing is not None
                 else _forcing_version_id(resolved_source_id, parsed_cycle_time, model_id)
             )
-            fields = self._read_fields(products_by_variable)
             values, components = self._generate_timeseries(
                 forcing_version_id=forcing_version_id,
                 basin_version_id=basin_version_id,
-                source_id=resolved_source_id,
                 products_by_variable=products_by_variable,
                 fields=fields,
                 stations=stations,
                 weights=weights,
+                canonical_to_forcing=canonical_to_forcing,
             )
 
             result = self._write_outputs_and_records(
@@ -311,6 +360,7 @@ class ForcingProducer:
                 rows=values,
                 components=components,
                 products_by_variable=products_by_variable,
+                fallback_lineage=fallback_lineage,
             )
             self.repository.update_forecast_cycle(
                 source_id=resolved_source_id,
@@ -342,16 +392,28 @@ class ForcingProducer:
             )
         return tuple(sorted(stations, key=lambda station: station.station_id))
 
+    def _required_canonical_variables(self, source_id: str) -> tuple[str, ...]:
+        if _is_era5_source(source_id):
+            return ERA5_REQUIRED_CANONICAL_VARIABLES
+        return self.config.required_canonical_variables
+
+    def _canonical_to_forcing(self, source_id: str) -> Mapping[str, str]:
+        if _is_era5_source(source_id):
+            return ERA5_CANONICAL_TO_FORCING
+        return CANONICAL_TO_FORCING
+
     def _load_canonical_products(
         self,
         *,
         source_id: str,
         cycle_time: datetime,
+        required_variables: Sequence[str],
+        require_complete: bool = True,
     ) -> dict[str, dict[datetime, CanonicalProduct]]:
         assert self.repository is not None
         products = self.repository.list_canonical_products(source_id=source_id, cycle_time=cycle_time)
         products_by_variable: dict[str, dict[datetime, CanonicalProduct]] = {
-            variable: {} for variable in self.config.required_canonical_variables
+            variable: {} for variable in required_variables
         }
         for product in products:
             if product.variable not in products_by_variable:
@@ -360,7 +422,22 @@ class ForcingProducer:
                 continue
             products_by_variable[product.variable][product.valid_time] = product
 
-        missing = _missing_product_details(products_by_variable, self.config.required_canonical_variables)
+        if not require_complete:
+            return products_by_variable
+
+        self._validate_canonical_products(
+            products_by_variable=products_by_variable,
+            required_variables=required_variables,
+        )
+        return products_by_variable
+
+    def _validate_canonical_products(
+        self,
+        *,
+        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+        required_variables: Sequence[str],
+    ) -> None:
+        missing = _missing_product_details(products_by_variable, required_variables)
         if missing:
             raise ForcingProductionError(f"Missing required canonical products: {', '.join(missing)}")
 
@@ -369,37 +446,102 @@ class ForcingProducer:
             for products_for_variable in products_by_variable.values()
             for product in products_for_variable.values()
         }
-        if len(grid_ids) != 1:
-            raise ForcingProductionError(f"Canonical products must share one grid_id; found {sorted(grid_ids)}.")
-        return products_by_variable
+        if not grid_ids:
+            raise ForcingProductionError("No canonical products are available.")
+
+    def _apply_era5_latency_fallback(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        products_by_variable: dict[str, dict[datetime, CanonicalProduct]],
+        required_variables: Sequence[str],
+    ) -> FallbackLineage | None:
+        if not _uses_era5_latency_fallback(source_id):
+            return None
+
+        assert self.repository is not None
+        existing_valid_times = sorted({
+            valid_time
+            for products_for_variable in products_by_variable.values()
+            for valid_time in products_for_variable
+        })
+        if existing_valid_times:
+            target_valid_times = tuple(existing_valid_times)
+            start_time = existing_valid_times[0]
+            end_time = existing_valid_times[-1]
+        else:
+            target_valid_times = ()
+            start_time = cycle_time
+            end_time = cycle_time + timedelta(hours=self.config.era5_latency_fallback_hours)
+
+        fallback_variables = _fallback_variables_for_required(required_variables)
+        fallback_products = self.repository.list_fallback_canonical_products(
+            source_id=ERA5_FALLBACK_SOURCE_ID,
+            start_time=start_time,
+            end_time=end_time,
+            variables=fallback_variables,
+        )
+        fallback_by_variable = _fallback_products_by_required_variable(
+            fallback_products,
+            required_variables=required_variables,
+        )
+        if not target_valid_times:
+            target_valid_times = tuple(sorted({
+                valid_time
+                for products_for_variable in fallback_by_variable.values()
+                for valid_time in products_for_variable
+            }))
+
+        fallback_valid_times: set[datetime] = set()
+        for valid_time in target_valid_times:
+            missing_variables = [
+                variable for variable in required_variables if valid_time not in products_by_variable[variable]
+            ]
+            for variable in missing_variables:
+                fallback_product = fallback_by_variable.get(variable, {}).get(valid_time)
+                if fallback_product is None:
+                    continue
+                products_by_variable[variable][valid_time] = fallback_product
+                fallback_valid_times.add(valid_time)
+
+        if not fallback_valid_times:
+            return None
+        return FallbackLineage(
+            fallback_reason=ERA5_LATENCY_FALLBACK_REASON,
+            fallback_source_id=ERA5_FALLBACK_SOURCE_ID,
+            fallback_valid_times=tuple(sorted(fallback_valid_times)),
+        )
 
     def _load_or_create_weights(
         self,
         *,
-        source_id: str,
-        grid_id: str,
         model_id: str,
         stations: Sequence[MetStation],
-        grid_points: Sequence[GridPoint],
-    ) -> tuple[InterpolationWeight, ...]:
+        grid_points_by_source_grid: Mapping[tuple[str, str], Sequence[GridPoint]],
+    ) -> dict[tuple[str, str], tuple[InterpolationWeight, ...]]:
         assert self.repository is not None
-        existing = self.repository.load_interp_weights(source_id=source_id, grid_id=grid_id, model_id=model_id)
-        if _weights_cover(existing, stations, self.config.output_variables):
-            _validate_weight_sums(existing)
-            return tuple(existing)
+        weights_by_source_grid: dict[tuple[str, str], tuple[InterpolationWeight, ...]] = {}
+        for (source_id, grid_id), grid_points in sorted(grid_points_by_source_grid.items()):
+            existing = self.repository.load_interp_weights(source_id=source_id, grid_id=grid_id, model_id=model_id)
+            if _weights_cover(existing, stations, self.config.output_variables):
+                _validate_weight_sums(existing)
+                weights_by_source_grid[(source_id, grid_id)] = tuple(existing)
+                continue
 
-        computed = compute_idw_weights(
-            stations=stations,
-            grid_points=grid_points,
-            variables=self.config.output_variables,
-            source_id=source_id,
-            grid_id=grid_id,
-            model_id=model_id,
-            neighbors=self.config.idw_neighbors,
-            power=self.config.idw_power,
-        )
-        self.repository.upsert_interp_weights(computed)
-        return computed
+            computed = compute_idw_weights(
+                stations=stations,
+                grid_points=grid_points,
+                variables=self.config.output_variables,
+                source_id=source_id,
+                grid_id=grid_id,
+                model_id=model_id,
+                neighbors=self.config.idw_neighbors,
+                power=self.config.idw_power,
+            )
+            self.repository.upsert_interp_weights(computed)
+            weights_by_source_grid[(source_id, grid_id)] = computed
+        return weights_by_source_grid
 
     def _read_fields(
         self,
@@ -524,15 +666,19 @@ class ForcingProducer:
         *,
         forcing_version_id: str,
         basin_version_id: str,
-        source_id: str,
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
         fields: Mapping[str, Mapping[datetime, CanonicalField]],
         stations: Sequence[MetStation],
-        weights: Sequence[InterpolationWeight],
+        weights: Mapping[tuple[str, str], Sequence[InterpolationWeight]],
+        canonical_to_forcing: Mapping[str, str],
     ) -> tuple[tuple[ForcingTimeseriesRow, ...], tuple[ForcingComponent, ...]]:
         valid_times = _valid_times(products_by_variable)
-        weights_by_station_variable = _weights_by_station_variable(weights)
+        weights_by_source_grid_station_variable = {
+            source_grid: _weights_by_station_variable(source_grid_weights)
+            for source_grid, source_grid_weights in weights.items()
+        }
         rows: list[ForcingTimeseriesRow] = []
+        radiation_variable = _canonical_variable_for_forcing("Rn", canonical_to_forcing)
 
         for valid_time in valid_times:
             station_values: dict[str, dict[str, float]] = {
@@ -540,47 +686,47 @@ class ForcingProducer:
                     "PRCP",
                     fields["prcp_rate_or_amount"][valid_time],
                     stations,
-                    weights_by_station_variable,
+                    weights_by_source_grid_station_variable,
                 ),
                 "TEMP": self._interpolate_forcing_variable(
                     "TEMP",
                     fields["air_temperature_2m"][valid_time],
                     stations,
-                    weights_by_station_variable,
+                    weights_by_source_grid_station_variable,
                 ),
                 "RH": self._interpolate_forcing_variable(
                     "RH",
                     fields["relative_humidity_2m"][valid_time],
                     stations,
-                    weights_by_station_variable,
+                    weights_by_source_grid_station_variable,
                 ),
                 "Rn": {
                     station_id: value * self.config.rn_shortwave_factor
                     for station_id, value in self._interpolate_forcing_variable(
                         "Rn",
-                        fields["shortwave_down"][valid_time],
+                        fields[radiation_variable][valid_time],
                         stations,
-                        weights_by_station_variable,
+                        weights_by_source_grid_station_variable,
                     ).items()
                 },
                 "Press": self._interpolate_forcing_variable(
                     "Press",
                     fields["pressure_surface"][valid_time],
                     stations,
-                    weights_by_station_variable,
+                    weights_by_source_grid_station_variable,
                 ),
             }
             u_values = self._interpolate_forcing_variable(
                 "wind",
                 fields["wind_u_10m"][valid_time],
                 stations,
-                weights_by_station_variable,
+                weights_by_source_grid_station_variable,
             )
             v_values = self._interpolate_forcing_variable(
                 "wind",
                 fields["wind_v_10m"][valid_time],
                 stations,
-                weights_by_station_variable,
+                weights_by_source_grid_station_variable,
             )
             station_values["wind"] = {
                 station.station_id: wind_speed(u_values[station.station_id], v_values[station.station_id])
@@ -588,7 +734,18 @@ class ForcingProducer:
             }
 
             for variable in self.config.output_variables:
-                native_resolution = _native_resolution_for_output(variable, products_by_variable, valid_time)
+                native_resolution = _native_resolution_for_output(
+                    variable,
+                    products_by_variable,
+                    valid_time,
+                    canonical_to_forcing,
+                )
+                row_source_id = _source_id_for_output_variable(
+                    variable,
+                    products_by_variable,
+                    valid_time,
+                    canonical_to_forcing,
+                )
                 for station in stations:
                     value = station_values[variable][station.station_id]
                     if not math.isfinite(value):
@@ -602,7 +759,7 @@ class ForcingProducer:
                             basin_version_id=basin_version_id,
                             station_id=station.station_id,
                             valid_time=valid_time,
-                            source_id=source_id,
+                            source_id=row_source_id,
                             variable=variable,
                             value=value,
                             unit=OUTPUT_UNITS[variable],
@@ -628,9 +785,20 @@ class ForcingProducer:
         variable: str,
         field: CanonicalField,
         stations: Sequence[MetStation],
-        weights_by_station_variable: Mapping[tuple[str, str], tuple[InterpolationWeight, ...]],
+        weights_by_source_grid_station_variable: Mapping[
+            tuple[str, str],
+            Mapping[tuple[str, str], tuple[InterpolationWeight, ...]],
+        ],
     ) -> dict[str, float]:
         values: dict[str, float] = {}
+        source_grid = (field.product.source_id, field.product.grid_id)
+        try:
+            weights_by_station_variable = weights_by_source_grid_station_variable[source_grid]
+        except KeyError as error:
+            raise ForcingProductionError(
+                f"No interpolation weights are available for source {field.product.source_id} "
+                f"grid {field.product.grid_id}."
+            ) from error
         for station in stations:
             station_weights = weights_by_station_variable[(station.station_id, variable)]
             weighted_value = 0.0
@@ -658,6 +826,7 @@ class ForcingProducer:
         rows: Sequence[ForcingTimeseriesRow],
         components: Sequence[ForcingComponent],
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+        fallback_lineage: FallbackLineage | None = None,
     ) -> ForcingProductionResult:
         assert self.repository is not None
         compact_cycle = format_cycle_time(cycle_time)
@@ -691,6 +860,14 @@ class ForcingProducer:
                 for product in products_for_variable.values()
             ),
         }
+        if fallback_lineage is not None:
+            lineage_json.update({
+                "fallback_reason": fallback_lineage.fallback_reason,
+                "fallback_source_id": fallback_lineage.fallback_source_id,
+                "fallback_valid_times": [
+                    _format_time(valid_time) for valid_time in fallback_lineage.fallback_valid_times
+                ],
+            })
         package_manifest = {
             "forcing_version_id": forcing_version_id,
             "model_id": model_id,
@@ -988,8 +1165,11 @@ def _missing_product_details(
     return missing
 
 
-def _first_product(products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]) -> CanonicalProduct:
-    for variable in REQUIRED_CANONICAL_VARIABLES:
+def _first_product(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    required_variables: Sequence[str],
+) -> CanonicalProduct:
+    for variable in required_variables:
         products_for_variable = products_by_variable.get(variable)
         if products_for_variable:
             return products_for_variable[sorted(products_for_variable)[0]]
@@ -997,8 +1177,87 @@ def _first_product(products_by_variable: Mapping[str, Mapping[datetime, Canonica
 
 
 def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]) -> tuple[datetime, ...]:
-    first_variable = REQUIRED_CANONICAL_VARIABLES[0]
-    return tuple(sorted(products_by_variable[first_variable]))
+    return tuple(sorted({
+        valid_time
+        for products_for_variable in products_by_variable.values()
+        for valid_time in products_for_variable
+    }))
+
+
+def _is_era5_source(source_id: str) -> bool:
+    return source_id.upper() == "ERA5"
+
+
+def _uses_era5_latency_fallback(source_id: str) -> bool:
+    return _is_era5_source(source_id)
+
+
+def _fallback_variables_for_required(required_variables: Sequence[str]) -> tuple[str, ...]:
+    variables: list[str] = []
+    for variable in required_variables:
+        fallback_variable = "shortwave_down" if variable == "net_radiation" else variable
+        if fallback_variable not in variables:
+            variables.append(fallback_variable)
+    return tuple(variables)
+
+
+def _fallback_products_by_required_variable(
+    products: Sequence[CanonicalProduct],
+    *,
+    required_variables: Sequence[str],
+) -> dict[str, dict[datetime, CanonicalProduct]]:
+    reverse_variables = {
+        ("shortwave_down" if variable == "net_radiation" else variable): variable for variable in required_variables
+    }
+    grouped: dict[str, dict[datetime, CanonicalProduct]] = {variable: {} for variable in required_variables}
+    for product in products:
+        required_variable = reverse_variables.get(product.variable)
+        if required_variable is None or product.quality_flag == "fail" or not product.checksum:
+            continue
+        grouped[required_variable][product.valid_time] = product
+    return grouped
+
+
+def _grid_points_by_source_grid(
+    fields: Mapping[str, Mapping[datetime, CanonicalField]],
+) -> dict[tuple[str, str], tuple[GridPoint, ...]]:
+    grid_points_by_source_grid: dict[tuple[str, str], tuple[GridPoint, ...]] = {}
+    for fields_by_time in fields.values():
+        for canonical_field in fields_by_time.values():
+            source_grid = (canonical_field.product.source_id, canonical_field.product.grid_id)
+            existing = grid_points_by_source_grid.get(source_grid)
+            if existing is None:
+                grid_points_by_source_grid[source_grid] = tuple(canonical_field.grid_points)
+            elif existing != tuple(canonical_field.grid_points):
+                raise ForcingProductionError(
+                    f"Canonical products for source {canonical_field.product.source_id} "
+                    f"grid {canonical_field.product.grid_id} "
+                    "do not share one grid definition."
+                )
+    return grid_points_by_source_grid
+
+
+def _canonical_variable_for_forcing(variable: str, canonical_to_forcing: Mapping[str, str]) -> str:
+    matches = sorted(
+        canonical_variable
+        for canonical_variable, forcing_variable in canonical_to_forcing.items()
+        if forcing_variable == variable
+    )
+    if not matches:
+        raise ForcingProductionError(f"No canonical variable is mapped to forcing variable {variable}.")
+    return matches[0]
+
+
+def _source_id_for_output_variable(
+    variable: str,
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    valid_time: datetime,
+    canonical_to_forcing: Mapping[str, str],
+) -> str:
+    if variable == "wind":
+        return products_by_variable["wind_u_10m"][valid_time].source_id
+    canonical_variable = _canonical_variable_for_forcing(variable, canonical_to_forcing)
+    return products_by_variable[canonical_variable][valid_time].source_id
 
 
 def _weights_cover(
@@ -1051,16 +1310,11 @@ def _native_resolution_for_output(
     variable: str,
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
     valid_time: datetime,
+    canonical_to_forcing: Mapping[str, str],
 ) -> str | None:
     if variable == "wind":
         return products_by_variable["wind_u_10m"][valid_time].native_time_resolution
-    canonical_variable = {
-        "PRCP": "prcp_rate_or_amount",
-        "TEMP": "air_temperature_2m",
-        "RH": "relative_humidity_2m",
-        "Rn": "shortwave_down",
-        "Press": "pressure_surface",
-    }[variable]
+    canonical_variable = _canonical_variable_for_forcing(variable, canonical_to_forcing)
     return products_by_variable[canonical_variable][valid_time].native_time_resolution
 
 
