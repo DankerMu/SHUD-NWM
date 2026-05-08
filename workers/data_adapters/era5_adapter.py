@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import queue
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -34,6 +37,7 @@ LOGGER = logging.getLogger(__name__)
 ERA5_DATASET_NAME = "reanalysis-era5-single-levels"
 ERA5_FORECAST_HOURS = tuple(range(24))
 ERA5_DEFAULT_AREA = (55.0, 70.0, 15.0, 140.0)
+ERA5_MAX_DISCOVERY_RANGE_DAYS = 365
 ERA5_ACCUMULATED_VARIABLES = {
     "total_precipitation",
     "surface_net_solar_radiation",
@@ -75,8 +79,32 @@ class CDSAPIClient:
         *,
         timeout_seconds: float,
     ) -> None:
-        del timeout_seconds
-        self.client.retrieve(dataset, dict(request), str(target))
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise TimeoutError(f"CDS retrieve timed out before starting; timeout_seconds={timeout_seconds!r}")
+
+        outcome: queue.Queue[BaseException | None] = queue.Queue(maxsize=1)
+
+        def retrieve_in_thread() -> None:
+            try:
+                self.client.retrieve(dataset, dict(request), str(target))
+            except BaseException as error:
+                outcome.put(error)
+            else:
+                outcome.put(None)
+
+        thread = threading.Thread(target=retrieve_in_thread, name="era5-cds-retrieve", daemon=True)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise TimeoutError(f"CDS retrieve timed out after {timeout:g} seconds.")
+
+        try:
+            error = outcome.get(timeout=1)
+        except queue.Empty:
+            return
+        if error is not None:
+            raise error
 
 
 class MockCDSClient:
@@ -247,6 +275,10 @@ class ERA5Adapter(DataSourceAdapter):
         self.initialize_data_source()
         start = parse_cycle_date(cycle_date)
         end = parse_cycle_date(end_date) if end_date is not None else start
+        if (end - start).days > ERA5_MAX_DISCOVERY_RANGE_DAYS:
+            raise ERA5AdapterError(
+                f"ERA5 discovery date range cannot exceed {ERA5_MAX_DISCOVERY_RANGE_DAYS} days."
+            )
         discoveries: list[CycleDiscovery] = []
 
         for target_date in _date_range(start, end):
@@ -307,11 +339,16 @@ class ERA5Adapter(DataSourceAdapter):
         self.initialize_data_source()
         parsed_cycle_time = parse_era5_cycle_time(cycle_time)
         date_key = _date_key(parsed_cycle_time)
-        hours = forecast_hours if forecast_hours is not None else self.config.forecast_hours()
+        variables = tuple(self.config.variables)
+        if not variables:
+            raise ERA5AdapterError("ERA5 manifest requires at least one variable.")
+        hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        if not hours:
+            raise ERA5AdapterError("ERA5 manifest requires at least one forecast hour.")
         entries: list[ManifestEntry] = []
 
         for forecast_hour in hours:
-            for variable in self.config.variables:
+            for variable in variables:
                 local_key = f"raw/{self.config.source_id}/{date_key}/{variable}_{forecast_hour:02d}.grib"
                 entries.append(
                     ManifestEntry(
@@ -385,6 +422,8 @@ class ERA5Adapter(DataSourceAdapter):
         return DownloadManifest.from_dict(payload)
 
     def download_plan(self, manifest: DownloadManifest) -> DownloadPlanResult:
+        manifest = self._manifest_with_persisted_checksums(manifest)
+        self._validate_download_manifest(manifest)
         cycle_time = manifest.cycle_time
         existing_cycle = self._get_cycle(cycle_time)
         already_done_by_key: dict[str, DownloadFileResult] = {}
@@ -475,6 +514,7 @@ class ERA5Adapter(DataSourceAdapter):
                 retry_count=retry_count,
             )
 
+        self._update_manifest_checksums(manifest)
         self._update_cycle(cycle_time=cycle_time, status="raw_complete", retry_count=0)
         return DownloadPlanResult(
             status="raw_complete",
@@ -645,7 +685,7 @@ class ERA5Adapter(DataSourceAdapter):
             if self.object_store.size(entry.local_key) < minimum_size:
                 return False
             if entry.expected_checksum is None:
-                return True
+                return False
             return self.object_store.checksum(entry.local_key) == entry.expected_checksum
         except (OSError, ObjectStoreError, ValueError):
             LOGGER.exception("Failed to check ERA5 idempotency for %s", entry.local_key)
@@ -725,6 +765,61 @@ class ERA5Adapter(DataSourceAdapter):
         index = max(0, min(attempt - 1, len(self.config.retry_backoff_seconds) - 1))
         return self.config.retry_backoff_seconds[index]
 
+    def _validate_download_manifest(self, manifest: DownloadManifest) -> None:
+        if not manifest.entries:
+            raise ERA5AdapterError("ERA5 download manifest contains no entries.")
+
+    def _manifest_with_persisted_checksums(self, manifest: DownloadManifest) -> DownloadManifest:
+        if manifest.manifest_uri is None or all(entry.expected_checksum for entry in manifest.entries):
+            return manifest
+
+        try:
+            persisted = self.load_manifest(manifest.manifest_uri)
+        except ERA5AdapterError:
+            LOGGER.debug(
+                "Unable to load persisted ERA5 manifest checksums from %s",
+                manifest.manifest_uri,
+                exc_info=True,
+            )
+            return manifest
+
+        if not self._same_manifest_entries(manifest, persisted):
+            LOGGER.warning("Persisted ERA5 manifest %s does not match the supplied manifest.", manifest.manifest_uri)
+            return manifest
+        return persisted
+
+    def _same_manifest_entries(self, left: DownloadManifest, right: DownloadManifest) -> bool:
+        left_identity = tuple((entry.local_key, entry.variable, entry.forecast_hour) for entry in left.entries)
+        right_identity = tuple((entry.local_key, entry.variable, entry.forecast_hour) for entry in right.entries)
+        return (
+            left.source_id == right.source_id
+            and left.cycle_time == right.cycle_time
+            and left_identity == right_identity
+        )
+
+    def _update_manifest_checksums(self, manifest: DownloadManifest) -> DownloadManifest:
+        if manifest.manifest_uri is None:
+            return manifest
+
+        updated_entries: list[ManifestEntry] = []
+        for entry in manifest.entries:
+            try:
+                checksum = self.object_store.checksum(entry.local_key)
+            except (OSError, ObjectStoreError, ValueError) as error:
+                raise ERA5AdapterError(f"Failed to checksum downloaded ERA5 file {entry.local_key}: {error}") from error
+            updated_entries.append(replace(entry, expected_checksum=checksum))
+
+        updated_manifest = replace(manifest, entries=tuple(updated_entries))
+        try:
+            self.object_store.write_bytes_atomic(
+                manifest.manifest_uri,
+                json.dumps(updated_manifest.as_dict(), indent=2, sort_keys=True).encode("utf-8"),
+            )
+        except (OSError, ObjectStoreError, ValueError) as error:
+            raise ERA5AdapterError(f"Failed to persist ERA5 manifest checksums: {error}") from error
+
+        return updated_manifest
+
 
 def parse_era5_cycle_time(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
@@ -760,13 +855,28 @@ def parse_area(value: str | tuple[float, float, float, float] | list[float]) -> 
         parts = [part.strip() for part in value.split(",")]
         if len(parts) != 4:
             raise ValueError("ERA5 area must be four comma-separated values: N,W,S,E.")
-        parsed = tuple(float(part) for part in parts)
+        try:
+            parsed = tuple(float(part) for part in parts)
+        except ValueError as error:
+            raise ValueError("ERA5 area values must be numeric.") from error
     else:
         parsed = tuple(float(part) for part in value)
 
     if len(parsed) != 4:
         raise ValueError("ERA5 area must contain exactly four values: N,W,S,E.")
     north, west, south, east = parsed
+    if not all(math.isfinite(coordinate) for coordinate in parsed):
+        raise ValueError("ERA5 area coordinates must be finite numbers.")
+    if not (-90.0 <= north <= 90.0 and -90.0 <= south <= 90.0):
+        raise ValueError("ERA5 area latitude bounds must be between -90 and 90 degrees.")
+    if not (-180.0 <= west <= 180.0 and -180.0 <= east <= 180.0):
+        raise ValueError("ERA5 area longitude bounds must be between -180 and 180 degrees.")
+    if north <= south:
+        raise ValueError("ERA5 area north latitude must be greater than south latitude.")
+    if east <= west:
+        raise ValueError("ERA5 area east longitude must be greater than west longitude.")
+    if (north - south) >= 180.0 and (east - west) >= 360.0:
+        raise ValueError("ERA5 area must be smaller than the full globe.")
     return north, west, south, east
 
 

@@ -167,8 +167,12 @@ class VerificationResult:
 
 class DataSourceAdapter(ABC):
     @abstractmethod
-    def discover_cycles(self, cycle_date: str | date | datetime) -> list[CycleDiscovery]:
-        """Discover available cycles for a source on a UTC date."""
+    def discover_cycles(
+        self,
+        cycle_date: str | date | datetime,
+        end_date: str | date | datetime | None = None,
+    ) -> list[CycleDiscovery]:
+        """Discover available cycles for a source on a UTC date or date range."""
 
     @abstractmethod
     def build_manifest(
