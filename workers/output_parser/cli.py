@@ -37,6 +37,15 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("parse")
+    @click.option("--run-id", required=True)
+    def parse(run_id: str) -> None:
+        try:
+            click.echo(json.dumps(_parse(run_id), sort_keys=True))
+        except OutputParsingError as error:
+            click.echo(f"{error.error_code}: {error.message}", err=True)
+            raise SystemExit(1) from error
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -46,9 +55,18 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     shud_parser = subparsers.add_parser("shud-output")
     shud_parser.add_argument("--run-id", required=True)
+    parse_parser = subparsers.add_parser("parse")
+    parse_parser.add_argument("--run-id", required=True)
     args = parser.parse_args(argv)
 
     if args.command == "shud-output":
+        try:
+            print(json.dumps(_parse(args.run_id), sort_keys=True))
+        except OutputParsingError as error:
+            print(f"{error.error_code}: {error.message}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "parse":
         try:
             print(json.dumps(_parse(args.run_id), sort_keys=True))
         except OutputParsingError as error:

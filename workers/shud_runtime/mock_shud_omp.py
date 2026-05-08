@@ -48,6 +48,10 @@ def main() -> int:
         values = [f"{100.0 + index + step:.3f}" for index in range(1, segment_count + 1)]
         rows.append(",".join([timestamp, *values]))
     (output_dir / f"{basin}.rivqdown").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    (output_dir / f"{basin}.cfg.ic").write_text(
+        f"STATE_TIME = {(start + timedelta(minutes=_timesteps(cfg) * interval_minutes)).isoformat()}\n",
+        encoding="utf-8",
+    )
     print(f"mock_shud_omp wrote {len(rows) - 1} timesteps to {output_dir}")
     return 0
 
