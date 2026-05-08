@@ -79,6 +79,7 @@ class PsycopgForcingRepository:
                 source_id,
                 cycle_time,
                 valid_time,
+                lead_time_hours,
                 variable,
                 unit,
                 grid_id,
@@ -101,6 +102,92 @@ class PsycopgForcingRepository:
                 source_id=str(row["source_id"]),
                 cycle_time=row["cycle_time"],
                 valid_time=row["valid_time"],
+                lead_time_hours=row.get("lead_time_hours"),
+                variable=str(row["variable"]),
+                unit=str(row["unit"]),
+                grid_id=str(row["grid_id"]),
+                grid_definition_uri=row.get("grid_definition_uri"),
+                native_time_resolution=row.get("native_time_resolution"),
+                native_spatial_resolution=row.get("native_spatial_resolution"),
+                object_uri=str(row["object_uri"]),
+                checksum=str(row["checksum"] or ""),
+                quality_flag=str(row.get("quality_flag") or "ok"),
+            )
+            for row in rows
+        )
+
+    def list_fallback_canonical_products(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        variables: Sequence[str],
+    ) -> tuple[CanonicalProduct, ...]:
+        if not variables:
+            return ()
+        rows = self._fetch_all(
+            """
+            WITH ranked AS (
+                SELECT
+                    cmp.canonical_product_id,
+                    cmp.source_id,
+                    cmp.cycle_time,
+                    cmp.valid_time,
+                    cmp.lead_time_hours,
+                    cmp.variable,
+                    cmp.unit,
+                    cmp.grid_id,
+                    cmp.grid_definition_uri,
+                    cmp.native_time_resolution,
+                    cmp.native_spatial_resolution,
+                    cmp.object_uri,
+                    cmp.checksum,
+                    cmp.quality_flag,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cmp.valid_time, cmp.variable
+                        ORDER BY cmp.lead_time_hours ASC NULLS LAST, cmp.cycle_time DESC, cmp.canonical_product_id
+                    ) AS rank
+                FROM met.canonical_met_product cmp
+                JOIN met.forecast_cycle fc
+                  ON fc.source_id = cmp.source_id
+                 AND fc.cycle_time = cmp.cycle_time
+                WHERE cmp.source_id = %s
+                  AND fc.status = 'canonical_ready'
+                  AND cmp.valid_time >= %s
+                  AND cmp.valid_time <= %s
+                  AND cmp.variable = ANY(%s)
+                  AND cmp.quality_flag <> 'fail'
+                  AND cmp.checksum <> ''
+            )
+            SELECT
+                canonical_product_id,
+                source_id,
+                cycle_time,
+                valid_time,
+                lead_time_hours,
+                variable,
+                unit,
+                grid_id,
+                grid_definition_uri,
+                native_time_resolution,
+                native_spatial_resolution,
+                object_uri,
+                checksum,
+                quality_flag
+            FROM ranked
+            WHERE rank = 1
+            ORDER BY variable, valid_time, canonical_product_id
+            """,
+            (source_id, start_time, end_time, list(variables)),
+        )
+        return tuple(
+            CanonicalProduct(
+                canonical_product_id=str(row["canonical_product_id"]),
+                source_id=str(row["source_id"]),
+                cycle_time=row["cycle_time"],
+                valid_time=row["valid_time"],
+                lead_time_hours=row.get("lead_time_hours"),
                 variable=str(row["variable"]),
                 unit=str(row["unit"]),
                 grid_id=str(row["grid_id"]),

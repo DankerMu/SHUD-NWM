@@ -58,6 +58,28 @@ class FakeForcingRepository:
             if product.source_id == source_id and product.cycle_time == cycle_time
         )
 
+    def list_fallback_canonical_products(
+        self,
+        *,
+        source_id: str,
+        start_time: Any,
+        end_time: Any,
+        variables: list[str] | tuple[str, ...],
+    ) -> tuple[CanonicalProduct, ...]:
+        selected: dict[tuple[Any, str], CanonicalProduct] = {}
+        for product in self.products:
+            if product.source_id != source_id or product.variable not in variables:
+                continue
+            if not start_time <= product.valid_time <= end_time:
+                continue
+            if product.quality_flag == "fail" or not product.checksum:
+                continue
+            key = (product.valid_time, product.variable)
+            existing = selected.get(key)
+            if existing is None or _lead_time_sort_key(product) < _lead_time_sort_key(existing):
+                selected[key] = product
+        return tuple(sorted(selected.values(), key=lambda product: (product.variable, product.valid_time)))
+
     def load_interp_weights(
         self,
         *,
@@ -198,6 +220,78 @@ def test_forcing_timeseries_long_table_rows_have_composite_pk_shape(tmp_path: Pa
     assert {row.variable for row in repository.timeseries} == {"PRCP", "TEMP", "RH", "wind", "Rn", "Press"}
     assert len(repository.components) == 7 * 2
     assert repository.cycle_updates[-1]["status"] == "forcing_ready"
+
+
+def test_era5_produce_uses_net_radiation_for_forcing(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path, source_id="ERA5", radiation_variable="net_radiation")
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="ERA5", cycle_time="2026050700", model_id="demo_model")
+
+    content = store.read_bytes(result.file_uris["tsd_forc"]).decode("utf-8")
+    lines = content.splitlines()
+    rn_lines = [line for line in lines if ",Rn," in line]
+    assert result.status == "forcing_ready"
+    assert len(lines) == 1 + 2 * 6
+    assert len(rn_lines) == 2
+    assert {component.variable for component in repository.components} == {
+        "prcp_rate_or_amount",
+        "air_temperature_2m",
+        "relative_humidity_2m",
+        "wind_u_10m",
+        "wind_v_10m",
+        "pressure_surface",
+        "net_radiation",
+    }
+    assert {row.source_id for row in repository.timeseries} == {"ERA5"}
+    assert repository.forcing_versions[result.forcing_version_id]["source_id"] == "ERA5"
+
+
+def test_era5_latency_fallback_uses_min_lead_gfs_products(tmp_path: Path) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        source_id="ERA5",
+        radiation_variable="net_radiation",
+        omitted_by_time={("net_radiation", 3)},
+    )
+    gfs_fallback = _write_canonical_products(
+        store,
+        source_id="GFS",
+        cycle_time_text="2026050618",
+        product_id_prefix="gfs_recent",
+        radiation_variable="shortwave_down",
+        forecast_hours=(9,),
+        values_by_variable={"shortwave_down": (500.0, 500.0, 500.0)},
+    )
+    older_gfs = _write_canonical_products(
+        store,
+        source_id="GFS",
+        cycle_time_text="2026050612",
+        product_id_prefix="gfs_older",
+        radiation_variable="shortwave_down",
+        forecast_hours=(15,),
+        values_by_variable={"shortwave_down": (900.0, 900.0, 900.0)},
+    )
+    repository.products = (*repository.products, *gfs_fallback, *older_gfs)
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="ERA5", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    rn_rows_at_f003 = [
+        row
+        for row in repository.timeseries
+        if row.variable == "Rn" and row.valid_time == parse_cycle_time("2026050703")
+    ]
+    assert rn_rows_at_f003
+    assert {row.source_id for row in rn_rows_at_f003} == {"GFS"}
+    assert rn_rows_at_f003[0].value == pytest.approx(500.0)
+    lineage = repository.forcing_versions[result.forcing_version_id]["lineage_json"]
+    assert lineage["fallback_reason"] == "era5_latency"
+    assert lineage["fallback_source_id"] == "GFS"
+    assert lineage["fallback_valid_times"] == ["2026-05-07T03:00:00Z"]
+    assert any(component.canonical_product_id.startswith("gfs_recent") for component in repository.components)
+    assert not any(component.canonical_product_id.startswith("gfs_older") for component in repository.components)
 
 
 def test_produce_is_idempotent_when_existing_checksum_is_valid(tmp_path: Path) -> None:
@@ -368,20 +462,26 @@ def _build_producer(
 def _build_repository(
     tmp_path: Path,
     *,
+    source_id: str = "gfs",
     omitted_variables: set[str] | None = None,
+    omitted_by_time: set[tuple[str, int]] | None = None,
     stations: tuple[MetStation, ...] | None = None,
     fail_next_timeseries_replace: bool = False,
     include_geographic_coords: bool = True,
     values_by_variable: Mapping[str, tuple[float, float, float]] | None = None,
+    radiation_variable: str = "shortwave_down",
     longitudes: tuple[float, float, float] = (-75.0, -74.5, -74.0),
     latitudes: tuple[float, float, float] = (40.0, 40.2, 40.4),
 ) -> tuple[LocalObjectStore, FakeForcingRepository]:
     store = LocalObjectStore(tmp_path)
     products = _write_canonical_products(
         store,
-        omitted_variables=omitted_variables or set(),
+        source_id=source_id,
+        omitted_variables=omitted_variables,
+        omitted_by_time=omitted_by_time or set(),
         include_geographic_coords=include_geographic_coords,
-        values_by_variable=values_by_variable or {},
+        values_by_variable=values_by_variable,
+        radiation_variable=radiation_variable,
         longitudes=longitudes,
         latitudes=latitudes,
     )
@@ -398,13 +498,25 @@ def _build_repository(
 def _write_canonical_products(
     store: LocalObjectStore,
     *,
-    omitted_variables: set[str],
-    include_geographic_coords: bool,
-    values_by_variable: Mapping[str, tuple[float, float, float]],
-    longitudes: tuple[float, float, float],
-    latitudes: tuple[float, float, float],
+    source_id: str = "gfs",
+    cycle_time_text: str = "2026050700",
+    product_id_prefix: str | None = None,
+    forecast_hours: tuple[int, ...] = (0, 3),
+    lead_time_by_hour: Mapping[int, int] | None = None,
+    omitted_variables: set[str] | None = None,
+    omitted_by_time: set[tuple[str, int]] | None = None,
+    include_geographic_coords: bool = True,
+    values_by_variable: Mapping[str, tuple[float, float, float]] | None = None,
+    radiation_variable: str = "shortwave_down",
+    longitudes: tuple[float, float, float] = (-75.0, -74.5, -74.0),
+    latitudes: tuple[float, float, float] = (40.0, 40.2, 40.4),
 ) -> tuple[CanonicalProduct, ...]:
-    cycle_time = parse_cycle_time("2026050700")
+    cycle_time = parse_cycle_time(cycle_time_text)
+    product_id_prefix = product_id_prefix or source_id.lower()
+    lead_time_by_hour = lead_time_by_hour or {}
+    omitted_variables = omitted_variables or set()
+    omitted_by_time = omitted_by_time or set()
+    values_by_variable = values_by_variable or {}
     products: list[CanonicalProduct] = []
     variables = {
         "prcp_rate_or_amount": ("mm", 1.0),
@@ -413,15 +525,16 @@ def _write_canonical_products(
         "wind_u_10m": ("m/s", 3.0),
         "wind_v_10m": ("m/s", 4.0),
         "pressure_surface": ("Pa", 101000.0),
-        "shortwave_down": ("W/m2", 250.0),
+        radiation_variable: ("W/m2", 250.0),
     }
-    for forecast_hour in (0, 3):
+    compact_cycle = cycle_time.strftime("%Y%m%d%H")
+    for forecast_hour in forecast_hours:
         valid_time = cycle_time + timedelta(hours=forecast_hour)
         for variable, (unit, base_value) in variables.items():
-            if variable in omitted_variables:
+            if variable in omitted_variables or (variable, forecast_hour) in omitted_by_time:
                 continue
-            product_id = f"gfs_2026050700_{variable}_f{forecast_hour:03d}"
-            key = f"canonical/gfs/2026050700/{variable}/{product_id}.nc"
+            product_id = f"{product_id_prefix}_{compact_cycle}_{variable}_f{forecast_hour:03d}"
+            key = f"canonical/{source_id}/{compact_cycle}/{variable}/{product_id}.nc"
             values = values_by_variable.get(
                 variable,
                 (base_value + forecast_hour, base_value + forecast_hour + 1.0, base_value + forecast_hour + 2.0),
@@ -437,7 +550,7 @@ def _write_canonical_products(
             products.append(
                 CanonicalProduct(
                     canonical_product_id=product_id,
-                    source_id="gfs",
+                    source_id=source_id,
                     cycle_time=cycle_time,
                     valid_time=valid_time,
                     variable=variable,
@@ -447,6 +560,7 @@ def _write_canonical_products(
                     checksum=sha256_bytes(content),
                     native_time_resolution="3h",
                     native_spatial_resolution="1deg",
+                    lead_time_hours=lead_time_by_hour.get(forecast_hour, forecast_hour),
                 )
             )
     return tuple(products)
@@ -479,3 +593,8 @@ def _netcdf_bytes(
             return temp_file.read()
     finally:
         dataset.close()
+
+
+def _lead_time_sort_key(product: CanonicalProduct) -> tuple[int, Any, str]:
+    lead_time = product.lead_time_hours if product.lead_time_hours is not None else 10**9
+    return lead_time, product.cycle_time, product.canonical_product_id
