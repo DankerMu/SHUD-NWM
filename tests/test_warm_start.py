@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.state_manager import StateSnapshot
+from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig
+from tests.test_orchestrator import FakeOrchestratorRepository, FakeSlurmClient
+from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig
+
+
+class FakeStateManager:
+    def __init__(self, snapshots: list[StateSnapshot] | None = None) -> None:
+        self.snapshots = {snapshot.state_id: snapshot for snapshot in snapshots or []}
+        self.corrupted: list[str] = []
+
+    def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None:
+        candidates = [
+            snapshot
+            for snapshot in self.snapshots.values()
+            if snapshot.model_id == model_id and snapshot.usable_flag and snapshot.valid_time <= _dt(before_time)
+        ]
+        return max(candidates, key=lambda snapshot: snapshot.valid_time) if candidates else None
+
+    def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
+        return self.snapshots.get(state_id)
+
+    def mark_init_state_corrupted(
+        self,
+        state_id: str,
+        *,
+        message: str,
+        actual_checksum: str | None,
+        expected_checksum: str | None,
+    ) -> None:
+        snapshot = self.snapshots[state_id]
+        self.snapshots[state_id] = replace(snapshot, usable_flag=False)
+        self.corrupted.append(state_id)
+
+
+class FakeRuntimeRepository:
+    def __init__(self) -> None:
+        self.init_state_updates: list[str | None] = []
+
+    def create_run(self, _manifest: dict[str, Any], _run_manifest_uri: str) -> dict[str, Any]:
+        return {}
+
+    def update_status(self, _run_id: str, _status: str, **_fields: Any) -> dict[str, Any]:
+        return {}
+
+    def mark_failed(self, _run_id: str, _error_code: str, _error_message: str, **_fields: Any) -> dict[str, Any]:
+        return {}
+
+    def update_init_state(self, _run_id: str, init_state_id: str | None) -> dict[str, Any]:
+        self.init_state_updates.append(init_state_id)
+        return {}
+
+
+def test_forecast_selects_latest_fresh_state_and_writes_nested_manifest(tmp_path: Path) -> None:
+    state = _state("state_demo_model_2026043000", "2026-04-30T00:00:00Z")
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]))
+
+    orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    context, manifest = repository.created_runs[0]
+    assert context.init_state_id == state.state_id
+    assert manifest["initial_state"] == {
+        "state_id": state.state_id,
+        "ic_file_uri": state.state_uri,
+        "valid_time": "2026-04-30T00:00:00Z",
+        "checksum": state.checksum,
+        "quality": "fresh",
+    }
+    assert manifest["runtime"]["init_mode"] == 3
+    manifest_path = tmp_path / "workspace" / "runs" / context.run_id / "input" / "manifest.json"
+    written = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert written["initial_state"]["state_id"] == state.state_id
+    assert written["runtime"]["init_mode"] == 3
+
+
+def test_forecast_cold_starts_when_no_state_is_available(tmp_path: Path) -> None:
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager())
+
+    orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    _context, manifest = repository.created_runs[0]
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+
+
+def test_forecast_marks_soft_stale_state_as_degraded(tmp_path: Path) -> None:
+    state = _state("state_demo_model_2026042000", "2026-04-20T00:00:00Z")
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]))
+
+    orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    _context, manifest = repository.created_runs[0]
+    assert manifest["initial_state"]["state_id"] == state.state_id
+    assert manifest["initial_state"]["quality"] == "degraded_stale_init_state"
+    assert manifest["runtime"]["init_mode"] == 3
+
+
+def test_forecast_hard_stale_state_falls_back_to_cold_start(tmp_path: Path) -> None:
+    state = _state("state_demo_model_2026033000", "2026-03-30T00:00:00Z")
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]))
+
+    orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    _context, manifest = repository.created_runs[0]
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_stale_state"
+    assert manifest["runtime"]["init_mode"] == 1
+
+
+def test_runtime_corrupted_init_state_is_rejected_and_next_state_is_staged(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_runtime_inputs(object_root)
+    good_content = b"good-state"
+    bad_content = b"bad-state"
+    _write_object(object_root, "states/demo_model/2026043000/state.cfg.ic", bad_content)
+    _write_object(object_root, "states/demo_model/2026042900/state.cfg.ic", good_content)
+    bad_state = _state("state_demo_model_2026043000", "2026-04-30T00:00:00Z", checksum=sha256_bytes(b"expected"))
+    good_state = _state("state_demo_model_2026042900", "2026-04-29T00:00:00Z", checksum=sha256_bytes(good_content))
+    state_manager = FakeStateManager([bad_state, good_state])
+    repository = FakeRuntimeRepository()
+    config = SHUDRuntimeConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+    )
+    runtime = SHUDRuntime(
+        config=config,
+        repository=repository,
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+        state_manager=state_manager,
+    )
+    manifest = _runtime_manifest(bad_state)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert state_manager.corrupted == [bad_state.state_id]
+    assert manifest["initial_state"]["state_id"] == good_state.state_id
+    assert manifest["initial_state"]["checksum"] == good_state.checksum
+    assert manifest["runtime"]["init_mode"] == 3
+    assert repository.init_state_updates[-1] == good_state.state_id
+    staged_ic = next(input_dir.rglob("*.cfg.ic"))
+    assert staged_ic.read_bytes() == good_content
+
+
+def _orchestrator(
+    tmp_path: Path,
+    repository: FakeOrchestratorRepository,
+    state_manager: FakeStateManager,
+) -> ForecastOrchestrator:
+    object_root = tmp_path / "object-store"
+    config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=0,
+        job_timeout_seconds=5,
+    )
+    return ForecastOrchestrator(
+        config=config,
+        repository=repository,
+        state_manager=state_manager,
+        slurm_client=FakeSlurmClient(),
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+    )
+
+
+def _state(state_id: str, valid_time: str, *, checksum: str = "abc123") -> StateSnapshot:
+    return StateSnapshot(
+        state_id=state_id,
+        model_id="demo_model",
+        run_id="analysis_previous",
+        valid_time=_dt(valid_time),
+        state_uri=f"states/demo_model/{_dt(valid_time):%Y%m%d%H}/state.cfg.ic",
+        checksum=checksum,
+        usable_flag=True,
+    )
+
+
+def _runtime_manifest(state: StateSnapshot) -> dict[str, Any]:
+    return {
+        "run_id": "fcst_gfs_2026050100_demo_model",
+        "run_type": "forecast",
+        "scenario_id": "forecast_gfs_deterministic",
+        "source_id": "GFS",
+        "cycle_time": "2026-05-01T00:00:00Z",
+        "start_time": "2026-05-01T00:00:00Z",
+        "end_time": "2026-05-02T00:00:00Z",
+        "model": {
+            "model_id": "demo_model",
+            "basin_version_id": "basin_v01",
+            "model_package_uri": "s3://nhms/models/demo_model/package/",
+            "project_name": "demo",
+            "segment_count": 2,
+        },
+        "initial_state": {
+            "state_id": state.state_id,
+            "ic_file_uri": state.state_uri,
+            "valid_time": "2026-04-30T00:00:00Z",
+            "checksum": state.checksum,
+            "quality": "fresh",
+        },
+        "forcing": {
+            "forcing_version_id": "forc_gfs_2026050100_demo_model",
+            "forcing_uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/",
+        },
+        "runtime": {"output_interval_minutes": 1440, "init_mode": 3},
+        "outputs": {"run_manifest_uri": "s3://nhms/runs/fcst_gfs_2026050100_demo_model/input/manifest.json"},
+    }
+
+
+def _write_runtime_inputs(object_root: Path) -> None:
+    package = object_root / "models" / "demo_model" / "package"
+    package.mkdir(parents=True)
+    (package / "demo.mesh").write_text("mesh\n", encoding="utf-8")
+    (package / "demo.para").write_text("START_TIME = {{START_TIME}}\n", encoding="utf-8")
+    (package / "demo.calib").write_text("calib\n", encoding="utf-8")
+    forcing = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    forcing.mkdir(parents=True)
+    (forcing / "forcing.tsd.forc").write_text("forcing\n", encoding="utf-8")
+
+
+def _write_object(object_root: Path, key: str, content: bytes) -> None:
+    path = object_root / key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+def _dt(value: str | datetime) -> datetime:
+    candidate = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if candidate.tzinfo is None:
+        return candidate.replace(tzinfo=UTC)
+    return candidate.astimezone(UTC)

@@ -11,8 +11,9 @@ from typing import Any, Protocol
 
 import httpx
 
+from packages.common.best_available import BestAvailableManager
 from packages.common.object_store import LocalObjectStore
-from packages.common.state_manager import StateManager, StateSnapshot
+from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
@@ -100,6 +101,8 @@ class OrchestratorConfig:
     forecast_horizon_hours: int = 168
     scenario_id: str = "forecast_gfs_deterministic"
     era5_area: str = "55,70,15,140"
+    state_soft_stale_threshold_days: int = 7
+    state_hard_stale_threshold_days: int = 30
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
@@ -122,6 +125,8 @@ class OrchestratorConfig:
             job_timeout_seconds=float(os.getenv("ORCHESTRATOR_JOB_TIMEOUT_SECONDS", "3600")),
             forecast_horizon_hours=int(os.getenv("FORECAST_HORIZON_HOURS", "168")),
             era5_area=os.getenv("ERA5_AREA", "55,70,15,140"),
+            state_soft_stale_threshold_days=int(os.getenv("STATE_SOFT_STALE_THRESHOLD_DAYS", "7")),
+            state_hard_stale_threshold_days=int(os.getenv("STATE_HARD_STALE_THRESHOLD_DAYS", "30")),
         )
 
 
@@ -145,6 +150,15 @@ class ForcingContext:
 
 
 @dataclass(frozen=True)
+class InitialStateSelection:
+    state_id: str | None
+    state_uri: str | None
+    valid_time: datetime | None
+    checksum: str | None
+    quality: str
+
+
+@dataclass(frozen=True)
 class ForecastRunContext:
     run_id: str
     source_id: str
@@ -163,6 +177,11 @@ class ForecastRunContext:
     run_manifest_uri: str
     output_uri: str
     log_uri: str
+    init_state_id: str | None = None
+    init_state_uri: str | None = None
+    init_state_valid_time: datetime | None = None
+    init_state_checksum: str | None = None
+    init_state_quality: str = "cold_start_no_state"
 
 
 @dataclass(frozen=True)
@@ -347,18 +366,24 @@ class ForecastOrchestrator:
         *,
         config: OrchestratorConfig,
         repository: OrchestratorRepository,
+        state_manager: StateManager | None = None,
         slurm_client: SlurmGatewayClient | None = None,
         object_store: LocalObjectStore | None = None,
     ) -> None:
         self.config = config
         self.repository = repository
+        self.state_manager = state_manager
         self.slurm_client = slurm_client or HttpSlurmGatewayClient(config.slurm_gateway_url)
         self.object_store = object_store or LocalObjectStore(config.object_store_root, config.object_store_prefix)
 
     @classmethod
     def from_env(cls) -> ForecastOrchestrator:
         config = OrchestratorConfig.from_env()
-        return cls(config=config, repository=PsycopgOrchestratorRepository.from_env())
+        return cls(
+            config=config,
+            repository=PsycopgOrchestratorRepository.from_env(),
+            state_manager=StateManager.from_env(),
+        )
 
     def trigger_forecast(
         self,
@@ -384,7 +409,8 @@ class ForecastOrchestrator:
             model_id=model_id,
         )
         self.repository.ensure_forecast_cycle(source_id=source_id, cycle_time=parsed_cycle_time)
-        context = self._build_run_context(source_id, parsed_cycle_time, model, forcing)
+        initial_state = self._select_forecast_initial_state(model_id=model_id, cycle_time=parsed_cycle_time)
+        context = self._build_run_context(source_id, parsed_cycle_time, model, forcing, initial_state)
         manifest = self._build_run_manifest(context)
         self._write_run_manifest(context, manifest)
         self.repository.create_hydro_run(context, manifest)
@@ -697,6 +723,7 @@ class ForecastOrchestrator:
         cycle_time: datetime,
         model: ModelContext,
         forcing: ForcingContext,
+        initial_state: InitialStateSelection | None = None,
     ) -> ForecastRunContext:
         compact_cycle = format_cycle_time(cycle_time)
         run_id = f"fcst_{source_id.lower()}_{compact_cycle}_{model.model_id}"
@@ -705,6 +732,7 @@ class ForecastOrchestrator:
         fallback_forcing_uri = (
             f"forcing/{source_id.lower()}/{compact_cycle}/{model.basin_version_id}/{model.model_id}/"
         )
+        selected_state = initial_state or InitialStateSelection(None, None, None, None, "cold_start_no_state")
         return ForecastRunContext(
             run_id=run_id,
             source_id=source_id,
@@ -723,6 +751,11 @@ class ForecastOrchestrator:
             run_manifest_uri=self.object_store.uri_for_key(f"runs/{run_id}/input/manifest.json"),
             output_uri=self.object_store.uri_for_key(f"runs/{run_id}/output/"),
             log_uri=self.object_store.uri_for_key(f"runs/{run_id}/logs/"),
+            init_state_id=selected_state.state_id,
+            init_state_uri=selected_state.state_uri,
+            init_state_valid_time=selected_state.valid_time,
+            init_state_checksum=selected_state.checksum,
+            init_state_quality=selected_state.quality,
         )
 
     def _build_run_manifest(self, context: ForecastRunContext) -> dict[str, Any]:
@@ -745,8 +778,16 @@ class ForecastOrchestrator:
                 "forcing_version_id": context.forcing_version_id,
                 "forcing_uri": context.forcing_package_uri,
             },
+            "initial_state": {
+                "state_id": context.init_state_id,
+                "ic_file_uri": context.init_state_uri,
+                "valid_time": _format_time_or_none(context.init_state_valid_time),
+                "checksum": context.init_state_checksum,
+                "quality": context.init_state_quality,
+            },
             "runtime": {
                 "output_interval_minutes": 60,
+                "init_mode": 3 if context.init_state_id else 1,
             },
             "outputs": {
                 "run_manifest_uri": context.run_manifest_uri,
@@ -754,6 +795,31 @@ class ForecastOrchestrator:
                 "log_uri": context.log_uri,
             },
         }
+
+    def _select_forecast_initial_state(self, *, model_id: str, cycle_time: datetime) -> InitialStateSelection:
+        if self.state_manager is None:
+            return InitialStateSelection(None, None, None, None, "cold_start_no_state")
+
+        state = self.state_manager.get_latest_usable_state(model_id=model_id, before_time=cycle_time)
+        if state is None:
+            return InitialStateSelection(None, None, None, None, "cold_start_no_state")
+
+        quality = assess_freshness(
+            state.valid_time,
+            cycle_time,
+            soft_threshold_days=self.config.state_soft_stale_threshold_days,
+            hard_threshold_days=self.config.state_hard_stale_threshold_days,
+        )
+        if quality == "cold_start_stale_state":
+            return InitialStateSelection(None, None, None, None, quality)
+
+        return InitialStateSelection(
+            state_id=state.state_id,
+            state_uri=state.state_uri,
+            valid_time=state.valid_time,
+            checksum=state.checksum,
+            quality=quality,
+        )
 
     def _write_run_manifest(self, context: ForecastRunContext | AnalysisRunContext, manifest: dict[str, Any]) -> None:
         content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
@@ -773,11 +839,18 @@ class AnalysisOrchestrator(ForecastOrchestrator):
         config: OrchestratorConfig,
         repository: OrchestratorRepository,
         state_manager: StateManager | None = None,
+        best_available_manager: BestAvailableManager | None = None,
         slurm_client: SlurmGatewayClient | None = None,
         object_store: LocalObjectStore | None = None,
     ) -> None:
-        super().__init__(config=config, repository=repository, slurm_client=slurm_client, object_store=object_store)
-        self.state_manager = state_manager
+        super().__init__(
+            config=config,
+            repository=repository,
+            state_manager=state_manager,
+            slurm_client=slurm_client,
+            object_store=object_store,
+        )
+        self.best_available_manager = best_available_manager
 
     @classmethod
     def from_env(cls) -> AnalysisOrchestrator:
@@ -786,6 +859,7 @@ class AnalysisOrchestrator(ForecastOrchestrator):
             config=config,
             repository=PsycopgOrchestratorRepository.from_env(),
             state_manager=StateManager.from_env(),
+            best_available_manager=BestAvailableManager.from_env(),
         )
 
     def trigger_analysis(
@@ -928,6 +1002,7 @@ class AnalysisOrchestrator(ForecastOrchestrator):
             self.repository.update_hydro_run_status(context.run_id, "succeeded")
         elif stage.stage == "parse_output":
             self.repository.update_hydro_run_status(context.run_id, "parsed")
+            self._record_best_available(context)
 
     def _after_stage_failure(
         self,
@@ -968,6 +1043,11 @@ class AnalysisOrchestrator(ForecastOrchestrator):
         _pipeline_job_id: str,
     ) -> tuple[str, str]:
         return "analysis_pipeline", context.run_id
+
+    def _record_best_available(self, context: ForecastRunContext | AnalysisRunContext) -> None:
+        if self.best_available_manager is None or context.forcing_version_id is None:
+            return
+        self.best_available_manager.write_forcing_version(context.forcing_version_id)
 
 
 @dataclass(frozen=True)
