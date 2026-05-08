@@ -9,12 +9,13 @@ import sys
 import tarfile
 import time
 from dataclasses import InitVar, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from packages.common.object_store import LocalObjectStore
+from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateSnapshot, assess_freshness
 
 
 class SHUDRuntimeError(RuntimeError):
@@ -75,6 +76,9 @@ class DryRunHydroRunRepository:
         return {}
 
     def mark_failed(self, _run_id: str, _error_code: str, _error_message: str, **_fields: Any) -> dict[str, Any]:
+        return {}
+
+    def update_init_state(self, _run_id: str, _init_state_id: str | None) -> dict[str, Any]:
         return {}
 
 
@@ -183,6 +187,18 @@ class PsycopgHydroRunRepository:
             (error_code, error_message, fields.get("output_uri"), fields.get("log_uri"), run_id),
         )
 
+    def update_init_state(self, run_id: str, init_state_id: str | None) -> dict[str, Any]:
+        return self._fetch_one(
+            """
+            UPDATE hydro.hydro_run
+            SET init_state_id = %s,
+                updated_at = now()
+            WHERE run_id = %s
+            RETURNING *
+            """,
+            (init_state_id, run_id),
+        )
+
     def _fetch_one(
         self,
         statement: str,
@@ -228,15 +244,25 @@ class SHUDRuntime:
         config: SHUDRuntimeConfig,
         repository: Any | None = None,
         object_store: LocalObjectStore | None = None,
+        state_manager: StateManager | None = None,
     ) -> None:
         self.config = config
+        self.object_store = object_store or LocalObjectStore(config.object_store_root, config.object_store_prefix)
         if repository is not None:
             self.repository = repository
         elif config.dry_run:
             self.repository = DryRunHydroRunRepository()
         else:
             self.repository = PsycopgHydroRunRepository.from_env()
-        self.object_store = object_store or LocalObjectStore(config.object_store_root, config.object_store_prefix)
+        if state_manager is not None:
+            self.state_manager = state_manager
+        elif config.dry_run or repository is not None:
+            self.state_manager = None
+        else:
+            self.state_manager = StateManager(
+                repository=PsycopgStateSnapshotRepository.from_env(),
+                object_store=self.object_store,
+            )
 
     @classmethod
     def from_env(cls, *, dry_run: bool = False) -> SHUDRuntime:
@@ -263,6 +289,7 @@ class SHUDRuntime:
 
         try:
             self.prepare_workspace(manifest, input_dir)
+            self._persist_manifest(manifest, input_dir)
             cfg_path = self.generate_cfg_para(manifest, input_dir, output_dir)
             self.repository.update_status(run_id, "staged")
             self.repository.update_status(run_id, "running")
@@ -295,15 +322,13 @@ class SHUDRuntime:
     def prepare_workspace(self, manifest: dict[str, Any], input_dir: Path) -> None:
         self._stage_artifact(manifest["model"]["model_package_uri"], input_dir)
         self._stage_artifact(manifest["forcing"]["forcing_uri"], input_dir)
-        initial_state_uri = _initial_state_uri(manifest)
-        if initial_state_uri:
-            self._stage_artifact(initial_state_uri, input_dir)
+        self._stage_initial_state(manifest, input_dir)
 
         for suffix in (".mesh", ".para", ".calib", ".tsd.forc"):
             matches = [path for path in input_dir.rglob(f"*{suffix}") if path.is_file() and path.stat().st_size > 0]
             if not matches:
                 raise SHUDRuntimeError("WORKSPACE_INCOMPLETE", f"Missing required staged file: *{suffix}")
-        if initial_state_uri:
+        if _initial_state_uri(manifest):
             matches = [path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0]
             if not matches:
                 raise SHUDRuntimeError(
@@ -413,6 +438,149 @@ class SHUDRuntime:
         run_id = _safe_path_component(run_id)
         self._upload_directory(log_dir, f"runs/{run_id}/logs")
         return self._directory_uri(f"runs/{run_id}/logs")
+
+    def _persist_manifest(self, manifest: dict[str, Any], input_dir: Path) -> None:
+        content = json.dumps(manifest, indent=2, sort_keys=True)
+        (input_dir / "manifest.json").write_text(content, encoding="utf-8")
+        run_manifest_uri = _run_manifest_uri(manifest)
+        self.object_store.write_bytes_atomic(run_manifest_uri, content.encode("utf-8"))
+
+    def _stage_initial_state(self, manifest: dict[str, Any], input_dir: Path) -> None:
+        if not _initial_state_id(manifest) and not _initial_state_uri(manifest):
+            _set_cold_start_initial_state(manifest, quality=_initial_state_quality(manifest) or "cold_start_no_state")
+            self._sync_init_state_id(manifest)
+            return
+
+        rejected_state_ids: set[str] = set()
+        before_time = _parse_time(manifest.get("cycle_time") or manifest["start_time"])
+        while True:
+            state_id = _initial_state_id(manifest)
+            state_uri = _initial_state_uri(manifest)
+            expected_checksum = _initial_state_checksum(manifest)
+            snapshot = self._state_snapshot(state_id)
+            if snapshot is not None:
+                state_uri = snapshot.state_uri
+                expected_checksum = snapshot.checksum
+                _set_initial_state_from_snapshot(
+                    manifest,
+                    snapshot,
+                    quality=_initial_state_quality(manifest) or "fresh",
+                )
+
+            if not state_uri:
+                _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
+                self._sync_init_state_id(manifest)
+                return
+
+            self._clear_staged_initial_states(input_dir)
+            staged_path, actual_checksum, error_message = self._stage_and_checksum_initial_state(state_uri, input_dir)
+            if staged_path is not None and (expected_checksum is None or actual_checksum == expected_checksum):
+                _set_runtime_init_mode(manifest, 3)
+                self._sync_init_state_id(manifest)
+                return
+
+            message = error_message or "Initial state checksum mismatch."
+            if state_id:
+                rejected_state_ids.add(state_id)
+                self._mark_init_state_corrupted(
+                    state_id,
+                    message=message,
+                    actual_checksum=actual_checksum,
+                    expected_checksum=expected_checksum,
+                )
+
+            next_state = self._next_usable_state(manifest, before_time, rejected_state_ids)
+            if next_state is None:
+                self._clear_staged_initial_states(input_dir)
+                _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
+                self._sync_init_state_id(manifest)
+                return
+            _set_initial_state_from_snapshot(
+                manifest,
+                next_state,
+                quality=assess_freshness(next_state.valid_time, before_time),
+            )
+
+    def _state_snapshot(self, state_id: str | None) -> StateSnapshot | None:
+        if state_id is None or self.state_manager is None:
+            return None
+        get_state_snapshot = getattr(self.state_manager, "get_state_snapshot", None)
+        if not callable(get_state_snapshot):
+            return None
+        try:
+            return get_state_snapshot(state_id)
+        except Exception as error:
+            message = f"Failed to load initial state {state_id}: {error}"
+            raise SHUDRuntimeError("STATE_LOOKUP_FAILED", message) from error
+
+    def _stage_and_checksum_initial_state(
+        self,
+        state_uri: str,
+        input_dir: Path,
+    ) -> tuple[Path | None, str | None, str | None]:
+        try:
+            self._stage_artifact(state_uri, input_dir)
+        except SHUDRuntimeError as error:
+            return None, None, error.message
+
+        matches = sorted(path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0)
+        if not matches:
+            return None, None, "Initial state URI did not stage a non-empty *.cfg.ic file."
+
+        staged_path = matches[0]
+        try:
+            return staged_path, sha256_bytes(staged_path.read_bytes()), None
+        except OSError as error:
+            return None, None, f"Failed to read staged initial state {staged_path}: {error}"
+
+    def _mark_init_state_corrupted(
+        self,
+        state_id: str,
+        *,
+        message: str,
+        actual_checksum: str | None,
+        expected_checksum: str | None,
+    ) -> None:
+        if self.state_manager is None:
+            return
+        mark_corrupted = getattr(self.state_manager, "mark_init_state_corrupted", None)
+        if not callable(mark_corrupted):
+            return
+        mark_corrupted(
+            state_id,
+            message=message,
+            actual_checksum=actual_checksum,
+            expected_checksum=expected_checksum,
+        )
+
+    def _next_usable_state(
+        self,
+        manifest: dict[str, Any],
+        before_time: datetime,
+        rejected_state_ids: set[str],
+    ) -> StateSnapshot | None:
+        if self.state_manager is None:
+            return None
+
+        model_id = manifest["model"]["model_id"]
+        cursor_time = before_time
+        while True:
+            state = self.state_manager.get_latest_usable_state(model_id=model_id, before_time=cursor_time)
+            if state is None:
+                return None
+            if state.state_id not in rejected_state_ids:
+                return state
+            cursor_time = state.valid_time - timedelta(microseconds=1)
+
+    def _clear_staged_initial_states(self, input_dir: Path) -> None:
+        for path in input_dir.rglob("*.cfg.ic"):
+            if path.is_file():
+                path.unlink()
+
+    def _sync_init_state_id(self, manifest: dict[str, Any]) -> None:
+        update_init_state = getattr(self.repository, "update_init_state", None)
+        if callable(update_init_state):
+            update_init_state(manifest["run_id"], _initial_state_id(manifest))
 
     def _stage_artifact(self, uri: str, destination: Path) -> None:
         source = self._object_store_path(uri)
@@ -609,15 +777,52 @@ def _initial_state_id(manifest: dict[str, Any]) -> str | None:
     return initial_state.get("state_id") or manifest.get("init_state_id")
 
 
+def _initial_state_checksum(manifest: dict[str, Any]) -> str | None:
+    initial_state = manifest.get("initial_state") or {}
+    checksum = initial_state.get("checksum")
+    return str(checksum) if checksum else None
+
+
+def _initial_state_quality(manifest: dict[str, Any]) -> str | None:
+    initial_state = manifest.get("initial_state") or {}
+    quality = initial_state.get("quality") or manifest.get("init_state_quality")
+    return str(quality) if quality else None
+
+
+def _set_initial_state_from_snapshot(manifest: dict[str, Any], snapshot: StateSnapshot, *, quality: str) -> None:
+    manifest["initial_state"] = {
+        "state_id": snapshot.state_id,
+        "ic_file_uri": snapshot.state_uri,
+        "valid_time": _format_time(snapshot.valid_time),
+        "checksum": snapshot.checksum,
+        "quality": quality,
+    }
+    _set_runtime_init_mode(manifest, 3)
+
+
+def _set_cold_start_initial_state(manifest: dict[str, Any], *, quality: str) -> None:
+    manifest["initial_state"] = {
+        "state_id": None,
+        "ic_file_uri": None,
+        "valid_time": None,
+        "checksum": None,
+        "quality": quality,
+    }
+    _set_runtime_init_mode(manifest, 1)
+
+
+def _set_runtime_init_mode(manifest: dict[str, Any], init_mode: int) -> None:
+    runtime = manifest.setdefault("runtime", {})
+    runtime["init_mode"] = init_mode
+
+
 def _init_mode(manifest: dict[str, Any]) -> str:
     runtime = manifest.get("runtime") or {}
     if runtime.get("init_mode") is not None:
         return str(runtime["init_mode"])
     if _initial_state_id(manifest) or _initial_state_uri(manifest):
         return "3"
-    if manifest.get("run_type") == "analysis":
-        return "1"
-    return "cold-start"
+    return "1"
 
 
 def _object_key(uri_or_key: str, object_store_prefix: str) -> str:

@@ -197,6 +197,33 @@ class StateManager:
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
         return self.repository.get_state_snapshot(state_id)
 
+    def mark_init_state_corrupted(
+        self,
+        state_id: str,
+        *,
+        message: str = "Initial state checksum mismatch.",
+        actual_checksum: str | None = None,
+        expected_checksum: str | None = None,
+    ) -> None:
+        snapshot = self.repository.get_state_snapshot(state_id)
+        self.repository.set_usable_flag(state_id=state_id, usable_flag=False)
+        self.repository.insert_qc_result(
+            _qc_record(
+                state_id=state_id,
+                run_id=snapshot.run_id if snapshot is not None else None,
+                passed=False,
+                severity="error",
+                checks_json={
+                    "passed": False,
+                    "error_code": "INIT_STATE_CORRUPTED",
+                    "message": message,
+                    "actual_checksum": actual_checksum,
+                    "expected_checksum": expected_checksum,
+                },
+                message=message,
+            )
+        )
+
     def _check_snapshot_object(self, snapshot: StateSnapshot) -> dict[str, Any]:
         checks: dict[str, Any] = {
             "exists": False,

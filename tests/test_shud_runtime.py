@@ -130,7 +130,7 @@ def test_runtime_executes_mock_shud_and_updates_statuses(tmp_path: Path) -> None
     assert "START_TIME = 2026-05-01T00:00:00Z" in cfg
     assert "END_TIME = 2026-05-04T00:00:00Z" in cfg
     assert "MODEL_OUTPUT_INTERVAL = 1440" in cfg
-    assert "INIT_MODE = cold-start" in cfg
+    assert "INIT_MODE = 1" in cfg
     assert ".cfg.ic" not in cfg
 
 

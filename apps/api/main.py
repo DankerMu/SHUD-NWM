@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from apps.api.errors import register_error_handlers
+from apps.api.routes.best_available import router as best_available_router
 from apps.api.routes.data_sources import router as data_sources_router
 from apps.api.routes.forecast import router as forecast_router
 from apps.api.routes.models import router as models_router
@@ -19,6 +20,7 @@ app = FastAPI(
 register_error_handlers(app)
 app.include_router(models_router)
 app.include_router(forecast_router)
+app.include_router(best_available_router)
 app.include_router(data_sources_router)
 app.include_router(state_snapshots_router)
 app.include_router(slurm_router)
