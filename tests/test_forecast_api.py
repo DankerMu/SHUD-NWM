@@ -9,7 +9,11 @@ from httpx import ASGITransport, AsyncClient
 from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
-from packages.common.forecast_store import ForecastStoreError
+from packages.common.forecast_store import (
+    ForecastStoreError,
+    _spliced_response_from_rows,
+    analysis_window_for_issue_time,
+)
 
 
 class FakeForecastStore:
@@ -33,6 +37,37 @@ class FakeForecastStore:
             ],
             "frequency_thresholds": {},
         }
+        self.spliced_response = {
+            "segments": [
+                {
+                    "scenario": "analysis_true_field",
+                    "source": "ERA5",
+                    "data": [{"valid_time": "2026-05-06T00:00:00Z", "value": 10.0}],
+                },
+                {
+                    "scenario": "forecast_gfs_deterministic",
+                    "source": "GFS",
+                    "data": [{"valid_time": "2026-05-07T00:00:00Z", "value": 11.25}],
+                },
+            ],
+            "issue_time": "2026-05-07T00:00:00Z",
+            "river_segment_id": "seg_001",
+            "variable": "discharge",
+            "unit": "m3/s",
+        }
+        self.analysis_only_response = {
+            "segments": [
+                {
+                    "scenario": "analysis_true_field",
+                    "source": "ERA5",
+                    "data": [{"valid_time": "2026-05-06T00:00:00Z", "value": 10.0}],
+                }
+            ],
+            "issue_time": "2026-05-07T00:00:00Z",
+            "river_segment_id": "analysis_only",
+            "variable": "discharge",
+            "unit": "m3/s",
+        }
 
     def forecast_series(self, **kwargs: Any) -> dict[str, Any]:
         self.forecast_calls.append(kwargs)
@@ -43,6 +78,10 @@ class FakeForecastStore:
                 message="River segment not found: missing",
                 details={"segment_id": "missing"},
             )
+        if kwargs.get("include_analysis") and kwargs["segment_id"] == "analysis_only":
+            return self.analysis_only_response
+        if kwargs.get("include_analysis"):
+            return self.spliced_response
         return self.response
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -133,6 +172,102 @@ async def test_forecast_series_returns_timestamp_value_tuples_and_q_down_filter(
     assert all(isinstance(point, list) and len(point) == 2 for point in points)
     assert fake_store.forecast_calls[-1]["variables"] == ["q_down"]
     assert fake_store.forecast_calls[-1]["scenarios"] == ["GFS"]
+    assert fake_store.forecast_calls[-1]["include_analysis"] is False
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_include_analysis_true_returns_spliced_segments(fake_store: FakeForecastStore) -> None:
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?issue_time=latest&variables=q_down&include_analysis=true"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "series" not in data
+    assert data["variable"] == "discharge"
+    assert data["river_segment_id"] == "seg_001"
+    assert [segment["scenario"] for segment in data["segments"]] == [
+        "analysis_true_field",
+        "forecast_gfs_deterministic",
+    ]
+    assert [segment["source"] for segment in data["segments"]] == ["ERA5", "GFS"]
+    assert fake_store.forecast_calls[-1]["include_analysis"] is True
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_include_analysis_false_keeps_m1_response(fake_store: FakeForecastStore) -> None:
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?issue_time=latest&variables=q_down&include_analysis=false"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "series" in data
+    assert "segments" not in data
+    assert data["series"][0]["scenario_id"] == "forecast_gfs_deterministic"
+    assert fake_store.forecast_calls[-1]["include_analysis"] is False
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_include_analysis_supports_analysis_only(fake_store: FakeForecastStore) -> None:
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/analysis_only/forecast-series"
+        "?issue_time=2026-05-07T00:00:00Z&variables=q_down&include_analysis=true"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [segment["scenario"] for segment in data["segments"]] == ["analysis_true_field"]
+    assert data["segments"][0]["data"] == [{"valid_time": "2026-05-06T00:00:00Z", "value": 10.0}]
+
+
+def test_spliced_response_deduplicates_issue_time_boundary_and_uses_sources() -> None:
+    issue_time = _dt("2026-05-07T00:00:00Z")
+    payload = _spliced_response_from_rows(
+        river_segment_id="seg_001",
+        issue_time=issue_time,
+        variable="discharge",
+        analysis_rows=[
+            {
+                "scenario_id": "analysis_true_field",
+                "source_id": "ERA5",
+                "valid_time": issue_time - timedelta(days=1),
+                "value": 10.0,
+                "unit": "m3/s",
+            },
+            {
+                "scenario_id": "analysis_true_field",
+                "source_id": "ERA5",
+                "valid_time": issue_time,
+                "value": 10.5,
+                "unit": "m3/s",
+            },
+        ],
+        forecast_rows=[
+            {
+                "scenario_id": "forecast_gfs_deterministic",
+                "source_id": "gfs",
+                "valid_time": issue_time,
+                "value": 11.0,
+                "unit": "m3/s",
+            }
+        ],
+    )
+
+    assert payload["segments"][0]["source"] == "ERA5"
+    assert payload["segments"][1]["source"] == "GFS"
+    assert payload["segments"][0]["data"] == [{"valid_time": "2026-05-06T00:00:00Z", "value": 10.0}]
+    assert payload["segments"][1]["data"] == [{"valid_time": "2026-05-07T00:00:00Z", "value": 11.0}]
+
+
+def test_analysis_window_for_issue_time_uses_open_end_seven_day_range() -> None:
+    issue_time = _dt("2026-05-07T00:00:00Z")
+    start_time, end_time = analysis_window_for_issue_time(issue_time)
+
+    assert start_time == _dt("2026-04-30T00:00:00Z")
+    assert end_time == issue_time
 
 
 @pytest.mark.asyncio

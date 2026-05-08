@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 
@@ -50,50 +50,21 @@ class PsycopgForecastStore:
         issue_time: str,
         variables: Sequence[str],
         scenarios: Sequence[str],
+        include_analysis: bool = False,
     ) -> dict[str, Any]:
         requested_variables = _normalized_tokens(variables)
         if "q_down" not in requested_variables:
+            if include_analysis:
+                return _empty_spliced_response(
+                    river_segment_id=segment_id,
+                    issue_time=None,
+                    variable=_response_variable_name(requested_variables),
+                )
             return _empty_forecast_response(segment_id=segment_id, issue_time=None)
 
         scenario_filter = _scenario_filter(scenarios)
         with self._transaction() as cursor:
-            basin = self._fetch_optional(
-                cursor,
-                "SELECT basin_version_id FROM core.basin_version WHERE basin_version_id = %s",
-                (basin_version_id,),
-            )
-            if basin is None:
-                raise ForecastStoreError(
-                    status_code=404,
-                    code="SOURCE_NOT_FOUND",
-                    message=f"Basin version not found: {basin_version_id}",
-                    details={"basin_version_id": basin_version_id},
-                )
-
-            segment = self._fetch_optional(
-                cursor,
-                """
-                SELECT
-                    rs.river_segment_id,
-                    rs.properties_json,
-                    rnv.river_network_version_id
-                FROM core.river_segment rs
-                JOIN core.river_network_version rnv
-                  ON rnv.river_network_version_id = rs.river_network_version_id
-                WHERE rnv.basin_version_id = %s
-                  AND rs.river_segment_id = %s
-                ORDER BY rnv.created_at DESC, rnv.river_network_version_id DESC
-                LIMIT 1
-                """,
-                (basin_version_id, segment_id),
-            )
-            if segment is None:
-                raise ForecastStoreError(
-                    status_code=404,
-                    code="SEGMENT_NOT_FOUND",
-                    message=f"River segment not found: {segment_id}",
-                    details={"basin_version_id": basin_version_id, "segment_id": segment_id},
-                )
+            self._validate_series_target(cursor, basin_version_id=basin_version_id, segment_id=segment_id)
 
             parsed_issue_time = None if issue_time == "latest" else _parse_datetime(issue_time)
             selected_issue_time = parsed_issue_time or self._latest_issue_time(
@@ -102,8 +73,46 @@ class PsycopgForecastStore:
                 segment_id=segment_id,
                 scenario_filter=scenario_filter,
             )
+            if include_analysis and selected_issue_time is None:
+                selected_issue_time = self._latest_analysis_issue_time(
+                    cursor,
+                    basin_version_id=basin_version_id,
+                    segment_id=segment_id,
+                )
             if selected_issue_time is None:
+                if include_analysis:
+                    return _empty_spliced_response(
+                        river_segment_id=segment_id,
+                        issue_time=None,
+                        variable=_response_variable_name(requested_variables),
+                    )
                 return _empty_forecast_response(segment_id=segment_id, issue_time=None)
+
+            if include_analysis:
+                analysis_start, analysis_end = analysis_window_for_issue_time(selected_issue_time)
+                forecast_end = selected_issue_time + timedelta(days=7)
+                analysis_rows = self._fetch_analysis_segment_rows(
+                    cursor,
+                    basin_version_id=basin_version_id,
+                    segment_id=segment_id,
+                    start_time=analysis_start,
+                    end_time=analysis_end,
+                )
+                forecast_rows = self._fetch_forecast_segment_rows(
+                    cursor,
+                    basin_version_id=basin_version_id,
+                    segment_id=segment_id,
+                    issue_time=selected_issue_time,
+                    end_time=forecast_end,
+                    scenario_filter=scenario_filter,
+                )
+                return _spliced_response_from_rows(
+                    river_segment_id=segment_id,
+                    issue_time=selected_issue_time,
+                    variable=_response_variable_name(requested_variables),
+                    analysis_rows=analysis_rows,
+                    forecast_rows=forecast_rows,
+                )
 
             rows = self._fetch_all(
                 cursor,
@@ -140,6 +149,45 @@ class PsycopgForecastStore:
 
         return _forecast_response_from_rows(segment_id=segment_id, issue_time=selected_issue_time, rows=rows)
 
+    def _validate_series_target(self, cursor: Any, *, basin_version_id: str, segment_id: str) -> None:
+        basin = self._fetch_optional(
+            cursor,
+            "SELECT basin_version_id FROM core.basin_version WHERE basin_version_id = %s",
+            (basin_version_id,),
+        )
+        if basin is None:
+            raise ForecastStoreError(
+                status_code=404,
+                code="SOURCE_NOT_FOUND",
+                message=f"Basin version not found: {basin_version_id}",
+                details={"basin_version_id": basin_version_id},
+            )
+
+        segment = self._fetch_optional(
+            cursor,
+            """
+            SELECT
+                rs.river_segment_id,
+                rs.properties_json,
+                rnv.river_network_version_id
+            FROM core.river_segment rs
+            JOIN core.river_network_version rnv
+              ON rnv.river_network_version_id = rs.river_network_version_id
+            WHERE rnv.basin_version_id = %s
+              AND rs.river_segment_id = %s
+            ORDER BY rnv.created_at DESC, rnv.river_network_version_id DESC
+            LIMIT 1
+            """,
+            (basin_version_id, segment_id),
+        )
+        if segment is None:
+            raise ForecastStoreError(
+                status_code=404,
+                code="SEGMENT_NOT_FOUND",
+                message=f"River segment not found: {segment_id}",
+                details={"basin_version_id": basin_version_id, "segment_id": segment_id},
+            )
+
     def _latest_issue_time(
         self,
         cursor: Any,
@@ -165,6 +213,99 @@ class PsycopgForecastStore:
             (basin_version_id, segment_id, *scenario_filter.params),
         )
         return _ensure_utc(row["cycle_time"]) if row is not None else None
+
+    def _latest_analysis_issue_time(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+    ) -> datetime | None:
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT h.end_time
+            FROM hydro.river_timeseries rt
+            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
+            WHERE rt.basin_version_id = %s
+              AND rt.river_segment_id = %s
+              AND rt.variable = 'q_down'
+              AND h.scenario_id = 'analysis_true_field'
+              AND h.end_time IS NOT NULL
+            ORDER BY h.end_time DESC, h.created_at DESC
+            LIMIT 1
+            """,
+            (basin_version_id, segment_id),
+        )
+        return _ensure_utc(row["end_time"]) if row is not None else None
+
+    def _fetch_analysis_segment_rows(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[dict[str, Any]]:
+        return self._fetch_all(
+            cursor,
+            """
+            SELECT DISTINCT ON (rt.valid_time)
+                h.scenario_id,
+                h.source_id,
+                fv.lineage_json,
+                rt.valid_time,
+                rt.value,
+                rt.unit
+            FROM hydro.river_timeseries rt
+            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
+            LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
+            WHERE rt.basin_version_id = %s
+              AND rt.river_segment_id = %s
+              AND rt.variable = 'q_down'
+              AND h.scenario_id = 'analysis_true_field'
+              AND rt.valid_time >= %s
+              AND rt.valid_time < %s
+            ORDER BY rt.valid_time, h.end_time DESC, h.created_at DESC
+            """,
+            (basin_version_id, segment_id, start_time, end_time),
+        )
+
+    def _fetch_forecast_segment_rows(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        issue_time: datetime,
+        end_time: datetime,
+        scenario_filter: "_ScenarioFilter",
+    ) -> list[dict[str, Any]]:
+        return self._fetch_all(
+            cursor,
+            f"""
+            SELECT
+                h.scenario_id,
+                h.source_id,
+                fv.lineage_json,
+                rt.valid_time,
+                rt.value,
+                rt.unit
+            FROM hydro.river_timeseries rt
+            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
+            LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
+            WHERE rt.basin_version_id = %s
+              AND rt.river_segment_id = %s
+              AND rt.variable = 'q_down'
+              AND h.cycle_time = %s
+              AND rt.valid_time >= %s
+              AND rt.valid_time <= %s
+              {scenario_filter.sql}
+            ORDER BY h.scenario_id, rt.valid_time
+            """,
+            (basin_version_id, segment_id, issue_time, issue_time, end_time, *scenario_filter.params),
+        )
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._transaction() as cursor:
@@ -521,6 +662,11 @@ def _json_ready(value: Any) -> Any:
     return value
 
 
+def analysis_window_for_issue_time(issue_time: datetime) -> tuple[datetime, datetime]:
+    end_time = _ensure_utc(issue_time)
+    return end_time - timedelta(days=7), end_time
+
+
 def _empty_forecast_response(*, segment_id: str, issue_time: datetime | None) -> dict[str, Any]:
     return {
         "segment_id": segment_id,
@@ -528,6 +674,22 @@ def _empty_forecast_response(*, segment_id: str, issue_time: datetime | None) ->
         "unit": "m3/s",
         "series": [],
         "frequency_thresholds": {},
+    }
+
+
+def _empty_spliced_response(
+    *,
+    river_segment_id: str,
+    issue_time: datetime | None,
+    variable: str,
+    unit: str = "m3/s",
+) -> dict[str, Any]:
+    return {
+        "segments": [],
+        "issue_time": _format_time(issue_time),
+        "river_segment_id": river_segment_id,
+        "variable": variable,
+        "unit": unit,
     }
 
 
@@ -564,6 +726,88 @@ def _forecast_response_from_rows(
         "series": list(grouped.values()),
         "frequency_thresholds": {},
     }
+
+
+def _spliced_response_from_rows(
+    *,
+    river_segment_id: str,
+    issue_time: datetime,
+    variable: str,
+    analysis_rows: Sequence[dict[str, Any]],
+    forecast_rows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    segments: list[dict[str, Any]] = []
+    unit = _unit_from_rows((*analysis_rows, *forecast_rows))
+    normalized_issue_time = _ensure_utc(issue_time)
+    analysis_data = [
+        _segment_point(row)
+        for row in analysis_rows
+        if _ensure_utc(row["valid_time"]) < normalized_issue_time
+    ]
+    if analysis_data:
+        segments.append(
+            {
+                "scenario": "analysis_true_field",
+                "scenario_id": "analysis_true_field",
+                "source": _source_label(analysis_rows[0]),
+                "data": analysis_data,
+            }
+        )
+
+    forecast_by_scenario: dict[str, list[dict[str, Any]]] = {}
+    forecast_source_by_scenario: dict[str, str] = {}
+    for row in forecast_rows:
+        scenario = str(row.get("scenario_id") or "forecast_gfs_deterministic")
+        forecast_by_scenario.setdefault(scenario, []).append(_segment_point(row))
+        forecast_source_by_scenario.setdefault(scenario, _source_label(row))
+
+    for scenario, data in forecast_by_scenario.items():
+        segments.append(
+            {
+                "scenario": scenario,
+                "scenario_id": scenario,
+                "source": forecast_source_by_scenario[scenario],
+                "data": sorted(data, key=lambda point: point["valid_time"]),
+            }
+        )
+
+    return {
+        "segments": segments,
+        "issue_time": _format_time(normalized_issue_time),
+        "river_segment_id": river_segment_id,
+        "variable": variable,
+        "unit": unit,
+    }
+
+
+def _segment_point(row: dict[str, Any]) -> dict[str, Any]:
+    return {"valid_time": _format_time(row["valid_time"]), "value": float(row["value"])}
+
+
+def _unit_from_rows(rows: Sequence[dict[str, Any]]) -> str:
+    for row in rows:
+        unit = row.get("unit")
+        if unit:
+            return str(unit)
+    return "m3/s"
+
+
+def _source_label(row: dict[str, Any]) -> str:
+    source_id = str(row.get("source_id") or "unknown")
+    lineage = row.get("lineage_json") or {}
+    if isinstance(lineage, dict) and lineage.get("fallback_reason"):
+        fallback_source = str(lineage.get("fallback_source_id") or source_id)
+        return f"{_display_source_id(fallback_source)} fallback"
+    return _display_source_id(source_id)
+
+
+def _display_source_id(source_id: str) -> str:
+    normalized = source_id.strip()
+    return normalized.upper() if normalized else "unknown"
+
+
+def _response_variable_name(requested_variables: Sequence[str]) -> str:
+    return "discharge" if "q_down" in requested_variables or not requested_variables else str(requested_variables[0])
 
 
 def _data_source_response(row: dict[str, Any]) -> dict[str, Any]:
