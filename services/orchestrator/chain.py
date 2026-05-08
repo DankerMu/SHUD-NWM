@@ -16,6 +16,7 @@ from packages.common.state_manager import StateManager, StateSnapshot
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+_SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
 
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running", "succeeded"}
@@ -654,6 +655,8 @@ class ForecastOrchestrator:
                 raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"{label} contains unsafe characters: {val!r}")
         if context.basin_id and not _SAFE_ID_RE.match(context.basin_id):
             raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"basin_id unsafe: {context.basin_id!r}")
+        if hasattr(self.config, "era5_area") and not _SAFE_AREA_RE.match(self.config.era5_area):
+            raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"era5_area unsafe: {self.config.era5_area!r}")
         run_manifest_path = Path(self.config.workspace_root) / "runs" / context.run_id / "input" / "manifest.json"
         return template_path.read_text(encoding="utf-8").format(
             source_id=context.source_id,
