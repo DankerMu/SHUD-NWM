@@ -701,7 +701,9 @@ class ForcingProducer:
                     weights_by_source_grid_station_variable,
                 ),
                 "Rn": {
-                    station_id: value * self.config.rn_shortwave_factor
+                    station_id: value * (
+                        1.0 if radiation_variable == "net_radiation" else self.config.rn_shortwave_factor
+                    )
                     for station_id, value in self._interpolate_forcing_variable(
                         "Rn",
                         fields[radiation_variable][valid_time],
@@ -1163,17 +1165,6 @@ def _missing_product_details(
             if valid_time not in product_times:
                 missing.append(f"{variable}:{_format_time(valid_time)}")
     return missing
-
-
-def _first_product(
-    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
-    required_variables: Sequence[str],
-) -> CanonicalProduct:
-    for variable in required_variables:
-        products_for_variable = products_by_variable.get(variable)
-        if products_for_variable:
-            return products_for_variable[sorted(products_for_variable)[0]]
-    raise ForcingProductionError("No canonical products are available.")
 
 
 def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]) -> tuple[datetime, ...]:

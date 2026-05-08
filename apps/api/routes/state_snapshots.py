@@ -22,7 +22,7 @@ def get_state_manager() -> StateManager:
 def list_state_snapshots(
     model_id: str | None = None,
     usable: bool | None = None,
-    limit: int = Query(default=DEFAULT_LIMIT, ge=1),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     offset: int = Query(default=0, ge=0),
     manager: StateManager = Depends(get_state_manager),
 ) -> dict[str, Any]:
