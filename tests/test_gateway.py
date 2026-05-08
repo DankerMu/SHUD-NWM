@@ -25,7 +25,7 @@ async def test_health(client):
     response = await client.get("/api/v1/slurm/health")
 
     assert response.status_code == 200
-    assert response.json() == {"backend": "mock", "version": "0.1.0", "status": "ok"}
+    assert response.json() == {"backend": "mock", "version": "0.1.0", "status": "ok", "error": None}
 
 
 @pytest.mark.asyncio
@@ -135,6 +135,33 @@ async def test_list_jobs(client):
     data = response.json()
     assert isinstance(data, list)
     assert [job["job_id"] for job in data] == ["mock_1002", "mock_1001"]
+
+
+@pytest.mark.asyncio
+async def test_array_task_results(client):
+    await client.post(
+        "/api/v1/slurm/internal/reset",
+        json={"delay_to_running_seconds": 0, "delay_to_succeeded_seconds": 0},
+    )
+    submitted = await client.post(
+        "/api/v1/slurm/job-arrays",
+        json={
+            "job_type": "run_shud_forecast_array",
+            "cycle_id": "gfs_2026050100",
+            "stage_name": "forecast",
+            "manifest": {"run_id": "run_array", "model_id": "model_001"},
+            "tasks": [
+                {"run_id": "run_0", "model_id": "model_001", "basin_version_id": "basin_0"},
+                {"run_id": "run_1", "model_id": "model_001", "basin_version_id": "basin_1"},
+            ],
+        },
+    )
+
+    response = await client.get(f"/api/v1/slurm/jobs/{submitted.json()['job_id']}/array-tasks")
+
+    assert response.status_code == 200
+    assert [task["task_id"] for task in response.json()] == [0, 1]
+    assert {task["status"] for task in response.json()} == {"succeeded"}
 
 
 @pytest.mark.asyncio

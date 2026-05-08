@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol, Sequence
 
 import httpx
 
@@ -19,7 +19,7 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cy
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
 
-TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+TERMINAL_JOB_STATUSES = {"succeeded", "partially_failed", "failed", "cancelled", "submission_failed"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running", "succeeded"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
@@ -63,15 +63,70 @@ class StageDefinition:
     template_name: str
     success_cycle_status: str
     failure_cycle_status: str
+    is_array: bool = False
 
 
-STAGES: tuple[StageDefinition, ...] = (
+LEGACY_FORECAST_STAGES: tuple[StageDefinition, ...] = (
     StageDefinition("download_gfs", "download", "download_gfs.sbatch", "raw_complete", "failed_download"),
     StageDefinition("convert_canonical", "canonical", "convert_canonical.sbatch", "canonical_ready", "failed_convert"),
     StageDefinition("produce_forcing", "forcing", "produce_forcing.sbatch", "forcing_ready", "failed_forcing"),
     StageDefinition("run_shud_forecast", "forecast", "run_shud_forecast.sbatch", "forecast_running", "failed_run"),
     StageDefinition("parse_output", "parse", "parse_output.sbatch", "complete", "failed_parse"),
 )
+
+M3_STAGES: tuple[StageDefinition, ...] = (
+    StageDefinition(
+        "download",
+        "download_source_cycle",
+        "download_source_cycle.sbatch",
+        "raw_complete",
+        "failed_download",
+        is_array=False,
+    ),
+    StageDefinition(
+        "convert",
+        "convert_canonical",
+        "convert_canonical.sbatch",
+        "canonical_ready",
+        "failed_convert",
+        is_array=False,
+    ),
+    StageDefinition(
+        "forcing",
+        "produce_forcing_array",
+        "produce_forcing_array.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+        is_array=True,
+    ),
+    StageDefinition(
+        "forecast",
+        "run_shud_forecast_array",
+        "run_shud_forecast_array.sbatch",
+        "forecast_running",
+        "failed_run",
+        is_array=True,
+    ),
+    StageDefinition(
+        "parse",
+        "parse_output_array",
+        "parse_output_array.sbatch",
+        "complete",
+        "failed_parse",
+        is_array=True,
+    ),
+    StageDefinition(
+        "frequency",
+        "compute_frequency_array",
+        "compute_frequency_array.sbatch",
+        "complete",
+        "failed_parse",
+        is_array=True,
+    ),
+    StageDefinition("publish", "publish_tiles", "publish_tiles.sbatch", "complete", "failed_publish", is_array=False),
+)
+
+STAGES: tuple[StageDefinition, ...] = M3_STAGES
 
 ANALYSIS_STAGES: tuple[StageDefinition, ...] = (
     StageDefinition("era5_download", "download", "download_era5.sbatch", "raw_complete", "failed_download"),
@@ -96,7 +151,7 @@ class OrchestratorConfig:
     object_store_prefix: str = ""
     slurm_gateway_url: str = "http://localhost:8000"
     templates_dir: Path | str | None = None
-    poll_interval_seconds: float = 1.0
+    poll_interval_seconds: float = 30.0
     job_timeout_seconds: float = 3600.0
     forecast_horizon_hours: int = 168
     scenario_id: str = "forecast_gfs_deterministic"
@@ -107,6 +162,7 @@ class OrchestratorConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
         object.__setattr__(self, "object_store_root", Path(self.object_store_root).expanduser().resolve())
+        object.__setattr__(self, "poll_interval_seconds", max(float(self.poll_interval_seconds), 1.0))
         if self.templates_dir is None:
             repo_root = Path(__file__).resolve().parents[2]
             object.__setattr__(self, "templates_dir", repo_root / "workers" / "sbatch_templates")
@@ -121,7 +177,7 @@ class OrchestratorConfig:
             object_store_root=os.getenv("OBJECT_STORE_ROOT", workspace_root),
             object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
             slurm_gateway_url=os.getenv("SLURM_GATEWAY_URL", "http://localhost:8000"),
-            poll_interval_seconds=float(os.getenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "1")),
+            poll_interval_seconds=float(os.getenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "30")),
             job_timeout_seconds=float(os.getenv("ORCHESTRATOR_JOB_TIMEOUT_SECONDS", "3600")),
             forecast_horizon_hours=int(os.getenv("FORECAST_HORIZON_HOURS", "168")),
             era5_area=os.getenv("ERA5_AREA", "55,70,15,140"),
@@ -228,11 +284,73 @@ class PipelineResult:
     stages: tuple[StageRunResult, ...]
 
 
+@dataclass(frozen=True)
+class ArrayTaskResult:
+    task_id: int
+    slurm_job_id: str
+    status: str
+    exit_code: int | None = None
+
+
+@dataclass(frozen=True)
+class ArrayAggregation:
+    total: int
+    succeeded: int
+    failed: int
+    cancelled: int
+    task_results: tuple[ArrayTaskResult, ...]
+
+    @property
+    def succeeded_task_ids(self) -> tuple[int, ...]:
+        return tuple(result.task_id for result in self.task_results if result.status == "succeeded")
+
+    @property
+    def failed_task_ids(self) -> tuple[int, ...]:
+        return tuple(result.task_id for result in self.task_results if result.status == "failed")
+
+    @property
+    def cancelled_task_ids(self) -> tuple[int, ...]:
+        return tuple(result.task_id for result in self.task_results if result.status == "cancelled")
+
+    @property
+    def status(self) -> str:
+        if self.total == 0 or self.succeeded == 0:
+            return "failed"
+        if self.succeeded == self.total:
+            return "succeeded"
+        return "partially_failed"
+
+
+@dataclass
+class CycleOrchestrationContext:
+    source_id: str
+    cycle_time: datetime
+    cycle_id: str
+    run_id: str
+    all_basins: list[dict[str, Any]]
+    active_basins: list[dict[str, Any]]
+    had_partial: bool = False
+    last_partial_status: str | None = None
+
+
 class SlurmGatewayClient(Protocol):
     def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
 
+    def submit_job_array(
+        self,
+        job_type: str | Mapping[str, Any],
+        cycle_id: str | None = None,
+        stage_name: str | None = None,
+        tasks: Sequence[Mapping[str, Any]] | None = None,
+        manifest: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
     def get_job_status(self, job_id: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     def fetch_logs(self, job_id: str) -> dict[str, Any]:
@@ -240,6 +358,9 @@ class SlurmGatewayClient(Protocol):
 
 
 class OrchestratorRepository(Protocol):
+    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+        raise NotImplementedError
+
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         raise NotImplementedError
 
@@ -286,7 +407,20 @@ class OrchestratorRepository(Protocol):
         exit_code: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        log_uri: str | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
+        raise NotImplementedError
+
+    def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def query_pipeline_jobs_by_run(self, run_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def query_pipeline_job_by_slurm_id(self, slurm_job_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def insert_pipeline_event(
@@ -331,8 +465,43 @@ class HttpSlurmGatewayClient:
     def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/api/v1/slurm/jobs", json=payload, expected=(200, 201))
 
+    def submit_job_array(
+        self,
+        job_type: str | Mapping[str, Any],
+        cycle_id: str | None = None,
+        stage_name: str | None = None,
+        tasks: Sequence[Mapping[str, Any]] | None = None,
+        manifest: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(job_type, Mapping):
+            payload = dict(job_type)
+        else:
+            payload = {"job_type": job_type}
+        if cycle_id is not None:
+            payload["cycle_id"] = cycle_id
+        if stage_name is not None:
+            payload["stage_name"] = stage_name
+        if tasks is not None:
+            payload["tasks"] = [dict(task) for task in tasks]
+        if manifest is not None:
+            payload["manifest"] = dict(manifest)
+        return self._request("POST", "/api/v1/slurm/job-arrays", json=payload, expected=(200, 201))
+
     def get_job_status(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/v1/slurm/jobs/{job_id}", expected=(200,))
+
+    def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
+        response = self._request("GET", f"/api/v1/slurm/jobs/{job_id}/array-tasks", expected=(200,))
+        if isinstance(response, list):
+            return [dict(item) for item in response]
+        tasks = response.get("tasks") if isinstance(response, Mapping) else None
+        if isinstance(tasks, Sequence) and not isinstance(tasks, str | bytes):
+            return [dict(_coerce_mapping(item)) for item in tasks]
+        raise SlurmClientError(
+            "SLURM_GATEWAY_INVALID_RESPONSE",
+            "Slurm Gateway returned an invalid array task response.",
+            {"response": response},
+        )
 
     def fetch_logs(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/v1/slurm/jobs/{job_id}/logs", expected=(200,))
@@ -344,7 +513,7 @@ class HttpSlurmGatewayClient:
         *,
         expected: tuple[int, ...],
         json: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         try:
             with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
                 response = client.request(method, path, json=json)
@@ -359,7 +528,7 @@ class HttpSlurmGatewayClient:
 
 class ForecastOrchestrator:
     stages: tuple[StageDefinition, ...] = STAGES
-    final_pipeline_status = "parsed"
+    final_pipeline_status = "complete"
 
     def __init__(
         self,
@@ -375,6 +544,7 @@ class ForecastOrchestrator:
         self.state_manager = state_manager
         self.slurm_client = slurm_client or HttpSlurmGatewayClient(config.slurm_gateway_url)
         self.object_store = object_store or LocalObjectStore(config.object_store_root, config.object_store_prefix)
+        self._active_cycles: set[str] = set()
 
     @classmethod
     def from_env(cls) -> ForecastOrchestrator:
@@ -384,6 +554,697 @@ class ForecastOrchestrator:
             repository=PsycopgOrchestratorRepository.from_env(),
             state_manager=StateManager.from_env(),
         )
+
+    def orchestrate_cycle(
+        self,
+        source: str,
+        cycle_time: str | datetime,
+        basins: Sequence[Mapping[str, Any] | ModelContext],
+    ) -> PipelineResult:
+        _validate_safe_id("source", source)
+        parsed_cycle_time = parse_cycle_time(cycle_time)
+        cycle_id = cycle_id_for(source, parsed_cycle_time)
+        _validate_safe_id("cycle_id", cycle_id)
+        if self.repository.has_active_orchestration(source_id=source, cycle_time=parsed_cycle_time):
+            raise OrchestratorError(
+                "PIPELINE_ALREADY_ACTIVE",
+                f"An active orchestration already exists for {source} {format_cycle_time(parsed_cycle_time)}.",
+                {"source_id": source, "cycle_time": _format_time(parsed_cycle_time), "cycle_id": cycle_id},
+            )
+        if cycle_id in self._active_cycles:
+            raise OrchestratorError(
+                "PIPELINE_ALREADY_ACTIVE",
+                f"An active orchestration already exists for {source} {format_cycle_time(parsed_cycle_time)}.",
+                {"source_id": source, "cycle_time": _format_time(parsed_cycle_time), "cycle_id": cycle_id},
+            )
+
+        normalized_basins = self._normalize_cycle_basins(basins, source, parsed_cycle_time)
+        if not normalized_basins:
+            raise OrchestratorError("EMPTY_BASIN_LIST", "orchestrate_cycle requires at least one basin.")
+
+        self._active_cycles.add(cycle_id)
+        try:
+            self.repository.ensure_forecast_cycle(source_id=source, cycle_time=parsed_cycle_time)
+            context = CycleOrchestrationContext(
+                source_id=source,
+                cycle_time=parsed_cycle_time,
+                cycle_id=cycle_id,
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(parsed_cycle_time)}",
+                all_basins=normalized_basins,
+                active_basins=list(normalized_basins),
+            )
+            return self._run_cycle_chain(context)
+        finally:
+            self._active_cycles.discard(cycle_id)
+
+    def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+        updates: list[dict[str, Any]] = []
+        for job in self._query_pipeline_jobs_by_cycle(cycle_id):
+            if str(job.get("status")) in TERMINAL_JOB_STATUSES or not job.get("slurm_job_id"):
+                continue
+            gateway_job = _coerce_mapping(self.slurm_client.get_job_status(str(job["slurm_job_id"])))
+            new_status = _status_from_gateway_job(gateway_job)
+            if new_status == str(job.get("status")):
+                continue
+            log_uri = self._log_uri_for_pipeline_job(job) if new_status in TERMINAL_JOB_STATUSES else None
+            previous_status, record = self.repository.update_pipeline_job_status(
+                str(job["job_id"]),
+                new_status,
+                started_at=_parse_gateway_time(gateway_job.get("started_at")),
+                finished_at=_parse_gateway_time(gateway_job.get("finished_at")),
+                exit_code=gateway_job.get("exit_code"),
+                error_code=gateway_job.get("error_code"),
+                error_message=gateway_job.get("error_message"),
+                log_uri=str(log_uri) if log_uri else None,
+            )
+            if str(record.get("status")) != new_status:
+                continue
+            self.repository.insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=str(job["job_id"]),
+                event_type="status_change",
+                status_from=previous_status or str(job.get("status")),
+                status_to=new_status,
+                message=_stage_status_message(str(job.get("stage") or job.get("job_type")), new_status, gateway_job),
+                details={
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": job.get("slurm_job_id"),
+                    "exit_code": gateway_job.get("exit_code"),
+                    "error_code": gateway_job.get("error_code"),
+                },
+            )
+            updates.append(record)
+        return updates
+
+    def _log_uri_for_pipeline_job(self, job: Mapping[str, Any]) -> str | None:
+        if job.get("log_uri"):
+            return str(job["log_uri"])
+        run_id = job.get("run_id")
+        stage = job.get("stage")
+        if run_id and stage:
+            return self.object_store.uri_for_key(f"runs/{run_id}/logs/{stage}.log")
+        return None
+
+    def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult:
+        stage_results: list[StageRunResult] = []
+        existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
+        for stage in self.stages:
+            existing_job = self._find_existing_stage_job(existing_jobs, stage)
+            if existing_job is not None:
+                result, aggregation = self._resume_cycle_stage(stage, context, existing_job)
+            else:
+                result, aggregation = self._submit_and_wait_cycle_stage(stage, context)
+                existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
+
+            stage_results.append(result)
+            if result.status in {"failed", "cancelled", "submission_failed"}:
+                return PipelineResult(context.run_id, context.cycle_id, "failed", tuple(stage_results))
+
+            if stage.is_array and aggregation is not None:
+                self._apply_array_progress(stage, context, aggregation)
+
+        final_status = context.last_partial_status if context.had_partial else self.final_pipeline_status
+        return PipelineResult(
+            context.run_id,
+            context.cycle_id,
+            final_status or self.final_pipeline_status,
+            tuple(stage_results),
+        )
+
+    def _submit_and_wait_cycle_stage(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+    ) -> tuple[StageRunResult, ArrayAggregation | None]:
+        if stage.is_array and not context.active_basins:
+            self.repository.update_forecast_cycle_status(
+                source_id=context.source_id,
+                cycle_time=context.cycle_time,
+                status=stage.failure_cycle_status,
+                error_code="NO_ACTIVE_BASINS",
+                error_message=f"No basins available for {stage.stage}.",
+            )
+            return (
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=_pipeline_job_id(context.run_id, stage.stage),
+                    slurm_job_id="",
+                    status="failed",
+                    error_code="NO_ACTIVE_BASINS",
+                    error_message=f"No basins available for {stage.stage}.",
+                ),
+                None,
+            )
+
+        self._before_cycle_stage_submit(stage, context)
+        submitted: dict[str, Any]
+        manifest_index_path: Path | None = None
+        stage_manifest = self._build_cycle_stage_manifest(stage, context)
+        try:
+            if stage.is_array:
+                tasks = self._reindexed_manifest_entries(context.active_basins)
+                manifest_index_path = self._write_cycle_manifest_index(context, stage, tasks)
+                stage_manifest["manifest_index_path"] = str(manifest_index_path)
+                submitted = self._submit_array_stage(stage, context, tasks, stage_manifest)
+            else:
+                submitted = _coerce_mapping(
+                    self.slurm_client.submit_job(
+                        {
+                            "run_id": context.run_id,
+                            "model_id": _cycle_payload_model_id(context),
+                            "job_type": stage.job_type,
+                            "manifest": stage_manifest,
+                        }
+                    )
+                )
+        except Exception as error:
+            return self._record_submission_failure(stage, context, error), None
+
+        slurm_job_id = str(submitted["job_id"])
+        pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
+        log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
+        submitted_status = _status_from_gateway_job(submitted)
+        self.repository.upsert_pipeline_job(
+            {
+                "job_id": pipeline_job_id,
+                "run_id": context.run_id,
+                "cycle_id": context.cycle_id,
+                "job_type": stage.job_type,
+                "slurm_job_id": slurm_job_id,
+                "model_id": None if not stage.is_array else _cycle_payload_model_id(context),
+                "status": submitted_status,
+                "stage": stage.stage,
+                "submitted_at": _parse_gateway_time(submitted.get("submitted_at")) or _utcnow(),
+                "started_at": _parse_gateway_time(submitted.get("started_at")),
+                "finished_at": _parse_gateway_time(submitted.get("finished_at")),
+                "exit_code": submitted.get("exit_code"),
+                "error_code": submitted.get("error_code"),
+                "error_message": submitted.get("error_message"),
+                "log_uri": log_uri,
+            }
+        )
+        self.repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=pipeline_job_id,
+            event_type="submission",
+            status_from=None,
+            status_to=submitted_status,
+            message=f"{stage.stage} submitted as Slurm job {slurm_job_id}",
+            details={
+                "stage": stage.stage,
+                "job_type": stage.job_type,
+                "slurm_job_id": slurm_job_id,
+                "manifest_index_path": str(manifest_index_path) if manifest_index_path else None,
+            },
+        )
+        terminal = self._poll_cycle_stage_until_terminal(
+            stage=stage,
+            context=context,
+            pipeline_job_id=pipeline_job_id,
+            initial_job=submitted,
+            initial_status=submitted_status,
+            log_uri=log_uri,
+        )
+        self._persist_gateway_logs(slurm_job_id, log_uri)
+
+        aggregation = self._aggregate_array_stage(stage, context, slurm_job_id, terminal) if stage.is_array else None
+        result_status = aggregation.status if aggregation is not None else _status_from_gateway_job(terminal)
+        if aggregation is not None:
+            self._record_cycle_stage_status_override(stage, context, pipeline_job_id, terminal, aggregation, log_uri)
+
+        self._after_cycle_stage_terminal(stage, context, result_status, terminal, aggregation)
+        return (
+            StageRunResult(
+                stage=stage.stage,
+                job_type=stage.job_type,
+                pipeline_job_id=pipeline_job_id,
+                slurm_job_id=slurm_job_id,
+                status=result_status,
+                exit_code=terminal.get("exit_code"),
+                error_code=terminal.get("error_code"),
+                error_message=terminal.get("error_message"),
+            ),
+            aggregation,
+        )
+
+    def _resume_cycle_stage(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        job: dict[str, Any],
+    ) -> tuple[StageRunResult, ArrayAggregation | None]:
+        status = str(job.get("status"))
+        terminal = dict(job)
+        if status not in TERMINAL_JOB_STATUSES and job.get("slurm_job_id"):
+            terminal = self._poll_cycle_stage_until_terminal(
+                stage=stage,
+                context=context,
+                pipeline_job_id=str(job["job_id"]),
+                initial_job={"job_id": job["slurm_job_id"], "status": status},
+                initial_status=status,
+                log_uri=job.get("log_uri"),
+            )
+            status = _status_from_gateway_job(terminal)
+
+        aggregation = None
+        if stage.is_array and job.get("slurm_job_id") and status not in {"failed", "cancelled", "submission_failed"}:
+            aggregation = self._aggregate_array_stage(stage, context, str(job["slurm_job_id"]), terminal)
+            status = aggregation.status
+            if str(job.get("status")) not in TERMINAL_JOB_STATUSES or status != str(job.get("status")):
+                log_uri = str(
+                    job.get("log_uri")
+                    or self._log_uri_for_pipeline_job(job)
+                    or self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
+                )
+                self._record_cycle_stage_status_override(
+                    stage,
+                    context,
+                    str(job["job_id"]),
+                    terminal,
+                    aggregation,
+                    log_uri,
+                )
+            if status == "partially_failed":
+                context.had_partial = True
+                context.last_partial_status = self._partial_cycle_status(stage)
+
+        self._after_cycle_stage_terminal(stage, context, status, terminal, aggregation)
+        return (
+            StageRunResult(
+                stage=stage.stage,
+                job_type=stage.job_type,
+                pipeline_job_id=str(job["job_id"]),
+                slurm_job_id=str(job.get("slurm_job_id") or ""),
+                status=status,
+                exit_code=job.get("exit_code"),
+                error_code=job.get("error_code"),
+                error_message=job.get("error_message"),
+            ),
+            aggregation,
+        )
+
+    def _poll_cycle_stage_until_terminal(
+        self,
+        *,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        pipeline_job_id: str,
+        initial_job: dict[str, Any],
+        initial_status: str,
+        log_uri: str | None,
+    ) -> dict[str, Any]:
+        job = dict(initial_job)
+        current_status = initial_status
+        deadline = time.monotonic() + self.config.job_timeout_seconds
+        while _status_from_gateway_job(job) not in TERMINAL_JOB_STATUSES:
+            if time.monotonic() >= deadline:
+                raise OrchestratorError(
+                    "SLURM_JOB_TIMEOUT",
+                    f"Stage {stage.stage} did not reach a terminal status before timeout.",
+                    {"stage": stage.stage, "cycle_id": context.cycle_id, "slurm_job_id": job["job_id"]},
+                )
+            time.sleep(self.config.poll_interval_seconds)
+            job = _coerce_mapping(self.slurm_client.get_job_status(str(job["job_id"])))
+            new_status = _status_from_gateway_job(job)
+            if new_status == current_status:
+                continue
+            if stage.is_array and new_status in TERMINAL_JOB_STATUSES:
+                current_status = new_status
+                continue
+            previous_status, record = self.repository.update_pipeline_job_status(
+                pipeline_job_id,
+                new_status,
+                started_at=_parse_gateway_time(job.get("started_at")),
+                finished_at=_parse_gateway_time(job.get("finished_at")),
+                exit_code=job.get("exit_code"),
+                error_code=job.get("error_code"),
+                error_message=job.get("error_message"),
+                log_uri=log_uri if new_status in TERMINAL_JOB_STATUSES else None,
+            )
+            persisted_status = str(record.get("status") or new_status)
+            if persisted_status != new_status:
+                job["status"] = persisted_status
+                current_status = persisted_status
+                if persisted_status in TERMINAL_JOB_STATUSES:
+                    return job
+                continue
+            self.repository.insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=pipeline_job_id,
+                event_type="status_change",
+                status_from=previous_status or current_status,
+                status_to=new_status,
+                message=_stage_status_message(stage.stage, new_status, job),
+                details={
+                    "stage": stage.stage,
+                    "job_type": stage.job_type,
+                    "slurm_job_id": job["job_id"],
+                    "exit_code": job.get("exit_code"),
+                    "error_code": job.get("error_code"),
+                },
+            )
+            current_status = new_status
+        return job
+
+    def _submit_array_stage(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        tasks: list[dict[str, Any]],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        submit_job_array = getattr(self.slurm_client, "submit_job_array", None)
+        if callable(submit_job_array):
+            return _coerce_mapping(
+                submit_job_array(
+                    stage.job_type,
+                    cycle_id=context.cycle_id,
+                    stage_name=stage.stage,
+                    tasks=tasks,
+                    manifest=manifest,
+                )
+            )
+        return _coerce_mapping(
+            self.slurm_client.submit_job(
+                {
+                    "run_id": context.run_id,
+                    "model_id": _cycle_payload_model_id(context),
+                    "job_type": stage.job_type,
+                    "manifest": {**manifest, "tasks": tasks},
+                }
+            )
+        )
+
+    def _aggregate_array_stage(
+        self,
+        _stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        slurm_job_id: str,
+        terminal: dict[str, Any],
+    ) -> ArrayAggregation:
+        provider = getattr(self.slurm_client, "get_array_task_results", None)
+        if callable(provider):
+            try:
+                raw_results = provider(slurm_job_id)
+            except (KeyError, LookupError):
+                raw_results = None
+            if raw_results is not None:
+                return _coerce_array_aggregation(raw_results, slurm_job_id)
+
+        stdout_provider = getattr(self.slurm_client, "get_array_sacct_output", None)
+        if callable(stdout_provider):
+            return parse_sacct_array_results(str(stdout_provider(slurm_job_id)), slurm_job_id)
+
+        status = _status_from_gateway_job(terminal)
+        task_status = "succeeded" if status == "succeeded" else "cancelled" if status == "cancelled" else "failed"
+        results = tuple(
+            ArrayTaskResult(
+                task_id=index,
+                slurm_job_id=f"{slurm_job_id}_{index}",
+                status=task_status,
+                exit_code=terminal.get("exit_code"),
+            )
+            for index, _basin in enumerate(context.active_basins)
+        )
+        return _aggregation_from_task_results(results)
+
+    def _record_cycle_stage_status_override(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        pipeline_job_id: str,
+        terminal: dict[str, Any],
+        aggregation: ArrayAggregation,
+        log_uri: str,
+    ) -> None:
+        previous_status, record = self.repository.update_pipeline_job_status(
+            pipeline_job_id,
+            aggregation.status,
+            finished_at=_parse_gateway_time(terminal.get("finished_at")) or _utcnow(),
+            exit_code=terminal.get("exit_code"),
+            error_code=terminal.get("error_code"),
+            error_message=terminal.get("error_message"),
+            log_uri=log_uri,
+        )
+        if str(record.get("status")) != aggregation.status:
+            return
+        self.repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=pipeline_job_id,
+            event_type="status_change",
+            status_from=previous_status or _status_from_gateway_job(terminal),
+            status_to=aggregation.status,
+            message=f"{stage.stage} array aggregated as {aggregation.status}",
+            details={
+                "stage": stage.stage,
+                "job_type": stage.job_type,
+                "total": aggregation.total,
+                "succeeded": aggregation.succeeded,
+                "failed": aggregation.failed,
+                "cancelled": aggregation.cancelled,
+            },
+        )
+
+    def _after_cycle_stage_terminal(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        result_status: str,
+        terminal: dict[str, Any],
+        aggregation: ArrayAggregation | None,
+    ) -> None:
+        if result_status == "succeeded":
+            status = self._success_cycle_status(stage, context)
+            if not (stage.stage == "publish" and context.had_partial):
+                self.repository.update_forecast_cycle_status(
+                    source_id=context.source_id,
+                    cycle_time=context.cycle_time,
+                    status=status,
+                )
+            elif context.last_partial_status is not None:
+                self.repository.update_forecast_cycle_status(
+                    source_id=context.source_id,
+                    cycle_time=context.cycle_time,
+                    status=context.last_partial_status,
+                )
+            return
+
+        if result_status == "partially_failed" and aggregation is not None:
+            context.had_partial = True
+            context.last_partial_status = self._partial_cycle_status(stage)
+            self.repository.update_forecast_cycle_status(
+                source_id=context.source_id,
+                cycle_time=context.cycle_time,
+                status=context.last_partial_status,
+                error_code=None,
+                error_message=None,
+            )
+            return
+
+        error_code = terminal.get("error_code") or f"{stage.job_type.upper()}_{result_status.upper()}"
+        error_message = terminal.get("error_message") or f"Stage {stage.stage} ended with {result_status}."
+        self.repository.update_forecast_cycle_status(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            status=stage.failure_cycle_status,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
+    def _before_cycle_stage_submit(self, stage: StageDefinition, context: CycleOrchestrationContext) -> None:
+        if stage.stage == "download":
+            self.repository.update_forecast_cycle_status(
+                source_id=context.source_id,
+                cycle_time=context.cycle_time,
+                status="downloading",
+            )
+        elif stage.stage == "forecast":
+            self.repository.update_forecast_cycle_status(
+                source_id=context.source_id,
+                cycle_time=context.cycle_time,
+                status="forecast_running",
+            )
+
+    def _record_submission_failure(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        error: Exception,
+    ) -> StageRunResult:
+        pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
+        now = _utcnow()
+        message = str(error)
+        self.repository.upsert_pipeline_job(
+            {
+                "job_id": pipeline_job_id,
+                "run_id": context.run_id,
+                "cycle_id": context.cycle_id,
+                "job_type": stage.job_type,
+                "slurm_job_id": None,
+                "model_id": None if not stage.is_array else _cycle_payload_model_id(context),
+                "status": "submission_failed",
+                "stage": stage.stage,
+                "submitted_at": now,
+                "started_at": None,
+                "finished_at": now,
+                "exit_code": None,
+                "error_code": "SBATCH_SUBMISSION_FAILED",
+                "error_message": message,
+                "log_uri": None,
+            }
+        )
+        self.repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=pipeline_job_id,
+            event_type="submission",
+            status_from=None,
+            status_to="submission_failed",
+            message=f"{stage.stage} submission failed: {message}",
+            details={"stage": stage.stage, "job_type": stage.job_type, "error": message},
+        )
+        self.repository.update_forecast_cycle_status(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            status=stage.failure_cycle_status,
+            error_code="SBATCH_SUBMISSION_FAILED",
+            error_message=message,
+        )
+        return StageRunResult(
+            stage=stage.stage,
+            job_type=stage.job_type,
+            pipeline_job_id=pipeline_job_id,
+            slurm_job_id="",
+            status="submission_failed",
+            error_code="SBATCH_SUBMISSION_FAILED",
+            error_message=message,
+        )
+
+    def _apply_array_progress(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        aggregation: ArrayAggregation,
+    ) -> None:
+        if aggregation.status == "succeeded":
+            if context.had_partial and stage.stage in {"parse", "frequency"}:
+                context.last_partial_status = "parsed_partial"
+            return
+        if aggregation.status == "failed":
+            context.active_basins = []
+            return
+        context.had_partial = True
+        context.last_partial_status = self._partial_cycle_status(stage)
+        context.active_basins = build_reindexed_manifest(context.active_basins, aggregation.succeeded_task_ids)
+
+    def _success_cycle_status(self, stage: StageDefinition, context: CycleOrchestrationContext) -> str:
+        if not context.had_partial:
+            return stage.success_cycle_status
+        if stage.stage in {"parse", "frequency", "publish"}:
+            return "parsed_partial"
+        if stage.stage in {"forcing", "forecast"}:
+            return "forcing_ready_partial"
+        return context.last_partial_status or stage.success_cycle_status
+
+    def _partial_cycle_status(self, stage: StageDefinition) -> str:
+        if stage.stage in {"parse", "frequency"}:
+            return "parsed_partial"
+        return "forcing_ready_partial"
+
+    def _build_cycle_stage_manifest(self, stage: StageDefinition, context: CycleOrchestrationContext) -> dict[str, Any]:
+        manifest: dict[str, Any] = {
+            "run_id": context.run_id,
+            "model_id": _cycle_payload_model_id(context),
+            "job_type": stage.job_type,
+            "stage": stage.stage,
+            "stage_name": stage.stage,
+            "cycle_id": context.cycle_id,
+            "source_id": context.source_id,
+            "cycle_time": _format_time(context.cycle_time),
+            "workspace_dir": str(Path(self.config.workspace_root)),
+            "total_basins": len(context.all_basins),
+            "active_basins": len(context.active_basins),
+        }
+        if stage.stage == "publish":
+            active_keys = {_basin_key(basin) for basin in context.active_basins}
+            excluded = [basin for basin in context.all_basins if _basin_key(basin) not in active_keys]
+            manifest["metadata"] = {
+                "total_basins": len(context.all_basins),
+                "published_basins": len(context.active_basins),
+                "excluded_basins": [_basin_identifier(basin) for basin in excluded],
+            }
+            manifest["basins"] = list(context.active_basins)
+        return manifest
+
+    def _write_cycle_manifest_index(
+        self,
+        context: CycleOrchestrationContext,
+        stage: StageDefinition,
+        tasks: list[dict[str, Any]],
+    ) -> Path:
+        manifest_dir = self._workspace_path("runs", context.run_id, "input")
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self._workspace_path("runs", context.run_id, "input", f"{stage.stage}_manifest_index.json")
+        manifest_path.write_text(json.dumps(tasks, indent=2, sort_keys=True), encoding="utf-8")
+        return manifest_path
+
+    def _reindexed_manifest_entries(self, basins: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return build_reindexed_manifest([dict(basin) for basin in basins], range(len(basins)))
+
+    def _normalize_cycle_basins(
+        self,
+        basins: Sequence[Mapping[str, Any] | ModelContext],
+        source_id: str,
+        cycle_time: datetime,
+    ) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        compact_cycle = format_cycle_time(cycle_time)
+        for index, basin in enumerate(basins):
+            if isinstance(basin, ModelContext):
+                entry = {
+                    "model_id": basin.model_id,
+                    "basin_id": basin.basin_id,
+                    "basin_version_id": basin.basin_version_id,
+                    "river_network_version_id": basin.river_network_version_id,
+                    "segment_count": basin.segment_count,
+                    "model_package_uri": basin.model_package_uri,
+                }
+            else:
+                entry = dict(basin)
+            model_id = str(entry.get("model_id") or "")
+            if not model_id:
+                raise OrchestratorError("BASIN_MODEL_ID_MISSING", "Each basin entry requires model_id.")
+            entry.setdefault("basin_id", entry.get("model_id"))
+            entry.setdefault("basin_version_id", f"{model_id}_basin")
+            entry.setdefault("run_id", f"fcst_{source_id.lower()}_{compact_cycle}_{model_id}")
+            entry.setdefault("workspace_dir", str(Path(self.config.workspace_root)))
+            entry["task_id"] = index
+            entry.setdefault("original_task_id", index)
+            for field_name in (
+                "model_id",
+                "basin_id",
+                "basin_version_id",
+                "river_network_version_id",
+                "run_id",
+            ):
+                field_value = entry.get(field_name)
+                if field_value not in (None, ""):
+                    _validate_safe_id(f"basins[{index}].{field_name}", str(field_value))
+            entries.append(entry)
+        return entries
+
+    def _query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
+        query = getattr(self.repository, "query_pipeline_jobs_by_cycle", None)
+        if callable(query):
+            return [dict(job) for job in query(cycle_id)]
+        return []
+
+    @staticmethod
+    def _find_existing_stage_job(jobs: Sequence[Mapping[str, Any]], stage: StageDefinition) -> dict[str, Any] | None:
+        for job in jobs:
+            if job.get("stage") == stage.stage or job.get("job_type") == stage.job_type:
+                return dict(job)
+        return None
 
     def trigger_forecast(
         self,
@@ -415,11 +1276,17 @@ class ForecastOrchestrator:
         self._write_run_manifest(context, manifest)
         self.repository.create_hydro_run(context, manifest)
         self.repository.update_hydro_run_status(context.run_id, "staged")
-        return self.run_chain(context)
+        return self.run_chain(context, stages=LEGACY_FORECAST_STAGES)
 
-    def run_chain(self, context: ForecastRunContext) -> PipelineResult:
+    def run_chain(
+        self,
+        context: ForecastRunContext | AnalysisRunContext,
+        *,
+        stages: Sequence[StageDefinition] | None = None,
+    ) -> PipelineResult:
         stage_results: list[StageRunResult] = []
-        for index, stage in enumerate(self.stages):
+        selected_stages = tuple(stages or self.stages)
+        for index, stage in enumerate(selected_stages):
             result = self._submit_and_wait(stage, context, first_stage=index == 0)
             stage_results.append(result)
             if result.status != "succeeded":
@@ -467,7 +1334,7 @@ class ForecastOrchestrator:
         slurm_job_id = str(submitted["job_id"])
         pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
         log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
-        current_status = str(submitted["status"])
+        current_status = _status_from_gateway_job(submitted)
         pipeline_record = self.repository.upsert_pipeline_job(
             {
                 "job_id": pipeline_job_id,
@@ -475,6 +1342,7 @@ class ForecastOrchestrator:
                 "cycle_id": context.cycle_id,
                 "job_type": stage.job_type,
                 "slurm_job_id": slurm_job_id,
+                "model_id": context.model_id,
                 "status": current_status,
                 "stage": stage.stage,
                 "submitted_at": _parse_gateway_time(submitted.get("submitted_at")),
@@ -536,7 +1404,7 @@ class ForecastOrchestrator:
         job = initial_job
         current_status = initial_status
         deadline = time.monotonic() + self.config.job_timeout_seconds
-        while str(job["status"]) not in TERMINAL_JOB_STATUSES:
+        while _status_from_gateway_job(job) not in TERMINAL_JOB_STATUSES:
             if time.monotonic() >= deadline:
                 raise OrchestratorError(
                     "SLURM_JOB_TIMEOUT",
@@ -545,10 +1413,10 @@ class ForecastOrchestrator:
                 )
             time.sleep(self.config.poll_interval_seconds)
             job = self.slurm_client.get_job_status(str(job["job_id"]))
-            new_status = str(job["status"])
+            new_status = _status_from_gateway_job(job)
             if new_status == current_status:
                 continue
-            previous_status, _record = self.repository.update_pipeline_job_status(
+            previous_status, record = self.repository.update_pipeline_job_status(
                 pipeline_job_id,
                 new_status,
                 started_at=_parse_gateway_time(job.get("started_at")),
@@ -557,6 +1425,13 @@ class ForecastOrchestrator:
                 error_code=job.get("error_code"),
                 error_message=job.get("error_message"),
             )
+            persisted_status = str(record.get("status") or new_status)
+            if persisted_status != new_status:
+                job["status"] = persisted_status
+                current_status = persisted_status
+                if persisted_status in TERMINAL_JOB_STATUSES:
+                    return job
+                continue
             entity_type, entity_id = self._pipeline_event_target(context, pipeline_job_id)
             self.repository.insert_pipeline_event(
                 entity_type=entity_type,
@@ -570,27 +1445,32 @@ class ForecastOrchestrator:
             self._after_stage_status_change(stage, context, previous_status or current_status, new_status, job)
             current_status = new_status
 
-        if str(job["status"]) != current_status:
-            previous_status, _record = self.repository.update_pipeline_job_status(
+        terminal_status = _status_from_gateway_job(job)
+        if terminal_status != current_status:
+            previous_status, record = self.repository.update_pipeline_job_status(
                 pipeline_job_id,
-                str(job["status"]),
+                terminal_status,
                 started_at=_parse_gateway_time(job.get("started_at")),
                 finished_at=_parse_gateway_time(job.get("finished_at")),
                 exit_code=job.get("exit_code"),
                 error_code=job.get("error_code"),
                 error_message=job.get("error_message"),
             )
+            persisted_status = str(record.get("status") or terminal_status)
+            if persisted_status != terminal_status:
+                job["status"] = persisted_status
+                return job
             entity_type, entity_id = self._pipeline_event_target(context, pipeline_job_id)
             self.repository.insert_pipeline_event(
                 entity_type=entity_type,
                 entity_id=entity_id,
                 event_type="status_change",
                 status_from=previous_status or current_status,
-                status_to=str(job["status"]),
-                message=_stage_status_message(stage.stage, str(job["status"]), job),
+                status_to=terminal_status,
+                message=_stage_status_message(stage.stage, terminal_status, job),
                 details={"stage": stage.stage, "slurm_job_id": job["job_id"]},
             )
-            self._after_stage_status_change(stage, context, previous_status or current_status, str(job["status"]), job)
+            self._after_stage_status_change(stage, context, previous_status or current_status, terminal_status, job)
         return job
 
     def _before_stage_submit(
@@ -598,13 +1478,13 @@ class ForecastOrchestrator:
         stage: StageDefinition,
         context: ForecastRunContext | AnalysisRunContext,
     ) -> None:
-        if stage.stage == "download_gfs":
+        if stage.stage in {"download_gfs", "download"}:
             self.repository.update_forecast_cycle_status(
                 source_id=context.source_id,
                 cycle_time=context.cycle_time,
                 status="downloading",
             )
-        elif stage.stage == "run_shud_forecast":
+        elif stage.stage in {"run_shud_forecast", "forecast"}:
             self.repository.update_forecast_cycle_status(
                 source_id=context.source_id,
                 cycle_time=context.cycle_time,
@@ -622,9 +1502,9 @@ class ForecastOrchestrator:
             cycle_time=context.cycle_time,
             status=stage.success_cycle_status,
         )
-        if stage.stage == "run_shud_forecast":
+        if stage.stage in {"run_shud_forecast", "forecast"}:
             self.repository.update_hydro_run_status(context.run_id, "succeeded")
-        elif stage.stage == "parse_output":
+        elif stage.stage in {"parse_output", "parse"}:
             self.repository.update_hydro_run_status(context.run_id, "parsed")
 
     def _after_stage_failure(
@@ -669,7 +1549,11 @@ class ForecastOrchestrator:
     def render_stage_template(self, stage: StageDefinition, context: ForecastRunContext | AnalysisRunContext) -> str:
         template_path = Path(self.config.templates_dir) / stage.template_name
         if not template_path.exists():
-            raise OrchestratorError("SBATCH_TEMPLATE_MISSING", f"Missing sbatch template: {template_path.name}")
+            repo_template_path = Path(__file__).resolve().parents[2] / "infra" / "sbatch" / stage.template_name
+            if repo_template_path.exists():
+                template_path = repo_template_path
+            else:
+                raise OrchestratorError("SBATCH_TEMPLATE_MISSING", f"Missing sbatch template: {template_path.name}")
         for label, val in [
             ("source_id", context.source_id),
             ("model_id", context.model_id),
@@ -683,37 +1567,56 @@ class ForecastOrchestrator:
             raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"basin_id unsafe: {context.basin_id!r}")
         if hasattr(self.config, "era5_area") and not _SAFE_AREA_RE.match(self.config.era5_area):
             raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"era5_area unsafe: {self.config.era5_area!r}")
-        run_manifest_path = Path(self.config.workspace_root) / "runs" / context.run_id / "input" / "manifest.json"
-        return template_path.read_text(encoding="utf-8").format(
-            source_id=context.source_id,
-            source_id_lower=context.source_id.lower(),
-            cycle_time=format_cycle_time(context.cycle_time),
-            cycle_time_iso=_format_time(context.cycle_time),
-            model_id=context.model_id,
-            basin_id=context.basin_id or "",
-            basin_version_id=context.basin_version_id,
-            river_network_version_id=context.river_network_version_id,
-            run_id=context.run_id,
-            stage_name=stage.stage,
-            job_type=stage.job_type,
-            workspace_dir=str(Path(self.config.workspace_root)),
-            object_store_root=str(Path(self.config.object_store_root)),
-            object_store_prefix=self.config.object_store_prefix,
-            run_manifest_path=str(run_manifest_path),
-            run_type=getattr(
+        run_manifest_path = self._workspace_path("runs", context.run_id, "input", "manifest.json")
+        template_context = {
+            "source_id": context.source_id,
+            "source_id_lower": context.source_id.lower(),
+            "cycle_time": format_cycle_time(context.cycle_time),
+            "cycle_time_iso": _format_time(context.cycle_time),
+            "model_id": context.model_id,
+            "basin_id": context.basin_id or "",
+            "basin_version_id": context.basin_version_id,
+            "river_network_version_id": context.river_network_version_id,
+            "run_id": context.run_id,
+            "stage_name": stage.stage,
+            "job_type": stage.job_type,
+            "workspace_dir": str(Path(self.config.workspace_root)),
+            "object_store_root": str(Path(self.config.object_store_root)),
+            "object_store_prefix": self.config.object_store_prefix,
+            "run_manifest_path": str(run_manifest_path),
+            "run_type": getattr(
                 context,
                 "run_type",
                 "analysis" if isinstance(context, AnalysisRunContext) else "forecast",
             ),
-            analysis_date=context.start_time.strftime("%Y-%m-%d"),
-            analysis_start_time=_format_time(context.start_time),
-            analysis_end_time=_format_time(context.end_time),
-            analysis_date_range=f"{_format_time(context.start_time)}/{_format_time(context.end_time)}",
-            era5_area=self.config.era5_area,
-        )
+            "analysis_date": context.start_time.strftime("%Y-%m-%d"),
+            "analysis_start_time": _format_time(context.start_time),
+            "analysis_end_time": _format_time(context.end_time),
+            "analysis_date_range": f"{_format_time(context.start_time)}/{_format_time(context.end_time)}",
+            "era5_area": self.config.era5_area,
+            "cycle_id": context.cycle_id,
+            "partition": "compute",
+            "nodes": 1,
+            "ntasks": 1,
+            "cpus_per_task": 1,
+            "memory_gb": 1,
+            "walltime": "01:00:00",
+            "max_concurrent": 1,
+            "shud_threads": 1,
+            "manifest_index_path": "",
+        }
+        template_text = template_path.read_text(encoding="utf-8")
+        if "{{" in template_text or "{%" in template_text:
+            from jinja2 import StrictUndefined
+            from jinja2.sandbox import SandboxedEnvironment
+
+            return SandboxedEnvironment(undefined=StrictUndefined, autoescape=False).from_string(template_text).render(
+                **template_context
+            )
+        return template_text.format(**template_context)
 
     def _persist_gateway_logs(self, slurm_job_id: str, log_uri: str) -> None:
-        logs = self.slurm_client.fetch_logs(slurm_job_id)
+        logs = _coerce_mapping(self.slurm_client.fetch_logs(slurm_job_id))
         content = str(logs.get("logs", ""))
         self.object_store.write_bytes_atomic(log_uri, content.encode("utf-8"))
 
@@ -824,9 +1727,22 @@ class ForecastOrchestrator:
     def _write_run_manifest(self, context: ForecastRunContext | AnalysisRunContext, manifest: dict[str, Any]) -> None:
         content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
         self.object_store.write_bytes_atomic(context.run_manifest_uri, content)
-        workspace_manifest = Path(self.config.workspace_root) / "runs" / context.run_id / "input" / "manifest.json"
+        workspace_manifest = self._workspace_path("runs", context.run_id, "input", "manifest.json")
         workspace_manifest.parent.mkdir(parents=True, exist_ok=True)
         workspace_manifest.write_bytes(content)
+
+    def _workspace_path(self, *parts: str) -> Path:
+        workspace_root = Path(self.config.workspace_root).expanduser().resolve()
+        resolved = workspace_root.joinpath(*parts).resolve()
+        try:
+            resolved.relative_to(workspace_root)
+        except ValueError as exc:
+            raise OrchestratorError(
+                "WORKSPACE_PATH_ESCAPE",
+                "Resolved workspace path is outside workspace_root.",
+                {"path": str(resolved), "workspace_root": str(workspace_root)},
+            ) from exc
+        return resolved
 
 
 class AnalysisOrchestrator(ForecastOrchestrator):
@@ -1061,6 +1977,20 @@ class PsycopgOrchestratorRepository:
             raise OrchestratorError("DATABASE_URL_MISSING", "DATABASE_URL is required for orchestration.")
         return cls(database_url)
 
+    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+        cycle_id = cycle_id_for(source_id, cycle_time)
+        row = self._fetch_optional(
+            """
+            SELECT 1 AS active
+            FROM ops.pipeline_job
+            WHERE cycle_id = %s
+              AND status NOT IN ('succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed')
+            LIMIT 1
+            """,
+            (cycle_id,),
+        )
+        return row is not None
+
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         row = self._fetch_optional(
             """
@@ -1072,7 +2002,9 @@ class PsycopgOrchestratorRepository:
               AND h.model_id = %s
               AND (
                     h.status::text = ANY(%s)
-                 OR COALESCE(pj.status, 'pending') NOT IN ('succeeded', 'failed', 'cancelled')
+                 OR COALESCE(pj.status, 'pending') NOT IN (
+                    'succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed'
+                 )
               )
             LIMIT 1
             """,
@@ -1257,6 +2189,7 @@ class PsycopgOrchestratorRepository:
                 cycle_id,
                 job_type,
                 slurm_job_id,
+                model_id,
                 status,
                 stage,
                 submitted_at,
@@ -1267,9 +2200,10 @@ class PsycopgOrchestratorRepository:
                 error_message,
                 log_uri
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (job_id) DO UPDATE SET
                 slurm_job_id = EXCLUDED.slurm_job_id,
+                model_id = EXCLUDED.model_id,
                 status = EXCLUDED.status,
                 submitted_at = EXCLUDED.submitted_at,
                 started_at = EXCLUDED.started_at,
@@ -1287,6 +2221,7 @@ class PsycopgOrchestratorRepository:
                 record["cycle_id"],
                 record["job_type"],
                 record["slurm_job_id"],
+                record.get("model_id"),
                 record["status"],
                 record["stage"],
                 record["submitted_at"],
@@ -1309,10 +2244,11 @@ class PsycopgOrchestratorRepository:
         exit_code: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        log_uri: str | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         current = self._fetch_optional("SELECT status FROM ops.pipeline_job WHERE job_id = %s", (job_id,))
         previous_status = current.get("status") if current is not None else None
-        record = self._fetch_one(
+        record = self._fetch_optional(
             """
             UPDATE ops.pipeline_job
             SET status = %s,
@@ -1321,13 +2257,56 @@ class PsycopgOrchestratorRepository:
                 exit_code = COALESCE(%s, exit_code),
                 error_code = COALESCE(%s, error_code),
                 error_message = COALESCE(%s, error_message),
+                log_uri = COALESCE(%s, log_uri),
                 updated_at = now()
             WHERE job_id = %s
+              AND (
+                    status NOT IN ('succeeded', 'failed', 'cancelled')
+                 OR %s = 'partially_failed'
+              )
             RETURNING *
             """,
-            (status, started_at, finished_at, exit_code, error_code, error_message, job_id),
+            (status, started_at, finished_at, exit_code, error_code, error_message, log_uri, job_id, status),
         )
+        if record is None:
+            record = self._fetch_one(
+                "SELECT * FROM ops.pipeline_job WHERE job_id = %s",
+                (job_id,),
+                missing_code="PIPELINE_JOB_NOT_FOUND",
+                missing_message=f"pipeline_job not found: {job_id}",
+            )
         return previous_status, record
+
+    def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
+        return self._fetch_optional("SELECT * FROM ops.pipeline_job WHERE job_id = %s", (job_id,))
+
+    def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
+        return self._fetch_all(
+            """
+            SELECT *
+            FROM ops.pipeline_job
+            WHERE cycle_id = %s
+            ORDER BY submitted_at ASC NULLS LAST, created_at ASC
+            """,
+            (cycle_id,),
+        )
+
+    def query_pipeline_jobs_by_run(self, run_id: str) -> list[dict[str, Any]]:
+        return self._fetch_all(
+            """
+            SELECT *
+            FROM ops.pipeline_job
+            WHERE run_id = %s
+            ORDER BY submitted_at ASC NULLS LAST, created_at ASC
+            """,
+            (run_id,),
+        )
+
+    def query_pipeline_job_by_slurm_id(self, slurm_job_id: str) -> dict[str, Any] | None:
+        return self._fetch_optional(
+            "SELECT * FROM ops.pipeline_job WHERE slurm_job_id = %s LIMIT 1",
+            (slurm_job_id,),
+        )
 
     def insert_pipeline_event(
         self,
@@ -1407,6 +2386,7 @@ class PsycopgOrchestratorRepository:
                 pj.cycle_id,
                 pj.job_type,
                 pj.slurm_job_id,
+                pj.model_id,
                 pj.status,
                 pj.stage,
                 pj.submitted_at,
@@ -1421,6 +2401,13 @@ class PsycopgOrchestratorRepository:
             LEFT JOIN hydro.hydro_run h ON h.run_id = pj.run_id
             WHERE {" AND ".join(filters)}
             ORDER BY CASE pj.stage
+                WHEN 'download' THEN 1
+                WHEN 'convert' THEN 2
+                WHEN 'forcing' THEN 3
+                WHEN 'forecast' THEN 4
+                WHEN 'parse' THEN 5
+                WHEN 'frequency' THEN 6
+                WHEN 'publish' THEN 7
                 WHEN 'download_gfs' THEN 1
                 WHEN 'convert_canonical' THEN 2
                 WHEN 'produce_forcing' THEN 3
@@ -1483,6 +2470,153 @@ class PsycopgOrchestratorRepository:
         finally:
             if connection is not None:
                 connection.close()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _coerce_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return dict(model_dump(mode="json"))
+    if hasattr(value, "__dict__"):
+        return dict(value.__dict__)
+    raise TypeError(f"Expected mapping-like Slurm payload, got {type(value).__name__}")
+
+
+def _validate_safe_id(label: str, value: str) -> None:
+    if _SAFE_ID_RE.fullmatch(value):
+        return
+    raise OrchestratorError(
+        "UNSAFE_IDENTIFIER",
+        f"{label} contains unsafe characters: {value!r}",
+        {"field": label, "value": value},
+    )
+
+
+def _status_from_gateway_job(job: Mapping[str, Any]) -> str:
+    status = job.get("status", "submitted")
+    value = getattr(status, "value", status)
+    normalized = str(value)
+    return "pending" if normalized == "submitted" else normalized
+
+
+def _cycle_payload_model_id(context: CycleOrchestrationContext) -> str:
+    if context.active_basins:
+        return str(context.active_basins[0].get("model_id") or "cycle")
+    return "cycle"
+
+
+def _basin_key(basin: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(basin.get("model_id") or ""), str(basin.get("basin_id") or basin.get("model_id") or ""))
+
+
+def _basin_identifier(basin: Mapping[str, Any]) -> str:
+    return str(basin.get("basin_id") or basin.get("model_id") or "")
+
+
+def build_reindexed_manifest(
+    entries: Sequence[Mapping[str, Any]],
+    succeeded_task_ids: Sequence[int],
+) -> list[dict[str, Any]]:
+    by_task_id = {int(entry.get("task_id", index)): dict(entry) for index, entry in enumerate(entries)}
+    reindexed: list[dict[str, Any]] = []
+    for new_task_id, previous_task_id in enumerate(succeeded_task_ids):
+        entry = dict(by_task_id[int(previous_task_id)])
+        entry["task_id"] = new_task_id
+        entry["original_task_id"] = int(entry.get("original_task_id", previous_task_id))
+        reindexed.append(entry)
+    return reindexed
+
+
+def parse_sacct_array_results(stdout: str, master_job_id: str) -> ArrayAggregation:
+    task_pattern = re.compile(rf"^{re.escape(master_job_id)}_(\d+)$")
+    results: list[ArrayTaskResult] = []
+    for raw_line in stdout.splitlines():
+        if not raw_line.strip():
+            continue
+        fields = raw_line.rstrip("\n").split("|")
+        if len(fields) < 3:
+            raise OrchestratorError(
+                "SLURM_SACCT_PARSE_ERROR",
+                "Unable to parse array sacct output.",
+                {"line": raw_line, "master_job_id": master_job_id},
+            )
+        job_id, raw_state, raw_exit_code = fields[0], fields[1], fields[2]
+        match = task_pattern.fullmatch(job_id)
+        if match is None:
+            continue
+        results.append(
+            ArrayTaskResult(
+                task_id=int(match.group(1)),
+                slurm_job_id=job_id,
+                status=_array_task_status(raw_state),
+                exit_code=_parse_slurm_exit_code(raw_exit_code),
+            )
+        )
+    return _aggregation_from_task_results(tuple(sorted(results, key=lambda result: result.task_id)))
+
+
+def _coerce_array_aggregation(raw_results: Any, master_job_id: str) -> ArrayAggregation:
+    if isinstance(raw_results, ArrayAggregation):
+        return raw_results
+    if isinstance(raw_results, str):
+        return parse_sacct_array_results(raw_results, master_job_id)
+    if isinstance(raw_results, Mapping):
+        if isinstance(raw_results.get("stdout"), str):
+            return parse_sacct_array_results(str(raw_results["stdout"]), master_job_id)
+        tasks = raw_results.get("tasks") or raw_results.get("task_results")
+        if isinstance(tasks, Sequence) and not isinstance(tasks, str | bytes):
+            return _coerce_array_aggregation(tasks, master_job_id)
+    if isinstance(raw_results, Sequence) and not isinstance(raw_results, str | bytes):
+        task_results = []
+        for index, item in enumerate(raw_results):
+            item_dict = _coerce_mapping(item)
+            task_id = int(item_dict.get("task_id", index))
+            status = str(item_dict.get("status") or _array_task_status(str(item_dict.get("state", ""))))
+            task_results.append(
+                ArrayTaskResult(
+                    task_id=task_id,
+                    slurm_job_id=str(
+                        item_dict.get("slurm_job_id") or item_dict.get("job_id") or f"{master_job_id}_{task_id}"
+                    ),
+                    status=status,
+                    exit_code=item_dict.get("exit_code"),
+                )
+            )
+        return _aggregation_from_task_results(tuple(sorted(task_results, key=lambda result: result.task_id)))
+    raise TypeError(f"Unsupported array task result payload: {type(raw_results).__name__}")
+
+
+def _aggregation_from_task_results(results: Sequence[ArrayTaskResult]) -> ArrayAggregation:
+    return ArrayAggregation(
+        total=len(results),
+        succeeded=sum(1 for result in results if result.status == "succeeded"),
+        failed=sum(1 for result in results if result.status == "failed"),
+        cancelled=sum(1 for result in results if result.status == "cancelled"),
+        task_results=tuple(results),
+    )
+
+
+def _array_task_status(raw_state: str) -> str:
+    normalized = raw_state.strip().upper().split()[0].rstrip("+")
+    if normalized == "COMPLETED":
+        return "succeeded"
+    if normalized == "CANCELLED":
+        return "cancelled"
+    return "failed"
+
+
+def _parse_slurm_exit_code(raw_exit_code: str) -> int | None:
+    if not raw_exit_code:
+        return None
+    try:
+        return int(raw_exit_code.split(":", maxsplit=1)[0])
+    except ValueError:
+        return None
 
 
 def _pipeline_job_id(run_id: str, stage: str) -> str:

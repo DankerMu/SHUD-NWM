@@ -213,6 +213,19 @@ class RealSlurmGateway(SlurmGateway):
         self._jobs[job_id] = record
         return record.model_copy(deep=True)
 
+    def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
+        self._validate_job_id(job_id)
+        result = self._run_command(
+            [
+                self._slurm_command("sacct"),
+                "--parsable2",
+                "--noheader",
+                "--format=JobID,State,ExitCode",
+                f"--jobs={job_id}",
+            ]
+        )
+        return self._parse_sacct_array_tasks(result.stdout, job_id)
+
     def cancel_job(self, job_id: str) -> SlurmJobRecord:
         self._validate_job_id(job_id)
         try:
@@ -570,6 +583,30 @@ class RealSlurmGateway(SlurmGateway):
             )
             records.append(record)
         return records
+
+    def _parse_sacct_array_tasks(self, stdout: str, job_id: str) -> list[dict[str, Any]]:
+        task_pattern = re.compile(rf"^{re.escape(job_id)}_(\d+)$")
+        results: list[dict[str, Any]] = []
+        for raw_line in stdout.splitlines():
+            if not raw_line.strip():
+                continue
+            fields = raw_line.rstrip("\n").split("|")
+            if len(fields) != 3:
+                LOGGER.error("Failed to parse sacct array task output: %r", stdout)
+                raise SlurmParseError("Unable to parse sacct array task output.", {"stdout": stdout})
+            task_job_id, state, raw_exit_code = fields
+            match = task_pattern.fullmatch(task_job_id)
+            if match is None:
+                continue
+            results.append(
+                {
+                    "task_id": int(match.group(1)),
+                    "job_id": task_job_id,
+                    "state": state,
+                    "exit_code": self._parse_exit_code(raw_exit_code),
+                }
+            )
+        return sorted(results, key=lambda result: int(result["task_id"]))
 
     def _record_from_sacct_fields(
         self,

@@ -14,6 +14,7 @@ EXPECTED_MIGRATIONS = [
     "000008_map.sql",
     "000009_ops.sql",
     "000010_indexes.sql",
+    "000011_pipeline_job_model_id.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}

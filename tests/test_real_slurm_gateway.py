@@ -144,6 +144,35 @@ def test_sacct_state_parsing(monkeypatch, tmp_path, slurm_state, expected):
     assert gateway.get_job_status("12345").status == expected
 
 
+def test_array_task_results_parse_task_lines_only(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        stdout = "\n".join(
+            [
+                "12345|COMPLETED|0:0",
+                "12345.batch|COMPLETED|0:0",
+                "12345_0|COMPLETED|0:0",
+                "12345_1|FAILED|1:0",
+                "12345_1.batch|FAILED|1:0",
+                "12345.extern|COMPLETED|0:0",
+            ]
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert gateway.get_array_task_results("12345") == [
+        {"task_id": 0, "job_id": "12345_0", "state": "COMPLETED", "exit_code": 0},
+        {"task_id": 1, "job_id": "12345_1", "state": "FAILED", "exit_code": 1},
+    ]
+    assert "--format=JobID,State,ExitCode" in calls[0]
+    assert "--jobs=12345" in calls[0]
+
+
 def test_scancel_invocation(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path)
     calls: list[list[str]] = []

@@ -32,6 +32,15 @@ async def submit_job(request: SubmitJobRequest):
         return _gateway_error_response(exc)
 
 
+@router.post("/job-arrays", status_code=201)
+async def submit_job_array(request: Annotated[dict, Body()]):
+    try:
+        submit_array = getattr(slurm_gateway, "submit_job_array")
+        return submit_array(request)
+    except SlurmGatewayError as exc:
+        return _gateway_error_response(exc)
+
+
 @router.get("/jobs")
 async def list_jobs(
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
@@ -47,6 +56,14 @@ async def list_jobs(
 async def get_job_status(job_id: str):
     try:
         return slurm_gateway.get_job_status(job_id)
+    except SlurmGatewayError as exc:
+        return _gateway_error_response(exc)
+
+
+@router.get("/jobs/{job_id}/array-tasks")
+async def get_array_task_results(job_id: str):
+    try:
+        return slurm_gateway.get_array_task_results(job_id)
     except SlurmGatewayError as exc:
         return _gateway_error_response(exc)
 
