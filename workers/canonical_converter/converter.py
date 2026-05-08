@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from packages.common.met_store import PsycopgMetStore
-from packages.common.mock_grib import MockGribError, decode_mock_grib2
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 
 LOGGER = logging.getLogger(__name__)
@@ -457,26 +456,6 @@ class CanonicalConverter:
         return records
 
     def _read_record(self, entry: Mapping[str, Any]) -> RawRecord:
-        local_key = str(entry["local_key"])
-        try:
-            content = self.object_store.read_bytes(local_key)
-        except (OSError, ObjectStoreError, ValueError) as error:
-            raise CanonicalConversionError(f"Failed to read raw file {local_key}: {error}") from error
-
-        try:
-            payload = decode_mock_grib2(content)
-            native_variable = str(payload["variable"])
-            forecast_hour = int(payload["forecast_hour"])
-            self._validate_mock_record(entry, native_variable, forecast_hour, local_key)
-            return RawRecord(
-                source_file=self.object_store.uri_for_key(local_key),
-                native_variable=native_variable,
-                forecast_hour=forecast_hour,
-                values=tuple(float(value) for value in payload["values"]),
-            )
-        except (KeyError, TypeError, ValueError, MockGribError):
-            LOGGER.debug("Raw file %s is not a synthetic mock GRIB2 payload; trying xarray/cfgrib.", local_key)
-
         return self._read_record_with_xarray(entry)
 
     def _read_record_with_xarray(self, entry: Mapping[str, Any]) -> RawRecord:
@@ -489,10 +468,14 @@ class CanonicalConverter:
             ) from error
 
         dataset = None
+        file_path = self.object_store.resolve_path(local_key)
         try:
-            dataset = xr.open_dataset(self.object_store.resolve_path(local_key), engine="cfgrib")
+            try:
+                dataset = xr.open_dataset(file_path, engine="cfgrib")
+            except Exception:
+                dataset = xr.open_dataset(file_path, engine="netcdf4")
             expected_native_variable = str(entry["variable"])
-            data_variable = self._select_cfgrib_data_variable(dataset, expected_native_variable, local_key)
+            data_variable = self._select_data_variable(dataset, expected_native_variable, local_key)
             values = tuple(float(value) for value in dataset[data_variable].values.ravel().tolist())
             return RawRecord(
                 source_file=self.object_store.uri_for_key(local_key),
@@ -501,34 +484,13 @@ class CanonicalConverter:
                 values=values,
             )
         except Exception as error:
-            raise CanonicalConversionError(f"Failed to parse GRIB2 file {local_key}: {error}") from error
+            raise CanonicalConversionError(f"Failed to parse raw file {local_key}: {error}") from error
         finally:
             if dataset is not None:
                 dataset.close()
 
-    def _validate_mock_record(
-        self,
-        entry: Mapping[str, Any],
-        native_variable: str,
-        forecast_hour: int,
-        local_key: str,
-    ) -> None:
-        expected_variable = str(entry["variable"])
-        expected_forecast_hour = int(entry["forecast_hour"])
-        if native_variable != expected_variable:
-            raise CanonicalConversionError(
-                (
-                    f"GRIB variable mismatch for {local_key}: manifest expected {expected_variable}, "
-                    f"payload contains {native_variable}."
-                )
-            )
-        if forecast_hour != expected_forecast_hour:
-            raise CanonicalConversionError(
-                (
-                    f"GRIB forecast hour mismatch for {local_key}: manifest expected f{expected_forecast_hour:03d}, "
-                    f"payload contains f{forecast_hour:03d}."
-                )
-            )
+    def _select_data_variable(self, dataset: Any, expected_native_variable: str, local_key: str) -> str:
+        return self._select_cfgrib_data_variable(dataset, expected_native_variable, local_key)
 
     def _select_cfgrib_data_variable(self, dataset: Any, expected_native_variable: str, local_key: str) -> str:
         expected_names = set(self.config.cfgrib_variable_aliases.get(expected_native_variable, ()))

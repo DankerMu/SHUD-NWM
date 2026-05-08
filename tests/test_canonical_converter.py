@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from packages.common.mock_grib import build_mock_payload, encode_mock_grib2
 from packages.common.object_store import LocalObjectStore
+from packages.common.test_netcdf4 import encode_test_netcdf4
 
 converter_module = importlib.import_module("workers.canonical_converter.converter")
 
@@ -67,8 +67,7 @@ def build_raw_manifest(
             if variable in omitted_variables or (variable, forecast_hour) in omitted_pairs:
                 continue
             local_key = f"raw/gfs/{compact_cycle}/gfs.t00z.pgrb2.0p25.f{forecast_hour:03d}.{variable}.grib2"
-            payload = build_mock_payload(cycle_time, variable, forecast_hour)
-            store.write_bytes_atomic(local_key, encode_mock_grib2(payload))
+            store.write_bytes_atomic(local_key, encode_test_netcdf4(variable, forecast_hour, cycle_time=cycle_time))
             entries.append(
                 {
                     "remote_url": f"mock://{variable}/{forecast_hour}",
@@ -199,9 +198,10 @@ def test_negative_apcp_delta_marks_product_warn(tmp_path: Path) -> None:
     compact_cycle = "2026050700"
     for forecast_hour, value in ((0, 5.0), (3, 3.0)):
         local_key = f"raw/gfs/{compact_cycle}/gfs.t00z.pgrb2.0p25.f{forecast_hour:03d}.apcp.grib2"
-        payload = build_mock_payload(cycle_time, "apcp", forecast_hour)
-        payload["values"] = [value]
-        store.write_bytes_atomic(local_key, encode_mock_grib2(payload))
+        store.write_bytes_atomic(
+            local_key,
+            encode_test_netcdf4("apcp", forecast_hour, values=[value], cycle_time=cycle_time),
+        )
     converter = build_converter(tmp_path, repository=repository)
 
     result = converter.convert_manifest(manifest)

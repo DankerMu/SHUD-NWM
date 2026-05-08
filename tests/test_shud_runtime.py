@@ -96,7 +96,7 @@ def _runtime(tmp_path: Path, repository: FakeHydroRunRepository, shud_executable
         workspace_root=tmp_path / "workspace",
         object_store_root=tmp_path / "object-store",
         object_store_prefix="s3://nhms",
-        shud_executable=str(shud_executable or Path("workers/shud_runtime/mock_shud_omp.py").resolve()),
+        shud_executable=str(shud_executable or Path("tests/mock_shud_omp.py").resolve()),
         output_interval_minutes=1440,
         timeout_seconds=30,
     )

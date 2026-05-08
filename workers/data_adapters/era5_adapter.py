@@ -15,8 +15,18 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from packages.common.met_store import PsycopgMetStore
-from packages.common.mock_grib import ERA5_VARIABLES, build_mock_era5_payload, encode_mock_grib2
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+
+ERA5_VARIABLES: tuple[str, ...] = (
+    "2m_temperature",
+    "2m_dewpoint_temperature",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
+    "surface_pressure",
+    "total_precipitation",
+    "surface_net_solar_radiation",
+    "surface_net_thermal_radiation",
+)
 
 from .base import (
     CycleDiscovery,
@@ -107,6 +117,113 @@ class CDSAPIClient:
             raise error
 
 
+ERA5_GCS_DEFAULT_STORE = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+
+CDS_TO_ZARR_VARIABLE: dict[str, str] = {
+    "2m_temperature": "2m_temperature",
+    "2m_dewpoint_temperature": "2m_dewpoint_temperature",
+    "10m_u_component_of_wind": "10m_u_component_of_wind",
+    "10m_v_component_of_wind": "10m_v_component_of_wind",
+    "surface_pressure": "surface_pressure",
+    "total_precipitation": "total_precipitation",
+    "surface_net_solar_radiation": "surface_net_solar_radiation",
+    "surface_net_thermal_radiation": "surface_net_thermal_radiation",
+}
+
+
+class GCSZarrClient:
+    """ERA5 data client using ARCO-ERA5 on Google Cloud Storage (anonymous, no credentials needed)."""
+
+    def __init__(self, store_url: str | None = None) -> None:
+        self._store_url = store_url or os.getenv("ERA5_GCS_ZARR_STORE", ERA5_GCS_DEFAULT_STORE)
+        self._dataset: Any = None
+
+    def _open_dataset(self) -> Any:
+        if self._dataset is not None:
+            return self._dataset
+        try:
+            import gcsfs
+            import xarray as xr
+        except ImportError as error:
+            raise ERA5AdapterError(
+                "gcsfs and xarray are required for GCS ERA5 downloads. "
+                "Install with: pip install gcsfs zarr"
+            ) from error
+        fs = gcsfs.GCSFileSystem(token="anon")
+        store = fs.get_mapper(self._store_url)
+        self._dataset = xr.open_zarr(store, consolidated=True)
+        return self._dataset
+
+    def is_available(self, request: Mapping[str, Any]) -> bool:
+        try:
+            import numpy as np
+
+            ds = self._open_dataset()
+            target_date = _date_from_request(request)
+            target_np = np.datetime64(f"{target_date.isoformat()}T00:00:00")
+            time_vals = ds.time.values
+            return bool(time_vals[0] <= target_np <= time_vals[-1])
+        except Exception:
+            LOGGER.debug("GCS Zarr availability check failed", exc_info=True)
+            return False
+
+    def retrieve(
+        self,
+        dataset: str,
+        request: Mapping[str, Any],
+        target: Path,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        import numpy as np
+        import xarray as xr
+
+        ds = self._open_dataset()
+        variable = str(request["variable"])
+        zarr_var = CDS_TO_ZARR_VARIABLE.get(variable)
+        if zarr_var is None:
+            raise ERA5AdapterError(f"No GCS Zarr mapping for ERA5 variable: {variable}")
+        if zarr_var not in ds.data_vars:
+            available = sorted(str(v) for v in ds.data_vars)
+            raise ERA5AdapterError(
+                f"Variable '{zarr_var}' not found in Zarr store. Available: {available[:20]}"
+            )
+
+        cycle_date = _date_from_request(request)
+        hour = int(str(request["time"]).split(":", maxsplit=1)[0])
+        target_time = np.datetime64(f"{cycle_date.isoformat()}T{hour:02d}:00:00")
+
+        area = request.get("area", list(ERA5_DEFAULT_AREA))
+        north, west, south, east = (float(area[0]), float(area[1]), float(area[2]), float(area[3]))
+
+        da = ds[zarr_var].sel(time=target_time, method="nearest")
+
+        lat_dim = "latitude" if "latitude" in da.dims else "lat"
+        lon_dim = "longitude" if "longitude" in da.dims else "lon"
+
+        lat_vals = da[lat_dim].values
+        if lat_vals[0] > lat_vals[-1]:
+            da = da.sel({lat_dim: slice(north, south)})
+        else:
+            da = da.sel({lat_dim: slice(south, north)})
+
+        lon_vals = da[lon_dim].values
+        if lon_vals.max() > 180.0 and west < 0:
+            west_adj, east_adj = west % 360.0, east % 360.0
+        else:
+            west_adj, east_adj = west, east
+        da = da.sel({lon_dim: slice(west_adj, east_adj)})
+
+        slice_ds = da.to_dataset(name=zarr_var)
+        slice_ds.attrs["source"] = "ARCO-ERA5-GCS"
+        slice_ds.attrs["variable_cds_name"] = variable
+        slice_ds.attrs["forecast_hour"] = hour
+        cycle_time_dt = datetime(cycle_date.year, cycle_date.month, cycle_date.day, hour, tzinfo=UTC)
+        slice_ds.attrs["cycle_time"] = cycle_time_dt.isoformat()
+        slice_ds.to_netcdf(target, engine="netcdf4")
+        slice_ds.close()
+
+
 class MockCDSClient:
     def __init__(
         self,
@@ -150,10 +267,12 @@ class MockCDSClient:
             self.failures_before_success -= 1
             raise self.failure_factory()
 
+        from packages.common.test_netcdf4 import encode_test_netcdf4
+
         cycle_time = _cycle_time_from_request(request)
         variable = str(request["variable"])
         forecast_hour = int(str(request["time"]).split(":", maxsplit=1)[0])
-        target.write_bytes(encode_mock_grib2(build_mock_era5_payload(cycle_time, variable, forecast_hour)))
+        target.write_bytes(encode_test_netcdf4(variable, forecast_hour, cycle_time=cycle_time, source="ERA5"))
 
 
 class ERA5AdapterError(RuntimeError):
@@ -206,6 +325,7 @@ class ERA5AdapterConfig:
     retry_backoff_seconds: tuple[float, ...] = (1.0, 2.0, 4.0)
     min_file_size_bytes: int = 1
     availability_lag_days: int = 5
+    backend: str = field(default_factory=lambda: os.getenv("ERA5_BACKEND", "gcs"))
 
     def forecast_hours(self) -> list[int]:
         return list(ERA5_FORECAST_HOURS)
@@ -240,9 +360,15 @@ class ERA5Adapter(DataSourceAdapter):
             self.config.workspace_root,
             object_store_prefix=self.config.object_store_prefix,
         )
-        self.cds_client = cds_client or CDSAPIClient()
+        self.cds_client = cds_client or self._default_client(self.config.backend)
         self.sleeper = sleeper or time.sleep
         self.now = now or (lambda: datetime.now(UTC))
+
+    @staticmethod
+    def _default_client(backend: str) -> CDSClient:
+        if backend == "gcs":
+            return GCSZarrClient()
+        return CDSAPIClient()
 
     @classmethod
     def from_env(cls, *, area: tuple[float, float, float, float] | None = None) -> ERA5Adapter:

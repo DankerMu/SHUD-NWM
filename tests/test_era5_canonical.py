@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from packages.common.mock_grib import ERA5_VARIABLES, build_mock_era5_payload, encode_mock_grib2
 from packages.common.object_store import LocalObjectStore
+from packages.common.test_netcdf4 import ERA5_VARIABLES, encode_test_netcdf4
 
 converter_module = importlib.import_module("workers.canonical_converter.converter")
 
@@ -60,13 +60,16 @@ def build_era5_manifest(
     for forecast_hour in forecast_hours:
         for variable in ERA5_VARIABLES:
             local_key = f"raw/ERA5/{date_key}/{variable}_{forecast_hour:02d}.grib"
-            payload = build_mock_era5_payload(
-                cycle_time,
-                variable,
-                forecast_hour,
-                values=overrides.get((variable, forecast_hour)),
+            store.write_bytes_atomic(
+                local_key,
+                encode_test_netcdf4(
+                    variable,
+                    forecast_hour,
+                    values=overrides.get((variable, forecast_hour)),
+                    cycle_time=cycle_time,
+                    source="ERA5",
+                ),
             )
-            store.write_bytes_atomic(local_key, encode_mock_grib2(payload))
             entries.append(
                 {
                     "remote_url": f"mock://ERA5/{variable}/{forecast_hour}",

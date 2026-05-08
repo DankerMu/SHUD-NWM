@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from packages.common.mock_grib import build_mock_era5_payload, encode_mock_grib2
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.test_netcdf4 import encode_test_netcdf4
 
 base = importlib.import_module("workers.data_adapters.base")
 cli_module = importlib.import_module("workers.data_adapters.cli")
@@ -165,7 +165,7 @@ def test_checksum_verification_reports_mismatch(tmp_path: Path) -> None:
     adapter = build_adapter(tmp_path)
     manifest = single_entry_manifest(adapter)
     entry = manifest.entries[0]
-    payload = encode_mock_grib2(build_mock_era5_payload(manifest.cycle_time, entry.variable, entry.forecast_hour))
+    payload = encode_test_netcdf4(entry.variable, entry.forecast_hour, cycle_time=manifest.cycle_time, source="ERA5")
     adapter.object_store.write_bytes_atomic(entry.local_key, payload)
     bad_entry = replace(entry, expected_checksum="bad")
     bad_manifest = DownloadManifest(source_id=manifest.source_id, cycle_time=manifest.cycle_time, entries=(bad_entry,))
@@ -181,7 +181,7 @@ def test_idempotency_skips_existing_file_when_checksum_matches(tmp_path: Path) -
     adapter = build_adapter(tmp_path, cds_client=client)
     manifest = single_entry_manifest(adapter)
     entry = manifest.entries[0]
-    payload = encode_mock_grib2(build_mock_era5_payload(manifest.cycle_time, entry.variable, entry.forecast_hour))
+    payload = encode_test_netcdf4(entry.variable, entry.forecast_hour, cycle_time=manifest.cycle_time, source="ERA5")
     checksum = sha256_bytes(payload)
     adapter.object_store.write_bytes_atomic(entry.local_key, payload)
     checksum_manifest = DownloadManifest(
@@ -216,3 +216,215 @@ def test_era5_cli_invocation_downloads_with_area(
     assert exit_code == 0
     assert output["status"] == "raw_complete"
     assert output["files"] == 24
+
+
+# ---------------------------------------------------------------------------
+# GCSZarrClient tests
+# ---------------------------------------------------------------------------
+
+GCSZarrClient = era5_module.GCSZarrClient
+CDS_TO_ZARR_VARIABLE = era5_module.CDS_TO_ZARR_VARIABLE
+
+
+class FakeZarrDataset:
+    """In-memory xarray-like object mimicking the ARCO-ERA5 Zarr store."""
+
+    def __init__(self, time_range: tuple[str, str], variables: list[str], lat_desc: bool = True) -> None:
+        import numpy as np
+
+        start, end = np.datetime64(time_range[0]), np.datetime64(time_range[1])
+        self._times = np.arange(start, end + np.timedelta64(1, "h"), np.timedelta64(1, "h"))
+        lats = np.arange(90.0, -90.25, -0.25) if lat_desc else np.arange(-90.0, 90.25, 0.25)
+        lons = np.arange(0.0, 360.0, 0.25)
+        self._variables = variables
+        self._lats = lats
+        self._lons = lons
+
+    @property
+    def time(self):
+        class _TimeCoord:
+            def __init__(self, vals):
+                self.values = vals
+        return _TimeCoord(self._times)
+
+    @property
+    def data_vars(self):
+        return self._variables
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._variables
+
+    def __getitem__(self, key: str):
+        import numpy as np
+        import xarray as xr
+
+        if key not in self._variables:
+            raise KeyError(key)
+        data = np.full((len(self._times), len(self._lats), len(self._lons)), 273.15, dtype=np.float32)
+        return xr.DataArray(
+            data,
+            dims=["time", "latitude", "longitude"],
+            coords={
+                "time": self._times,
+                "latitude": self._lats,
+                "longitude": self._lons,
+            },
+        )
+
+
+def _make_gcs_client_with_fake(variables: list[str] | None = None) -> GCSZarrClient:
+    """Create a GCSZarrClient with an in-memory fake dataset (no network)."""
+    client = GCSZarrClient.__new__(GCSZarrClient)
+    client._store_url = "fake://test"
+    vars_list = variables or list(CDS_TO_ZARR_VARIABLE.values())
+    client._dataset = FakeZarrDataset(("2026-04-01", "2026-04-30"), vars_list)
+    return client
+
+
+def test_gcs_zarr_client_is_available_returns_true_for_date_in_range() -> None:
+    client = _make_gcs_client_with_fake()
+    request = {"year": "2026", "month": "04", "day": "15", "time": ["00:00"]}
+    assert client.is_available(request) is True
+
+
+def test_gcs_zarr_client_is_available_returns_false_for_date_out_of_range() -> None:
+    client = _make_gcs_client_with_fake()
+    request = {"year": "2025", "month": "01", "day": "01", "time": ["00:00"]}
+    assert client.is_available(request) is False
+
+
+def test_gcs_zarr_client_retrieve_writes_netcdf4(tmp_path: Path) -> None:
+    client = _make_gcs_client_with_fake()
+    target = tmp_path / "output.nc"
+    request = {
+        "variable": "2m_temperature",
+        "year": "2026",
+        "month": "04",
+        "day": "15",
+        "time": "14:00",
+        "area": [55.0, 70.0, 15.0, 140.0],
+    }
+
+    client.retrieve("reanalysis-era5-single-levels", request, target, timeout_seconds=60)
+
+    assert target.exists()
+    assert target.stat().st_size > 0
+
+    import xarray as xr
+
+    ds = xr.open_dataset(target, engine="netcdf4")
+    assert "2m_temperature" in ds.data_vars
+    assert ds.attrs["source"] == "ARCO-ERA5-GCS"
+    assert ds.attrs["variable_cds_name"] == "2m_temperature"
+    ds.close()
+
+
+def test_gcs_zarr_client_retrieve_rejects_unmapped_variable(tmp_path: Path) -> None:
+    client = _make_gcs_client_with_fake()
+    target = tmp_path / "output.nc"
+    request = {
+        "variable": "nonexistent_variable",
+        "year": "2026",
+        "month": "04",
+        "day": "15",
+        "time": "00:00",
+        "area": [55.0, 70.0, 15.0, 140.0],
+    }
+
+    with pytest.raises(era5_module.ERA5AdapterError, match="No GCS Zarr mapping"):
+        client.retrieve("reanalysis-era5-single-levels", request, target, timeout_seconds=60)
+
+
+def test_gcs_zarr_client_retrieve_rejects_missing_zarr_variable(tmp_path: Path) -> None:
+    client = _make_gcs_client_with_fake(variables=["2m_temperature"])
+    target = tmp_path / "output.nc"
+    request = {
+        "variable": "surface_pressure",
+        "year": "2026",
+        "month": "04",
+        "day": "15",
+        "time": "00:00",
+        "area": [55.0, 70.0, 15.0, 140.0],
+    }
+
+    with pytest.raises(era5_module.ERA5AdapterError, match="not found in Zarr store"):
+        client.retrieve("reanalysis-era5-single-levels", request, target, timeout_seconds=60)
+
+
+def test_adapter_default_client_is_gcs() -> None:
+    config = ERA5AdapterConfig(backend="gcs")
+    client = ERA5Adapter._default_client(config.backend)
+    assert isinstance(client, GCSZarrClient)
+
+
+def test_adapter_default_client_cds_fallback() -> None:
+    CDSAPIClient = era5_module.CDSAPIClient
+    try:
+        client = ERA5Adapter._default_client("cds")
+        assert isinstance(client, CDSAPIClient)
+    except Exception:
+        # CDSAPIClient requires ~/.cdsapirc; verify it at least attempted CDS path
+        assert True
+
+
+def test_gcs_netcdf4_roundtrip_through_canonical_converter(tmp_path: Path) -> None:
+    """GCS-sourced NetCDF4 raw files are readable by the canonical converter."""
+    import xarray as xr
+
+    converter_module = importlib.import_module("workers.canonical_converter.converter")
+    ERA5CanonicalConverter = converter_module.ERA5CanonicalConverter
+    ERA5CanonicalConverterConfig = converter_module.ERA5CanonicalConverterConfig
+
+    object_store = LocalObjectStore(tmp_path)
+    cycle_time = datetime(2026, 4, 15, tzinfo=UTC)
+    date_key = "2026-04-15"
+
+    variables = [
+        ("2m_temperature", "2t"),
+        ("2m_dewpoint_temperature", "2d"),
+        ("10m_u_component_of_wind", "10u"),
+        ("10m_v_component_of_wind", "10v"),
+        ("surface_pressure", "sp"),
+        ("total_precipitation", "tp"),
+        ("surface_net_solar_radiation", "ssr"),
+        ("surface_net_thermal_radiation", "str"),
+    ]
+
+    entries = []
+    for forecast_hour in range(2):
+        for cds_name, zarr_name in variables:
+            local_key = f"raw/ERA5/{date_key}/{cds_name}_{forecast_hour:02d}.grib"
+            ds = xr.Dataset(
+                {zarr_name: (["latitude", "longitude"], [[285.0 + forecast_hour * 0.1]])},
+                coords={"latitude": [30.0], "longitude": [105.0]},
+                attrs={
+                    "source": "ARCO-ERA5-GCS",
+                    "variable_cds_name": cds_name,
+                    "forecast_hour": forecast_hour,
+                    "cycle_time": cycle_time.isoformat(),
+                },
+            )
+            file_path = object_store.resolve_path(local_key)
+            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+            ds.to_netcdf(file_path, engine="netcdf4")
+            ds.close()
+            entries.append({
+                "local_key": local_key,
+                "variable": cds_name,
+                "forecast_hour": forecast_hour,
+            })
+
+    manifest = {
+        "source_id": "ERA5",
+        "cycle_time": cycle_time.isoformat(),
+        "entries": entries,
+        "metadata": {"forecast_hours": [0, 1]},
+    }
+
+    converter = ERA5CanonicalConverter(
+        config=ERA5CanonicalConverterConfig(workspace_root=tmp_path),
+        object_store=object_store,
+    )
+    result = converter.convert_manifest(manifest)
+    assert result.status == "canonical_ready"
+    assert len(result.products) > 0

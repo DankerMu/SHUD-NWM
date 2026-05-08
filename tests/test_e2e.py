@@ -12,8 +12,8 @@ from apps.api.main import app
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.best_available import BestAvailableManager, BestAvailableSelection, ForcingInputSelection
 from packages.common.forecast_store import _spliced_response_from_rows, analysis_window_for_issue_time
-from packages.common.mock_grib import build_mock_payload, encode_mock_grib2
 from packages.common.object_store import LocalObjectStore
+from packages.common.test_netcdf4 import encode_test_netcdf4
 from packages.common.state_manager import StateManager, StateSnapshot
 from services.orchestrator.chain import ForcingContext, ForecastOrchestrator, InitialStateSelection, ModelContext
 from services.orchestrator.chain import OrchestratorConfig as ChainOrchestratorConfig
@@ -733,8 +733,8 @@ def _run_gfs_adapter(
     )
     manifest = adapter.build_manifest(cycle_time, forecast_hours=forecast_hours)
     for entry in manifest.entries:
-        payloads_by_url[entry.remote_url] = encode_mock_grib2(
-            build_mock_payload(cycle_time, entry.variable, entry.forecast_hour)
+        payloads_by_url[entry.remote_url] = encode_test_netcdf4(
+            entry.variable, entry.forecast_hour, cycle_time=cycle_time
         )
     result = adapter.download_plan(manifest)
     assert result.status == "raw_complete"
@@ -861,7 +861,7 @@ def _run_shud_runtime(
     initial_state: StateSnapshot | None = None,
 ) -> str:
     _write_model_package(store)
-    mock_executable = Path("workers/shud_runtime/mock_shud_omp.py").resolve()
+    mock_executable = Path("tests/mock_shud_omp.py").resolve()
     start = start_time or cycle_time
     end = end_time or cycle_time + timedelta(days=7)
     forcing_version = repository.forcing_versions[forcing_version_id]
