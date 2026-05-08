@@ -55,6 +55,7 @@ class CycleDiscovery:
     cycle_time: datetime
     cycle_hour: int
     available: bool
+    status: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +64,7 @@ class CycleDiscovery:
             "cycle_time": self.cycle_time.isoformat(),
             "cycle_hour": self.cycle_hour,
             "available": self.available,
+            "status": self.status,
         }
 
 
@@ -165,8 +167,12 @@ class VerificationResult:
 
 class DataSourceAdapter(ABC):
     @abstractmethod
-    def discover_cycles(self, cycle_date: str | date | datetime) -> list[CycleDiscovery]:
-        """Discover available cycles for a source on a UTC date."""
+    def discover_cycles(
+        self,
+        cycle_date: str | date | datetime,
+        end_date: str | date | datetime | None = None,
+    ) -> list[CycleDiscovery]:
+        """Discover available cycles for a source on a UTC date or date range."""
 
     @abstractmethod
     def build_manifest(

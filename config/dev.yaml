@@ -24,6 +24,44 @@ gfs_adapter:
   max_wait_seconds: 21600
   min_file_size_bytes: 1
 
+era5_adapter:
+  source_id: ERA5
+  source_name: ERA5 Reanalysis
+  source_type: reanalysis
+  status: enabled
+  native_format: GRIB
+  adapter_name: era5
+  cds_timeout_seconds: 7200
+  max_retries: 3
+  area: [55, 70, 15, 140]
+  cycle_hours_utc: [0]
+  variables:
+    - 2m_temperature
+    - 2m_dewpoint_temperature
+    - 10m_u_component_of_wind
+    - 10m_v_component_of_wind
+    - surface_pressure
+    - total_precipitation
+    - surface_net_solar_radiation
+    - surface_net_thermal_radiation
+  environment_variables:
+    CDS_API_KEY: "CDS API credential key used by cdsapi."
+    CDS_API_URL: "CDS API endpoint URL used by cdsapi."
+    ERA5_AREA: "North,West,South,East bounding box; default 55,70,15,140."
+    ERA5_CDS_TIMEOUT_SECONDS: "Per CDS retrieve timeout; default 7200."
+    ERA5_MAX_RETRIES: "Maximum CDS retrieve attempts; default 3."
+
+analysis_pipeline:
+  enabled: true
+  dry_run: false
+
+state_manager:
+  soft_stale_threshold_days: 7
+  hard_stale_threshold_days: 30
+  environment_variables:
+    STATE_SOFT_STALE_THRESHOLD_DAYS: "State age warning threshold in days; default 7."
+    STATE_HARD_STALE_THRESHOLD_DAYS: "State age hard cutoff in days; default 30."
+
 canonical_converter:
   enabled: true
   source_id: gfs

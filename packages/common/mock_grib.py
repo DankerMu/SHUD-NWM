@@ -4,6 +4,17 @@ import json
 from datetime import datetime
 from typing import Any
 
+ERA5_VARIABLES: tuple[str, ...] = (
+    "2m_temperature",
+    "2m_dewpoint_temperature",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
+    "surface_pressure",
+    "total_precipitation",
+    "surface_net_solar_radiation",
+    "surface_net_thermal_radiation",
+)
+
 
 class MockGribError(ValueError):
     """Raised when synthetic GRIB2 test payloads cannot be decoded."""
@@ -69,4 +80,56 @@ def build_mock_payload(cycle_time: datetime, variable: str, forecast_hour: int) 
         "values": [default_mock_value(variable, forecast_hour)],
         "shape": [1],
         "created_by": "workers.data_adapters.mock_gfs",
+    }
+
+
+def default_mock_era5_value(variable: str, forecast_hour: int) -> float:
+    if variable == "2m_temperature":
+        return 285.0 + forecast_hour * 0.05
+    if variable == "2m_dewpoint_temperature":
+        return 278.0 + forecast_hour * 0.03
+    if variable == "10m_u_component_of_wind":
+        return 3.0
+    if variable == "10m_v_component_of_wind":
+        return 4.0
+    if variable == "surface_pressure":
+        return 101325.0
+    if variable == "total_precipitation":
+        return max(0.0, forecast_hour * 0.00025)
+    if variable == "surface_net_solar_radiation":
+        return max(0.0, forecast_hour * 3600.0 * 180.0)
+    if variable == "surface_net_thermal_radiation":
+        return forecast_hour * 3600.0 * -70.0
+    raise ValueError(f"Unsupported mock ERA5 variable: {variable}")
+
+
+def build_mock_era5_payload(
+    cycle_time: datetime,
+    variable: str,
+    forecast_hour: int,
+    values: list[float] | tuple[float, ...] | None = None,
+) -> dict[str, Any]:
+    payload_values = (
+        [float(value) for value in values] if values is not None else [default_mock_era5_value(variable, forecast_hour)]
+    )
+    return {
+        "source": "ERA5",
+        "format": "mock-grib2",
+        "cycle_time": cycle_time.isoformat(),
+        "variable": variable,
+        "forecast_hour": forecast_hour,
+        "values": payload_values,
+        "shape": [len(payload_values)],
+        "created_by": "workers.data_adapters.mock_era5",
+        "metadata": {
+            "product_type": "reanalysis",
+            "accumulation_type": "since_midnight"
+            if variable
+            in {
+                "total_precipitation",
+                "surface_net_solar_radiation",
+                "surface_net_thermal_radiation",
+            }
+            else "instantaneous",
+        },
     }

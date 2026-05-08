@@ -4,18 +4,24 @@ import argparse
 import json
 from typing import Sequence
 
-from .converter import CanonicalConverter, format_cycle_time, parse_cycle_time
+from .converter import CanonicalConverter, ERA5CanonicalConverter, format_cycle_time, parse_cycle_time
 
 
 def _convert(source_id: str, cycle_time: str) -> dict[str, object]:
-    converter = CanonicalConverter.from_env()
-    if source_id != converter.config.source_id:
+    normalized_source_id = "ERA5" if source_id.upper() == "ERA5" else source_id
+    if normalized_source_id == "ERA5":
+        converter = ERA5CanonicalConverter.from_env()
+    else:
+        converter = CanonicalConverter.from_env()
+    if normalized_source_id != converter.config.source_id:
         raise SystemExit(
             f"Unsupported source_id {source_id!r}; this worker is configured for {converter.config.source_id!r}."
         )
 
-    compact_cycle = format_cycle_time(parse_cycle_time(cycle_time))
-    manifest_uri = converter.object_store.uri_for_key(f"raw/{source_id}/{compact_cycle}/manifest.json")
+    parsed_cycle_time = parse_cycle_time(cycle_time)
+    compact_cycle = format_cycle_time(parsed_cycle_time)
+    manifest_cycle_key = parsed_cycle_time.strftime("%Y-%m-%d") if normalized_source_id == "ERA5" else compact_cycle
+    manifest_uri = converter.object_store.uri_for_key(f"raw/{normalized_source_id}/{manifest_cycle_key}/manifest.json")
     result = converter.convert_manifest_uri(manifest_uri)
     return {"status": result.status, "products": len(result.products)}
 
