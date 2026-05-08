@@ -35,7 +35,7 @@ CFGRIB_SHORT_NAMES: dict[str, str] = {
     "u10m": "u10",
     "v10m": "v10",
     "pressfc": "sp",
-    "dswrf": "ssrd",
+    "dswrf": "sdswrf",
     "2m_temperature": "2t",
     "2m_dewpoint_temperature": "2d",
     "10m_u_component_of_wind": "10u",

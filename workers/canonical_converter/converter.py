@@ -74,7 +74,7 @@ CFGRIB_VARIABLE_ALIASES: dict[str, tuple[str, ...]] = {
     "u10m": ("u10m", "u10", "10u"),
     "v10m": ("v10m", "v10", "10v"),
     "pressfc": ("pressfc", "sp", "pres"),
-    "dswrf": ("dswrf", "ssrd"),
+    "dswrf": ("dswrf", "ssrd", "sdswrf"),
     "2m_temperature": ("2m_temperature", "t2m", "2t"),
     "2m_dewpoint_temperature": ("2m_dewpoint_temperature", "d2m", "2d"),
     "10m_u_component_of_wind": ("10m_u_component_of_wind", "u10", "10u"),
@@ -464,15 +464,17 @@ class CanonicalConverter:
             import xarray as xr
         except ImportError as error:
             raise CanonicalConversionError(
-                f"Cannot parse non-mock GRIB2 file {local_key}; install xarray and cfgrib."
+                f"Cannot parse raw file {local_key}; install xarray, cfgrib, and netCDF4."
             ) from error
 
         dataset = None
         file_path = self.object_store.resolve_path(local_key)
+        cfgrib_error: Exception | None = None
         try:
             try:
                 dataset = xr.open_dataset(file_path, engine="cfgrib")
-            except Exception:
+            except Exception as _cfgrib_err:
+                cfgrib_error = _cfgrib_err
                 dataset = xr.open_dataset(file_path, engine="netcdf4")
             expected_native_variable = str(entry["variable"])
             data_variable = self._select_data_variable(dataset, expected_native_variable, local_key)
@@ -484,7 +486,10 @@ class CanonicalConverter:
                 values=values,
             )
         except Exception as error:
-            raise CanonicalConversionError(f"Failed to parse raw file {local_key}: {error}") from error
+            detail = f"Failed to parse raw file {local_key}: {error}"
+            if cfgrib_error is not None:
+                detail += f" (cfgrib also failed: {cfgrib_error})"
+            raise CanonicalConversionError(detail) from error
         finally:
             if dataset is not None:
                 dataset.close()

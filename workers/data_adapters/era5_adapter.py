@@ -137,31 +137,31 @@ class GCSZarrClient:
     def __init__(self, store_url: str | None = None) -> None:
         self._store_url = store_url or os.getenv("ERA5_GCS_ZARR_STORE", ERA5_GCS_DEFAULT_STORE)
         self._dataset: Any = None
+        self._lock = threading.Lock()
 
     def _open_dataset(self) -> Any:
         if self._dataset is not None:
             return self._dataset
-        try:
-            import gcsfs
-            import xarray as xr
-        except ImportError as error:
-            raise ERA5AdapterError(
-                "gcsfs and xarray are required for GCS ERA5 downloads. "
-                "Install with: pip install gcsfs zarr"
-            ) from error
-        fs = gcsfs.GCSFileSystem(token="anon")
-        store = fs.get_mapper(self._store_url)
-        self._dataset = xr.open_zarr(store, consolidated=True)
-        return self._dataset
+        with self._lock:
+            if self._dataset is not None:
+                return self._dataset
+            try:
+                import gcsfs
+                import xarray as xr
+            except ImportError as error:
+                raise ERA5AdapterError(
+                    "gcsfs and xarray are required for GCS ERA5 downloads. "
+                    "Install with: pip install gcsfs zarr"
+                ) from error
+            fs = gcsfs.GCSFileSystem(token="anon")
+            store = fs.get_mapper(self._store_url)
+            self._dataset = xr.open_zarr(store, consolidated=True)
+            return self._dataset
 
     def is_available(self, request: Mapping[str, Any]) -> bool:
         import numpy as np
 
-        try:
-            ds = self._open_dataset()
-        except Exception:
-            raise
-
+        ds = self._open_dataset()
         try:
             target_date = _date_from_request(request)
             target_np = np.datetime64(f"{target_date.isoformat()}T00:00:00")
@@ -178,7 +178,9 @@ class GCSZarrClient:
         *,
         timeout_seconds: float,
     ) -> None:
-        import numpy as np
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise TimeoutError(f"GCS retrieve timed out before starting; timeout_seconds={timeout_seconds!r}")
 
         outcome: queue.Queue[BaseException | None] = queue.Queue(maxsize=1)
 
@@ -192,9 +194,9 @@ class GCSZarrClient:
 
         thread = threading.Thread(target=_do_retrieve, name="era5-gcs-retrieve", daemon=True)
         thread.start()
-        thread.join(float(timeout_seconds))
+        thread.join(timeout)
         if thread.is_alive():
-            raise TimeoutError(f"GCS Zarr retrieve timed out after {timeout_seconds:g} seconds.")
+            raise TimeoutError(f"GCS Zarr retrieve timed out after {timeout:g} seconds.")
 
         try:
             error = outcome.get(timeout=1)
@@ -225,6 +227,12 @@ class GCSZarrClient:
         north, west, south, east = (float(area[0]), float(area[1]), float(area[2]), float(area[3]))
 
         da = ds[zarr_var].sel(time=target_time, method="nearest")
+        if "time" in da.coords:
+            actual_time = da.time.values
+            if abs(actual_time - target_time) > np.timedelta64(1, "h"):
+                raise ERA5AdapterError(
+                    f"GCS Zarr exact time {target_time} not found; nearest is {actual_time}"
+                )
 
         lat_dim = "latitude" if "latitude" in da.dims else "lat"
         lon_dim = "longitude" if "longitude" in da.dims else "lon"
@@ -240,7 +248,9 @@ class GCSZarrClient:
         if lon_is_360:
             west_adj = west % 360.0 if west < 0 else west
             east_adj = east % 360.0 if east < 0 else east
-            if west_adj > east_adj:
+            if abs(east - west) >= 360.0:
+                pass
+            elif west_adj > east_adj:
                 part_a = da.sel({lon_dim: slice(west_adj, 360.0)})
                 part_b = da.sel({lon_dim: slice(0.0, east_adj)})
                 import xarray as xr
