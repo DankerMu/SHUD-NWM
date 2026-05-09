@@ -1,10 +1,10 @@
 import type { ReactNode } from 'react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { useAuthStore } from '@/stores/auth'
+import { type AuthRole, useAuthStore } from '@/stores/auth'
 
 interface RBACGateProps {
-  roles: string[]
+  roles: AuthRole[]
   children: ReactNode
 }
 

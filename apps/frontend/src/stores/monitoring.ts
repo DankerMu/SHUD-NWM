@@ -3,27 +3,51 @@ import { create } from 'zustand'
 import type { PipelineStatus } from '@/lib/constants'
 
 export interface PipelineStage {
-  id: string
-  name: string
-  status: PipelineStatus
-  startedAt?: string
-  finishedAt?: string
-  durationMs?: number
+  stage: string
+  display_status: PipelineStatus
+  status?: PipelineStatus
+  duration_seconds: number | null
+  basin_progress: {
+    completed: number
+    total: number
+    failed: number
+  }
+  basin_results: Array<{
+    model_id: string | null
+    basin_id: string | null
+    status: string
+    error_code: string | null
+    error_message: string | null
+  }>
 }
 
 export interface PipelineJob {
-  id: string
-  stageId: string
-  status: PipelineStatus
-  submittedAt: string
-  durationMs?: number
+  job_id: string
+  run_id: string | null
+  cycle_id: string | null
+  run_type: string | null
+  scenario: string | null
+  job_type: string
+  model_id: string | null
+  stage: string | null
+  status: string
+  slurm_job_id: string | null
+  submitted_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  completed_at?: string | null
+  duration_seconds: number | null
+  error_code: string | null
+  error_message: string | null
+  exit_code: number | null
+  retry_count: number
+  log_uri: string | null
 }
 
 export interface QueueState {
   running: number
   pending: number
-  failed: number
-  succeeded: number
+  idle: number
 }
 
 export interface JobFilters {
