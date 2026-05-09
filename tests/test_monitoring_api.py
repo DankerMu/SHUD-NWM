@@ -66,6 +66,36 @@ def test_pipeline_stages_endpoint() -> None:
         assert convert["basin_progress"] == {"completed": 1, "total": 2, "failed": 1}
 
 
+def test_pipeline_stages_missing_cycle() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "PIPELINE_CYCLE_NOT_FOUND"
+
+
+def test_pipeline_stages_submitted_display_status_running() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(store, job_id="job_submitted", cycle_id=cycle_id, stage="forecast", status="submitted")
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 200
+        forecast = next(stage for stage in response.json()["data"] if stage["stage"] == "forecast")
+        assert forecast["display_status"] == "running"
+
+
 def test_jobs_list_endpoint() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
@@ -78,7 +108,11 @@ def test_jobs_list_endpoint() -> None:
             )
 
         assert response.status_code == 200
-        jobs = response.json()["data"]
+        page = response.json()["data"]
+        jobs = page["items"]
+        assert page["total"] == 5
+        assert page["limit"] == 2
+        assert page["offset"] == 0
         assert len(jobs) == 2
         assert jobs[0]["job_id"] == "job_running"
         assert set(jobs[0]) >= {
@@ -111,31 +145,58 @@ def test_jobs_list_filter_by_status() -> None:
             response = client.get("/api/v1/jobs", params={"status": "failed"})
 
         assert response.status_code == 200
-        jobs = response.json()["data"]
+        jobs = response.json()["data"]["items"]
         assert [job["job_id"] for job in jobs] == ["job_convert_failed"]
         assert jobs[0]["error_code"] == "NODE_FAILURE"
 
 
-def test_job_logs_endpoint(tmp_path: Path) -> None:
+def test_job_logs_endpoint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     with _store() as store:
         log_path = tmp_path / "job.log"
         log_path.write_text("line 1\nline 2\n", encoding="utf-8")
-        _create_job(store, job_id="job_logs", log_uri=str(log_path))
+        _create_job(store, job_id="job_logs", log_uri="job.log")
         with _client(store) as client:
             response = client.get("/api/v1/jobs/job_logs/logs")
 
         assert response.status_code == 200
         assert response.json()["data"] == {
             "job_id": "job_logs",
-            "log_uri": str(log_path),
+            "log_uri": "job.log",
             "content": "line 1\nline 2\n",
         }
 
 
-def test_job_logs_not_found(tmp_path: Path) -> None:
+def test_job_logs_tails_large_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    monkeypatch.setattr(pipeline_routes, "_MAX_LOG_BYTES", 8)
+    with _store() as store:
+        log_path = tmp_path / "large.log"
+        log_path.write_text("0123456789abcdef", encoding="utf-8")
+        _create_job(store, job_id="job_large_logs", log_uri="large.log")
+        with _client(store) as client:
+            response = client.get("/api/v1/jobs/job_large_logs/logs")
+
+        assert response.status_code == 200
+        assert response.json()["data"]["content"] == "89abcdef"
+
+
+def test_job_logs_path_traversal(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    with _store() as store:
+        _create_job(store, job_id="job_traversal", log_uri="../../../etc/passwd")
+        with _client(store) as client:
+            response = client.get("/api/v1/jobs/job_traversal/logs")
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_job_logs_not_found(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     with _store() as store:
         _create_job(store, job_id="job_no_log", log_uri=None)
-        _create_job(store, job_id="job_missing_log", log_uri=str(tmp_path / "missing.log"))
+        _create_job(store, job_id="job_missing_log", log_uri="missing.log")
         with _client(store) as client:
             no_log = client.get("/api/v1/jobs/job_no_log/logs")
             missing_log = client.get("/api/v1/jobs/job_missing_log/logs")
@@ -157,6 +218,17 @@ def test_retry_rbac() -> None:
         assert allowed.json()["data"]["status"] == "pending"
         assert denied.status_code == 403
         assert denied.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_retry_no_role_header() -> None:
+    with _store() as store:
+        _create_job(store, job_id="job_retry_no_role", run_id="run_retry_no_role", status="failed")
+        with _client(store) as client:
+            response = client.post("/api/v1/runs/run_retry_no_role/retry")
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert response.json()["error"]["message"] == "Operator role required."
 
 
 def test_cancel_endpoint() -> None:
@@ -193,6 +265,20 @@ def test_cancel_rbac() -> None:
         assert store.get_job("job_cancel_denied").status == "running"
 
 
+def test_cancel_no_role_header() -> None:
+    with _store() as store:
+        gateway = _MockGateway()
+        _create_job(store, job_id="job_cancel_no_role", run_id="run_cancel_no_role", status="running")
+        with _client(store, gateway) as client:
+            response = client.post("/api/v1/runs/run_cancel_no_role/cancel")
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert response.json()["error"]["message"] == "Operator role required."
+        assert gateway.cancelled == []
+        assert store.get_job("job_cancel_no_role").status == "running"
+
+
 def test_metrics_stage_duration() -> None:
     with _store() as store:
         cycle_id = cycle_id_for("GFS", _cycle_time())
@@ -205,6 +291,15 @@ def test_metrics_stage_duration() -> None:
         download = next(row for row in rows if row["stage"] == "download")
         assert download["average_duration_seconds"] == 360
         assert download["job_count"] == 2
+
+
+def test_metrics_days_upper_bound() -> None:
+    with _store() as store:
+        with _client(store) as client:
+            response = client.get("/api/v1/metrics/stage-duration", params={"days": 366})
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_metrics_success_rate() -> None:

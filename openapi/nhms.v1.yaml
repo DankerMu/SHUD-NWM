@@ -663,8 +663,8 @@ paths:
       summary: Get pipeline status for a cycle
       tags: [pipeline]
       parameters:
-        - $ref: "#/components/parameters/SourceQuery"
-        - $ref: "#/components/parameters/CycleTimeQuery"
+        - $ref: "#/components/parameters/SourceQueryRequired"
+        - $ref: "#/components/parameters/CycleTimeQueryRequired"
       responses:
         "200":
           description: Pipeline status
@@ -688,8 +688,8 @@ paths:
       summary: List pipeline stages for a cycle
       tags: [pipeline]
       parameters:
-        - $ref: "#/components/parameters/SourceQuery"
-        - $ref: "#/components/parameters/CycleTimeQuery"
+        - $ref: "#/components/parameters/SourceQueryRequired"
+        - $ref: "#/components/parameters/CycleTimeQueryRequired"
       responses:
         "200":
           description: Pipeline stage list
@@ -765,9 +765,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/PipelineJob"
+                        $ref: "#/components/schemas/PipelineJobPage"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -830,6 +828,7 @@ paths:
           schema:
             type: integer
             minimum: 1
+            maximum: 365
             default: 7
       responses:
         "200":
@@ -862,6 +861,7 @@ paths:
           schema:
             type: integer
             minimum: 1
+            maximum: 365
             default: 7
       responses:
         "200":
@@ -1182,6 +1182,13 @@ components:
       schema:
         type: string
         format: date-time
+    CycleTimeQueryRequired:
+      name: cycle_time
+      in: query
+      required: true
+      schema:
+        type: string
+        format: date-time
     FromTime:
       name: from
       in: query
@@ -1271,6 +1278,12 @@ components:
       name: source
       in: query
       required: false
+      schema:
+        type: string
+    SourceQueryRequired:
+      name: source
+      in: query
+      required: true
       schema:
         type: string
     StationId:
@@ -1900,6 +1913,24 @@ components:
         duration_seconds:
           type: integer
           nullable: true
+    PipelineJobPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PipelineJob"
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+        offset:
+          type: integer
+          minimum: 0
     QcResult:
       type: object
       required: [qc_id, qc_checkpoint, target_type, target_id, passed, severity, checks_json, created_at]

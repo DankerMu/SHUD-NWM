@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -30,6 +30,8 @@ _ACTIVE_JOB_STATUSES = {"pending", "submitted", "running"}
 _FAILED_JOB_STATUSES = {"failed", "submission_failed", "permanently_failed", "cancelled"}
 _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "frequency", "publish")
 _MAX_JOBS_LIMIT = 200
+_MAX_LOG_BYTES = 1024 * 1024
+LOG_ROOT = Path(os.getenv("LOG_ROOT", "workspace"))
 
 
 @lru_cache
@@ -101,7 +103,17 @@ def pipeline_stages(
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     parsed_cycle_time = _parse_cycle_time(cycle_time)
-    jobs = store.query_jobs_by_cycle(cycle_id_for(source, parsed_cycle_time))
+    cycle_id = cycle_id_for(source, parsed_cycle_time)
+    cycle = _fetch_forecast_cycle(store, source=source, cycle_time=parsed_cycle_time, cycle_id=cycle_id)
+    if cycle is None:
+        raise ApiError(
+            status_code=404,
+            code="PIPELINE_CYCLE_NOT_FOUND",
+            message="No forecast cycle found for the requested source and cycle_time.",
+            details={"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id},
+        )
+
+    jobs = store.query_jobs_by_cycle(cycle_id)
     return _ok(request, _stage_summaries(jobs))
 
 
@@ -140,7 +152,7 @@ def list_jobs(
     run_ids = _run_ids_matching_filters(store, run_type=run_type, scenario=scenario)
     if run_ids is not None:
         if not run_ids:
-            return _ok(request, [])
+            return _ok(request, {"items": [], "total": 0, "limit": limit, "offset": offset})
         statement = statement.where(PipelineJob.run_id.in_(run_ids))
     else:
         if run_type is not None:
@@ -148,13 +160,22 @@ def list_jobs(
         if scenario is not None:
             statement = statement.where(PipelineJob.run_id.like(f"%{scenario}%"))
 
+    total = store.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
     statement = (
         statement.order_by(PipelineJob.submitted_at.desc(), PipelineJob.created_at.desc())
         .limit(limit)
         .offset(offset)
     )
     jobs = list(store.session.scalars(statement))
-    return _ok(request, [_job_payload(job) for job in jobs])
+    return _ok(
+        request,
+        {
+            "items": [_job_payload(job) for job in jobs],
+            "total": int(total),
+            "limit": limit,
+            "offset": offset,
+        },
+    )
 
 
 @router.get("/jobs/{job_id}/logs")
@@ -193,7 +214,7 @@ def job_logs(
         {
             "job_id": job.job_id,
             "log_uri": job.log_uri,
-            "content": log_path.read_text(encoding="utf-8", errors="replace"),
+            "content": _read_log_tail(log_path),
         },
     )
 
@@ -286,7 +307,7 @@ def cancel_run(
 @router.get("/metrics/stage-duration")
 def stage_duration_metrics(
     request: Request,
-    days: int = Query(default=7, ge=1),
+    days: int = Query(default=7, ge=1, le=365),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     cutoff = datetime.now(UTC) - timedelta(days=days)
@@ -320,7 +341,7 @@ def stage_duration_metrics(
 @router.get("/metrics/success-rate")
 def success_rate_metrics(
     request: Request,
-    days: int = Query(default=7, ge=1),
+    days: int = Query(default=7, ge=1, le=365),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     cutoff = datetime.now(UTC) - timedelta(days=days)
@@ -405,16 +426,12 @@ def _ok(request: Request, data: Any) -> dict[str, Any]:
 
 def _require_operator_role(request: Request) -> None:
     role = request.headers.get("X-User-Role")
-    if role is None:
-        return
-    normalized_role = role.strip().lower()
-    if normalized_role in _OPERATOR_ROLES:
+    if role is not None and role.strip().lower() in _OPERATOR_ROLES:
         return
     raise ApiError(
         status_code=403,
         code="FORBIDDEN",
-        message="User role is not allowed to perform this operation.",
-        details={"role": role, "required_roles": sorted(_OPERATOR_ROLES)},
+        message="Operator role required.",
     )
 
 
@@ -583,9 +600,9 @@ def _stage_display_status(jobs: list[PipelineJob]) -> str:
         return "pending"
 
     statuses = {job.status for job in jobs}
-    if "running" in statuses:
+    if statuses & {"submitted", "running"}:
         return "running"
-    if statuses <= {"pending", "submitted"}:
+    if statuses == {"pending"}:
         return "pending"
     if "partially_failed" in statuses:
         return "partially_failed"
@@ -648,9 +665,44 @@ def _duration_seconds(started_at: datetime | None, finished_at: datetime | None)
     return max(0, int((finished_at - started_at).total_seconds()))
 
 
+def _log_root() -> Path:
+    configured_root = os.getenv("LOG_ROOT", "").strip()
+    return Path(configured_root or LOG_ROOT).expanduser().resolve()
+
+
 def _local_log_path(log_uri: str) -> Path | None:
     if log_uri.startswith("file://"):
-        return Path(log_uri.removeprefix("file://")).expanduser()
-    if "://" in log_uri:
+        raw_path = Path(log_uri.removeprefix("file://")).expanduser()
+    elif "://" in log_uri:
         return None
-    return Path(log_uri).expanduser()
+    else:
+        raw_path = Path(log_uri).expanduser()
+
+    log_root = _log_root()
+    candidates = [raw_path.resolve()]
+    if not raw_path.is_absolute():
+        rooted_path = (log_root / raw_path).resolve()
+        if rooted_path not in candidates:
+            candidates.append(rooted_path)
+
+    for candidate in candidates:
+        try:
+            candidate.relative_to(log_root)
+        except ValueError:
+            continue
+        return candidate
+
+    raise ApiError(
+        status_code=403,
+        code="FORBIDDEN",
+        message="Job log path is outside the configured log root.",
+        details={"log_uri": log_uri, "log_root": str(log_root)},
+    )
+
+
+def _read_log_tail(log_path: Path) -> str:
+    size = log_path.stat().st_size
+    with log_path.open("rb") as file:
+        if size > _MAX_LOG_BYTES:
+            file.seek(size - _MAX_LOG_BYTES)
+        return file.read(_MAX_LOG_BYTES).decode("utf-8", errors="replace")
