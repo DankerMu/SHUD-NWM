@@ -1283,8 +1283,12 @@
         nodes.logTitle.textContent = `作业日志 ${jobId}`;
         nodes.logContent.textContent = "加载中...";
         nodes.modal.classList.add("is-visible");
-        const log = await fetchJobLogs(jobId);
-        nodes.logContent.textContent = log.content || "";
+        try {
+          const log = await fetchJobLogs(jobId);
+          nodes.logContent.textContent = log.content || "(空日志)";
+        } catch (err) {
+          nodes.logContent.textContent = `加载失败: ${err.message || "日志不可用"}`;
+        }
       }
 
       function closeLogModal() {
@@ -1396,7 +1400,7 @@
       }
 
       function operatorHeaders() {
-        return { "X-User-Role": "operator" };
+        return { "X-User-Role": state.role };
       }
 
       function handleRefreshError(error, silent) {
