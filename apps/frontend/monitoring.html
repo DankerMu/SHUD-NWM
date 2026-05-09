@@ -1,0 +1,1529 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NHMS 产品监控</title>
+    <style>
+      :root {
+        --bg: #f7f9fb;
+        --panel: #ffffff;
+        --text: #1f2937;
+        --muted: #64748b;
+        --line: #d7dee8;
+        --river: #0f8fbf;
+        --river-strong: #ef7d22;
+        --accent: #2266cc;
+        --danger: #b42318;
+        --success: #14804a;
+        --warning: #b54708;
+        --pending: #6b7280;
+        --running: #0b63ce;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      }
+
+      button,
+      select,
+      input {
+        font: inherit;
+      }
+
+      button {
+        min-height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        cursor: pointer;
+        padding: 0 12px;
+      }
+
+      button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      select,
+      input {
+        min-height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        padding: 0 10px;
+      }
+
+      .page {
+        min-height: 100vh;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        padding: 14px 18px;
+      }
+
+      .title-block {
+        min-width: 0;
+      }
+
+      h1,
+      h2 {
+        margin: 0;
+        line-height: 1.35;
+      }
+
+      h1 {
+        font-size: 20px;
+        font-weight: 650;
+      }
+
+      h2 {
+        font-size: 15px;
+        font-weight: 650;
+      }
+
+      .meta {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .nav-link {
+        display: inline-flex;
+        min-height: 34px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        padding: 0 12px;
+        text-decoration: none;
+        font-size: 14px;
+      }
+
+      .nav-link:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .banner {
+        display: none;
+        margin: 12px 18px 0;
+        border: 1px solid #f2b8ad;
+        border-radius: 6px;
+        background: #fff4f2;
+        color: var(--danger);
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+
+      .banner.is-visible {
+        display: block;
+      }
+
+      .summary {
+        display: grid;
+        grid-template-columns: minmax(260px, 1fr) minmax(360px, 1.4fr) 260px;
+        gap: 14px;
+        padding: 14px 18px 0;
+      }
+
+      .panel {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border-bottom: 1px solid var(--line);
+        padding: 12px 14px;
+      }
+
+      .panel-body {
+        min-width: 0;
+        padding: 14px;
+      }
+
+      .cycle-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .metric-value {
+        margin-top: 4px;
+        overflow-wrap: anywhere;
+        font-size: 15px;
+        font-weight: 650;
+      }
+
+      .badges {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .badge {
+        min-height: 62px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+      }
+
+      .badge strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 20px;
+      }
+
+      .badge--success {
+        border-color: #a7d9bd;
+        color: var(--success);
+      }
+
+      .badge--danger {
+        border-color: #f2b8ad;
+        color: var(--danger);
+      }
+
+      .badge--running {
+        border-color: #a9c7f7;
+        color: var(--running);
+      }
+
+      .badge--pending {
+        border-color: #cfd6df;
+        color: var(--pending);
+      }
+
+      .queue-chart {
+        width: 100%;
+        height: 128px;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: 340px minmax(0, 1fr) 360px;
+        gap: 14px;
+        padding: 14px 18px 18px;
+      }
+
+      .stage-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .stage-node {
+        position: relative;
+      }
+
+      .stage-node:not(:last-child)::after {
+        position: absolute;
+        bottom: -12px;
+        left: 24px;
+        width: 1px;
+        height: 12px;
+        background: var(--line);
+        content: "";
+      }
+
+      .stage-card {
+        display: grid;
+        width: 100%;
+        min-height: 78px;
+        grid-template-columns: 34px minmax(0, 1fr);
+        gap: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        padding: 10px;
+        text-align: left;
+      }
+
+      .stage-card.is-clickable:hover {
+        border-color: var(--accent);
+      }
+
+      .stage-icon {
+        display: grid;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border-radius: 50%;
+        background: #f2f5f9;
+        font-weight: 700;
+      }
+
+      .stage-card[data-status="succeeded"] .stage-icon {
+        background: #e7f6ed;
+        color: var(--success);
+      }
+
+      .stage-card[data-status="failed"] .stage-icon,
+      .stage-card[data-status="partially_failed"] .stage-icon {
+        background: #fff0ee;
+        color: var(--danger);
+      }
+
+      .stage-card[data-status="running"] .stage-icon {
+        background: #eaf2ff;
+        color: var(--running);
+      }
+
+      .stage-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-weight: 650;
+      }
+
+      .stage-name {
+        overflow-wrap: anywhere;
+      }
+
+      .stage-status {
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .stage-facts {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .failure-list {
+        margin-top: 8px;
+        border: 1px solid #f2b8ad;
+        border-radius: 8px;
+        background: #fff9f8;
+        padding: 8px;
+      }
+
+      .failure-row {
+        display: grid;
+        grid-template-columns: minmax(86px, 0.8fr) minmax(86px, 0.8fr) minmax(0, 1.4fr);
+        gap: 8px;
+        padding: 6px 0;
+        color: var(--danger);
+        font-size: 12px;
+      }
+
+      .failure-row + .failure-row {
+        border-top: 1px solid #f2d2cc;
+      }
+
+      .duration-chart {
+        width: 100%;
+        height: 220px;
+      }
+
+      .filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .table-wrap {
+        width: 100%;
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        min-width: 980px;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 10px 8px;
+        text-align: left;
+        vertical-align: middle;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      th button {
+        min-height: 24px;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        padding: 0;
+        font-size: 12px;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        border-radius: 999px;
+        padding: 0 8px;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .status-pill--succeeded {
+        background: #e7f6ed;
+        color: var(--success);
+      }
+
+      .status-pill--failed,
+      .status-pill--submission_failed,
+      .status-pill--permanently_failed,
+      .status-pill--cancelled,
+      .status-pill--partially_failed {
+        background: #fff0ee;
+        color: var(--danger);
+      }
+
+      .status-pill--running,
+      .status-pill--submitted {
+        background: #eaf2ff;
+        color: var(--running);
+      }
+
+      .status-pill--pending {
+        background: #f2f5f9;
+        color: var(--pending);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .actions button {
+        min-height: 30px;
+        padding: 0 8px;
+        font-size: 12px;
+      }
+
+      .pager {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .pager-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      .trend-chart {
+        width: 100%;
+        height: 260px;
+      }
+
+      .empty {
+        display: grid;
+        min-height: 160px;
+        place-items: center;
+        border: 1px dashed var(--line);
+        border-radius: 8px;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .permission {
+        display: none;
+        margin: 18px;
+        border: 1px solid #f2b8ad;
+        border-radius: 8px;
+        background: #fff4f2;
+        color: var(--danger);
+        padding: 18px;
+      }
+
+      .permission.is-visible {
+        display: block;
+      }
+
+      .modal {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 23, 42, 0.38);
+        padding: 18px;
+      }
+
+      .modal.is-visible {
+        display: flex;
+      }
+
+      .modal-dialog {
+        width: min(900px, 100%);
+        max-height: min(760px, calc(100vh - 36px));
+        overflow: hidden;
+        border-radius: 8px;
+        background: #fff;
+        box-shadow: 0 24px 80px rgba(15, 23, 42, 0.24);
+      }
+
+      .modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+        padding: 12px 14px;
+      }
+
+      .log-body {
+        max-height: calc(100vh - 150px);
+        overflow: auto;
+        margin: 0;
+        background: #111827;
+        color: #e5e7eb;
+        padding: 14px;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 30;
+        display: none;
+        max-width: min(420px, calc(100vw - 36px));
+        border: 1px solid rgba(31, 41, 55, 0.16);
+        border-radius: 8px;
+        background: #fff;
+        box-shadow: 0 12px 40px rgba(15, 23, 42, 0.2);
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+
+      .toast.is-visible {
+        display: block;
+      }
+
+      @media (max-width: 1200px) {
+        .summary {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .summary .panel:last-child {
+          grid-column: 1 / -1;
+        }
+
+        .workspace {
+          grid-template-columns: 340px minmax(0, 1fr);
+        }
+
+        .trends-panel {
+          grid-column: 1 / -1;
+        }
+
+        .trends-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+        }
+      }
+
+      @media (max-width: 800px) {
+        .topbar {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .toolbar {
+          justify-content: flex-start;
+          width: 100%;
+        }
+
+        .summary,
+        .workspace,
+        .trends-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .badges,
+        .cycle-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .summary .panel:last-child,
+        .trends-panel {
+          grid-column: auto;
+        }
+
+        .failure-row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <div class="title-block">
+          <h1>NHMS 产品监控</h1>
+          <div id="page-meta" class="meta">流水线阶段、作业队列和近 7 天趋势</div>
+        </div>
+        <div class="toolbar" aria-label="监控查询条件">
+          <label>
+            <span class="metric-label">Source</span>
+            <select id="source-select">
+              <option value="GFS">GFS</option>
+              <option value="IFS">IFS</option>
+              <option value="ERA5">ERA5</option>
+            </select>
+          </label>
+          <label>
+            <span class="metric-label">Cycle</span>
+            <input id="cycle-input" type="datetime-local" />
+          </label>
+          <button id="refresh-button" type="button">刷新</button>
+          <a class="nav-link" href="index.html">地图</a>
+        </div>
+      </header>
+
+      <div id="error-banner" class="banner" role="status"></div>
+      <section id="permission" class="permission" role="alert">
+        <h2>权限不足</h2>
+        <div class="meta">当前用户角色无权访问产品监控页面，请使用 operator、model_admin 或 sys_admin 角色。</div>
+      </section>
+
+      <section id="content">
+        <section class="summary" aria-label="顶部摘要">
+          <article class="panel">
+            <div class="panel-header">
+              <h2>当前周期</h2>
+              <span id="poll-state" class="meta">自动轮询开启</span>
+            </div>
+            <div class="panel-body">
+              <div class="cycle-grid">
+                <div>
+                  <div class="metric-label">Source</div>
+                  <div id="cycle-source" class="metric-value">--</div>
+                </div>
+                <div>
+                  <div class="metric-label">Cycle Time</div>
+                  <div id="cycle-time" class="metric-value">--</div>
+                </div>
+                <div>
+                  <div class="metric-label">Current State</div>
+                  <div id="cycle-state" class="metric-value">--</div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <h2>作业计数</h2>
+            </div>
+            <div class="panel-body">
+              <div class="badges">
+                <div class="badge badge--success">
+                  <span class="metric-label">成功</span>
+                  <strong id="count-success">0</strong>
+                </div>
+                <div class="badge badge--danger">
+                  <span class="metric-label">失败</span>
+                  <strong id="count-failed">0</strong>
+                </div>
+                <div class="badge badge--running">
+                  <span class="metric-label">运行中</span>
+                  <strong id="count-running">0</strong>
+                </div>
+                <div class="badge badge--pending">
+                  <span class="metric-label">等待</span>
+                  <strong id="count-pending">0</strong>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Slurm 队列深度</h2>
+            </div>
+            <div class="panel-body">
+              <div id="queue-chart" class="queue-chart" aria-label="Slurm queue depth chart"></div>
+            </div>
+          </article>
+        </section>
+
+        <section class="workspace">
+          <article class="panel">
+            <div class="panel-header">
+              <h2>七阶段流水线</h2>
+            </div>
+            <div class="panel-body">
+              <div id="stage-list" class="stage-list"></div>
+              <div id="duration-chart" class="duration-chart" aria-label="阶段耗时横向柱状图"></div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <h2>作业列表</h2>
+              <div class="filters" aria-label="作业过滤">
+                <select id="status-filter">
+                  <option value="">全部状态</option>
+                  <option value="pending">pending</option>
+                  <option value="submitted">submitted</option>
+                  <option value="running">running</option>
+                  <option value="succeeded">succeeded</option>
+                  <option value="failed">failed</option>
+                  <option value="cancelled">cancelled</option>
+                  <option value="partially_failed">partially_failed</option>
+                </select>
+                <select id="run-type-filter">
+                  <option value="">全部类型</option>
+                  <option value="forecast">forecast</option>
+                  <option value="analysis">analysis</option>
+                  <option value="hindcast">hindcast</option>
+                </select>
+                <select id="scenario-filter">
+                  <option value="">全部场景</option>
+                  <option value="forecast_gfs_deterministic">GFS</option>
+                  <option value="forecast_ifs_deterministic">IFS</option>
+                  <option value="best_available">best_available</option>
+                  <option value="analysis_true_field">analysis_true_field</option>
+                </select>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>run_id</th>
+                      <th>model_id</th>
+                      <th>run_type</th>
+                      <th>scenario</th>
+                      <th>status</th>
+                      <th>slurm_job_id</th>
+                      <th><button type="button" data-sort="submitted_at">submitted_at</button></th>
+                      <th><button type="button" data-sort="duration_seconds">duration</button></th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="jobs-body"></tbody>
+                </table>
+              </div>
+              <div id="jobs-empty" class="empty" hidden>暂无作业</div>
+              <div class="pager">
+                <div id="jobs-total">总数 0</div>
+                <div class="pager-actions">
+                  <button id="prev-page" type="button">上一页</button>
+                  <button id="next-page" type="button">下一页</button>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel trends-panel">
+            <div class="panel-header">
+              <h2>趋势</h2>
+              <span class="meta">近 7 天</span>
+            </div>
+            <div class="panel-body trends-grid">
+              <div id="stage-trend-chart" class="trend-chart" aria-label="各阶段平均耗时折线图"></div>
+              <div id="success-trend-chart" class="trend-chart" aria-label="每周期成功率折线图"></div>
+            </div>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <div id="log-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="log-title">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h2 id="log-title">作业日志</h2>
+          <button id="close-log" type="button" aria-label="关闭">×</button>
+        </div>
+        <pre id="log-content" class="log-body">加载中...</pre>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+    <script>
+      /**
+       * @typedef {Object} PipelineJob
+       * @property {string} job_id
+       * @property {string=} run_id
+       * @property {string=} model_id
+       * @property {string=} run_type
+       * @property {string=} scenario
+       * @property {string} status
+       * @property {number=} duration_seconds
+       */
+
+      const allowedRoles = new Set(["operator", "model_admin", "sys_admin"]);
+      const failedStatuses = new Set(["failed", "submission_failed", "permanently_failed", "cancelled", "partially_failed"]);
+      const activeStatuses = new Set(["pending", "submitted", "running"]);
+      const stageLabels = {
+        download: "下载",
+        convert: "标准化",
+        forcing: "强迫场",
+        forecast: "预报",
+        parse: "解析",
+        frequency: "频率计算",
+        publish: "发布",
+      };
+
+      const params = new URLSearchParams(window.location.search);
+      const state = {
+        source: params.get("source") || "GFS",
+        cycleTime: normalizeCycleInput(params.get("cycle_time")) || defaultCycleInput(),
+        role: params.get("role") || localStorage.getItem("nhms.user_role") || "operator",
+        stages: [],
+        jobs: [],
+        summaryJobs: [],
+        jobTotal: 0,
+        currentPage: 1,
+        pageSize: 12,
+        sortKey: "submitted_at",
+        sortDirection: "desc",
+        expandedStage: "",
+        pollTimer: null,
+        charts: {},
+      };
+
+      const nodes = {
+        sourceSelect: document.getElementById("source-select"),
+        cycleInput: document.getElementById("cycle-input"),
+        refreshButton: document.getElementById("refresh-button"),
+        banner: document.getElementById("error-banner"),
+        permission: document.getElementById("permission"),
+        content: document.getElementById("content"),
+        pollState: document.getElementById("poll-state"),
+        cycleSource: document.getElementById("cycle-source"),
+        cycleTime: document.getElementById("cycle-time"),
+        cycleState: document.getElementById("cycle-state"),
+        countSuccess: document.getElementById("count-success"),
+        countFailed: document.getElementById("count-failed"),
+        countRunning: document.getElementById("count-running"),
+        countPending: document.getElementById("count-pending"),
+        stageList: document.getElementById("stage-list"),
+        jobsBody: document.getElementById("jobs-body"),
+        jobsEmpty: document.getElementById("jobs-empty"),
+        jobsTotal: document.getElementById("jobs-total"),
+        statusFilter: document.getElementById("status-filter"),
+        runTypeFilter: document.getElementById("run-type-filter"),
+        scenarioFilter: document.getElementById("scenario-filter"),
+        prevPage: document.getElementById("prev-page"),
+        nextPage: document.getElementById("next-page"),
+        modal: document.getElementById("log-modal"),
+        logTitle: document.getElementById("log-title"),
+        logContent: document.getElementById("log-content"),
+        closeLog: document.getElementById("close-log"),
+        toast: document.getElementById("toast"),
+      };
+
+      nodes.sourceSelect.value = state.source;
+      nodes.cycleInput.value = state.cycleTime;
+      bindEvents();
+      refreshAll();
+      startPolling();
+
+      async function fetchPipelineStatus(source, cycleTime) {
+        return apiGet("/pipeline/status", { source, cycle_time: cycleTime }, authHeaders());
+      }
+
+      async function fetchPipelineStages(source, cycleTime) {
+        return apiGet("/pipeline/stages", { source, cycle_time: cycleTime }, authHeaders());
+      }
+
+      async function fetchJobs(filters) {
+        return apiGet("/jobs", filters, authHeaders());
+      }
+
+      async function fetchJobLogs(jobId) {
+        return apiGet(`/jobs/${encodeURIComponent(jobId)}/logs`, {}, authHeaders());
+      }
+
+      async function retryRun(runId) {
+        return apiPost(`/runs/${encodeURIComponent(runId)}/retry`, operatorHeaders());
+      }
+
+      async function cancelRun(runId) {
+        return apiPost(`/runs/${encodeURIComponent(runId)}/cancel`, operatorHeaders());
+      }
+
+      async function fetchMetrics(type, days) {
+        const path = type === "success-rate" ? "/metrics/success-rate" : "/metrics/stage-duration";
+        return apiGet(path, { days }, authHeaders());
+      }
+
+      async function fetchQueueDepth() {
+        return apiGet("/queue/depth", {}, authHeaders());
+      }
+
+      function bindEvents() {
+        nodes.refreshButton.addEventListener("click", () => {
+          state.currentPage = 1;
+          refreshAll();
+          restartPolling();
+        });
+        nodes.sourceSelect.addEventListener("change", () => {
+          state.source = nodes.sourceSelect.value;
+          state.currentPage = 1;
+          refreshAll();
+        });
+        nodes.cycleInput.addEventListener("change", () => {
+          state.cycleTime = nodes.cycleInput.value || defaultCycleInput();
+          state.currentPage = 1;
+          refreshAll();
+        });
+        [nodes.statusFilter, nodes.runTypeFilter, nodes.scenarioFilter].forEach((node) => {
+          node.addEventListener("change", () => {
+            state.currentPage = 1;
+            refreshJobsOnly();
+          });
+        });
+        document.querySelectorAll("[data-sort]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const key = button.dataset.sort;
+            if (state.sortKey === key) {
+              state.sortDirection = state.sortDirection === "asc" ? "desc" : "asc";
+            } else {
+              state.sortKey = key;
+              state.sortDirection = key === "duration_seconds" ? "desc" : "desc";
+            }
+            renderJobs();
+          });
+        });
+        nodes.prevPage.addEventListener("click", () => {
+          state.currentPage = Math.max(1, state.currentPage - 1);
+          renderJobs();
+        });
+        nodes.nextPage.addEventListener("click", () => {
+          const maxPage = Math.max(1, Math.ceil(state.jobs.length / state.pageSize));
+          state.currentPage = Math.min(maxPage, state.currentPage + 1);
+          renderJobs();
+        });
+        nodes.jobsBody.addEventListener("click", onJobAction);
+        nodes.stageList.addEventListener("click", onStageClick);
+        nodes.closeLog.addEventListener("click", closeLogModal);
+        nodes.modal.addEventListener("click", (event) => {
+          if (event.target === nodes.modal) closeLogModal();
+        });
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden) {
+            stopPolling();
+            nodes.pollState.textContent = "自动轮询暂停";
+          } else {
+            nodes.pollState.textContent = "自动轮询开启";
+            refreshOperationalData(true);
+            startPolling();
+          }
+        });
+        window.addEventListener("resize", resizeCharts);
+      }
+
+      async function refreshAll(silent = false) {
+        state.source = nodes.sourceSelect.value;
+        state.cycleTime = nodes.cycleInput.value || state.cycleTime;
+        setLoading(true);
+        try {
+          await refreshOperationalData(silent);
+          await refreshTrends();
+          hideBanner();
+        } catch (error) {
+          handleRefreshError(error, silent);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      async function refreshOperationalData(silent = false) {
+        const cycleTime = cycleTimeForApi();
+        const status = await fetchPipelineStatus(state.source, cycleTime);
+        if (!allowedRoles.has(state.role.toLowerCase())) {
+          showPermission();
+          return;
+        }
+
+        const [stages, allJobs, filteredJobs, queue] = await Promise.all([
+          fetchPipelineStages(state.source, cycleTime),
+          fetchJobs({ source: state.source, cycle_time: cycleTime, limit: 200, offset: 0 }),
+          fetchJobs(jobQueryParams()),
+          fetchQueueDepth(),
+        ]);
+
+        nodes.content.hidden = false;
+        nodes.permission.classList.remove("is-visible");
+        renderCycle(status);
+        state.stages = stages;
+        state.summaryJobs = (allJobs.items || []).map(normalizeJob);
+        state.jobs = (filteredJobs.items || []).map(normalizeJob);
+        state.jobTotal = filteredJobs.total || state.jobs.length;
+        renderBadges(state.summaryJobs);
+        renderQueue(queue);
+        renderStages();
+        renderDurationBar();
+        renderJobs();
+        if (!silent) showToast("监控数据已刷新");
+      }
+
+      async function refreshJobsOnly() {
+        try {
+          const filteredJobs = await fetchJobs(jobQueryParams());
+          state.jobs = (filteredJobs.items || []).map(normalizeJob);
+          state.jobTotal = filteredJobs.total || state.jobs.length;
+          renderJobs();
+          hideBanner();
+        } catch (error) {
+          handleRefreshError(error, false);
+        }
+      }
+
+      async function refreshTrends() {
+        const [stageDuration, successRate] = await Promise.all([
+          fetchMetrics("stage-duration", 7),
+          fetchMetrics("success-rate", 7),
+        ]);
+        renderStageTrend(stageDuration);
+        renderSuccessTrend(successRate);
+      }
+
+      function renderCycle(cycle) {
+        nodes.cycleSource.textContent = cycle.source || state.source;
+        nodes.cycleTime.textContent = formatDateTime(cycle.cycle_time || cycleTimeForApi());
+        nodes.cycleState.textContent = cycle.current_state || "--";
+      }
+
+      function renderBadges(jobs) {
+        const counts = { succeeded: 0, failed: 0, running: 0, pending: 0 };
+        jobs.forEach((job) => {
+          if (job.status === "succeeded") counts.succeeded += 1;
+          else if (failedStatuses.has(job.status)) counts.failed += 1;
+          else if (job.status === "running" || job.status === "submitted") counts.running += 1;
+          else counts.pending += 1;
+        });
+        nodes.countSuccess.textContent = counts.succeeded;
+        nodes.countFailed.textContent = counts.failed;
+        nodes.countRunning.textContent = counts.running;
+        nodes.countPending.textContent = counts.pending;
+      }
+
+      function renderQueue(queue) {
+        const chart = chartFor("queue-chart");
+        chart.setOption({
+          color: ["#0b63ce", "#ef7d22", "#94a3b8"],
+          tooltip: { trigger: "item" },
+          legend: { bottom: 0, left: "center", itemWidth: 12, itemHeight: 8 },
+          series: [
+            {
+              type: "pie",
+              radius: ["48%", "72%"],
+              center: ["50%", "42%"],
+              avoidLabelOverlap: true,
+              label: { formatter: "{b}: {c}" },
+              data: [
+                { name: "running", value: queue.running || 0 },
+                { name: "pending", value: queue.pending || 0 },
+                { name: "idle", value: queue.idle || 0 },
+              ],
+            },
+          ],
+        });
+      }
+
+      function renderStages() {
+        nodes.stageList.innerHTML = "";
+        if (!state.stages.length) {
+          nodes.stageList.append(emptyNode("暂无阶段数据"));
+          return;
+        }
+        state.stages.forEach((stage) => {
+          const status = stage.display_status || stage.status || "pending";
+          const progress = stage.basin_progress || { completed: 0, total: 0, failed: 0 };
+          const rate = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
+          const canExpand = status === "failed" || status === "partially_failed";
+          const node = document.createElement("div");
+          node.className = "stage-node";
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `stage-card${canExpand ? " is-clickable" : ""}`;
+          button.dataset.stage = stage.stage;
+          button.dataset.status = status;
+          button.setAttribute("aria-expanded", String(state.expandedStage === stage.stage));
+          button.innerHTML = `
+            <span class="stage-icon">${stageIcon(status)}</span>
+            <span>
+              <span class="stage-title">
+                <span class="stage-name">${escapeHtml(stageLabels[stage.stage] || stage.stage)}</span>
+                <span class="stage-status">${escapeHtml(status)}</span>
+              </span>
+              <span class="stage-facts">
+                <span>耗时 ${formatDuration(stage.duration_seconds)}</span>
+                <span>完成率 ${rate}% (${progress.completed}/${progress.total || 0})</span>
+              </span>
+            </span>
+          `;
+          node.appendChild(button);
+          if (canExpand && state.expandedStage === stage.stage) {
+            node.appendChild(renderFailures(stage));
+          }
+          nodes.stageList.appendChild(node);
+        });
+      }
+
+      function renderFailures(stage) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "failure-list";
+        const failures = (stage.basin_results || []).filter((item) => failedStatuses.has(item.status) || item.error_code);
+        if (!failures.length) {
+          wrapper.textContent = "暂无 per-basin 失败明细";
+          return wrapper;
+        }
+        failures.forEach((item) => {
+          const row = document.createElement("div");
+          row.className = "failure-row";
+          row.innerHTML = `
+            <span>${escapeHtml(item.model_id || "--")}</span>
+            <span>${escapeHtml(item.error_code || item.status || "--")}</span>
+            <span>${escapeHtml(item.error_message || "--")}</span>
+          `;
+          wrapper.appendChild(row);
+        });
+        return wrapper;
+      }
+
+      function renderDurationBar() {
+        const chart = chartFor("duration-chart");
+        const stages = state.stages.map((stage) => stageLabels[stage.stage] || stage.stage);
+        const durations = state.stages.map((stage) => stage.duration_seconds || 0);
+        chart.setOption({
+          color: ["#0f8fbf"],
+          grid: { left: 72, right: 16, top: 18, bottom: 28 },
+          tooltip: { trigger: "axis", valueFormatter: (value) => formatDuration(Number(value)) },
+          xAxis: { type: "value", name: "秒" },
+          yAxis: { type: "category", data: stages, axisLabel: { interval: 0 } },
+          series: [{ type: "bar", data: durations, barWidth: 14 }],
+        });
+      }
+
+      function renderJobs() {
+        const sorted = [...state.jobs].sort(compareJobs);
+        const maxPage = Math.max(1, Math.ceil(sorted.length / state.pageSize));
+        state.currentPage = Math.min(state.currentPage, maxPage);
+        const start = (state.currentPage - 1) * state.pageSize;
+        const pageJobs = sorted.slice(start, start + state.pageSize);
+        nodes.jobsBody.innerHTML = "";
+        nodes.jobsEmpty.hidden = pageJobs.length > 0;
+
+        pageJobs.forEach((job) => {
+          const row = document.createElement("tr");
+          row.innerHTML = `
+            <td>${escapeHtml(job.run_id || "--")}</td>
+            <td>${escapeHtml(job.model_id || "--")}</td>
+            <td>${escapeHtml(job.run_type || "--")}</td>
+            <td>${escapeHtml(job.scenario || "--")}</td>
+            <td><span class="status-pill status-pill--${escapeHtml(job.status)}">${escapeHtml(job.status)}</span></td>
+            <td>${escapeHtml(job.slurm_job_id || "--")}</td>
+            <td>${formatDateTime(job.submitted_at)}</td>
+            <td>${formatDuration(job.duration_seconds)}</td>
+            <td><div class="actions">${actionButtons(job)}</div></td>
+          `;
+          nodes.jobsBody.appendChild(row);
+        });
+
+        const displayTotal = state.jobTotal === state.jobs.length ? state.jobs.length : `${state.jobs.length}/${state.jobTotal}`;
+        nodes.jobsTotal.textContent = `总数 ${displayTotal}，第 ${state.currentPage}/${maxPage} 页`;
+        nodes.prevPage.disabled = state.currentPage <= 1;
+        nodes.nextPage.disabled = state.currentPage >= maxPage;
+      }
+
+      function renderStageTrend(rows) {
+        const chart = chartFor("stage-trend-chart");
+        const dates = [...new Set((rows || []).map((row) => row.date))].sort();
+        const stages = Object.keys(stageLabels);
+        const byStageDate = new Map((rows || []).map((row) => [`${row.stage}:${row.date}`, row.average_duration_seconds || 0]));
+        chart.setOption({
+          color: ["#0f8fbf", "#ef7d22", "#14804a", "#b42318", "#2266cc", "#7c3aed", "#64748b"],
+          title: { text: "阶段平均耗时", left: 0, textStyle: { fontSize: 14, fontWeight: 650 } },
+          grid: { left: 48, right: 16, top: 56, bottom: 42 },
+          tooltip: { trigger: "axis", valueFormatter: (value) => formatDuration(Number(value)) },
+          legend: { top: 24, type: "scroll" },
+          xAxis: { type: "category", data: dates },
+          yAxis: { type: "value", name: "秒" },
+          series: stages.map((stage) => ({
+            type: "line",
+            name: stageLabels[stage],
+            smooth: true,
+            symbolSize: 5,
+            data: dates.map((date) => byStageDate.get(`${stage}:${date}`) || 0),
+          })),
+        });
+      }
+
+      function renderSuccessTrend(rows) {
+        const chart = chartFor("success-trend-chart");
+        const dates = (rows || []).map((row) => row.date);
+        chart.setOption({
+          color: ["#14804a"],
+          title: { text: "每周期成功率", left: 0, textStyle: { fontSize: 14, fontWeight: 650 } },
+          grid: { left: 48, right: 16, top: 48, bottom: 42 },
+          tooltip: { trigger: "axis", valueFormatter: (value) => `${Number(value).toFixed(1)}%` },
+          xAxis: { type: "category", data: dates },
+          yAxis: { type: "value", min: 0, max: 100, axisLabel: { formatter: "{value}%" } },
+          series: [
+            {
+              type: "line",
+              name: "success_rate",
+              smooth: true,
+              symbolSize: 6,
+              areaStyle: { opacity: 0.12 },
+              data: (rows || []).map((row) => Math.round((row.success_rate || 0) * 1000) / 10),
+            },
+          ],
+        });
+      }
+
+      function onStageClick(event) {
+        const card = event.target.closest(".stage-card");
+        if (!card) return;
+        const status = card.dataset.status;
+        if (status !== "failed" && status !== "partially_failed") return;
+        state.expandedStage = state.expandedStage === card.dataset.stage ? "" : card.dataset.stage;
+        renderStages();
+      }
+
+      async function onJobAction(event) {
+        const button = event.target.closest("button[data-action]");
+        if (!button) return;
+        const action = button.dataset.action;
+        const jobId = button.dataset.jobId;
+        const runId = button.dataset.runId;
+        try {
+          button.disabled = true;
+          if (action === "logs") {
+            await openLogModal(jobId);
+          } else if (action === "retry") {
+            await retryRun(runId);
+            showToast("重试已提交");
+            await refreshAll(true);
+          } else if (action === "cancel") {
+            await cancelRun(runId);
+            showToast("取消请求已提交");
+            await refreshAll(true);
+          }
+        } catch (error) {
+          showToast(error.message || "操作失败");
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      async function openLogModal(jobId) {
+        nodes.logTitle.textContent = `作业日志 ${jobId}`;
+        nodes.logContent.textContent = "加载中...";
+        nodes.modal.classList.add("is-visible");
+        const log = await fetchJobLogs(jobId);
+        nodes.logContent.textContent = log.content || "";
+      }
+
+      function closeLogModal() {
+        nodes.modal.classList.remove("is-visible");
+      }
+
+      function actionButtons(job) {
+        const parts = [
+          `<button type="button" data-action="logs" data-job-id="${escapeHtml(job.job_id)}">查看日志</button>`,
+        ];
+        if (failedStatuses.has(job.status) && job.run_id) {
+          parts.push(`<button type="button" data-action="retry" data-run-id="${escapeHtml(job.run_id)}">重试</button>`);
+        }
+        if (activeStatuses.has(job.status) && job.run_id) {
+          parts.push(`<button type="button" data-action="cancel" data-run-id="${escapeHtml(job.run_id)}">取消</button>`);
+        }
+        return parts.join("");
+      }
+
+      function normalizeJob(job) {
+        const runId = job.run_id || "";
+        return {
+          ...job,
+          run_type: job.run_type || inferRunType(runId, job.job_type),
+          scenario: job.scenario || job.scenario_id || inferScenario(runId),
+          duration_seconds: job.duration_seconds,
+        };
+      }
+
+      function inferRunType(runId, jobType) {
+        const value = `${runId} ${jobType || ""}`.toLowerCase();
+        if (value.includes("analysis")) return "analysis";
+        if (value.includes("hindcast")) return "hindcast";
+        return "forecast";
+      }
+
+      function inferScenario(runId) {
+        const value = String(runId).toLowerCase();
+        if (value.includes("ifs")) return "forecast_ifs_deterministic";
+        if (value.includes("best")) return "best_available";
+        if (value.includes("analysis")) return "analysis_true_field";
+        return "forecast_gfs_deterministic";
+      }
+
+      function compareJobs(a, b) {
+        const direction = state.sortDirection === "asc" ? 1 : -1;
+        const left = sortValue(a, state.sortKey);
+        const right = sortValue(b, state.sortKey);
+        if (left < right) return -1 * direction;
+        if (left > right) return 1 * direction;
+        return 0;
+      }
+
+      function sortValue(job, key) {
+        if (key === "duration_seconds") return Number(job.duration_seconds || 0);
+        return Date.parse(job[key] || "") || 0;
+      }
+
+      function jobQueryParams() {
+        const filters = {
+          source: state.source,
+          cycle_time: cycleTimeForApi(),
+          limit: 200,
+          offset: 0,
+        };
+        if (nodes.statusFilter.value) filters.status = nodes.statusFilter.value;
+        if (nodes.runTypeFilter.value) filters.run_type = nodes.runTypeFilter.value;
+        if (nodes.scenarioFilter.value) filters.scenario = nodes.scenarioFilter.value;
+        return filters;
+      }
+
+      async function apiGet(path, query, headers) {
+        const url = new URL(`/api/v1${path}`, window.location.origin);
+        Object.entries(query || {}).forEach(([key, value]) => {
+          if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
+        });
+        const response = await fetch(url, { headers: { Accept: "application/json", ...headers } });
+        return unwrap(response);
+      }
+
+      async function apiPost(path, headers) {
+        const response = await fetch(`/api/v1${path}`, {
+          method: "POST",
+          headers: { Accept: "application/json", ...headers },
+        });
+        return unwrap(response);
+      }
+
+      async function unwrap(response) {
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 403) {
+          const error = new Error("权限不足");
+          error.status = 403;
+          error.payload = payload;
+          throw error;
+        }
+        if (!response.ok || payload.status === "error") {
+          const apiError = payload.error || {};
+          const error = new Error(apiError.message || `请求失败 (${response.status})`);
+          error.status = response.status;
+          error.payload = payload;
+          throw error;
+        }
+        return payload.data === undefined ? payload : payload.data;
+      }
+
+      function authHeaders() {
+        return { "X-User-Role": state.role };
+      }
+
+      function operatorHeaders() {
+        return { "X-User-Role": "operator" };
+      }
+
+      function handleRefreshError(error, silent) {
+        if (error.status === 403) {
+          showPermission();
+          return;
+        }
+        if (!silent) showToast(error.message || "刷新失败");
+        showBanner(`轮询失败：${error.message || "网络连接失败"}`);
+      }
+
+      function showPermission() {
+        nodes.content.hidden = true;
+        nodes.permission.classList.add("is-visible");
+        showBanner("权限不足");
+      }
+
+      function showBanner(message) {
+        nodes.banner.textContent = message;
+        nodes.banner.classList.add("is-visible");
+      }
+
+      function hideBanner() {
+        nodes.banner.classList.remove("is-visible");
+        nodes.banner.textContent = "";
+      }
+
+      function showToast(message) {
+        nodes.toast.textContent = message;
+        nodes.toast.classList.add("is-visible");
+        window.clearTimeout(nodes.toast._timer);
+        nodes.toast._timer = window.setTimeout(() => nodes.toast.classList.remove("is-visible"), 2800);
+      }
+
+      function setLoading(loading) {
+        nodes.refreshButton.disabled = loading;
+        nodes.refreshButton.textContent = loading ? "刷新中" : "刷新";
+      }
+
+      function startPolling() {
+        if (document.hidden || state.pollTimer) return;
+        state.pollTimer = window.setInterval(() => refreshOperationalData(true), 10000);
+      }
+
+      function stopPolling() {
+        if (state.pollTimer) {
+          window.clearInterval(state.pollTimer);
+          state.pollTimer = null;
+        }
+      }
+
+      function restartPolling() {
+        stopPolling();
+        startPolling();
+      }
+
+      function chartFor(id) {
+        if (!state.charts[id]) state.charts[id] = echarts.init(document.getElementById(id));
+        return state.charts[id];
+      }
+
+      function resizeCharts() {
+        Object.values(state.charts).forEach((chart) => chart.resize());
+      }
+
+      function emptyNode(text) {
+        const node = document.createElement("div");
+        node.className = "empty";
+        node.textContent = text;
+        return node;
+      }
+
+      function stageIcon(status) {
+        if (status === "succeeded") return "✓";
+        if (status === "failed" || status === "partially_failed") return "✗";
+        if (status === "running" || status === "submitted") return "◉";
+        return "○";
+      }
+
+      function formatDuration(seconds) {
+        if (seconds === null || seconds === undefined || seconds === "") return "--";
+        const value = Number(seconds);
+        if (!Number.isFinite(value)) return "--";
+        if (value < 60) return `${Math.round(value)}s`;
+        const minutes = Math.floor(value / 60);
+        const rest = Math.round(value % 60);
+        if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+        const hours = Math.floor(minutes / 60);
+        const minuteRest = minutes % 60;
+        return minuteRest ? `${hours}h ${minuteRest}m` : `${hours}h`;
+      }
+
+      function formatDateTime(value) {
+        if (!value) return "--";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        return date.toISOString().replace("T", " ").replace(".000Z", "Z");
+      }
+
+      function defaultCycleInput() {
+        const date = new Date();
+        date.setUTCMinutes(0, 0, 0);
+        return date.toISOString().slice(0, 16);
+      }
+
+      function normalizeCycleInput(value) {
+        if (!value) return "";
+        if (/^\d{10}$/.test(value)) {
+          return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}T${value.slice(8, 10)}:00`;
+        }
+        const date = new Date(value);
+        if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 16);
+        return value.slice(0, 16);
+      }
+
+      function cycleTimeForApi() {
+        return state.cycleTime && state.cycleTime.length === 16 ? `${state.cycleTime}:00Z` : state.cycleTime;
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+    </script>
+  </body>
+</html>

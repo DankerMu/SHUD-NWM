@@ -167,10 +167,11 @@ def list_jobs(
         .offset(offset)
     )
     jobs = list(store.session.scalars(statement))
+    run_metadata = _run_metadata_by_ids(store, {job.run_id for job in jobs if job.run_id})
     return _ok(
         request,
         {
-            "items": [_job_payload(job) for job in jobs],
+            "items": [_job_payload(job, run_metadata.get(job.run_id or "")) for job in jobs],
             "total": int(total),
             "limit": limit,
             "offset": offset,
@@ -561,6 +562,55 @@ def _run_ids_matching_filters(
     return {str(row["run_id"]) for row in rows if row.get("run_id") is not None}
 
 
+def _run_metadata_by_ids(store: PipelineStore, run_ids: set[str]) -> dict[str, dict[str, str | None]]:
+    if not run_ids:
+        return {}
+
+    try:
+        inspector = inspect(store.session.get_bind())
+        column_names = {column["name"] for column in inspector.get_columns("hydro_run", schema="hydro")}
+    except (NoSuchTableError, SQLAlchemyError):
+        return {}
+
+    if "run_id" not in column_names:
+        return {}
+
+    selected_columns = ["run_id"]
+    if "run_type" in column_names:
+        selected_columns.append("run_type")
+    scenario_column = "scenario_id" if "scenario_id" in column_names else "scenario"
+    if scenario_column in column_names:
+        selected_columns.append(f"{scenario_column} AS scenario")
+
+    bind_names = [f"run_id_{index}" for index, _run_id in enumerate(run_ids)]
+    params = dict(zip(bind_names, run_ids, strict=True))
+    placeholders = ", ".join(f":{name}" for name in bind_names)
+    try:
+        rows = store.session.execute(
+            text(
+                f"""
+                SELECT {", ".join(selected_columns)}
+                FROM hydro.hydro_run
+                WHERE run_id IN ({placeholders})
+                """
+            ),
+            params,
+        ).mappings()
+    except SQLAlchemyError:
+        return {}
+
+    metadata: dict[str, dict[str, str | None]] = {}
+    for row in rows:
+        run_id = row.get("run_id")
+        if run_id is None:
+            continue
+        metadata[str(run_id)] = {
+            "run_type": str(row["run_type"]) if row.get("run_type") is not None else None,
+            "scenario": str(row["scenario"]) if row.get("scenario") is not None else None,
+        }
+    return metadata
+
+
 def _stage_summaries(jobs: list[PipelineJob]) -> list[dict[str, Any]]:
     jobs_by_stage: dict[str, list[PipelineJob]] = defaultdict(list)
     for job in jobs:
@@ -637,11 +687,14 @@ def _basin_result(job: PipelineJob) -> dict[str, Any]:
     }
 
 
-def _job_payload(job: PipelineJob) -> dict[str, Any]:
+def _job_payload(job: PipelineJob, run_metadata: dict[str, str | None] | None = None) -> dict[str, Any]:
+    run_metadata = run_metadata or {}
     return {
         "job_id": job.job_id,
         "run_id": job.run_id,
         "cycle_id": job.cycle_id,
+        "run_type": run_metadata.get("run_type"),
+        "scenario": run_metadata.get("scenario"),
         "job_type": job.job_type,
         "slurm_job_id": job.slurm_job_id,
         "model_id": job.model_id,

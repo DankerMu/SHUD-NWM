@@ -67,6 +67,13 @@
         min-width: 0;
       }
 
+      .panel__actions {
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 8px;
+      }
+
       h1 {
         margin: 0;
         font-size: 18px;
@@ -94,6 +101,25 @@
       }
 
       button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .nav-link {
+        display: inline-flex;
+        height: 36px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        padding: 0 12px;
+        text-decoration: none;
+        font-size: 14px;
+        line-height: 1;
+      }
+
+      .nav-link:hover {
         border-color: var(--accent);
         color: var(--accent);
       }
@@ -199,7 +225,10 @@
             <h1 id="segment-title">请选择河段</h1>
             <div id="segment-meta" class="meta">点击地图中的河段查看预报曲线</div>
           </div>
-          <button id="close-panel" type="button" title="关闭" aria-label="关闭">×</button>
+          <div class="panel__actions">
+            <a class="nav-link" href="monitoring.html">监控</a>
+            <button id="close-panel" type="button" title="关闭" aria-label="关闭">×</button>
+          </div>
         </div>
         <div class="panel__body">
           <div id="state" class="state">暂无预报数据</div>
