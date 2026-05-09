@@ -95,6 +95,8 @@ class RetryService:
         self.config = config
 
     def should_auto_retry(self, job: PipelineJob) -> bool:
+        if job.status == "permanently_failed":
+            return False
         if not is_transient_error(job.error_code):
             return False
         return job.retry_count < self.config.max_retries
@@ -110,10 +112,22 @@ class RetryService:
         next_retry_count = job.retry_count + 1
         backoff_seconds = compute_backoff_seconds(job.retry_count, self.config.backoff_schedule)
 
-        updated = self._update_job_for_retry(job, retry_count=next_retry_count, status="pending")
+        retry_job = self.store.create_job(
+            job_id=f"{job.job_id}_retry_{next_retry_count}",
+            run_id=job.run_id,
+            cycle_id=job.cycle_id,
+            job_type=job.job_type,
+            slurm_job_id=None,
+            model_id=job.model_id,
+            stage=job.stage,
+            status="pending",
+            commit=False,
+        )
+        retry_job.retry_count = next_retry_count
+        self.store.session.add(retry_job)
         self.store.insert_event(
             entity_type="pipeline_job",
-            entity_id=updated.job_id,
+            entity_id=retry_job.job_id,
             event_type="retry",
             status_from=status_from,
             status_to="pending",
@@ -122,9 +136,13 @@ class RetryService:
                 "retry_count": next_retry_count,
                 "previous_error": previous_error,
                 "backoff_seconds": backoff_seconds,
+                "previous_job_id": job.job_id,
             },
+            commit=False,
         )
-        return updated
+        self.store.session.commit()
+        self.store.session.refresh(retry_job)
+        return retry_job
 
     def mark_permanently_failed(self, job: PipelineJob) -> PipelineJob:
         if job.status == "permanently_failed":
@@ -204,12 +222,3 @@ class RetryService:
         self.store.session.commit()
         self.store.session.refresh(retry_job)
         return retry_job
-
-    def _update_job_for_retry(self, job: PipelineJob, *, retry_count: int, status: str) -> PipelineJob:
-        job.retry_count = retry_count
-        job.status = status
-        job.updated_at = datetime.now(UTC)
-        self.store.session.add(job)
-        self.store.session.commit()
-        self.store.session.refresh(job)
-        return job

@@ -117,6 +117,9 @@ class PipelineStore:
         if job is None:
             raise KeyError(f"pipeline_job not found: {job_id}")
 
+        if job.status == "permanently_failed":
+            return job
+
         if job.status in TERMINAL_STATUS_GUARD and status not in TERMINAL_STATUS_OVERRIDES:
             return job
 

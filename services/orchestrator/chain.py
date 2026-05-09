@@ -14,8 +14,9 @@ import httpx
 from packages.common.best_available import BestAvailableManager
 from packages.common.object_store import LocalObjectStore
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
-from services.orchestrator.persistence import PipelineJob
+from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
+from services.slurm_gateway.config import SlurmGatewaySettings
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
@@ -561,10 +562,12 @@ class ForecastOrchestrator:
     @classmethod
     def from_env(cls) -> ForecastOrchestrator:
         config = OrchestratorConfig.from_env()
+        retry_service = _retry_service_from_env()
         return cls(
             config=config,
             repository=PsycopgOrchestratorRepository.from_env(),
             state_manager=StateManager.from_env(),
+            retry_service=retry_service,
         )
 
     def orchestrate_cycle(
@@ -664,12 +667,25 @@ class ForecastOrchestrator:
             had_partial_before_stage = context.had_partial
             last_partial_before_stage = context.last_partial_status
             retry_attempts = 0
+            retry_pipeline_job_id: str | None = None
             while True:
                 existing_job = self._find_existing_stage_job(existing_jobs, stage)
-                if existing_job is not None:
+                if (
+                    existing_job is not None
+                    and retry_pipeline_job_id is None
+                    and not self._job_needs_submission(existing_job)
+                ):
                     result, aggregation = self._resume_cycle_stage(stage, context, existing_job)
                 else:
-                    result, aggregation = self._submit_and_wait_cycle_stage(stage, context)
+                    pipeline_job_id = retry_pipeline_job_id
+                    if pipeline_job_id is None and existing_job is not None:
+                        pipeline_job_id = str(existing_job["job_id"])
+                    result, aggregation = self._submit_and_wait_cycle_stage(
+                        stage,
+                        context,
+                        pipeline_job_id=pipeline_job_id,
+                    )
+                    retry_pipeline_job_id = None
                     existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
 
                 if len(stage_results) == stage_index:
@@ -677,9 +693,10 @@ class ForecastOrchestrator:
                 else:
                     stage_results[-1] = result
 
-                if result.status in {"failed", "submission_failed"}:
+                if result.status in {"failed", "submission_failed", "permanently_failed"}:
                     retry_attempts += 1
-                    if self._schedule_cycle_stage_retry(result, retry_attempts):
+                    retry_pipeline_job_id = self._schedule_cycle_stage_retry(result, retry_attempts)
+                    if retry_pipeline_job_id is not None:
                         existing_jobs = [job for job in existing_jobs if not self._job_matches_stage(job, stage)]
                         continue
                     return PipelineResult(context.run_id, context.cycle_id, "failed", tuple(stage_results))
@@ -712,23 +729,40 @@ class ForecastOrchestrator:
             tuple(stage_results),
         )
 
-    def _schedule_cycle_stage_retry(self, result: StageRunResult, failure_number: int) -> bool:
+    def _schedule_cycle_stage_retry(self, result: StageRunResult, _failure_number: int) -> str | None:
         if self.retry_service is None:
-            return False
+            return None
 
         job = self._retry_job_for_stage_result(result)
         if job is None:
-            return False
+            return None
 
         retry_count = int(getattr(job, "retry_count", 0) or 0)
         backoff_seconds = compute_backoff_seconds(retry_count, self.retry_config.backoff_schedule)
         handled = self.retry_service.handle_failed_job(job)
-        if str(getattr(handled, "status", "")) != "pending":
-            return False
-        if failure_number > self.retry_config.max_retries:
-            return False
+        handled_status = str(getattr(handled, "status", ""))
+        handled_job_id = str(getattr(handled, "job_id"))
+        self._release_retry_store_transaction()
+        if handled_status != "pending":
+            return None
         time.sleep(backoff_seconds)
-        return True
+        return handled_job_id
+
+    def _release_retry_store_transaction(self) -> None:
+        service = self.retry_service
+        if service is None:
+            return
+        session = getattr(getattr(service, "store", None), "session", None)
+        if session is None:
+            return
+        in_transaction = getattr(session, "in_transaction", None)
+        if callable(in_transaction):
+            if in_transaction():
+                session.commit()
+            return
+        commit = getattr(session, "commit", None)
+        if callable(commit):
+            commit()
 
     def _retry_job_for_stage_result(self, result: StageRunResult) -> PipelineJob | None:
         service = self.retry_service
@@ -736,6 +770,10 @@ class ForecastOrchestrator:
             return None
 
         store = getattr(service, "store", None)
+        session = getattr(store, "session", None)
+        expire_all = getattr(session, "expire_all", None)
+        if callable(expire_all):
+            expire_all()
         get_job = getattr(store, "get_job", None)
         if callable(get_job):
             job = get_job(result.pipeline_job_id)
@@ -889,7 +927,10 @@ class ForecastOrchestrator:
         self,
         stage: StageDefinition,
         context: CycleOrchestrationContext,
+        *,
+        pipeline_job_id: str | None = None,
     ) -> tuple[StageRunResult, ArrayAggregation | None]:
+        pipeline_job_id = pipeline_job_id or _pipeline_job_id(context.run_id, stage.stage)
         if stage.is_array and not context.active_basins:
             self.repository.update_forecast_cycle_status(
                 source_id=context.source_id,
@@ -902,7 +943,7 @@ class ForecastOrchestrator:
                 StageRunResult(
                     stage=stage.stage,
                     job_type=stage.job_type,
-                    pipeline_job_id=_pipeline_job_id(context.run_id, stage.stage),
+                    pipeline_job_id=pipeline_job_id,
                     slurm_job_id="",
                     status="failed",
                     error_code="NO_ACTIVE_BASINS",
@@ -933,10 +974,9 @@ class ForecastOrchestrator:
                     )
                 )
         except Exception as error:
-            return self._record_submission_failure(stage, context, error), None
+            return self._record_submission_failure(stage, context, error, pipeline_job_id=pipeline_job_id), None
 
         slurm_job_id = str(submitted["job_id"])
-        pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
         log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
         submitted_status = _status_from_gateway_job(submitted)
         self.repository.upsert_pipeline_job(
@@ -1022,7 +1062,11 @@ class ForecastOrchestrator:
             status = _status_from_gateway_job(terminal)
 
         aggregation = None
-        if stage.is_array and job.get("slurm_job_id") and status not in {"failed", "cancelled", "submission_failed"}:
+        if (
+            stage.is_array
+            and job.get("slurm_job_id")
+            and status not in {"failed", "cancelled", "submission_failed", "permanently_failed"}
+        ):
             aggregation = self._aggregate_array_stage(stage, context, str(job["slurm_job_id"]), terminal)
             status = aggregation.status
             if str(job.get("status")) not in TERMINAL_JOB_STATUSES or status != str(job.get("status")):
@@ -1285,8 +1329,10 @@ class ForecastOrchestrator:
         stage: StageDefinition,
         context: CycleOrchestrationContext,
         error: Exception,
+        *,
+        pipeline_job_id: str | None = None,
     ) -> StageRunResult:
-        pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
+        pipeline_job_id = pipeline_job_id or _pipeline_job_id(context.run_id, stage.stage)
         now = _utcnow()
         message = str(error)
         self.repository.upsert_pipeline_job(
@@ -1464,6 +1510,10 @@ class ForecastOrchestrator:
     @staticmethod
     def _job_matches_stage(job: Mapping[str, Any], stage: StageDefinition) -> bool:
         return job.get("stage") == stage.stage or job.get("job_type") == stage.job_type
+
+    @staticmethod
+    def _job_needs_submission(job: Mapping[str, Any]) -> bool:
+        return str(job.get("status")) == "pending" and not job.get("slurm_job_id")
 
     def trigger_forecast(
         self,
@@ -1992,11 +2042,13 @@ class AnalysisOrchestrator(ForecastOrchestrator):
     @classmethod
     def from_env(cls) -> AnalysisOrchestrator:
         config = OrchestratorConfig.from_env()
+        retry_service = _retry_service_from_env()
         return cls(
             config=config,
             repository=PsycopgOrchestratorRepository.from_env(),
             state_manager=StateManager.from_env(),
             best_available_manager=BestAvailableManager.from_env(),
+            retry_service=retry_service,
         )
 
     def trigger_analysis(
@@ -2483,8 +2535,9 @@ class PsycopgOrchestratorRepository:
                 log_uri = COALESCE(%s, log_uri),
                 updated_at = now()
             WHERE job_id = %s
+              AND status <> 'permanently_failed'
               AND (
-                    status NOT IN ('succeeded', 'failed', 'cancelled', 'permanently_failed')
+                    status NOT IN ('succeeded', 'failed', 'cancelled')
                  OR %s IN ('partially_failed', 'permanently_failed')
               )
             RETURNING *
@@ -2697,6 +2750,20 @@ class PsycopgOrchestratorRepository:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _retry_service_from_env() -> RetryService | None:
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        return None
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    engine = create_engine(database_url, future=True)
+    session = Session(engine)
+    store = PipelineStore(session)
+    return RetryService(store, RetryConfig.from_settings(SlurmGatewaySettings()))
 
 
 def _coerce_mapping(value: Any) -> dict[str, Any]:

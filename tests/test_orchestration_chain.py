@@ -276,6 +276,38 @@ def test_stage_three_failure_blocks_downstream_stages(tmp_path: Path) -> None:
     assert repository.cycle_statuses[-1] == "failed_forcing"
 
 
+def test_permanently_failed_stage_blocks_downstream_stages(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    run_id = "cycle_gfs_2026050100"
+    repository.jobs[f"job_{run_id}_download"] = {
+        "job_id": f"job_{run_id}_download",
+        "run_id": run_id,
+        "cycle_id": cycle_id,
+        "job_type": "download_source_cycle",
+        "slurm_job_id": "3001",
+        "model_id": None,
+        "status": "permanently_failed",
+        "stage": "download",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": None,
+        "finished_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+        "exit_code": 1,
+        "error_code": "SLURM_TIMEOUT",
+        "error_message": "retry budget exhausted",
+        "log_uri": None,
+    }
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert [stage.status for stage in result.stages] == ["permanently_failed"]
+    assert client.submissions == []
+    assert repository.cycle_statuses[-1] == "failed_download"
+
+
 def test_failed_stage_auto_retries_before_downstream_stages(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient(

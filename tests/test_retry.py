@@ -72,10 +72,14 @@ def test_handle_failed_job_transient() -> None:
         job = _create_job(store, error_code="SLURM_TIMEOUT")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        updated = service.handle_failed_job(job)
+        retry = service.handle_failed_job(job)
 
-        assert updated.status == "pending"
-        assert updated.retry_count == 1
+        store.session.refresh(job)
+        assert retry.job_id == "job_1_retry_1"
+        assert retry.status == "pending"
+        assert retry.retry_count == 1
+        assert job.status == "failed"
+        assert job.retry_count == 0
 
 
 def test_handle_failed_job_non_transient() -> None:
@@ -103,10 +107,22 @@ def test_schedule_auto_retry() -> None:
         job = _create_job(store, error_code="SLURM_TIMEOUT")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        updated = service.schedule_auto_retry(job)
+        retry = service.schedule_auto_retry(job)
 
-        assert updated.retry_count == 1
-        assert updated.status == "pending"
+        store.session.refresh(job)
+        assert retry.job_id != job.job_id
+        assert retry.job_id == "job_1_retry_1"
+        assert retry.run_id == job.run_id
+        assert retry.cycle_id == job.cycle_id
+        assert retry.job_type == job.job_type
+        assert retry.model_id == job.model_id
+        assert retry.stage == job.stage
+        assert retry.retry_count == 1
+        assert retry.status == "pending"
+        assert retry.slurm_job_id is None
+        assert job.status == "failed"
+        assert job.retry_count == 0
+        assert job.slurm_job_id == "123"
         event = _events(store)[0]
         assert event.event_type == "retry"
         assert event.status_from == "failed"
@@ -188,6 +204,7 @@ def test_audit_event_auto() -> None:
             "retry_count": 1,
             "previous_error": "STORAGE_WRITE_FAILED",
             "backoff_seconds": 60,
+            "previous_job_id": job.job_id,
         }
 
 
@@ -267,6 +284,18 @@ def test_permanently_failed_override() -> None:
         updated = store.update_job_status("job_failed", "permanently_failed")
 
         assert updated.status == "permanently_failed"
+
+
+def test_permanently_failed_is_sticky() -> None:
+    with _store() as store:
+        _create_job(store, job_id="job_failed", run_id="run_1", status="permanently_failed")
+
+        partial = store.update_job_status("job_failed", "partially_failed")
+        running = store.update_job_status("job_failed", "running")
+
+        assert partial.status == "permanently_failed"
+        assert running.status == "permanently_failed"
+        assert store.get_job("job_failed").status == "permanently_failed"
 
 
 def _store() -> "_ClosingStore":
