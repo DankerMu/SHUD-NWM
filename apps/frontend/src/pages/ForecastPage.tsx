@@ -1,35 +1,79 @@
-import { Activity, Map } from 'lucide-react'
+import { useCallback } from 'react'
 
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ForecastPanel } from '@/components/forecast/ForecastPanel'
+import { MapView } from '@/components/map/MapView'
+import { useToast } from '@/hooks/useToast'
+import { getApiErrorMessage } from '@/api/response'
+import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 
 export function ForecastPage() {
+  const selectedSegment = useForecastStore((state) => state.selectedSegment)
+  const forecastData = useForecastStore((state) => state.forecastData)
+  const loading = useForecastStore((state) => state.loading)
+  const error = useForecastStore((state) => state.error)
+  const includeAnalysis = useForecastStore((state) => state.includeAnalysis)
+  const selectSegment = useForecastStore((state) => state.selectSegment)
+  const fetchForecast = useForecastStore((state) => state.fetchForecast)
+  const clearSelection = useForecastStore((state) => state.clearSelection)
+  const toast = useToast((state) => state.toast)
+
+  const loadSegmentForecast = useCallback(
+    async (segment: ForecastSegmentInfo) => {
+      selectSegment(segment)
+      try {
+        await fetchForecast({ includeAnalysis: true })
+      } catch (error) {
+        toast({
+          title: '预报曲线加载失败',
+          description: getApiErrorMessage(error, '获取预报曲线失败'),
+          variant: 'destructive',
+        })
+      }
+    },
+    [fetchForecast, selectSegment, toast],
+  )
+
+  const retryForecast = useCallback(() => {
+    void fetchForecast({ includeAnalysis: true }).catch((error) => {
+      toast({
+        title: '预报曲线加载失败',
+        description: getApiErrorMessage(error, '获取预报曲线失败'),
+        variant: 'destructive',
+      })
+    })
+  }, [fetchForecast, toast])
+
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
-      <section className="min-h-[28rem] rounded-lg border border-border bg-panel p-4">
-        <div className="flex items-center gap-2 text-sm font-medium text-muted">
-          <Map className="size-4" />
-          全国河网
-        </div>
+    <div className="grid min-h-[calc(100vh-7rem)] gap-4 lg:h-[calc(100vh-7rem)] lg:grid-cols-[minmax(0,1fr)_24rem]">
+      <section
+        className="min-h-[32rem] overflow-hidden rounded-lg border border-border bg-panel lg:min-h-0"
+        aria-label="河网地图"
+      >
+        <MapView
+          className="h-full"
+          selectedSegmentId={selectedSegment?.segmentId}
+          onSegmentSelect={(segment) => void loadSegmentForecast(segment)}
+          onClearSelection={clearSelection}
+        />
       </section>
-      <aside className="space-y-4">
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between gap-3">
-              <CardTitle>预报工作台</CardTitle>
-              <Badge variant="secondary">Group 3</Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4 text-sm text-muted">
-            <p>React 迁移占位。</p>
-            <Button size="sm" variant="outline">
-              <Activity className="size-4" />
-              刷新
-            </Button>
-          </CardContent>
-        </Card>
-      </aside>
+
+      {selectedSegment ? (
+        <ForecastPanel
+          segment={selectedSegment}
+          forecastData={forecastData}
+          loading={loading}
+          error={error}
+          includeAnalysis={includeAnalysis}
+          onClose={clearSelection}
+          onRetry={retryForecast}
+        />
+      ) : (
+        <aside className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-panel">
+          <div className="grid min-h-72 flex-1 place-items-center p-4 text-center text-sm text-muted">
+            请在地图上选择河段查看预报
+          </div>
+        </aside>
+      )}
     </div>
   )
 }
