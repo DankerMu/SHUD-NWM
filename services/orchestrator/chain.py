@@ -19,7 +19,14 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cy
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
 
-TERMINAL_JOB_STATUSES = {"succeeded", "partially_failed", "failed", "cancelled", "submission_failed"}
+TERMINAL_JOB_STATUSES = {
+    "succeeded",
+    "partially_failed",
+    "failed",
+    "cancelled",
+    "submission_failed",
+    "permanently_failed",
+}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running", "succeeded"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
@@ -1984,7 +1991,9 @@ class PsycopgOrchestratorRepository:
             SELECT 1 AS active
             FROM ops.pipeline_job
             WHERE cycle_id = %s
-              AND status NOT IN ('succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed')
+              AND status NOT IN (
+                'succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed', 'permanently_failed'
+              )
             LIMIT 1
             """,
             (cycle_id,),
@@ -2003,7 +2012,7 @@ class PsycopgOrchestratorRepository:
               AND (
                     h.status::text = ANY(%s)
                  OR COALESCE(pj.status, 'pending') NOT IN (
-                    'succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed'
+                    'succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed', 'permanently_failed'
                  )
               )
             LIMIT 1
@@ -2261,7 +2270,7 @@ class PsycopgOrchestratorRepository:
                 updated_at = now()
             WHERE job_id = %s
               AND (
-                    status NOT IN ('succeeded', 'failed', 'cancelled')
+                    status NOT IN ('succeeded', 'failed', 'cancelled', 'permanently_failed')
                  OR %s = 'partially_failed'
               )
             RETURNING *

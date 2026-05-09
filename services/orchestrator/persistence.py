@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import JSON, BigInteger, DateTime, Integer, MetaData, Text, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-TERMINAL_STATUS_GUARD = {"succeeded", "failed", "cancelled"}
+TERMINAL_STATUS_GUARD = {"succeeded", "failed", "cancelled", "permanently_failed"}
 TERMINAL_STATUS_OVERRIDES = {"partially_failed"}
 
 
