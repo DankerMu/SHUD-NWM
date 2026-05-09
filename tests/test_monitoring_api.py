@@ -18,7 +18,9 @@ from workers.data_adapters.base import cycle_id_for
 def test_pipeline_status_endpoint() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
         _insert_cycle(store, cycle_time=cycle_time, current_state="forecast_running")
+        _seed_monitoring_jobs(store, cycle_id=cycle_id)
         with _client(store) as client:
             response = client.get(
                 "/api/v1/pipeline/status",
@@ -32,6 +34,7 @@ def test_pipeline_status_endpoint() -> None:
         assert body["data"]["cycle_id"] == cycle_id_for("GFS", cycle_time)
         assert body["data"]["started_at"] is not None
         assert body["data"]["updated_at"] is not None
+        assert body["data"]["job_counts"] == {"succeeded": 3, "failed": 1, "running": 1, "pending": 0}
 
 
 def test_pipeline_stages_endpoint() -> None:
@@ -134,6 +137,44 @@ def test_jobs_list_endpoint() -> None:
             "log_uri",
             "duration_seconds",
         }
+
+
+def test_jobs_list_endpoint_server_side_sorting() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _seed_monitoring_jobs(store, cycle_id=cycle_id)
+        with _client(store) as client:
+            submitted_response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "sort_by": "submitted_at",
+                    "sort_order": "asc",
+                    "limit": 2,
+                    "offset": 0,
+                },
+            )
+            duration_response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "sort_by": "duration_seconds",
+                    "sort_order": "desc",
+                    "limit": 2,
+                    "offset": 0,
+                },
+            )
+
+        assert submitted_response.status_code == 200
+        submitted_jobs = submitted_response.json()["data"]["items"]
+        assert [job["job_id"] for job in submitted_jobs] == ["job_download_a", "job_download_b"]
+
+        assert duration_response.status_code == 200
+        duration_jobs = duration_response.json()["data"]["items"]
+        assert [job["job_id"] for job in duration_jobs] == ["job_download_b", "job_download_a"]
 
 
 def test_jobs_list_filter_by_status() -> None:

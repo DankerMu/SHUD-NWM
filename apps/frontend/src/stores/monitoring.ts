@@ -17,6 +17,8 @@ export type PipelineJobPage = components['schemas']['PipelineJobPage'] & {
 export type PipelineStage = components['schemas']['PipelineStage']
 export type StageDurationMetric = components['schemas']['StageDurationMetric']
 export type SuccessRateMetric = components['schemas']['SuccessRateMetric']
+export type JobSortBy = 'submitted_at' | 'duration_seconds'
+export type JobSortOrder = 'asc' | 'desc'
 
 export type QueueState = components['schemas']['QueueDepth']
 
@@ -24,6 +26,8 @@ export interface JobFilters {
   status?: JobStatus
   runType?: string
   scenario?: string
+  sortBy?: JobSortBy
+  sortOrder?: JobSortOrder
   page?: number
   pageSize?: number
 }
@@ -33,7 +37,6 @@ interface MonitoringState {
   cycleTime: string
   cycle: PipelineCycle | null
   stages: PipelineStage[]
-  summaryJobs: PipelineJob[]
   jobs: PipelineJob[]
   jobTotal: number
   queue: QueueState | null
@@ -117,6 +120,8 @@ async function getJobsPage(source: string, cycleTime: string, filters: JobFilter
         status: filters.status,
         run_type: filters.runType,
         scenario: filters.scenario,
+        sort_by: filters.sortBy,
+        sort_order: filters.sortOrder,
         limit: pageSize,
         offset: (page - 1) * pageSize,
       },
@@ -131,27 +136,28 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   cycleTime: defaultCycleTime(),
   cycle: null,
   stages: [],
-  summaryJobs: [],
   jobs: [],
   jobTotal: 0,
   queue: null,
   queueError: null,
-  jobFilters: { page: 1, pageSize: 12 },
+  jobFilters: { page: 1, pageSize: 12, sortBy: 'submitted_at', sortOrder: 'desc' },
   isPolling: false,
   isJobsLoading: false,
   error: null,
-  setSource: (source) => set({ source }),
-  setCycleTime: (cycleTime) => set({ cycleTime: cycleTimeForApi(cycleTime) }),
+  setSource: (source) => set((state) => ({ source, jobFilters: { ...state.jobFilters, page: 1 } })),
+  setCycleTime: (cycleTime) => set((state) => ({
+    cycleTime: cycleTimeForApi(cycleTime),
+    jobFilters: { ...state.jobFilters, page: 1 },
+  })),
   fetchAll: async () => {
     const { source, cycleTime } = get()
     const apiCycleTime = cycleTimeForApi(cycleTime)
     set({ isPolling: true, error: null, queueError: null })
 
     try {
-      const [cycle, stages, summaryJobsPage] = await Promise.all([
+      const [cycle, stages] = await Promise.all([
         getPipelineStatus(source, apiCycleTime),
         getPipelineStages(source, apiCycleTime),
-        getJobsPage(source, apiCycleTime, { page: 1, pageSize: 200 }),
       ])
 
       let queue: QueueState | null = null
@@ -166,7 +172,6 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
         cycle,
         cycleTime: apiCycleTime,
         stages,
-        summaryJobs: summaryJobsPage.items.map(normalizeJob),
         queue,
         queueError,
         isPolling: false,

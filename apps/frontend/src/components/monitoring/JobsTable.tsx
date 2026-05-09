@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, RotateCcw, Square, Terminal } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { client } from '@/api/client'
 import { getApiErrorMessage } from '@/api/response'
@@ -16,7 +16,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { usePagination } from '@/hooks/usePagination'
 import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
 import { formatDate, formatDuration } from '@/lib/format'
@@ -28,6 +27,7 @@ type SortDirection = 'asc' | 'desc'
 
 const operatorRoles = new Set(['operator', 'model_admin', 'sys_admin'])
 const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
+const retryableStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'partially_failed'])
 const activeStatuses = new Set(['pending', 'submitted', 'running'])
 
 function statusClass(status: string) {
@@ -35,11 +35,6 @@ function statusClass(status: string) {
   if (failedStatuses.has(status)) return 'border-danger/30 bg-danger/10 text-danger'
   if (status === 'running' || status === 'submitted') return 'border-accent/30 bg-accent/10 text-accent'
   return 'border-border bg-muted/10 text-muted'
-}
-
-function sortValue(job: PipelineJob, key: SortKey) {
-  if (key === 'duration_seconds') return Number(job.duration_seconds ?? 0)
-  return Date.parse(job.submitted_at ?? '') || 0
 }
 
 function SortIcon({ active, direction }: { active: boolean; direction: SortDirection }) {
@@ -51,55 +46,34 @@ export function JobsTable() {
   const role = useAuthStore((state) => state.role)
   const jobs = useMonitoringStore((state) => state.jobs)
   const jobTotal = useMonitoringStore((state) => state.jobTotal)
+  const filters = useMonitoringStore((state) => state.jobFilters)
   const isJobsLoading = useMonitoringStore((state) => state.isJobsLoading)
   const fetchJobs = useMonitoringStore((state) => state.fetchJobs)
   const fetchAll = useMonitoringStore((state) => state.fetchAll)
   const { toast } = useToast()
 
-  const pagination = usePagination({ initialPageSize: 12 })
-  const [filters, setFilters] = useState<JobFilterState>({ page: 1, pageSize: 12 })
-  const [sortKey, setSortKey] = useState<SortKey>('submitted_at')
-  const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [logJobId, setLogJobId] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<string | null>(null)
 
-  useEffect(() => {
-    pagination.setTotal(jobTotal)
-  }, [jobTotal, pagination])
+  const page = filters.page ?? 1
+  const pageSize = filters.pageSize ?? 12
+  const pageCount = Math.max(1, Math.ceil(jobTotal / pageSize))
+  const sortKey = filters.sortBy ?? 'submitted_at'
+  const sortDirection = filters.sortOrder ?? 'desc'
 
   useEffect(() => {
-    void fetchJobs({
-      ...filters,
-      page: pagination.page,
-      pageSize: pagination.pageSize,
-    }).catch(() => undefined)
-  }, [fetchJobs, filters, pagination.page, pagination.pageSize])
-
-  const sortedJobs = useMemo(() => {
-    const direction = sortDirection === 'asc' ? 1 : -1
-    return [...jobs].sort((left, right) => {
-      const leftValue = sortValue(left, sortKey)
-      const rightValue = sortValue(right, sortKey)
-      if (leftValue < rightValue) return -1 * direction
-      if (leftValue > rightValue) return 1 * direction
-      return 0
-    })
-  }, [jobs, sortDirection, sortKey])
+    void fetchJobs().catch(() => undefined)
+  }, [fetchJobs])
 
   const canOperate = operatorRoles.has(role)
 
   const updateFilters = (nextFilters: JobFilterState) => {
-    setFilters({ ...nextFilters, page: 1, pageSize: pagination.pageSize })
-    pagination.setPage(1)
+    void fetchJobs({ ...nextFilters, page: 1, pageSize }).catch(() => undefined)
   }
 
   const toggleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      setSortDirection((direction) => (direction === 'asc' ? 'desc' : 'asc'))
-      return
-    }
-    setSortKey(key)
-    setSortDirection('desc')
+    const nextDirection = sortKey === key && sortDirection === 'desc' ? 'asc' : 'desc'
+    void fetchJobs({ ...filters, sortBy: key, sortOrder: nextDirection, page: 1, pageSize }).catch(() => undefined)
   }
 
   const runAction = async (job: PipelineJob, action: 'retry' | 'cancel') => {
@@ -140,7 +114,7 @@ export function JobsTable() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <CardTitle>作业列表</CardTitle>
           <div className="text-sm text-muted">
-            总数 {jobTotal}，第 {pagination.page}/{pagination.pageCount} 页
+            总数 {jobTotal}，第 {page}/{pageCount} 页
           </div>
         </div>
         <JobFilters filters={filters} onChange={updateFilters} />
@@ -171,8 +145,8 @@ export function JobsTable() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sortedJobs.length ? (
-              sortedJobs.map((job) => {
+            {jobs.length ? (
+              jobs.map((job) => {
                 const retryKey = `retry:${job.run_id ?? ''}`
                 const cancelKey = `cancel:${job.run_id ?? ''}`
                 return (
@@ -191,9 +165,9 @@ export function JobsTable() {
                       <div className="flex flex-wrap gap-1.5">
                         <Button variant="outline" size="sm" onClick={() => setLogJobId(job.job_id)}>
                           <Terminal className="size-3.5" />
-                          日志
+                          查看日志
                         </Button>
-                        {canOperate && failedStatuses.has(job.status) && job.run_id ? (
+                        {canOperate && retryableStatuses.has(job.status) && job.run_id ? (
                           <Button
                             variant="outline"
                             size="sm"
@@ -232,14 +206,14 @@ export function JobsTable() {
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-sm text-muted">
-            每页 {pagination.pageSize} 条
+            每页 {pageSize} 条
           </div>
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              disabled={pagination.page <= 1 || isJobsLoading}
-              onClick={() => pagination.setPage(Math.max(1, pagination.page - 1))}
+              disabled={page <= 1 || isJobsLoading}
+              onClick={() => void fetchJobs({ ...filters, page: Math.max(1, page - 1), pageSize }).catch(() => undefined)}
             >
               <ChevronLeft className="size-4" />
               上一页
@@ -247,8 +221,8 @@ export function JobsTable() {
             <Button
               variant="outline"
               size="sm"
-              disabled={pagination.page >= pagination.pageCount || isJobsLoading}
-              onClick={() => pagination.setPage(Math.min(pagination.pageCount, pagination.page + 1))}
+              disabled={page >= pageCount || isJobsLoading}
+              onClick={() => void fetchJobs({ ...filters, page: Math.min(pageCount, page + 1), pageSize }).catch(() => undefined)}
             >
               下一页
               <ChevronRight className="size-4" />

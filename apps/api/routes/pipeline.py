@@ -7,7 +7,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -91,6 +91,7 @@ def pipeline_status(
             "current_state": cycle["current_state"],
             "started_at": cycle.get("started_at"),
             "updated_at": cycle.get("updated_at"),
+            "job_counts": _job_count_summary(store, cycle_id),
         },
     )
 
@@ -127,6 +128,8 @@ def list_jobs(
     stage: str | None = None,
     run_type: str | None = None,
     scenario: str | None = None,
+    sort_by: Literal["submitted_at", "duration_seconds"] = Query(default="submitted_at"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc"),
     limit: int = Query(default=50, ge=1, le=_MAX_JOBS_LIMIT),
     offset: int = Query(default=0, ge=0),
     store: PipelineStore = Depends(get_pipeline_store),
@@ -161,11 +164,7 @@ def list_jobs(
             statement = statement.where(PipelineJob.run_id.like(f"%{scenario}%"))
 
     total = store.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
-    statement = (
-        statement.order_by(PipelineJob.submitted_at.desc(), PipelineJob.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+    statement = statement.order_by(*_job_sort_clauses(store, sort_by, sort_order)).limit(limit).offset(offset)
     jobs = list(store.session.scalars(statement))
     run_metadata = _run_metadata_by_ids(store, {job.run_id for job in jobs if job.run_id})
     return _ok(
@@ -609,6 +608,56 @@ def _run_metadata_by_ids(store: PipelineStore, run_ids: set[str]) -> dict[str, d
             "scenario": str(row["scenario"]) if row.get("scenario") is not None else None,
         }
     return metadata
+
+
+def _job_count_summary(store: PipelineStore, cycle_id: str) -> dict[str, int]:
+    counts = {"succeeded": 0, "failed": 0, "running": 0, "pending": 0}
+    failed_statuses = _FAILED_JOB_STATUSES | {"partially_failed"}
+    rows = store.session.execute(
+        select(PipelineJob.status, func.count())
+        .where(PipelineJob.cycle_id == cycle_id)
+        .group_by(PipelineJob.status)
+    )
+    for status, count in rows:
+        if status == "succeeded":
+            counts["succeeded"] += count
+        elif status in failed_statuses:
+            counts["failed"] += count
+        elif status in {"running", "submitted"}:
+            counts["running"] += count
+        else:
+            counts["pending"] += count
+    return counts
+
+
+def _job_sort_clauses(
+    store: PipelineStore,
+    sort_by: Literal["submitted_at", "duration_seconds"],
+    sort_order: Literal["asc", "desc"],
+) -> list[Any]:
+    descending = sort_order == "desc"
+    if sort_by == "duration_seconds":
+        duration_expr = _duration_sort_expression(store)
+        primary = duration_expr.desc() if descending else duration_expr.asc()
+        return [
+            (PipelineJob.started_at.is_(None) | PipelineJob.finished_at.is_(None)).asc(),
+            primary,
+            PipelineJob.submitted_at.desc(),
+            PipelineJob.created_at.desc(),
+        ]
+
+    primary = PipelineJob.submitted_at.desc() if descending else PipelineJob.submitted_at.asc()
+    created = PipelineJob.created_at.desc() if descending else PipelineJob.created_at.asc()
+    return [PipelineJob.submitted_at.is_(None).asc(), primary, created]
+
+
+def _duration_sort_expression(store: PipelineStore) -> Any:
+    dialect_name = store.session.get_bind().dialect.name
+    if dialect_name == "sqlite":
+        return func.strftime("%s", PipelineJob.finished_at) - func.strftime("%s", PipelineJob.started_at)
+    if dialect_name == "postgresql":
+        return func.extract("epoch", PipelineJob.finished_at - PipelineJob.started_at)
+    return PipelineJob.finished_at - PipelineJob.started_at
 
 
 def _stage_summaries(jobs: list[PipelineJob]) -> list[dict[str, Any]]:

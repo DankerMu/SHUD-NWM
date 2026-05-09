@@ -5,45 +5,30 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatDate } from '@/lib/format'
-import type { PipelineCycle, PipelineJob, QueueState } from '@/stores/monitoring'
-
-const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
+import type { PipelineCycle, QueueState } from '@/stores/monitoring'
 
 interface SummaryBarProps {
   source: string
   cycleTime: string
   cycle: PipelineCycle | null
-  jobs: PipelineJob[]
   queue: QueueState | null
   queueError?: string | null
   isRefreshing?: boolean
   onRefresh: () => void
 }
 
-function jobCounts(jobs: PipelineJob[]) {
-  return jobs.reduce(
-    (counts, job) => {
-      if (job.status === 'succeeded') counts.succeeded += 1
-      else if (failedStatuses.has(job.status)) counts.failed += 1
-      else if (job.status === 'running' || job.status === 'submitted') counts.running += 1
-      else counts.pending += 1
-      return counts
-    },
-    { succeeded: 0, failed: 0, running: 0, pending: 0 },
-  )
-}
+const emptyJobCounts = { succeeded: 0, failed: 0, running: 0, pending: 0 }
 
 export function SummaryBar({
   source,
   cycleTime,
   cycle,
-  jobs,
   queue,
   queueError,
   isRefreshing,
   onRefresh,
 }: SummaryBarProps) {
-  const counts = jobCounts(jobs)
+  const counts = cycle?.job_counts ?? emptyJobCounts
 
   return (
     <section className="grid gap-4 min-[900px]:grid-cols-[minmax(0,1.2fr)_minmax(22rem,0.9fr)_minmax(18rem,0.8fr)]">
