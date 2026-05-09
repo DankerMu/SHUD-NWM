@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { expect, test, type Page, type Request, type Route } from '@playwright/test'
 
 const cycleTime = '2026-05-09T00:00:00Z'
 
@@ -99,8 +99,24 @@ const successRateMetrics = [
   { date: '2026-05-04', success_rate: 0.8, succeeded_cycles: 8, total_cycles: 10 },
 ]
 
+interface MonitoringApiMockOptions {
+  onRetryRequest?: (request: Request) => void
+}
+
 function success<T>(data: T) {
   return { status: 'success', data }
+}
+
+function expectedFormattedDate(value: string) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(value))
 }
 
 async function fulfill(route: Route, data: unknown) {
@@ -111,7 +127,7 @@ async function fulfill(route: Route, data: unknown) {
   })
 }
 
-async function mockMonitoringApi(page: Page) {
+async function mockMonitoringApi(page: Page, options: MonitoringApiMockOptions = {}) {
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -129,6 +145,7 @@ async function mockMonitoringApi(page: Page) {
       })
     }
     if (url.pathname === '/api/v1/runs/run-failed/retry' && request.method() === 'POST') {
+      options.onRetryRequest?.(request)
       return fulfill(route, { job_id: 'job-failed-retry', run_id: 'run-failed', retry_count: 1, status: 'pending' })
     }
     if (url.pathname === '/api/v1/jobs') {
@@ -151,8 +168,8 @@ async function selectRole(page: Page, roleName: 'Viewer' | 'Operator' | 'Model A
   await page.getByRole('option', { name: roleName }).click()
 }
 
-async function openMonitoringAsOperator(page: Page) {
-  await mockMonitoringApi(page)
+async function openMonitoringAsOperator(page: Page, mockOptions?: MonitoringApiMockOptions) {
+  await mockMonitoringApi(page, mockOptions)
   await page.goto('/monitoring')
   await selectRole(page, 'Operator')
   await expect(page.getByRole('heading', { name: '监控工作台' })).toBeVisible()
@@ -166,8 +183,22 @@ test.describe('monitoring page', () => {
     await expect(page.getByRole('heading', { name: '七阶段流水线' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '作业列表' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '趋势' })).toBeVisible()
+
+    const summarySection = page.locator('section').filter({
+      has: page.getByRole('heading', { name: '当前周期' }),
+    }).first()
+    await expect(summarySection).toContainText(cycle.source)
+    await expect(summarySection).toContainText(expectedFormattedDate(cycleTime))
+    await expect(summarySection).toContainText(/成功\s*3/)
+    await expect(summarySection).toContainText(/失败\s*1/)
+    await expect(summarySection).toContainText(/运行中\s*1/)
+    await expect(summarySection).toContainText(/等待\s*2/)
+
+    await expect(page.getByRole('button', { name: /下载.*succeeded/ })).toBeVisible()
     await expect(page.getByRole('cell', { name: 'run-failed' })).toBeVisible()
     await expect(page.getByRole('cell', { name: 'run-success' })).toBeVisible()
+    await expect(page.getByRole('row', { name: /run-failed/ })).toContainText('model-b')
+    await expect(page.getByRole('row', { name: /run-failed/ })).toContainText('failed')
   })
 
   test('expands a failed stage to show basin failures', async ({ page }) => {
@@ -201,9 +232,24 @@ test.describe('monitoring page', () => {
   })
 
   test('shows retry for operator and hides it when role becomes viewer', async ({ page }) => {
-    await openMonitoringAsOperator(page)
+    const retryRequests: Array<{ method: string; pathname: string }> = []
+    await openMonitoringAsOperator(page, {
+      onRetryRequest: (request) => {
+        retryRequests.push({
+          method: request.method(),
+          pathname: new URL(request.url()).pathname,
+        })
+      },
+    })
 
-    await expect(page.getByRole('row', { name: /run-failed/ }).getByRole('button', { name: /重试/ })).toBeVisible()
+    const retryButton = page.getByRole('row', { name: /run-failed/ }).getByRole('button', { name: /重试/ })
+    await expect(retryButton).toBeVisible()
+    await retryButton.click()
+
+    await expect.poll(() => retryRequests).toEqual([
+      { method: 'POST', pathname: '/api/v1/runs/run-failed/retry' },
+    ])
+    await expect(page.getByText('重试已提交')).toBeVisible()
 
     await selectRole(page, 'Viewer')
 

@@ -97,10 +97,20 @@ describe('useMonitoringStore', () => {
   })
 
   it('fetchAll updates cycle, stages, and queue state', async () => {
+    let statusQuery: Record<string, unknown> | undefined
+    let stagesQuery: Record<string, unknown> | undefined
+
     vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
       const path = String(args[0])
-      if (path === '/api/v1/pipeline/status') return success(cycle) as never
-      if (path === '/api/v1/pipeline/stages') return success(stages) as never
+      const options = args[1] as { params?: { query?: Record<string, unknown> } } | undefined
+      if (path === '/api/v1/pipeline/status') {
+        statusQuery = options?.params?.query
+        return success(cycle) as never
+      }
+      if (path === '/api/v1/pipeline/stages') {
+        stagesQuery = options?.params?.query
+        return success(stages) as never
+      }
       if (path === '/api/v1/queue/depth') return success(queue) as never
       throw new Error(`Unexpected GET ${path}`)
     })
@@ -113,6 +123,8 @@ describe('useMonitoringStore', () => {
     expect(state.queue).toEqual(queue)
     expect(state.isPolling).toBe(false)
     expect(state.error).toBeNull()
+    expect(statusQuery).toMatchObject({ source: 'GFS', cycle_time: TEST_CYCLE_TIME })
+    expect(stagesQuery).toMatchObject({ source: 'GFS', cycle_time: TEST_CYCLE_TIME })
   })
 
   it('fetchJobs sends filters and pagination and stores normalized jobs', async () => {
