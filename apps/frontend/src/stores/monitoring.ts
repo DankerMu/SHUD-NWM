@@ -1,6 +1,9 @@
 import { create } from 'zustand'
 
-import type { PipelineStatus } from '@/lib/constants'
+import type { components } from '@/api/types'
+import type { JobStatus, PipelineStatus } from '@/lib/constants'
+
+export type PipelineJob = components['schemas']['PipelineJob']
 
 export interface PipelineStage {
   stage: string
@@ -21,29 +24,6 @@ export interface PipelineStage {
   }>
 }
 
-export interface PipelineJob {
-  job_id: string
-  run_id: string | null
-  cycle_id: string | null
-  run_type: string | null
-  scenario: string | null
-  job_type: string
-  model_id: string | null
-  stage: string | null
-  status: string
-  slurm_job_id: string | null
-  submitted_at: string | null
-  started_at: string | null
-  finished_at: string | null
-  completed_at?: string | null
-  duration_seconds: number | null
-  error_code: string | null
-  error_message: string | null
-  exit_code: number | null
-  retry_count: number
-  log_uri: string | null
-}
-
 export interface QueueState {
   running: number
   pending: number
@@ -51,7 +31,7 @@ export interface QueueState {
 }
 
 export interface JobFilters {
-  status?: PipelineStatus
+  status?: JobStatus
   runType?: string
   scenario?: string
   page?: number

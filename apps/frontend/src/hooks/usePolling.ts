@@ -27,8 +27,8 @@ export function usePolling(
 
       try {
         await callbackRef.current()
-      } catch (error) {
-        console.error('Polling callback failed', error)
+      } catch {
+        console.error('Polling callback failed')
       } finally {
         if (!stopped && !document.hidden) {
           timerId = window.setTimeout(tick, intervalMs)
