@@ -1,11 +1,11 @@
 export const STAGE_NAMES = {
-  ingest: '资料接入',
-  forcing: '强迫生成',
-  model_run: '模型计算',
-  routing: '河道演算',
-  forecast: '预报生成',
-  publish: '产品发布',
-  archive: '归档',
+  download: '下载',
+  convert: '标准化',
+  forcing: '强迫场',
+  forecast: '预报',
+  parse: '解析',
+  frequency: '频率计算',
+  publish: '发布',
 } as const
 
 export type PipelineStatus =
@@ -21,6 +21,7 @@ export type JobStatus =
   | 'submitted'
   | 'running'
   | 'succeeded'
+  | 'partially_failed'
   | 'failed'
   | 'cancelled'
   | 'submission_failed'

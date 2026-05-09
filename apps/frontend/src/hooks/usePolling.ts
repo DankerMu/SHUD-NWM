@@ -6,6 +6,7 @@ export function usePolling(
   enabled = true,
 ) {
   const callbackRef = useRef(callback)
+  const inFlightRef = useRef(false)
   callbackRef.current = callback
 
   useEffect(() => {
@@ -23,13 +24,15 @@ export function usePolling(
 
     const tick = async () => {
       clearTimer()
-      if (stopped || document.hidden) return
+      if (stopped || document.hidden || inFlightRef.current) return
 
+      inFlightRef.current = true
       try {
         await callbackRef.current()
       } catch {
         console.error('Polling callback failed')
       } finally {
+        inFlightRef.current = false
         if (!stopped && !document.hidden) {
           timerId = window.setTimeout(tick, intervalMs)
         }
@@ -42,7 +45,7 @@ export function usePolling(
         return
       }
 
-      void tick()
+      if (!inFlightRef.current) void tick()
     }
 
     document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -50,6 +53,7 @@ export function usePolling(
 
     return () => {
       stopped = true
+      inFlightRef.current = false
       clearTimer()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }

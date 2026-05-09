@@ -738,6 +738,20 @@ paths:
           required: false
           schema:
             type: string
+        - name: sort_by
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [submitted_at, duration_seconds]
+            default: submitted_at
+        - name: sort_order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
         - name: limit
           in: query
           required: false
@@ -2056,9 +2070,25 @@ components:
                   - type: string
                     format: date-time
                   - type: number
+    JobStatusCounts:
+      type: object
+      required: [succeeded, failed, running, pending]
+      properties:
+        succeeded:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        running:
+          type: integer
+          minimum: 0
+        pending:
+          type: integer
+          minimum: 0
     PipelineStatus:
       type: object
-      required: [cycle_id, source, cycle_time, current_state, started_at, updated_at]
+      required: [cycle_id, source, cycle_time, current_state, started_at, updated_at, job_counts]
       properties:
         cycle_id:
           type: string
@@ -2077,6 +2107,8 @@ components:
           type: string
           format: date-time
           nullable: true
+        job_counts:
+          $ref: "#/components/schemas/JobStatusCounts"
     JobLogs:
       type: object
       required: [job_id, log_uri, content]

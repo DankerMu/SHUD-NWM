@@ -946,6 +946,12 @@ export interface components {
                 [key: string]: (string | number)[][];
             };
         };
+        JobStatusCounts: {
+            succeeded: number;
+            failed: number;
+            running: number;
+            pending: number;
+        };
         PipelineStatus: {
             cycle_id: string;
             source: string;
@@ -956,6 +962,7 @@ export interface components {
             started_at: string | null;
             /** Format: date-time */
             updated_at: string | null;
+            job_counts: components["schemas"]["JobStatusCounts"];
         };
         JobLogs: {
             job_id: string;
@@ -1753,6 +1760,8 @@ export interface operations {
                 stage?: string;
                 run_type?: string;
                 scenario?: string;
+                sort_by?: "submitted_at" | "duration_seconds";
+                sort_order?: "asc" | "desc";
                 limit?: number;
                 offset?: number;
             };
