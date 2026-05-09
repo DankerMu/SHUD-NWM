@@ -59,6 +59,27 @@ def test_terminal_pipeline_job_status_does_not_regress() -> None:
         assert store.get_job("job_1").status == "succeeded"
 
 
+def test_permanently_failed_pipeline_job_status_is_sticky() -> None:
+    with _store() as store:
+        store.create_job(
+            job_id="job_1",
+            run_id="run_1",
+            cycle_id="gfs_2026050100",
+            job_type="download_source_cycle",
+            slurm_job_id="123",
+            model_id="model_a",
+            stage="download",
+            status="permanently_failed",
+        )
+
+        partial = store.update_job_status("job_1", "partially_failed")
+        running = store.update_job_status("job_1", "running")
+
+        assert partial.status == "permanently_failed"
+        assert running.status == "permanently_failed"
+        assert store.get_job("job_1").status == "permanently_failed"
+
+
 def test_pipeline_event_append_and_bidirectional_queries() -> None:
     with _store() as store:
         store.create_job(
