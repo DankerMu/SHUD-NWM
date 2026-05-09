@@ -664,7 +664,7 @@ async def test_m2_analysis_warm_start_spliced_curve_and_selection_e2e(tmp_path: 
 
 
 def test_frontend_splicing_script_requests_segments_and_configures_echarts() -> None:
-    html = Path("apps/frontend/index.html").read_text(encoding="utf-8")
+    html = Path("apps/frontend/index.legacy.html").read_text(encoding="utf-8")
 
     assert "include_analysis=true" in html
     assert "payload.segments" in html
