@@ -243,8 +243,9 @@ def test_retry_api_endpoint() -> None:
         app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
         try:
             client = TestClient(app)
+            headers = {"X-User-Role": "operator"}
 
-            response = client.post("/api/v1/runs/run_api/retry")
+            response = client.post("/api/v1/runs/run_api/retry", headers=headers)
             assert response.status_code == 200
             assert response.json()["status"] == "ok"
             data = response.json()["data"]
@@ -258,20 +259,20 @@ def test_retry_api_endpoint() -> None:
             store.session.refresh(failed)
             assert failed.status == "failed"
 
-            conflict = client.post("/api/v1/runs/run_api/retry")
+            conflict = client.post("/api/v1/runs/run_api/retry", headers=headers)
             assert conflict.status_code == 409
             assert conflict.json()["error"]["code"] == "RETRY_CONFLICT"
             assert conflict.json()["error"]["message"] == "A retry is already in progress for this run."
             assert conflict.json()["error"]["details"]["run_id"] == "run_api"
             assert "active_job_id" in conflict.json()["error"]["details"]
 
-            missing = client.post("/api/v1/runs/missing/retry")
+            missing = client.post("/api/v1/runs/missing/retry", headers=headers)
             assert missing.status_code == 404
             assert missing.json()["error"]["code"] == "RETRY_NOT_FOUND"
             assert missing.json()["error"]["message"] == "No retryable failure found for this run."
             assert missing.json()["error"]["details"]["run_id"] == "missing"
 
-            invalid = client.post("/api/v1/runs/-bad/retry")
+            invalid = client.post("/api/v1/runs/-bad/retry", headers=headers)
             assert invalid.status_code == 400
             assert invalid.json()["error"]["code"] == "INVALID_RUN_ID"
         finally:
