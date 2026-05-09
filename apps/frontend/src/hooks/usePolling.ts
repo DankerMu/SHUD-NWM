@@ -53,6 +53,7 @@ export function usePolling(
 
     return () => {
       stopped = true
+      inFlightRef.current = false
       clearTimer()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
