@@ -83,5 +83,5 @@ def _api_error(error: RetryConflictError | RetryNotFoundError) -> ApiError:
         status_code=error.status_code,
         code=error.code,
         message=error.message,
-        details=None,
+        details=error.details,
     )

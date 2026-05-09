@@ -153,8 +153,7 @@ class RetryService:
         job.status = "permanently_failed"
         job.updated_at = datetime.now(UTC)
         self.store.session.add(job)
-        self.store.session.commit()
-        self.store.session.refresh(job)
+        self.store.session.flush()
         self.store.insert_event(
             entity_type="pipeline_job",
             entity_id=job.job_id,

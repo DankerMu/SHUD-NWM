@@ -262,13 +262,14 @@ def test_retry_api_endpoint() -> None:
             assert conflict.status_code == 409
             assert conflict.json()["error"]["code"] == "RETRY_CONFLICT"
             assert conflict.json()["error"]["message"] == "A retry is already in progress for this run."
-            assert conflict.json()["error"]["details"] is None
+            assert conflict.json()["error"]["details"]["run_id"] == "run_api"
+            assert "active_job_id" in conflict.json()["error"]["details"]
 
             missing = client.post("/api/v1/runs/missing/retry")
             assert missing.status_code == 404
             assert missing.json()["error"]["code"] == "RETRY_NOT_FOUND"
             assert missing.json()["error"]["message"] == "No retryable failure found for this run."
-            assert missing.json()["error"]["details"] is None
+            assert missing.json()["error"]["details"]["run_id"] == "missing"
 
             invalid = client.post("/api/v1/runs/-bad/retry")
             assert invalid.status_code == 400
