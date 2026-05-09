@@ -1,34 +1,24 @@
 import { create } from 'zustand'
 
+import { client } from '@/api/client'
+import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
 import type { JobStatus, PipelineStatus } from '@/lib/constants'
 
-export type PipelineJob = components['schemas']['PipelineJob']
-
-export interface PipelineStage {
-  stage: string
-  display_status: PipelineStatus
-  status?: PipelineStatus
-  duration_seconds: number | null
-  basin_progress: {
-    completed: number
-    total: number
-    failed: number
-  }
-  basin_results: Array<{
-    model_id: string | null
-    basin_id: string | null
-    status: string
-    error_code: string | null
-    error_message: string | null
-  }>
+export type PipelineCycle = components['schemas']['PipelineStatus']
+export type PipelineJob = components['schemas']['PipelineJob'] & {
+  run_type?: string | null
+  scenario?: string | null
+  scenario_id?: string | null
 }
-
-export interface QueueState {
-  running: number
-  pending: number
-  idle: number
+export type PipelineJobPage = components['schemas']['PipelineJobPage'] & {
+  items: PipelineJob[]
 }
+export type PipelineStage = components['schemas']['PipelineStage']
+export type StageDurationMetric = components['schemas']['StageDurationMetric']
+export type SuccessRateMetric = components['schemas']['SuccessRateMetric']
+
+export type QueueState = components['schemas']['QueueDepth']
 
 export interface JobFilters {
   status?: JobStatus
@@ -40,12 +30,17 @@ export interface JobFilters {
 
 interface MonitoringState {
   source: string
-  cycleTime: string | null
+  cycleTime: string
+  cycle: PipelineCycle | null
   stages: PipelineStage[]
+  summaryJobs: PipelineJob[]
   jobs: PipelineJob[]
   jobTotal: number
   queue: QueueState | null
+  queueError: string | null
+  jobFilters: JobFilters
   isPolling: boolean
+  isJobsLoading: boolean
   error: string | null
   setSource: (source: string) => void
   setCycleTime: (cycleTime: string | null) => void
@@ -53,21 +48,154 @@ interface MonitoringState {
   fetchJobs: (filters?: JobFilters) => Promise<void>
 }
 
-export const useMonitoringStore = create<MonitoringState>((set) => ({
+function defaultCycleTime() {
+  const date = new Date()
+  date.setUTCMinutes(0, 0, 0)
+  return date.toISOString().slice(0, 19) + 'Z'
+}
+
+function cycleTimeForApi(cycleTime: string | null | undefined) {
+  if (!cycleTime) return defaultCycleTime()
+  if (cycleTime.length === 16) return `${cycleTime}:00Z`
+  return cycleTime
+}
+
+function inferRunType(runId: string, jobType: string | null | undefined) {
+  const value = `${runId} ${jobType ?? ''}`.toLowerCase()
+  if (value.includes('analysis')) return 'analysis'
+  if (value.includes('hindcast')) return 'hindcast'
+  return 'forecast'
+}
+
+function inferScenario(runId: string) {
+  const value = runId.toLowerCase()
+  if (value.includes('ifs')) return 'forecast_ifs_deterministic'
+  if (value.includes('best')) return 'best_available'
+  if (value.includes('analysis')) return 'analysis_true_field'
+  return 'forecast_gfs_deterministic'
+}
+
+function normalizeJob(job: PipelineJob): PipelineJob {
+  const runId = job.run_id ?? ''
+  return {
+    ...job,
+    run_type: job.run_type ?? inferRunType(runId, job.job_type),
+    scenario: job.scenario ?? job.scenario_id ?? inferScenario(runId),
+  }
+}
+
+async function getPipelineStatus(source: string, cycleTime: string) {
+  const { data, error } = await client.GET('/api/v1/pipeline/status', {
+    params: { query: { source, cycle_time: cycleTime } },
+  })
+  if (error) throw new Error(getApiErrorMessage(error, '获取周期状态失败'))
+  return unwrapApiData<PipelineCycle>(data, '获取周期状态失败')
+}
+
+async function getPipelineStages(source: string, cycleTime: string) {
+  const { data, error } = await client.GET('/api/v1/pipeline/stages', {
+    params: { query: { source, cycle_time: cycleTime } },
+  })
+  if (error) throw new Error(getApiErrorMessage(error, '获取阶段状态失败'))
+  return unwrapApiData<PipelineStage[]>(data, '获取阶段状态失败')
+}
+
+async function getQueueDepth() {
+  const { data, error } = await client.GET('/api/v1/queue/depth')
+  if (error) throw new Error(getApiErrorMessage(error, '获取队列深度失败'))
+  return unwrapApiData<QueueState>(data, '获取队列深度失败')
+}
+
+async function getJobsPage(source: string, cycleTime: string, filters: JobFilters) {
+  const page = filters.page ?? 1
+  const pageSize = filters.pageSize ?? 12
+  const { data, error } = await client.GET('/api/v1/jobs', {
+    params: {
+      query: {
+        source,
+        cycle_time: cycleTime,
+        status: filters.status,
+        run_type: filters.runType,
+        scenario: filters.scenario,
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+      },
+    },
+  })
+  if (error) throw new Error(getApiErrorMessage(error, '获取作业列表失败'))
+  return unwrapApiData<PipelineJobPage>(data, '获取作业列表失败')
+}
+
+export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   source: 'GFS',
-  cycleTime: null,
+  cycleTime: defaultCycleTime(),
+  cycle: null,
   stages: [],
+  summaryJobs: [],
   jobs: [],
   jobTotal: 0,
   queue: null,
+  queueError: null,
+  jobFilters: { page: 1, pageSize: 12 },
   isPolling: false,
+  isJobsLoading: false,
   error: null,
   setSource: (source) => set({ source }),
-  setCycleTime: (cycleTime) => set({ cycleTime }),
+  setCycleTime: (cycleTime) => set({ cycleTime: cycleTimeForApi(cycleTime) }),
   fetchAll: async () => {
-    set({ error: null })
+    const { source, cycleTime } = get()
+    const apiCycleTime = cycleTimeForApi(cycleTime)
+    set({ isPolling: true, error: null, queueError: null })
+
+    try {
+      const [cycle, stages, summaryJobsPage] = await Promise.all([
+        getPipelineStatus(source, apiCycleTime),
+        getPipelineStages(source, apiCycleTime),
+        getJobsPage(source, apiCycleTime, { page: 1, pageSize: 200 }),
+      ])
+
+      let queue: QueueState | null = null
+      let queueError: string | null = null
+      try {
+        queue = await getQueueDepth()
+      } catch (error) {
+        queueError = getApiErrorMessage(error, '队列深度暂不可用')
+      }
+
+      set({
+        cycle,
+        cycleTime: apiCycleTime,
+        stages,
+        summaryJobs: summaryJobsPage.items.map(normalizeJob),
+        queue,
+        queueError,
+        isPolling: false,
+        error: queueError,
+      })
+    } catch (error) {
+      const message = getApiErrorMessage(error, '刷新监控数据失败')
+      set({ error: message, isPolling: false })
+      throw error
+    }
   },
-  fetchJobs: async () => {
-    set({ error: null })
+  fetchJobs: async (filters) => {
+    const { source, cycleTime, jobFilters } = get()
+    const nextFilters = { ...jobFilters, ...filters }
+    const apiCycleTime = cycleTimeForApi(cycleTime)
+    set({ jobFilters: nextFilters, isJobsLoading: true, error: null })
+
+    try {
+      const page = await getJobsPage(source, apiCycleTime, nextFilters)
+      set({
+        jobs: page.items.map(normalizeJob),
+        jobTotal: page.total,
+        isJobsLoading: false,
+        error: null,
+      })
+    } catch (error) {
+      const message = getApiErrorMessage(error, '获取作业列表失败')
+      set({ error: message, isJobsLoading: false })
+      throw error
+    }
   },
 }))
