@@ -119,3 +119,20 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Run tests with coverage
         run: pytest tests/ -v --tb=short --co -q 2>/dev/null; pytest tests/ -v --tb=short
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+      - name: Install, build, and test frontend
+        run: cd apps/frontend && pnpm install --frozen-lockfile && pnpm build && pnpm test
+      - name: Check frontend bundle size
+        run: cd apps/frontend && pnpm check:bundle

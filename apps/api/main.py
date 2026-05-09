@@ -1,6 +1,8 @@
 import os
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from apps.api.errors import register_error_handlers
@@ -11,6 +13,10 @@ from apps.api.routes.models import router as models_router
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
 from services.slurm_gateway.routes import router as slurm_router
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_DIST_DIR = REPO_ROOT / "apps" / "frontend" / "dist"
+FRONTEND_INDEX = FRONTEND_DIST_DIR / "index.html"
 
 app = FastAPI(
     title="NHMS API",
@@ -37,7 +43,16 @@ async def health():
     }
 
 
-app.mount("/", StaticFiles(directory="apps/frontend", html=True), name="frontend")
+app.mount(
+    "/assets",
+    StaticFiles(directory=FRONTEND_DIST_DIR / "assets", check_dir=False),
+    name="frontend-assets",
+)
+
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    return FileResponse(FRONTEND_INDEX)
 
 
 if __name__ == "__main__":

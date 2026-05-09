@@ -62,6 +62,18 @@ SHUD-NWM/
 | 查看实施计划与阅读清单 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) |
 | 查看设计图 | [`design/`](design/) |
 
+## Frontend Development
+
+Frontend source lives in `apps/frontend/` and uses Vite, React, TypeScript, Vitest, and Playwright.
+
+```bash
+cd apps/frontend
+pnpm install
+pnpm dev
+```
+
+Use `pnpm build` for the production bundle, `pnpm test` for unit tests, and `pnpm test:e2e` for Playwright E2E tests. The Vite dev server proxies `/api` and `/health` to `http://localhost:8000`; production builds are served by FastAPI from `apps/frontend/dist/`. The default frontend API base is documented in `apps/frontend/.env.example` as `VITE_API_BASE_URL=/api/v1`.
+
 ## 设计图与文档对照
 
 | 设计图 | 对应规格文档 |
