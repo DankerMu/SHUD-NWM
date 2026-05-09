@@ -7,7 +7,7 @@ from sqlalchemy import JSON, BigInteger, DateTime, Integer, MetaData, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 TERMINAL_STATUS_GUARD = {"succeeded", "failed", "cancelled", "permanently_failed"}
-TERMINAL_STATUS_OVERRIDES = {"partially_failed"}
+TERMINAL_STATUS_OVERRIDES = {"partially_failed", "permanently_failed"}
 
 
 def _utcnow() -> datetime:
@@ -80,6 +80,7 @@ class PipelineStore:
         model_id: str | None,
         stage: str | None,
         status: str = "pending",
+        commit: bool = True,
     ) -> PipelineJob:
         job = PipelineJob(
             job_id=job_id,
@@ -93,8 +94,11 @@ class PipelineStore:
             submitted_at=_utcnow(),
         )
         self.session.add(job)
-        self.session.commit()
-        self.session.refresh(job)
+        if commit:
+            self.session.commit()
+            self.session.refresh(job)
+        else:
+            self.session.flush()
         return job
 
     def update_job_status(
@@ -167,6 +171,7 @@ class PipelineStore:
         status_to: str | None,
         message: str | None = None,
         details: dict[str, Any] | None = None,
+        commit: bool = True,
     ) -> PipelineEvent:
         event = PipelineEvent(
             entity_type=entity_type,
@@ -178,6 +183,9 @@ class PipelineStore:
             details=details or {},
         )
         self.session.add(event)
-        self.session.commit()
-        self.session.refresh(event)
+        if commit:
+            self.session.commit()
+            self.session.refresh(event)
+        else:
+            self.session.flush()
         return event

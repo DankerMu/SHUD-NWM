@@ -14,6 +14,8 @@ import httpx
 from packages.common.best_available import BestAvailableManager
 from packages.common.object_store import LocalObjectStore
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
+from services.orchestrator.persistence import PipelineJob
+from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
@@ -545,12 +547,15 @@ class ForecastOrchestrator:
         state_manager: StateManager | None = None,
         slurm_client: SlurmGatewayClient | None = None,
         object_store: LocalObjectStore | None = None,
+        retry_service: RetryService | None = None,
     ) -> None:
         self.config = config
         self.repository = repository
         self.state_manager = state_manager
         self.slurm_client = slurm_client or HttpSlurmGatewayClient(config.slurm_gateway_url)
         self.object_store = object_store or LocalObjectStore(config.object_store_root, config.object_store_prefix)
+        self.retry_service = retry_service
+        self.retry_config = getattr(retry_service, "config", None) or RetryConfig()
         self._active_cycles: set[str] = set()
 
     @classmethod
@@ -655,17 +660,46 @@ class ForecastOrchestrator:
     def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult:
         stage_results: list[StageRunResult] = []
         existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
-        for stage in self.stages:
-            existing_job = self._find_existing_stage_job(existing_jobs, stage)
-            if existing_job is not None:
-                result, aggregation = self._resume_cycle_stage(stage, context, existing_job)
-            else:
-                result, aggregation = self._submit_and_wait_cycle_stage(stage, context)
-                existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
+        for stage_index, stage in enumerate(self.stages):
+            had_partial_before_stage = context.had_partial
+            last_partial_before_stage = context.last_partial_status
+            retry_attempts = 0
+            while True:
+                existing_job = self._find_existing_stage_job(existing_jobs, stage)
+                if existing_job is not None:
+                    result, aggregation = self._resume_cycle_stage(stage, context, existing_job)
+                else:
+                    result, aggregation = self._submit_and_wait_cycle_stage(stage, context)
+                    existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
 
-            stage_results.append(result)
-            if result.status in {"failed", "cancelled", "submission_failed"}:
-                return PipelineResult(context.run_id, context.cycle_id, "failed", tuple(stage_results))
+                if len(stage_results) == stage_index:
+                    stage_results.append(result)
+                else:
+                    stage_results[-1] = result
+
+                if result.status in {"failed", "submission_failed"}:
+                    retry_attempts += 1
+                    if self._schedule_cycle_stage_retry(result, retry_attempts):
+                        existing_jobs = [job for job in existing_jobs if not self._job_matches_stage(job, stage)]
+                        continue
+                    return PipelineResult(context.run_id, context.cycle_id, "failed", tuple(stage_results))
+
+                if result.status == "cancelled":
+                    return PipelineResult(context.run_id, context.cycle_id, "failed", tuple(stage_results))
+
+                if stage.is_array and aggregation is not None and aggregation.status == "partially_failed":
+                    retried = self._retry_partial_array_stage(
+                        stage,
+                        context,
+                        result,
+                        aggregation,
+                        had_partial_before_stage,
+                        last_partial_before_stage,
+                    )
+                    if retried is not None:
+                        result, aggregation = retried
+                        stage_results[-1] = result
+                break
 
             if stage.is_array and aggregation is not None:
                 self._apply_array_progress(stage, context, aggregation)
@@ -677,6 +711,179 @@ class ForecastOrchestrator:
             final_status or self.final_pipeline_status,
             tuple(stage_results),
         )
+
+    def _schedule_cycle_stage_retry(self, result: StageRunResult, failure_number: int) -> bool:
+        if self.retry_service is None:
+            return False
+
+        job = self._retry_job_for_stage_result(result)
+        if job is None:
+            return False
+
+        retry_count = int(getattr(job, "retry_count", 0) or 0)
+        backoff_seconds = compute_backoff_seconds(retry_count, self.retry_config.backoff_schedule)
+        handled = self.retry_service.handle_failed_job(job)
+        if str(getattr(handled, "status", "")) != "pending":
+            return False
+        if failure_number > self.retry_config.max_retries:
+            return False
+        time.sleep(backoff_seconds)
+        return True
+
+    def _retry_job_for_stage_result(self, result: StageRunResult) -> PipelineJob | None:
+        service = self.retry_service
+        if service is None:
+            return None
+
+        store = getattr(service, "store", None)
+        get_job = getattr(store, "get_job", None)
+        if callable(get_job):
+            job = get_job(result.pipeline_job_id)
+            if job is not None:
+                return job
+            if isinstance(service, RetryService):
+                return None
+
+        get_pipeline_job = getattr(self.repository, "get_pipeline_job", None)
+        if callable(get_pipeline_job):
+            record = get_pipeline_job(result.pipeline_job_id)
+        else:
+            repository_jobs = getattr(self.repository, "jobs", {})
+            record = repository_jobs.get(result.pipeline_job_id) if isinstance(repository_jobs, Mapping) else None
+        if record is None:
+            return None
+
+        job = PipelineJob(
+            job_id=str(record.get("job_id") or result.pipeline_job_id),
+            run_id=record.get("run_id"),
+            cycle_id=record.get("cycle_id"),
+            job_type=str(record.get("job_type") or result.job_type),
+            slurm_job_id=record.get("slurm_job_id"),
+            model_id=record.get("model_id"),
+            status=str(record.get("status") or result.status),
+            stage=record.get("stage") or result.stage,
+        )
+        job.retry_count = int(record.get("retry_count") or 0)
+        job.error_code = record.get("error_code") or result.error_code
+        job.error_message = record.get("error_message") or result.error_message
+        return job
+
+    def _retry_partial_array_stage(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        result: StageRunResult,
+        aggregation: ArrayAggregation,
+        had_partial_before_stage: bool,
+        last_partial_before_stage: str | None,
+    ) -> tuple[StageRunResult, ArrayAggregation] | None:
+        if self.retry_service is None:
+            return None
+
+        original_basins = [dict(basin) for basin in context.active_basins]
+        task_results = {
+            task.task_id: ArrayTaskResult(
+                task_id=task.task_id,
+                slurm_job_id=task.slurm_job_id,
+                status=task.status,
+                exit_code=task.exit_code,
+            )
+            for task in aggregation.task_results
+        }
+        pending_task_ids = [task.task_id for task in aggregation.task_results if task.status != "succeeded"]
+        latest_result = result
+        retry_attempts = 0
+
+        try:
+            while pending_task_ids:
+                retry_attempts += 1
+                if not self._schedule_cycle_stage_retry(latest_result, retry_attempts):
+                    break
+
+                retry_basins = self._reindexed_basins_for_task_ids(original_basins, pending_task_ids)
+                retry_task_to_original = {index: task_id for index, task_id in enumerate(pending_task_ids)}
+                context.active_basins = retry_basins
+                latest_result, retry_aggregation = self._submit_and_wait_cycle_stage(stage, context)
+
+                if retry_aggregation is None:
+                    retry_status = "succeeded" if latest_result.status == "succeeded" else "failed"
+                    for task_id in pending_task_ids:
+                        task_results[task_id] = ArrayTaskResult(
+                            task_id=task_id,
+                            slurm_job_id=latest_result.slurm_job_id,
+                            status=retry_status,
+                            exit_code=latest_result.exit_code,
+                        )
+                    if retry_status == "succeeded":
+                        pending_task_ids = []
+                    continue
+
+                next_pending_task_ids: list[int] = []
+                updated_task_ids: set[int] = set()
+                for retry_task in retry_aggregation.task_results:
+                    original_task_id = retry_task_to_original.get(retry_task.task_id)
+                    if original_task_id is None:
+                        continue
+                    updated_task_ids.add(original_task_id)
+                    task_results[original_task_id] = ArrayTaskResult(
+                        task_id=original_task_id,
+                        slurm_job_id=retry_task.slurm_job_id,
+                        status=retry_task.status,
+                        exit_code=retry_task.exit_code,
+                    )
+                    if retry_task.status != "succeeded":
+                        next_pending_task_ids.append(original_task_id)
+
+                missing_task_ids = [task_id for task_id in pending_task_ids if task_id not in updated_task_ids]
+                next_pending_task_ids.extend(missing_task_ids)
+                pending_task_ids = next_pending_task_ids
+        finally:
+            context.active_basins = original_basins
+
+        final_aggregation = _aggregation_from_task_results(
+            tuple(task_results[task_id] for task_id in sorted(task_results))
+        )
+        if final_aggregation.status == "succeeded":
+            context.had_partial = had_partial_before_stage
+            context.last_partial_status = last_partial_before_stage
+        final_result = StageRunResult(
+            stage=stage.stage,
+            job_type=stage.job_type,
+            pipeline_job_id=latest_result.pipeline_job_id,
+            slurm_job_id=latest_result.slurm_job_id,
+            status=final_aggregation.status,
+            exit_code=latest_result.exit_code,
+            error_code=latest_result.error_code,
+            error_message=latest_result.error_message,
+        )
+        if final_result.status != latest_result.status or final_aggregation.status == "succeeded":
+            self._after_cycle_stage_terminal(
+                stage,
+                context,
+                final_result.status,
+                {
+                    "status": final_result.status,
+                    "exit_code": final_result.exit_code,
+                    "error_code": final_result.error_code,
+                    "error_message": final_result.error_message,
+                },
+                final_aggregation,
+            )
+        return final_result, final_aggregation
+
+    @staticmethod
+    def _reindexed_basins_for_task_ids(
+        basins: Sequence[Mapping[str, Any]],
+        task_ids: Sequence[int],
+    ) -> list[dict[str, Any]]:
+        by_task_id = {int(basin.get("task_id", index)): dict(basin) for index, basin in enumerate(basins)}
+        reindexed: list[dict[str, Any]] = []
+        for new_task_id, task_id in enumerate(task_ids):
+            entry = dict(by_task_id[int(task_id)])
+            entry["task_id"] = new_task_id
+            entry["original_task_id"] = int(entry.get("original_task_id", task_id))
+            reindexed.append(entry)
+        return reindexed
 
     def _submit_and_wait_cycle_stage(
         self,
@@ -1248,10 +1455,15 @@ class ForecastOrchestrator:
 
     @staticmethod
     def _find_existing_stage_job(jobs: Sequence[Mapping[str, Any]], stage: StageDefinition) -> dict[str, Any] | None:
-        for job in jobs:
-            if job.get("stage") == stage.stage or job.get("job_type") == stage.job_type:
-                return dict(job)
-        return None
+        matches = [dict(job) for job in jobs if ForecastOrchestrator._job_matches_stage(job, stage)]
+        if not matches:
+            return None
+        active_matches = [job for job in matches if str(job.get("status")) not in TERMINAL_JOB_STATUSES]
+        return dict((active_matches or matches)[-1])
+
+    @staticmethod
+    def _job_matches_stage(job: Mapping[str, Any], stage: StageDefinition) -> bool:
+        return job.get("stage") == stage.stage or job.get("job_type") == stage.job_type
 
     def trigger_forecast(
         self,
@@ -1765,6 +1977,7 @@ class AnalysisOrchestrator(ForecastOrchestrator):
         best_available_manager: BestAvailableManager | None = None,
         slurm_client: SlurmGatewayClient | None = None,
         object_store: LocalObjectStore | None = None,
+        retry_service: RetryService | None = None,
     ) -> None:
         super().__init__(
             config=config,
@@ -1772,6 +1985,7 @@ class AnalysisOrchestrator(ForecastOrchestrator):
             state_manager=state_manager,
             slurm_client=slurm_client,
             object_store=object_store,
+            retry_service=retry_service,
         )
         self.best_available_manager = best_available_manager
 
@@ -2271,7 +2485,7 @@ class PsycopgOrchestratorRepository:
             WHERE job_id = %s
               AND (
                     status NOT IN ('succeeded', 'failed', 'cancelled', 'permanently_failed')
-                 OR %s = 'partially_failed'
+                 OR %s IN ('partially_failed', 'permanently_failed')
               )
             RETURNING *
             """,

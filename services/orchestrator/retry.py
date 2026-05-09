@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
+
+from sqlalchemy import select
 
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
@@ -66,7 +69,7 @@ class RetryConflictError(RetryError):
     def __init__(self, run_id: str, active_job: PipelineJob) -> None:
         super().__init__(
             "RETRY_CONFLICT",
-            f"Run {run_id} already has an active pipeline job.",
+            "A retry is already in progress for this run.",
             {
                 "run_id": run_id,
                 "active_job_id": active_job.job_id,
@@ -81,7 +84,7 @@ class RetryNotFoundError(RetryError):
     def __init__(self, run_id: str) -> None:
         super().__init__(
             "RETRY_NOT_FOUND",
-            f"No failed pipeline job found for run {run_id}.",
+            "No retryable failure found for this run.",
             {"run_id": run_id},
         )
 
@@ -94,10 +97,12 @@ class RetryService:
     def should_auto_retry(self, job: PipelineJob) -> bool:
         if not is_transient_error(job.error_code):
             return False
-        if job.retry_count >= self.config.max_retries:
-            self.mark_permanently_failed(job)
-            return False
-        return True
+        return job.retry_count < self.config.max_retries
+
+    def handle_failed_job(self, job: PipelineJob) -> PipelineJob:
+        if self.should_auto_retry(job):
+            return self.schedule_auto_retry(job)
+        return self.mark_permanently_failed(job)
 
     def schedule_auto_retry(self, job: PipelineJob) -> PipelineJob:
         status_from = job.status
@@ -146,35 +151,59 @@ class RetryService:
         return job
 
     def attempt_manual_retry(self, run_id: str) -> PipelineJob:
-        jobs = self.store.query_jobs_by_run(run_id)
-        if not jobs:
-            raise RetryNotFoundError(run_id)
+        with self.store.session.begin_nested():
+            lock_statement = (
+                select(PipelineJob)
+                .where(PipelineJob.run_id == run_id)
+                .order_by(PipelineJob.submitted_at.asc(), PipelineJob.created_at.asc())
+                .with_for_update()
+            )
+            locked_jobs = list(self.store.session.scalars(lock_statement))
+            if not locked_jobs:
+                raise RetryNotFoundError(run_id)
 
-        active_job = next((job for job in jobs if job.status in ACTIVE_RETRY_STATUSES), None)
-        if active_job is not None:
-            raise RetryConflictError(run_id, active_job)
+            jobs = self.store.query_jobs_by_run(run_id)
+            active_job = next((job for job in jobs if job.status in ACTIVE_RETRY_STATUSES), None)
+            if active_job is not None:
+                raise RetryConflictError(run_id, active_job)
 
-        failed_job = next((job for job in reversed(jobs) if job.status in FAILED_RETRY_STATUSES), None)
-        if failed_job is None:
-            raise RetryNotFoundError(run_id)
+            failed_job = next((job for job in reversed(jobs) if job.status in FAILED_RETRY_STATUSES), None)
+            if failed_job is None:
+                raise RetryNotFoundError(run_id)
 
-        status_from = failed_job.status
-        previous_error = failed_job.error_code
-        next_retry_count = failed_job.retry_count + 1
-        updated = self._update_job_for_retry(failed_job, retry_count=next_retry_count, status="pending")
-        self.store.insert_event(
-            entity_type="pipeline_job",
-            entity_id=updated.job_id,
-            event_type="retry",
-            status_from=status_from,
-            status_to="pending",
-            details={
-                "trigger": "manual",
-                "retry_count": next_retry_count,
-                "previous_error": previous_error,
-            },
-        )
-        return updated
+            status_from = failed_job.status
+            previous_error = failed_job.error_code
+            next_retry_count = failed_job.retry_count + 1
+            retry_job = self.store.create_job(
+                job_id=f"{run_id}_retry_{uuid4().hex[:8]}",
+                run_id=failed_job.run_id,
+                cycle_id=failed_job.cycle_id,
+                job_type=failed_job.job_type,
+                slurm_job_id=None,
+                model_id=failed_job.model_id,
+                stage=failed_job.stage,
+                status="pending",
+                commit=False,
+            )
+            retry_job.retry_count = next_retry_count
+            self.store.session.add(retry_job)
+            self.store.insert_event(
+                entity_type="pipeline_job",
+                entity_id=retry_job.job_id,
+                event_type="retry",
+                status_from=status_from,
+                status_to="pending",
+                details={
+                    "trigger": "manual",
+                    "retry_count": next_retry_count,
+                    "previous_error": previous_error,
+                    "previous_job_id": failed_job.job_id,
+                },
+                commit=False,
+            )
+        self.store.session.commit()
+        self.store.session.refresh(retry_job)
+        return retry_job
 
     def _update_job_for_retry(self, job: PipelineJob, *, retry_count: int, status: str) -> PipelineJob:
         job.retry_count = retry_count

@@ -8,6 +8,7 @@ import pytest
 
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.chain import M3_STAGES, ForecastOrchestrator, OrchestratorConfig, OrchestratorError
+from services.orchestrator.retry import RetryConfig
 
 
 class FakeCycleSlurmClient:
@@ -15,10 +16,14 @@ class FakeCycleSlurmClient:
         self,
         *,
         fail_stage: str | None = None,
-        array_results_by_stage: dict[str, list[str]] | None = None,
+        array_results_by_stage: dict[str, list[str] | list[list[str]]] | None = None,
+        failures_before_success_by_stage: dict[str, int] | None = None,
+        error_code_by_stage: dict[str, str] | None = None,
     ) -> None:
         self.fail_stage = fail_stage
         self.array_results_by_stage = array_results_by_stage or {}
+        self.failures_before_success_by_stage = failures_before_success_by_stage or {}
+        self.error_code_by_stage = error_code_by_stage or {}
         self.submissions: list[dict[str, Any]] = []
         self.jobs: dict[str, dict[str, Any]] = {}
         self.poll_counts: dict[str, int] = {}
@@ -49,12 +54,13 @@ class FakeCycleSlurmClient:
             job["status"] = "running"
             job["started_at"] = _fmt(submitted_at + timedelta(minutes=1))
         else:
-            failed = self.fail_stage == job["stage"]
+            remaining_failures = self.failures_before_success_by_stage.get(job["stage"], 0)
+            failed = self.fail_stage == job["stage"] or job["stage_attempt"] < remaining_failures
             job["status"] = "failed" if failed else "succeeded"
             job["finished_at"] = _fmt(submitted_at + timedelta(minutes=2))
             job["exit_code"] = 1 if failed else 0
             if failed:
-                job["error_code"] = "FORCED_FAILURE"
+                job["error_code"] = self.error_code_by_stage.get(job["stage"], "FORCED_FAILURE")
                 job["error_message"] = "forced failure"
         return dict(job)
 
@@ -64,6 +70,8 @@ class FakeCycleSlurmClient:
         task_count = len(job["payload"].get("tasks") or [])
         if statuses is None:
             statuses = ["succeeded"] * task_count
+        elif statuses and isinstance(statuses[0], list):
+            statuses = statuses[min(job["stage_attempt"], len(statuses) - 1)]
         return [
             {
                 "task_id": index,
@@ -83,6 +91,7 @@ class FakeCycleSlurmClient:
             raise AssertionError("orchestrator submitted a stage before the previous stage reached terminal status")
         self.next_job += 1
         job_id = str(self.next_job)
+        stage_attempt = sum(1 for job in self.jobs.values() if job["stage"] == stage)
         submitted_at = _dt("2026-05-01T00:00:00Z") + timedelta(minutes=len(self.submissions) * 5)
         job = {
             "job_id": job_id,
@@ -97,6 +106,7 @@ class FakeCycleSlurmClient:
             "error_code": None,
             "error_message": None,
             "payload": payload,
+            "stage_attempt": stage_attempt,
         }
         self.submissions.append(payload)
         self.jobs[job_id] = job
@@ -191,6 +201,25 @@ class FakeCycleRepository:
         )
 
 
+class FakeRetryService:
+    def __init__(self, *, max_retries: int = 1) -> None:
+        self.config = RetryConfig(max_retries=max_retries, backoff_schedule=[0])
+        self.retry_counts: dict[str, int] = {}
+        self.handled_job_ids: list[str] = []
+
+    def handle_failed_job(self, job: Any) -> Any:
+        self.handled_job_ids.append(job.job_id)
+        retry_count = self.retry_counts.get(job.job_id, int(getattr(job, "retry_count", 0) or 0))
+        if retry_count >= self.config.max_retries:
+            job.status = "permanently_failed"
+            return job
+        retry_count += 1
+        self.retry_counts[job.job_id] = retry_count
+        job.retry_count = retry_count
+        job.status = "pending"
+        return job
+
+
 def test_m3_cycle_orchestration_submits_all_seven_stages_lazily(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
@@ -245,6 +274,42 @@ def test_stage_three_failure_blocks_downstream_stages(tmp_path: Path) -> None:
     assert result.status == "failed"
     assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
     assert repository.cycle_statuses[-1] == "failed_forcing"
+
+
+def test_failed_stage_auto_retries_before_downstream_stages(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(
+        failures_before_success_by_stage={"download": 1},
+        error_code_by_stage={"download": "SLURM_TIMEOUT"},
+    )
+    retry_service = FakeRetryService(max_retries=1)
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "complete"
+    assert [submission["stage"] for submission in client.submissions[:3]] == ["download", "download", "convert"]
+    assert [stage.status for stage in result.stages] == ["succeeded"] * 7
+    assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_download"]
+
+
+def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(
+        array_results_by_stage={"forcing": [["succeeded", "failed", "succeeded"], ["succeeded"]]}
+    )
+    retry_service = FakeRetryService(max_retries=1)
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    forcing_submissions = [submission for submission in client.submissions if submission["stage"] == "forcing"]
+    assert result.status == "complete"
+    assert [task["model_id"] for task in forcing_submissions[0]["tasks"]] == ["model_0", "model_1", "model_2"]
+    assert [task["model_id"] for task in forcing_submissions[1]["tasks"]] == ["model_1"]
+    assert [submission["stage"] for submission in client.submissions].count("forcing") == 2
+    assert client.submissions[4]["stage"] == "forecast"
+    assert [task["model_id"] for task in client.submissions[4]["tasks"]] == ["model_0", "model_1", "model_2"]
 
 
 def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> None:
@@ -304,6 +369,8 @@ def _orchestrator(
     tmp_path: Path,
     repository: FakeCycleRepository,
     client: FakeCycleSlurmClient,
+    *,
+    retry_service: Any | None = None,
 ) -> ForecastOrchestrator:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "object-store"
@@ -319,6 +386,7 @@ def _orchestrator(
         repository=repository,
         slurm_client=client,
         object_store=LocalObjectStore(object_root, "s3://nhms"),
+        retry_service=retry_service,
     )
 
 

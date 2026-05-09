@@ -54,6 +54,7 @@ def test_should_auto_retry_non_transient() -> None:
 
         assert service.should_auto_retry(job) is False
         assert job.status == "failed"
+        assert _events(store) == []
 
 
 def test_should_auto_retry_max_reached() -> None:
@@ -62,7 +63,39 @@ def test_should_auto_retry_max_reached() -> None:
         service = RetryService(store, RetryConfig(max_retries=3))
 
         assert service.should_auto_retry(job) is False
-        assert job.status == "permanently_failed"
+        assert job.status == "failed"
+        assert _events(store) == []
+
+
+def test_handle_failed_job_transient() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="SLURM_TIMEOUT")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        updated = service.handle_failed_job(job)
+
+        assert updated.status == "pending"
+        assert updated.retry_count == 1
+
+
+def test_handle_failed_job_non_transient() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="INVALID_MANIFEST")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+
+
+def test_handle_failed_job_exhausted() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="SLURM_TIMEOUT", retry_count=3)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
 
 
 def test_schedule_auto_retry() -> None:
@@ -95,16 +128,28 @@ def test_mark_permanently_failed() -> None:
         assert event.details == {"final_retry_count": 3, "last_error": "SLURM_TIMEOUT"}
 
 
-def test_manual_retry_success() -> None:
+def test_manual_retry_creates_new_job() -> None:
     with _store() as store:
-        _create_job(store, run_id="run_1", error_code="NODE_FAILURE")
+        original = _create_job(store, run_id="run_1", error_code="NODE_FAILURE", retry_count=2)
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        updated = service.attempt_manual_retry("run_1")
+        retry = service.attempt_manual_retry("run_1")
 
-        assert updated.status == "pending"
-        assert updated.retry_count == 1
-        assert updated.error_code == "NODE_FAILURE"
+        store.session.refresh(original)
+        assert retry.job_id != original.job_id
+        assert retry.job_id.startswith("run_1_retry_")
+        assert retry.run_id == original.run_id
+        assert retry.cycle_id == original.cycle_id
+        assert retry.job_type == original.job_type
+        assert retry.model_id == original.model_id
+        assert retry.stage == original.stage
+        assert retry.status == "pending"
+        assert retry.retry_count == 3
+        assert retry.slurm_job_id is None
+        assert retry.error_code is None
+        assert original.status == "failed"
+        assert original.retry_count == 2
+        assert original.slurm_job_id == "123"
 
 
 def test_manual_retry_conflict_409() -> None:
@@ -113,8 +158,12 @@ def test_manual_retry_conflict_409() -> None:
         _create_job(store, job_id="job_pending", run_id="run_1", status="pending")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        with pytest.raises(RetryConflictError):
+        with pytest.raises(RetryConflictError) as exc_info:
             service.attempt_manual_retry("run_1")
+
+        assert exc_info.value.message == "A retry is already in progress for this run."
+        assert exc_info.value.details["active_job_id"] == "job_pending"
+        assert len(store.query_jobs_by_run("run_1")) == 2
 
 
 def test_manual_retry_no_failed_job() -> None:
@@ -144,7 +193,7 @@ def test_audit_event_auto() -> None:
 
 def test_audit_event_manual() -> None:
     with _store() as store:
-        _create_job(store, run_id="run_1", error_code="SBATCH_SUBMISSION_FAILED")
+        failed = _create_job(store, run_id="run_1", error_code="SBATCH_SUBMISSION_FAILED")
         service = RetryService(store, RetryConfig(max_retries=3))
 
         service.attempt_manual_retry("run_1")
@@ -154,12 +203,25 @@ def test_audit_event_manual() -> None:
             "trigger": "manual",
             "retry_count": 1,
             "previous_error": "SBATCH_SUBMISSION_FAILED",
+            "previous_job_id": failed.job_id,
         }
+
+
+def test_manual_retry_audit_has_previous_job_id() -> None:
+    with _store() as store:
+        failed = _create_job(store, run_id="run_1", error_code="SBATCH_SUBMISSION_FAILED")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("run_1")
+
+        event = _events(store)[0]
+        assert event.entity_id == retry.job_id
+        assert event.details["previous_job_id"] == failed.job_id
 
 
 def test_retry_api_endpoint() -> None:
     with _store() as store:
-        _create_job(store, run_id="run_api", error_code="SLURM_UNAVAILABLE")
+        failed = _create_job(store, run_id="run_api", error_code="SLURM_UNAVAILABLE")
         service = RetryService(store, RetryConfig(max_retries=3))
         app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
         try:
@@ -168,22 +230,43 @@ def test_retry_api_endpoint() -> None:
             response = client.post("/api/v1/runs/run_api/retry")
             assert response.status_code == 200
             assert response.json()["status"] == "ok"
-            assert response.json()["data"] == {
-                "job_id": "job_1",
+            data = response.json()["data"]
+            assert data == {
+                "job_id": data["job_id"],
                 "run_id": "run_api",
                 "retry_count": 1,
                 "status": "pending",
             }
+            assert data["job_id"].startswith("run_api_retry_")
+            store.session.refresh(failed)
+            assert failed.status == "failed"
 
             conflict = client.post("/api/v1/runs/run_api/retry")
             assert conflict.status_code == 409
             assert conflict.json()["error"]["code"] == "RETRY_CONFLICT"
+            assert conflict.json()["error"]["message"] == "A retry is already in progress for this run."
+            assert conflict.json()["error"]["details"] is None
 
             missing = client.post("/api/v1/runs/missing/retry")
             assert missing.status_code == 404
             assert missing.json()["error"]["code"] == "RETRY_NOT_FOUND"
+            assert missing.json()["error"]["message"] == "No retryable failure found for this run."
+            assert missing.json()["error"]["details"] is None
+
+            invalid = client.post("/api/v1/runs/-bad/retry")
+            assert invalid.status_code == 400
+            assert invalid.json()["error"]["code"] == "INVALID_RUN_ID"
         finally:
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
+
+
+def test_permanently_failed_override() -> None:
+    with _store() as store:
+        _create_job(store, job_id="job_failed", run_id="run_1", status="failed")
+
+        updated = store.update_job_status("job_failed", "permanently_failed")
+
+        assert updated.status == "permanently_failed"
 
 
 def _store() -> "_ClosingStore":

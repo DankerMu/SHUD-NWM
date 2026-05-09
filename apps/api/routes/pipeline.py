@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Generator
 from functools import lru_cache
 from typing import Any
@@ -17,6 +18,7 @@ from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryNo
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
+_SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 
 
 @lru_cache
@@ -49,6 +51,14 @@ def retry_run(
     request: Request,
     service: RetryService = Depends(get_retry_service),
 ) -> dict[str, Any]:
+    # TODO: require an operator/admin RBAC dependency here when API auth middleware is added.
+    if not _SAFE_RUN_ID_RE.fullmatch(run_id):
+        raise ApiError(
+            status_code=400,
+            code="INVALID_RUN_ID",
+            message="Invalid run identifier.",
+        )
+
     try:
         job = service.attempt_manual_retry(run_id)
     except RetryConflictError as error:
@@ -73,5 +83,5 @@ def _api_error(error: RetryConflictError | RetryNotFoundError) -> ApiError:
         status_code=error.status_code,
         code=error.code,
         message=error.message,
-        details=error.details,
+        details=None,
     )
