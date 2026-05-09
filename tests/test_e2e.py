@@ -663,17 +663,21 @@ async def test_m2_analysis_warm_start_spliced_curve_and_selection_e2e(tmp_path: 
     assert analysis_times.isdisjoint(forecast_times)
 
 
-def test_frontend_splicing_script_requests_segments_and_configures_echarts() -> None:
-    html = Path("apps/frontend/index.legacy.html").read_text(encoding="utf-8")
+def test_frontend_forecast_react_requests_segments_and_configures_echarts() -> None:
+    forecast_page = Path("apps/frontend/src/pages/ForecastPage.tsx").read_text(encoding="utf-8")
+    forecast_store = Path("apps/frontend/src/stores/forecast.ts").read_text(encoding="utf-8")
+    forecast_chart = Path("apps/frontend/src/components/charts/ForecastChart.tsx").read_text(encoding="utf-8")
+    forecast_panel = Path("apps/frontend/src/components/forecast/ForecastPanel.tsx").read_text(encoding="utf-8")
 
-    assert "include_analysis=true" in html
-    assert "payload.segments" in html
-    assert "analysis_true_field" in html
-    assert "#2266cc" in html
-    assert "#ef7d22" in html
-    assert "markLine" in html
-    assert "起报时间" in html
-    assert "资料来源" in html
+    assert "includeAnalysis: true" in forecast_page
+    assert "include_analysis" in forecast_store
+    assert "payload.segments" in forecast_store or "payload.segments" in forecast_chart
+    assert "analysis_true_field" in forecast_store
+    assert "#2266cc" in forecast_store
+    assert "#ef7d22" in forecast_store
+    assert "markLine" in forecast_chart
+    assert "起报时间" in forecast_chart
+    assert "资料来源" in forecast_panel
 
 
 def test_forecast_manifest_contains_degraded_initial_state_markers(tmp_path: Path) -> None:
