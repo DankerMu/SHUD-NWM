@@ -4,7 +4,6 @@ import { ForecastPanel } from '@/components/forecast/ForecastPanel'
 import { MapView } from '@/components/map/MapView'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
-import { cn } from '@/lib/cn'
 import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 
 export function ForecastPage() {
@@ -45,12 +44,7 @@ export function ForecastPage() {
   }, [fetchForecast, toast])
 
   return (
-    <div
-      className={cn(
-        'grid min-h-[calc(100vh-7rem)] gap-4 lg:h-[calc(100vh-7rem)]',
-        selectedSegment ? 'lg:grid-cols-[minmax(0,1fr)_24rem]' : 'lg:grid-cols-1',
-      )}
-    >
+    <div className="grid min-h-[calc(100vh-7rem)] gap-4 lg:h-[calc(100vh-7rem)] lg:grid-cols-[minmax(0,1fr)_24rem]">
       <section
         className="min-h-[32rem] overflow-hidden rounded-lg border border-border bg-panel lg:min-h-0"
         aria-label="河网地图"
@@ -73,7 +67,13 @@ export function ForecastPage() {
           onClose={clearSelection}
           onRetry={retryForecast}
         />
-      ) : null}
+      ) : (
+        <aside className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-panel">
+          <div className="grid min-h-72 flex-1 place-items-center p-4 text-center text-sm text-muted">
+            请在地图上选择河段查看预报
+          </div>
+        </aside>
+      )}
     </div>
   )
 }

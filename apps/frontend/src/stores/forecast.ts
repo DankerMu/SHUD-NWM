@@ -46,6 +46,7 @@ interface ForecastState {
   loading: boolean
   error: string | null
   includeAnalysis: boolean
+  requestNonce: number
   selectSegment: (segment: ForecastSegmentInfo) => void
   fetchForecast: (options?: FetchForecastOptions) => Promise<void>
   clearSelection: () => void
@@ -200,6 +201,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
   loading: false,
   error: null,
   includeAnalysis: true,
+  requestNonce: 0,
   selectSegment: (segment) =>
     set({
       selectedSegment: segment,
@@ -213,11 +215,13 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
 
     const includeAnalysis = options?.includeAnalysis ?? get().includeAnalysis
     const requestedSegmentId = segment.segmentId
-    set({ loading: true, error: null, forecastData: null, includeAnalysis })
+    const requestNonce = get().requestNonce + 1
+    set({ loading: true, error: null, forecastData: null, includeAnalysis, requestNonce })
 
     try {
       const payload = await fetchForecastSeries(segment, includeAnalysis)
-      if (get().selectedSegment?.segmentId !== requestedSegmentId) return
+      const state = get()
+      if (state.requestNonce !== requestNonce || state.selectedSegment?.segmentId !== requestedSegmentId) return
 
       set({
         forecastData: normalizeForecastPayload(payload),
@@ -225,7 +229,8 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
         error: null,
       })
     } catch (error) {
-      if (get().selectedSegment?.segmentId !== requestedSegmentId) return
+      const state = get()
+      if (state.requestNonce !== requestNonce || state.selectedSegment?.segmentId !== requestedSegmentId) return
       const message = getApiErrorMessage(error, '获取预报曲线失败')
       set({ error: message, loading: false, forecastData: null })
       throw error

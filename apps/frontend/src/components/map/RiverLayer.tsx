@@ -33,60 +33,184 @@ export interface RiverFeatureCollection {
   features: RiverFeature[]
 }
 
+const DEMO_BASIN_VERSION_ID = 'yangtze_v2026_01'
+const DEMO_RIVER_NETWORK_VERSION_ID = 'yangtze_rivnet_v01'
+
+function riverProperties(index: number, name: string): RiverFeatureProperties {
+  return {
+    segment_id: `${DEMO_RIVER_NETWORK_VERSION_ID}_riv_${String(index).padStart(4, '0')}`,
+    name,
+    stream_order: index,
+    basin_version_id: DEMO_BASIN_VERSION_ID,
+    river_network_version_id: DEMO_RIVER_NETWORK_VERSION_ID,
+  }
+}
+
 export const demoRivers: RiverFeatureCollection = {
   type: 'FeatureCollection',
   features: [
     {
       type: 'Feature',
-      properties: {
-        segment_id: 'yangtze_v12_riv_000001',
-        name: '长江干流上段',
-        stream_order: 5,
-        basin_version_id: 'yangtze_v12',
-        river_network_version_id: 'yangtze_v12_rivnet',
-      },
+      properties: riverProperties(1, '长江干流 0001'),
       geometry: {
         type: 'LineString',
         coordinates: [
-          [104.1, 30.7],
-          [106.2, 30.5],
-          [108.4, 30.7],
+          [91, 31],
+          [94, 31.2],
         ],
       },
     },
     {
       type: 'Feature',
-      properties: {
-        segment_id: 'yangtze_v12_riv_000002',
-        name: '长江干流中段',
-        stream_order: 6,
-        basin_version_id: 'yangtze_v12',
-        river_network_version_id: 'yangtze_v12_rivnet',
-      },
+      properties: riverProperties(2, '长江干流 0002'),
       geometry: {
         type: 'LineString',
         coordinates: [
-          [108.4, 30.7],
-          [111.0, 30.4],
-          [113.4, 30.6],
+          [94, 31.2],
+          [97, 31],
         ],
       },
     },
     {
       type: 'Feature',
-      properties: {
-        segment_id: 'yangtze_v12_riv_000003',
-        name: '汉江支流',
-        stream_order: 4,
-        basin_version_id: 'yangtze_v12',
-        river_network_version_id: 'yangtze_v12_rivnet',
-      },
+      properties: riverProperties(3, '长江干流 0003'),
       geometry: {
         type: 'LineString',
         coordinates: [
-          [110.0, 32.6],
-          [111.2, 31.8],
-          [112.4, 30.8],
+          [97, 31],
+          [100, 30.8],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(4, '长江干流 0004'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [100, 30.8],
+          [103, 30.6],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(5, '长江干流 0005'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [103, 30.6],
+          [106, 30.7],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(6, '长江干流 0006'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [106, 30.7],
+          [109, 30.9],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(7, '长江干流 0007'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [109, 30.9],
+          [112, 31.1],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(8, '长江干流 0008'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [112, 31.1],
+          [115, 31],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(9, '长江干流 0009'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [115, 31],
+          [118, 31.2],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(10, '长江干流 0010'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [118, 31.2],
+          [121, 31],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(11, '北侧支流 0011'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [98, 33.5],
+          [100, 30.8],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(12, '北侧支流 0012'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [104, 34],
+          [106, 30.7],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(13, '北侧支流 0013'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [110, 33.8],
+          [112, 31.1],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(14, '南侧支流 0014'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [114, 28],
+          [115, 31],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: riverProperties(15, '南侧支流 0015'),
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [119, 29],
+          [121, 31],
         ],
       },
     },

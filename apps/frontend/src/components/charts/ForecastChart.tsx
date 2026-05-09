@@ -36,7 +36,8 @@ function issueTimeMarkLine(issueTimeMs: number, issueTimeLabel: string) {
       padding: [2, 4],
     },
     tooltip: {
-      formatter: () => `起报时间 ${issueTimeLabel}<br/>左侧为真实场 analysis，右侧为预报`,
+      renderMode: 'richText',
+      formatter: () => `起报时间 ${issueTimeLabel}\n左侧为真实场 analysis，右侧为预报`,
     },
     data: [{ name: '起报时间', xAxis: issueTimeMs }],
   }
@@ -76,6 +77,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
       grid: { left: 52, right: 18, top: 98, bottom: 52 },
       tooltip: {
         trigger: 'axis',
+        renderMode: 'richText',
         valueFormatter: (value: number) => `${Number(value).toFixed(2)} ${data?.unit ?? 'm3/s'}`,
       },
       xAxis: {

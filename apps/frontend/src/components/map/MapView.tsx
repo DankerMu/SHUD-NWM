@@ -10,7 +10,9 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 
 import {
   demoRivers,
+  RIVER_HOVER_LAYER_ID,
   RIVER_LAYER_ID,
+  RIVER_SELECTED_LAYER_ID,
   RiverLayer,
   type RiverFeatureCollection,
   type RiverFeatureProperties,
@@ -31,6 +33,12 @@ const LEGACY_MAP_STYLE: MapStyle = {
   },
   layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
 }
+
+const RIVER_INTERACTIVE_LAYER_IDS = [
+  RIVER_LAYER_ID,
+  RIVER_HOVER_LAYER_ID,
+  RIVER_SELECTED_LAYER_ID,
+]
 
 interface TooltipState {
   x: number
@@ -62,6 +70,10 @@ function readRiverProperties(properties: unknown): RiverFeatureProperties | null
     basin_version_id: record.basin_version_id ? String(record.basin_version_id) : '',
     river_network_version_id: record.river_network_version_id ? String(record.river_network_version_id) : '',
   }
+}
+
+function findRiverFeature(event: MapLayerMouseEvent) {
+  return event.features?.find((feature) => RIVER_INTERACTIVE_LAYER_IDS.includes(feature.layer.id))
 }
 
 function toForecastSegment(properties: RiverFeatureProperties): ForecastSegmentInfo {
@@ -120,7 +132,7 @@ export function MapView({
 
   const handleMouseMove = useCallback(
     (event: MapLayerMouseEvent) => {
-      const feature = event.features?.find((feature) => feature.layer.id === RIVER_LAYER_ID)
+      const feature = findRiverFeature(event)
       const properties = readRiverProperties(feature?.properties)
 
       if (!properties) {
@@ -149,7 +161,7 @@ export function MapView({
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
-      const feature = event.features?.find((feature) => feature.layer.id === RIVER_LAYER_ID)
+      const feature = findRiverFeature(event)
       const properties = readRiverProperties(feature?.properties)
 
       if (!properties) {
@@ -214,13 +226,12 @@ export function MapView({
       <Map
         initialViewState={initialViewState}
         mapStyle={LEGACY_MAP_STYLE}
-        interactiveLayerIds={[RIVER_LAYER_ID]}
+        interactiveLayerIds={RIVER_INTERACTIVE_LAYER_IDS}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
         onError={handleMapError}
         attributionControl
-        reuseMaps
       >
         <NavigationControl position="top-left" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
