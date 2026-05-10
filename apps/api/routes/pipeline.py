@@ -505,10 +505,14 @@ def _fetch_forecast_cycle(
         """
     )
     try:
-        row = store.session.execute(
-            statement,
-            {"source": source, "cycle_time": cycle_time, "cycle_id": cycle_id},
-        ).mappings().first()
+        row = (
+            store.session.execute(
+                statement,
+                {"source": source, "cycle_time": cycle_time, "cycle_id": cycle_id},
+            )
+            .mappings()
+            .first()
+        )
     except SQLAlchemyError as error:
         raise ApiError(
             status_code=500,
@@ -614,9 +618,7 @@ def _job_count_summary(store: PipelineStore, cycle_id: str) -> dict[str, int]:
     counts = {"succeeded": 0, "failed": 0, "running": 0, "pending": 0}
     failed_statuses = _FAILED_JOB_STATUSES | {"partially_failed"}
     rows = store.session.execute(
-        select(PipelineJob.status, func.count())
-        .where(PipelineJob.cycle_id == cycle_id)
-        .group_by(PipelineJob.status)
+        select(PipelineJob.status, func.count()).where(PipelineJob.cycle_id == cycle_id).group_by(PipelineJob.status)
     )
     for status, count in rows:
         if status == "succeeded":

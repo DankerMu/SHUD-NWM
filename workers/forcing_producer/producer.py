@@ -165,14 +165,11 @@ class FallbackLineage:
 
 
 class ForcingRepository(Protocol):
-    def resolve_model_basin_version(self, *, model_id: str) -> str:
-        ...
+    def resolve_model_basin_version(self, *, model_id: str) -> str: ...
 
-    def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
-        ...
+    def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]: ...
 
-    def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> tuple[CanonicalProduct, ...]:
-        ...
+    def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> tuple[CanonicalProduct, ...]: ...
 
     def list_fallback_canonical_products(
         self,
@@ -181,8 +178,7 @@ class ForcingRepository(Protocol):
         start_time: datetime,
         end_time: datetime,
         variables: Sequence[str],
-    ) -> tuple[CanonicalProduct, ...]:
-        ...
+    ) -> tuple[CanonicalProduct, ...]: ...
 
     def load_interp_weights(
         self,
@@ -190,11 +186,9 @@ class ForcingRepository(Protocol):
         source_id: str,
         grid_id: str,
         model_id: str,
-    ) -> tuple[InterpolationWeight, ...]:
-        ...
+    ) -> tuple[InterpolationWeight, ...]: ...
 
-    def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None:
-        ...
+    def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None: ...
 
     def get_forcing_version(
         self,
@@ -202,24 +196,19 @@ class ForcingRepository(Protocol):
         source_id: str,
         cycle_time: datetime,
         model_id: str,
-    ) -> dict[str, Any] | None:
-        ...
+    ) -> dict[str, Any] | None: ...
 
-    def upsert_forcing_version(self, record: Mapping[str, Any]) -> dict[str, Any]:
-        ...
+    def upsert_forcing_version(self, record: Mapping[str, Any]) -> dict[str, Any]: ...
 
-    def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]:
-        ...
+    def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]: ...
 
-    def replace_forcing_components(self, forcing_version_id: str, components: Sequence[ForcingComponent]) -> None:
-        ...
+    def replace_forcing_components(self, forcing_version_id: str, components: Sequence[ForcingComponent]) -> None: ...
 
     def replace_forcing_timeseries(
         self,
         forcing_version_id: str,
         rows: Sequence[ForcingTimeseriesRow],
-    ) -> None:
-        ...
+    ) -> None: ...
 
     def update_forecast_cycle(
         self,
@@ -229,8 +218,7 @@ class ForcingRepository(Protocol):
         status: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
-    ) -> dict[str, Any] | None:
-        ...
+    ) -> dict[str, Any] | None: ...
 
 
 @dataclass(frozen=True)
@@ -461,11 +449,13 @@ class ForcingProducer:
             return None
 
         assert self.repository is not None
-        existing_valid_times = sorted({
-            valid_time
-            for products_for_variable in products_by_variable.values()
-            for valid_time in products_for_variable
-        })
+        existing_valid_times = sorted(
+            {
+                valid_time
+                for products_for_variable in products_by_variable.values()
+                for valid_time in products_for_variable
+            }
+        )
         if existing_valid_times:
             target_valid_times = tuple(existing_valid_times)
             start_time = existing_valid_times[0]
@@ -487,11 +477,15 @@ class ForcingProducer:
             required_variables=required_variables,
         )
         if not target_valid_times:
-            target_valid_times = tuple(sorted({
-                valid_time
-                for products_for_variable in fallback_by_variable.values()
-                for valid_time in products_for_variable
-            }))
+            target_valid_times = tuple(
+                sorted(
+                    {
+                        valid_time
+                        for products_for_variable in fallback_by_variable.values()
+                        for valid_time in products_for_variable
+                    }
+                )
+            )
 
         fallback_valid_times: set[datetime] = set()
         for valid_time in target_valid_times:
@@ -701,9 +695,8 @@ class ForcingProducer:
                     weights_by_source_grid_station_variable,
                 ),
                 "Rn": {
-                    station_id: value * (
-                        1.0 if radiation_variable == "net_radiation" else self.config.rn_shortwave_factor
-                    )
+                    station_id: value
+                    * (1.0 if radiation_variable == "net_radiation" else self.config.rn_shortwave_factor)
                     for station_id, value in self._interpolate_forcing_variable(
                         "Rn",
                         fields[radiation_variable][valid_time],
@@ -863,13 +856,15 @@ class ForcingProducer:
             ),
         }
         if fallback_lineage is not None:
-            lineage_json.update({
-                "fallback_reason": fallback_lineage.fallback_reason,
-                "fallback_source_id": fallback_lineage.fallback_source_id,
-                "fallback_valid_times": [
-                    _format_time(valid_time) for valid_time in fallback_lineage.fallback_valid_times
-                ],
-            })
+            lineage_json.update(
+                {
+                    "fallback_reason": fallback_lineage.fallback_reason,
+                    "fallback_source_id": fallback_lineage.fallback_source_id,
+                    "fallback_valid_times": [
+                        _format_time(valid_time) for valid_time in fallback_lineage.fallback_valid_times
+                    ],
+                }
+            )
         package_manifest = {
             "forcing_version_id": forcing_version_id,
             "model_id": model_id,
@@ -1051,13 +1046,15 @@ def format_debug_csv(rows: Sequence[ForcingTimeseriesRow]) -> str:
     writer = csv.writer(output, lineterminator="\n")
     writer.writerow(["valid_time", "station_id", "variable", "value", "unit"])
     for row in sorted(rows, key=lambda item: (item.valid_time, item.station_id, item.variable)):
-        writer.writerow([
-            _format_time(row.valid_time),
-            row.station_id,
-            row.variable,
-            _format_number(row.value),
-            row.unit,
-        ])
+        writer.writerow(
+            [
+                _format_time(row.valid_time),
+                row.station_id,
+                row.variable,
+                _format_number(row.value),
+                row.unit,
+            ]
+        )
     return output.getvalue()
 
 
@@ -1150,11 +1147,9 @@ def _missing_product_details(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
     required_variables: Sequence[str],
 ) -> list[str]:
-    all_times = sorted({
-        valid_time
-        for variable in required_variables
-        for valid_time in products_by_variable.get(variable, {})
-    })
+    all_times = sorted(
+        {valid_time for variable in required_variables for valid_time in products_by_variable.get(variable, {})}
+    )
     missing: list[str] = []
     for variable in required_variables:
         product_times = set(products_by_variable.get(variable, {}))
@@ -1168,11 +1163,15 @@ def _missing_product_details(
 
 
 def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]) -> tuple[datetime, ...]:
-    return tuple(sorted({
-        valid_time
-        for products_for_variable in products_by_variable.values()
-        for valid_time in products_for_variable
-    }))
+    return tuple(
+        sorted(
+            {
+                valid_time
+                for products_for_variable in products_by_variable.values()
+                for valid_time in products_for_variable
+            }
+        )
+    )
 
 
 def _is_era5_source(source_id: str) -> bool:
@@ -1291,10 +1290,7 @@ def _weights_by_station_variable(
     grouped: dict[tuple[str, str], list[InterpolationWeight]] = {}
     for weight in weights:
         grouped.setdefault((weight.station_id, weight.variable), []).append(weight)
-    return {
-        key: tuple(sorted(group, key=lambda item: item.grid_cell_id))
-        for key, group in grouped.items()
-    }
+    return {key: tuple(sorted(group, key=lambda item: item.grid_cell_id)) for key, group in grouped.items()}
 
 
 def _native_resolution_for_output(

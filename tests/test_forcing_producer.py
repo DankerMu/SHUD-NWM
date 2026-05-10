@@ -53,9 +53,7 @@ class FakeForcingRepository:
 
     def list_canonical_products(self, *, source_id: str, cycle_time: Any) -> tuple[CanonicalProduct, ...]:
         return tuple(
-            product
-            for product in self.products
-            if product.source_id == source_id and product.cycle_time == cycle_time
+            product for product in self.products if product.source_id == source_id and product.cycle_time == cycle_time
         )
 
     def list_fallback_canonical_products(
@@ -210,10 +208,7 @@ def test_forcing_timeseries_long_table_rows_have_composite_pk_shape(tmp_path: Pa
 
     result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
-    keys = {
-        (row.forcing_version_id, row.station_id, row.variable, row.valid_time)
-        for row in repository.timeseries
-    }
+    keys = {(row.forcing_version_id, row.station_id, row.variable, row.valid_time) for row in repository.timeseries}
     assert result.status == "forcing_ready"
     assert len(repository.timeseries) == 1 * 6 * 2
     assert len(keys) == len(repository.timeseries)
@@ -578,10 +573,12 @@ def _netcdf_bytes(
 
     coords: dict[str, Any] = {"point": [0, 1, 2]}
     if include_geographic_coords:
-        coords.update({
-            "longitude": ("point", list(longitudes)),
-            "latitude": ("point", list(latitudes)),
-        })
+        coords.update(
+            {
+                "longitude": ("point", list(longitudes)),
+                "latitude": ("point", list(latitudes)),
+            }
+        )
     dataset = xr.Dataset(
         data_vars={variable: ("point", list(values))},
         coords=coords,

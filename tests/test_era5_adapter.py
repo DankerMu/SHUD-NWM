@@ -245,6 +245,7 @@ class FakeZarrDataset:
         class _TimeCoord:
             def __init__(self, vals):
                 self.values = vals
+
         return _TimeCoord(self._times)
 
     @property
@@ -408,11 +409,13 @@ def test_gcs_netcdf4_roundtrip_through_canonical_converter(tmp_path: Path) -> No
             Path(file_path).parent.mkdir(parents=True, exist_ok=True)
             ds.to_netcdf(file_path, engine="netcdf4")
             ds.close()
-            entries.append({
-                "local_key": local_key,
-                "variable": cds_name,
-                "forecast_hour": forecast_hour,
-            })
+            entries.append(
+                {
+                    "local_key": local_key,
+                    "variable": cds_name,
+                    "forecast_hour": forecast_hour,
+                }
+            )
 
     manifest = {
         "source_id": "ERA5",

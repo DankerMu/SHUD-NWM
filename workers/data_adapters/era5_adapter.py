@@ -17,17 +17,6 @@ from typing import Any, Protocol
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 
-ERA5_VARIABLES: tuple[str, ...] = (
-    "2m_temperature",
-    "2m_dewpoint_temperature",
-    "10m_u_component_of_wind",
-    "10m_v_component_of_wind",
-    "surface_pressure",
-    "total_precipitation",
-    "surface_net_solar_radiation",
-    "surface_net_thermal_radiation",
-)
-
 from .base import (
     CycleDiscovery,
     DataSourceAdapter,
@@ -44,6 +33,16 @@ from .gfs_adapter import ForecastCycleRepository
 
 LOGGER = logging.getLogger(__name__)
 
+ERA5_VARIABLES: tuple[str, ...] = (
+    "2m_temperature",
+    "2m_dewpoint_temperature",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
+    "surface_pressure",
+    "total_precipitation",
+    "surface_net_solar_radiation",
+    "surface_net_thermal_radiation",
+)
 ERA5_DATASET_NAME = "reanalysis-era5-single-levels"
 ERA5_FORECAST_HOURS = tuple(range(24))
 ERA5_DEFAULT_AREA = (55.0, 70.0, 15.0, 140.0)
@@ -150,8 +149,7 @@ class GCSZarrClient:
                 import xarray as xr
             except ImportError as error:
                 raise ERA5AdapterError(
-                    "gcsfs and xarray are required for GCS ERA5 downloads. "
-                    "Install with: pip install gcsfs zarr"
+                    "gcsfs and xarray are required for GCS ERA5 downloads. Install with: pip install gcsfs zarr"
                 ) from error
             fs = gcsfs.GCSFileSystem(token="anon")
             store = fs.get_mapper(self._store_url)
@@ -215,9 +213,7 @@ class GCSZarrClient:
             raise ERA5AdapterError(f"No GCS Zarr mapping for ERA5 variable: {variable}")
         if zarr_var not in ds.data_vars:
             available = sorted(str(v) for v in ds.data_vars)
-            raise ERA5AdapterError(
-                f"Variable '{zarr_var}' not found in Zarr store. Available: {available[:20]}"
-            )
+            raise ERA5AdapterError(f"Variable '{zarr_var}' not found in Zarr store. Available: {available[:20]}")
 
         cycle_date = _date_from_request(request)
         hour = int(str(request["time"]).split(":", maxsplit=1)[0])
@@ -230,9 +226,7 @@ class GCSZarrClient:
         if "time" in da.coords:
             actual_time = da.time.values
             if abs(actual_time - target_time) > np.timedelta64(1, "h"):
-                raise ERA5AdapterError(
-                    f"GCS Zarr exact time {target_time} not found; nearest is {actual_time}"
-                )
+                raise ERA5AdapterError(f"GCS Zarr exact time {target_time} not found; nearest is {actual_time}")
 
         lat_dim = "latitude" if "latitude" in da.dims else "lat"
         lon_dim = "longitude" if "longitude" in da.dims else "lon"
@@ -254,6 +248,7 @@ class GCSZarrClient:
                 part_a = da.sel({lon_dim: slice(west_adj, 360.0)})
                 part_b = da.sel({lon_dim: slice(0.0, east_adj)})
                 import xarray as xr
+
                 da = xr.concat([part_a, part_b], dim=lon_dim)
             else:
                 da = da.sel({lon_dim: slice(west_adj, east_adj)})
@@ -262,8 +257,7 @@ class GCSZarrClient:
 
         if da.size == 0:
             raise ERA5AdapterError(
-                f"GCS Zarr selection returned empty data for {variable} "
-                f"area=[{north},{west},{south},{east}]"
+                f"GCS Zarr selection returned empty data for {variable} area=[{north},{west},{south},{east}]"
             )
 
         slice_ds = da.to_dataset(name=zarr_var)
@@ -454,9 +448,7 @@ class ERA5Adapter(DataSourceAdapter):
         start = parse_cycle_date(cycle_date)
         end = parse_cycle_date(end_date) if end_date is not None else start
         if (end - start).days > ERA5_MAX_DISCOVERY_RANGE_DAYS:
-            raise ERA5AdapterError(
-                f"ERA5 discovery date range cannot exceed {ERA5_MAX_DISCOVERY_RANGE_DAYS} days."
-            )
+            raise ERA5AdapterError(f"ERA5 discovery date range cannot exceed {ERA5_MAX_DISCOVERY_RANGE_DAYS} days.")
         discoveries: list[CycleDiscovery] = []
 
         for target_date in _date_range(start, end):

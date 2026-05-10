@@ -146,14 +146,11 @@ def test_e2e_m3_retry_chain_and_manual_conflict(tmp_path: Path, monkeypatch: Any
 
         retry_events = list(
             store.session.scalars(
-                select(PipelineEvent)
-                .where(PipelineEvent.event_type == "retry")
-                .order_by(PipelineEvent.event_id.asc())
+                select(PipelineEvent).where(PipelineEvent.event_type == "retry").order_by(PipelineEvent.event_id.asc())
             )
         )
         assert any(
-            event.details.get("trigger") == "auto" and event.details.get("retry_count") == 1
-            for event in retry_events
+            event.details.get("trigger") == "auto" and event.details.get("retry_count") == 1 for event in retry_events
         )
 
 

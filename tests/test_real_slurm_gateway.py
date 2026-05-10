@@ -268,9 +268,7 @@ def test_subprocess_timeout_handling(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(SlurmTimeoutError):
-        gateway.submit_job(
-            SubmitJobRequest(run_id="run_001", model_id="model_001", job_type="run_shud_forecast_array")
-        )
+        gateway.submit_job(SubmitJobRequest(run_id="run_001", model_id="model_001", job_type="run_shud_forecast_array"))
 
 
 def test_factory_returns_real_gateway_for_slurm_backend(tmp_path):

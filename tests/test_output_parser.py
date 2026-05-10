@@ -60,11 +60,7 @@ def test_parse_csv_converts_units_and_writes_q_down(tmp_path: Path) -> None:
     store, parser, repository = _build_parser(tmp_path)
     store.write_bytes_atomic(
         "runs/run_001/output/demo.rivqdown",
-        (
-            "time,seg_a,seg_b\n"
-            "2026-05-01T00:00:00Z,86400,172800\n"
-            "2026-05-02T00:00:00Z,0,43200\n"
-        ).encode("utf-8"),
+        ("time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n2026-05-02T00:00:00Z,0,43200\n").encode("utf-8"),
     )
 
     result = parser.parse_run("run_001")

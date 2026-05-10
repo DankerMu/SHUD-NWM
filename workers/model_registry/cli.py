@@ -32,8 +32,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(str(error), err=True)
             raise SystemExit(1) from error
         click.echo(
-            "All required model package files are present: "
-            + ", ".join(str(file) for file in result["matched_files"])
+            "All required model package files are present: " + ", ".join(str(file) for file in result["matched_files"])
         )
 
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)

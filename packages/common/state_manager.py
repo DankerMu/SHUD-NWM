@@ -48,28 +48,19 @@ class StateSnapshotSaveResult:
             return self.state_id == other
         if not isinstance(other, StateSnapshotSaveResult):
             return False
-        return (
-            self.status == other.status
-            and self.state_id == other.state_id
-            and self.snapshot == other.snapshot
-        )
+        return self.status == other.status and self.state_id == other.state_id and self.snapshot == other.snapshot
 
 
 class StateSnapshotRepository(Protocol):
-    def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
-        ...
+    def get_state_snapshot(self, state_id: str) -> StateSnapshot | None: ...
 
-    def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
-        ...
+    def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None: ...
 
-    def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
-        ...
+    def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot: ...
 
-    def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
-        ...
+    def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None: ...
 
-    def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None:
-        ...
+    def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None: ...
 
     def list_state_snapshots(
         self,
@@ -78,11 +69,9 @@ class StateSnapshotRepository(Protocol):
         usable: bool | None,
         limit: int,
         offset: int,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
-    def insert_qc_result(self, record: Mapping[str, Any]) -> dict[str, Any]:
-        ...
+    def insert_qc_result(self, record: Mapping[str, Any]) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -248,18 +237,22 @@ class StateManager:
             checks["actual_checksum"] = actual_checksum
             checks["checksum_matches"] = actual_checksum == snapshot.checksum
             if actual_checksum != snapshot.checksum:
-                checks.update({
-                    "passed": False,
-                    "error_code": "STATE_CHECKSUM_MISMATCH",
-                    "message": "State checksum mismatch.",
-                })
+                checks.update(
+                    {
+                        "passed": False,
+                        "error_code": "STATE_CHECKSUM_MISMATCH",
+                        "message": "State checksum mismatch.",
+                    }
+                )
                 return checks
         except (OSError, ObjectStoreError, ValueError) as error:
-            checks.update({
-                "passed": False,
-                "error_code": "STATE_OBJECT_ERROR",
-                "message": str(error),
-            })
+            checks.update(
+                {
+                    "passed": False,
+                    "error_code": "STATE_OBJECT_ERROR",
+                    "message": str(error),
+                }
+            )
             return checks
 
         checks.update({"passed": True, "error_code": None, "message": "State snapshot QC passed."})

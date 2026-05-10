@@ -1,0 +1,260 @@
+from __future__ import annotations
+
+import importlib
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from packages.common.object_store import LocalObjectStore
+from packages.common.test_netcdf4 import encode_test_netcdf4
+
+converter_module = importlib.import_module("workers.canonical_converter.converter")
+
+IFSCanonicalConverter = converter_module.IFSCanonicalConverter
+IFSCanonicalConverterConfig = converter_module.IFSCanonicalConverterConfig
+IFS_VARIABLE_MAPPING = converter_module.IFS_VARIABLE_MAPPING
+convert_ifs_precipitation_with_metadata = converter_module.convert_ifs_precipitation_with_metadata
+parse_cycle_time = converter_module.parse_cycle_time
+
+IFS_VARIABLES: tuple[str, ...] = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str")
+
+
+class FakeCanonicalRepository:
+    def __init__(self) -> None:
+        self.products: dict[str, dict[str, Any]] = {}
+        self.cycles: dict[tuple[str, datetime], dict[str, Any]] = {}
+
+    def get_canonical_product(self, *, canonical_product_id: str) -> dict[str, Any] | None:
+        product = self.products.get(canonical_product_id)
+        return dict(product) if product is not None else None
+
+    def upsert_canonical_product(self, record: dict[str, Any]) -> dict[str, Any]:
+        self.products[record["canonical_product_id"]] = dict(record)
+        return self.products[record["canonical_product_id"]]
+
+    def update_forecast_cycle(self, **kwargs: Any) -> dict[str, Any]:
+        key = (kwargs["source_id"], kwargs["cycle_time"])
+        cycle = self.cycles.setdefault(key, {"source_id": kwargs["source_id"], "cycle_time": kwargs["cycle_time"]})
+        for field in ("status", "error_code", "error_message"):
+            if kwargs.get(field) is not None:
+                cycle[field] = kwargs[field]
+        return cycle
+
+
+def default_ifs_value(variable: str, forecast_hour: int) -> float:
+    if variable == "2t":
+        return 293.15
+    if variable == "2d":
+        return 283.15
+    if variable == "10u":
+        return 3.5
+    if variable == "10v":
+        return -2.0
+    if variable == "tp":
+        return forecast_hour * 0.001
+    if variable == "sp":
+        return 100500.0
+    if variable == "ssr":
+        return forecast_hour * 3600.0 * 120.0
+    if variable == "str":
+        return forecast_hour * 3600.0 * -40.0
+    raise ValueError(f"Unsupported IFS variable: {variable}")
+
+
+def build_ifs_manifest(
+    tmp_path: Path,
+    *,
+    forecast_hours: tuple[int, ...] = (0,),
+    overrides: dict[tuple[str, int], list[float]] | None = None,
+) -> tuple[LocalObjectStore, dict[str, Any]]:
+    cycle_time = parse_cycle_time("2026050100")
+    compact_cycle = "2026050100"
+    store = LocalObjectStore(tmp_path)
+    entries: list[dict[str, Any]] = []
+    overrides = overrides or {}
+
+    for forecast_hour in forecast_hours:
+        for variable in IFS_VARIABLES:
+            values = overrides.get((variable, forecast_hour), [default_ifs_value(variable, forecast_hour)])
+            local_key = f"raw/IFS/{compact_cycle}/ifs.t00z.f{forecast_hour:03d}.{variable}.grib2"
+            store.write_bytes_atomic(
+                local_key,
+                encode_test_netcdf4(
+                    variable,
+                    forecast_hour,
+                    values=values,
+                    cycle_time=cycle_time,
+                    source="IFS",
+                ),
+            )
+            entries.append(
+                {
+                    "remote_url": f"mock://IFS/{variable}/{forecast_hour}",
+                    "local_key": local_key,
+                    "variable": variable,
+                    "forecast_hour": forecast_hour,
+                }
+            )
+
+    return (
+        store,
+        {
+            "source_id": "IFS",
+            "cycle_time": cycle_time.isoformat(),
+            "metadata": {"forecast_hours": list(forecast_hours), "max_lead_hours": max(forecast_hours)},
+            "entries": entries,
+        },
+    )
+
+
+def build_converter(tmp_path: Path, repository: FakeCanonicalRepository | None = None) -> IFSCanonicalConverter:
+    config = IFSCanonicalConverterConfig(workspace_root=tmp_path)
+    return IFSCanonicalConverter(
+        config=config,
+        repository=repository or FakeCanonicalRepository(),
+        object_store=LocalObjectStore(tmp_path),
+    )
+
+
+def read_product_values(store: LocalObjectStore, product: dict[str, Any], variable: str) -> list[float]:
+    import xarray as xr
+
+    dataset = xr.open_dataset(store.resolve_path(product["object_uri"]), engine="netcdf4")
+    try:
+        return [float(value) for value in dataset[variable].values.tolist()]
+    finally:
+        dataset.close()
+
+
+def test_ifs_variable_mapping_uses_surface_pressure() -> None:
+    assert IFS_VARIABLE_MAPPING["2t"] == "air_temperature_2m"
+    assert IFS_VARIABLE_MAPPING["2d"] == "relative_humidity_2m"
+    assert IFS_VARIABLE_MAPPING["tp"] == "prcp_rate_or_amount"
+    assert IFS_VARIABLE_MAPPING["sp"] == "surface_pressure"
+
+
+def test_temperature_rh_wind_and_pressure_conversion(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    store, manifest = build_ifs_manifest(
+        tmp_path,
+        forecast_hours=(0,),
+        overrides={
+            ("2t", 0): [293.15],
+            ("2d", 0): [283.15],
+            ("10u", 0): [6.0],
+            ("10v", 0): [-4.0],
+            ("sp", 0): [100125.0],
+        },
+    )
+    converter = build_converter(tmp_path, repository=repository)
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_ready"
+    assert len(result.products) == 7
+    temperature = repository.products["IFS_2026050100_air_temperature_2m_f000"]
+    humidity = repository.products["IFS_2026050100_relative_humidity_2m_f000"]
+    wind_u = repository.products["IFS_2026050100_wind_u_10m_f000"]
+    wind_v = repository.products["IFS_2026050100_wind_v_10m_f000"]
+    assert read_product_values(store, temperature, "air_temperature_2m") == pytest.approx([20.0])
+    assert read_product_values(store, humidity, "relative_humidity_2m") == pytest.approx([0.525], abs=1e-3)
+    assert read_product_values(store, wind_u, "wind_u_10m") == pytest.approx([6.0])
+    assert read_product_values(store, wind_v, "wind_v_10m") == pytest.approx([-4.0])
+    pressure = repository.products["IFS_2026050100_surface_pressure_f000"]
+    assert pressure["variable"] == "surface_pressure"
+    assert pressure["unit"] == "Pa"
+    assert read_product_values(store, pressure, "surface_pressure") == pytest.approx([100125.0])
+
+
+def test_precipitation_cumulative_m_to_mm_per_step(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    store, manifest = build_ifs_manifest(
+        tmp_path,
+        forecast_hours=(3, 6),
+        overrides={
+            ("tp", 3): [0.003],
+            ("tp", 6): [0.006],
+        },
+    )
+    converter = build_converter(tmp_path, repository=repository)
+
+    converter.convert_manifest(manifest)
+
+    precipitation = repository.products["IFS_2026050100_prcp_rate_or_amount_f006"]
+    assert precipitation["unit"] == "mm"
+    assert precipitation["quality_flag"] == "ok"
+    assert read_product_values(store, precipitation, "prcp_rate_or_amount") == pytest.approx([3.0])
+    lineage = precipitation["lineage_json"]["conversion_params"]
+    assert lineage["accumulation_type"] == "since_cycle"
+    assert lineage["unit_conversion"] == "m_to_mm"
+    assert lineage["step_hours"] == 3.0
+
+
+def test_negative_precipitation_handling_all_cases() -> None:
+    small, small_count, _ = convert_ifs_precipitation_with_metadata([0.001999], [0.002])
+    warning, warning_count, _ = convert_ifs_precipitation_with_metadata([0.001], [0.002])
+    error, error_count, _ = convert_ifs_precipitation_with_metadata(
+        [0.001],
+        [0.002],
+        consecutive_negative_count=2,
+    )
+
+    assert small.values == pytest.approx((0.0,))
+    assert small.quality_flag == "ok"
+    assert small_count == 0
+    assert warning.values == pytest.approx((0.0,))
+    assert warning.quality_flag == "warning_negative_precip"
+    assert warning_count == 1
+    assert error.values == pytest.approx((0.0,))
+    assert error.quality_flag == "error_precip_accumulation"
+    assert error_count == 3
+
+
+def test_radiation_cumulative_diff_to_w_m2(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    store, manifest = build_ifs_manifest(
+        tmp_path,
+        forecast_hours=(3, 6),
+        overrides={
+            ("ssr", 3): [720_000.0],
+            ("str", 3): [-180_000.0],
+            ("ssr", 6): [1_440_000.0],
+            ("str", 6): [-360_000.0],
+        },
+    )
+    converter = build_converter(tmp_path, repository=repository)
+
+    converter.convert_manifest(manifest)
+
+    radiation = repository.products["IFS_2026050100_net_radiation_f006"]
+    assert read_product_values(store, radiation, "net_radiation") == pytest.approx([50.0])
+    assert radiation["lineage_json"]["radiation_method"] == "direct_net"
+    assert radiation["lineage_json"]["components"] == ["ssr", "str"]
+
+
+def test_lineage_json_structure_for_each_variable_type(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_ifs_manifest(tmp_path, forecast_hours=(0, 3))
+    converter = build_converter(tmp_path, repository=repository)
+
+    converter.convert_manifest(manifest)
+
+    temperature = repository.products["IFS_2026050100_air_temperature_2m_f000"]["lineage_json"]
+    humidity = repository.products["IFS_2026050100_relative_humidity_2m_f000"]["lineage_json"]
+    precipitation = repository.products["IFS_2026050100_prcp_rate_or_amount_f003"]["lineage_json"]
+    radiation = repository.products["IFS_2026050100_net_radiation_f003"]["lineage_json"]
+    wind = repository.products["IFS_2026050100_wind_u_10m_f000"]["lineage_json"]
+    pressure = repository.products["IFS_2026050100_surface_pressure_f000"]["lineage_json"]
+
+    assert temperature["conversion_params"]["unit_conversion"] == "K_to_C"
+    assert humidity["conversion_params"]["derived_from"] == ["2t", "2d"]
+    assert humidity["method"] == "magnus_formula"
+    assert precipitation["conversion_params"]["operation"] == "cumulative_m_to_mm_step"
+    assert precipitation["conversion_params"]["step_hours"] == 3.0
+    assert radiation["conversion_params"]["components"] == ["ssr", "str"]
+    assert wind["conversion_params"]["operation"] == "pass_through"
+    assert pressure["conversion_params"]["native_variable"] == "sp"
+    lineages = (temperature, humidity, precipitation, radiation, wind, pressure)
+    assert {lineage["converter_version"] for lineage in lineages} == {"m4.0"}
