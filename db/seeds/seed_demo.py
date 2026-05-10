@@ -28,6 +28,15 @@ CYCLE_ID = "gfs_2026050100"
 FORCING_VERSION_ID = "forc_gfs_2026050100_yangtze_shud_v12"
 RUN_ID = "fcst_gfs_2026050100_yangtze_shud_v12"
 SCENARIO_ID = "forecast_gfs_deterministic"
+IFS_SOURCE_ID = "IFS"
+IFS_SOURCE_ID_IN_IDS = "ifs"
+IFS_CYCLE_ID = "ifs_2026050100"
+IFS_FORCING_VERSION_ID = "forc_ifs_2026050100_yangtze_shud_v12"
+IFS_RUN_ID = "fcst_ifs_2026050100_yangtze_shud_v12"
+IFS_SCENARIO_ID = "forecast_ifs_deterministic"
+IFS_06Z_CYCLE_ID = "ifs_2026050106"
+IFS_06Z_FORCING_VERSION_ID = "forc_ifs_2026050106_yangtze_shud_v12"
+IFS_06Z_RUN_ID = "fcst_ifs_2026050106_yangtze_shud_v12"
 TILE_LAYER_ID = "river_network_yangtze"
 PIPELINE_JOB_ID = "job_download_gfs_2026050100"
 QC_CHECKPOINT = "forcing_completeness"
@@ -35,6 +44,12 @@ QC_CHECKPOINT = "forcing_completeness"
 START_TIME = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
 END_TIME = datetime(2026, 5, 8, 0, 0, tzinfo=UTC)
 FORECAST_HOURS = int((END_TIME - START_TIME).total_seconds() // 3600)
+IFS_CYCLE_TIME = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+IFS_END_TIME = IFS_CYCLE_TIME + timedelta(hours=168)
+IFS_FORECAST_HOURS = int((IFS_END_TIME - IFS_CYCLE_TIME).total_seconds() // 3600)
+IFS_06Z_CYCLE_TIME = datetime(2026, 5, 1, 6, 0, tzinfo=UTC)
+IFS_06Z_END_TIME = IFS_06Z_CYCLE_TIME + timedelta(hours=144)
+IFS_06Z_FORECAST_HOURS = int((IFS_06Z_END_TIME - IFS_06Z_CYCLE_TIME).total_seconds() // 3600)
 
 BASIN_GEOM_WKT = "MULTIPOLYGON(((90 25, 122 25, 122 35, 90 35, 90 25)))"
 MODEL_PACKAGE_URI = f"s3://nhms/models/{MODEL_ID}/model_package.tar.gz"
@@ -43,6 +58,16 @@ FORCING_PACKAGE_URI = (
 )
 RUN_MANIFEST_URI = f"s3://nhms/runs/{RUN_ID}/input/manifest.json"
 RUN_OUTPUT_URI = f"s3://nhms/runs/{RUN_ID}/output/"
+IFS_FORCING_PACKAGE_URI = (
+    f"s3://nhms/forcing/{IFS_SOURCE_ID_IN_IDS}/2026050100/{BASIN_VERSION_ID}/{MODEL_ID}/forcing_package.tar.gz"
+)
+IFS_RUN_MANIFEST_URI = f"s3://nhms/runs/{IFS_RUN_ID}/input/manifest.json"
+IFS_RUN_OUTPUT_URI = f"s3://nhms/runs/{IFS_RUN_ID}/output/"
+IFS_06Z_FORCING_PACKAGE_URI = (
+    f"s3://nhms/forcing/{IFS_SOURCE_ID_IN_IDS}/2026050106/{BASIN_VERSION_ID}/{MODEL_ID}/forcing_package.tar.gz"
+)
+IFS_06Z_RUN_MANIFEST_URI = f"s3://nhms/runs/{IFS_06Z_RUN_ID}/input/manifest.json"
+IFS_06Z_RUN_OUTPUT_URI = f"s3://nhms/runs/{IFS_06Z_RUN_ID}/output/"
 
 FORCING_VARIABLES = ("t2m", "rh2m", "wind_u", "wind_v", "precip", "srad")
 RIVER_VARIABLES = ("q_down", "y_stage")
@@ -79,12 +104,49 @@ S3_PLACEHOLDER_OBJECTS: dict[str, bytes] = {
         },
         indent=2,
     ).encode("utf-8"),
+    IFS_FORCING_PACKAGE_URI: b"NHMS demo IFS forcing package placeholder\n",
+    IFS_RUN_MANIFEST_URI: json.dumps(
+        {
+            "run_id": IFS_RUN_ID,
+            "model_id": MODEL_ID,
+            "forcing_version_id": IFS_FORCING_VERSION_ID,
+            "source_id": IFS_SOURCE_ID,
+            "scenario_id": IFS_SCENARIO_ID,
+            "start_time": IFS_CYCLE_TIME.isoformat(),
+            "end_time": IFS_END_TIME.isoformat(),
+            "forecast_horizon_hours": 168,
+        },
+        indent=2,
+    ).encode("utf-8"),
+    IFS_06Z_FORCING_PACKAGE_URI: b"NHMS demo IFS 06Z forcing package placeholder\n",
+    IFS_06Z_RUN_MANIFEST_URI: json.dumps(
+        {
+            "run_id": IFS_06Z_RUN_ID,
+            "model_id": MODEL_ID,
+            "forcing_version_id": IFS_06Z_FORCING_VERSION_ID,
+            "source_id": IFS_SOURCE_ID,
+            "scenario_id": IFS_SCENARIO_ID,
+            "start_time": IFS_06Z_CYCLE_TIME.isoformat(),
+            "end_time": IFS_06Z_END_TIME.isoformat(),
+            "forecast_horizon_hours": 144,
+        },
+        indent=2,
+    ).encode("utf-8"),
     f"s3://nhms/runs/{RUN_ID}/output/rivqdown.csv": b"river_segment_id,valid_time,q_down\n"
     b"yangtze_rivnet_v01_riv_0001,2026-05-01T00:00:00Z,820.5\n",
     f"s3://nhms/runs/{RUN_ID}/logs/run.log": b"Demo SHUD run completed successfully.\n",
+    f"s3://nhms/runs/{IFS_RUN_ID}/output/rivqdown.csv": b"river_segment_id,valid_time,q_down\n"
+    b"yangtze_rivnet_v01_riv_0001,2026-05-01T00:00:00Z,801.5\n",
+    f"s3://nhms/runs/{IFS_RUN_ID}/logs/run.log": b"Demo IFS SHUD run completed successfully.\n",
+    f"s3://nhms/runs/{IFS_06Z_RUN_ID}/output/rivqdown.csv": b"river_segment_id,valid_time,q_down\n"
+    b"yangtze_rivnet_v01_riv_0001,2026-05-01T06:00:00Z,797.5\n",
+    f"s3://nhms/runs/{IFS_06Z_RUN_ID}/logs/run.log": b"Demo IFS 06Z SHUD run completed successfully.\n",
     f"s3://nhms/states/{MODEL_ID}/2026050100/yangtze_v12.cfg.ic": b"NHMS demo initial state placeholder\n",
     "s3://nhms/raw/gfs/2026050100/gfs_t2m.grib2": b"NHMS demo raw GFS t2m placeholder\n",
+    "s3://nhms/raw/ifs/2026050100/ifs_t2m.grib2": b"NHMS demo raw IFS t2m placeholder\n",
+    "s3://nhms/raw/ifs/2026050106/ifs_t2m.grib2": b"NHMS demo raw IFS 06Z t2m placeholder\n",
     "s3://nhms/canonical/gfs/2026050100/t2m/data.nc": b"NHMS demo canonical t2m placeholder\n",
+    "s3://nhms/canonical/ifs/2026050100/2t/data.nc": b"NHMS demo canonical IFS 2t placeholder\n",
 }
 
 
@@ -174,8 +236,8 @@ def build_met_stations() -> list[MetStation]:
     ]
 
 
-def hourly_times() -> list[datetime]:
-    return [START_TIME + timedelta(hours=hour) for hour in range(FORECAST_HOURS)]
+def hourly_times(start_time: datetime = START_TIME, forecast_hours: int = FORECAST_HOURS) -> list[datetime]:
+    return [start_time + timedelta(hours=hour) for hour in range(forecast_hours)]
 
 
 def forcing_unit(variable: str) -> str:
@@ -204,10 +266,18 @@ def forcing_value(rng: random.Random, variable: str, valid_time: datetime) -> fl
     raise ValueError(f"Unsupported forcing variable: {variable}")
 
 
-def river_value(rng: random.Random, segment_order: int, variable: str, lead_time_hours: int) -> float:
+def river_value(
+    rng: random.Random,
+    segment_order: int,
+    variable: str,
+    lead_time_hours: int,
+    *,
+    forecast_hours: int = FORECAST_HOURS,
+    flow_offset: float = 0.0,
+) -> float:
     daily_wave = math.sin(2 * math.pi * (lead_time_hours % 24) / 24)
-    forecast_wave = math.sin(2 * math.pi * lead_time_hours / FORECAST_HOURS)
-    base_q = 650.0 + segment_order * 95.0
+    forecast_wave = math.sin(2 * math.pi * lead_time_hours / forecast_hours)
+    base_q = 650.0 + segment_order * 95.0 + flow_offset
     q_down = max(80.0, base_q * (1.0 + 0.18 * daily_wave + 0.28 * forecast_wave) + rng.uniform(-55.0, 85.0))
 
     if variable == "q_down":
@@ -356,11 +426,46 @@ def seed_met(cursor: Any, json_adapter: Any, execute_values: Any, rng: random.Ra
     )
     cursor.execute(
         """
+        INSERT INTO met.data_source (source_id, source_name, source_type, status, native_format, adapter_name)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (source_id) DO NOTHING
+        """,
+        (IFS_SOURCE_ID, "IFS Open Data", "forecast", "enabled", "GRIB2", "ifs_adapter"),
+    )
+    cursor.execute(
+        """
         INSERT INTO met.forecast_cycle (cycle_id, source_id, cycle_time, issue_time, status, manifest_uri)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT DO NOTHING
         """,
         (CYCLE_ID, SOURCE_ID, START_TIME, START_TIME + timedelta(minutes=45), "complete", RUN_MANIFEST_URI),
+    )
+    execute_values(
+        cursor,
+        """
+        INSERT INTO met.forecast_cycle (cycle_id, source_id, cycle_time, issue_time, status, manifest_uri)
+        VALUES %s
+        ON CONFLICT DO NOTHING
+        """,
+        [
+            (
+                IFS_CYCLE_ID,
+                IFS_SOURCE_ID,
+                IFS_CYCLE_TIME,
+                IFS_CYCLE_TIME + timedelta(minutes=90),
+                "complete",
+                IFS_RUN_MANIFEST_URI,
+            ),
+            (
+                IFS_06Z_CYCLE_ID,
+                IFS_SOURCE_ID,
+                IFS_06Z_CYCLE_TIME,
+                IFS_06Z_CYCLE_TIME + timedelta(minutes=90),
+                "complete",
+                IFS_06Z_RUN_MANIFEST_URI,
+            ),
+        ],
+        page_size=1000,
     )
 
     station_rows = [
@@ -396,7 +501,43 @@ def seed_met(cursor: Any, json_adapter: Any, execute_values: Any, rng: random.Ra
         template="(%s, %s, %s, ST_GeomFromText(%s, 4490), %s, %s, %s, %s)",
         page_size=1000,
     )
-    cursor.execute(
+    forcing_version_rows = [
+        (
+            FORCING_VERSION_ID,
+            MODEL_ID,
+            SOURCE_ID,
+            START_TIME,
+            START_TIME,
+            END_TIME,
+            5,
+            FORCING_PACKAGE_URI,
+            json_adapter({"forecast_cycle_id": CYCLE_ID, "source_id": SOURCE_ID, "max_lead_hours": 168}),
+        ),
+        (
+            IFS_FORCING_VERSION_ID,
+            MODEL_ID,
+            IFS_SOURCE_ID,
+            IFS_CYCLE_TIME,
+            IFS_CYCLE_TIME,
+            IFS_END_TIME,
+            5,
+            IFS_FORCING_PACKAGE_URI,
+            json_adapter({"forecast_cycle_id": IFS_CYCLE_ID, "source_id": IFS_SOURCE_ID, "max_lead_hours": 168}),
+        ),
+        (
+            IFS_06Z_FORCING_VERSION_ID,
+            MODEL_ID,
+            IFS_SOURCE_ID,
+            IFS_06Z_CYCLE_TIME,
+            IFS_06Z_CYCLE_TIME,
+            IFS_06Z_END_TIME,
+            5,
+            IFS_06Z_FORCING_PACKAGE_URI,
+            json_adapter({"forecast_cycle_id": IFS_06Z_CYCLE_ID, "source_id": IFS_SOURCE_ID, "max_lead_hours": 144}),
+        ),
+    ]
+    execute_values(
+        cursor,
         """
         INSERT INTO met.forcing_version (
             forcing_version_id,
@@ -409,20 +550,11 @@ def seed_met(cursor: Any, json_adapter: Any, execute_values: Any, rng: random.Ra
             forcing_package_uri,
             lineage_json
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES %s
         ON CONFLICT DO NOTHING
         """,
-        (
-            FORCING_VERSION_ID,
-            MODEL_ID,
-            SOURCE_ID,
-            START_TIME,
-            START_TIME,
-            END_TIME,
-            5,
-            FORCING_PACKAGE_URI,
-            json_adapter({"forecast_cycle_id": CYCLE_ID, "source_id": SOURCE_ID}),
-        ),
+        forcing_version_rows,
+        page_size=1000,
     )
 
     forcing_rows = [
@@ -466,7 +598,58 @@ def seed_met(cursor: Any, json_adapter: Any, execute_values: Any, rng: random.Ra
 
 
 def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
-    cursor.execute(
+    hydro_run_rows = [
+        (
+            RUN_ID,
+            "forecast",
+            SCENARIO_ID,
+            MODEL_ID,
+            BASIN_VERSION_ID,
+            FORCING_VERSION_ID,
+            SOURCE_ID,
+            START_TIME,
+            START_TIME,
+            END_TIME,
+            "published",
+            RUN_MANIFEST_URI,
+            RUN_OUTPUT_URI,
+            f"s3://nhms/runs/{RUN_ID}/logs/run.log",
+        ),
+        (
+            IFS_RUN_ID,
+            "forecast",
+            IFS_SCENARIO_ID,
+            MODEL_ID,
+            BASIN_VERSION_ID,
+            IFS_FORCING_VERSION_ID,
+            IFS_SOURCE_ID,
+            IFS_CYCLE_TIME,
+            IFS_CYCLE_TIME,
+            IFS_END_TIME,
+            "published",
+            IFS_RUN_MANIFEST_URI,
+            IFS_RUN_OUTPUT_URI,
+            f"s3://nhms/runs/{IFS_RUN_ID}/logs/run.log",
+        ),
+        (
+            IFS_06Z_RUN_ID,
+            "forecast",
+            IFS_SCENARIO_ID,
+            MODEL_ID,
+            BASIN_VERSION_ID,
+            IFS_06Z_FORCING_VERSION_ID,
+            IFS_SOURCE_ID,
+            IFS_06Z_CYCLE_TIME,
+            IFS_06Z_CYCLE_TIME,
+            IFS_06Z_END_TIME,
+            "published",
+            IFS_06Z_RUN_MANIFEST_URI,
+            IFS_06Z_RUN_OUTPUT_URI,
+            f"s3://nhms/runs/{IFS_06Z_RUN_ID}/logs/run.log",
+        ),
+    ]
+    execute_values(
+        cursor,
         """
         INSERT INTO hydro.hydro_run (
             run_id,
@@ -484,46 +667,35 @@ def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
             output_uri,
             log_uri
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES %s
         ON CONFLICT DO NOTHING
         """,
-        (
-            RUN_ID,
-            "forecast",
-            SCENARIO_ID,
-            MODEL_ID,
-            BASIN_VERSION_ID,
-            FORCING_VERSION_ID,
-            SOURCE_ID,
-            START_TIME,
-            START_TIME,
-            END_TIME,
-            "published",
-            RUN_MANIFEST_URI,
-            RUN_OUTPUT_URI,
-            f"s3://nhms/runs/{RUN_ID}/logs/run.log",
-        ),
+        hydro_run_rows,
+        page_size=1000,
     )
 
-    river_rows = []
-    for segment in build_river_segments():
-        for variable in RIVER_VARIABLES:
-            unit = "m3/s" if variable == "q_down" else "m"
-            for lead_time_hours, valid_time in enumerate(hourly_times()):
-                river_rows.append(
-                    (
-                        RUN_ID,
-                        BASIN_VERSION_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        segment.river_segment_id,
-                        valid_time,
-                        lead_time_hours,
-                        variable,
-                        river_value(rng, segment.segment_order, variable, lead_time_hours),
-                        unit,
-                        "ok",
-                    )
-                )
+    river_rows = [
+        *_build_river_timeseries_rows(
+            rng,
+            run_id=RUN_ID,
+            start_time=START_TIME,
+            forecast_hours=FORECAST_HOURS,
+        ),
+        *_build_river_timeseries_rows(
+            rng,
+            run_id=IFS_RUN_ID,
+            start_time=IFS_CYCLE_TIME,
+            forecast_hours=IFS_FORECAST_HOURS,
+            flow_offset=-20.0,
+        ),
+        *_build_river_timeseries_rows(
+            rng,
+            run_id=IFS_06Z_RUN_ID,
+            start_time=IFS_06Z_CYCLE_TIME,
+            forecast_hours=IFS_06Z_FORECAST_HOURS,
+            flow_offset=-25.0,
+        ),
+    ]
     execute_values(
         cursor,
         """
@@ -545,6 +717,43 @@ def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
         river_rows,
         page_size=1000,
     )
+
+
+def _build_river_timeseries_rows(
+    rng: random.Random,
+    *,
+    run_id: str,
+    start_time: datetime,
+    forecast_hours: int,
+    flow_offset: float = 0.0,
+) -> list[tuple[Any, ...]]:
+    rows: list[tuple[Any, ...]] = []
+    for segment in build_river_segments():
+        for variable in RIVER_VARIABLES:
+            unit = "m3/s" if variable == "q_down" else "m"
+            for lead_time_hours, valid_time in enumerate(hourly_times(start_time, forecast_hours)):
+                rows.append(
+                    (
+                        run_id,
+                        BASIN_VERSION_ID,
+                        RIVER_NETWORK_VERSION_ID,
+                        segment.river_segment_id,
+                        valid_time,
+                        lead_time_hours,
+                        variable,
+                        river_value(
+                            rng,
+                            segment.segment_order,
+                            variable,
+                            lead_time_hours,
+                            forecast_hours=forecast_hours,
+                            flow_offset=flow_offset,
+                        ),
+                        unit,
+                        "ok",
+                    )
+                )
+    return rows
 
 
 def seed_flood(cursor: Any, json_adapter: Any, execute_values: Any) -> None:
@@ -807,7 +1016,13 @@ def collect_counts(cursor: Any) -> dict[str, int]:
         ("core.mesh_version", "SELECT COUNT(*) FROM core.mesh_version WHERE mesh_version_id = %s", (MESH_VERSION_ID,)),
         ("core.model_instance", "SELECT COUNT(*) FROM core.model_instance WHERE model_id = %s", (MODEL_ID,)),
         ("met.data_source", "SELECT COUNT(*) FROM met.data_source WHERE source_id = %s", (SOURCE_ID,)),
+        ("met.data_source.ifs", "SELECT COUNT(*) FROM met.data_source WHERE source_id = %s", (IFS_SOURCE_ID,)),
         ("met.forecast_cycle", "SELECT COUNT(*) FROM met.forecast_cycle WHERE cycle_id = %s", (CYCLE_ID,)),
+        (
+            "met.forecast_cycle.ifs",
+            "SELECT COUNT(*) FROM met.forecast_cycle WHERE cycle_id = ANY(%s)",
+            ([IFS_CYCLE_ID, IFS_06Z_CYCLE_ID],),
+        ),
         ("met.met_station", "SELECT COUNT(*) FROM met.met_station WHERE station_id = ANY(%s)", (station_ids,)),
         (
             "met.forcing_version",
@@ -815,12 +1030,27 @@ def collect_counts(cursor: Any) -> dict[str, int]:
             (FORCING_VERSION_ID,),
         ),
         (
+            "met.forcing_version.ifs",
+            "SELECT COUNT(*) FROM met.forcing_version WHERE forcing_version_id = ANY(%s)",
+            ([IFS_FORCING_VERSION_ID, IFS_06Z_FORCING_VERSION_ID],),
+        ),
+        (
             "met.forcing_station_timeseries",
             "SELECT COUNT(*) FROM met.forcing_station_timeseries WHERE forcing_version_id = %s",
             (FORCING_VERSION_ID,),
         ),
         ("hydro.hydro_run", "SELECT COUNT(*) FROM hydro.hydro_run WHERE run_id = %s", (RUN_ID,)),
+        (
+            "hydro.hydro_run.ifs",
+            "SELECT COUNT(*) FROM hydro.hydro_run WHERE run_id = ANY(%s)",
+            ([IFS_RUN_ID, IFS_06Z_RUN_ID],),
+        ),
         ("hydro.river_timeseries", "SELECT COUNT(*) FROM hydro.river_timeseries WHERE run_id = %s", (RUN_ID,)),
+        (
+            "hydro.river_timeseries.ifs",
+            "SELECT COUNT(*) FROM hydro.river_timeseries WHERE run_id = ANY(%s)",
+            ([IFS_RUN_ID, IFS_06Z_RUN_ID],),
+        ),
         (
             "flood.flood_frequency_curve",
             """
