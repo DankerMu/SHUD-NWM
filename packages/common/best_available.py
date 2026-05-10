@@ -52,14 +52,11 @@ class BestAvailableSelection:
 
 
 class BestAvailableRepository(Protocol):
-    def list_enabled_sources(self) -> tuple[str, ...]:
-        ...
+    def list_enabled_sources(self) -> tuple[str, ...]: ...
 
-    def list_forcing_inputs(self, forcing_version_id: str) -> list[ForcingInputSelection]:
-        ...
+    def list_forcing_inputs(self, forcing_version_id: str) -> list[ForcingInputSelection]: ...
 
-    def upsert_selection(self, selection: BestAvailableSelection) -> dict[str, Any]:
-        ...
+    def upsert_selection(self, selection: BestAvailableSelection) -> dict[str, Any]: ...
 
     def list_selections(
         self,
@@ -67,8 +64,7 @@ class BestAvailableRepository(Protocol):
         from_time: datetime,
         to_time: datetime,
         variable: str | None,
-    ) -> list[dict[str, Any]]:
-        ...
+    ) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -295,11 +291,15 @@ def selection_from_forcing_input(
     now: datetime | None = None,
 ) -> BestAvailableSelection:
     selected_source = row.selected_source.upper()
-    fallback_order = ["ERA5"] if selected_source == "ERA5" else fallback_order_for_valid_time(
-        row.valid_time,
-        now=now,
-        enabled_sources=enabled_sources,
-        selected_source=selected_source,
+    fallback_order = (
+        ["ERA5"]
+        if selected_source == "ERA5"
+        else fallback_order_for_valid_time(
+            row.valid_time,
+            now=now,
+            enabled_sources=enabled_sources,
+            selected_source=selected_source,
+        )
     )
     return BestAvailableSelection(
         valid_time=_ensure_utc(row.valid_time),

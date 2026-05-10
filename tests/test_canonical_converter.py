@@ -182,9 +182,7 @@ def test_quality_flag_fail_triggers_reconversion(tmp_path: Path) -> None:
     result = converter.convert_manifest(manifest)
 
     updated = [
-        product
-        for product in result.products
-        if product.canonical_product_id.endswith("air_temperature_2m_f000")
+        product for product in result.products if product.canonical_product_id.endswith("air_temperature_2m_f000")
     ]
     assert updated[0].status == "updated"
     assert repository.products["gfs_2026050700_air_temperature_2m_f000"]["quality_flag"] == "ok"

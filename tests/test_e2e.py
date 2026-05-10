@@ -13,8 +13,8 @@ from apps.api.routes.forecast import get_forecast_store
 from packages.common.best_available import BestAvailableManager, BestAvailableSelection, ForcingInputSelection
 from packages.common.forecast_store import _spliced_response_from_rows, analysis_window_for_issue_time
 from packages.common.object_store import LocalObjectStore
-from packages.common.test_netcdf4 import encode_test_netcdf4
 from packages.common.state_manager import StateManager, StateSnapshot
+from packages.common.test_netcdf4 import encode_test_netcdf4
 from services.orchestrator.chain import ForcingContext, ForecastOrchestrator, InitialStateSelection, ModelContext
 from services.orchestrator.chain import OrchestratorConfig as ChainOrchestratorConfig
 from workers.canonical_converter.converter import (
@@ -480,9 +480,7 @@ class E2ERepository:
             if run["scenario_id"] != scenario_id or row.river_segment_id != segment_id or row.variable != "q_down":
                 continue
             in_window = (
-                start_time <= row.valid_time <= end_time
-                if include_end
-                else start_time <= row.valid_time < end_time
+                start_time <= row.valid_time <= end_time if include_end else start_time <= row.valid_time < end_time
             )
             if not in_window:
                 continue

@@ -1879,8 +1879,10 @@ class ForecastOrchestrator:
             from jinja2 import StrictUndefined
             from jinja2.sandbox import SandboxedEnvironment
 
-            return SandboxedEnvironment(undefined=StrictUndefined, autoescape=False).from_string(template_text).render(
-                **template_context
+            return (
+                SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
+                .from_string(template_text)
+                .render(**template_context)
             )
         return template_text.format(**template_context)
 
@@ -1901,9 +1903,7 @@ class ForecastOrchestrator:
         run_id = f"fcst_{source_id.lower()}_{compact_cycle}_{model.model_id}"
         start_time = cycle_time
         end_time = cycle_time + timedelta(hours=self.config.forecast_horizon_hours)
-        fallback_forcing_uri = (
-            f"forcing/{source_id.lower()}/{compact_cycle}/{model.basin_version_id}/{model.model_id}/"
-        )
+        fallback_forcing_uri = f"forcing/{source_id.lower()}/{compact_cycle}/{model.basin_version_id}/{model.model_id}/"
         selected_state = initial_state or InitialStateSelection(None, None, None, None, "cold_start_no_state")
         return ForecastRunContext(
             run_id=run_id,

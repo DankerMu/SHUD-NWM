@@ -740,9 +740,7 @@ def _spliced_response_from_rows(
     unit = _unit_from_rows((*analysis_rows, *forecast_rows))
     normalized_issue_time = _ensure_utc(issue_time)
     analysis_data = [
-        _segment_point(row)
-        for row in analysis_rows
-        if _ensure_utc(row["valid_time"]) < normalized_issue_time
+        _segment_point(row) for row in analysis_rows if _ensure_utc(row["valid_time"]) < normalized_issue_time
     ]
     if analysis_data:
         segments.append(

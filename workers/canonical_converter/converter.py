@@ -35,6 +35,16 @@ ERA5_VARIABLE_MAPPING: dict[str, str] = {
     "surface_net_solar_radiation": "net_radiation",
     "surface_net_thermal_radiation": "net_radiation",
 }
+IFS_VARIABLE_MAPPING: dict[str, str] = {
+    "2t": "air_temperature_2m",
+    "2d": "relative_humidity_2m",
+    "tp": "prcp_rate_or_amount",
+    "10u": "wind_u_10m",
+    "10v": "wind_v_10m",
+    "sp": "surface_pressure",
+    "ssr": "net_radiation",
+    "str": "net_radiation",
+}
 STANDARD_UNITS: dict[str, str] = {
     "air_temperature_2m": "degC",
     "prcp_rate_or_amount": "mm",
@@ -49,6 +59,11 @@ STANDARD_UNITS: dict[str, str] = {
 ERA5_STANDARD_UNITS: dict[str, str] = {
     **STANDARD_UNITS,
     "prcp_rate_or_amount": "mm/day",
+}
+IFS_STANDARD_UNITS: dict[str, str] = {
+    **STANDARD_UNITS,
+    "surface_pressure": "Pa",
+    "prcp_rate_or_amount": "mm",
 }
 CONVERSION_PARAMS: dict[str, str] = {
     "tmp2m": "K_to_C",
@@ -66,6 +81,14 @@ CONVERSION_PARAMS: dict[str, str] = {
     "total_precipitation": "cumulative_m_to_mm_day",
     "surface_net_solar_radiation": "cumulative_j_m2_to_w_m2",
     "surface_net_thermal_radiation": "cumulative_j_m2_to_w_m2",
+    "2t": "K_to_C",
+    "2d": "dewpoint_magnus_rh",
+    "tp": "cumulative_m_to_mm_step",
+    "10u": "pass_through",
+    "10v": "pass_through",
+    "sp": "pass_through",
+    "ssr": "cumulative_j_m2_to_w_m2",
+    "str": "cumulative_j_m2_to_w_m2",
 }
 CFGRIB_VARIABLE_ALIASES: dict[str, tuple[str, ...]] = {
     "tmp2m": ("tmp2m", "t2m", "2t"),
@@ -83,6 +106,14 @@ CFGRIB_VARIABLE_ALIASES: dict[str, tuple[str, ...]] = {
     "total_precipitation": ("total_precipitation", "tp"),
     "surface_net_solar_radiation": ("surface_net_solar_radiation", "ssr"),
     "surface_net_thermal_radiation": ("surface_net_thermal_radiation", "str"),
+    "2t": ("2t", "t2m"),
+    "2d": ("2d", "d2m"),
+    "10u": ("10u", "u10"),
+    "10v": ("10v", "v10"),
+    "tp": ("tp",),
+    "sp": ("sp",),
+    "ssr": ("ssr",),
+    "str": ("str",),
 }
 
 
@@ -133,6 +164,20 @@ class ERA5CanonicalConverterConfig(CanonicalConverterConfig):
     native_time_resolution: str = "1h"
     native_spatial_resolution: str = "0.25deg"
     variable_mapping: Mapping[str, str] = field(default_factory=lambda: dict(ERA5_VARIABLE_MAPPING))
+    cfgrib_variable_aliases: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: dict(CFGRIB_VARIABLE_ALIASES)
+    )
+
+
+@dataclass(frozen=True)
+class IFSCanonicalConverterConfig(CanonicalConverterConfig):
+    source_id: str = "IFS"
+    converter_version: str = "m4.0"
+    grid_id: str = "ifs_0p25"
+    grid_definition_uri: str = "grids/ifs_0p25.json"
+    native_time_resolution: str = "3h"
+    native_spatial_resolution: str = "0.25deg"
+    variable_mapping: Mapping[str, str] = field(default_factory=lambda: dict(IFS_VARIABLE_MAPPING))
     cfgrib_variable_aliases: Mapping[str, tuple[str, ...]] = field(
         default_factory=lambda: dict(CFGRIB_VARIABLE_ALIASES)
     )
@@ -227,7 +272,7 @@ def convert_units_with_metadata(
     previous_forecast_hour: int | None = None,
 ) -> UnitConversionResult:
     current = tuple(float(value) for value in values)
-    if native_variable in {"tmp2m", "2m_temperature", "2m_dewpoint_temperature"}:
+    if native_variable in {"tmp2m", "2m_temperature", "2m_dewpoint_temperature", "2t", "2d"}:
         return UnitConversionResult(tuple(value - 273.15 for value in current))
     if native_variable == "apcp":
         previous = (
@@ -345,9 +390,117 @@ def convert_era5_radiation_values(
     )
 
 
+def compute_ifs_relative_humidity(temperature_c: float, dewpoint_c: float) -> float:
+    e_s = math.exp(17.625 * temperature_c / (243.04 + temperature_c))
+    e_d = math.exp(17.625 * dewpoint_c / (243.04 + dewpoint_c))
+    return clamp(e_d / e_s, 0.0, 1.0)
+
+
+def compute_ifs_relative_humidity_values(
+    temperature_c: tuple[float, ...] | list[float],
+    dewpoint_c: tuple[float, ...] | list[float],
+) -> tuple[float, ...]:
+    if len(temperature_c) != len(dewpoint_c):
+        raise CanonicalConversionError("IFS temperature and dewpoint arrays must have the same length.")
+    return tuple(compute_ifs_relative_humidity(float(t), float(td)) for t, td in zip(temperature_c, dewpoint_c))
+
+
+def convert_ifs_precipitation_with_metadata(
+    values_m: tuple[float, ...] | list[float],
+    previous_values_m: tuple[float, ...] | list[float] | None = None,
+    *,
+    forecast_hour: int | None = None,
+    previous_forecast_hour: int | None = None,
+    consecutive_negative_count: int = 0,
+) -> tuple[UnitConversionResult, int, float]:
+    current = tuple(float(value) for value in values_m)
+    previous = (
+        tuple(float(value) for value in previous_values_m) if previous_values_m is not None else (0.0,) * len(current)
+    )
+    if len(previous) != len(current):
+        raise CanonicalConversionError("IFS precipitation previous/current arrays must have the same length.")
+
+    step_hours = _ifs_step_hours(forecast_hour, previous_forecast_hour)
+    deltas_mm = tuple(
+        (current_value - previous_value) * 1000.0 for current_value, previous_value in zip(current, previous)
+    )
+    small_negatives = tuple(delta for delta in deltas_mm if -0.01 < delta < 0.0)
+    significant_negatives = tuple(delta for delta in deltas_mm if delta <= -0.01)
+    anomalies: list[dict[str, Any]] = []
+    next_consecutive_negative_count = 0
+    quality_flag = "ok"
+
+    if small_negatives:
+        anomalies.append(
+            {
+                "type": "small_negative_ifs_precipitation_delta",
+                "forecast_hour": forecast_hour,
+                "previous_forecast_hour": previous_forecast_hour,
+                "negative_count": len(small_negatives),
+                "min_delta_mm": min(small_negatives),
+            }
+        )
+    if significant_negatives:
+        next_consecutive_negative_count = consecutive_negative_count + 1
+        quality_flag = "warning_negative_precip"
+        if next_consecutive_negative_count >= 3:
+            quality_flag = "error_precip_accumulation"
+        anomalies.append(
+            {
+                "type": "negative_ifs_precipitation_delta",
+                "forecast_hour": forecast_hour,
+                "previous_forecast_hour": previous_forecast_hour,
+                "negative_count": len(significant_negatives),
+                "min_delta_mm": min(significant_negatives),
+                "consecutive_negative_count": next_consecutive_negative_count,
+            }
+        )
+
+    values = tuple(max(0.0, delta) for delta in deltas_mm)
+    return UnitConversionResult(values, quality_flag, tuple(anomalies)), next_consecutive_negative_count, step_hours
+
+
+def convert_ifs_radiation_values(
+    ssr_values: tuple[float, ...] | list[float],
+    str_values: tuple[float, ...] | list[float],
+    previous_ssr_values: tuple[float, ...] | list[float] | None = None,
+    previous_str_values: tuple[float, ...] | list[float] | None = None,
+    *,
+    forecast_hour: int | None = None,
+    previous_forecast_hour: int | None = None,
+) -> tuple[tuple[float, ...], float]:
+    ssr = tuple(float(value) for value in ssr_values)
+    str_ = tuple(float(value) for value in str_values)
+    previous_ssr = (
+        tuple(float(value) for value in previous_ssr_values) if previous_ssr_values is not None else (0.0,) * len(ssr)
+    )
+    previous_str = (
+        tuple(float(value) for value in previous_str_values) if previous_str_values is not None else (0.0,) * len(str_)
+    )
+    lengths = {len(ssr), len(str_), len(previous_ssr), len(previous_str)}
+    if len(lengths) != 1:
+        raise CanonicalConversionError("IFS radiation arrays must have the same length.")
+
+    step_hours = _ifs_step_hours(forecast_hour, previous_forecast_hour)
+    step_seconds = step_hours * 3600.0
+    values = tuple(
+        ((current_ssr - prior_ssr) + (current_str - prior_str)) / step_seconds
+        for current_ssr, prior_ssr, current_str, prior_str in zip(ssr, previous_ssr, str_, previous_str)
+    )
+    return values, step_hours
+
+
 def _step_hours(forecast_hour: int | None, previous_forecast_hour: int | None) -> float:
     if forecast_hour is None or previous_forecast_hour is None:
         return 1.0
+    return float(max(1, forecast_hour - previous_forecast_hour))
+
+
+def _ifs_step_hours(forecast_hour: int | None, previous_forecast_hour: int | None) -> float:
+    if forecast_hour is None:
+        return 3.0
+    if previous_forecast_hour is None:
+        return float(forecast_hour) if forecast_hour > 0 else 3.0
     return float(max(1, forecast_hour - previous_forecast_hour))
 
 
@@ -1204,6 +1357,373 @@ class ERA5CanonicalConverter(CanonicalConverter):
             math.sqrt((u_value * u_value) + (v_value * v_value))
             for u_value, v_value in zip(wind_u_values, wind_v_values)
         )
+
+
+class IFSCanonicalConverter(CanonicalConverter):
+    def __init__(
+        self,
+        *,
+        config: IFSCanonicalConverterConfig | None = None,
+        repository: CanonicalRepository | None = None,
+        object_store: LocalObjectStore | None = None,
+    ) -> None:
+        super().__init__(
+            config=config or IFSCanonicalConverterConfig(),
+            repository=repository,
+            object_store=object_store,
+        )
+
+    @classmethod
+    def from_env(cls) -> IFSCanonicalConverter:
+        config = IFSCanonicalConverterConfig()
+        return cls(config=config, repository=PsycopgMetStore.from_env())
+
+    def convert_manifest(self, manifest: Any) -> ConversionResult:
+        cycle_time = parse_cycle_time(_manifest_value(manifest, "cycle_time"))
+        source_id = _manifest_value(manifest, "source_id")
+        if source_id != self.config.source_id:
+            raise CanonicalConversionError(
+                f"Manifest source_id {source_id!r} does not match converter source_id {self.config.source_id!r}."
+            )
+
+        try:
+            entries = _manifest_entries(manifest)
+            raw_records = self._read_records(entries)
+            missing_pairs = self._missing_required_pairs(manifest, entries, raw_records)
+            if missing_pairs:
+                self._record_missing_products(source_id, cycle_time, missing_pairs)
+                raise CanonicalConversionError(self._missing_pairs_message(missing_pairs))
+
+            records_by_hour = self._records_by_hour_and_variable(raw_records)
+            forecast_hours = self._configured_forecast_hours(manifest, entries)
+            products: list[CanonicalProductResult] = []
+            previous_precipitation: RawRecord | None = None
+            previous_ssr: RawRecord | None = None
+            previous_str: RawRecord | None = None
+            consecutive_negative_precipitation = 0
+
+            for forecast_hour in forecast_hours:
+                records = records_by_hour[forecast_hour]
+                temperature = records["2t"]
+                dewpoint = records["2d"]
+                wind_u = records["10u"]
+                wind_v = records["10v"]
+                pressure = records["sp"]
+                precipitation = records["tp"]
+                ssr = records["ssr"]
+                str_ = records["str"]
+
+                temperature_c = convert_units("2t", temperature.values)
+                dewpoint_c = convert_units("2t", dewpoint.values)
+                products.append(
+                    self._write_product(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        standard_variable="air_temperature_2m",
+                        forecast_hour=forecast_hour,
+                        values=temperature_c,
+                        unit=self._unit_for_standard_variable("air_temperature_2m"),
+                        source_files=[temperature.source_file],
+                        conversion_params={
+                            "native_variable": temperature.native_variable,
+                            "operation": "K_to_C",
+                            "unit_conversion": "K_to_C",
+                        },
+                    )
+                )
+                products.append(
+                    self._write_product(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        standard_variable="relative_humidity_2m",
+                        forecast_hour=forecast_hour,
+                        values=compute_ifs_relative_humidity_values(temperature_c, dewpoint_c),
+                        unit=self._unit_for_standard_variable("relative_humidity_2m"),
+                        source_files=[temperature.source_file, dewpoint.source_file],
+                        conversion_params={
+                            "native_variables": [temperature.native_variable, dewpoint.native_variable],
+                            "operation": "magnus_formula",
+                            "derived_from": [temperature.native_variable, dewpoint.native_variable],
+                            "method": "magnus_formula",
+                        },
+                        lineage_updates={
+                            "derived_from": [temperature.native_variable, dewpoint.native_variable],
+                            "method": "magnus_formula",
+                        },
+                    )
+                )
+                products.append(
+                    self._write_product(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        standard_variable="wind_u_10m",
+                        forecast_hour=forecast_hour,
+                        values=wind_u.values,
+                        unit=self._unit_for_standard_variable("wind_u_10m"),
+                        source_files=[wind_u.source_file],
+                        conversion_params={"native_variable": wind_u.native_variable, "operation": "pass_through"},
+                    )
+                )
+                products.append(
+                    self._write_product(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        standard_variable="wind_v_10m",
+                        forecast_hour=forecast_hour,
+                        values=wind_v.values,
+                        unit=self._unit_for_standard_variable("wind_v_10m"),
+                        source_files=[wind_v.source_file],
+                        conversion_params={"native_variable": wind_v.native_variable, "operation": "pass_through"},
+                    )
+                )
+                products.append(
+                    self._write_product(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        standard_variable="surface_pressure",
+                        forecast_hour=forecast_hour,
+                        values=pressure.values,
+                        unit=self._unit_for_standard_variable("surface_pressure"),
+                        source_files=[pressure.source_file],
+                        conversion_params={"native_variable": pressure.native_variable, "operation": "pass_through"},
+                    )
+                )
+
+                precipitation_conversion, consecutive_negative_precipitation, precip_step_hours = (
+                    convert_ifs_precipitation_with_metadata(
+                        precipitation.values,
+                        previous_precipitation.values if previous_precipitation is not None else None,
+                        forecast_hour=forecast_hour,
+                        previous_forecast_hour=previous_precipitation.forecast_hour
+                        if previous_precipitation is not None
+                        else None,
+                        consecutive_negative_count=consecutive_negative_precipitation,
+                    )
+                )
+                if not precipitation_conversion.anomalies or precipitation_conversion.quality_flag == "ok":
+                    consecutive_negative_precipitation = 0
+                precipitation_sources = [precipitation.source_file]
+                if previous_precipitation is not None:
+                    precipitation_sources.insert(0, previous_precipitation.source_file)
+                precipitation_params: dict[str, Any] = {
+                    "native_variable": precipitation.native_variable,
+                    "operation": "cumulative_m_to_mm_step",
+                    "accumulation_type": "since_cycle",
+                    "unit_conversion": "m_to_mm",
+                    "step_hours": precip_step_hours,
+                }
+                if precipitation_conversion.anomalies:
+                    precipitation_params["anomalies"] = list(precipitation_conversion.anomalies)
+                products.append(
+                    self._write_product(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        standard_variable="prcp_rate_or_amount",
+                        forecast_hour=forecast_hour,
+                        values=precipitation_conversion.values,
+                        unit=self._unit_for_standard_variable("prcp_rate_or_amount"),
+                        source_files=precipitation_sources,
+                        conversion_params=precipitation_params,
+                        quality_flag=precipitation_conversion.quality_flag,
+                    )
+                )
+
+                radiation_values, radiation_step_hours = convert_ifs_radiation_values(
+                    ssr.values,
+                    str_.values,
+                    previous_ssr.values if previous_ssr is not None else None,
+                    previous_str.values if previous_str is not None else None,
+                    forecast_hour=forecast_hour,
+                    previous_forecast_hour=previous_ssr.forecast_hour if previous_ssr is not None else None,
+                )
+                radiation_sources = [ssr.source_file, str_.source_file]
+                if previous_ssr is not None and previous_str is not None:
+                    radiation_sources = [
+                        previous_ssr.source_file,
+                        previous_str.source_file,
+                        ssr.source_file,
+                        str_.source_file,
+                    ]
+                products.append(
+                    self._write_product(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        standard_variable="net_radiation",
+                        forecast_hour=forecast_hour,
+                        values=radiation_values,
+                        unit=self._unit_for_standard_variable("net_radiation"),
+                        source_files=radiation_sources,
+                        conversion_params={
+                            "native_variables": [ssr.native_variable, str_.native_variable],
+                            "operation": "cumulative_j_m2_to_w_m2_direct_net",
+                            "accumulation_type": "since_cycle",
+                            "radiation_method": "direct_net",
+                            "components": [ssr.native_variable, str_.native_variable],
+                            "step_hours": radiation_step_hours,
+                        },
+                        lineage_updates={
+                            "radiation_method": "direct_net",
+                            "components": [ssr.native_variable, str_.native_variable],
+                        },
+                    )
+                )
+
+                previous_precipitation = precipitation
+                previous_ssr = ssr
+                previous_str = str_
+
+            self._update_cycle_status(cycle_time, status="canonical_ready", error_code="", error_message="")
+            return ConversionResult(status="canonical_ready", products=tuple(products))
+        except Exception as error:
+            self._update_cycle_status(
+                cycle_time,
+                status="failed_convert",
+                error_code="CONVERT_FAILED",
+                error_message=str(error),
+            )
+            raise
+
+    def _records_by_hour_and_variable(self, records: list[RawRecord]) -> dict[int, dict[str, RawRecord]]:
+        grouped: dict[int, dict[str, RawRecord]] = {}
+        for record in records:
+            grouped.setdefault(record.forecast_hour, {})[record.native_variable] = record
+        return grouped
+
+    def _write_product(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        standard_variable: str,
+        forecast_hour: int,
+        values: tuple[float, ...],
+        unit: str,
+        source_files: list[str],
+        conversion_params: Mapping[str, Any],
+        quality_flag: str = "ok",
+        lineage_updates: Mapping[str, Any] | None = None,
+    ) -> CanonicalProductResult:
+        valid_time = cycle_time + timedelta(hours=forecast_hour)
+        compact_cycle = format_cycle_time(cycle_time)
+        canonical_product_id = f"{source_id}_{compact_cycle}_{standard_variable}_f{forecast_hour:03d}"
+        object_key = f"canonical/{source_id}/{compact_cycle}/{standard_variable}/{canonical_product_id}.nc"
+        lineage_json: dict[str, Any] = {
+            "source_files": source_files,
+            "source_cycle_id": f"{source_id}_{compact_cycle}",
+            "conversion_params": dict(conversion_params),
+            "converter_version": self.config.converter_version,
+        }
+        if lineage_updates:
+            lineage_json.update(lineage_updates)
+        content = self._serialize_product(
+            variable=standard_variable,
+            values=values,
+            cycle_time=cycle_time,
+            valid_time=valid_time,
+            lead_time_hours=forecast_hour,
+            unit=unit,
+            lineage_json=lineage_json,
+        )
+        checksum = sha256_bytes(content)
+
+        existing = self._get_existing_product(canonical_product_id)
+        if self._existing_product_is_current(existing, object_key, checksum):
+            return CanonicalProductResult(
+                canonical_product_id=canonical_product_id,
+                variable=standard_variable,
+                valid_time=valid_time,
+                lead_time_hours=forecast_hour,
+                object_uri=existing["object_uri"],
+                checksum=existing["checksum"],
+                status="already_done",
+                quality_flag=existing.get("quality_flag", "ok"),
+            )
+
+        try:
+            object_uri = self.object_store.write_bytes_atomic(object_key, content)
+        except (OSError, ObjectStoreError, ValueError) as error:
+            raise CanonicalConversionError(f"Failed to write canonical product {object_key}: {error}") from error
+
+        self._upsert_product(
+            {
+                "canonical_product_id": canonical_product_id,
+                "source_id": source_id,
+                "source_version": compact_cycle,
+                "cycle_time": cycle_time,
+                "valid_time": valid_time,
+                "lead_time_hours": forecast_hour,
+                "variable": standard_variable,
+                "unit": unit,
+                "grid_id": self.config.grid_id,
+                "grid_definition_uri": self.config.grid_definition_uri,
+                "native_time_resolution": self.config.native_time_resolution,
+                "native_spatial_resolution": self.config.native_spatial_resolution,
+                "object_uri": object_uri,
+                "checksum": checksum,
+                "quality_flag": quality_flag,
+                "lineage_json": lineage_json,
+            }
+        )
+        return CanonicalProductResult(
+            canonical_product_id=canonical_product_id,
+            variable=standard_variable,
+            valid_time=valid_time,
+            lead_time_hours=forecast_hour,
+            object_uri=object_uri,
+            checksum=checksum,
+            status="updated" if existing else "created",
+            quality_flag=quality_flag,
+        )
+
+    def _record_missing_products(
+        self,
+        source_id: str,
+        cycle_time: datetime,
+        missing_pairs: tuple[MissingForecastVariable, ...],
+    ) -> None:
+        compact_cycle = format_cycle_time(cycle_time)
+        for pair in missing_pairs:
+            canonical_product_id = f"{source_id}_{compact_cycle}_{pair.standard_variable}_f{pair.forecast_hour:03d}"
+            object_key = (
+                f"canonical/{source_id}/{compact_cycle}/{pair.standard_variable}/{canonical_product_id}.missing"
+            )
+            lineage_json = {
+                "source_files": [],
+                "source_cycle_id": f"{source_id}_{compact_cycle}",
+                "conversion_params": {
+                    "operation": "coverage_validation",
+                    "missing_native_variable": pair.native_variable,
+                    "missing_standard_variable": pair.standard_variable,
+                    "missing_forecast_hour": pair.forecast_hour,
+                },
+                "converter_version": self.config.converter_version,
+            }
+            self._upsert_product(
+                {
+                    "canonical_product_id": canonical_product_id,
+                    "source_id": source_id,
+                    "source_version": compact_cycle,
+                    "cycle_time": cycle_time,
+                    "valid_time": cycle_time + timedelta(hours=pair.forecast_hour),
+                    "lead_time_hours": pair.forecast_hour,
+                    "variable": pair.standard_variable,
+                    "unit": self._unit_for_standard_variable(pair.standard_variable),
+                    "grid_id": self.config.grid_id,
+                    "grid_definition_uri": self.config.grid_definition_uri,
+                    "native_time_resolution": self.config.native_time_resolution,
+                    "native_spatial_resolution": self.config.native_spatial_resolution,
+                    "object_uri": self.object_store.uri_for_key(object_key),
+                    "checksum": "",
+                    "quality_flag": "fail",
+                    "lineage_json": lineage_json,
+                }
+            )
+
+    def _unit_for_standard_variable(self, standard_variable: str) -> str:
+        try:
+            return IFS_STANDARD_UNITS[standard_variable]
+        except KeyError as error:
+            raise CanonicalConversionError(f"No IFS standard unit configured for {standard_variable}") from error
 
 
 def _manifest_value(manifest: Any, key: str) -> Any:

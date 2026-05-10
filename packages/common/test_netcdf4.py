@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-
 
 ERA5_VARIABLES: tuple[str, ...] = (
     "2m_temperature",
