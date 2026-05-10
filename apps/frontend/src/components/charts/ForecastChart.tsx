@@ -4,6 +4,9 @@ import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from '@/components/charts/echartsCore'
 import type { ForecastData } from '@/stores/forecast'
 
+const IFS_SIX_DAY_LEAD_HOURS = 144
+const HOUR_MS = 60 * 60 * 1000
+
 interface ForecastChartProps {
   data: ForecastData | null
   segmentName?: string
@@ -18,16 +21,27 @@ function timestampValue(time: string | number) {
 function axisTimeLabel(value: number) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  const hour = String(date.getHours()).padStart(2, '0')
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(date.getUTCDate()).padStart(2, '0')
+  const hour = String(date.getUTCHours()).padStart(2, '0')
   return `${month}-${day} ${hour}:00`
 }
 
-function issueTimeMarkLine(issueTimeMs: number, issueTimeLabel: string) {
+function tooltipTimeLabel(value: number) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const year = date.getUTCFullYear()
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(date.getUTCDate()).padStart(2, '0')
+  const hour = String(date.getUTCHours()).padStart(2, '0')
+  const minute = String(date.getUTCMinutes()).padStart(2, '0')
+  return `${year}-${month}-${day} ${hour}:${minute}`
+}
+
+function issueTimeMarkLineData(issueTimeMs: number, issueTimeLabel: string) {
   return {
-    silent: false,
-    symbol: 'none',
+    name: '起报时间',
+    xAxis: issueTimeMs,
     lineStyle: { color: '#64748b', type: 'dashed', width: 1.5 },
     label: {
       formatter: '起报时间',
@@ -39,20 +53,98 @@ function issueTimeMarkLine(issueTimeMs: number, issueTimeLabel: string) {
       renderMode: 'richText',
       formatter: () => `起报时间 ${issueTimeLabel}\n左侧为真实场 analysis，右侧为预报`,
     },
-    data: [{ name: '起报时间', xAxis: issueTimeMs }],
   }
+}
+
+function ifsSixDayMarkLineData(endpointMs: number) {
+  return {
+    name: 'IFS 6d',
+    xAxis: endpointMs,
+    lineStyle: { color: '#2ca02c', type: 'dashed', width: 1.5 },
+    label: {
+      formatter: 'IFS 6d',
+      color: '#166534',
+      backgroundColor: '#ffffff',
+      padding: [2, 4],
+      position: 'insideEndTop',
+    },
+    tooltip: {
+      renderMode: 'richText',
+      formatter: () => `IFS 6d ${tooltipTimeLabel(endpointMs)}`,
+    },
+  }
+}
+
+function buildMarkLine(data: object[]) {
+  if (data.length === 0) return undefined
+  return {
+    silent: false,
+    symbol: 'none',
+    data,
+  }
+}
+
+function isIfsSeries(series: { scenario: string; source?: string }) {
+  return `${series.source ?? ''} ${series.scenario}`.toLowerCase().includes('ifs')
+}
+
+function sixDayEndpointMs(series: { cycleTime?: string | null; availableLeadHours?: number | null }) {
+  if (series.availableLeadHours !== IFS_SIX_DAY_LEAD_HOURS || !series.cycleTime) return null
+  const cycleMs = Date.parse(series.cycleTime)
+  if (!Number.isFinite(cycleMs)) return null
+  return cycleMs + IFS_SIX_DAY_LEAD_HOURS * HOUR_MS
+}
+
+interface TooltipParam {
+  axisValue?: string | number
+  marker?: string
+  seriesName?: string
+  value?: number | string | Array<number | string>
+}
+
+function tooltipValue(param: TooltipParam) {
+  if (Array.isArray(param.value)) return Number(param.value[1])
+  return Number(param.value)
+}
+
+function tooltipFormatter(params: TooltipParam | TooltipParam[], unit?: string) {
+  const items = Array.isArray(params) ? params : [params]
+  const first = items[0]
+  const axisValue = Number(first?.axisValue ?? (Array.isArray(first?.value) ? first.value[0] : NaN))
+  const lines = [`时间: ${Number.isFinite(axisValue) ? tooltipTimeLabel(axisValue) : ''}`]
+
+  items.forEach((param) => {
+    const value = tooltipValue(param)
+    if (!Number.isFinite(value)) return
+    lines.push(`${param.marker ?? ''}${param.seriesName ?? 'series'}: ${value.toFixed(2)} ${unit ?? 'm3/s'}`)
+  })
+
+  return lines.join('\n')
 }
 
 export function ForecastChart({ data, segmentName }: ForecastChartProps) {
   const normalizedSeries = useMemo(
     () =>
       (data?.series ?? [])
-        .map((series) => ({
-          ...series,
-          data: series.points
+        .map((series) => {
+          const ifs = isIfsSeries(series)
+          const endpointMs = ifs ? sixDayEndpointMs(series) : null
+          const seriesData = series.points
             .map((point) => [timestampValue(point.time), point.value])
-            .filter(([time, value]) => Number.isFinite(time) && Number.isFinite(value)),
-        }))
+            .filter(
+              ([time, value]) =>
+                Number.isFinite(time) &&
+                Number.isFinite(value) &&
+                (endpointMs === null || time <= endpointMs),
+            )
+
+          return {
+            ...series,
+            data: seriesData,
+            isIfs: ifs,
+            sixDayEndpointMs: endpointMs,
+          }
+        })
         .filter((series) => series.data.length > 0),
     [data?.series],
   )
@@ -66,7 +158,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
       color: normalizedSeries.map((series) => series.color),
       title: {
         text: `${segmentName ?? data?.segmentId ?? '河段'} 预报曲线`,
-        subtext: `起报时间 ${data?.issueTime ?? 'latest'}${
+        subtext: `起报时间 ${data?.cycleAttribution || data?.issueTime || 'latest'}${
           data?.sourceAttribution ? `\n资料来源 ${data.sourceAttribution}` : ''
         }`,
         left: 0,
@@ -78,7 +170,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
       tooltip: {
         trigger: 'axis',
         renderMode: 'richText',
-        valueFormatter: (value: number) => `${Number(value).toFixed(2)} ${data?.unit ?? 'm3/s'}`,
+        formatter: (params: TooltipParam | TooltipParam[]) => tooltipFormatter(params, data?.unit),
       },
       xAxis: {
         type: 'time',
@@ -100,12 +192,16 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
         smooth: true,
         symbolSize: 6,
         data: series.data,
-        lineStyle: { width: 2.5, color: series.color },
+        lineStyle: { width: 2.5, color: series.color, type: series.isIfs ? 'dashed' : 'solid' },
         itemStyle: { color: series.color },
-        markLine:
-          index === 0 && showIssueDivider
-            ? issueTimeMarkLine(issueTimeMs, data?.issueTime ?? 'latest')
-            : undefined,
+        markLine: buildMarkLine([
+          ...(index === 0 && showIssueDivider
+            ? [issueTimeMarkLineData(issueTimeMs, data?.issueTime ?? 'latest')]
+            : []),
+          ...(series.isIfs && series.sixDayEndpointMs !== null
+            ? [ifsSixDayMarkLineData(series.sixDayEndpointMs)]
+            : []),
+        ]),
       })),
     }
   }, [data, normalizedSeries, segmentName])
