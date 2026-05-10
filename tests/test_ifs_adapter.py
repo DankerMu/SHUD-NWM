@@ -201,7 +201,8 @@ def test_download_plan_normal_idempotent_retry_and_mirror_switch(tmp_path: Path)
 
     assert mirror_result.status == "raw_complete"
     assert "://ecmwf/" in mirror_calls[0]
-    assert "://aws/" in mirror_calls[1]
+    assert mirror_calls[:2] == ["ecmwf-opendata://ecmwf/ifs/2026050100/ifs.t00z.f000.2t.grib2"] * 2
+    assert "://aws/" in mirror_calls[2]
 
 
 def test_download_plan_rate_limit_honors_retry_after_and_switches_mirror(tmp_path: Path) -> None:
@@ -290,6 +291,29 @@ def test_verify_manifest_pass_missing_empty_and_checksum(tmp_path: Path) -> None
     empty_result = adapter.verify_manifest(manifest)
     assert empty_result.status == "failed"
     assert empty_result.failures[0].error_code == "EMPTY_FILE"
+
+
+def test_verify_manifest_checksum_mismatch(tmp_path: Path) -> None:
+    content = b"GRIB checksum payload 7777"
+    adapter, manifest = one_entry_manifest(tmp_path, expected_checksum="bad")
+    entry = manifest.entries[0]
+    adapter.object_store.write_bytes_atomic(entry.local_key, content)
+
+    result = adapter.verify_manifest(manifest)
+
+    assert result.status == "failed"
+    assert result.failures[0].error_code == "CHECKSUM_MISMATCH"
+
+
+def test_verify_manifest_invalid_grib(tmp_path: Path) -> None:
+    adapter, manifest = one_entry_manifest(tmp_path)
+    entry = manifest.entries[0]
+    adapter.object_store.write_bytes_atomic(entry.local_key, b"<html>error</html>")
+
+    result = adapter.verify_manifest(manifest)
+
+    assert result.status == "failed"
+    assert result.failures[0].error_code == "INVALID_GRIB"
 
 
 def test_initialize_data_source_registers_correctly_and_is_idempotent(tmp_path: Path) -> None:

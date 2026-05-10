@@ -535,6 +535,16 @@ class IFSAdapter(DataSourceAdapter):
                     )
                     continue
 
+                if self.object_store.read_bytes(entry.local_key)[:4] != b"GRIB":
+                    failures.append(
+                        VerificationFailure(
+                            local_key=entry.local_key,
+                            error_code="INVALID_GRIB",
+                            error_message=f"{entry.local_key} does not start with a valid GRIB message",
+                        )
+                    )
+                    continue
+
                 actual_checksum = self.object_store.checksum(entry.local_key)
                 if entry.expected_checksum and actual_checksum != entry.expected_checksum:
                     failures.append(
@@ -702,7 +712,7 @@ class IFSAdapter(DataSourceAdapter):
 
     def _download_with_retries(self, remote_url: str) -> tuple[DownloadedPayload, int]:
         last_error: Exception | None = None
-        max_attempts = max(1, self.config.max_retries)
+        max_attempts = 1 + max(0, self.config.max_retries)
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._normalize_payload(self.downloader(remote_url)), attempt - 1

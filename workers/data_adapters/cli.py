@@ -57,7 +57,16 @@ def _download_era5(cycle_date: str, area: str | None = None) -> dict[str, object
 def _download_ifs(cycle_time: str) -> dict[str, object]:
     adapter = IFSAdapter.from_env()
     parsed_cycle_time = parse_cycle_time(cycle_time)
-    adapter.discover_cycles(parsed_cycle_time.date())
+    discoveries = adapter.discover_cycles(parsed_cycle_time.date())
+    requested_cycle = next((cycle for cycle in discoveries if cycle.cycle_time == parsed_cycle_time), None)
+    if requested_cycle is None or not requested_cycle.available:
+        print(f"IFS data not yet available for {cycle_time}")
+        return {
+            "status": "unavailable",
+            "total_bytes_written": 0,
+            "retry_count": 0,
+            "files": 0,
+        }
     manifest = adapter.build_manifest(parsed_cycle_time)
     result = adapter.download_plan(manifest)
     verification = adapter.verify_manifest(manifest) if result.status != "failed_download" else None
