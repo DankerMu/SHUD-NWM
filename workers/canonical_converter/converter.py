@@ -1414,7 +1414,7 @@ class IFSCanonicalConverter(CanonicalConverter):
                 str_ = records["str"]
 
                 temperature_c = convert_units("2t", temperature.values)
-                dewpoint_c = convert_units("2t", dewpoint.values)
+                dewpoint_c = convert_units("2d", dewpoint.values)
                 products.append(
                     self._write_product(
                         source_id=source_id,
