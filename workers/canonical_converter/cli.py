@@ -14,7 +14,13 @@ from .converter import (
 
 
 def _convert(source_id: str, cycle_time: str) -> dict[str, object]:
-    normalized_source_id = source_id.upper() if source_id.upper() in {"ERA5", "IFS"} else source_id
+    source_id_upper = source_id.upper()
+    if source_id_upper in {"ERA5", "IFS"}:
+        normalized_source_id = source_id_upper
+    elif source_id_upper == "GFS":
+        normalized_source_id = "gfs"
+    else:
+        normalized_source_id = source_id
     if normalized_source_id == "ERA5":
         converter = ERA5CanonicalConverter.from_env()
     elif normalized_source_id == "IFS":

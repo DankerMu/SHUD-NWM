@@ -14,11 +14,20 @@ set -euo pipefail
 export WORKSPACE_ROOT="{{workspace_dir}}"
 export NHMS_RUN_ID="{{run_id}}"
 export NHMS_MODEL_ID="{{model_id}}"
+export NHMS_SOURCE_ID="{{source_id | default('GFS')}}"
 export NHMS_CYCLE_ID="{{cycle_id | default('')}}"
+export NHMS_CYCLE_TIME="{{cycle_time | default('')}}"
 export NHMS_JOB_TYPE="{{job_type}}"
 export NHMS_MAX_CONCURRENT={{max_concurrent}}
 export SHUD_THREADS={{shud_threads}}
 export OMP_NUM_THREADS={{shud_threads}}
+NHMS_CYCLE_TIME="${NHMS_CYCLE_TIME:-${NHMS_CYCLE_ID:-}}"
+export NHMS_CYCLE_TIME
 
 mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
-nhms-gfs download --cycle-id "$NHMS_CYCLE_ID"
+SOURCE_ID="${NHMS_SOURCE_ID:-GFS}"
+if [ "${SOURCE_ID^^}" = "IFS" ]; then
+    nhms-ifs download --cycle-time "$NHMS_CYCLE_TIME"
+else
+    nhms-gfs download --cycle-time "$NHMS_CYCLE_TIME"
+fi

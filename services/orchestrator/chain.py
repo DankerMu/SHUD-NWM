@@ -4,7 +4,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -31,8 +31,18 @@ TERMINAL_JOB_STATUSES = {
     "permanently_failed",
 }
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running", "succeeded"}
+COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "published", "complete"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
+
+
+def scenario_for_source(source_id: str) -> str:
+    normalized_source_id = source_id.upper()
+    if normalized_source_id == "GFS":
+        return "forecast_gfs_deterministic"
+    if normalized_source_id == "IFS":
+        return "forecast_ifs_deterministic"
+    return f"forecast_{source_id.lower()}_deterministic"
 
 
 class OrchestratorError(RuntimeError):
@@ -77,7 +87,7 @@ class StageDefinition:
 
 
 LEGACY_FORECAST_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition("download_gfs", "download", "download_gfs.sbatch", "raw_complete", "failed_download"),
+    StageDefinition("download_gfs", "download", "download_source_cycle.sbatch", "raw_complete", "failed_download"),
     StageDefinition("convert_canonical", "canonical", "convert_canonical.sbatch", "canonical_ready", "failed_convert"),
     StageDefinition("produce_forcing", "forcing", "produce_forcing.sbatch", "forcing_ready", "failed_forcing"),
     StageDefinition("run_shud_forecast", "forecast", "run_shud_forecast.sbatch", "forecast_running", "failed_run"),
@@ -163,8 +173,10 @@ class OrchestratorConfig:
     templates_dir: Path | str | None = None
     poll_interval_seconds: float = 30.0
     job_timeout_seconds: float = 3600.0
+    source_id: str = "GFS"
     forecast_horizon_hours: int = 168
-    scenario_id: str = "forecast_gfs_deterministic"
+    scenario_id: str | None = None
+    scenario_id_explicit: bool = field(init=False, default=False, repr=False, compare=False)
     era5_area: str = "55,70,15,140"
     state_soft_stale_threshold_days: int = 7
     state_hard_stale_threshold_days: int = 30
@@ -173,6 +185,9 @@ class OrchestratorConfig:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
         object.__setattr__(self, "object_store_root", Path(self.object_store_root).expanduser().resolve())
         object.__setattr__(self, "poll_interval_seconds", max(float(self.poll_interval_seconds), 1.0))
+        object.__setattr__(self, "scenario_id_explicit", self.scenario_id is not None)
+        if self.scenario_id is None:
+            object.__setattr__(self, "scenario_id", scenario_for_source(self.source_id))
         if self.templates_dir is None:
             repo_root = Path(__file__).resolve().parents[2]
             object.__setattr__(self, "templates_dir", repo_root / "workers" / "sbatch_templates")
@@ -189,6 +204,7 @@ class OrchestratorConfig:
             slurm_gateway_url=os.getenv("SLURM_GATEWAY_URL", "http://localhost:8000"),
             poll_interval_seconds=float(os.getenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "30")),
             job_timeout_seconds=float(os.getenv("ORCHESTRATOR_JOB_TIMEOUT_SECONDS", "3600")),
+            source_id=os.getenv("FORECAST_SOURCE_ID", "GFS"),
             forecast_horizon_hours=int(os.getenv("FORECAST_HORIZON_HOURS", "168")),
             era5_area=os.getenv("ERA5_AREA", "55,70,15,140"),
             state_soft_stale_threshold_days=int(os.getenv("STATE_SOFT_STALE_THRESHOLD_DAYS", "7")),
@@ -213,6 +229,7 @@ class ForcingContext:
     start_time: datetime | None = None
     end_time: datetime | None = None
     source_id: str | None = None
+    max_lead_hours: int | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +245,7 @@ class InitialStateSelection:
 class ForecastRunContext:
     run_id: str
     source_id: str
+    scenario_id: str
     cycle_id: str
     cycle_time: datetime
     model_id: str
@@ -240,6 +258,7 @@ class ForecastRunContext:
     forcing_package_uri: str | None
     start_time: datetime
     end_time: datetime
+    forecast_horizon_hours: int
     run_manifest_uri: str
     output_uri: str
     log_uri: str
@@ -1518,10 +1537,48 @@ class ForecastOrchestrator:
     def trigger_forecast(
         self,
         *,
-        source_id: str,
+        source_id: str | None = None,
         cycle_time: str | datetime,
         model_id: str,
         basin_id: str | None = None,
+        max_lead_hours: int | None = None,
+    ) -> PipelineResult:
+        return self._trigger_forecast(
+            source_id=source_id or self.config.source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+            basin_id=basin_id,
+            max_lead_hours=max_lead_hours,
+            stages=LEGACY_FORECAST_STAGES,
+        )
+
+    def trigger_forecast_from_canonical(
+        self,
+        *,
+        source_id: str | None = None,
+        cycle_time: str | datetime,
+        model_id: str,
+        basin_id: str | None = None,
+        max_lead_hours: int | None = None,
+    ) -> PipelineResult:
+        return self._trigger_forecast(
+            source_id=source_id or self.config.source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+            basin_id=basin_id,
+            max_lead_hours=max_lead_hours,
+            stages=LEGACY_FORECAST_STAGES[2:],
+        )
+
+    def _trigger_forecast(
+        self,
+        *,
+        source_id: str,
+        cycle_time: str | datetime,
+        model_id: str,
+        basin_id: str | None,
+        max_lead_hours: int | None,
+        stages: Sequence[StageDefinition],
     ) -> PipelineResult:
         parsed_cycle_time = parse_cycle_time(cycle_time)
         if self.repository.has_active_pipeline(source_id=source_id, cycle_time=parsed_cycle_time, model_id=model_id):
@@ -1540,12 +1597,19 @@ class ForecastOrchestrator:
         )
         self.repository.ensure_forecast_cycle(source_id=source_id, cycle_time=parsed_cycle_time)
         initial_state = self._select_forecast_initial_state(model_id=model_id, cycle_time=parsed_cycle_time)
-        context = self._build_run_context(source_id, parsed_cycle_time, model, forcing, initial_state)
+        context = self._build_run_context(
+            source_id,
+            parsed_cycle_time,
+            model,
+            forcing,
+            initial_state,
+            max_lead_hours=max_lead_hours,
+        )
         manifest = self._build_run_manifest(context)
         self._write_run_manifest(context, manifest)
         self.repository.create_hydro_run(context, manifest)
         self.repository.update_hydro_run_status(context.run_id, "staged")
-        return self.run_chain(context, stages=LEGACY_FORECAST_STAGES)
+        return self.run_chain(context, stages=stages)
 
     def run_chain(
         self,
@@ -1574,6 +1638,74 @@ class ForecastOrchestrator:
             cycle_time=parse_cycle_time(cycle_time),
             model_id=model_id,
         )
+
+    def trigger_ready_forecasts(
+        self,
+        *,
+        source_id: str | None = None,
+        model_ids: Sequence[str] | None = None,
+        limit: int = 100,
+    ) -> tuple[PipelineResult, ...]:
+        resolved_source_id = source_id or self.config.source_id
+        ready_cycles = self._list_canonical_ready_cycles(source_id=resolved_source_id, limit=limit)
+        selected_model_ids = tuple(model_ids) if model_ids is not None else self._list_forecast_model_ids()
+        results: list[PipelineResult] = []
+        for cycle in ready_cycles:
+            cycle_source_id = str(cycle.get("source_id") or resolved_source_id)
+            cycle_time_value = cycle.get("cycle_time")
+            if cycle_time_value is None:
+                continue
+            parsed_cycle_time = parse_cycle_time(cycle_time_value)
+            max_lead_hours = _optional_int(cycle.get("max_lead_hours"))
+            for model_id in selected_model_ids:
+                if self._has_completed_forecast(
+                    source_id=cycle_source_id,
+                    cycle_time=parsed_cycle_time,
+                    model_id=model_id,
+                ):
+                    continue
+                try:
+                    results.append(
+                        self.trigger_forecast_from_canonical(
+                            source_id=cycle_source_id,
+                            cycle_time=parsed_cycle_time,
+                            model_id=model_id,
+                            max_lead_hours=max_lead_hours,
+                        )
+                    )
+                except PipelineAlreadyActiveError:
+                    continue
+        return tuple(results)
+
+    def _list_canonical_ready_cycles(self, *, source_id: str | None, limit: int) -> tuple[dict[str, Any], ...]:
+        provider = getattr(self.repository, "list_canonical_ready_cycles", None)
+        if not callable(provider):
+            raise OrchestratorError(
+                "READY_CYCLE_LIST_UNSUPPORTED",
+                "The orchestrator repository does not support canonical-ready cycle listing.",
+            )
+        return tuple(dict(cycle) for cycle in provider(source_id=source_id, limit=limit))
+
+    def _list_forecast_model_ids(self) -> tuple[str, ...]:
+        provider = getattr(self.repository, "list_forecast_model_ids", None)
+        if not callable(provider):
+            raise OrchestratorError(
+                "FORECAST_MODEL_LIST_UNSUPPORTED",
+                "The orchestrator repository does not support forecast model listing.",
+            )
+        return tuple(str(model_id) for model_id in provider())
+
+    def _has_completed_forecast(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        provider = getattr(self.repository, "has_completed_pipeline", None)
+        if callable(provider):
+            return bool(provider(source_id=source_id, cycle_time=cycle_time, model_id=model_id))
+        run_id = f"fcst_{source_id.lower()}_{format_cycle_time(cycle_time)}_{model_id}"
+        hydro_runs = getattr(self.repository, "hydro_runs", None)
+        if isinstance(hydro_runs, Mapping):
+            run = hydro_runs.get(run_id)
+            if isinstance(run, Mapping):
+                return str(run.get("status")) in COMPLETED_HYDRO_STATUSES
+        return False
 
     def _submit_and_wait(
         self,
@@ -1898,16 +2030,25 @@ class ForecastOrchestrator:
         model: ModelContext,
         forcing: ForcingContext,
         initial_state: InitialStateSelection | None = None,
+        max_lead_hours: int | None = None,
     ) -> ForecastRunContext:
         compact_cycle = format_cycle_time(cycle_time)
         run_id = f"fcst_{source_id.lower()}_{compact_cycle}_{model.model_id}"
         start_time = cycle_time
-        end_time = cycle_time + timedelta(hours=self.config.forecast_horizon_hours)
+        forecast_horizon_hours = _resolve_forecast_horizon_hours(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            configured_horizon_hours=self.config.forecast_horizon_hours,
+            forcing=forcing,
+            max_lead_hours=max_lead_hours,
+        )
+        end_time = cycle_time + timedelta(hours=forecast_horizon_hours)
         fallback_forcing_uri = f"forcing/{source_id.lower()}/{compact_cycle}/{model.basin_version_id}/{model.model_id}/"
         selected_state = initial_state or InitialStateSelection(None, None, None, None, "cold_start_no_state")
         return ForecastRunContext(
             run_id=run_id,
             source_id=source_id,
+            scenario_id=self._forecast_scenario_id(source_id),
             cycle_id=cycle_id_for(source_id, cycle_time),
             cycle_time=cycle_time,
             model_id=model.model_id,
@@ -1920,6 +2061,7 @@ class ForecastOrchestrator:
             forcing_package_uri=forcing.forcing_package_uri or fallback_forcing_uri,
             start_time=start_time,
             end_time=end_time,
+            forecast_horizon_hours=forecast_horizon_hours,
             run_manifest_uri=self.object_store.uri_for_key(f"runs/{run_id}/input/manifest.json"),
             output_uri=self.object_store.uri_for_key(f"runs/{run_id}/output/"),
             log_uri=self.object_store.uri_for_key(f"runs/{run_id}/logs/"),
@@ -1930,15 +2072,21 @@ class ForecastOrchestrator:
             init_state_quality=selected_state.quality,
         )
 
+    def _forecast_scenario_id(self, source_id: str) -> str:
+        if self.config.scenario_id_explicit and self.config.scenario_id:
+            return self.config.scenario_id
+        return scenario_for_source(source_id)
+
     def _build_run_manifest(self, context: ForecastRunContext) -> dict[str, Any]:
         return {
             "run_id": context.run_id,
             "run_type": "forecast",
-            "scenario_id": self.config.scenario_id,
+            "scenario_id": context.scenario_id,
             "source_id": context.source_id,
             "cycle_time": _format_time(context.cycle_time),
             "start_time": _format_time(context.start_time),
             "end_time": _format_time(context.end_time),
+            "forecast_horizon_hours": context.forecast_horizon_hours,
             "model": {
                 "model_id": context.model_id,
                 "basin_version_id": context.basin_version_id,
@@ -2287,6 +2435,21 @@ class PsycopgOrchestratorRepository:
         )
         return row is not None
 
+    def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        row = self._fetch_optional(
+            """
+            SELECT 1 AS completed
+            FROM hydro.hydro_run
+            WHERE source_id = %s
+              AND cycle_time = %s
+              AND model_id = %s
+              AND status::text = ANY(%s)
+            LIMIT 1
+            """,
+            (source_id, cycle_time, model_id, list(COMPLETED_HYDRO_STATUSES)),
+        )
+        return row is not None
+
     def has_active_analysis_run(self, *, model_id: str, start_time: datetime, end_time: datetime) -> bool:
         row = self._fetch_optional(
             """
@@ -2302,6 +2465,46 @@ class PsycopgOrchestratorRepository:
             (model_id, end_time, start_time),
         )
         return row is not None
+
+    def list_canonical_ready_cycles(self, *, source_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        parameters: list[Any] = []
+        source_filter = ""
+        if source_id is not None:
+            source_filter = "AND fc.source_id = %s"
+            parameters.append(source_id)
+        parameters.append(max(int(limit), 1))
+        return self._fetch_all(
+            f"""
+            SELECT
+                fc.source_id,
+                fc.cycle_time,
+                fc.cycle_id,
+                MAX(cmp.lead_time_hours) AS max_lead_hours
+            FROM met.forecast_cycle fc
+            LEFT JOIN met.canonical_met_product cmp
+              ON cmp.source_id = fc.source_id
+             AND cmp.cycle_time = fc.cycle_time
+             AND cmp.quality_flag <> 'fail'
+            WHERE fc.status = 'canonical_ready'
+              {source_filter}
+            GROUP BY fc.source_id, fc.cycle_time, fc.cycle_id
+            ORDER BY fc.cycle_time ASC, fc.source_id ASC
+            LIMIT %s
+            """,
+            tuple(parameters),
+        )
+
+    def list_forecast_model_ids(self) -> list[str]:
+        rows = self._fetch_all(
+            """
+            SELECT model_id
+            FROM core.model_instance
+            WHERE active_flag = true
+            ORDER BY model_id
+            """,
+            (),
+        )
+        return [str(row["model_id"]) for row in rows]
 
     def load_model_context(self, model_id: str) -> ModelContext:
         row = self._fetch_one(
@@ -2334,7 +2537,7 @@ class PsycopgOrchestratorRepository:
     def find_forcing_context(self, *, source_id: str, cycle_time: datetime, model_id: str) -> ForcingContext:
         row = self._fetch_optional(
             """
-            SELECT forcing_version_id, forcing_package_uri, start_time, end_time, source_id
+            SELECT forcing_version_id, forcing_package_uri, start_time, end_time, source_id, lineage_json
             FROM met.forcing_version
             WHERE source_id = %s
               AND cycle_time = %s
@@ -2352,6 +2555,7 @@ class PsycopgOrchestratorRepository:
             row.get("start_time"),
             row.get("end_time"),
             row.get("source_id"),
+            _max_lead_hours_from_lineage(row.get("lineage_json")),
         )
 
     def ensure_forecast_cycle(self, *, source_id: str, cycle_time: datetime) -> dict[str, Any]:
@@ -2919,6 +3123,60 @@ def _stage_status_message(stage: str, status: str, job: dict[str, Any]) -> str:
         error_message = job.get("error_message") or "No error message provided."
         return f"{stage} failed: {error_code} {error_message}"
     return f"{stage} status changed to {status}"
+
+
+def _resolve_forecast_horizon_hours(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    configured_horizon_hours: int,
+    forcing: ForcingContext,
+    max_lead_hours: int | None,
+) -> int:
+    source_max_lead_hours = max_lead_hours or forcing.max_lead_hours
+    if source_max_lead_hours is None and source_id.upper() == "IFS" and forcing.end_time is not None:
+        source_max_lead_hours = _elapsed_hours(cycle_time, forcing.end_time)
+    if source_max_lead_hours is None and source_id.upper() == "IFS":
+        source_max_lead_hours = _ifs_max_lead_hours_for_cycle(cycle_time)
+    if source_max_lead_hours is None:
+        return int(configured_horizon_hours)
+    return min(int(configured_horizon_hours), int(source_max_lead_hours))
+
+
+def _ifs_max_lead_hours_for_cycle(cycle_time: datetime) -> int | None:
+    hour = _ensure_utc(cycle_time).hour
+    if hour in {6, 18}:
+        return 144
+    if hour in {0, 12}:
+        return 168
+    return None
+
+
+def _elapsed_hours(start_time: datetime, end_time: datetime) -> int | None:
+    elapsed_seconds = (_ensure_utc(end_time) - _ensure_utc(start_time)).total_seconds()
+    if elapsed_seconds <= 0:
+        return None
+    return int(round(elapsed_seconds / 3600.0))
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _max_lead_hours_from_lineage(value: Any) -> int | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, Mapping):
+        return None
+    return _optional_int(value.get("max_lead_hours"))
 
 
 def _parse_gateway_time(value: Any) -> datetime | None:

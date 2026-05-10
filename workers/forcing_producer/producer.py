@@ -36,6 +36,15 @@ ERA5_REQUIRED_CANONICAL_VARIABLES: tuple[str, ...] = (
     "pressure_surface",
     "net_radiation",
 )
+IFS_REQUIRED_CANONICAL_VARIABLES: tuple[str, ...] = (
+    "prcp_rate_or_amount",
+    "air_temperature_2m",
+    "relative_humidity_2m",
+    "wind_u_10m",
+    "wind_v_10m",
+    "surface_pressure",
+    "net_radiation",
+)
 FORCING_VARIABLES: tuple[str, ...] = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 OUTPUT_UNITS: dict[str, str] = {
     "PRCP": "mm",
@@ -58,6 +67,13 @@ ERA5_CANONICAL_TO_FORCING: dict[str, str] = {
     "relative_humidity_2m": "RH",
     "net_radiation": "Rn",
     "pressure_surface": "Press",
+}
+IFS_CANONICAL_TO_FORCING: dict[str, str] = {
+    "prcp_rate_or_amount": "PRCP",
+    "air_temperature_2m": "TEMP",
+    "relative_humidity_2m": "RH",
+    "net_radiation": "Rn",
+    "surface_pressure": "Press",
 }
 ERA5_FALLBACK_SOURCE_ID = "GFS"
 ERA5_LATENCY_FALLBACK_REASON = "era5_latency"
@@ -236,6 +252,7 @@ class ForcingProducerConfig:
     output_variables: tuple[str, ...] = FORCING_VARIABLES
     required_canonical_variables: tuple[str, ...] = REQUIRED_CANONICAL_VARIABLES
     era5_latency_fallback_hours: int = 23
+    ifs_precip_step_hours: float = 3.0
 
 
 class ForcingProducer:
@@ -267,6 +284,7 @@ class ForcingProducer:
         source_id: str | None = None,
         cycle_time: str | datetime,
         model_id: str,
+        max_lead_hours: int | None = None,
     ) -> ForcingProductionResult:
         if self.repository is None:
             raise ForcingProductionError("A forcing repository is required for production.")
@@ -301,7 +319,12 @@ class ForcingProducer:
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
                 required_variables=required_variables,
-                require_complete=not _uses_era5_latency_fallback(resolved_source_id),
+                require_complete=(max_lead_hours is None and not _uses_era5_latency_fallback(resolved_source_id)),
+            )
+            products_by_variable = _limit_products_by_max_lead_hours(
+                products_by_variable,
+                cycle_time=parsed_cycle_time,
+                max_lead_hours=max_lead_hours,
             )
             fallback_lineage = self._apply_era5_latency_fallback(
                 source_id=resolved_source_id,
@@ -329,6 +352,7 @@ class ForcingProducer:
                 else _forcing_version_id(resolved_source_id, parsed_cycle_time, model_id)
             )
             values, components = self._generate_timeseries(
+                source_id=resolved_source_id,
                 forcing_version_id=forcing_version_id,
                 basin_version_id=basin_version_id,
                 products_by_variable=products_by_variable,
@@ -349,6 +373,7 @@ class ForcingProducer:
                 components=components,
                 products_by_variable=products_by_variable,
                 fallback_lineage=fallback_lineage,
+                max_lead_hours=max_lead_hours,
             )
             self.repository.update_forecast_cycle(
                 source_id=resolved_source_id,
@@ -381,11 +406,15 @@ class ForcingProducer:
         return tuple(sorted(stations, key=lambda station: station.station_id))
 
     def _required_canonical_variables(self, source_id: str) -> tuple[str, ...]:
+        if _is_ifs_source(source_id):
+            return IFS_REQUIRED_CANONICAL_VARIABLES
         if _is_era5_source(source_id):
             return ERA5_REQUIRED_CANONICAL_VARIABLES
         return self.config.required_canonical_variables
 
     def _canonical_to_forcing(self, source_id: str) -> Mapping[str, str]:
+        if _is_ifs_source(source_id):
+            return IFS_CANONICAL_TO_FORCING
         if _is_era5_source(source_id):
             return ERA5_CANONICAL_TO_FORCING
         return CANONICAL_TO_FORCING
@@ -658,6 +687,7 @@ class ForcingProducer:
     def _generate_timeseries(
         self,
         *,
+        source_id: str,
         forcing_version_id: str,
         basin_version_id: str,
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
@@ -673,15 +703,25 @@ class ForcingProducer:
         }
         rows: list[ForcingTimeseriesRow] = []
         radiation_variable = _canonical_variable_for_forcing("Rn", canonical_to_forcing)
+        pressure_variable = _canonical_variable_for_forcing("Press", canonical_to_forcing)
 
         for valid_time in valid_times:
+            precip_product = products_by_variable["prcp_rate_or_amount"][valid_time]
+            precip_factor = (
+                24.0 / _precip_step_hours(precip_product, self.config.ifs_precip_step_hours)
+                if _is_ifs_source(source_id)
+                else 1.0
+            )
             station_values: dict[str, dict[str, float]] = {
-                "PRCP": self._interpolate_forcing_variable(
-                    "PRCP",
-                    fields["prcp_rate_or_amount"][valid_time],
-                    stations,
-                    weights_by_source_grid_station_variable,
-                ),
+                "PRCP": {
+                    station_id: value * precip_factor
+                    for station_id, value in self._interpolate_forcing_variable(
+                        "PRCP",
+                        fields["prcp_rate_or_amount"][valid_time],
+                        stations,
+                        weights_by_source_grid_station_variable,
+                    ).items()
+                },
                 "TEMP": self._interpolate_forcing_variable(
                     "TEMP",
                     fields["air_temperature_2m"][valid_time],
@@ -706,7 +746,7 @@ class ForcingProducer:
                 },
                 "Press": self._interpolate_forcing_variable(
                     "Press",
-                    fields["pressure_surface"][valid_time],
+                    fields[pressure_variable][valid_time],
                     stations,
                     weights_by_source_grid_station_variable,
                 ),
@@ -822,6 +862,7 @@ class ForcingProducer:
         components: Sequence[ForcingComponent],
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
         fallback_lineage: FallbackLineage | None = None,
+        max_lead_hours: int | None = None,
     ) -> ForcingProductionResult:
         assert self.repository is not None
         compact_cycle = format_cycle_time(cycle_time)
@@ -844,6 +885,7 @@ class ForcingProducer:
             "producer_version": self.config.producer_version,
             "source_id": source_id,
             "cycle_time": _format_time(cycle_time),
+            "max_lead_hours": max_lead_hours or _max_product_lead_hours(products_by_variable, cycle_time),
             "model_id": model_id,
             "basin_version_id": basin_version_id,
             "grid_id": grid_id,
@@ -1174,8 +1216,51 @@ def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalP
     )
 
 
+def _limit_products_by_max_lead_hours(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    *,
+    cycle_time: datetime,
+    max_lead_hours: int | None,
+) -> dict[str, dict[datetime, CanonicalProduct]]:
+    if max_lead_hours is None:
+        return {
+            variable: dict(products_for_variable) for variable, products_for_variable in products_by_variable.items()
+        }
+    return {
+        variable: {
+            valid_time: product
+            for valid_time, product in products_for_variable.items()
+            if _product_lead_hours(product, cycle_time) <= max_lead_hours
+        }
+        for variable, products_for_variable in products_by_variable.items()
+    }
+
+
+def _max_product_lead_hours(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    cycle_time: datetime,
+) -> int | None:
+    lead_hours = [
+        _product_lead_hours(product, cycle_time)
+        for products_for_variable in products_by_variable.values()
+        for product in products_for_variable.values()
+    ]
+    return max(lead_hours) if lead_hours else None
+
+
+def _product_lead_hours(product: CanonicalProduct, cycle_time: datetime) -> int:
+    if product.lead_time_hours is not None:
+        return int(product.lead_time_hours)
+    elapsed_seconds = (_ensure_utc(product.valid_time) - _ensure_utc(cycle_time)).total_seconds()
+    return int(round(elapsed_seconds / 3600.0))
+
+
 def _is_era5_source(source_id: str) -> bool:
     return source_id.upper() == "ERA5"
+
+
+def _is_ifs_source(source_id: str) -> bool:
+    return source_id.upper() == "IFS"
 
 
 def _uses_era5_latency_fallback(source_id: str) -> bool:
@@ -1303,6 +1388,38 @@ def _native_resolution_for_output(
         return products_by_variable["wind_u_10m"][valid_time].native_time_resolution
     canonical_variable = _canonical_variable_for_forcing(variable, canonical_to_forcing)
     return products_by_variable[canonical_variable][valid_time].native_time_resolution
+
+
+def _precip_step_hours(product: CanonicalProduct, default_hours: float) -> float:
+    parsed = _parse_hour_resolution(product.native_time_resolution)
+    step_hours = parsed if parsed is not None else default_hours
+    if step_hours <= 0.0 or not math.isfinite(step_hours):
+        raise ForcingProductionError(
+            f"Invalid precipitation step hours for canonical product {product.canonical_product_id}."
+        )
+    return step_hours
+
+
+def _parse_hour_resolution(value: str | None) -> float | None:
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    if normalized.startswith("pt") and normalized.endswith("h"):
+        normalized = normalized[2:]
+    if normalized.endswith("hours"):
+        normalized = normalized.removesuffix("hours").strip()
+    elif normalized.endswith("hour"):
+        normalized = normalized.removesuffix("hour").strip()
+    elif normalized.endswith("hrs"):
+        normalized = normalized.removesuffix("hrs").strip()
+    elif normalized.endswith("hr"):
+        normalized = normalized.removesuffix("hr").strip()
+    elif normalized.endswith("h"):
+        normalized = normalized[:-1].strip()
+    try:
+        return float(normalized)
+    except ValueError:
+        return None
 
 
 def _distance_degrees(lon_a: float, lat_a: float, lon_b: float, lat_b: float) -> float:
