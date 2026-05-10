@@ -1762,6 +1762,18 @@ components:
       properties:
         scenario_id:
           type: string
+        source_id:
+          type: string
+          nullable: true
+          example: GFS
+        cycle_time:
+          type: string
+          format: date-time
+          nullable: true
+        available_lead_hours:
+          type: integer
+          nullable: true
+          example: 168
         segment_role:
           type: string
         points:
