@@ -92,6 +92,28 @@ def test_ifs_max_lead_hours_limits_forcing_range(tmp_path: Path) -> None:
     assert repository.forcing_versions[result.forcing_version_id]["lineage_json"]["max_lead_hours"] == 144
 
 
+def test_ifs_max_lead_filter_runs_before_completeness_validation(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    cycle_time = parse_cycle_time("2026050718")
+    products = tuple(
+        product
+        for product in _write_ifs_products(store, cycle_time=cycle_time, forecast_hours=(0, 3, 144, 147))
+        if not (product.lead_time_hours == 147 and product.variable == "net_radiation")
+    )
+    repository = FakeForcingRepository(products=products)
+    producer = _build_forcing_producer(tmp_path, repository, store)
+
+    result = producer.produce(
+        source_id="IFS",
+        cycle_time=cycle_time,
+        model_id="demo_model",
+        max_lead_hours=144,
+    )
+
+    assert result.status == "forcing_ready"
+    assert result.timestep_count == 3
+
+
 def test_gfs_and_ifs_contexts_produce_independent_runs(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-07T00:00:00Z")
     model = _model()
@@ -106,6 +128,33 @@ def test_gfs_and_ifs_contexts_produce_independent_runs(tmp_path: Path) -> None:
     assert ifs_context.run_id == "fcst_ifs_2026050700_demo_model"
     assert gfs_orchestrator._build_run_manifest(gfs_context)["scenario_id"] == "forecast_gfs_deterministic"
     assert ifs_orchestrator._build_run_manifest(ifs_context)["scenario_id"] == "forecast_ifs_deterministic"
+
+
+def test_explicit_scenario_id_override_is_preserved_for_ifs_context(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_root,
+        source_id="GFS",
+        scenario_id="custom_forecast_scenario",
+        poll_interval_seconds=0,
+        job_timeout_seconds=5,
+    )
+    orchestrator = ForecastOrchestrator(
+        config=config,
+        repository=NoopRepository(),
+        object_store=LocalObjectStore(object_root),
+        slurm_client=ImmediateSlurmClient(),
+    )
+
+    context = orchestrator._build_run_context(
+        "IFS",
+        _dt("2026-05-07T00:00:00Z"),
+        _model(),
+        ForcingContext(None, None),
+    )
+
+    assert orchestrator._build_run_manifest(context)["scenario_id"] == "custom_forecast_scenario"
 
 
 def test_ifs_canonical_ready_auto_trigger_starts_at_forcing_stage(tmp_path: Path) -> None:

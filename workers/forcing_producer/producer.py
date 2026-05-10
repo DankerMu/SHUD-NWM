@@ -319,7 +319,7 @@ class ForcingProducer:
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
                 required_variables=required_variables,
-                require_complete=not _uses_era5_latency_fallback(resolved_source_id),
+                require_complete=(max_lead_hours is None and not _uses_era5_latency_fallback(resolved_source_id)),
             )
             products_by_variable = _limit_products_by_max_lead_hours(
                 products_by_variable,

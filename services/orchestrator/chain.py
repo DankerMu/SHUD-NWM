@@ -4,7 +4,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -87,7 +87,7 @@ class StageDefinition:
 
 
 LEGACY_FORECAST_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition("download_gfs", "download", "download_gfs.sbatch", "raw_complete", "failed_download"),
+    StageDefinition("download_gfs", "download", "download_source_cycle.sbatch", "raw_complete", "failed_download"),
     StageDefinition("convert_canonical", "canonical", "convert_canonical.sbatch", "canonical_ready", "failed_convert"),
     StageDefinition("produce_forcing", "forcing", "produce_forcing.sbatch", "forcing_ready", "failed_forcing"),
     StageDefinition("run_shud_forecast", "forecast", "run_shud_forecast.sbatch", "forecast_running", "failed_run"),
@@ -176,6 +176,7 @@ class OrchestratorConfig:
     source_id: str = "GFS"
     forecast_horizon_hours: int = 168
     scenario_id: str | None = None
+    scenario_id_explicit: bool = field(init=False, default=False, repr=False, compare=False)
     era5_area: str = "55,70,15,140"
     state_soft_stale_threshold_days: int = 7
     state_hard_stale_threshold_days: int = 30
@@ -184,6 +185,7 @@ class OrchestratorConfig:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
         object.__setattr__(self, "object_store_root", Path(self.object_store_root).expanduser().resolve())
         object.__setattr__(self, "poll_interval_seconds", max(float(self.poll_interval_seconds), 1.0))
+        object.__setattr__(self, "scenario_id_explicit", self.scenario_id is not None)
         if self.scenario_id is None:
             object.__setattr__(self, "scenario_id", scenario_for_source(self.source_id))
         if self.templates_dir is None:
@@ -243,6 +245,7 @@ class InitialStateSelection:
 class ForecastRunContext:
     run_id: str
     source_id: str
+    scenario_id: str
     cycle_id: str
     cycle_time: datetime
     model_id: str
@@ -2045,6 +2048,7 @@ class ForecastOrchestrator:
         return ForecastRunContext(
             run_id=run_id,
             source_id=source_id,
+            scenario_id=self._forecast_scenario_id(source_id),
             cycle_id=cycle_id_for(source_id, cycle_time),
             cycle_time=cycle_time,
             model_id=model.model_id,
@@ -2068,11 +2072,16 @@ class ForecastOrchestrator:
             init_state_quality=selected_state.quality,
         )
 
+    def _forecast_scenario_id(self, source_id: str) -> str:
+        if self.config.scenario_id_explicit and self.config.scenario_id:
+            return self.config.scenario_id
+        return scenario_for_source(source_id)
+
     def _build_run_manifest(self, context: ForecastRunContext) -> dict[str, Any]:
         return {
             "run_id": context.run_id,
             "run_type": "forecast",
-            "scenario_id": scenario_for_source(context.source_id),
+            "scenario_id": context.scenario_id,
             "source_id": context.source_id,
             "cycle_time": _format_time(context.cycle_time),
             "start_time": _format_time(context.start_time),

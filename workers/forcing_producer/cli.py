@@ -8,6 +8,7 @@ from .producer import ForcingProducer
 
 
 def _produce(source_id: str, cycle_time: str, model_id: str, max_lead_hours: int | None = None) -> dict[str, object]:
+    source_id = source_id.upper()
     producer = ForcingProducer.from_env()
     result = producer.produce(
         source_id=source_id,
