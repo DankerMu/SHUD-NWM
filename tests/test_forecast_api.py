@@ -11,6 +11,8 @@ from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import (
     ForecastStoreError,
+    PsycopgForecastStore,
+    _forecast_response_from_rows,
     _spliced_response_from_rows,
     analysis_window_for_issue_time,
 )
@@ -142,6 +144,95 @@ class FakeForecastStore:
         }
 
 
+class InMemoryForecastSeriesStore(PsycopgForecastStore):
+    def __init__(self) -> None:
+        super().__init__("postgresql://test")
+        self.latest_cycles = {
+            "forecast_gfs_deterministic": _dt("2026-05-07T00:00:00Z"),
+            "forecast_ifs_deterministic": _dt("2026-05-07T18:00:00Z"),
+        }
+        self.forecast_fetches: list[dict[str, Any]] = []
+        self.analysis_rows = [
+            {
+                "scenario_id": "analysis_true_field",
+                "source_id": "ERA5",
+                "valid_time": _dt("2026-05-06T18:00:00Z"),
+                "value": 10.0,
+                "unit": "m3/s",
+            }
+        ]
+        self.forecast_rows = [
+            {
+                "scenario_id": "forecast_gfs_deterministic",
+                "source_id": "GFS",
+                "cycle_time": _dt("2026-05-07T00:00:00Z"),
+                "valid_time": _dt("2026-05-07T00:00:00Z"),
+                "value": 11.0,
+                "unit": "m3/s",
+            },
+            {
+                "scenario_id": "forecast_ifs_deterministic",
+                "source_id": "IFS",
+                "cycle_time": _dt("2026-05-07T18:00:00Z"),
+                "valid_time": _dt("2026-05-07T18:00:00Z"),
+                "value": 12.0,
+                "unit": "m3/s",
+            },
+        ]
+
+    def _transaction(self) -> Any:
+        return _NullTransaction()
+
+    def _validate_series_target(self, cursor: Any, *, basin_version_id: str, segment_id: str) -> None:
+        del cursor, basin_version_id, segment_id
+
+    def _per_source_latest_cycles(self, cursor: Any, **_kwargs: Any) -> dict[str, datetime]:
+        del cursor
+        return dict(self.latest_cycles)
+
+    def _latest_analysis_issue_time(self, cursor: Any, **_kwargs: Any) -> datetime | None:
+        del cursor
+        return _dt("2026-05-07T18:00:00Z")
+
+    def _fetch_analysis_segment_rows(self, cursor: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        del cursor
+        return list(self.analysis_rows)
+
+    def _fetch_forecast_segment_rows(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        issue_time: datetime,
+        scenario_filter: Any,
+        cycle_times_by_scenario: dict[str, datetime] | None = None,
+        end_time: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        del cursor, basin_version_id, segment_id, scenario_filter, end_time
+        self.forecast_fetches.append(
+            {
+                "issue_time": issue_time,
+                "cycle_times_by_scenario": cycle_times_by_scenario,
+            }
+        )
+        if cycle_times_by_scenario is None:
+            return [row for row in self.forecast_rows if row["cycle_time"] == issue_time]
+        return [
+            row
+            for row in self.forecast_rows
+            if cycle_times_by_scenario.get(str(row["scenario_id"])) == row["cycle_time"]
+        ]
+
+
+class _NullTransaction:
+    def __enter__(self) -> object:
+        return object()
+
+    def __exit__(self, *_args: Any) -> bool:
+        return False
+
+
 @pytest.fixture
 def fake_store() -> FakeForecastStore:
     store = FakeForecastStore()
@@ -221,6 +312,94 @@ async def test_forecast_series_include_analysis_supports_analysis_only(fake_stor
     data = response.json()
     assert [segment["scenario"] for segment in data["segments"]] == ["analysis_true_field"]
     assert data["segments"][0]["data"] == [{"valid_time": "2026-05-06T00:00:00Z", "value": 10.0}]
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_multi_source_latest_returns_per_source_metadata() -> None:
+    store = InMemoryForecastSeriesStore()
+    app.dependency_overrides[get_forecast_store] = lambda: store
+
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?issue_time=latest&variables=q_down&scenarios=GFS,IFS"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    series_by_scenario = {series["scenario_id"]: series for series in data["series"]}
+    assert data["issue_time"] == "2026-05-07T18:00:00Z"
+    assert set(series_by_scenario) == {"forecast_gfs_deterministic", "forecast_ifs_deterministic"}
+    assert series_by_scenario["forecast_gfs_deterministic"]["source_id"] == "GFS"
+    assert series_by_scenario["forecast_gfs_deterministic"]["cycle_time"] == "2026-05-07T00:00:00Z"
+    assert series_by_scenario["forecast_ifs_deterministic"]["source_id"] == "IFS"
+    assert series_by_scenario["forecast_ifs_deterministic"]["cycle_time"] == "2026-05-07T18:00:00Z"
+    assert series_by_scenario["forecast_ifs_deterministic"]["available_lead_hours"] == 144
+    assert series_by_scenario["forecast_gfs_deterministic"]["points"] == [
+        [_timestamp_ms(_dt("2026-05-07T00:00:00Z")), 11.0]
+    ]
+    assert store.forecast_fetches[-1]["cycle_times_by_scenario"] == store.latest_cycles
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_include_analysis_multi_source_has_one_analysis_segment() -> None:
+    store = InMemoryForecastSeriesStore()
+    app.dependency_overrides[get_forecast_store] = lambda: store
+
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?issue_time=latest&variables=q_down&scenarios=GFS,IFS&include_analysis=true"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    analysis_segments = [segment for segment in data["segments"] if segment["scenario_id"] == "analysis_true_field"]
+    forecast_segments = [segment for segment in data["segments"] if segment["scenario_id"] != "analysis_true_field"]
+    assert len(analysis_segments) == 1
+    assert analysis_segments[0]["segment_role"] == "past_7_days"
+    assert "source_id" not in analysis_segments[0]
+    assert "cycle_time" not in analysis_segments[0]
+    assert {segment["scenario_id"] for segment in forecast_segments} == {
+        "forecast_gfs_deterministic",
+        "forecast_ifs_deterministic",
+    }
+    assert all(segment["segment_role"] == "future_7_days" for segment in forecast_segments)
+    assert {segment["source_id"] for segment in forecast_segments} == {"GFS", "IFS"}
+    assert store.forecast_fetches[-1]["cycle_times_by_scenario"] == store.latest_cycles
+
+
+def test_forecast_response_groups_multi_source_rows_with_metadata_and_points() -> None:
+    gfs_cycle = _dt("2026-05-07T00:00:00Z")
+    ifs_cycle = _dt("2026-05-07T06:00:00Z")
+    payload = _forecast_response_from_rows(
+        segment_id="seg_001",
+        issue_time=ifs_cycle,
+        rows=[
+            {
+                "scenario_id": "forecast_gfs_deterministic",
+                "source_id": "gfs",
+                "cycle_time": gfs_cycle,
+                "valid_time": gfs_cycle,
+                "value": 11.0,
+                "unit": "m3/s",
+            },
+            {
+                "scenario_id": "forecast_ifs_deterministic",
+                "source_id": "IFS",
+                "cycle_time": ifs_cycle,
+                "valid_time": ifs_cycle,
+                "value": 12.0,
+                "unit": "m3/s",
+            },
+        ],
+    )
+
+    series_by_scenario = {series["scenario_id"]: series for series in payload["series"]}
+    assert series_by_scenario["forecast_gfs_deterministic"]["source_id"] == "GFS"
+    assert series_by_scenario["forecast_gfs_deterministic"]["available_lead_hours"] == 168
+    assert series_by_scenario["forecast_ifs_deterministic"]["cycle_time"] == "2026-05-07T06:00:00Z"
+    assert series_by_scenario["forecast_ifs_deterministic"]["available_lead_hours"] == 144
+    assert series_by_scenario["forecast_gfs_deterministic"]["points"] == [[_timestamp_ms(gfs_cycle), 11.0]]
+    assert "segments" not in payload
 
 
 def test_spliced_response_deduplicates_issue_time_boundary_and_uses_sources() -> None:

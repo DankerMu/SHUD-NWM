@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -67,12 +68,15 @@ class PsycopgForecastStore:
             self._validate_series_target(cursor, basin_version_id=basin_version_id, segment_id=segment_id)
 
             parsed_issue_time = None if issue_time == "latest" else _parse_datetime(issue_time)
-            selected_issue_time = parsed_issue_time or self._latest_issue_time(
-                cursor,
-                basin_version_id=basin_version_id,
-                segment_id=segment_id,
-                scenario_filter=scenario_filter,
-            )
+            latest_cycles_by_scenario: dict[str, datetime] = {}
+            if parsed_issue_time is None:
+                latest_cycles_by_scenario = self._per_source_latest_cycles(
+                    cursor,
+                    basin_version_id=basin_version_id,
+                    segment_id=segment_id,
+                    scenario_filter=scenario_filter,
+                )
+            selected_issue_time = parsed_issue_time or _latest_cycle_time(latest_cycles_by_scenario)
             if include_analysis and selected_issue_time is None:
                 selected_issue_time = self._latest_analysis_issue_time(
                     cursor,
@@ -103,8 +107,9 @@ class PsycopgForecastStore:
                     basin_version_id=basin_version_id,
                     segment_id=segment_id,
                     issue_time=selected_issue_time,
-                    end_time=forecast_end,
                     scenario_filter=scenario_filter,
+                    cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
+                    end_time=forecast_end,
                 )
                 return _spliced_response_from_rows(
                     river_segment_id=segment_id,
@@ -114,25 +119,14 @@ class PsycopgForecastStore:
                     forecast_rows=forecast_rows,
                 )
 
-            rows = self._fetch_all(
+            rows = self._fetch_forecast_segment_rows(
                 cursor,
-                f"""
-                SELECT
-                    h.scenario_id,
-                    h.cycle_time,
-                    rt.valid_time,
-                    rt.value,
-                    rt.unit
-                FROM hydro.river_timeseries rt
-                JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-                WHERE rt.basin_version_id = %s
-                  AND rt.river_segment_id = %s
-                  AND rt.variable = 'q_down'
-                  AND h.cycle_time = %s
-                  {scenario_filter.sql}
-                ORDER BY h.scenario_id, rt.valid_time
-                """,
-                (basin_version_id, segment_id, selected_issue_time, *scenario_filter.params),
+                basin_version_id=basin_version_id,
+                segment_id=segment_id,
+                issue_time=selected_issue_time,
+                scenario_filter=scenario_filter,
+                cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
+                end_time=selected_issue_time + timedelta(days=7),
             )
 
         if not rows and parsed_issue_time is not None:
@@ -214,6 +208,39 @@ class PsycopgForecastStore:
         )
         return _ensure_utc(row["cycle_time"]) if row is not None else None
 
+    def _per_source_latest_cycles(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        scenario_filter: "_ScenarioFilter",
+    ) -> dict[str, datetime]:
+        rows = self._fetch_all(
+            cursor,
+            f"""
+            SELECT
+                h.scenario_id,
+                MAX(h.cycle_time) AS cycle_time
+            FROM hydro.river_timeseries rt
+            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
+            WHERE rt.basin_version_id = %s
+              AND rt.river_segment_id = %s
+              AND rt.variable = 'q_down'
+              AND h.run_type = 'forecast'
+              AND h.cycle_time IS NOT NULL
+              {scenario_filter.sql}
+            GROUP BY h.scenario_id
+            ORDER BY h.scenario_id
+            """,
+            (basin_version_id, segment_id, *scenario_filter.params),
+        )
+        return {
+            str(row["scenario_id"]): _ensure_utc(row["cycle_time"])
+            for row in rows
+            if row.get("scenario_id") and row.get("cycle_time") is not None
+        }
+
     def _latest_analysis_issue_time(
         self,
         cursor: Any,
@@ -279,15 +306,59 @@ class PsycopgForecastStore:
         basin_version_id: str,
         segment_id: str,
         issue_time: datetime,
-        end_time: datetime,
         scenario_filter: "_ScenarioFilter",
+        cycle_times_by_scenario: Mapping[str, datetime] | None = None,
+        end_time: datetime | None = None,
     ) -> list[dict[str, Any]]:
+        if cycle_times_by_scenario is not None:
+            if not cycle_times_by_scenario:
+                return []
+            selected_cycle_values = ", ".join(["(%s, %s::timestamptz)"] * len(cycle_times_by_scenario))
+            selected_cycle_params: list[Any] = []
+            for scenario_id, cycle_time in cycle_times_by_scenario.items():
+                selected_cycle_params.extend([scenario_id, _ensure_utc(cycle_time)])
+            return self._fetch_all(
+                cursor,
+                f"""
+                WITH selected_cycles(scenario_id, cycle_time) AS (
+                    VALUES {selected_cycle_values}
+                )
+                SELECT
+                    h.scenario_id,
+                    h.source_id,
+                    h.cycle_time,
+                    h.end_time AS run_end_time,
+                    fv.lineage_json,
+                    rt.valid_time,
+                    rt.value,
+                    rt.unit
+                FROM hydro.river_timeseries rt
+                JOIN hydro.hydro_run h ON h.run_id = rt.run_id
+                JOIN selected_cycles sc
+                  ON sc.scenario_id = h.scenario_id
+                 AND sc.cycle_time = h.cycle_time
+                LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
+                WHERE rt.basin_version_id = %s
+                  AND rt.river_segment_id = %s
+                  AND rt.variable = 'q_down'
+                  AND h.run_type = 'forecast'
+                  AND rt.valid_time >= h.cycle_time
+                  AND rt.valid_time <= h.cycle_time + INTERVAL '7 days'
+                  {scenario_filter.sql}
+                ORDER BY h.scenario_id, rt.valid_time
+                """,
+                (*selected_cycle_params, basin_version_id, segment_id, *scenario_filter.params),
+            )
+
+        forecast_end = end_time or issue_time + timedelta(days=7)
         return self._fetch_all(
             cursor,
             f"""
             SELECT
                 h.scenario_id,
                 h.source_id,
+                h.cycle_time,
+                h.end_time AS run_end_time,
                 fv.lineage_json,
                 rt.valid_time,
                 rt.value,
@@ -298,13 +369,14 @@ class PsycopgForecastStore:
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
               AND rt.variable = 'q_down'
+              AND h.run_type = 'forecast'
               AND h.cycle_time = %s
               AND rt.valid_time >= %s
               AND rt.valid_time <= %s
               {scenario_filter.sql}
             ORDER BY h.scenario_id, rt.valid_time
             """,
-            (basin_version_id, segment_id, issue_time, issue_time, end_time, *scenario_filter.params),
+            (basin_version_id, segment_id, issue_time, issue_time, forecast_end, *scenario_filter.params),
         )
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -642,10 +714,27 @@ def _ensure_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _datetime_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            return _ensure_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except ValueError:
+            return None
+    return None
+
+
 def _format_time(value: datetime | None) -> str | None:
     if value is None:
         return None
     return _ensure_utc(value).isoformat().replace("+00:00", "Z")
+
+
+def _format_time_value(value: Any) -> str | None:
+    return _format_time(_datetime_value(value))
 
 
 def _timestamp_ms(value: datetime) -> int:
@@ -665,6 +754,12 @@ def _json_ready(value: Any) -> Any:
 def analysis_window_for_issue_time(issue_time: datetime) -> tuple[datetime, datetime]:
     end_time = _ensure_utc(issue_time)
     return end_time - timedelta(days=7), end_time
+
+
+def _latest_cycle_time(cycle_times_by_scenario: Mapping[str, datetime]) -> datetime | None:
+    if not cycle_times_by_scenario:
+        return None
+    return max(_ensure_utc(cycle_time) for cycle_time in cycle_times_by_scenario.values())
 
 
 def _empty_forecast_response(*, segment_id: str, issue_time: datetime | None) -> dict[str, Any]:
@@ -711,6 +806,7 @@ def _forecast_response_from_rows(
             {
                 "scenario_id": scenario_id,
                 "segment_role": "future_7_days",
+                **_forecast_series_metadata(row),
                 "points": [],
             },
         )
@@ -748,16 +844,19 @@ def _spliced_response_from_rows(
                 "scenario": "analysis_true_field",
                 "scenario_id": "analysis_true_field",
                 "source": _source_label(analysis_rows[0]),
+                "segment_role": "past_7_days",
                 "data": analysis_data,
             }
         )
 
     forecast_by_scenario: dict[str, list[dict[str, Any]]] = {}
     forecast_source_by_scenario: dict[str, str] = {}
+    forecast_metadata_by_scenario: dict[str, dict[str, Any]] = {}
     for row in forecast_rows:
         scenario = str(row.get("scenario_id") or "forecast_gfs_deterministic")
         forecast_by_scenario.setdefault(scenario, []).append(_segment_point(row))
         forecast_source_by_scenario.setdefault(scenario, _source_label(row))
+        forecast_metadata_by_scenario.setdefault(scenario, _forecast_series_metadata(row))
 
     for scenario, data in forecast_by_scenario.items():
         segments.append(
@@ -765,6 +864,8 @@ def _spliced_response_from_rows(
                 "scenario": scenario,
                 "scenario_id": scenario,
                 "source": forecast_source_by_scenario[scenario],
+                "segment_role": "future_7_days",
+                **forecast_metadata_by_scenario[scenario],
                 "data": sorted(data, key=lambda point: point["valid_time"]),
             }
         )
@@ -802,6 +903,88 @@ def _source_label(row: dict[str, Any]) -> str:
 def _display_source_id(source_id: str) -> str:
     normalized = source_id.strip()
     return normalized.upper() if normalized else "unknown"
+
+
+def _forecast_series_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    source_id = _forecast_source_id(row)
+    if source_id is not None:
+        metadata["source_id"] = source_id
+    cycle_time = _format_time_value(row.get("cycle_time"))
+    if cycle_time is not None:
+        metadata["cycle_time"] = cycle_time
+    available_lead_hours = _available_lead_hours(row)
+    if available_lead_hours is not None:
+        metadata["available_lead_hours"] = available_lead_hours
+    return metadata
+
+
+def _forecast_source_id(row: dict[str, Any]) -> str | None:
+    raw_source_id = row.get("source_id")
+    if raw_source_id:
+        return _display_source_id(str(raw_source_id))
+
+    scenario_id = str(row.get("scenario_id") or "").strip().lower()
+    prefix = "forecast_"
+    suffix = "_deterministic"
+    if scenario_id.startswith(prefix) and scenario_id.endswith(suffix):
+        source_id = scenario_id[len(prefix) : -len(suffix)]
+        return _display_source_id(source_id)
+    return None
+
+
+def _available_lead_hours(row: dict[str, Any]) -> int | None:
+    explicit_lead_hours = _optional_int(row.get("available_lead_hours"))
+    if explicit_lead_hours is not None:
+        return explicit_lead_hours
+
+    lineage_lead_hours = _optional_int(_lineage_dict(row.get("lineage_json")).get("max_lead_hours"))
+    if lineage_lead_hours is not None:
+        return lineage_lead_hours
+
+    cycle_time = _datetime_value(row.get("cycle_time"))
+    source_id = _forecast_source_id(row)
+    if source_id == "IFS" and cycle_time is not None:
+        if cycle_time.hour in {6, 18}:
+            return 144
+        if cycle_time.hour in {0, 12}:
+            return 168
+
+    run_end_time = _datetime_value(row.get("run_end_time") or row.get("end_time"))
+    elapsed_lead_hours = _elapsed_lead_hours(cycle_time, run_end_time)
+    if elapsed_lead_hours is not None:
+        return elapsed_lead_hours
+
+    if source_id is not None:
+        return 168
+    return None
+
+
+def _lineage_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _elapsed_lead_hours(start_time: datetime | None, end_time: datetime | None) -> int | None:
+    if start_time is None or end_time is None:
+        return None
+    elapsed_seconds = (_ensure_utc(end_time) - _ensure_utc(start_time)).total_seconds()
+    if elapsed_seconds <= 0:
+        return None
+    return int(round(elapsed_seconds / 3600.0))
 
 
 def _response_variable_name(requested_variables: Sequence[str]) -> str:
