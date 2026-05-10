@@ -8,6 +8,7 @@ from .chain import (
     PipelineResult,
     PsycopgOrchestratorRepository,
     StageRunResult,
+    scenario_for_source,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "PipelineResult",
     "PsycopgOrchestratorRepository",
     "StageRunResult",
+    "scenario_for_source",
 ]
