@@ -2,6 +2,7 @@ import { Loader2, RefreshCw, X } from 'lucide-react'
 
 import { ForecastChart } from '@/components/charts/ForecastChart'
 import { SegmentInfo } from '@/components/forecast/SegmentInfo'
+import { ScenarioSelector } from '@/components/ScenarioSelector'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { formatDate } from '@/lib/format'
@@ -43,6 +44,7 @@ export function ForecastPanel({
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
         <SegmentInfo segment={segment} />
+        <ScenarioSelector />
 
         {forecastData ? (
           <div className="grid gap-2 rounded-md border border-border bg-background/60 p-3 text-xs">
@@ -52,8 +54,16 @@ export function ForecastPanel({
                 {formatDate(forecastData.issueTime)}
               </span>
             </div>
+            {forecastData.cycleAttribution ? (
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-muted">周期</span>
+                <span className="min-w-0 truncate font-medium text-foreground">
+                  {forecastData.cycleAttribution}
+                </span>
+              </div>
+            ) : null}
             <div className="flex items-center justify-between gap-3">
-              <span className="text-muted">资料来源</span>
+              <span className="text-muted">数据源</span>
               <span className="min-w-0 truncate font-medium text-foreground">
                 {forecastData.sourceAttribution || '-'}
               </span>

@@ -675,7 +675,7 @@ def test_frontend_forecast_react_requests_segments_and_configures_echarts() -> N
     assert "#ef7d22" in forecast_store
     assert "markLine" in forecast_chart
     assert "起报时间" in forecast_chart
-    assert "资料来源" in forecast_panel
+    assert "数据源" in forecast_panel
 
 
 def test_forecast_manifest_contains_degraded_initial_state_markers(tmp_path: Path) -> None:
