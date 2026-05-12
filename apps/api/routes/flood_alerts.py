@@ -460,7 +460,7 @@ def _require_frequency_ready(session: Session, run_id: str) -> dict[str, Any]:
 def _time_filter_sql(valid_time: datetime | None, *, alias: str = "") -> str:
     prefix = f"{alias}." if alias else ""
     if valid_time is not None:
-        return f"{prefix}valid_time = :valid_time"
+        return f"({prefix}valid_time = :valid_time AND {prefix}max_over_window = false)"
     return f"{prefix}max_over_window = :max_over_window"
 
 
