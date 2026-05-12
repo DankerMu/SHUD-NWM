@@ -1,0 +1,636 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Sequence
+
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from services.orchestrator.chain import HttpSlurmGatewayClient
+from services.orchestrator.persistence import PipelineStore
+from workers.flood_frequency.config import HindcastConfig
+
+HINDCAST_SCENARIO_ID = "hindcast_replay"
+INSUFFICIENT_ERA5_COVERAGE = "INSUFFICIENT_ERA5_COVERAGE"
+
+
+class HindcastError(RuntimeError):
+    def __init__(self, error_code: str, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.details = details or {}
+
+
+@dataclass(frozen=True)
+class HindcastSubmitResult:
+    total_runs: int
+    run_ids: list[str]
+    skipped_years: list[int]
+
+
+@dataclass(frozen=True)
+class HindcastForcingResult:
+    forcing_version_id: str
+    coverage: float
+    missing_rate: float
+    start_time: datetime
+    end_time: datetime
+
+
+@dataclass(frozen=True)
+class HindcastYearResult:
+    run_id: str
+    forcing_version_id: str
+    status: str
+    shud_result: dict[str, Any]
+    parse_result: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class HindcastSlurmResult:
+    slurm_job_array_id: str | None
+    job_ids: list[str]
+
+
+def run_id_for_year(model_id: str, year: int) -> str:
+    return f"hindcast_era5_{model_id}_{int(year)}"
+
+
+def forcing_version_id_for_year(model_id: str, year: int) -> str:
+    return f"forc_era5_hindcast_{model_id}_{int(year)}"
+
+
+def calendar_years(start_time: str | datetime, end_time: str | datetime) -> list[int]:
+    start = _parse_time(start_time)
+    end = _parse_time(end_time)
+    if start >= end:
+        raise HindcastError(
+            "INVALID_TIME_RANGE",
+            "start_time must be earlier than end_time.",
+            {"start_time": start.isoformat(), "end_time": end.isoformat()},
+        )
+    return list(range(start.year, end.year + 1))
+
+
+def submit_hindcast(
+    model_id: str,
+    source_id: str,
+    start_time: str | datetime,
+    end_time: str | datetime,
+    purpose: str,
+    db_session: Session,
+) -> HindcastSubmitResult:
+    years = calendar_years(start_time, end_time)
+    source_id = source_id.upper()
+    model = _load_model_context(db_session, model_id)
+    run_ids: list[str] = []
+    skipped_years: list[int] = []
+
+    try:
+        for year in years:
+            run_id = run_id_for_year(model_id, year)
+            existing = db_session.execute(
+                text("SELECT status FROM hydro.hydro_run WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            ).mappings().first()
+            if existing is not None and str(existing["status"]) == "succeeded":
+                skipped_years.append(year)
+                continue
+
+            year_start, year_end = _year_bounds(year)
+            db_session.execute(
+                text(
+                    """
+                    INSERT INTO hydro.hydro_run (
+                        run_id,
+                        run_type,
+                        scenario_id,
+                        model_id,
+                        basin_version_id,
+                        source_id,
+                        cycle_time,
+                        start_time,
+                        end_time,
+                        status,
+                        run_manifest_uri,
+                        output_uri,
+                        log_uri,
+                        error_code,
+                        error_message
+                    )
+                    VALUES (
+                        :run_id,
+                        'hindcast',
+                        :scenario_id,
+                        :model_id,
+                        :basin_version_id,
+                        :source_id,
+                        NULL,
+                        :start_time,
+                        :end_time,
+                        'created',
+                        :run_manifest_uri,
+                        :output_uri,
+                        :log_uri,
+                        NULL,
+                        NULL
+                    )
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        status = 'created',
+                        source_id = EXCLUDED.source_id,
+                        start_time = EXCLUDED.start_time,
+                        end_time = EXCLUDED.end_time,
+                        run_manifest_uri = EXCLUDED.run_manifest_uri,
+                        output_uri = EXCLUDED.output_uri,
+                        log_uri = EXCLUDED.log_uri,
+                        error_code = NULL,
+                        error_message = NULL
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "scenario_id": HINDCAST_SCENARIO_ID,
+                    "model_id": model_id,
+                    "basin_version_id": model["basin_version_id"],
+                    "source_id": source_id,
+                    "start_time": year_start,
+                    "end_time": year_end,
+                    "run_manifest_uri": _run_manifest_uri(run_id),
+                    "output_uri": _run_output_uri(run_id),
+                    "log_uri": _run_log_uri(run_id),
+                },
+            )
+            run_ids.append(run_id)
+        db_session.commit()
+    except SQLAlchemyError as error:
+        db_session.rollback()
+        raise HindcastError("HINDCAST_SUBMIT_DB_ERROR", f"Failed to create hindcast runs: {error}") from error
+
+    return HindcastSubmitResult(total_runs=len(run_ids), run_ids=run_ids, skipped_years=skipped_years)
+
+
+def produce_hindcast_forcing(
+    model_id: str,
+    source_id: str,
+    year: int,
+    db_session: Session,
+) -> HindcastForcingResult:
+    source_id = source_id.upper()
+    if source_id != "ERA5":
+        raise HindcastError("UNSUPPORTED_SOURCE", "Hindcast replay currently supports ERA5 only.")
+    model = _load_model_context(db_session, model_id)
+    start_time, end_time = _year_bounds(year)
+    coverage = _era5_coverage(db_session, source_id=source_id, start_time=start_time, end_time=end_time)
+    missing_rate = 1.0 - coverage
+    forcing_version_id = forcing_version_id_for_year(model_id, year)
+
+    if missing_rate > 0.10:
+        _record_qc_result(
+            db_session,
+            target_id=forcing_version_id,
+            run_id=run_id_for_year(model_id, year),
+            passed=False,
+            checks_json={"coverage": coverage, "missing_rate": missing_rate},
+            message="ERA5 canonical coverage is below the 90% hindcast threshold.",
+        )
+        db_session.commit()
+        raise HindcastError(
+            INSUFFICIENT_ERA5_COVERAGE,
+            "ERA5 canonical coverage is below the 90% hindcast threshold.",
+            {"coverage": coverage, "missing_rate": missing_rate, "year": int(year)},
+        )
+
+    station_count = _station_count(db_session, model_id)
+    lineage = {"purpose": "hindcast", "year": int(year)}
+    try:
+        db_session.execute(
+            text(
+                """
+                INSERT INTO met.forcing_version (
+                    forcing_version_id,
+                    model_id,
+                    source_id,
+                    cycle_time,
+                    start_time,
+                    end_time,
+                    station_count,
+                    forcing_package_uri,
+                    checksum,
+                    lineage_json
+                )
+                VALUES (
+                    :forcing_version_id,
+                    :model_id,
+                    :source_id,
+                    NULL,
+                    :start_time,
+                    :end_time,
+                    :station_count,
+                    :forcing_package_uri,
+                    :checksum,
+                    :lineage_json
+                )
+                ON CONFLICT (forcing_version_id) DO UPDATE SET
+                    start_time = EXCLUDED.start_time,
+                    end_time = EXCLUDED.end_time,
+                    station_count = EXCLUDED.station_count,
+                    forcing_package_uri = EXCLUDED.forcing_package_uri,
+                    checksum = EXCLUDED.checksum,
+                    lineage_json = EXCLUDED.lineage_json
+                """
+            ),
+            {
+                "forcing_version_id": forcing_version_id,
+                "model_id": model_id,
+                "source_id": source_id,
+                "start_time": start_time,
+                "end_time": end_time,
+                "station_count": station_count,
+                "forcing_package_uri": f"object://forcing/{forcing_version_id}",
+                "checksum": f"hindcast-{model['river_network_version_id']}-{year}",
+                "lineage_json": _json_param(db_session, lineage),
+            },
+        )
+        _record_qc_result(
+            db_session,
+            target_id=forcing_version_id,
+            run_id=run_id_for_year(model_id, year),
+            passed=True,
+            checks_json={"coverage": coverage, "missing_rate": missing_rate},
+            message="ERA5 canonical coverage satisfies hindcast threshold.",
+        )
+        db_session.commit()
+    except SQLAlchemyError as error:
+        db_session.rollback()
+        raise HindcastError("HINDCAST_FORCING_DB_ERROR", f"Failed to save hindcast forcing: {error}") from error
+
+    return HindcastForcingResult(
+        forcing_version_id=forcing_version_id,
+        coverage=coverage,
+        missing_rate=missing_rate,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+
+def hindcast_year(
+    model_id: str,
+    source_id: str,
+    year: int,
+    db_session: Session,
+) -> HindcastYearResult:
+    run_id = run_id_for_year(model_id, year)
+    forcing_version_id = forcing_version_id_for_year(model_id, year)
+    try:
+        _update_hydro_run(
+            db_session,
+            run_id,
+            status="running",
+            error_code=None,
+            error_message=None,
+        )
+        forcing = produce_hindcast_forcing(model_id, source_id, year, db_session)
+        forcing_version_id = forcing.forcing_version_id
+        _set_run_forcing(db_session, run_id, forcing_version_id)
+        shud_result = run_shud_hindcast(run_id, model_id, source_id, year, db_session)
+        parse_result = parse_hindcast_output(run_id)
+        _update_hydro_run(db_session, run_id, status="parsed", error_code=None, error_message=None)
+        db_session.commit()
+        return HindcastYearResult(run_id, forcing_version_id, "parsed", shud_result, parse_result)
+    except HindcastError as error:
+        db_session.rollback()
+        _mark_run_failed(db_session, run_id, error.error_code, error.message)
+        raise
+    except Exception as error:
+        db_session.rollback()
+        _mark_run_failed(db_session, run_id, "HINDCAST_YEAR_FAILED", str(error))
+        raise HindcastError("HINDCAST_YEAR_FAILED", str(error)) from error
+
+
+def run_shud_hindcast(
+    run_id: str,
+    model_id: str,
+    source_id: str,
+    year: int,
+    db_session: Session,
+) -> dict[str, Any]:
+    from workers.shud_runtime.runtime import SHUDRuntime
+
+    manifest_path = _write_hindcast_manifest(run_id, model_id, source_id, year, db_session)
+    result = SHUDRuntime.from_env().execute_manifest_path(str(manifest_path))
+    return {
+        "run_id": result.run_id,
+        "status": result.status,
+        "output_uri": result.output_uri,
+        "log_uri": result.log_uri,
+    }
+
+
+def parse_hindcast_output(run_id: str) -> dict[str, Any]:
+    from workers.output_parser.parser import OutputParser
+
+    result = OutputParser.from_env().parse_run(run_id)
+    return {
+        "run_id": result.run_id,
+        "status": result.status,
+        "rows_written": result.rows_written,
+        "qc_passed": result.qc_passed,
+    }
+
+
+def submit_hindcast_slurm(
+    model_id: str,
+    source_id: str,
+    years: Sequence[int],
+    config: HindcastConfig,
+) -> HindcastSlurmResult:
+    years = [int(year) for year in years]
+    if not years:
+        return HindcastSlurmResult(slurm_job_array_id=None, job_ids=[])
+
+    slurm_client = config.slurm_client or HttpSlurmGatewayClient(config.slurm_gateway_url)
+    tasks = [
+        {
+            "array_task_id": index,
+            "run_id": run_id_for_year(model_id, year),
+            "model_id": model_id,
+            "source_id": source_id.upper(),
+            "year": year,
+            "workspace_root": str(config.workspace_root),
+        }
+        for index, year in enumerate(years)
+    ]
+    payload = {
+        "job_type": "hindcast",
+        "cycle_id": f"hindcast_{model_id}_{years[0]}_{years[-1]}",
+        "stage_name": "hindcast",
+        "manifest": {
+            "run_id": f"hindcast_era5_{model_id}",
+            "model_id": model_id,
+            "source_id": source_id.upper(),
+            "years": years,
+            "workspace_root": str(config.workspace_root),
+        },
+        "tasks": tasks,
+    }
+    submit_job_array = getattr(slurm_client, "submit_job_array", None)
+    if callable(submit_job_array):
+        submitted = submit_job_array(payload)
+    else:
+        submitted = slurm_client.submit_job(payload)
+    submitted = _mapping(submitted)
+    slurm_job_id = str(submitted.get("job_id") or submitted.get("slurm_job_id"))
+
+    session = config.db_session
+    job_ids: list[str] = []
+    if session is not None:
+        store = PipelineStore(session)
+        for task in tasks:
+            task_id = int(task["array_task_id"])
+            job_id = f"{task['run_id']}_hindcast_{task_id}"
+            job_ids.append(job_id)
+            job = store.create_job(
+                job_id=job_id,
+                run_id=str(task["run_id"]),
+                cycle_id=str(payload["cycle_id"]),
+                job_type="hindcast",
+                slurm_job_id=slurm_job_id,
+                model_id=model_id,
+                stage="hindcast",
+                status=str(submitted.get("status") or "submitted"),
+                commit=False,
+            )
+            if hasattr(job, "array_task_id"):
+                job.array_task_id = task_id
+        session.commit()
+
+    return HindcastSlurmResult(slurm_job_array_id=slurm_job_id, job_ids=job_ids)
+
+
+def hindcast_status(model_id: str, db_session: Session) -> list[dict[str, Any]]:
+    rows = db_session.execute(
+        text(
+            """
+            SELECT run_id, status, start_time, end_time, error_code, error_message, updated_at
+            FROM hydro.hydro_run
+            WHERE run_type = 'hindcast'
+              AND scenario_id = :scenario_id
+              AND model_id = :model_id
+            ORDER BY start_time, run_id
+            """
+        ),
+        {"scenario_id": HINDCAST_SCENARIO_ID, "model_id": model_id},
+    ).mappings()
+    return [dict(row) for row in rows]
+
+
+def _parse_time(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError as error:
+            raise HindcastError("INVALID_TIME", f"Invalid ISO datetime: {value}") from error
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _year_bounds(year: int) -> tuple[datetime, datetime]:
+    return datetime(int(year), 1, 1, tzinfo=UTC), datetime(int(year) + 1, 1, 1, tzinfo=UTC)
+
+
+def _load_model_context(db_session: Session, model_id: str) -> dict[str, Any]:
+    row = db_session.execute(
+        text(
+            """
+            SELECT model_id, basin_version_id, river_network_version_id, model_package_uri
+            FROM core.model_instance
+            WHERE model_id = :model_id
+            LIMIT 1
+            """
+        ),
+        {"model_id": model_id},
+    ).mappings().first()
+    if row is None:
+        raise HindcastError("MODEL_NOT_FOUND", f"Model not found: {model_id}", {"model_id": model_id})
+    return dict(row)
+
+
+def _era5_coverage(db_session: Session, *, source_id: str, start_time: datetime, end_time: datetime) -> float:
+    expected_hours = int((end_time - start_time).total_seconds() // 3600)
+    if expected_hours <= 0:
+        return 0.0
+    row = db_session.execute(
+        text(
+            """
+            SELECT COUNT(DISTINCT valid_time) AS available_hours
+            FROM met.canonical_met_product
+            WHERE source_id = :source_id
+              AND valid_time >= :start_time
+              AND valid_time < :end_time
+              AND COALESCE(quality_flag, 'ok') = 'ok'
+            """
+        ),
+        {"source_id": source_id, "start_time": start_time, "end_time": end_time},
+    ).mappings().first()
+    available_hours = int(row["available_hours"] or 0) if row is not None else 0
+    return min(1.0, max(0.0, available_hours / expected_hours))
+
+
+def _station_count(db_session: Session, model_id: str) -> int:
+    row = db_session.execute(
+        text("SELECT COUNT(DISTINCT station_id) AS station_count FROM met.interp_weight WHERE model_id = :model_id"),
+        {"model_id": model_id},
+    ).mappings().first()
+    station_count = int(row["station_count"] or 0) if row is not None else 0
+    return station_count
+
+
+def _record_qc_result(
+    db_session: Session,
+    *,
+    target_id: str,
+    run_id: str,
+    passed: bool,
+    checks_json: dict[str, Any],
+    message: str,
+) -> None:
+    db_session.execute(
+        text(
+            """
+            INSERT INTO ops.qc_result (
+                qc_checkpoint,
+                target_type,
+                target_id,
+                run_id,
+                passed,
+                severity,
+                checks_json,
+                message
+            )
+            VALUES (
+                'hindcast_era5_coverage',
+                'forcing_version',
+                :target_id,
+                :run_id,
+                :passed,
+                :severity,
+                :checks_json,
+                :message
+            )
+            """
+        ),
+        {
+            "target_id": target_id,
+            "run_id": run_id,
+            "passed": passed,
+            "severity": "info" if passed else "error",
+            "checks_json": _json_param(db_session, checks_json),
+            "message": message,
+        },
+    )
+
+
+def _update_hydro_run(
+    db_session: Session,
+    run_id: str,
+    *,
+    status: str,
+    error_code: str | None,
+    error_message: str | None,
+) -> None:
+    db_session.execute(
+        text(
+            """
+            UPDATE hydro.hydro_run
+            SET status = :status,
+                error_code = :error_code,
+                error_message = :error_message
+            WHERE run_id = :run_id
+            """
+        ),
+        {"run_id": run_id, "status": status, "error_code": error_code, "error_message": error_message},
+    )
+    db_session.commit()
+
+
+def _set_run_forcing(db_session: Session, run_id: str, forcing_version_id: str) -> None:
+    db_session.execute(
+        text(
+            """
+            UPDATE hydro.hydro_run
+            SET forcing_version_id = :forcing_version_id
+            WHERE run_id = :run_id
+            """
+        ),
+        {"run_id": run_id, "forcing_version_id": forcing_version_id},
+    )
+    db_session.commit()
+
+
+def _mark_run_failed(db_session: Session, run_id: str, error_code: str, error_message: str) -> None:
+    _update_hydro_run(db_session, run_id, status="failed", error_code=error_code, error_message=error_message)
+
+
+def _write_hindcast_manifest(run_id: str, model_id: str, source_id: str, year: int, db_session: Session) -> Path:
+    config = HindcastConfig.from_env()
+    model = _load_model_context(db_session, model_id)
+    run_dir = config.workspace_root / "runs" / run_id / "input"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = run_dir / "manifest.json"
+    start_time, end_time = _year_bounds(year)
+    manifest = {
+        "run_id": run_id,
+        "run_type": "hindcast",
+        "scenario_id": HINDCAST_SCENARIO_ID,
+        "model_id": model_id,
+        "basin_version_id": model["basin_version_id"],
+        "river_network_version_id": model["river_network_version_id"],
+        "source_id": source_id.upper(),
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+        "forcing": {"forcing_version_id": forcing_version_id_for_year(model_id, year)},
+    }
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    return manifest_path
+
+
+def _run_manifest_uri(run_id: str) -> str:
+    return f"object://runs/{run_id}/input/manifest.json"
+
+
+def _run_output_uri(run_id: str) -> str:
+    return f"object://runs/{run_id}/output"
+
+
+def _run_log_uri(run_id: str) -> str:
+    return f"object://runs/{run_id}/logs/hindcast.log"
+
+
+def _json_param(db_session: Session, value: dict[str, Any]) -> Any:
+    if db_session.get_bind().dialect.name == "sqlite":
+        return json.dumps(value, sort_keys=True)
+    return value
+
+
+def _table_exists(db_session: Session, schema: str, table_name: str) -> bool:
+    try:
+        return inspect(db_session.get_bind()).has_table(table_name, schema=schema)
+    except SQLAlchemyError:
+        return False
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return dict(model_dump())
+    return dict(value)

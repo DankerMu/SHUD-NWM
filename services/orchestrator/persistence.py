@@ -26,6 +26,7 @@ class PipelineJob(Base):
     cycle_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     job_type: Mapped[str] = mapped_column(Text, nullable=False)
     slurm_job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    array_task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     stage: Mapped[str | None] = mapped_column(Text, nullable=True)

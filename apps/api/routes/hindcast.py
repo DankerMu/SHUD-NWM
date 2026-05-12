@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import os
+from collections.abc import Generator
+from functools import lru_cache
+from typing import Any
+
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+
+from apps.api.errors import ApiError
+from apps.api.routes.pipeline import _ok
+from workers.flood_frequency.config import HindcastConfig
+from workers.flood_frequency.hindcast import (
+    HindcastError,
+    calendar_years,
+    submit_hindcast,
+    submit_hindcast_slurm,
+)
+
+router = APIRouter(prefix="/api/v1", tags=["hindcast"])
+_OPERATOR_ROLES = {"operator", "model_admin", "sys_admin"}
+
+
+class HindcastSubmitRequest(BaseModel):
+    model_id: str
+    source_id: str
+    start_time: str
+    end_time: str
+    purpose: str = "flood_frequency_sample"
+
+
+@lru_cache
+def _engine(database_url: str) -> Engine:
+    return create_engine(database_url, future=True)
+
+
+def get_hindcast_session() -> Generator[Session, None, None]:
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        raise ApiError(
+            status_code=500,
+            code="DATABASE_URL_MISSING",
+            message="DATABASE_URL is required for hindcast operations.",
+        )
+    with Session(_engine(database_url)) as session:
+        yield session
+
+
+def get_hindcast_config() -> HindcastConfig:
+    return HindcastConfig.from_env()
+
+
+@router.post("/hindcast/submit")
+def submit_hindcast_api(
+    body: HindcastSubmitRequest,
+    request: Request,
+    session: Session = Depends(get_hindcast_session),
+    config: HindcastConfig = Depends(get_hindcast_config),
+) -> dict[str, Any]:
+    _require_operator_role(request)
+    if body.source_id.upper() != "ERA5":
+        raise ApiError(
+            status_code=400,
+            code="INVALID_SOURCE_ID",
+            message="Hindcast source_id must be ERA5.",
+            details={"source_id": body.source_id},
+        )
+    _validate_time_range(body.start_time, body.end_time)
+    _require_model_exists(session, body.model_id)
+
+    try:
+        result = submit_hindcast(
+            body.model_id,
+            body.source_id,
+            body.start_time,
+            body.end_time,
+            body.purpose,
+            session,
+        )
+        years = _years_from_run_ids(result.run_ids)
+        slurm_config = HindcastConfig(
+            workspace_root=config.workspace_root,
+            object_store_root=config.object_store_root,
+            object_store_prefix=config.object_store_prefix,
+            slurm_gateway_url=config.slurm_gateway_url,
+            slurm_client=config.slurm_client,
+            db_session=session,
+        )
+        slurm = submit_hindcast_slurm(body.model_id, body.source_id, years, slurm_config) if years else None
+    except HindcastError as error:
+        raise _api_error(error) from error
+
+    return _ok(
+        request,
+        {
+            "total_runs": result.total_runs,
+            "run_ids": result.run_ids,
+            "skipped_years": result.skipped_years,
+            "slurm_job_array_id": slurm.slurm_job_array_id if slurm is not None else None,
+        },
+    )
+
+
+def _require_operator_role(request: Request) -> None:
+    role = request.headers.get("X-User-Role")
+    if role is not None and role.strip().lower() in _OPERATOR_ROLES:
+        return
+    raise ApiError(
+        status_code=403,
+        code="PERMISSION_DENIED",
+        message="Operator or model_admin role required.",
+    )
+
+
+def _validate_time_range(start_time: str, end_time: str) -> None:
+    try:
+        calendar_years(start_time, end_time)
+    except HindcastError as error:
+        raise ApiError(
+            status_code=400,
+            code=error.error_code,
+            message=error.message,
+            details=error.details,
+        ) from error
+
+
+def _require_model_exists(session: Session, model_id: str) -> None:
+    row = session.execute(
+        text("SELECT model_id FROM core.model_instance WHERE model_id = :model_id LIMIT 1"),
+        {"model_id": model_id},
+    ).first()
+    if row is None:
+        raise ApiError(
+            status_code=404,
+            code="MODEL_NOT_FOUND",
+            message=f"Model not found: {model_id}",
+            details={"model_id": model_id},
+        )
+
+
+def _years_from_run_ids(run_ids: list[str]) -> list[int]:
+    years: list[int] = []
+    for run_id in run_ids:
+        try:
+            years.append(int(run_id.rsplit("_", maxsplit=1)[1]))
+        except (IndexError, ValueError):
+            continue
+    return years
+
+
+def _api_error(error: HindcastError) -> ApiError:
+    status_code = 404 if error.error_code == "MODEL_NOT_FOUND" else 400
+    return ApiError(
+        status_code=status_code,
+        code=error.error_code,
+        message=error.message,
+        details=error.details,
+    )

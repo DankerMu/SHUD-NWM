@@ -29,6 +29,7 @@ def get_forecast_series(
     variables: str = Query(default="q_down"),
     scenarios: str = Query(default="GFS"),
     include_analysis: bool = Query(default=False),
+    run_types: str | None = Query(default=None),
     store: PsycopgForecastStore = Depends(get_forecast_store),
 ) -> dict[str, Any]:
     try:
@@ -39,6 +40,7 @@ def get_forecast_series(
             variables=_split_query_list(variables),
             scenarios=_split_query_list(scenarios),
             include_analysis=include_analysis,
+            run_types=_split_query_list(run_types) if run_types is not None else None,
         )
     except ForecastStoreError as error:
         raise _api_error(error) from error

@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
@@ -168,6 +169,7 @@ class RetryService:
         return job
 
     def attempt_manual_retry(self, run_id: str) -> PipelineJob:
+        has_hydro_run_table = _has_hydro_run_table(self.store)
         with self.store.session.begin_nested():
             lock_statement = (
                 select(PipelineJob)
@@ -218,6 +220,27 @@ class RetryService:
                 },
                 commit=False,
             )
+            if failed_job.run_id and has_hydro_run_table:
+                self.store.session.execute(
+                    text(
+                        """
+                        UPDATE hydro.hydro_run
+                        SET status = 'running',
+                            error_code = NULL,
+                            error_message = NULL
+                        WHERE run_id = :run_id
+                          AND status = 'failed'
+                        """
+                    ),
+                    {"run_id": failed_job.run_id},
+                )
         self.store.session.commit()
         self.store.session.refresh(retry_job)
         return retry_job
+
+
+def _has_hydro_run_table(store: PipelineStore) -> bool:
+    try:
+        return inspect(store.session.get_bind()).has_table("hydro_run", schema="hydro")
+    except SQLAlchemyError:
+        return False
