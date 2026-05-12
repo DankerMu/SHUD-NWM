@@ -18,6 +18,7 @@ from workers.flood_frequency.hindcast import (
     submit_hindcast,
     submit_hindcast_slurm,
 )
+from workers.flood_frequency.return_period import ReturnPeriodError, compute_return_periods
 
 
 def _session_from_env() -> Session:
@@ -100,6 +101,21 @@ def _fit_curves(
         if verbose or result.total_segments <= 20:
             output["items"] = result.items
         return output
+
+
+def _compute_return_period(run_id: str) -> dict[str, object]:
+    with _session_from_env() as session:
+        result = compute_return_periods(run_id, session)
+        return {
+            "total_segments": result.total_segments,
+            "with_curve": result.with_curve,
+            "without_curve": result.without_curve,
+            "warning_counts": result.warning_counts,
+            "rows_written": result.rows_written,
+            "status": result.status,
+            "error_code": result.error_code,
+            "error_message": result.error_message,
+        }
 
 
 def _years_from_run_ids(run_ids: list[str]) -> list[int]:
@@ -190,6 +206,17 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"{code}: {message}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("compute-return-period")
+    @click.option("--run-id", required=True)
+    def compute_return_period_command(run_id: str) -> None:
+        try:
+            click.echo(json.dumps(_compute_return_period(run_id), sort_keys=True, default=str))
+        except (HindcastError, ReturnPeriodError) as error:
+            message = getattr(error, "message", str(error))
+            code = getattr(error, "error_code", "RETURN_PERIOD_ERROR")
+            click.echo(f"{code}: {message}", err=True)
+            raise SystemExit(1) from error
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -222,6 +249,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     fit_parser.add_argument("--supersede-model-id")
     fit_parser.add_argument("--verbose", action="store_true")
 
+    compute_parser = subparsers.add_parser("compute-return-period")
+    compute_parser.add_argument("--run-id", required=True)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "hindcast-submit":
@@ -246,7 +276,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result))
             return 0
-    except (HindcastError, FrequencyFitError) as error:
+        if args.command == "compute-return-period":
+            print(json.dumps(_compute_return_period(args.run_id), default=str))
+            return 0
+    except (HindcastError, FrequencyFitError, ReturnPeriodError) as error:
         message = getattr(error, "message", str(error))
         code = getattr(error, "error_code", "FREQUENCY_FIT_ERROR")
         print(f"{code}: {message}", file=sys.stderr)
