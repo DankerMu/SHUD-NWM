@@ -383,7 +383,7 @@ def write_frequency_qc_result(curve_id: str, curve_data: Mapping[str, Any], db_s
     )
 
 
-def supersede_old_curves(model_id: str, db_session: Session) -> int:
+def supersede_old_curves(old_model_id: str, db_session: Session) -> int:
     result = db_session.execute(
         text(
             """
@@ -393,7 +393,7 @@ def supersede_old_curves(model_id: str, db_session: Session) -> int:
               AND quality_flag NOT IN ('superseded_by_model_upgrade', 'fit_failed')
             """
         ),
-        {"model_id": model_id},
+        {"model_id": old_model_id},
     )
     return int(result.rowcount or 0)
 
@@ -509,6 +509,7 @@ def fit_curves(
     duration: str | None = None,
     method: str = "auto",
     dry_run: bool = False,
+    supersede_model_id: str | None = None,
 ) -> FitCurvesStats:
     durations = [_validate_duration(duration)] if duration else list(DURATION_HOURS)
     segments = [segment_id] if segment_id else _segments_for_model(model_id, db_session)
@@ -516,6 +517,10 @@ def fit_curves(
     succeeded = 0
     failed = 0
     skipped = 0
+
+    if supersede_model_id and not dry_run:
+        supersede_old_curves(supersede_model_id, db_session)
+        db_session.commit()
 
     for segment in segments:
         for item_duration in durations:
@@ -530,7 +535,9 @@ def fit_curves(
                     failed += 1
                 else:
                     succeeded += 1
+                db_session.commit()
             except Exception as error:
+                db_session.rollback()
                 failed += 1
                 items.append({"river_segment_id": segment, "duration": item_duration, "error": str(error)})
     if not dry_run:
@@ -551,6 +558,7 @@ def _annual_rows(
     db_session: Session,
 ) -> list[Mapping[str, Any]]:
     year_expr = _year_expr(db_session)
+    min_window_count = 1
     if window_hours == 1:
         statement = text(
             f"""
@@ -595,20 +603,34 @@ def _annual_rows(
                   AND rt.river_segment_id = :river_segment_id
                   AND rt.variable = 'q_down'
                   AND COALESCE(rt.quality_flag, 'ok') = 'ok'
+            ),
+            valid_windows AS (
+                SELECT *
+                FROM hourly
+                -- ROWS-based windows assume hourly model output intervals
+                -- (model_output_interval=1h), which is true for ERA5 hindcast.
+                WHERE window_count >= :min_window_count
             )
             SELECT
-                year,
-                COUNT(DISTINCT valid_time) AS available_hours,
-                MAX(CASE WHEN window_count >= {min_window_count} THEN window_avg END) AS annual_max
-            FROM hourly
-            GROUP BY year
-            ORDER BY year
+                h.year,
+                COUNT(DISTINCT h.valid_time) AS available_hours,
+                MAX(vw.window_avg) AS annual_max
+            FROM hourly h
+            LEFT JOIN valid_windows vw
+              ON vw.year = h.year
+             AND vw.valid_time = h.valid_time
+            GROUP BY h.year
+            ORDER BY h.year
             """
         )
     return list(
         db_session.execute(
             statement,
-            {"model_id": model_id, "river_segment_id": river_segment_id},
+            {
+                "model_id": model_id,
+                "river_segment_id": river_segment_id,
+                "min_window_count": min_window_count,
+            },
         ).mappings()
     )
 

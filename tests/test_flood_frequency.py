@@ -149,6 +149,45 @@ def test_cli_dry_run_no_db_writes() -> None:
         assert count["count"] == 0
 
 
+def test_fit_curves_supersedes_old_model_curves(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        session.execute(
+            text(
+                """
+                INSERT INTO core.model_instance (model_id, basin_version_id, river_network_version_id)
+                VALUES ('model_v2', 'basin_v1', 'rnv_v1')
+                """
+            )
+        )
+        _patch_annual(
+            monkeypatch,
+            AnnualMaximaResult(
+                samples=[(1980 + index, float(100 + index * 4 + (index % 5) * 3)) for index in range(40)],
+                excluded_years=[],
+                observed_years=list(range(1980, 2020)),
+            ),
+        )
+
+        result = fit_curves(
+            "model_v2",
+            session,
+            segment_id="seg_001",
+            duration="1h",
+            supersede_model_id="model_v1",
+        )
+
+        rows = session.execute(
+            text("SELECT model_id, quality_flag FROM flood.flood_frequency_curve ORDER BY model_id")
+        ).mappings()
+        flags = {str(row["model_id"]): str(row["quality_flag"]) for row in rows}
+        assert result.succeeded == 1
+        assert flags == {
+            "model_v1": "superseded_by_model_upgrade",
+            "model_v2": "ok",
+        }
+
+
 def test_argparse_cli_dry_run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     with _store() as session:
         monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
