@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.errors import ApiError
 from packages.common.forecast_store import ForecastStoreError, PsycopgForecastStore
@@ -12,6 +12,7 @@ router = APIRouter(prefix="/api/v1", tags=["forecast"])
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
+_HINDCAST_ACCESS_ROLES = {"analyst", "operator", "model_admin", "sys_admin"}
 
 
 def get_forecast_store() -> PsycopgForecastStore:
@@ -23,6 +24,7 @@ def get_forecast_store() -> PsycopgForecastStore:
 
 @router.get("/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series")
 def get_forecast_series(
+    request: Request,
     basin_version_id: str,
     segment_id: str,
     issue_time: str = Query(default="latest"),
@@ -32,6 +34,9 @@ def get_forecast_series(
     run_types: str | None = Query(default=None),
     store: PsycopgForecastStore = Depends(get_forecast_store),
 ) -> dict[str, Any]:
+    run_type_tokens = _split_query_list(run_types) if run_types is not None else None
+    if run_type_tokens is not None and "hindcast" in {token.lower() for token in run_type_tokens}:
+        _require_hindcast_access_role(request)
     try:
         return store.forecast_series(
             basin_version_id=basin_version_id,
@@ -40,7 +45,7 @@ def get_forecast_series(
             variables=_split_query_list(variables),
             scenarios=_split_query_list(scenarios),
             include_analysis=include_analysis,
-            run_types=_split_query_list(run_types) if run_types is not None else None,
+            run_types=run_type_tokens,
         )
     except ForecastStoreError as error:
         raise _api_error(error) from error
@@ -91,4 +96,15 @@ def _api_error(error: ForecastStoreError) -> ApiError:
         code=error.code,
         message=error.message,
         details=error.details,
+    )
+
+
+def _require_hindcast_access_role(request: Request) -> None:
+    role = request.headers.get("X-User-Role")
+    if role is not None and role.strip().lower() in _HINDCAST_ACCESS_ROLES:
+        return
+    raise ApiError(
+        status_code=403,
+        code="PERMISSION_DENIED",
+        message="Analyst, operator, or admin role required for hindcast series.",
     )

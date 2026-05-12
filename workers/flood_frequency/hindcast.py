@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-from sqlalchemy import inspect, text
+from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,8 @@ from workers.flood_frequency.config import HindcastConfig
 
 HINDCAST_SCENARIO_ID = "hindcast_replay"
 INSUFFICIENT_ERA5_COVERAGE = "INSUFFICIENT_ERA5_COVERAGE"
+TERMINAL_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 
 
 class HindcastError(RuntimeError):
@@ -43,6 +46,17 @@ class HindcastForcingResult:
 
 
 @dataclass(frozen=True)
+class Era5CoverageResult:
+    coverage: float
+    expected_pairs: int
+    actual_pairs: int
+    expected_hours: int
+    required_variables: tuple[str, ...]
+    missing_variables: list[str]
+    missing_by_variable: dict[str, int]
+
+
+@dataclass(frozen=True)
 class HindcastYearResult:
     run_id: str
     forcing_version_id: str
@@ -58,10 +72,12 @@ class HindcastSlurmResult:
 
 
 def run_id_for_year(model_id: str, year: int) -> str:
+    _validate_model_id(model_id)
     return f"hindcast_era5_{model_id}_{int(year)}"
 
 
 def forcing_version_id_for_year(model_id: str, year: int) -> str:
+    _validate_model_id(model_id)
     return f"forc_era5_hindcast_{model_id}_{int(year)}"
 
 
@@ -85,6 +101,7 @@ def submit_hindcast(
     purpose: str,
     db_session: Session,
 ) -> HindcastSubmitResult:
+    _validate_model_id(model_id)
     years = calendar_years(start_time, end_time)
     source_id = source_id.upper()
     model = _load_model_context(db_session, model_id)
@@ -98,7 +115,7 @@ def submit_hindcast(
                 text("SELECT status FROM hydro.hydro_run WHERE run_id = :run_id"),
                 {"run_id": run_id},
             ).mappings().first()
-            if existing is not None and str(existing["status"]) == "succeeded":
+            if existing is not None and str(existing["status"]) in TERMINAL_SUCCESS_STATUSES:
                 skipped_years.append(year)
                 continue
 
@@ -130,7 +147,7 @@ def submit_hindcast(
                         :model_id,
                         :basin_version_id,
                         :source_id,
-                        NULL,
+                        :cycle_time,
                         :start_time,
                         :end_time,
                         'created',
@@ -143,6 +160,7 @@ def submit_hindcast(
                     ON CONFLICT (run_id) DO UPDATE SET
                         status = 'created',
                         source_id = EXCLUDED.source_id,
+                        cycle_time = EXCLUDED.cycle_time,
                         start_time = EXCLUDED.start_time,
                         end_time = EXCLUDED.end_time,
                         run_manifest_uri = EXCLUDED.run_manifest_uri,
@@ -158,6 +176,7 @@ def submit_hindcast(
                     "model_id": model_id,
                     "basin_version_id": model["basin_version_id"],
                     "source_id": source_id,
+                    "cycle_time": year_start,
                     "start_time": year_start,
                     "end_time": year_end,
                     "run_manifest_uri": _run_manifest_uri(run_id),
@@ -180,12 +199,20 @@ def produce_hindcast_forcing(
     year: int,
     db_session: Session,
 ) -> HindcastForcingResult:
+    _validate_model_id(model_id)
     source_id = source_id.upper()
     if source_id != "ERA5":
         raise HindcastError("UNSUPPORTED_SOURCE", "Hindcast replay currently supports ERA5 only.")
     model = _load_model_context(db_session, model_id)
     start_time, end_time = _year_bounds(year)
-    coverage = _era5_coverage(db_session, source_id=source_id, start_time=start_time, end_time=end_time)
+    coverage_result = _era5_coverage(
+        db_session,
+        source_id=source_id,
+        start_time=start_time,
+        end_time=end_time,
+        required_variables=HindcastConfig.from_env().era5_required_variables,
+    )
+    coverage = coverage_result.coverage
     missing_rate = 1.0 - coverage
     forcing_version_id = forcing_version_id_for_year(model_id, year)
 
@@ -195,14 +222,20 @@ def produce_hindcast_forcing(
             target_id=forcing_version_id,
             run_id=run_id_for_year(model_id, year),
             passed=False,
-            checks_json={"coverage": coverage, "missing_rate": missing_rate},
+            checks_json=_coverage_checks_json(coverage_result),
             message="ERA5 canonical coverage is below the 90% hindcast threshold.",
         )
         db_session.commit()
         raise HindcastError(
             INSUFFICIENT_ERA5_COVERAGE,
             "ERA5 canonical coverage is below the 90% hindcast threshold.",
-            {"coverage": coverage, "missing_rate": missing_rate, "year": int(year)},
+            {
+                "coverage": coverage,
+                "missing_rate": missing_rate,
+                "year": int(year),
+                "missing_variables": coverage_result.missing_variables,
+                "missing_by_variable": coverage_result.missing_by_variable,
+            },
         )
 
     station_count = _station_count(db_session, model_id)
@@ -227,7 +260,7 @@ def produce_hindcast_forcing(
                     :forcing_version_id,
                     :model_id,
                     :source_id,
-                    NULL,
+                    :cycle_time,
                     :start_time,
                     :end_time,
                     :station_count,
@@ -236,6 +269,7 @@ def produce_hindcast_forcing(
                     :lineage_json
                 )
                 ON CONFLICT (forcing_version_id) DO UPDATE SET
+                    cycle_time = EXCLUDED.cycle_time,
                     start_time = EXCLUDED.start_time,
                     end_time = EXCLUDED.end_time,
                     station_count = EXCLUDED.station_count,
@@ -248,10 +282,11 @@ def produce_hindcast_forcing(
                 "forcing_version_id": forcing_version_id,
                 "model_id": model_id,
                 "source_id": source_id,
+                "cycle_time": start_time,
                 "start_time": start_time,
                 "end_time": end_time,
                 "station_count": station_count,
-                "forcing_package_uri": f"object://forcing/{forcing_version_id}",
+                "forcing_package_uri": _hindcast_forcing_package_uri(forcing_version_id),
                 "checksum": f"hindcast-{model['river_network_version_id']}-{year}",
                 "lineage_json": _json_param(db_session, lineage),
             },
@@ -261,7 +296,7 @@ def produce_hindcast_forcing(
             target_id=forcing_version_id,
             run_id=run_id_for_year(model_id, year),
             passed=True,
-            checks_json={"coverage": coverage, "missing_rate": missing_rate},
+            checks_json=_coverage_checks_json(coverage_result),
             message="ERA5 canonical coverage satisfies hindcast threshold.",
         )
         db_session.commit()
@@ -284,6 +319,7 @@ def hindcast_year(
     year: int,
     db_session: Session,
 ) -> HindcastYearResult:
+    _validate_model_id(model_id)
     run_id = run_id_for_year(model_id, year)
     forcing_version_id = forcing_version_id_for_year(model_id, year)
     try:
@@ -349,6 +385,7 @@ def submit_hindcast_slurm(
     years: Sequence[int],
     config: HindcastConfig,
 ) -> HindcastSlurmResult:
+    _validate_model_id(model_id)
     years = [int(year) for year in years]
     if not years:
         return HindcastSlurmResult(slurm_job_array_id=None, job_ids=[])
@@ -413,6 +450,7 @@ def submit_hindcast_slurm(
 
 
 def hindcast_status(model_id: str, db_session: Session) -> list[dict[str, Any]]:
+    _validate_model_id(model_id)
     rows = db_session.execute(
         text(
             """
@@ -447,6 +485,7 @@ def _year_bounds(year: int) -> tuple[datetime, datetime]:
 
 
 def _load_model_context(db_session: Session, model_id: str) -> dict[str, Any]:
+    _validate_model_id(model_id)
     row = db_session.execute(
         text(
             """
@@ -460,28 +499,90 @@ def _load_model_context(db_session: Session, model_id: str) -> dict[str, Any]:
     ).mappings().first()
     if row is None:
         raise HindcastError("MODEL_NOT_FOUND", f"Model not found: {model_id}", {"model_id": model_id})
-    return dict(row)
+    model = dict(row)
+    segment_count = _model_segment_count(db_session, str(model["river_network_version_id"]))
+    if segment_count is not None:
+        model["segment_count"] = segment_count
+    return model
 
 
-def _era5_coverage(db_session: Session, *, source_id: str, start_time: datetime, end_time: datetime) -> float:
+def _era5_coverage(
+    db_session: Session,
+    *,
+    source_id: str,
+    start_time: datetime,
+    end_time: datetime,
+    required_variables: Sequence[str],
+) -> Era5CoverageResult:
     expected_hours = int((end_time - start_time).total_seconds() // 3600)
-    if expected_hours <= 0:
-        return 0.0
+    variables = tuple(dict.fromkeys(str(variable) for variable in required_variables if str(variable)))
+    if expected_hours <= 0 or not variables:
+        return Era5CoverageResult(0.0, 0, 0, expected_hours, variables, list(variables), {})
+    statement = text(
+        """
+        SELECT variable, COUNT(DISTINCT valid_time) AS available_hours
+        FROM met.canonical_met_product
+        WHERE source_id = :source_id
+          AND valid_time >= :start_time
+          AND valid_time < :end_time
+          AND variable IN :variables
+          AND COALESCE(quality_flag, 'ok') = 'ok'
+        GROUP BY variable
+        """
+    ).bindparams(bindparam("variables", expanding=True))
+    rows = db_session.execute(
+        statement,
+        {"source_id": source_id, "start_time": start_time, "end_time": end_time, "variables": variables},
+    ).mappings()
+    counts = {str(row["variable"]): min(int(row["available_hours"] or 0), expected_hours) for row in rows}
+    expected_pairs = expected_hours * len(variables)
+    actual_pairs = sum(counts.get(variable, 0) for variable in variables)
+    missing_by_variable = {
+        variable: expected_hours - counts.get(variable, 0)
+        for variable in variables
+        if counts.get(variable, 0) < expected_hours
+    }
+    missing_variables = [variable for variable in variables if counts.get(variable, 0) == 0]
+    return Era5CoverageResult(
+        coverage=min(1.0, max(0.0, actual_pairs / expected_pairs)),
+        expected_pairs=expected_pairs,
+        actual_pairs=actual_pairs,
+        expected_hours=expected_hours,
+        required_variables=variables,
+        missing_variables=missing_variables,
+        missing_by_variable=missing_by_variable,
+    )
+
+
+def _coverage_checks_json(coverage: Era5CoverageResult) -> dict[str, Any]:
+    return {
+        "coverage": coverage.coverage,
+        "missing_rate": 1.0 - coverage.coverage,
+        "expected_pairs": coverage.expected_pairs,
+        "actual_pairs": coverage.actual_pairs,
+        "expected_hours": coverage.expected_hours,
+        "required_variables": list(coverage.required_variables),
+        "missing_variables": coverage.missing_variables,
+        "missing_by_variable": coverage.missing_by_variable,
+    }
+
+
+def _model_segment_count(db_session: Session, river_network_version_id: str) -> int | None:
+    bind = db_session.get_bind()
+    if not inspect(bind).has_table("river_network_version", schema="core"):
+        return None
     row = db_session.execute(
         text(
             """
-            SELECT COUNT(DISTINCT valid_time) AS available_hours
-            FROM met.canonical_met_product
-            WHERE source_id = :source_id
-              AND valid_time >= :start_time
-              AND valid_time < :end_time
-              AND COALESCE(quality_flag, 'ok') = 'ok'
+            SELECT segment_count
+            FROM core.river_network_version
+            WHERE river_network_version_id = :river_network_version_id
+            LIMIT 1
             """
         ),
-        {"source_id": source_id, "start_time": start_time, "end_time": end_time},
+        {"river_network_version_id": river_network_version_id},
     ).mappings().first()
-    available_hours = int(row["available_hours"] or 0) if row is not None else 0
-    return min(1.0, max(0.0, available_hours / expected_hours))
+    return int(row["segment_count"]) if row is not None and row["segment_count"] is not None else None
 
 
 def _station_count(db_session: Session, model_id: str) -> int:
@@ -586,20 +687,73 @@ def _write_hindcast_manifest(run_id: str, model_id: str, source_id: str, year: i
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = run_dir / "manifest.json"
     start_time, end_time = _year_bounds(year)
+    forcing_version_id = forcing_version_id_for_year(model_id, year)
+    model_section = {
+        "model_id": model_id,
+        "basin_version_id": model["basin_version_id"],
+        "river_network_version_id": model["river_network_version_id"],
+        "model_package_uri": model["model_package_uri"],
+    }
+    if model.get("segment_count") is not None:
+        model_section["segment_count"] = model["segment_count"]
     manifest = {
         "run_id": run_id,
         "run_type": "hindcast",
         "scenario_id": HINDCAST_SCENARIO_ID,
-        "model_id": model_id,
-        "basin_version_id": model["basin_version_id"],
-        "river_network_version_id": model["river_network_version_id"],
         "source_id": source_id.upper(),
-        "start_time": start_time.isoformat(),
-        "end_time": end_time.isoformat(),
-        "forcing": {"forcing_version_id": forcing_version_id_for_year(model_id, year)},
+        "cycle_time": _format_time(start_time),
+        "start_time": _format_time(start_time),
+        "end_time": _format_time(end_time),
+        "model": model_section,
+        "forcing": {
+            "forcing_version_id": forcing_version_id,
+            "forcing_uri": _load_forcing_package_uri(db_session, forcing_version_id)
+            or _hindcast_forcing_package_uri(forcing_version_id),
+        },
+        "initial_state": {
+            "state_id": None,
+            "ic_file_uri": None,
+            "valid_time": None,
+            "checksum": None,
+            "quality": "cold_start_no_state",
+        },
+        "runtime": {
+            "output_interval_minutes": 60,
+            "init_mode": 1,
+        },
+        "outputs": {
+            "run_manifest_uri": _run_manifest_uri(run_id),
+            "output_uri": _run_output_uri(run_id),
+            "log_uri": _run_log_uri(run_id),
+        },
     }
     manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     return manifest_path
+
+
+def _load_forcing_package_uri(db_session: Session, forcing_version_id: str) -> str | None:
+    row = db_session.execute(
+        text(
+            """
+            SELECT forcing_package_uri
+            FROM met.forcing_version
+            WHERE forcing_version_id = :forcing_version_id
+            LIMIT 1
+            """
+        ),
+        {"forcing_version_id": forcing_version_id},
+    ).mappings().first()
+    if row is None:
+        return None
+    return str(row["forcing_package_uri"])
+
+
+def _hindcast_forcing_package_uri(forcing_version_id: str) -> str:
+    return f"forcing/{forcing_version_id}/"
+
+
+def _format_time(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _run_manifest_uri(run_id: str) -> str:
@@ -615,9 +769,12 @@ def _run_log_uri(run_id: str) -> str:
 
 
 def _json_param(db_session: Session, value: dict[str, Any]) -> Any:
-    if db_session.get_bind().dialect.name == "sqlite":
-        return json.dumps(value, sort_keys=True)
-    return value
+    return json.dumps(value, sort_keys=True)
+
+
+def _validate_model_id(model_id: str) -> None:
+    if _SAFE_ID_RE.fullmatch(str(model_id)) is None:
+        raise HindcastError("INVALID_MODEL_ID", "model_id contains invalid characters.", {"model_id": model_id})
 
 
 def _table_exists(db_session: Session, schema: str, table_name: str) -> bool:

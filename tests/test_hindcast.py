@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from workers.flood_frequency.hindcast import (
     INSUFFICIENT_ERA5_COVERAGE,
     HindcastError,
     HindcastForcingResult,
+    _write_hindcast_manifest,
     calendar_years,
     hindcast_year,
     produce_hindcast_forcing,
@@ -56,6 +58,25 @@ def test_idempotent_skip_already_succeeded_year() -> None:
         assert result.total_runs == 1
         assert result.skipped_years == [1993]
         assert result.run_ids == [run_id_for_year("yangtze_shud_v12", 1994)]
+
+
+def test_idempotent_skip_already_parsed_year() -> None:
+    with _store() as session:
+        _insert_hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993), 1993, status="parsed")
+
+        result = submit_hindcast(
+            "yangtze_shud_v12",
+            "ERA5",
+            "1993-01-01T00:00:00Z",
+            "1993-12-31T23:00:00Z",
+            "flood_frequency_sample",
+            session,
+        )
+
+        assert result.total_runs == 0
+        assert result.skipped_years == [1993]
+        assert result.run_ids == []
+        assert _hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993))["status"] == "parsed"
 
 
 def test_single_year_full_flow_forcing_shud_parse_and_river_timeseries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,6 +124,7 @@ def test_single_year_full_flow_forcing_shud_parse_and_river_timeseries(monkeypat
         run = _hydro_run(session, result.run_id)
         assert run["status"] == "parsed"
         assert run["forcing_version_id"] == "forc_era5_hindcast_yangtze_shud_v12_1993"
+        assert run["cycle_time"] is not None
         assert _count(session, "hydro.river_timeseries") == 1
 
 
@@ -125,6 +147,20 @@ def test_forcing_incomplete_failure_marks_run_failed() -> None:
         run = _hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993))
         assert run["status"] == "failed"
         assert run["error_code"] == INSUFFICIENT_ERA5_COVERAGE
+
+
+def test_era5_coverage_reports_missing_required_variables() -> None:
+    with _store() as session:
+        _insert_era5_hours(session, 1993, 24 * 365, variables=("prcp_rate_or_amount",))
+
+        with pytest.raises(HindcastError) as exc_info:
+            produce_hindcast_forcing("yangtze_shud_v12", "ERA5", 1993, session)
+
+        assert exc_info.value.error_code == INSUFFICIENT_ERA5_COVERAGE
+        assert "air_temperature_2m" in exc_info.value.details["missing_variables"]
+        qc = session.execute(text("SELECT checks_json FROM ops.qc_result")).mappings().one()
+        assert isinstance(qc["checks_json"], str)
+        assert '"missing_variables"' in qc["checks_json"]
 
 
 def test_failure_retry_resets_failed_hindcast_run() -> None:
@@ -169,6 +205,10 @@ def test_data_isolation_forecast_series_default_excludes_hindcast() -> None:
     try:
         with TestClient(app) as client:
             default = client.get("/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series")
+            denied = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?run_types=hindcast",
+                headers={"X-User-Role": "viewer"},
+            )
             explicit = client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?run_types=hindcast",
                 headers={"X-User-Role": "analyst"},
@@ -178,10 +218,26 @@ def test_data_isolation_forecast_series_default_excludes_hindcast() -> None:
 
     assert default.status_code == 200
     assert default.json()["series"] == []
+    assert denied.status_code == 403
     assert explicit.status_code == 200
     assert explicit.json()["series"][0]["scenario_id"] == "hindcast_replay"
     assert store.calls[0]["run_types"] is None
     assert store.calls[1]["run_types"] == ["hindcast"]
+
+
+def test_forecast_series_unsupported_variable_returns_empty_response() -> None:
+    store = forecast_routes.PsycopgForecastStore("postgresql://test")
+
+    response = store.forecast_series(
+        basin_version_id="basin_v1",
+        segment_id="seg_001",
+        issue_time="latest",
+        variables=["temperature"],
+        scenarios=["GFS"],
+    )
+
+    assert response["series"] == []
+    assert response["issue_time"] is None
 
 
 def test_hindcast_submit_input_validation() -> None:
@@ -261,8 +317,29 @@ def test_produce_hindcast_forcing_success_lineage() -> None:
             {"id": result.forcing_version_id},
         ).mappings().one()
         assert result.coverage == pytest.approx(1.0)
+        assert isinstance(row["lineage_json"], str)
         assert '"purpose": "hindcast"' in row["lineage_json"]
         assert '"year": 1993' in row["lineage_json"]
+        qc = session.execute(text("SELECT checks_json FROM ops.qc_result WHERE passed = 1")).mappings().one()
+        assert isinstance(qc["checks_json"], str)
+        assert '"required_variables"' in qc["checks_json"]
+
+
+def test_hindcast_manifest_uses_shud_nested_schema(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _store() as session:
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        _insert_era5_hours(session, 1993, 24 * 365)
+        forcing = produce_hindcast_forcing("yangtze_shud_v12", "ERA5", 1993, session)
+        run_id = run_id_for_year("yangtze_shud_v12", 1993)
+
+        manifest_path = _write_hindcast_manifest(run_id, "yangtze_shud_v12", "ERA5", 1993, session)
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["cycle_time"] == "1993-01-01T00:00:00Z"
+        assert manifest["model"]["model_id"] == "yangtze_shud_v12"
+        assert manifest["model"]["model_package_uri"] == "object://models/yangtze"
+        assert manifest["forcing"]["forcing_version_id"] == forcing.forcing_version_id
+        assert manifest["forcing"]["forcing_uri"] == "forcing/forc_era5_hindcast_yangtze_shud_v12_1993/"
 
 
 class _FakeSlurmClient:
@@ -372,6 +449,7 @@ def _create_tables(connection: Any) -> None:
             CREATE TABLE met.canonical_met_product (
                 canonical_product_id TEXT PRIMARY KEY,
                 source_id TEXT NOT NULL,
+                variable TEXT NOT NULL,
                 valid_time DATETIME NOT NULL,
                 quality_flag TEXT DEFAULT 'ok'
             )
@@ -544,24 +622,41 @@ def _insert_hydro_run(
     session.commit()
 
 
-def _insert_era5_hours(session: Session, year: int, hours: int) -> None:
+def _insert_era5_hours(
+    session: Session,
+    year: int,
+    hours: int,
+    *,
+    variables: tuple[str, ...] | None = None,
+) -> None:
     start = datetime(year, 1, 1, tzinfo=UTC)
+    variables = variables or (
+        "prcp_rate_or_amount",
+        "air_temperature_2m",
+        "relative_humidity_2m",
+        "wind_u_10m",
+        "wind_v_10m",
+        "pressure_surface",
+        "net_radiation",
+    )
     rows = [
         {
-            "canonical_product_id": f"era5_{year}_{index}",
+            "canonical_product_id": f"era5_{year}_{variable}_{index}",
             "source_id": "ERA5",
+            "variable": variable,
             "valid_time": start + timedelta(hours=index),
             "quality_flag": "ok",
         }
+        for variable in variables
         for index in range(hours)
     ]
     session.execute(
         text(
             """
             INSERT INTO met.canonical_met_product (
-                canonical_product_id, source_id, valid_time, quality_flag
+                canonical_product_id, source_id, variable, valid_time, quality_flag
             )
-            VALUES (:canonical_product_id, :source_id, :valid_time, :quality_flag)
+            VALUES (:canonical_product_id, :source_id, :variable, :valid_time, :quality_flag)
             """
         ),
         rows,

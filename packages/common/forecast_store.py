@@ -62,7 +62,7 @@ class PsycopgForecastStore:
                     issue_time=None,
                     variable=_response_variable_name(requested_variables),
                 )
-                return _empty_forecast_response(segment_id=segment_id, issue_time=None)
+            return _empty_forecast_response(segment_id=segment_id, issue_time=None)
 
         run_type_tokens = _run_type_tokens(run_types)
         scenario_filter = _scenario_filter(scenarios)

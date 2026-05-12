@@ -9,11 +9,13 @@ from collections.abc import Sequence
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.hindcast import (
     HindcastError,
     hindcast_status,
     hindcast_year,
     submit_hindcast,
+    submit_hindcast_slurm,
 )
 
 
@@ -27,10 +29,27 @@ def _session_from_env() -> Session:
 def _hindcast_submit(model_id: str, source_id: str, start_time: str, end_time: str, purpose: str) -> dict[str, object]:
     with _session_from_env() as session:
         result = submit_hindcast(model_id, source_id, start_time, end_time, purpose, session)
+        years = _years_from_run_ids(result.run_ids)
+        config = HindcastConfig.from_env()
+        slurm = submit_hindcast_slurm(
+            model_id,
+            source_id,
+            years,
+            HindcastConfig(
+                workspace_root=config.workspace_root,
+                object_store_root=config.object_store_root,
+                object_store_prefix=config.object_store_prefix,
+                slurm_gateway_url=config.slurm_gateway_url,
+                slurm_client=config.slurm_client,
+                db_session=session,
+                era5_required_variables=config.era5_required_variables,
+            ),
+        )
         return {
             "total_runs": result.total_runs,
             "run_ids": result.run_ids,
             "skipped_years": result.skipped_years,
+            "slurm_job_array_id": slurm.slurm_job_array_id,
         }
 
 
@@ -49,6 +68,16 @@ def _hindcast_year(model_id: str, source_id: str, year: int) -> dict[str, object
 def _hindcast_status(model_id: str) -> dict[str, object]:
     with _session_from_env() as session:
         return {"items": hindcast_status(model_id, session)}
+
+
+def _years_from_run_ids(run_ids: list[str]) -> list[int]:
+    years: list[int] = []
+    for run_id in run_ids:
+        try:
+            years.append(int(run_id.rsplit("_", maxsplit=1)[1]))
+        except (IndexError, ValueError):
+            continue
+    return years
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:
