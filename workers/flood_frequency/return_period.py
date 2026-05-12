@@ -139,7 +139,7 @@ def get_frequency_curve(
               AND river_network_version_id = :river_network_version_id
               AND river_segment_id = :river_segment_id
               AND duration = '1h'
-              AND quality_flag IN ('ok', 'partial_sample', 'monotonicity_corrected')
+              AND quality_flag IN ('ok', 'partial_sample', 'monotonicity_corrected', 'p3_fallback_gev')
             ORDER BY sample_period_end DESC, sample_period_start DESC, curve_id DESC
             LIMIT 1
             """
@@ -201,7 +201,10 @@ def map_warning_level(
 ) -> str | None:
     if curve_quality_flag in {"fit_failed", "no_valid_sample"} or return_period is None:
         return None
-    raw_level = _raw_warning_level(float(return_period))
+    rp = float(return_period)
+    if not math.isfinite(rp):
+        return None
+    raw_level = _raw_warning_level(rp)
     max_index = _highest_reliable_warning_index(sample_quality or {})
     return WARNING_LEVELS[min(WARNING_LEVELS.index(raw_level), max_index)]
 
