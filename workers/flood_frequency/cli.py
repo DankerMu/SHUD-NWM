@@ -49,6 +49,7 @@ def _hindcast_submit(model_id: str, source_id: str, start_time: str, end_time: s
             "total_runs": result.total_runs,
             "run_ids": result.run_ids,
             "skipped_years": result.skipped_years,
+            "active_years": result.active_years,
             "slurm_job_array_id": slurm.slurm_job_array_id,
         }
 

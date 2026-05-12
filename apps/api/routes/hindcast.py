@@ -70,7 +70,7 @@ def submit_hindcast_api(
             details={"source_id": body.source_id},
         )
     _validate_time_range(body.start_time, body.end_time)
-    _require_model_exists(session, body.model_id)
+    basin_version_id = _require_model_exists(session, body.model_id)
 
     try:
         result = submit_hindcast(
@@ -90,7 +90,17 @@ def submit_hindcast_api(
             slurm_client=config.slurm_client,
             db_session=session,
         )
-        slurm = submit_hindcast_slurm(body.model_id, body.source_id, years, slurm_config) if years else None
+        slurm = (
+            submit_hindcast_slurm(
+                body.model_id,
+                body.source_id,
+                years,
+                slurm_config,
+                basin_version_id=basin_version_id,
+            )
+            if years
+            else None
+        )
     except HindcastError as error:
         raise _api_error(error) from error
 
@@ -100,6 +110,7 @@ def submit_hindcast_api(
             "total_runs": result.total_runs,
             "run_ids": result.run_ids,
             "skipped_years": result.skipped_years,
+            "active_years": result.active_years,
             "slurm_job_array_id": slurm.slurm_job_array_id if slurm is not None else None,
         },
     )
@@ -128,11 +139,11 @@ def _validate_time_range(start_time: str, end_time: str) -> None:
         ) from error
 
 
-def _require_model_exists(session: Session, model_id: str) -> None:
+def _require_model_exists(session: Session, model_id: str) -> str:
     row = session.execute(
-        text("SELECT model_id FROM core.model_instance WHERE model_id = :model_id LIMIT 1"),
+        text("SELECT model_id, basin_version_id FROM core.model_instance WHERE model_id = :model_id LIMIT 1"),
         {"model_id": model_id},
-    ).first()
+    ).mappings().first()
     if row is None:
         raise ApiError(
             status_code=404,
@@ -140,6 +151,7 @@ def _require_model_exists(session: Session, model_id: str) -> None:
             message=f"Model not found: {model_id}",
             details={"model_id": model_id},
         )
+    return str(row["basin_version_id"])
 
 
 def _years_from_run_ids(run_ids: list[str]) -> list[int]:

@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -57,6 +58,7 @@ def test_idempotent_skip_already_succeeded_year() -> None:
 
         assert result.total_runs == 1
         assert result.skipped_years == [1993]
+        assert result.active_years == []
         assert result.run_ids == [run_id_for_year("yangtze_shud_v12", 1994)]
 
 
@@ -75,8 +77,35 @@ def test_idempotent_skip_already_parsed_year() -> None:
 
         assert result.total_runs == 0
         assert result.skipped_years == [1993]
+        assert result.active_years == []
         assert result.run_ids == []
         assert _hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993))["status"] == "parsed"
+
+
+def test_submit_hindcast_skips_active_years_without_resetting() -> None:
+    with _store() as session:
+        running_id = run_id_for_year("yangtze_shud_v12", 1993)
+        submitted_id = run_id_for_year("yangtze_shud_v12", 1994)
+        _insert_hydro_run(session, running_id, 1993, status="running", error_code="KEEP_RUNNING")
+        _insert_hydro_run(session, submitted_id, 1994, status="submitted", error_code="KEEP_SUBMITTED")
+
+        result = submit_hindcast(
+            "yangtze_shud_v12",
+            "ERA5",
+            "1993-01-01T00:00:00Z",
+            "1995-12-31T23:00:00Z",
+            "flood_frequency_sample",
+            session,
+        )
+
+        assert result.total_runs == 1
+        assert result.active_years == [1993, 1994]
+        assert result.skipped_years == []
+        assert result.run_ids == [run_id_for_year("yangtze_shud_v12", 1995)]
+        assert _hydro_run(session, running_id)["status"] == "running"
+        assert _hydro_run(session, running_id)["error_code"] == "KEEP_RUNNING"
+        assert _hydro_run(session, submitted_id)["status"] == "submitted"
+        assert _hydro_run(session, submitted_id)["error_code"] == "KEEP_SUBMITTED"
 
 
 def test_single_year_full_flow_forcing_shud_parse_and_river_timeseries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,6 +354,37 @@ def test_produce_hindcast_forcing_success_lineage() -> None:
         assert '"required_variables"' in qc["checks_json"]
 
 
+def test_produce_hindcast_forcing_subthreshold_gap_marks_incomplete_forcing() -> None:
+    with _store() as session:
+        _insert_era5_hours(session, 1993, int(24 * 365 * 0.95))
+
+        result = produce_hindcast_forcing("yangtze_shud_v12", "ERA5", 1993, session)
+
+        assert result.missing_rate == pytest.approx(0.05)
+        qc = session.execute(text("SELECT checks_json FROM ops.qc_result WHERE passed = 1")).mappings().one()
+        checks = json.loads(qc["checks_json"])
+        assert checks["quality_flag"] == "incomplete_forcing"
+
+
+def test_produce_hindcast_forcing_uses_producer_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    produced = SimpleNamespace(
+        forcing_version_id="forc_era5_1993010100_yangtze_shud_v12",
+        forcing_package_uri="forcing/era5/1993010100/basin_v1/yangtze_shud_v12/",
+    )
+
+    with _store() as session:
+        _insert_era5_hours(session, 1993, 24 * 365)
+        monkeypatch.setattr(
+            "workers.flood_frequency.hindcast._produce_forcing_package_with_producer",
+            lambda **_kwargs: produced,
+        )
+
+        result = produce_hindcast_forcing("yangtze_shud_v12", "ERA5", 1993, session)
+
+        assert result.forcing_version_id == produced.forcing_version_id
+        assert result.forcing_package_uri == produced.forcing_package_uri
+
+
 def test_hindcast_manifest_uses_shud_nested_schema(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with _store() as session:
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
@@ -340,12 +400,37 @@ def test_hindcast_manifest_uses_shud_nested_schema(monkeypatch: pytest.MonkeyPat
         assert manifest["model"]["model_package_uri"] == "object://models/yangtze"
         assert manifest["forcing"]["forcing_version_id"] == forcing.forcing_version_id
         assert manifest["forcing"]["forcing_uri"] == "forcing/forc_era5_hindcast_yangtze_shud_v12_1993/"
+        assert manifest["outputs"]["run_manifest_uri"] == f"runs/{run_id}/input/manifest.json"
+        assert manifest["outputs"]["output_uri"] == f"runs/{run_id}/output/"
+        assert not manifest["outputs"]["run_manifest_uri"].startswith("object://")
+
+
+def test_hindcast_run_uris_use_plain_object_keys() -> None:
+    with _store() as session:
+        run_id = run_id_for_year("yangtze_shud_v12", 1993)
+
+        submit_hindcast(
+            "yangtze_shud_v12",
+            "ERA5",
+            "1993-01-01T00:00:00Z",
+            "1993-12-31T23:00:00Z",
+            "flood_frequency_sample",
+            session,
+        )
+
+        run = _hydro_run(session, run_id)
+        assert run["run_manifest_uri"] == f"runs/{run_id}/input/manifest.json"
+        assert run["output_uri"] == f"runs/{run_id}/output/"
+        assert run["log_uri"] == f"runs/{run_id}/logs/hindcast.log"
+        assert not run["run_manifest_uri"].startswith("object://")
 
 
 class _FakeSlurmClient:
     def submit_job_array(self, payload: dict[str, Any]) -> dict[str, Any]:
         assert payload["job_type"] == "hindcast"
         assert payload["tasks"][0]["array_task_id"] == 0
+        assert payload["tasks"][0]["basin_version_id"] == "basin_v1"
+        assert payload["manifest"]["basin_version_id"] == "basin_v1"
         return {"job_id": "slurm_array_1", "status": "submitted"}
 
 
@@ -614,7 +699,7 @@ def _insert_hydro_run(
             "start_time": datetime(year, 1, 1, tzinfo=UTC),
             "end_time": datetime(year + 1, 1, 1, tzinfo=UTC),
             "status": status,
-            "run_manifest_uri": f"object://runs/{run_id}/manifest.json",
+            "run_manifest_uri": f"runs/{run_id}/input/manifest.json",
             "error_code": error_code,
             "error_message": error_code,
         },
