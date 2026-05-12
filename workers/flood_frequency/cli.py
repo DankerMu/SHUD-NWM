@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from workers.flood_frequency.config import HindcastConfig
+from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
 from workers.flood_frequency.hindcast import (
     HindcastError,
     hindcast_status,
@@ -71,6 +72,36 @@ def _hindcast_status(model_id: str) -> dict[str, object]:
         return {"items": hindcast_status(model_id, session)}
 
 
+def _fit_curves(
+    model_id: str,
+    segment_id: str | None,
+    duration: str | None,
+    method: str,
+    dry_run: bool,
+    supersede_model_id: str | None = None,
+    verbose: bool = False,
+) -> dict[str, object]:
+    with _session_from_env() as session:
+        result = fit_curves(
+            model_id,
+            session,
+            segment_id=segment_id,
+            duration=duration,
+            method=method,
+            dry_run=dry_run,
+            supersede_model_id=supersede_model_id,
+        )
+        output: dict[str, object] = {
+            "total_segments": result.total_segments,
+            "succeeded": result.succeeded,
+            "failed": result.failed,
+            "skipped": result.skipped,
+        }
+        if verbose or result.total_segments <= 20:
+            output["items"] = result.items
+        return output
+
+
 def _years_from_run_ids(run_ids: list[str]) -> list[int]:
     years: list[int] = []
     for run_id in run_ids:
@@ -121,6 +152,44 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("fit-curves")
+    @click.option("--model-id", required=True)
+    @click.option("--segment-id")
+    @click.option("--duration", type=click.Choice(["1h", "3h", "6h", "24h", "72h", "7d"]))
+    @click.option("--method", type=click.Choice(["P-III", "GEV", "auto"]), default="auto", show_default=True)
+    @click.option("--dry-run", is_flag=True)
+    @click.option("--supersede-model-id")
+    @click.option("--verbose", is_flag=True)
+    def fit_curves_command(
+        model_id: str,
+        segment_id: str | None,
+        duration: str | None,
+        method: str,
+        dry_run: bool,
+        supersede_model_id: str | None,
+        verbose: bool,
+    ) -> None:
+        try:
+            click.echo(
+                json.dumps(
+                    _fit_curves(
+                        model_id,
+                        segment_id,
+                        duration,
+                        method,
+                        dry_run,
+                        supersede_model_id=supersede_model_id,
+                        verbose=verbose,
+                    ),
+                    sort_keys=True,
+                )
+            )
+        except (HindcastError, FrequencyFitError) as error:
+            message = getattr(error, "message", str(error))
+            code = getattr(error, "error_code", "FREQUENCY_FIT_ERROR")
+            click.echo(f"{code}: {message}", err=True)
+            raise SystemExit(1) from error
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -144,6 +213,15 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     status_parser = subparsers.add_parser("hindcast-status")
     status_parser.add_argument("--model-id", required=True)
 
+    fit_parser = subparsers.add_parser("fit-curves")
+    fit_parser.add_argument("--model-id", required=True)
+    fit_parser.add_argument("--segment-id")
+    fit_parser.add_argument("--duration", choices=["1h", "3h", "6h", "24h", "72h", "7d"])
+    fit_parser.add_argument("--method", choices=["P-III", "GEV", "auto"], default="auto")
+    fit_parser.add_argument("--dry-run", action="store_true")
+    fit_parser.add_argument("--supersede-model-id")
+    fit_parser.add_argument("--verbose", action="store_true")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "hindcast-submit":
@@ -156,8 +234,22 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         if args.command == "hindcast-status":
             print(json.dumps(_hindcast_status(args.model_id), default=str))
             return 0
-    except HindcastError as error:
-        print(f"{error.error_code}: {error.message}", file=sys.stderr)
+        if args.command == "fit-curves":
+            result = _fit_curves(
+                args.model_id,
+                args.segment_id,
+                args.duration,
+                args.method,
+                args.dry_run,
+                supersede_model_id=args.supersede_model_id,
+                verbose=args.verbose,
+            )
+            print(json.dumps(result))
+            return 0
+    except (HindcastError, FrequencyFitError) as error:
+        message = getattr(error, "message", str(error))
+        code = getattr(error, "error_code", "FREQUENCY_FIT_ERROR")
+        print(f"{code}: {message}", file=sys.stderr)
         return 1
     parser.error(f"Unsupported command: {args.command}")
     return 2
