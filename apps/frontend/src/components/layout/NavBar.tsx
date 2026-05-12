@@ -3,8 +3,9 @@ import { NavLink } from 'react-router-dom'
 import { cn } from '@/lib/cn'
 
 const links = [
-  { to: '/', label: '预报' },
-  { to: '/monitoring', label: '监控' },
+  { to: '/', label: '水文预报' },
+  { to: '/flood-alerts', label: '洪水预警' },
+  { to: '/monitoring', label: '产品监控' },
 ]
 
 export function NavBar() {

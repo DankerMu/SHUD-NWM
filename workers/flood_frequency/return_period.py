@@ -309,12 +309,68 @@ def _compute_return_periods(
             rows_written += 1
 
     _mark_frequency_succeeded(db_session, context, started_at)
+    register_flood_tile_layer(run_id, db_session)
     return ReturnPeriodComputationStats(
         total_segments=len(segment_ids),
         with_curve=sum(1 for curve in curves.values() if curve is not None),
         without_curve=sum(1 for curve in curves.values() if curve is None),
         warning_counts={level: int(warning_counts.get(level, 0)) for level in WARNING_LEVELS},
         rows_written=rows_written,
+    )
+
+
+def register_flood_tile_layer(run_id: str, db_session: Session) -> None:
+    """Register the vector tile layer metadata for a computed flood warning run."""
+    if not _table_exists(db_session, "map", "tile_layer"):
+        LOGGER.info("Skipping flood tile layer registration; map.tile_layer is unavailable")
+        return
+
+    columns = _table_columns(db_session, "map", "tile_layer")
+    context = _load_run_context(run_id, db_session)
+    layer_id = f"flood_return_period_{run_id}"
+    tile_uri_template = (
+        f"/api/v1/tiles/flood-return-period/{run_id}/{{duration}}/{{valid_time}}/{{z}}/{{x}}/{{y}}.pbf"
+    )
+    style_json = {
+        "source_layer": "flood_return_period",
+        "warning_level_property": "warning_level",
+        "return_period_property": "return_period",
+        "zoom": {"min": 0, "max": 14},
+    }
+    values: dict[str, Any] = {
+        "layer_id": layer_id,
+        "layer_type": "flood_return_period",
+        "source_run_id": run_id,
+        "source_product_id": None,
+        "variable": "return_period",
+        "valid_time": None,
+        "tile_format": "pbf",
+        "tile_uri_template": tile_uri_template,
+        "min_zoom": 0,
+        "max_zoom": 14,
+        "style_json": json.dumps(style_json),
+        "published_flag": True,
+        "publish_time": datetime.now(UTC),
+        "created_at": datetime.now(UTC),
+    }
+    if "source_product_id" in columns and context.get("scenario_id"):
+        values["source_product_id"] = str(context["scenario_id"])
+
+    insert_columns = [column for column in values if column in columns]
+    assignments = [
+        f"{column} = EXCLUDED.{column}"
+        for column in insert_columns
+        if column not in {"layer_id", "created_at"}
+    ]
+    db_session.execute(
+        text(
+            f"""
+            INSERT INTO map.tile_layer ({', '.join(insert_columns)})
+            VALUES ({', '.join(f':{column}' for column in insert_columns)})
+            ON CONFLICT (layer_id) DO UPDATE SET {', '.join(assignments)}
+            """
+        ),
+        values,
     )
 
 
@@ -682,11 +738,14 @@ def _json_loads(value: Any) -> dict[str, Any]:
 
 def _table_exists(db_session: Session, schema: str, table_name: str) -> bool:
     if _dialect_name(db_session) == "sqlite":
-        row = db_session.execute(
-            text(f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = :table_name LIMIT 1"),
-            {"table_name": table_name},
-        ).first()
-        return row is not None
+        try:
+            row = db_session.execute(
+                text(f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = :table_name LIMIT 1"),
+                {"table_name": table_name},
+            ).first()
+            return row is not None
+        except SQLAlchemyError:
+            return False
     try:
         return inspect(db_session.get_bind()).has_table(table_name, schema=schema)
     except SQLAlchemyError:

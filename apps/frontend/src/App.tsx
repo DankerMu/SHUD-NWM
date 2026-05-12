@@ -7,6 +7,9 @@ import { RBACGate } from '@/components/layout/RBACGate'
 const ForecastPage = lazy(() =>
   import('./pages/ForecastPage').then((module) => ({ default: module.ForecastPage })),
 )
+const FloodAlertPage = lazy(() =>
+  import('./pages/FloodAlertPage').then((module) => ({ default: module.FloodAlertPage })),
+)
 const MonitoringPage = lazy(() =>
   import('./pages/MonitoringPage').then((module) => ({ default: module.MonitoringPage })),
 )
@@ -18,6 +21,7 @@ export default function App() {
         <Suspense fallback={<div>加载中...</div>}>
           <Routes>
             <Route path="/" element={<ForecastPage />} />
+            <Route path="/flood-alerts" element={<FloodAlertPage />} />
             <Route
               path="/monitoring"
               element={
