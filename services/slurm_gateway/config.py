@@ -13,6 +13,7 @@ DEFAULT_JOB_TYPE_TEMPLATES = {
     "parse_output_array": "parse_output_array.sbatch",
     "compute_frequency_array": "compute_frequency_array.sbatch",
     "publish_tiles": "publish_tiles.sbatch",
+    "hindcast": "hindcast.sbatch",
 }
 
 

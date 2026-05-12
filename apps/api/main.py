@@ -9,6 +9,7 @@ from apps.api.errors import register_error_handlers
 from apps.api.routes.best_available import router as best_available_router
 from apps.api.routes.data_sources import router as data_sources_router
 from apps.api.routes.forecast import router as forecast_router
+from apps.api.routes.hindcast import router as hindcast_router
 from apps.api.routes.models import router as models_router
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
@@ -27,6 +28,7 @@ app = FastAPI(
 register_error_handlers(app)
 app.include_router(models_router)
 app.include_router(forecast_router)
+app.include_router(hindcast_router)
 app.include_router(best_available_router)
 app.include_router(data_sources_router)
 app.include_router(state_snapshots_router)

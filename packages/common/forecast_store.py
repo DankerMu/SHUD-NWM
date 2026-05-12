@@ -52,6 +52,7 @@ class PsycopgForecastStore:
         variables: Sequence[str],
         scenarios: Sequence[str],
         include_analysis: bool = False,
+        run_types: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         requested_variables = _normalized_tokens(variables)
         if "q_down" not in requested_variables:
@@ -63,9 +64,29 @@ class PsycopgForecastStore:
                 )
             return _empty_forecast_response(segment_id=segment_id, issue_time=None)
 
+        run_type_tokens = _run_type_tokens(run_types)
         scenario_filter = _scenario_filter(scenarios)
         with self._transaction() as cursor:
             self._validate_series_target(cursor, basin_version_id=basin_version_id, segment_id=segment_id)
+
+            if "hindcast" in run_type_tokens and not include_analysis:
+                parsed_issue_time = None if issue_time == "latest" else _parse_datetime(issue_time)
+                selected_issue_time = parsed_issue_time or self._latest_run_type_valid_time(
+                    cursor,
+                    basin_version_id=basin_version_id,
+                    segment_id=segment_id,
+                    run_types=run_type_tokens,
+                )
+                if selected_issue_time is None:
+                    return _empty_forecast_response(segment_id=segment_id, issue_time=None)
+                rows = self._fetch_run_type_segment_rows(
+                    cursor,
+                    basin_version_id=basin_version_id,
+                    segment_id=segment_id,
+                    run_types=run_type_tokens,
+                    end_time=selected_issue_time,
+                )
+                return _forecast_response_from_rows(segment_id=segment_id, issue_time=selected_issue_time, rows=rows)
 
             parsed_issue_time = None if issue_time == "latest" else _parse_datetime(issue_time)
             latest_cycles_by_scenario: dict[str, datetime] = {}
@@ -379,6 +400,65 @@ class PsycopgForecastStore:
             (basin_version_id, segment_id, issue_time, issue_time, forecast_end, *scenario_filter.params),
         )
 
+    def _latest_run_type_valid_time(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        run_types: Sequence[str],
+    ) -> datetime | None:
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT MAX(rt.valid_time) AS valid_time
+            FROM hydro.river_timeseries rt
+            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
+            WHERE rt.basin_version_id = %s
+              AND rt.river_segment_id = %s
+              AND rt.variable = 'q_down'
+              AND LOWER(h.run_type) = ANY(%s)
+            """,
+            (basin_version_id, segment_id, list(run_types)),
+        )
+        return _ensure_utc(row["valid_time"]) if row is not None and row.get("valid_time") is not None else None
+
+    def _fetch_run_type_segment_rows(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        run_types: Sequence[str],
+        end_time: datetime,
+    ) -> list[dict[str, Any]]:
+        start_time = end_time - timedelta(days=7)
+        return self._fetch_all(
+            cursor,
+            """
+            SELECT
+                h.scenario_id,
+                h.source_id,
+                h.cycle_time,
+                h.end_time AS run_end_time,
+                fv.lineage_json,
+                rt.valid_time,
+                rt.value,
+                rt.unit
+            FROM hydro.river_timeseries rt
+            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
+            LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
+            WHERE rt.basin_version_id = %s
+              AND rt.river_segment_id = %s
+              AND rt.variable = 'q_down'
+              AND LOWER(h.run_type) = ANY(%s)
+              AND rt.valid_time >= %s
+              AND rt.valid_time <= %s
+            ORDER BY h.scenario_id, rt.valid_time
+            """,
+            (basin_version_id, segment_id, list(run_types), start_time, end_time),
+        )
+
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._transaction() as cursor:
             row = self._fetch_optional(
@@ -684,6 +764,13 @@ def _scenario_filter(scenarios: Sequence[str]) -> _ScenarioFilter:
         "AND (LOWER(h.source_id) = ANY(%s) OR LOWER(h.scenario_id) = ANY(%s))",
         (list(source_ids), sorted(scenario_ids)),
     )
+
+
+def _run_type_tokens(run_types: Sequence[str] | None) -> list[str]:
+    tokens = _normalized_tokens(run_types or [])
+    if not tokens:
+        return ["forecast"]
+    return tokens
 
 
 def _normalized_tokens(values: Sequence[str]) -> list[str]:
