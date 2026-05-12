@@ -86,7 +86,13 @@ class PsycopgForecastStore:
                     run_types=run_type_tokens,
                     end_time=selected_issue_time,
                 )
-                return _forecast_response_from_rows(segment_id=segment_id, issue_time=selected_issue_time, rows=rows)
+                thresholds = self._frequency_thresholds_for_rows(cursor, rows, segment_id=segment_id)
+                return _forecast_response_from_rows(
+                    segment_id=segment_id,
+                    issue_time=selected_issue_time,
+                    rows=rows,
+                    frequency_thresholds=thresholds,
+                )
 
             parsed_issue_time = None if issue_time == "latest" else _parse_datetime(issue_time)
             latest_cycles_by_scenario: dict[str, datetime] = {}
@@ -132,12 +138,14 @@ class PsycopgForecastStore:
                     cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
                     end_time=forecast_end,
                 )
+                thresholds = self._frequency_thresholds_for_rows(cursor, forecast_rows, segment_id=segment_id)
                 return _spliced_response_from_rows(
                     river_segment_id=segment_id,
                     issue_time=selected_issue_time,
                     variable=_response_variable_name(requested_variables),
                     analysis_rows=analysis_rows,
                     forecast_rows=forecast_rows,
+                    frequency_thresholds=thresholds,
                 )
 
             rows = self._fetch_forecast_segment_rows(
@@ -149,6 +157,7 @@ class PsycopgForecastStore:
                 cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
                 end_time=selected_issue_time + timedelta(days=7),
             )
+            thresholds = self._frequency_thresholds_for_rows(cursor, rows, segment_id=segment_id)
 
         if not rows and parsed_issue_time is not None:
             raise ForecastStoreError(
@@ -162,7 +171,12 @@ class PsycopgForecastStore:
                 },
             )
 
-        return _forecast_response_from_rows(segment_id=segment_id, issue_time=selected_issue_time, rows=rows)
+        return _forecast_response_from_rows(
+            segment_id=segment_id,
+            issue_time=selected_issue_time,
+            rows=rows,
+            frequency_thresholds=thresholds,
+        )
 
     def _validate_series_target(self, cursor: Any, *, basin_version_id: str, segment_id: str) -> None:
         basin = self._fetch_optional(
@@ -346,10 +360,12 @@ class PsycopgForecastStore:
                 )
                 SELECT
                     h.scenario_id,
+                    h.model_id,
                     h.source_id,
                     h.cycle_time,
                     h.end_time AS run_end_time,
                     fv.lineage_json,
+                    rt.river_network_version_id,
                     rt.valid_time,
                     rt.value,
                     rt.unit
@@ -377,10 +393,12 @@ class PsycopgForecastStore:
             f"""
             SELECT
                 h.scenario_id,
+                h.model_id,
                 h.source_id,
                 h.cycle_time,
                 h.end_time AS run_end_time,
                 fv.lineage_json,
+                rt.river_network_version_id,
                 rt.valid_time,
                 rt.value,
                 rt.unit
@@ -438,10 +456,12 @@ class PsycopgForecastStore:
             """
             SELECT
                 h.scenario_id,
+                h.model_id,
                 h.source_id,
                 h.cycle_time,
                 h.end_time AS run_end_time,
                 fv.lineage_json,
+                rt.river_network_version_id,
                 rt.valid_time,
                 rt.value,
                 rt.unit
@@ -458,6 +478,63 @@ class PsycopgForecastStore:
             """,
             (basin_version_id, segment_id, list(run_types), start_time, end_time),
         )
+
+    def _frequency_thresholds_for_rows(
+        self,
+        cursor: Any,
+        rows: Sequence[dict[str, Any]],
+        *,
+        segment_id: str,
+    ) -> dict[str, Any] | None:
+        for row in rows:
+            model_id = row.get("model_id")
+            river_network_version_id = row.get("river_network_version_id")
+            if model_id and river_network_version_id:
+                return self._fetch_frequency_thresholds(
+                    cursor,
+                    model_id=str(model_id),
+                    river_network_version_id=str(river_network_version_id),
+                    segment_id=segment_id,
+                )
+        return None
+
+    def _fetch_frequency_thresholds(
+        self,
+        cursor: Any,
+        *,
+        model_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any] | None:
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT q2, q5, q10, q20, q50, q100, parameters_json
+            FROM flood.flood_frequency_curve
+            WHERE model_id = %s
+              AND river_network_version_id = %s
+              AND river_segment_id = %s
+              AND duration = '1h'
+              AND quality_flag IN ('ok', 'partial_sample', 'monotonicity_corrected')
+            ORDER BY sample_period_end DESC
+            LIMIT 1
+            """,
+            (model_id, river_network_version_id, segment_id),
+        )
+        if row is None:
+            return None
+        thresholds: dict[str, Any] = {
+            "Q2": _optional_float(row.get("q2")),
+            "Q5": _optional_float(row.get("q5")),
+            "Q10": _optional_float(row.get("q10")),
+            "Q20": _optional_float(row.get("q20")),
+            "Q50": _optional_float(row.get("q50")),
+            "Q100": _optional_float(row.get("q100")),
+        }
+        sample_quality = _lineage_dict(row.get("parameters_json")).get("sample_quality")
+        if isinstance(sample_quality, dict):
+            thresholds["sample_quality"] = sample_quality
+        return thresholds
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._transaction() as cursor:
@@ -880,9 +957,12 @@ def _forecast_response_from_rows(
     segment_id: str,
     issue_time: datetime,
     rows: Sequence[dict[str, Any]],
+    frequency_thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not rows:
-        return _empty_forecast_response(segment_id=segment_id, issue_time=issue_time)
+        response = _empty_forecast_response(segment_id=segment_id, issue_time=issue_time)
+        response["frequency_thresholds"] = frequency_thresholds
+        return response
 
     grouped: dict[str, dict[str, Any]] = {}
     unit = str(rows[0].get("unit") or "m3/s")
@@ -907,7 +987,7 @@ def _forecast_response_from_rows(
         "issue_time": _format_time(issue_time),
         "unit": unit,
         "series": list(grouped.values()),
-        "frequency_thresholds": {},
+        "frequency_thresholds": frequency_thresholds,
     }
 
 
@@ -918,6 +998,7 @@ def _spliced_response_from_rows(
     variable: str,
     analysis_rows: Sequence[dict[str, Any]],
     forecast_rows: Sequence[dict[str, Any]],
+    frequency_thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     segments: list[dict[str, Any]] = []
     unit = _unit_from_rows((*analysis_rows, *forecast_rows))
@@ -963,6 +1044,7 @@ def _spliced_response_from_rows(
         "river_segment_id": river_segment_id,
         "variable": variable,
         "unit": unit,
+        "frequency_thresholds": frequency_thresholds,
     }
 
 
@@ -1061,6 +1143,15 @@ def _optional_int(value: Any) -> int | None:
         return None
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 
