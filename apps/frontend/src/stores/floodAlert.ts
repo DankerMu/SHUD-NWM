@@ -4,10 +4,18 @@ import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
 import type { AlertLevel } from '@/components/flood/alertLevels'
-import { ALERT_LEVELS, isAlertLevel } from '@/components/flood/alertLevels'
+import { isAlertLevel } from '@/components/flood/alertLevels'
 
 export type FloodAlertSortBy = 'return_period_desc' | 'q_value_desc'
 export type AlertThreshold = 'Q2' | 'Q5' | 'Q10' | 'Q20' | 'Q50' | 'Q100'
+type ApiHydroRun = components['schemas']['HydroRun']
+type ApiHydroRunPage = components['schemas']['HydroRunPage']
+type ApiFloodAlertSummary = components['schemas']['FloodAlertSummary']
+type ApiFloodAlertRanking = components['schemas']['FloodAlertRanking']
+type ApiFloodAlertRankingItem = components['schemas']['FloodAlertRankingItem']
+type ApiFloodAlertTimeline = components['schemas']['FloodAlertTimeline']
+type ApiFloodAlertTimelinePoint = components['schemas']['FloodAlertTimelinePoint']
+type ApiFloodFrequencyThresholds = components['schemas']['FloodFrequencyThresholds']
 
 export interface FloodAlertLevelCount {
   level: AlertLevel
@@ -55,20 +63,13 @@ export interface FloodAlertTimelinePoint {
   qValue?: number | null
 }
 
-export interface FloodFrequencyThresholds {
-  Q2?: number | null
-  Q5?: number | null
-  Q10?: number | null
-  Q20?: number | null
-  Q50?: number | null
-  Q100?: number | null
+export type FloodFrequencyThresholds = ApiFloodFrequencyThresholds & {
   q2?: number | null
   q5?: number | null
   q10?: number | null
   q20?: number | null
   q50?: number | null
   q100?: number | null
-  sample_quality?: Record<string, unknown> | null
 }
 
 export interface FloodAlertTimeline {
@@ -83,7 +84,7 @@ export interface FloodAlertTimeline {
 
 interface FloodAlertState {
   selectedRunId: string | null
-  latestRun: components['schemas']['HydroRun'] | null
+  latestRun: ApiHydroRun | null
   alertThreshold: AlertThreshold | null
   selectedAlertLevel: AlertLevel | null
   selectedValidTime: string | null
@@ -124,113 +125,89 @@ async function fetchJson<T>(path: string, query: Record<string, string | number 
   return unwrapApiData<T>(payload, '请求失败')
 }
 
-function numberOrNull(value: unknown): number | null {
+function numberOrNull(value: number | string | null | undefined): number | null {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric : null
 }
 
-function stringOrNull(value: unknown): string | null {
+function stringOrNull(value: string | null | undefined): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
-function normalizeLevel(value: unknown): AlertLevel | null {
+function normalizeLevel(value: string | null | undefined): AlertLevel | null {
   return isAlertLevel(value) ? value : null
 }
 
-function normalizeSummary(payload: unknown): FloodAlertSummary {
-  const record = (payload ?? {}) as Record<string, unknown>
-  const counts = (record.alert_counts ?? {}) as Record<string, unknown>
-  const levelRows = Array.isArray(record.levels)
-    ? (record.levels as Array<Record<string, unknown>>)
-    : ALERT_LEVELS.map((level) => ({ level, count: counts[level], color: undefined }))
-
+function normalizeSummary(payload: ApiFloodAlertSummary): FloodAlertSummary {
   return {
-    runId: String(record.run_id ?? ''),
-    levels: levelRows
+    runId: payload.run_id,
+    levels: payload.levels
       .map((row) => ({
         level: normalizeLevel(row.level),
-        count: Number(row.count ?? 0),
-        color: String(row.color ?? ''),
+        count: row.count,
+        color: row.color,
       }))
       .filter((row): row is FloodAlertLevelCount => row.level !== null),
-    totalSegments: Number(record.total_segments ?? 0),
-    usableCurves: Number(record.usable_curves ?? record.total_segments ?? 0),
-    unavailableCount: Number(record.unavailable_count ?? 0),
-    qualityNote: stringOrNull(record.quality_note),
-    updatedAt: stringOrNull(record.updated_at),
+    totalSegments: payload.total_segments,
+    usableCurves: payload.usable_curves,
+    unavailableCount: payload.unavailable_count,
+    qualityNote: stringOrNull(payload.quality_note),
+    updatedAt: null,
   }
 }
 
-function normalizeRankingItem(item: Record<string, unknown>, index: number): FloodAlertRankingItem {
-  const segmentId = String(item.river_segment_id ?? item.segment_id ?? '')
-  const centroid = item.geom_centroid as { type?: string; coordinates?: unknown } | null | undefined
-  const coordinates = Array.isArray(centroid?.coordinates)
-    ? centroid.coordinates.map(Number).filter(Number.isFinite)
-    : []
-
+function normalizeRankingItem(item: ApiFloodAlertRankingItem, index: number): FloodAlertRankingItem {
+  const segmentId = item.river_segment_id || item.segment_id
   return {
-    rank: Number(item.rank ?? index + 1),
+    rank: item.rank ?? index + 1,
     riverSegmentId: segmentId,
-    segmentId: String(item.segment_id ?? segmentId),
-    segmentName: stringOrNull(item.segment_name ?? item.name),
+    segmentId: item.segment_id || segmentId,
+    segmentName: stringOrNull(item.segment_name),
     basinVersionId: stringOrNull(item.basin_version_id),
-    basinName: stringOrNull(item.basin_name ?? item.basin_id),
+    basinName: null,
     qValue: numberOrNull(item.q_value),
     qUnit: stringOrNull(item.q_unit) ?? 'm3/s',
-    returnPeriod: numberOrNull(item.return_period ?? item.max_return_period),
-    warningLevel: normalizeLevel(item.warning_level ?? item.severity),
+    returnPeriod: numberOrNull(item.return_period),
+    warningLevel: normalizeLevel(item.warning_level),
     duration: stringOrNull(item.duration),
     validTime: stringOrNull(item.valid_time),
-    geomCentroid:
-      centroid?.type === 'Point' && coordinates.length >= 2
-        ? { type: 'Point', coordinates: [coordinates[0], coordinates[1]] }
-        : null,
+    geomCentroid: null,
   }
 }
 
-function normalizeRanking(payload: unknown, fallbackLimit: number): FloodAlertRanking {
-  const record = (payload ?? {}) as Record<string, unknown>
-  const sourceItems = Array.isArray(record.items) ? record.items : Array.isArray(payload) ? payload : []
-  const items = (sourceItems as Array<Record<string, unknown>>).map(normalizeRankingItem)
+function normalizeRanking(payload: ApiFloodAlertRanking, fallbackLimit: number): FloodAlertRanking {
+  const items = payload.items.map(normalizeRankingItem)
   return {
     items,
-    total: Number(record.total ?? items.length),
-    limit: Number(record.limit ?? fallbackLimit),
-    offset: Number(record.offset ?? 0),
+    total: payload.total,
+    limit: payload.limit ?? fallbackLimit,
+    offset: payload.offset,
   }
 }
 
-function normalizeTimelinePoint(point: Record<string, unknown>): FloodAlertTimelinePoint {
+function normalizeTimelinePoint(point: ApiFloodAlertTimelinePoint): FloodAlertTimelinePoint {
   return {
-    validTime: String(point.valid_time ?? point.validTime ?? ''),
+    validTime: point.valid_time,
     returnPeriod: numberOrNull(point.return_period),
-    warningLevel: normalizeLevel(point.warning_level ?? point.severity),
+    warningLevel: normalizeLevel(point.warning_level),
     qValue: numberOrNull(point.q_value),
   }
 }
 
-function normalizeTimeline(payload: unknown): FloodAlertTimeline {
-  const record = (payload ?? {}) as Record<string, unknown>
-  const sourcePoints = Array.isArray(record.timesteps)
-    ? record.timesteps
-    : Array.isArray(record.timeline)
-      ? record.timeline
-      : Array.isArray(record.points)
-        ? record.points
-        : []
-  const timesteps = (sourcePoints as Array<Record<string, unknown>>).map(normalizeTimelinePoint)
+function normalizeTimeline(payload: ApiFloodAlertTimeline): FloodAlertTimeline {
+  const timesteps = payload.timesteps.map(normalizeTimelinePoint)
   return {
-    runId: String(record.run_id ?? ''),
-    segmentId: String(record.segment_id ?? record.river_segment_id ?? ''),
-    riverSegmentId: String(record.river_segment_id ?? record.segment_id ?? ''),
+    runId: payload.run_id,
+    segmentId: payload.segment_id,
+    riverSegmentId: payload.river_segment_id,
     timesteps,
-    peak: record.peak && typeof record.peak === 'object' ? normalizeTimelinePoint(record.peak as Record<string, unknown>) : null,
-    frequencyThresholds: (record.frequency_thresholds as FloodFrequencyThresholds | undefined) ?? null,
-    qualityNote: stringOrNull(record.quality_note),
+    peak: payload.peak ? normalizeTimelinePoint(payload.peak) : null,
+    frequencyThresholds: payload.frequency_thresholds,
+    qualityNote: stringOrNull(payload.quality_note),
   }
 }
 
-function buildValidTimes(run: components['schemas']['HydroRun'] | null) {
+function buildValidTimes(run: ApiHydroRun | null) {
   if (!run) return []
   const start = Date.parse(run.start_time)
   const end = Date.parse(run.end_time)
@@ -254,7 +231,7 @@ function mergeTimelineValidTimes(existing: string[], timeline: FloodAlertTimelin
   return [...merged].sort((a, b) => Date.parse(a) - Date.parse(b))
 }
 
-function sortLatestRuns(runs: components['schemas']['HydroRun'][]) {
+function sortLatestRuns(runs: ApiHydroRun[]) {
   return [...runs].sort((a, b) => {
     const bTime = Date.parse(b.cycle_time ?? b.created_at ?? b.updated_at)
     const aTime = Date.parse(a.cycle_time ?? a.created_at ?? a.updated_at)
@@ -295,10 +272,8 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         params: { query: { status: 'frequency_done', limit: 50 } },
       })
       if (error) throw new Error(getApiErrorMessage(error, '获取最新预警 Run 失败'))
-      const payload = unwrapApiData<unknown>(data, '获取最新预警 Run 失败')
-      const runs = Array.isArray(payload)
-        ? (payload as components['schemas']['HydroRun'][])
-        : (((payload as { items?: unknown[] } | null)?.items ?? []) as components['schemas']['HydroRun'][])
+      const payload = unwrapApiData<ApiHydroRunPage>(data, '获取最新预警 Run 失败')
+      const runs = payload.items
       const latestRun = sortLatestRuns(runs).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(runs)[0] ?? null
       set({
         latestRun,
@@ -322,7 +297,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
     const validTime = options?.validTime ?? get().selectedValidTime
     set({ summaryLoading: true, error: null })
     try {
-      const payload = await fetchJson<unknown>('/api/v1/flood-alerts/summary', {
+      const payload = await fetchJson<ApiFloodAlertSummary>('/api/v1/flood-alerts/summary', {
         run_id: runId,
         threshold: get().alertThreshold,
         valid_time: validTime,
@@ -342,7 +317,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
     const limit = options?.limit ?? get().topLimit
     set({ rankingLoading: true, error: null })
     try {
-      const payload = await fetchJson<unknown>('/api/v1/flood-alerts/ranking', {
+      const payload = await fetchJson<ApiFloodAlertRanking>('/api/v1/flood-alerts/ranking', {
         run_id: runId,
         limit,
         offset: 0,
@@ -362,7 +337,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
 
     set({ timelineLoading: true, error: null })
     try {
-      const payload = await fetchJson<unknown>('/api/v1/flood-alerts/timeline', {
+      const payload = await fetchJson<ApiFloodAlertTimeline>('/api/v1/flood-alerts/timeline', {
         run_id: runId,
         segment_id: segmentId,
       })

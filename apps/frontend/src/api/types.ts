@@ -637,11 +637,15 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Standard success envelope returned by API endpoints using the `_ok()` response pattern. */
         SuccessEnvelope: {
             /** @example req_01J0NHMS */
             request_id: string;
-            /** @example ok */
-            status: string;
+            /**
+             * @example ok
+             * @enum {string}
+             */
+            status: "ok";
             data: {
                 [key: string]: unknown;
             };
@@ -805,6 +809,14 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        HydroRunPage: {
+            items: components["schemas"]["HydroRun"][];
+            total: number;
+            /** @description Backward-compatible alias of total. */
+            total_count?: number;
+            limit: number;
+            offset: number;
+        };
         RiverSeriesResponse: {
             segment_id: string;
             /** Format: date-time */
@@ -822,24 +834,28 @@ export interface components {
         };
         SeriesSegment: {
             scenario_id: string;
+            /** @example GFS */
+            source_id?: string | null;
+            /** Format: date-time */
+            cycle_time?: string | null;
+            /** @example 168 */
+            available_lead_hours?: number | null;
             segment_role: string;
             points: (string | number)[][];
         };
         FloodAlertSummary: {
             run_id: string;
-            threshold: string;
             total_segments: number;
-            alert_counts: {
-                normal: number;
-                elevated: number;
-                watch: number;
-                warning: number;
-                high_risk: number;
-                severe: number;
-                extreme: number;
-            };
-            /** Format: date-time */
-            updated_at: string;
+            usable_curves: number;
+            unavailable_count: number;
+            quality_note?: string | null;
+            levels: components["schemas"]["FloodAlertLevelCount"][];
+        };
+        FloodAlertLevelCount: {
+            /** @enum {string} */
+            level: "normal" | "elevated" | "watch" | "warning" | "high_risk" | "severe" | "extreme";
+            count: number;
+            color: string;
         };
         PipelineStage: {
             stage: string;
@@ -870,6 +886,8 @@ export interface components {
             job_id: string;
             run_id: string | null;
             cycle_id: string | null;
+            run_type: string | null;
+            scenario: string | null;
             job_type: string;
             slurm_job_id: string | null;
             model_id: string | null;
@@ -976,15 +994,55 @@ export interface components {
         };
         RetryRunResult: {
             job_id: string;
+            /** @description Alias of job_id for pipeline-control clients. */
+            pipeline_job_id: string;
             run_id: string | null;
             retry_count: number;
             status: string;
+            slurm_job_id: string | null;
+            /** @enum {string} */
+            execution_status: "queued" | "submitted";
         };
         CancelRunResult: {
             run_id: string;
             cancelled_jobs: components["schemas"]["PipelineJob"][];
             /** @description Backward-compatible alias of cancelled_jobs. */
             cancelled?: components["schemas"]["PipelineJob"][];
+            failed_jobs?: components["schemas"]["SlurmCancelFailure"][];
+            /** @description Alias of failed_jobs for Slurm cancellation failures. */
+            slurm_failures?: components["schemas"]["SlurmCancelFailure"][];
+            partial_failure?: boolean;
+            idempotent_jobs?: components["schemas"]["IdempotentCancelJob"][];
+            /** @description hydro_run transition, or null if not applicable */
+            hydro_run?: Record<string, never> | null;
+            /** @description forecast_cycle transition, or null if not applicable */
+            forecast_cycle?: Record<string, never> | null;
+        };
+        SlurmCancelFailure: {
+            job_id: string;
+            run_id: string;
+            status: string;
+            slurm_job_id: string | null;
+            error: {
+                status_code: number;
+                code: string;
+                message: string;
+                details: {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        IdempotentCancelJob: {
+            job_id: string;
+            slurm_job_id: string | null;
+            note: string;
+        };
+        CancelTransition: {
+            run_id?: string;
+            cycle_id?: string;
+            previous_status: string;
+            status: string;
+            preserved: boolean;
         };
         StageDurationMetric: {
             /** Format: date */
@@ -1001,27 +1059,71 @@ export interface components {
             total_cycles: number;
         };
         FloodAlertRankingItem: {
-            segment_id: string;
-            max_return_period: number;
-            severity: string;
             rank: number;
-        };
-        FloodAlertSegment: {
+            river_segment_id: string;
             segment_id: string;
+            segment_name: string | null;
+            basin_version_id: string;
+            q_value: number;
+            q_unit: string;
+            return_period: number | null;
+            warning_level: string | null;
+            duration: string;
             /** Format: date-time */
             valid_time: string;
-            return_period: number;
-            severity: string;
+        };
+        FloodAlertRanking: {
+            items: components["schemas"]["FloodAlertRankingItem"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        FloodAlertSegment: {
+            river_segment_id: string;
+            segment_id: string;
+            segment_name: string | null;
+            basin_version_id: string;
+            q_value: number;
+            return_period: number | null;
+            warning_level: string | null;
+            /** Format: date-time */
+            valid_time: string;
+            /** @description GeoJSON point centroid, or null */
+            geom_centroid: Record<string, never> | null;
+        };
+        FloodAlertSegmentList: {
+            segments: components["schemas"]["FloodAlertSegment"][];
+            total: number;
+        };
+        FloodAlertTimelinePoint: {
+            /** Format: date-time */
+            valid_time: string;
+            return_period: number | null;
+            warning_level: string | null;
+            q_value: number;
+        };
+        FloodFrequencyThresholds: {
+            Q2?: number | null;
+            Q5?: number | null;
+            Q10?: number | null;
+            Q20?: number | null;
+            Q50?: number | null;
+            Q100?: number | null;
+            sample_quality?: {
+                [key: string]: unknown;
+            } | null;
         };
         FloodAlertTimeline: {
             run_id: string;
             segment_id: string;
-            points: {
-                /** Format: date-time */
-                valid_time: string;
-                return_period: number;
-                severity: string;
-            }[];
+            river_segment_id: string;
+            timesteps: components["schemas"]["FloodAlertTimelinePoint"][];
+            timeline: components["schemas"]["FloodAlertTimelinePoint"][];
+            /** @description Peak timeline point, or null */
+            peak: Record<string, never> | null;
+            /** @description Flood frequency thresholds, or null */
+            frequency_thresholds: Record<string, never> | null;
+            quality_note: string | null;
         };
         LineageResponse: {
             target_type: string;
@@ -1491,7 +1593,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["HydroRun"][];
+                        data: components["schemas"]["HydroRunPage"];
                     };
                 };
             };
@@ -1893,6 +1995,7 @@ export interface operations {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
                 threshold?: string;
+                valid_time?: components["parameters"]["ValidTimeQuery"];
             };
             header?: never;
             path?: never;
@@ -1920,6 +2023,9 @@ export interface operations {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
                 limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+                basin_id?: string;
+                valid_time?: components["parameters"]["ValidTimeQuery"];
             };
             header?: never;
             path?: never;
@@ -1934,7 +2040,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["FloodAlertRankingItem"][];
+                        data: components["schemas"]["FloodAlertRanking"];
                     };
                 };
             };
@@ -1947,6 +2053,8 @@ export interface operations {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
                 min_return_period?: number;
+                /** @description Comma-separated warning levels. */
+                warning_level?: string;
                 valid_time?: components["parameters"]["ValidTimeQuery"];
             };
             header?: never;
@@ -1962,7 +2070,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["FloodAlertSegment"][];
+                        data: components["schemas"]["FloodAlertSegmentList"];
                     };
                 };
             };
