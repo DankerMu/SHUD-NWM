@@ -1497,6 +1497,8 @@ class ForecastOrchestrator:
             entry.setdefault("basin_version_id", f"{model_id}_basin")
             entry.setdefault("run_id", f"fcst_{source_id.lower()}_{compact_cycle}_{model_id}")
             entry.setdefault("workspace_dir", str(Path(self.config.workspace_root)))
+            entry.setdefault("source_id", source_id)
+            entry.setdefault("cycle_time", compact_cycle)
             entry["task_id"] = index
             entry.setdefault("original_task_id", index)
             for field_name in (

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from packages.common.manifest_index import ManifestValidationError, load_manifest_entry
+
 from .runtime import SHUDRuntime, SHUDRuntimeError
 
 
@@ -33,6 +35,23 @@ def _run(run_id: str, *, run_type: str | None = None, dry_run: bool = False) -> 
     return _execute(str(manifest_path), dry_run=dry_run)
 
 
+def _resolve_execute_manifest(manifest: str | None, manifest_index: str | None, task_id: int | None) -> str:
+    if (manifest_index is None) != (task_id is None):
+        raise ManifestValidationError(
+            "--manifest-index and --task-id must be provided together.",
+            {"manifest_index": manifest_index, "task_id": task_id},
+        )
+    if manifest_index is not None and task_id is not None:
+        entry = load_manifest_entry(manifest_index, task_id)
+        return str(Path(str(entry["workspace_dir"])) / "runs" / str(entry["run_id"]) / "input" / "manifest.json")
+    if not manifest:
+        raise ManifestValidationError(
+            "Explicit runtime execution requires --manifest.",
+            {"missing_fields": ["manifest"]},
+        )
+    return manifest
+
+
 def _click_main(argv: Sequence[str] | None = None) -> int:
     import click
 
@@ -41,12 +60,15 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         pass
 
     @cli.command("execute")
-    @click.option("--manifest", required=True)
+    @click.option("--manifest")
+    @click.option("--manifest-index")
+    @click.option("--task-id", type=int, default=None)
     @click.option("--dry-run", is_flag=True, default=False)
-    def execute(manifest: str, dry_run: bool) -> None:
+    def execute(manifest: str | None, manifest_index: str | None, task_id: int | None, dry_run: bool) -> None:
         try:
-            click.echo(json.dumps(_execute(manifest, dry_run=dry_run), sort_keys=True))
-        except SHUDRuntimeError as error:
+            resolved_manifest = _resolve_execute_manifest(manifest, manifest_index, task_id)
+            click.echo(json.dumps(_execute(resolved_manifest, dry_run=dry_run), sort_keys=True))
+        except (ManifestValidationError, SHUDRuntimeError) as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
 
@@ -72,7 +94,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nhms-shud-runtime")
     subparsers = parser.add_subparsers(dest="command", required=True)
     execute_parser = subparsers.add_parser("execute")
-    execute_parser.add_argument("--manifest", required=True)
+    execute_parser.add_argument("--manifest")
+    execute_parser.add_argument("--manifest-index")
+    execute_parser.add_argument("--task-id", type=int, default=None)
     execute_parser.add_argument("--dry-run", action="store_true")
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--run-type", default=None)
@@ -82,8 +106,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "execute":
         try:
-            print(json.dumps(_execute(args.manifest, dry_run=args.dry_run), sort_keys=True))
-        except SHUDRuntimeError as error:
+            resolved_manifest = _resolve_execute_manifest(args.manifest, args.manifest_index, args.task_id)
+            print(json.dumps(_execute(resolved_manifest, dry_run=args.dry_run), sort_keys=True))
+        except (ManifestValidationError, SHUDRuntimeError) as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
         return 0
