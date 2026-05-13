@@ -44,7 +44,7 @@ def test_seed_ids_follow_convention() -> None:
     assert re.fullmatch(r"yangtze_rivnet_v\d{2}", seed_demo.RIVER_NETWORK_VERSION_ID)
     assert re.fullmatch(r"yangtze_shud_v\d{2}", seed_demo.MODEL_ID)
     assert re.fullmatch(r"yangtze_mesh_v\d{2}", seed_demo.MESH_VERSION_ID)
-    assert seed_demo.SOURCE_ID == "GFS"
+    assert seed_demo.SOURCE_ID == "gfs"
     assert seed_demo.SOURCE_ID_IN_IDS == "gfs"
     assert re.fullmatch(r"forc_gfs_\d{10}_yangtze_shud_v\d{2}", seed_demo.FORCING_VERSION_ID)
     assert re.fullmatch(r"fcst_gfs_\d{10}_yangtze_shud_v\d{2}", seed_demo.RUN_ID)

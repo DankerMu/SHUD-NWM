@@ -6,12 +6,13 @@ import sys
 from typing import Sequence
 
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
+from packages.common.source_identity import normalize_source_id
 
 from .producer import ForcingProducer
 
 
 def _produce(source_id: str, cycle_time: str, model_id: str, max_lead_hours: int | None = None) -> dict[str, object]:
-    source_id = source_id.upper()
+    source_id = normalize_source_id(source_id)
     producer = ForcingProducer.from_env()
     result = producer.produce(
         source_id=source_id,
@@ -49,7 +50,12 @@ def _resolve_produce_args(
         resolved_max_lead_hours = max_lead_hours
         if resolved_max_lead_hours is None and entry.get("max_lead_hours") not in (None, ""):
             resolved_max_lead_hours = int(entry["max_lead_hours"])
-        return str(entry["source_id"]), str(entry["cycle_time"]), str(entry["model_id"]), resolved_max_lead_hours
+        return (
+            normalize_source_id(str(entry["source_id"])),
+            str(entry["cycle_time"]),
+            str(entry["model_id"]),
+            resolved_max_lead_hours,
+        )
 
     missing = [
         field
@@ -61,7 +67,7 @@ def _resolve_produce_args(
             "Explicit forcing execution requires --cycle-time and --model-id.",
             {"missing_fields": missing},
         )
-    return source_id or "gfs", str(cycle_time), str(model_id), max_lead_hours
+    return normalize_source_id(source_id or "gfs"), str(cycle_time), str(model_id), max_lead_hours
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:

@@ -1,7 +1,7 @@
 """Seed deterministic Yangtze demo data.
 
-Database records use source_id='GFS' to satisfy foreign keys. Composite IDs and
-object-storage key paths intentionally use lowercase 'gfs' per Appendix A.
+Database records, composite IDs, and object-storage key paths use canonical
+source_id='gfs' for GFS.
 
 Timeseries records use hourly half-open interval semantics: [START_TIME, END_TIME).
 """
@@ -22,7 +22,7 @@ BASIN_VERSION_ID = "yangtze_v2026_01"
 RIVER_NETWORK_VERSION_ID = "yangtze_rivnet_v01"
 MODEL_ID = "yangtze_shud_v12"
 MESH_VERSION_ID = "yangtze_mesh_v01"
-SOURCE_ID = "GFS"
+SOURCE_ID = "gfs"
 SOURCE_ID_IN_IDS = "gfs"
 CYCLE_ID = "gfs_2026050100"
 FORCING_VERSION_ID = "forc_gfs_2026050100_yangtze_shud_v12"
