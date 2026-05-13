@@ -991,9 +991,15 @@ def _local_log_path(log_uri: str) -> Path | None:
         raw_path = Path(log_uri).expanduser()
 
     log_root = _log_root()
+    if raw_path.is_symlink():
+        _raise_log_path_forbidden(log_uri, log_root)
+
     candidates = [raw_path.resolve()]
     if not raw_path.is_absolute():
-        rooted_path = (log_root / raw_path).resolve()
+        rooted_raw_path = log_root / raw_path
+        if rooted_raw_path.is_symlink():
+            _raise_log_path_forbidden(log_uri, log_root)
+        rooted_path = rooted_raw_path.resolve()
         if rooted_path not in candidates:
             candidates.append(rooted_path)
 
@@ -1004,6 +1010,10 @@ def _local_log_path(log_uri: str) -> Path | None:
             continue
         return candidate
 
+    _raise_log_path_forbidden(log_uri, log_root)
+
+
+def _raise_log_path_forbidden(log_uri: str, log_root: Path) -> None:
     raise ApiError(
         status_code=403,
         code="FORBIDDEN",

@@ -82,10 +82,11 @@ class StateManager:
     @classmethod
     def from_env(cls) -> StateManager:
         workspace_root = Path(os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
+        object_store_root = Path(os.getenv("OBJECT_STORE_ROOT", str(workspace_root)))
         object_store_prefix = os.getenv("OBJECT_STORE_PREFIX", "")
         return cls(
             repository=PsycopgStateSnapshotRepository.from_env(),
-            object_store=LocalObjectStore(workspace_root, object_store_prefix=object_store_prefix),
+            object_store=LocalObjectStore(object_store_root, object_store_prefix=object_store_prefix),
         )
 
     def save_state_snapshot(

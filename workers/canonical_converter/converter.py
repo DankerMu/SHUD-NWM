@@ -143,6 +143,7 @@ class CanonicalConversionError(RuntimeError):
 class CanonicalConverterConfig:
     source_id: str = "gfs"
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
+    object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
     converter_version: str = "m1.0"
     grid_id: str = "gfs_0p25"
@@ -153,6 +154,10 @@ class CanonicalConverterConfig:
     cfgrib_variable_aliases: Mapping[str, tuple[str, ...]] = field(
         default_factory=lambda: dict(CFGRIB_VARIABLE_ALIASES)
     )
+
+    def __post_init__(self) -> None:
+        if not str(self.object_store_root):
+            object.__setattr__(self, "object_store_root", self.workspace_root)
 
 
 @dataclass(frozen=True)
@@ -526,7 +531,7 @@ class CanonicalConverter:
         self.config = config or CanonicalConverterConfig()
         self.repository = repository
         self.object_store = object_store or LocalObjectStore(
-            self.config.workspace_root,
+            self.config.object_store_root,
             object_store_prefix=self.config.object_store_prefix,
         )
 
