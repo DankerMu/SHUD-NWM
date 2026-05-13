@@ -2234,12 +2234,12 @@ components:
             $ref: "#/components/schemas/IdempotentCancelJob"
         hydro_run:
           nullable: true
-          allOf:
-            - $ref: "#/components/schemas/CancelTransition"
+          type: object
+          description: "hydro_run transition, or null if not applicable"
         forecast_cycle:
           nullable: true
-          allOf:
-            - $ref: "#/components/schemas/CancelTransition"
+          type: object
+          description: "forecast_cycle transition, or null if not applicable"
     SlurmCancelFailure:
       type: object
       required: [job_id, run_id, status, slurm_job_id, error]
@@ -2413,8 +2413,8 @@ components:
           format: date-time
         geom_centroid:
           nullable: true
-          allOf:
-            - $ref: "#/components/schemas/GeoJsonPoint"
+          type: object
+          description: "GeoJSON point centroid, or null"
     FloodAlertSegmentList:
       type: object
       required: [segments, total]
@@ -2486,12 +2486,12 @@ components:
             $ref: "#/components/schemas/FloodAlertTimelinePoint"
         peak:
           nullable: true
-          allOf:
-            - $ref: "#/components/schemas/FloodAlertTimelinePoint"
+          type: object
+          description: "Peak timeline point, or null"
         frequency_thresholds:
           nullable: true
-          allOf:
-            - $ref: "#/components/schemas/FloodFrequencyThresholds"
+          type: object
+          description: "Flood frequency thresholds, or null"
         quality_note:
           type: string
           nullable: true

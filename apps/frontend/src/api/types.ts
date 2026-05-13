@@ -1013,8 +1013,10 @@ export interface components {
             slurm_failures?: components["schemas"]["SlurmCancelFailure"][];
             partial_failure?: boolean;
             idempotent_jobs?: components["schemas"]["IdempotentCancelJob"][];
-            hydro_run?: components["schemas"]["CancelTransition"] | null;
-            forecast_cycle?: components["schemas"]["CancelTransition"] | null;
+            /** @description hydro_run transition, or null if not applicable */
+            hydro_run?: Record<string, never> | null;
+            /** @description forecast_cycle transition, or null if not applicable */
+            forecast_cycle?: Record<string, never> | null;
         };
         SlurmCancelFailure: {
             job_id: string;
@@ -1086,7 +1088,8 @@ export interface components {
             warning_level: string | null;
             /** Format: date-time */
             valid_time: string;
-            geom_centroid: components["schemas"]["GeoJsonPoint"] | null;
+            /** @description GeoJSON point centroid, or null */
+            geom_centroid: Record<string, never> | null;
         };
         FloodAlertSegmentList: {
             segments: components["schemas"]["FloodAlertSegment"][];
@@ -1116,8 +1119,10 @@ export interface components {
             river_segment_id: string;
             timesteps: components["schemas"]["FloodAlertTimelinePoint"][];
             timeline: components["schemas"]["FloodAlertTimelinePoint"][];
-            peak: components["schemas"]["FloodAlertTimelinePoint"] | null;
-            frequency_thresholds: components["schemas"]["FloodFrequencyThresholds"] | null;
+            /** @description Peak timeline point, or null */
+            peak: Record<string, never> | null;
+            /** @description Flood frequency thresholds, or null */
+            frequency_thresholds: Record<string, never> | null;
             quality_note: string | null;
         };
         LineageResponse: {
