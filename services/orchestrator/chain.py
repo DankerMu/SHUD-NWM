@@ -1447,6 +1447,8 @@ class ForecastOrchestrator:
             "source_id": context.source_id,
             "cycle_time": _format_time(context.cycle_time),
             "workspace_dir": str(Path(self.config.workspace_root)),
+            "object_store_root": str(Path(self.config.object_store_root)),
+            "object_store_prefix": self.config.object_store_prefix,
             "total_basins": len(context.all_basins),
             "active_basins": len(context.active_basins),
         }

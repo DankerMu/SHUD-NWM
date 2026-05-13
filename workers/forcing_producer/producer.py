@@ -242,6 +242,7 @@ class ForcingRepository(Protocol):
 class ForcingProducerConfig:
     source_id: str = "gfs"
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
+    object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
     idw_power: float = 2.0
     idw_neighbors: int = 4
@@ -255,6 +256,10 @@ class ForcingProducerConfig:
     era5_latency_fallback_hours: int = 23
     ifs_precip_step_hours: float = 3.0
 
+    def __post_init__(self) -> None:
+        if not str(self.object_store_root):
+            object.__setattr__(self, "object_store_root", self.workspace_root)
+
 
 class ForcingProducer:
     def __init__(
@@ -267,7 +272,7 @@ class ForcingProducer:
         self.config = config or ForcingProducerConfig()
         self.repository = repository
         self.object_store = object_store or LocalObjectStore(
-            self.config.workspace_root,
+            self.config.object_store_root,
             object_store_prefix=self.config.object_store_prefix,
         )
 
