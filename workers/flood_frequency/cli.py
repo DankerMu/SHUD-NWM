@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
 from workers.flood_frequency.hindcast import (
@@ -118,6 +119,19 @@ def _compute_return_period(run_id: str) -> dict[str, object]:
         }
 
 
+def _resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:
+    if manifest_index is not None:
+        resolved_task_id = resolve_task_id(task_id)
+        entry = load_manifest_entry(manifest_index, resolved_task_id)
+        return str(entry["run_id"])
+    if not run_id:
+        raise ManifestValidationError(
+            "Explicit return-period computation requires --run-id.",
+            {"missing_fields": ["run_id"]},
+        )
+    return run_id
+
+
 def _years_from_run_ids(run_ids: list[str]) -> list[int]:
     years: list[int] = []
     for run_id in run_ids:
@@ -207,11 +221,19 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(1) from error
 
     @cli.command("compute-return-period")
-    @click.option("--run-id", required=True)
-    def compute_return_period_command(run_id: str) -> None:
+    @click.option("--run-id")
+    @click.option("--manifest-index")
+    @click.option("--task-id", type=int, default=None)
+    def compute_return_period_command(run_id: str | None, manifest_index: str | None, task_id: int | None) -> None:
         try:
-            click.echo(json.dumps(_compute_return_period(run_id), sort_keys=True, default=str))
-        except (HindcastError, ReturnPeriodError) as error:
+            click.echo(
+                json.dumps(
+                    _compute_return_period(_resolve_run_id(run_id, manifest_index, task_id)),
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+        except (ManifestValidationError, HindcastError, ReturnPeriodError) as error:
             message = getattr(error, "message", str(error))
             code = getattr(error, "error_code", "RETURN_PERIOD_ERROR")
             click.echo(f"{code}: {message}", err=True)
@@ -250,7 +272,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     fit_parser.add_argument("--verbose", action="store_true")
 
     compute_parser = subparsers.add_parser("compute-return-period")
-    compute_parser.add_argument("--run-id", required=True)
+    compute_parser.add_argument("--run-id")
+    compute_parser.add_argument("--manifest-index")
+    compute_parser.add_argument("--task-id", type=int, default=None)
 
     args = parser.parse_args(argv)
     try:
@@ -277,9 +301,14 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(result))
             return 0
         if args.command == "compute-return-period":
-            print(json.dumps(_compute_return_period(args.run_id), default=str))
+            print(
+                json.dumps(
+                    _compute_return_period(_resolve_run_id(args.run_id, args.manifest_index, args.task_id)),
+                    default=str,
+                )
+            )
             return 0
-    except (HindcastError, FrequencyFitError, ReturnPeriodError) as error:
+    except (ManifestValidationError, HindcastError, FrequencyFitError, ReturnPeriodError) as error:
         message = getattr(error, "message", str(error))
         code = getattr(error, "error_code", "FREQUENCY_FIT_ERROR")
         print(f"{code}: {message}", file=sys.stderr)

@@ -1,3 +1,10 @@
+"""Slurm gateway configuration.
+
+`infra/sbatch/` is the canonical real Slurm template set per M6 design decision #1.
+`workers/sbatch_templates/` contains legacy single-run templates and is not used by M3+ array orchestration.
+`SlurmGatewaySettings.template_dir` defaults to `infra/sbatch`.
+"""
+
 from __future__ import annotations
 
 from functools import lru_cache

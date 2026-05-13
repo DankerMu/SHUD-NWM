@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Sequence
+
+from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 
 from .producer import ForcingProducer
 
@@ -26,6 +29,41 @@ def _produce(source_id: str, cycle_time: str, model_id: str, max_lead_hours: int
     }
 
 
+def _resolve_produce_args(
+    source_id: str | None,
+    cycle_time: str | None,
+    model_id: str | None,
+    max_lead_hours: int | None,
+    manifest_index: str | None,
+    task_id: int | None,
+) -> tuple[str, str, str, int | None]:
+    if manifest_index is not None:
+        resolved_task_id = resolve_task_id(task_id)
+        entry = load_manifest_entry(manifest_index, resolved_task_id)
+        missing = [field for field in ("source_id", "cycle_time", "model_id") if entry.get(field) in (None, "")]
+        if missing:
+            raise ManifestValidationError(
+                "Manifest index entry is missing forcing fields.",
+                {"manifest_index_path": manifest_index, "task_id": resolved_task_id, "missing_fields": missing},
+            )
+        resolved_max_lead_hours = max_lead_hours
+        if resolved_max_lead_hours is None and entry.get("max_lead_hours") not in (None, ""):
+            resolved_max_lead_hours = int(entry["max_lead_hours"])
+        return str(entry["source_id"]), str(entry["cycle_time"]), str(entry["model_id"]), resolved_max_lead_hours
+
+    missing = [
+        field
+        for field, value in (("cycle_time", cycle_time), ("model_id", model_id))
+        if value in (None, "")
+    ]
+    if missing:
+        raise ManifestValidationError(
+            "Explicit forcing execution requires --cycle-time and --model-id.",
+            {"missing_fields": missing},
+        )
+    return source_id or "gfs", str(cycle_time), str(model_id), max_lead_hours
+
+
 def _click_main(argv: Sequence[str] | None = None) -> int:
     import click
 
@@ -35,11 +73,25 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
 
     @cli.command()
     @click.option("--source-id", default="gfs", show_default=True)
-    @click.option("--cycle-time", required=True)
-    @click.option("--model-id", required=True)
+    @click.option("--cycle-time")
+    @click.option("--model-id")
     @click.option("--max-lead-hours", type=int, default=None)
-    def produce(source_id: str, cycle_time: str, model_id: str, max_lead_hours: int | None) -> None:
-        click.echo(json.dumps(_produce(source_id, cycle_time, model_id, max_lead_hours), sort_keys=True))
+    @click.option("--manifest-index")
+    @click.option("--task-id", type=int, default=None)
+    def produce(
+        source_id: str,
+        cycle_time: str | None,
+        model_id: str | None,
+        max_lead_hours: int | None,
+        manifest_index: str | None,
+        task_id: int | None,
+    ) -> None:
+        try:
+            resolved = _resolve_produce_args(source_id, cycle_time, model_id, max_lead_hours, manifest_index, task_id)
+            click.echo(json.dumps(_produce(*resolved), sort_keys=True))
+        except ManifestValidationError as error:
+            click.echo(f"{error.error_code}: {error.message}", err=True)
+            raise SystemExit(1) from error
 
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
@@ -50,13 +102,27 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     produce_parser = subparsers.add_parser("produce")
     produce_parser.add_argument("--source-id", default="gfs")
-    produce_parser.add_argument("--cycle-time", required=True)
-    produce_parser.add_argument("--model-id", required=True)
+    produce_parser.add_argument("--cycle-time")
+    produce_parser.add_argument("--model-id")
     produce_parser.add_argument("--max-lead-hours", type=int, default=None)
+    produce_parser.add_argument("--manifest-index")
+    produce_parser.add_argument("--task-id", type=int, default=None)
     args = parser.parse_args(argv)
 
     if args.command == "produce":
-        print(json.dumps(_produce(args.source_id, args.cycle_time, args.model_id, args.max_lead_hours), sort_keys=True))
+        try:
+            resolved = _resolve_produce_args(
+                args.source_id,
+                args.cycle_time,
+                args.model_id,
+                args.max_lead_hours,
+                args.manifest_index,
+                args.task_id,
+            )
+            print(json.dumps(_produce(*resolved), sort_keys=True))
+        except ManifestValidationError as error:
+            print(f"{error.error_code}: {error.message}", file=sys.stderr)
+            return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2

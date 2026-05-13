@@ -22,4 +22,4 @@ export SHUD_THREADS={{shud_threads}}
 export OMP_NUM_THREADS={{shud_threads}}
 
 mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
-nhms-flood compute-return-period --run-id "$NHMS_RUN_ID"
+nhms-flood compute-return-period --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"

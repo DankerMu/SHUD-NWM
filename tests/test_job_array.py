@@ -76,7 +76,10 @@ def _tasks(count: int) -> list[dict[str, str]]:
         {
             "model_id": "model_001",
             "basin_version_id": f"basin_{index}",
+            "river_network_version_id": f"river_{index}",
             "run_id": f"run_{index}",
+            "source_id": "gfs",
+            "cycle_time": "2026050100",
         }
         for index in range(count)
     ]

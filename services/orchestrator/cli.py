@@ -31,6 +31,11 @@ def _trigger_analysis(*, model_id: str, date_range: str) -> dict[str, object]:
     }
 
 
+def _publish_tiles(*, cycle_id: str) -> dict[str, object]:
+    del cycle_id
+    return {"status": "skipped", "reason": "publish_tiles_not_implemented"}
+
+
 def _click_main(argv: Sequence[str] | None = None) -> int:
     import click
 
@@ -48,6 +53,12 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("publish-tiles")
+    @click.option("--cycle-id", required=True)
+    def publish_tiles(cycle_id: str) -> None:
+        click.echo("publish-tiles is not yet implemented", err=True)
+        click.echo(json.dumps(_publish_tiles(cycle_id=cycle_id), sort_keys=True))
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -58,6 +69,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     trigger_parser = subparsers.add_parser("trigger-analysis")
     trigger_parser.add_argument("--model-id", required=True)
     trigger_parser.add_argument("--date-range", required=True)
+    publish_tiles_parser = subparsers.add_parser("publish-tiles")
+    publish_tiles_parser.add_argument("--cycle-id", required=True)
     args = parser.parse_args(argv)
 
     if args.command == "trigger-analysis":
@@ -66,6 +79,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         except OrchestratorError as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
+        return 0
+    if args.command == "publish-tiles":
+        print("publish-tiles is not yet implemented", file=sys.stderr)
+        print(json.dumps(_publish_tiles(cycle_id=args.cycle_id), sort_keys=True))
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2
