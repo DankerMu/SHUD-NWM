@@ -138,6 +138,7 @@ class RetryService:
                 "previous_error": previous_error,
                 "backoff_seconds": backoff_seconds,
                 "previous_job_id": job.job_id,
+                "slurm_job_id": retry_job.slurm_job_id,
             },
             commit=False,
         )
@@ -217,6 +218,7 @@ class RetryService:
                     "retry_count": next_retry_count,
                     "previous_error": previous_error,
                     "previous_job_id": failed_job.job_id,
+                    "slurm_job_id": retry_job.slurm_job_id,
                 },
                 commit=False,
             )
@@ -225,7 +227,7 @@ class RetryService:
                     text(
                         """
                         UPDATE hydro.hydro_run
-                        SET status = 'running',
+                        SET status = 'pending',
                             error_code = NULL,
                             error_message = NULL
                         WHERE run_id = :run_id
