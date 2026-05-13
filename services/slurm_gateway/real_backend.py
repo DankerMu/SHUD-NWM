@@ -365,7 +365,11 @@ class RealSlurmGateway(SlurmGateway):
             entry = dict(task)
             entry["task_id"] = index
             entry.setdefault("workspace_dir", str(Path(self.settings.workspace_dir)))
-            self._require_manifest_fields(entry, ["task_id", "model_id", "basin_version_id", "run_id", "workspace_dir"])
+            self._require_manifest_fields(
+                entry,
+                ["task_id", "model_id", "basin_version_id", "river_network_version_id",
+                 "run_id", "source_id", "cycle_time", "workspace_dir"],
+            )
             self._validate_manifest(entry)
             entries.append(entry)
 

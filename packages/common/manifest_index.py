@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 REQUIRED_MANIFEST_ENTRY_FIELDS = (
     "task_id",
@@ -31,18 +34,26 @@ class ManifestValidationError(RuntimeError):
 
 
 def resolve_task_id(explicit_task_id: int | None) -> int:
-    if explicit_task_id is not None:
-        return explicit_task_id
     env_task_id = os.getenv("SLURM_ARRAY_TASK_ID")
+    if explicit_task_id is not None:
+        if env_task_id is not None and str(explicit_task_id) != env_task_id:
+            LOGGER.info(
+                "task_id resolved from explicit --task-id=%d (SLURM_ARRAY_TASK_ID=%s ignored)",
+                explicit_task_id, env_task_id,
+            )
+        return explicit_task_id
     if env_task_id is None:
+        LOGGER.info("task_id defaulted to 0 (no --task-id or SLURM_ARRAY_TASK_ID)")
         return 0
     try:
-        return int(env_task_id)
+        resolved = int(env_task_id)
     except ValueError as exc:
         raise ManifestValidationError(
             "SLURM_ARRAY_TASK_ID is not a valid integer.",
             {"SLURM_ARRAY_TASK_ID": env_task_id},
         ) from exc
+    LOGGER.info("task_id resolved from SLURM_ARRAY_TASK_ID=%d", resolved)
+    return resolved
 
 
 def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any]:

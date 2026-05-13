@@ -39,7 +39,8 @@ def _resolve_execute_manifest(manifest: str | None, manifest_index: str | None, 
     if manifest_index is not None:
         resolved_task_id = resolve_task_id(task_id)
         entry = load_manifest_entry(manifest_index, resolved_task_id)
-        return str(Path(str(entry["workspace_dir"])) / "runs" / str(entry["run_id"]) / "input" / "manifest.json")
+        workspace = os.getenv("WORKSPACE_ROOT") or str(entry["workspace_dir"])
+        return str(Path(workspace) / "runs" / str(entry["run_id"]) / "input" / "manifest.json")
     if not manifest:
         raise ManifestValidationError(
             "Explicit runtime execution requires --manifest.",
