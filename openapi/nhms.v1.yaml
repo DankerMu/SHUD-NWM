@@ -2253,14 +2253,12 @@ components:
             $ref: "#/components/schemas/IdempotentCancelJob"
         hydro_run:
           nullable: true
-          allOf:
-            - $ref: "#/components/schemas/CancelTransition"
-          description: "hydro_run transition, or null if not applicable"
+          type: object
+          description: "hydro_run transition (CancelTransition shape), or null if not applicable"
         forecast_cycle:
           nullable: true
-          allOf:
-            - $ref: "#/components/schemas/CancelTransition"
-          description: "forecast_cycle transition, or null if not applicable"
+          type: object
+          description: "forecast_cycle transition (CancelTransition shape), or null if not applicable"
     SlurmCancelFailure:
       type: object
       required: [job_id, run_id, status, slurm_job_id, error]

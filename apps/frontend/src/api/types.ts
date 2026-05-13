@@ -1013,10 +1013,10 @@ export interface components {
             slurm_failures?: components["schemas"]["SlurmCancelFailure"][];
             partial_failure?: boolean;
             idempotent_jobs?: components["schemas"]["IdempotentCancelJob"][];
-            /** @description hydro_run transition, or null if not applicable */
-            hydro_run?: components["schemas"]["CancelTransition"] | null;
-            /** @description forecast_cycle transition, or null if not applicable */
-            forecast_cycle?: components["schemas"]["CancelTransition"] | null;
+            /** @description hydro_run transition (CancelTransition shape), or null if not applicable */
+            hydro_run?: Record<string, never> | null;
+            /** @description forecast_cycle transition (CancelTransition shape), or null if not applicable */
+            forecast_cycle?: Record<string, never> | null;
         };
         SlurmCancelFailure: {
             job_id: string;

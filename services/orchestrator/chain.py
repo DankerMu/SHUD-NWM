@@ -2620,7 +2620,7 @@ class PsycopgOrchestratorRepository:
                 error_code = NULL,
                 error_message = NULL,
                 updated_at = now()
-            WHERE hydro.hydro_run.status IN ('failed', 'cancelled')
+            WHERE hydro.hydro_run.status IN ('failed', 'cancelled', 'pending')
             RETURNING *
             """,
             (
