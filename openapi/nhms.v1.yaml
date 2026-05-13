@@ -477,9 +477,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/HydroRun"
+                        $ref: "#/components/schemas/HydroRunPage"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -908,6 +906,7 @@ paths:
           required: false
           schema:
             type: string
+        - $ref: "#/components/parameters/ValidTimeQuery"
       responses:
         "200":
           description: Flood alert summary
@@ -933,6 +932,13 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
         - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: basin_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - $ref: "#/components/parameters/ValidTimeQuery"
       responses:
         "200":
           description: Flood alert ranking
@@ -945,9 +951,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/FloodAlertRankingItem"
+                        $ref: "#/components/schemas/FloodAlertRanking"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -965,6 +969,12 @@ paths:
           schema:
             type: number
             minimum: 0
+        - name: warning_level
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated warning levels.
         - $ref: "#/components/parameters/ValidTimeQuery"
       responses:
         "200":
@@ -978,9 +988,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/FloodAlertSegment"
+                        $ref: "#/components/schemas/FloodAlertSegmentList"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1377,6 +1385,7 @@ components:
   schemas:
     SuccessEnvelope:
       type: object
+      description: Standard success envelope returned by API endpoints using the `_ok()` response pattern.
       required: [request_id, status, data]
       properties:
         request_id:
@@ -1384,6 +1393,7 @@ components:
           example: req_01J0NHMS
         status:
           type: string
+          enum: [ok]
           example: ok
         data:
           type: object
@@ -1725,6 +1735,28 @@ components:
         updated_at:
           type: string
           format: date-time
+    HydroRunPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/HydroRun"
+        total:
+          type: integer
+          minimum: 0
+        total_count:
+          type: integer
+          minimum: 0
+          description: Backward-compatible alias of total.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+        offset:
+          type: integer
+          minimum: 0
     RiverSeriesResponse:
       type: object
       required: [segment_id, issue_time, unit, series, frequency_thresholds]
@@ -1789,35 +1821,34 @@ components:
                 - type: number
     FloodAlertSummary:
       type: object
-      required: [run_id, threshold, total_segments, alert_counts, updated_at]
+      required: [run_id, levels, total_segments, usable_curves, unavailable_count]
       properties:
         run_id:
           type: string
-        threshold:
-          type: string
         total_segments:
           type: integer
-        alert_counts:
-          type: object
-          required: [normal, elevated, watch, warning, high_risk, severe, extreme]
-          properties:
-            normal:
-              type: integer
-            elevated:
-              type: integer
-            watch:
-              type: integer
-            warning:
-              type: integer
-            high_risk:
-              type: integer
-            severe:
-              type: integer
-            extreme:
-              type: integer
-        updated_at:
+        usable_curves:
+          type: integer
+        unavailable_count:
+          type: integer
+        quality_note:
           type: string
-          format: date-time
+          nullable: true
+        levels:
+          type: array
+          items:
+            $ref: "#/components/schemas/FloodAlertLevelCount"
+    FloodAlertLevelCount:
+      type: object
+      required: [level, count, color]
+      properties:
+        level:
+          type: string
+          enum: [normal, elevated, watch, warning, high_risk, severe, extreme]
+        count:
+          type: integer
+        color:
+          type: string
     PipelineStage:
       type: object
       required: [stage, display_status, duration_seconds, basin_progress, basin_results]
@@ -1874,6 +1905,8 @@ components:
         - job_id
         - run_id
         - cycle_id
+        - run_type
+        - scenario
         - job_type
         - slurm_job_id
         - model_id
@@ -1895,6 +1928,12 @@ components:
           type: string
           nullable: true
         cycle_id:
+          type: string
+          nullable: true
+        run_type:
+          type: string
+          nullable: true
+        scenario:
           type: string
           nullable: true
         job_type:
@@ -2143,10 +2182,13 @@ components:
           type: integer
     RetryRunResult:
       type: object
-      required: [job_id, run_id, retry_count, status]
+      required: [job_id, pipeline_job_id, run_id, retry_count, status, slurm_job_id, execution_status]
       properties:
         job_id:
           type: string
+        pipeline_job_id:
+          type: string
+          description: Alias of job_id for pipeline-control clients.
         run_id:
           type: string
           nullable: true
@@ -2154,6 +2196,12 @@ components:
           type: integer
         status:
           type: string
+        slurm_job_id:
+          type: string
+          nullable: true
+        execution_status:
+          type: string
+          enum: [queued, submitted]
     CancelRunResult:
       type: object
       required: [run_id, cancelled_jobs]
@@ -2169,6 +2217,80 @@ components:
           description: Backward-compatible alias of cancelled_jobs.
           items:
             $ref: "#/components/schemas/PipelineJob"
+        failed_jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/SlurmCancelFailure"
+        slurm_failures:
+          type: array
+          description: Alias of failed_jobs for Slurm cancellation failures.
+          items:
+            $ref: "#/components/schemas/SlurmCancelFailure"
+        partial_failure:
+          type: boolean
+        idempotent_jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/IdempotentCancelJob"
+        hydro_run:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/CancelTransition"
+        forecast_cycle:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/CancelTransition"
+    SlurmCancelFailure:
+      type: object
+      required: [job_id, run_id, status, slurm_job_id, error]
+      properties:
+        job_id:
+          type: string
+        run_id:
+          type: string
+        status:
+          type: string
+        slurm_job_id:
+          type: string
+          nullable: true
+        error:
+          type: object
+          required: [status_code, code, message, details]
+          properties:
+            status_code:
+              type: integer
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+    IdempotentCancelJob:
+      type: object
+      required: [job_id, slurm_job_id, note]
+      properties:
+        job_id:
+          type: string
+        slurm_job_id:
+          type: string
+          nullable: true
+        note:
+          type: string
+    CancelTransition:
+      type: object
+      required: [previous_status, status, preserved]
+      properties:
+        run_id:
+          type: string
+        cycle_id:
+          type: string
+        previous_status:
+          type: string
+        status:
+          type: string
+        preserved:
+          type: boolean
     StageDurationMetric:
       type: object
       required: [date, stage, average_duration_seconds, job_count]
@@ -2199,50 +2321,180 @@ components:
           type: integer
     FloodAlertRankingItem:
       type: object
-      required: [segment_id, max_return_period, severity, rank]
+      required:
+        - rank
+        - river_segment_id
+        - segment_id
+        - segment_name
+        - basin_version_id
+        - q_value
+        - q_unit
+        - return_period
+        - warning_level
+        - duration
+        - valid_time
       properties:
-        segment_id:
-          type: string
-        max_return_period:
-          type: number
-        severity:
-          type: string
         rank:
           type: integer
-    FloodAlertSegment:
-      type: object
-      required: [segment_id, valid_time, return_period, severity]
-      properties:
+        river_segment_id:
+          type: string
         segment_id:
           type: string
+        segment_name:
+          type: string
+          nullable: true
+        basin_version_id:
+          type: string
+        q_value:
+          type: number
+        q_unit:
+          type: string
+        return_period:
+          type: number
+          nullable: true
+        warning_level:
+          type: string
+          nullable: true
+        duration:
+          type: string
+        valid_time:
+          type: string
+          format: date-time
+    FloodAlertRanking:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FloodAlertRankingItem"
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+        offset:
+          type: integer
+          minimum: 0
+    FloodAlertSegment:
+      type: object
+      required:
+        - river_segment_id
+        - segment_id
+        - segment_name
+        - basin_version_id
+        - q_value
+        - return_period
+        - warning_level
+        - valid_time
+        - geom_centroid
+      properties:
+        river_segment_id:
+          type: string
+        segment_id:
+          type: string
+        segment_name:
+          type: string
+          nullable: true
+        basin_version_id:
+          type: string
+        q_value:
+          type: number
+        return_period:
+          type: number
+          nullable: true
+        warning_level:
+          type: string
+          nullable: true
+        valid_time:
+          type: string
+          format: date-time
+        geom_centroid:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/GeoJsonPoint"
+    FloodAlertSegmentList:
+      type: object
+      required: [segments, total]
+      properties:
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/FloodAlertSegment"
+        total:
+          type: integer
+          minimum: 0
+    FloodAlertTimelinePoint:
+      type: object
+      required: [valid_time, return_period, warning_level, q_value]
+      properties:
         valid_time:
           type: string
           format: date-time
         return_period:
           type: number
-        severity:
+          nullable: true
+        warning_level:
           type: string
+          nullable: true
+        q_value:
+          type: number
+    FloodFrequencyThresholds:
+      type: object
+      properties:
+        Q2:
+          type: number
+          nullable: true
+        Q5:
+          type: number
+          nullable: true
+        Q10:
+          type: number
+          nullable: true
+        Q20:
+          type: number
+          nullable: true
+        Q50:
+          type: number
+          nullable: true
+        Q100:
+          type: number
+          nullable: true
+        sample_quality:
+          type: object
+          nullable: true
+          additionalProperties: true
     FloodAlertTimeline:
       type: object
-      required: [run_id, segment_id, points]
+      required: [run_id, segment_id, river_segment_id, timesteps, timeline, peak, frequency_thresholds, quality_note]
       properties:
         run_id:
           type: string
         segment_id:
           type: string
-        points:
+        river_segment_id:
+          type: string
+        timesteps:
           type: array
           items:
-            type: object
-            required: [valid_time, return_period, severity]
-            properties:
-              valid_time:
-                type: string
-                format: date-time
-              return_period:
-                type: number
-              severity:
-                type: string
+            $ref: "#/components/schemas/FloodAlertTimelinePoint"
+        timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/FloodAlertTimelinePoint"
+        peak:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/FloodAlertTimelinePoint"
+        frequency_thresholds:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/FloodFrequencyThresholds"
+        quality_note:
+          type: string
+          nullable: true
     LineageResponse:
       type: object
       required: [target_type, target_id, nodes, edges]

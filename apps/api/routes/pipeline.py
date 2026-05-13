@@ -394,6 +394,7 @@ def cancel_run(
             "cancelled_jobs": cancelled_jobs,
             "cancelled": cancelled_jobs,
             "failed_jobs": failed_jobs,
+            "slurm_failures": failed_jobs,
             "partial_failure": bool(failed_jobs),
             "idempotent_jobs": idempotent_jobs,
             "hydro_run": hydro_transition,

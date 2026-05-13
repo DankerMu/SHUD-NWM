@@ -466,7 +466,11 @@ async def test_run_list_uses_offset_limit_pagination_and_caps_limit(fake_store: 
     response = await _get("/api/v1/runs?basin_id=yangtze&source=gfs&status=parsed&limit=1000&offset=20")
 
     assert response.status_code == 200
-    data = response.json()
+    envelope = response.json()
+    assert set(envelope) == {"request_id", "status", "data"}
+    assert envelope["status"] == "ok"
+    data = envelope["data"]
+    assert data["total"] == 1
     assert data["total_count"] == 1
     assert data["limit"] == 200
     assert data["offset"] == 20

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request
 
@@ -54,16 +55,18 @@ def get_forecast_series(
 @router.get("/runs/{run_id}")
 def get_run(
     run_id: str,
+    request: Request,
     store: PsycopgForecastStore = Depends(get_forecast_store),
 ) -> dict[str, Any]:
     try:
-        return store.get_run(run_id)
+        return _ok(request, store.get_run(run_id))
     except ForecastStoreError as error:
         raise _api_error(error) from error
 
 
 @router.get("/runs")
 def list_runs(
+    request: Request,
     basin_id: str | None = None,
     source: str | None = None,
     cycle_time: datetime | None = None,
@@ -74,7 +77,7 @@ def list_runs(
 ) -> dict[str, Any]:
     capped_limit = min(limit, MAX_LIMIT)
     try:
-        return store.list_runs(
+        page = store.list_runs(
             basin_id=basin_id,
             source=source,
             cycle_time=cycle_time,
@@ -82,6 +85,7 @@ def list_runs(
             limit=capped_limit,
             offset=offset,
         )
+        return _ok(request, _paginated_payload(page))
     except ForecastStoreError as error:
         raise _api_error(error) from error
 
@@ -97,6 +101,23 @@ def _api_error(error: ForecastStoreError) -> ApiError:
         message=error.message,
         details=error.details,
     )
+
+
+def _ok(request: Request, data: Any) -> dict[str, Any]:
+    return {
+        "request_id": getattr(request.state, "request_id", None) or str(uuid4()),
+        "status": "ok",
+        "data": data,
+    }
+
+
+def _paginated_payload(page: dict[str, Any]) -> dict[str, Any]:
+    total = int(page.get("total", page.get("total_count", 0)) or 0)
+    return {
+        **page,
+        "total": total,
+        "total_count": total,
+    }
 
 
 def _require_hindcast_access_role(request: Request) -> None:

@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "preview": "vite preview",
-    "generate:api": "openapi-typescript ../../openapi/nhms.v1.yaml -o src/api/types.ts"
+    "generate:api": "openapi-typescript ../../openapi/nhms.v1.yaml -o src/api/types.ts",
+    "check:api-types": "openapi-typescript ../../openapi/nhms.v1.yaml --output /tmp/nhms-api-types.ts && diff src/api/types.ts /tmp/nhms-api-types.ts"
   },
   "keywords": [],
   "author": "",
