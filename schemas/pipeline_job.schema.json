@@ -19,7 +19,19 @@
     "status": {
       "description": "Pipeline job lifecycle status.",
       "type": "string",
-      "enum": ["pending", "submitted", "running", "succeeded", "failed", "cancelled"]
+      "enum": [
+        "pending",
+        "queued",
+        "submitted",
+        "running",
+        "succeeded",
+        "partially_failed",
+        "failed",
+        "submission_failed",
+        "permanently_failed",
+        "cancelled",
+        "skipped"
+      ]
     },
     "run_id": {
       "type": "string"
@@ -27,8 +39,15 @@
     "cycle_id": {
       "type": "string"
     },
+    "model_id": {
+      "type": "string"
+    },
     "slurm_job_id": {
       "type": "string"
+    },
+    "array_task_id": {
+      "type": "integer",
+      "minimum": 0
     },
     "stage": {
       "type": "string"

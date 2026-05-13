@@ -3,6 +3,8 @@
   "job_type": "download",
   "status": "succeeded",
   "cycle_id": "cycle_gfs_2026043000",
+  "model_id": "yangtze_shud_v12",
+  "array_task_id": 0,
   "stage": "raw_download",
   "submitted_at": "2026-04-30T00:05:00Z",
   "started_at": "2026-04-30T00:05:02Z",
