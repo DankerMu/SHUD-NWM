@@ -284,5 +284,5 @@ def test_create_run_conflict_only_resets_retriable_statuses(monkeypatch: pytest.
         PsycopgHydroRunRepository("postgresql://example").create_run(_manifest(), "runs/demo/input/manifest.json")
 
     assert exc_info.value.error_code == "HYDRO_RUN_NOT_RETRIABLE"
-    retriable_conflict_clause = "WHERE hydro.hydro_run.status IN ('failed', 'cancelled')"
+    retriable_conflict_clause = "WHERE hydro.hydro_run.status IN ('failed', 'cancelled', 'pending')"
     assert any(retriable_conflict_clause in statement for statement in cursor.statements)

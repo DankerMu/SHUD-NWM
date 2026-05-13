@@ -16,6 +16,7 @@ EXPECTED_MIGRATIONS = [
     "000010_indexes.sql",
     "000011_pipeline_job_model_id.sql",
     "000012_pipeline_job_array_task.sql",
+    "000013_enum_remediation.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -62,7 +63,7 @@ def test_all_migration_files_exist_with_expected_names() -> None:
 
 
 def test_migration_files_are_non_empty_sql() -> None:
-    required_keywords = ("create", "select", "do")
+    required_keywords = ("create", "select", "do", "alter")
 
     for migration_name, sql in _migration_sql():
         normalized = sql.strip().lower()

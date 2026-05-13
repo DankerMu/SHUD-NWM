@@ -781,7 +781,7 @@ export interface components {
         /** @enum {string} */
         RunType: "analysis" | "forecast" | "hindcast";
         /** @enum {string} */
-        RunStatus: "created" | "staged" | "submitted" | "running" | "succeeded" | "parsed" | "frequency_done" | "published" | "failed" | "cancelled" | "superseded";
+        RunStatus: "created" | "staged" | "pending" | "submitted" | "running" | "succeeded" | "parsed" | "frequency_done" | "published" | "failed" | "cancelled" | "superseded";
         HydroRun: {
             run_id: string;
             run_type: components["schemas"]["RunType"];
@@ -1013,9 +1013,9 @@ export interface components {
             slurm_failures?: components["schemas"]["SlurmCancelFailure"][];
             partial_failure?: boolean;
             idempotent_jobs?: components["schemas"]["IdempotentCancelJob"][];
-            /** @description hydro_run transition, or null if not applicable */
+            /** @description hydro_run transition (CancelTransition shape), or null if not applicable */
             hydro_run?: Record<string, never> | null;
-            /** @description forecast_cycle transition, or null if not applicable */
+            /** @description forecast_cycle transition (CancelTransition shape), or null if not applicable */
             forecast_cycle?: Record<string, never> | null;
         };
         SlurmCancelFailure: {
@@ -1162,7 +1162,7 @@ export interface components {
         BasinId: string;
         BasinVersionId: string;
         BasinVersionIdQuery: string;
-        CycleStatus: string;
+        CycleStatus: "discovered" | "downloading" | "raw_complete" | "canonical_ready" | "forcing_ready_partial" | "forcing_ready" | "forecast_running" | "parsed_partial" | "complete" | "published" | "failed_download" | "failed_convert" | "failed_forcing" | "failed_run" | "failed_parse" | "failed_publish" | "cancelled";
         CycleTimeQuery: string;
         CycleTimeQueryRequired: string;
         FromTime: string;

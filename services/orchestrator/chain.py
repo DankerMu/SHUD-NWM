@@ -31,7 +31,7 @@ TERMINAL_JOB_STATUSES = {
     "submission_failed",
     "permanently_failed",
 }
-ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running", "succeeded"}
+ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running", "succeeded"}
 COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "published", "complete"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
@@ -2620,7 +2620,7 @@ class PsycopgOrchestratorRepository:
                 error_code = NULL,
                 error_message = NULL,
                 updated_at = now()
-            WHERE hydro.hydro_run.status IN ('failed', 'cancelled')
+            WHERE hydro.hydro_run.status IN ('failed', 'cancelled', 'pending')
             RETURNING *
             """,
             (

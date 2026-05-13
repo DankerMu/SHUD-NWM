@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
@@ -11,11 +14,48 @@ from sqlalchemy.pool import StaticPool
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryService
+from services.orchestrator.retry import RetryConfig, RetryNotFoundError, RetryService
 from services.slurm_gateway.gateway import SlurmGatewayError
 
+HYDRO_RUN_STATUS_ENUM = {
+    "created",
+    "staged",
+    "pending",
+    "submitted",
+    "running",
+    "succeeded",
+    "parsed",
+    "frequency_done",
+    "published",
+    "failed",
+    "cancelled",
+    "superseded",
+}
 
-def test_manual_retry_creates_pending_not_running() -> None:
+MET_CYCLE_STATUS_ENUM = {
+    "discovered",
+    "downloading",
+    "raw_complete",
+    "canonical_ready",
+    "forcing_ready_partial",
+    "forcing_ready",
+    "forecast_running",
+    "parsed_partial",
+    "complete",
+    "published",
+    "failed_download",
+    "failed_convert",
+    "failed_forcing",
+    "failed_run",
+    "failed_parse",
+    "failed_publish",
+    "cancelled",
+}
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_characterization_manual_retry_writes_pending_to_hydro_run() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_retry", status="failed")
         _create_job(store, job_id="job_failed", run_id="run_retry", status="failed", error_code="NODE_FAILURE")
@@ -23,6 +63,7 @@ def test_manual_retry_creates_pending_not_running() -> None:
 
         retry = service.attempt_manual_retry("run_retry")
 
+        # Characterization: before enum remediation, SQLite allowed this value even though PostgreSQL did not.
         assert retry.status == "pending"
         assert _hydro_status(store, "run_retry") == "pending"
         assert store.get_job(retry.job_id).status == "pending"
@@ -78,7 +119,7 @@ def test_retry_event_records_trigger_and_previous_error() -> None:
         assert event.details["slurm_job_id"] is None
 
 
-def test_cancel_updates_pipeline_job_and_hydro_run() -> None:
+def test_characterization_cancel_writes_cancelled_to_forecast_cycle() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_cancel", status="running")
         _insert_forecast_cycle(store, "cycle_cancel", status="forecast_running")
@@ -92,6 +133,7 @@ def test_cancel_updates_pipeline_job_and_hydro_run() -> None:
         assert data["partial_failure"] is False
         assert store.get_job("job_running").status == "cancelled"
         assert _hydro_status(store, "run_cancel") == "cancelled"
+        # Characterization: before enum remediation, SQLite allowed this value even though PostgreSQL did not.
         assert _cycle_status(store, "cycle_cancel") == "cancelled"
 
 
@@ -106,6 +148,7 @@ def test_cancel_preserves_terminal_forecast_cycle() -> None:
         assert response.status_code == 200
         assert _hydro_status(store, "run_published") == "cancelled"
         assert _cycle_status(store, "cycle_published") == "published"
+        assert _cycle_status(store, "cycle_published") in MET_CYCLE_STATUS_ENUM
         assert response.json()["data"]["forecast_cycle"]["preserved"] is True
 
 
@@ -141,6 +184,9 @@ def test_partial_slurm_cancel_reflected_in_response() -> None:
         assert store.get_job("job_cancel_ok").status == "cancelled"
         assert store.get_job("job_cancel_fail").status == "running"
         assert _hydro_status(store, "run_partial") == "running"
+        assert _cycle_status(store, "cycle_partial") == "forecast_running"
+        assert data["hydro_run"] is None
+        assert data["forecast_cycle"] is None
 
 
 def test_cancel_idempotent_for_terminal_slurm_job() -> None:
@@ -209,6 +255,115 @@ def test_cancelled_run_does_not_block_active_guard() -> None:
 
         assert response.status_code == 200
         assert _has_active_pipeline(store, source_id="gfs", cycle_time=_cycle_time(), model_id="model_a") is False
+
+
+def test_retry_status_is_valid_hydro_enum() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_retry_valid_enum", status="failed")
+        _create_job(
+            store,
+            job_id="job_retry_valid_enum",
+            run_id="run_retry_valid_enum",
+            status="failed",
+            error_code="NODE_FAILURE",
+        )
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        service.attempt_manual_retry("run_retry_valid_enum")
+
+        assert _hydro_status(store, "run_retry_valid_enum") == "pending"
+        assert _hydro_status(store, "run_retry_valid_enum") in HYDRO_RUN_STATUS_ENUM
+
+
+def test_cancel_status_is_valid_cycle_enum() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_cancel_valid_cycle", status="running")
+        _insert_forecast_cycle(store, "cycle_cancel_valid_cycle", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_cancel_valid_cycle",
+            run_id="run_cancel_valid_cycle",
+            cycle_id="cycle_cancel_valid_cycle",
+            status="running",
+        )
+        with _client(store, gateway=_MockGateway()) as client:
+            response = client.post("/api/v1/runs/run_cancel_valid_cycle/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        assert _cycle_status(store, "cycle_cancel_valid_cycle") in MET_CYCLE_STATUS_ENUM
+        assert response.json()["data"]["forecast_cycle"]["status"] in MET_CYCLE_STATUS_ENUM
+
+
+def test_cancel_status_is_valid_hydro_enum() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_cancel_valid_hydro", status="running")
+        _insert_forecast_cycle(store, "cycle_cancel_valid_hydro", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_cancel_valid_hydro",
+            run_id="run_cancel_valid_hydro",
+            cycle_id="cycle_cancel_valid_hydro",
+            status="running",
+        )
+        with _client(store, gateway=_MockGateway()) as client:
+            response = client.post("/api/v1/runs/run_cancel_valid_hydro/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        assert _hydro_status(store, "run_cancel_valid_hydro") == "cancelled"
+        assert _hydro_status(store, "run_cancel_valid_hydro") in HYDRO_RUN_STATUS_ENUM
+
+
+def test_retry_preserves_terminal_hydro_status() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_retry_terminal", status="published")
+        _create_job(
+            store,
+            job_id="job_retry_terminal",
+            run_id="run_retry_terminal",
+            status="failed",
+            error_code="NODE_FAILURE",
+        )
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("run_retry_terminal")
+
+        assert retry.status == "pending"
+        assert _hydro_status(store, "run_retry_terminal") == "published"
+        assert _hydro_status(store, "run_retry_terminal") in HYDRO_RUN_STATUS_ENUM
+
+
+def test_cancel_preserves_terminal_hydro_run() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_cancel_terminal_hydro", status="published")
+        _insert_forecast_cycle(store, "cycle_cancel_terminal_hydro", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_cancel_terminal_hydro",
+            run_id="run_cancel_terminal_hydro",
+            cycle_id="cycle_cancel_terminal_hydro",
+            status="running",
+        )
+        with _client(store, gateway=_MockGateway()) as client:
+            response = client.post("/api/v1/runs/run_cancel_terminal_hydro/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        assert _hydro_status(store, "run_cancel_terminal_hydro") == "published"
+        assert response.json()["data"]["hydro_run"]["preserved"] is True
+
+
+def test_retry_nonexistent_run_raises_not_found_without_enum_write() -> None:
+    with _store() as store:
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with pytest.raises(RetryNotFoundError):
+            service.attempt_manual_retry("run_missing")
+
+        assert _events(store) == []
+
+
+def test_enum_sets_match_migration() -> None:
+    assert _migration_enum_values("hydro.run_status") == HYDRO_RUN_STATUS_ENUM
+    assert _migration_enum_values("met.cycle_status") == MET_CYCLE_STATUS_ENUM
 
 
 class _ClosingStore(PipelineStore):
@@ -425,6 +580,25 @@ def _has_active_pipeline(store: PipelineStore, *, source_id: str, cycle_time: da
 def _events(store: PipelineStore) -> list[PipelineEvent]:
     statement = select(PipelineEvent).order_by(PipelineEvent.event_id.asc())
     return list(store.session.scalars(statement))
+
+
+def _migration_enum_values(type_name: str) -> set[str]:
+    migration_text = "\n".join(
+        (_REPO_ROOT / path).read_text(encoding="utf-8")
+        for path in ("db/migrations/000003_enums.sql", "db/migrations/000013_enum_remediation.sql")
+    )
+    create_match = re.search(
+        rf"CREATE TYPE {re.escape(type_name)} AS ENUM\s*\((?P<body>.*?)\);",
+        migration_text,
+        flags=re.DOTALL,
+    )
+    if create_match is None:
+        raise AssertionError(f"Missing CREATE TYPE for {type_name}")
+
+    values = set(re.findall(r"'([^']+)'", create_match.group("body")))
+    alter_pattern = rf"ALTER TYPE {re.escape(type_name)} ADD VALUE IF NOT EXISTS '([^']+)'"
+    values.update(re.findall(alter_pattern, migration_text))
+    return values
 
 
 def _operator_headers() -> dict[str, str]:
