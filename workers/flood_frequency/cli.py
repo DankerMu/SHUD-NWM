@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from packages.common.manifest_index import ManifestValidationError, load_manifest_entry
+from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
 from workers.flood_frequency.hindcast import (
@@ -120,13 +120,9 @@ def _compute_return_period(run_id: str) -> dict[str, object]:
 
 
 def _resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:
-    if (manifest_index is None) != (task_id is None):
-        raise ManifestValidationError(
-            "--manifest-index and --task-id must be provided together.",
-            {"manifest_index": manifest_index, "task_id": task_id},
-        )
-    if manifest_index is not None and task_id is not None:
-        entry = load_manifest_entry(manifest_index, task_id)
+    if manifest_index is not None:
+        resolved_task_id = resolve_task_id(task_id)
+        entry = load_manifest_entry(manifest_index, resolved_task_id)
         return str(entry["run_id"])
     if not run_id:
         raise ManifestValidationError(

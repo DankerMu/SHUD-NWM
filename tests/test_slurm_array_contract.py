@@ -8,7 +8,7 @@ from typing import Any, Callable, Sequence
 
 import pytest
 
-from packages.common.manifest_index import ManifestValidationError, load_manifest_entry
+from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from services.orchestrator import cli as orchestrator_cli
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.real_backend import RealSlurmGateway
@@ -105,6 +105,15 @@ def _invoke_main(main: Callable[[Sequence[str]], int], argv: Sequence[str]) -> N
         assert exc.code in (0, None)
     else:
         assert result == 0
+
+
+def _invoke_main_expect_failure(main: Callable[[Sequence[str]], int], argv: Sequence[str]) -> None:
+    try:
+        result = main(argv)
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        assert result == 1
 
 
 def _rendered_command_argv(rendered: str, *, manifest_index_path: Path) -> list[str]:
@@ -311,6 +320,61 @@ def test_forcing_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
     assert captured["model_id"] == "model_001"
 
 
+def test_manifest_index_uses_slurm_array_task_id_when_no_explicit_task_id(monkeypatch, tmp_path):
+    captured: dict[str, Any] = {}
+
+    class FakeProducer:
+        def produce(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                status="succeeded",
+                forcing_version_id="forcing_001",
+                forcing_package_uri="file:///forcing",
+                checksum="abc",
+                station_count=1,
+                timestep_count=2,
+            )
+
+    monkeypatch.setenv("SLURM_ARRAY_TASK_ID", "1")
+    monkeypatch.setattr(forcing_cli.ForcingProducer, "from_env", staticmethod(lambda: FakeProducer()))
+
+    _invoke_main(forcing_cli.main, ["produce", "--manifest-index", str(_manifest_index(tmp_path))])
+
+    assert captured["source_id"] == "IFS"
+    assert captured["model_id"] == "model_002"
+
+
+def test_manifest_index_defaults_to_zero_when_no_task_id_source(monkeypatch, tmp_path):
+    captured: dict[str, Any] = {}
+
+    class FakeProducer:
+        def produce(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                status="succeeded",
+                forcing_version_id="forcing_001",
+                forcing_package_uri="file:///forcing",
+                checksum="abc",
+                station_count=1,
+                timestep_count=2,
+            )
+
+    monkeypatch.delenv("SLURM_ARRAY_TASK_ID", raising=False)
+    monkeypatch.setattr(forcing_cli.ForcingProducer, "from_env", staticmethod(lambda: FakeProducer()))
+
+    _invoke_main(forcing_cli.main, ["produce", "--manifest-index", str(_manifest_index(tmp_path))])
+
+    assert captured["source_id"] == "GFS"
+    assert captured["model_id"] == "model_001"
+
+
+def test_manifest_index_invalid_slurm_array_task_id_raises(monkeypatch):
+    monkeypatch.setenv("SLURM_ARRAY_TASK_ID", "abc")
+
+    with pytest.raises(ManifestValidationError):
+        resolve_task_id(None)
+
+
 def test_runtime_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
     captured: dict[str, str] = {}
 
@@ -371,6 +435,61 @@ def test_compute_frequency_array_cli_accepts_manifest_index(monkeypatch, tmp_pat
     assert captured["run_id"] == "run_001"
 
 
+def test_worker_does_not_call_downstream_on_manifest_validation_error(monkeypatch, tmp_path):
+    path = tmp_path / "manifest_index.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": 0,
+                    "model_id": "model_001",
+                    "basin_version_id": "basin_001",
+                    "run_id": "run_001",
+                    "workspace_dir": str(tmp_path / "workspace"),
+                    "source_id": "GFS",
+                    "cycle_time": "2026051200",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        forcing_cli.ForcingProducer,
+        "from_env",
+        staticmethod(lambda: (_ for _ in ()).throw(AssertionError("should not be called"))),
+    )
+
+    _invoke_main_expect_failure(forcing_cli.main, ["produce", "--manifest-index", str(path)])
+
+
+def test_different_task_ids_invoke_worker_with_different_contexts(monkeypatch, tmp_path):
+    captured: list[dict[str, Any]] = []
+
+    class FakeProducer:
+        def produce(self, **kwargs):
+            captured.append(dict(kwargs))
+            return SimpleNamespace(
+                status="succeeded",
+                forcing_version_id="forcing_001",
+                forcing_package_uri="file:///forcing",
+                checksum="abc",
+                station_count=1,
+                timestep_count=2,
+            )
+
+    monkeypatch.setattr(forcing_cli.ForcingProducer, "from_env", staticmethod(lambda: FakeProducer()))
+    manifest_index = _manifest_index(tmp_path)
+
+    _invoke_main(forcing_cli.main, ["produce", "--manifest-index", str(manifest_index), "--task-id", "0"])
+    _invoke_main(forcing_cli.main, ["produce", "--manifest-index", str(manifest_index), "--task-id", "1"])
+
+    assert captured[0]["source_id"] == "GFS"
+    assert captured[1]["source_id"] == "IFS"
+    assert captured[0]["model_id"] == "model_001"
+    assert captured[1]["model_id"] == "model_002"
+
+
 def test_non_array_templates_use_existing_cli_args(tmp_path):
     gateway = _gateway(tmp_path)
 
@@ -419,6 +538,51 @@ def test_manifest_validation_rejects_empty_manifest_index(tmp_path):
     path.write_text("[]", encoding="utf-8")
 
     with pytest.raises(ManifestValidationError):
+        load_manifest_entry(str(path), 0)
+
+
+def test_manifest_index_rejects_symlink(tmp_path):
+    target = _manifest_index(tmp_path)
+    link = tmp_path / "manifest_index_link.json"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+
+    with pytest.raises(ManifestValidationError, match="symlink"):
+        load_manifest_entry(str(link), 0)
+
+
+def test_manifest_index_rejects_oversized_file(tmp_path):
+    path = tmp_path / "manifest_index.json"
+    with path.open("wb") as file:
+        file.truncate(50_000_001)
+
+    with pytest.raises(ManifestValidationError, match="size limit"):
+        load_manifest_entry(str(path), 0)
+
+
+def test_manifest_entry_rejects_path_traversal_run_id(tmp_path):
+    path = tmp_path / "manifest_index.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": 0,
+                    "model_id": "model_001",
+                    "basin_version_id": "basin_001",
+                    "river_network_version_id": "river_001",
+                    "run_id": "../evil",
+                    "workspace_dir": str(tmp_path / "workspace"),
+                    "source_id": "GFS",
+                    "cycle_time": "2026051200",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestValidationError, match="unsafe characters"):
         load_manifest_entry(str(path), 0)
 
 

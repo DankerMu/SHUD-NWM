@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from packages.common.manifest_index import ManifestValidationError, load_manifest_entry
+from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 
 from .runtime import SHUDRuntime, SHUDRuntimeError
 
@@ -36,13 +36,9 @@ def _run(run_id: str, *, run_type: str | None = None, dry_run: bool = False) -> 
 
 
 def _resolve_execute_manifest(manifest: str | None, manifest_index: str | None, task_id: int | None) -> str:
-    if (manifest_index is None) != (task_id is None):
-        raise ManifestValidationError(
-            "--manifest-index and --task-id must be provided together.",
-            {"manifest_index": manifest_index, "task_id": task_id},
-        )
-    if manifest_index is not None and task_id is not None:
-        entry = load_manifest_entry(manifest_index, task_id)
+    if manifest_index is not None:
+        resolved_task_id = resolve_task_id(task_id)
+        entry = load_manifest_entry(manifest_index, resolved_task_id)
         return str(Path(str(entry["workspace_dir"])) / "runs" / str(entry["run_id"]) / "input" / "manifest.json")
     if not manifest:
         raise ManifestValidationError(

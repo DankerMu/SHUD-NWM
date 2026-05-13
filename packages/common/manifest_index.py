@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-REQUIRED_MANIFEST_ENTRY_FIELDS = ("task_id", "model_id", "basin_version_id", "run_id", "workspace_dir")
+REQUIRED_MANIFEST_ENTRY_FIELDS = (
+    "task_id",
+    "model_id",
+    "basin_version_id",
+    "river_network_version_id",
+    "run_id",
+    "source_id",
+    "cycle_time",
+    "workspace_dir",
+)
+SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+MAX_MANIFEST_INDEX_BYTES = 50_000_000
+MAX_MANIFEST_INDEX_ENTRIES = 10_000
 
 
 class ManifestValidationError(RuntimeError):
@@ -16,9 +30,35 @@ class ManifestValidationError(RuntimeError):
         self.details = details or {}
 
 
-def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any]:
+def resolve_task_id(explicit_task_id: int | None) -> int:
+    if explicit_task_id is not None:
+        return explicit_task_id
+    env_task_id = os.getenv("SLURM_ARRAY_TASK_ID")
+    if env_task_id is None:
+        return 0
     try:
-        data = json.loads(Path(manifest_index_path).read_text(encoding="utf-8"))
+        return int(env_task_id)
+    except ValueError as exc:
+        raise ManifestValidationError(
+            "SLURM_ARRAY_TASK_ID is not a valid integer.",
+            {"SLURM_ARRAY_TASK_ID": env_task_id},
+        ) from exc
+
+
+def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any]:
+    path = Path(manifest_index_path)
+    if path.is_symlink():
+        raise ManifestValidationError(
+            "Manifest index path is a symlink",
+            {"manifest_index_path": manifest_index_path},
+        )
+    try:
+        if path.stat().st_size > MAX_MANIFEST_INDEX_BYTES:
+            raise ManifestValidationError(
+                "Manifest index file exceeds size limit",
+                {"manifest_index_path": manifest_index_path, "size_limit": MAX_MANIFEST_INDEX_BYTES},
+            )
+        data = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise ManifestValidationError(
             "Unable to read manifest index.",
@@ -34,6 +74,15 @@ def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any
         raise ManifestValidationError(
             "Manifest index must be a list.",
             {"manifest_index_path": manifest_index_path, "type": type(data).__name__},
+        )
+    if len(data) > MAX_MANIFEST_INDEX_ENTRIES:
+        raise ManifestValidationError(
+            "Manifest index exceeds maximum entry count",
+            {
+                "manifest_index_path": manifest_index_path,
+                "entry_count": len(data),
+                "entry_limit": MAX_MANIFEST_INDEX_ENTRIES,
+            },
         )
     if not data:
         raise ManifestValidationError(
@@ -60,7 +109,21 @@ def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any
             "Manifest index entry is missing required fields.",
             {"manifest_index_path": manifest_index_path, "task_id": task_id, "missing_fields": missing},
         )
-    if int(result["task_id"]) != task_id:
+    for field in ("run_id", "model_id", "source_id", "basin_version_id", "river_network_version_id"):
+        value = str(result.get(field, ""))
+        if value and not SAFE_IDENTIFIER_RE.fullmatch(value):
+            raise ManifestValidationError(
+                f"Manifest entry field {field} contains unsafe characters: {value!r}",
+                {"manifest_index_path": manifest_index_path, "task_id": task_id, "field": field, "value": value},
+            )
+    try:
+        stored_task_id = int(result["task_id"])
+    except (TypeError, ValueError) as exc:
+        raise ManifestValidationError(
+            f"Manifest entry task_id is not a valid integer: {result.get('task_id')!r}",
+            {"manifest_index_path": manifest_index_path, "task_id": task_id, "entry_task_id": result.get("task_id")},
+        ) from exc
+    if stored_task_id != task_id:
         raise ManifestValidationError(
             "Manifest index entry task_id does not match selected task.",
             {"manifest_index_path": manifest_index_path, "task_id": task_id, "entry_task_id": result["task_id"]},

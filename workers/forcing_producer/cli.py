@@ -5,7 +5,7 @@ import json
 import sys
 from typing import Sequence
 
-from packages.common.manifest_index import ManifestValidationError, load_manifest_entry
+from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 
 from .producer import ForcingProducer
 
@@ -37,19 +37,14 @@ def _resolve_produce_args(
     manifest_index: str | None,
     task_id: int | None,
 ) -> tuple[str, str, str, int | None]:
-    if (manifest_index is None) != (task_id is None):
-        raise ManifestValidationError(
-            "--manifest-index and --task-id must be provided together.",
-            {"manifest_index": manifest_index, "task_id": task_id},
-        )
-
-    if manifest_index is not None and task_id is not None:
-        entry = load_manifest_entry(manifest_index, task_id)
+    if manifest_index is not None:
+        resolved_task_id = resolve_task_id(task_id)
+        entry = load_manifest_entry(manifest_index, resolved_task_id)
         missing = [field for field in ("source_id", "cycle_time", "model_id") if entry.get(field) in (None, "")]
         if missing:
             raise ManifestValidationError(
                 "Manifest index entry is missing forcing fields.",
-                {"manifest_index_path": manifest_index, "task_id": task_id, "missing_fields": missing},
+                {"manifest_index_path": manifest_index, "task_id": resolved_task_id, "missing_fields": missing},
             )
         resolved_max_lead_hours = max_lead_hours
         if resolved_max_lead_hours is None and entry.get("max_lead_hours") not in (None, ""):
