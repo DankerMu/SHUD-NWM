@@ -213,7 +213,7 @@ def test_failure_retry_resets_failed_hindcast_run() -> None:
 
         assert retry.status == "pending"
         assert retry.job_type == "hindcast"
-        assert _hydro_run(session, run_id)["status"] == "running"
+        assert _hydro_run(session, run_id)["status"] == "pending"
 
 
 def test_hindcast_submit_permission_denied_for_viewer_and_analyst() -> None:

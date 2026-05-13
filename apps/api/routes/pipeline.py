@@ -28,6 +28,19 @@ _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _OPERATOR_ROLES = {"operator", "model_admin", "sys_admin"}
 _ACTIVE_JOB_STATUSES = {"pending", "submitted", "running"}
 _FAILED_JOB_STATUSES = {"failed", "submission_failed", "permanently_failed", "cancelled"}
+_TERMINAL_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "failed", "cancelled", "superseded"}
+_TERMINAL_CYCLE_STATUSES = {
+    "complete",
+    "published",
+    "parsed_partial",
+    "failed_download",
+    "failed_convert",
+    "failed_forcing",
+    "failed_run",
+    "failed_parse",
+    "failed_publish",
+    "cancelled",
+}
 _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "frequency", "publish")
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024
@@ -244,9 +257,12 @@ def retry_run(
         request,
         {
             "job_id": job.job_id,
+            "pipeline_job_id": job.job_id,
             "run_id": job.run_id,
             "retry_count": job.retry_count,
             "status": job.status,
+            "slurm_job_id": job.slurm_job_id,
+            "execution_status": _retry_execution_status(job.status),
         },
     )
 
@@ -268,19 +284,46 @@ def cancel_run(
 
     active_jobs = [job for job in store.query_jobs_by_run(run_id) if job.status in _ACTIVE_JOB_STATUSES]
     cancelled_jobs: list[dict[str, Any]] = []
+    failed_jobs: list[dict[str, Any]] = []
+    idempotent_jobs: list[dict[str, Any]] = []
     now = datetime.now(UTC)
     for job in active_jobs:
         previous_status = job.status
+        idempotent = False
         if job.slurm_job_id:
             try:
                 gateway.cancel_job(job.slurm_job_id)
             except SlurmGatewayError as error:
-                raise ApiError(
-                    status_code=error.status_code,
-                    code=error.code,
-                    message=error.message,
-                    details=error.details,
-                ) from error
+                if not _is_idempotent_slurm_cancel_error(error):
+                    failure = {
+                        "job_id": job.job_id,
+                        "run_id": run_id,
+                        "status": job.status,
+                        "slurm_job_id": job.slurm_job_id,
+                        "error": {
+                            "status_code": error.status_code,
+                            "code": error.code,
+                            "message": error.message,
+                            "details": error.details or {},
+                        },
+                    }
+                    failed_jobs.append(failure)
+                    store.insert_event(
+                        entity_type="pipeline_job",
+                        entity_id=job.job_id,
+                        event_type="cancel_failed",
+                        status_from=previous_status,
+                        status_to=previous_status,
+                        message=f"Failed to cancel run {run_id}.",
+                        details={
+                            "run_id": run_id,
+                            "slurm_job_id": job.slurm_job_id,
+                            "previous_status": previous_status,
+                            "error": failure["error"],
+                        },
+                    )
+                    continue
+                idempotent = True
 
         updated = store.update_job_status(job.job_id, "cancelled", finished_at=now)
         store.insert_event(
@@ -290,9 +333,59 @@ def cancel_run(
             status_from=previous_status,
             status_to="cancelled",
             message=f"Cancelled run {run_id}.",
-            details={"run_id": run_id, "slurm_job_id": job.slurm_job_id},
+            details={
+                "run_id": run_id,
+                "slurm_job_id": job.slurm_job_id,
+                "previous_status": previous_status,
+                "idempotent": idempotent,
+            },
         )
-        cancelled_jobs.append(_job_payload(updated))
+        payload = _job_payload(updated)
+        cancelled_jobs.append(payload)
+        if idempotent:
+            idempotent_jobs.append(
+                {
+                    "job_id": job.job_id,
+                    "slurm_job_id": job.slurm_job_id,
+                    "note": "Slurm job was already terminal or absent; local job was marked cancelled.",
+                }
+            )
+
+    hydro_transition = None
+    forecast_cycle_transition = None
+    if not failed_jobs:
+        hydro_transition = _cancel_hydro_run(store, run_id)
+        if hydro_transition is not None:
+            store.insert_event(
+                entity_type="hydro_run",
+                entity_id=run_id,
+                event_type="cancel",
+                status_from=hydro_transition["previous_status"],
+                status_to=hydro_transition["status"],
+                message=f"Cancelled run {run_id}.",
+                details={
+                    "run_id": run_id,
+                    "previous_status": hydro_transition["previous_status"],
+                    "status": hydro_transition["status"],
+                },
+            )
+        forecast_cycle_transition = _cancel_forecast_cycle(store, active_jobs)
+        if forecast_cycle_transition is not None:
+            store.insert_event(
+                entity_type="forecast_cycle",
+                entity_id=forecast_cycle_transition["cycle_id"],
+                event_type="cancel",
+                status_from=forecast_cycle_transition["previous_status"],
+                status_to=forecast_cycle_transition["status"],
+                message=f"Cancelled forecast cycle {forecast_cycle_transition['cycle_id']}.",
+                details={
+                    "run_id": run_id,
+                    "cycle_id": forecast_cycle_transition["cycle_id"],
+                    "previous_status": forecast_cycle_transition["previous_status"],
+                    "status": forecast_cycle_transition["status"],
+                    "preserved": forecast_cycle_transition["preserved"],
+                },
+            )
 
     return _ok(
         request,
@@ -300,6 +393,11 @@ def cancel_run(
             "run_id": run_id,
             "cancelled_jobs": cancelled_jobs,
             "cancelled": cancelled_jobs,
+            "failed_jobs": failed_jobs,
+            "partial_failure": bool(failed_jobs),
+            "idempotent_jobs": idempotent_jobs,
+            "hydro_run": hydro_transition,
+            "forecast_cycle": forecast_cycle_transition,
         },
     )
 
@@ -414,6 +512,116 @@ def _api_error(error: RetryConflictError | RetryNotFoundError) -> ApiError:
         message=error.message,
         details=error.details,
     )
+
+
+def _retry_execution_status(status: str) -> str:
+    if status == "pending":
+        return "queued"
+    if status == "submitted":
+        return "submitted"
+    return status
+
+
+def _is_idempotent_slurm_cancel_error(error: SlurmGatewayError) -> bool:
+    code = error.code.lower()
+    message = error.message.lower()
+    return error.status_code == 404 or "not found" in code or "not found" in message or "invalid job" in message
+
+
+def _cancel_hydro_run(store: PipelineStore, run_id: str) -> dict[str, Any] | None:
+    column_names = _table_columns(store, "hydro_run", "hydro")
+    if "run_id" not in column_names or "status" not in column_names:
+        return None
+
+    row = (
+        store.session.execute(
+            text("SELECT status FROM hydro.hydro_run WHERE run_id = :run_id LIMIT 1"),
+            {"run_id": run_id},
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+
+    previous_status = str(row["status"])
+    if previous_status not in _TERMINAL_HYDRO_STATUSES:
+        store.session.execute(
+            text(
+                """
+                UPDATE hydro.hydro_run
+                SET status = 'cancelled'
+                WHERE run_id = :run_id
+                """
+            ),
+            {"run_id": run_id},
+        )
+        store.session.commit()
+
+    return {
+        "run_id": run_id,
+        "previous_status": previous_status,
+        "status": "cancelled" if previous_status not in _TERMINAL_HYDRO_STATUSES else previous_status,
+        "preserved": previous_status in _TERMINAL_HYDRO_STATUSES,
+    }
+
+
+def _cancel_forecast_cycle(store: PipelineStore, jobs: list[PipelineJob]) -> dict[str, Any] | None:
+    cycle_id = next((job.cycle_id for job in jobs if job.cycle_id), None)
+    if cycle_id is None:
+        return None
+
+    column_names = _table_columns(store, "forecast_cycle", "met")
+    if "current_state" in column_names:
+        state_column = "current_state"
+    elif "status" in column_names:
+        state_column = "status"
+    else:
+        state_column = None
+    if "cycle_id" not in column_names or state_column is None:
+        return None
+
+    row = (
+        store.session.execute(
+            text(f"SELECT {state_column} AS status FROM met.forecast_cycle WHERE cycle_id = :cycle_id LIMIT 1"),
+            {"cycle_id": cycle_id},
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+
+    previous_status = str(row["status"])
+    preserved = previous_status in _TERMINAL_CYCLE_STATUSES
+    if not preserved:
+        updated_at_clause = ", updated_at = :updated_at" if "updated_at" in column_names else ""
+        store.session.execute(
+            text(
+                f"""
+                UPDATE met.forecast_cycle
+                SET {state_column} = 'cancelled'{updated_at_clause}
+                WHERE cycle_id = :cycle_id
+                """
+            ),
+            {"cycle_id": cycle_id, "updated_at": datetime.now(UTC)},
+        )
+        store.session.commit()
+
+    return {
+        "cycle_id": cycle_id,
+        "previous_status": previous_status,
+        "status": previous_status if preserved else "cancelled",
+        "preserved": preserved,
+    }
+
+
+def _table_columns(store: PipelineStore, table_name: str, schema: str) -> set[str]:
+    try:
+        inspector = inspect(store.session.get_bind())
+        return {column["name"] for column in inspector.get_columns(table_name, schema=schema)}
+    except (NoSuchTableError, SQLAlchemyError):
+        return set()
 
 
 def _ok(request: Request, data: Any) -> dict[str, Any]:

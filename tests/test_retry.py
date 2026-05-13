@@ -205,6 +205,7 @@ def test_audit_event_auto() -> None:
             "previous_error": "STORAGE_WRITE_FAILED",
             "backoff_seconds": 60,
             "previous_job_id": job.job_id,
+            "slurm_job_id": None,
         }
 
 
@@ -221,6 +222,7 @@ def test_audit_event_manual() -> None:
             "retry_count": 1,
             "previous_error": "SBATCH_SUBMISSION_FAILED",
             "previous_job_id": failed.job_id,
+            "slurm_job_id": None,
         }
 
 
@@ -251,9 +253,12 @@ def test_retry_api_endpoint() -> None:
             data = response.json()["data"]
             assert data == {
                 "job_id": data["job_id"],
+                "pipeline_job_id": data["job_id"],
                 "run_id": "run_api",
                 "retry_count": 1,
                 "status": "pending",
+                "slurm_job_id": None,
+                "execution_status": "queued",
             }
             assert data["job_id"].startswith("run_api_retry_")
             store.session.refresh(failed)
