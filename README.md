@@ -74,6 +74,35 @@ pnpm dev
 
 Use `pnpm build` for the production bundle, `pnpm test` for unit tests, and `pnpm test:e2e` for Playwright E2E tests. The Vite dev server proxies `/api` and `/health` to `http://localhost:8000`; production builds are served by FastAPI from `apps/frontend/dist/`. The default frontend API base is documented in `apps/frontend/.env.example` as `VITE_API_BASE_URL=/api/v1`.
 
+## Runtime Source Layout
+
+Active source paths use the package names below:
+
+```text
+apps/api/                       FastAPI backend
+apps/frontend/                  Vite React frontend
+services/orchestrator/          pipeline orchestration
+services/slurm_gateway/         Slurm gateway
+workers/data_adapters/          GFS, ERA5, IFS adapters
+workers/canonical_converter/    canonical meteorological products
+workers/forcing_producer/       SHUD forcing production
+workers/shud_runtime/           SHUD execution adapter
+workers/output_parser/          SHUD output parsing
+workers/flood_frequency/        hindcast, frequency, return-period workers
+infra/sbatch/                   canonical real Slurm templates
+```
+
+`workers/sbatch_templates/` and hyphenated placeholder directories are legacy/non-canonical unless their local README says otherwise. Durable artifacts use `OBJECT_STORE_ROOT` plus `OBJECT_STORE_PREFIX`; `WORKSPACE_ROOT` is reserved for local/HPC execution workspace files.
+
+## Milestones
+
+| Milestone | Status | Evidence |
+|---|---|---|
+| M3 Slurm nationalization | Implemented | `openspec/changes/m3-slurm-nationalization/tasks.md` |
+| M4 IFS multi-source | Implemented | `openspec/changes/m4-ifs-multi-source/tasks.md` |
+| M5 flood frequency warning | Implemented | `openspec/changes/m5-flood-frequency-warning/tasks.md` |
+| M6 system hardening alignment | Completed | `openspec/changes/m6-system-hardening-alignment/tasks.md` |
+
 ## 设计图与文档对照
 
 | 设计图 | 对应规格文档 |

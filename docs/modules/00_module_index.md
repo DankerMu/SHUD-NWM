@@ -5,6 +5,17 @@
 
 > 模块文档为开发拆解说明；如与 `docs/spec/03_database_design.md`、`04_api_design.md` 不一致，以 Spec 主文档为准。
 
+## 当前代码路径
+
+M6 hardening 后，活跃代码路径以 importable package 和实际构建目录为准：
+
+- 前端：`apps/frontend`
+- Slurm 模板：`infra/sbatch`
+- Worker packages：`workers/data_adapters`、`workers/canonical_converter`、`workers/forcing_producer`、`workers/shud_runtime`、`workers/output_parser`、`workers/flood_frequency`
+- Storage roots：`WORKSPACE_ROOT` 仅用于本地/HPC 临时执行 workspace；`OBJECT_STORE_ROOT` + `OBJECT_STORE_PREFIX` 用于 durable raw/canonical/forcing/runs/states/tiles/log artifacts。
+
+旧目录如 `apps/web`、`workers/sbatch_templates` 和 hyphenated worker placeholders 仅作 legacy/placeholder 保留，不是当前开发入口。
+
 | 编号 | 模块 | 设计文档 | 开发 Spec |
 |---|---|---|---|
 | 01 | 数据源适配器模块 | `01_data_source_adapter_design.md` | `01_data_source_adapter_spec.md` |

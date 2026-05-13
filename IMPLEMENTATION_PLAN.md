@@ -31,19 +31,18 @@
 ```text
 SHUD-NWM/
 ├── apps/
-│   ├── api/                    ← FastAPI / Express 后端
-│   └── web/                    ← Vue 3 / React 前端
+│   ├── api/                    ← FastAPI 后端
+│   └── frontend/               ← Vite / React / TypeScript 前端
 ├── services/
 │   ├── orchestrator/           ← 流水线编排器
-│   ├── slurm-gateway/          ← Slurm 提交代理
-│   └── tile-publisher/         ← 瓦片发布服务
+│   └── slurm_gateway/          ← Slurm 提交代理
 ├── workers/
-│   ├── data-adapters/          ← GFS/IFS/ERA5/CLDAS 适配器
-│   ├── canonical-converter/    ← 标准化转换
-│   ├── forcing-producer/       ← forcing 生产
-│   ├── shud-runtime/           ← SHUD 运行适配
-│   ├── output-parser/          ← 输出解析入库
-│   └── flood-frequency/        ← 洪水频率计算
+│   ├── data_adapters/          ← GFS/IFS/ERA5/CLDAS 适配器
+│   ├── canonical_converter/    ← 标准化转换
+│   ├── forcing_producer/       ← forcing 生产
+│   ├── shud_runtime/           ← SHUD 运行适配
+│   ├── output_parser/          ← 输出解析入库
+│   └── flood_frequency/        ← 洪水频率计算
 ├── packages/
 │   ├── common/                 ← 共享工具、类型、错误码
 │   └── schemas/                ← JSON Schema（manifest、QC、job）
@@ -51,10 +50,13 @@ SHUD-NWM/
 │   ├── migrations/             ← 有序 SQL migration
 │   └── seeds/                  ← Demo 数据
 ├── openapi/                    ← nhms.v1.yaml
-├── infra/                      ← Docker Compose、环境配置
+├── infra/
+│   └── sbatch/                 ← canonical real Slurm templates
 ├── tests/                      ← 集成测试
 └── docs/                       ← 现有文档（不动）
 ```
+
+Legacy placeholder paths such as `apps/web`, `workers/forcing-producer`, `workers/shud-runtime`, `workers/output-parser`, and `workers/flood-frequency` are non-canonical. Active code, package entry points, and tests use the underscore Python package paths above.
 
 #### M0-2：数据库 Migration
 
@@ -113,7 +115,13 @@ FloodAlertSummary, PipelineStage, PipelineJob, QcResult, ErrorResponse
 
 #### M0-6：对象存储 Prefix 落地
 
-按 `docs/spec/01_architecture_and_flow.md` §7 文件流定义：
+按 `docs/spec/01_architecture_and_flow.md` §7 文件流定义。M6 后根目录语义固定为：
+
+- `WORKSPACE_ROOT`：本地/HPC 临时执行 workspace，用于作业运行目录、临时 manifest、临时输出和 Slurm 本地文件。
+- `OBJECT_STORE_ROOT`：持久化对象存储根目录，用于 raw、canonical、forcing、runs、states、tiles、持久化日志等可复用产物。
+- `OBJECT_STORE_PREFIX`：对象 URI 前缀（例如 `s3://nhms`），用于把 `OBJECT_STORE_ROOT` 下的相对 key 呈现为稳定 URI；为空时保留本地相对 key。
+
+`WORKSPACE_ROOT` 可以和 `OBJECT_STORE_ROOT` 不同；持久化产物必须通过 `OBJECT_STORE_ROOT` + `OBJECT_STORE_PREFIX` 解析。
 
 ```text
 raw/{source}/{cycle_time}/
@@ -312,7 +320,34 @@ GFS 周期发现 → 下载 → canonical → forcing → SHUD forecast
 
 ---
 
-## 阶段 6：CLDAS 接入
+## 阶段 6：系统硬化与交付对齐（M6，已完成）
+
+**目标**：消除 M3-M5 交付中的路径、状态、对象存储、API/OpenAPI、前端类型和验证证据漂移，形成可发布基线。
+
+### 任务包
+
+| 编号 | 任务 |
+|---|---|
+| M6-1 | Slurm array contract 对齐：`infra/sbatch` 模板、worker CLI、manifest index、array task id |
+| M6-2 | Source identity canonicalization：统一 GFS/ERA5/IFS source_id 归一化 |
+| M6-3 | Object store split-root：`WORKSPACE_ROOT` 与 `OBJECT_STORE_ROOT`/`OBJECT_STORE_PREFIX` 语义分离 |
+| M6-4 | Retry/cancel 状态一致性：pipeline_job、hydro_run、forecast_cycle、事件与 API 响应同步 |
+| M6-5 | API contract alignment：OpenAPI、后端响应、frontend generated types 同步 |
+| M6-6 | Delivery traceability：文档、schema、OpenSpec task state 和验证证据补齐 |
+
+### 验收证据
+
+M6 hardening is tracked in `openspec/changes/m6-system-hardening-alignment/` with regression coverage in:
+
+- `tests/test_slurm_array_contract.py`
+- `tests/test_source_identity.py`
+- `tests/test_object_store_roots.py`
+- `tests/test_retry_cancel_consistency.py`
+- `tests/test_api_contract.py`
+
+---
+
+## 阶段 7：CLDAS 接入（后续）
 
 **目标**：CLDAS 资料参与 analysis run，best_available 产品显示实际来源。
 
@@ -329,11 +364,11 @@ GFS 周期发现 → 下载 → canonical → forcing → SHUD forecast
 
 | 编号 | 任务 |
 |---|---|
-| M6-1 | CLDAS adapter：权限配置 + 下载策略 |
-| M6-2 | CLDAS canonical convert：瞬时降水率 → 时段量 |
-| M6-3 | CLDAS QC：空间覆盖范围检查 |
-| M6-4 | best_available 规则更新：CLDAS 优先级接入 |
-| M6-5 | data_source 状态切换：restricted → enabled |
+| M7-1 | CLDAS adapter：权限配置 + 下载策略 |
+| M7-2 | CLDAS canonical convert：瞬时降水率 → 时段量 |
+| M7-3 | CLDAS QC：空间覆盖范围检查 |
+| M7-4 | best_available 规则更新：CLDAS 优先级接入 |
+| M7-5 | data_source 状态切换：restricted → enabled |
 
 ---
 
@@ -390,14 +425,17 @@ M0 ─→ M1 ─→ M2 ─→ M3 ─→ M4
                         ↘
                     M5（需要 M2 的 hindcast 能力）
                         ↘
-                    M6（需要 best_available 基础）
+                    M6 hardening（M3-M5 后交付对齐）
+                        ↘
+                    M7 CLDAS（需要 best_available 基础）
 ```
 
 - M0 是所有后续阶段的前置。
 - M1 和 M2 严格串行：forecast 闭环必须先于 analysis warm-start。
 - M3 在 M2 之后：全国化需要先验证单流域闭环。
 - M4 与 M5 可部分并行：IFS 接入和洪水频率计算相互独立。
-- M6 依赖 best_available 框架（M2）和 adapter 模式（M1），可在 M4/M5 之后启动。
+- M6 是 M3-M5 合并后的系统硬化与交付对齐阶段，已完成。
+- M7 依赖 best_available 框架（M2）和 adapter 模式（M1），可在 M4/M5/M6 之后启动。
 
 ---
 
@@ -411,5 +449,6 @@ M0 ─→ M1 ─→ M2 ─→ M3 ─→ M4
 | M3 完成 | ≥10 流域并行 forecast，单流域失败不阻塞，监控页可用 |
 | M4 完成 | GFS/IFS 双曲线对比展示 |
 | M5 完成 | 频率曲线入库，重现期产品自动计算，预警地图配色 |
-| M6 完成 | CLDAS enabled，best_available 可追溯来源 |
+| M6 完成 | 系统硬化完成：Slurm array、source identity、object-store split-root、retry/cancel、API/OpenAPI/frontend types、交付证据对齐 |
+| M7 完成 | CLDAS enabled，best_available 可追溯来源 |
 | 最终验收 | `docs/appendices/F_acceptance_checklist.md` 全部 ✓ |
