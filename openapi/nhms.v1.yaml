@@ -2253,11 +2253,13 @@ components:
             $ref: "#/components/schemas/IdempotentCancelJob"
         hydro_run:
           nullable: true
-          type: object
+          allOf:
+            - $ref: "#/components/schemas/CancelTransition"
           description: "hydro_run transition, or null if not applicable"
         forecast_cycle:
           nullable: true
-          type: object
+          allOf:
+            - $ref: "#/components/schemas/CancelTransition"
           description: "forecast_cycle transition, or null if not applicable"
     SlurmCancelFailure:
       type: object

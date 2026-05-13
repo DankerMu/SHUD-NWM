@@ -119,7 +119,7 @@ class PsycopgHydroRunRepository:
                 output_uri = NULL,
                 log_uri = NULL,
                 updated_at = now()
-            WHERE hydro.hydro_run.status IN ('failed', 'cancelled')
+            WHERE hydro.hydro_run.status IN ('failed', 'cancelled', 'pending')
             RETURNING *
             """,
             (
@@ -145,7 +145,7 @@ class PsycopgHydroRunRepository:
             SELECT *
             FROM hydro.hydro_run
             WHERE run_id = %s
-              AND status IN ('created', 'staged', 'submitted', 'running')
+              AND status IN ('created', 'staged', 'submitted', 'running', 'pending')
             """,
             (manifest["run_id"],),
         )
