@@ -1197,6 +1197,24 @@ components:
       required: false
       schema:
         type: string
+        enum:
+          - discovered
+          - downloading
+          - raw_complete
+          - canonical_ready
+          - forcing_ready_partial
+          - forcing_ready
+          - forecast_running
+          - parsed_partial
+          - complete
+          - published
+          - failed_download
+          - failed_convert
+          - failed_forcing
+          - failed_run
+          - failed_parse
+          - failed_publish
+          - cancelled
     CycleTimeQuery:
       name: cycle_time
       in: query
@@ -1657,6 +1675,7 @@ components:
       enum:
         - created
         - staged
+        - pending
         - submitted
         - running
         - succeeded

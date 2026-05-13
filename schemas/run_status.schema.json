@@ -17,6 +17,7 @@
       "enum": [
         "created",
         "staged",
+        "pending",
         "submitted",
         "running",
         "succeeded",
