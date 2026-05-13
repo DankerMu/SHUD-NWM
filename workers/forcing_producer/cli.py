@@ -98,6 +98,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         except ManifestValidationError as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
+        except ValueError as error:
+            click.echo(f"INVALID_SOURCE_ID: {error}", err=True)
+            raise SystemExit(1) from error
 
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
@@ -128,6 +131,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(_produce(*resolved), sort_keys=True))
         except ManifestValidationError as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
+            return 1
+        except ValueError as error:
+            print(f"INVALID_SOURCE_ID: {error}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")

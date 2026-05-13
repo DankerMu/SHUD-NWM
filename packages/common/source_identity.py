@@ -9,12 +9,9 @@ _STORAGE_SOURCE_IDS = {
 }
 
 
-def normalize_source_id(source_id: str) -> str:
-    """Normalize source_id for storage/repository use.
-
-    GFS -> gfs, ERA5 -> ERA5, IFS -> IFS.
-    Case-insensitive input, deterministic output.
-    """
+def normalize_source_id(source_id: str | None) -> str:
+    if source_id is None:
+        raise ValueError("source_id must not be None")
     normalized = _STORAGE_SOURCE_IDS.get(source_id.upper())
     if normalized is None:
         raise ValueError(f"Unknown source_id: {source_id!r}")

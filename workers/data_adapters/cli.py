@@ -12,8 +12,11 @@ from .ifs_adapter import IFSAdapter
 
 
 def _download(source_id: str, cycle_time: str) -> dict[str, object]:
+    from packages.common.source_identity import normalize_source_id
+
     adapter = GFSAdapter.from_env()
-    if source_id != adapter.config.source_id:
+    normalized = normalize_source_id(source_id)
+    if normalized != adapter.config.source_id:
         raise SystemExit(
             f"Unsupported source_id {source_id!r}; this worker is configured for {adapter.config.source_id!r}."
         )
