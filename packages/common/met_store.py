@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from packages.common.source_identity import normalize_source_id
+
 
 class MetStoreError(RuntimeError):
     """Raised when a met-schema database operation fails."""
@@ -40,6 +42,7 @@ class PsycopgMetStore:
         config_json: Mapping[str, Any] | None = None,
         license_status: str | None = None,
     ) -> dict[str, Any]:
+        source_id = normalize_source_id(source_id)
         try:
             from psycopg2.extras import Json
         except ImportError as error:
@@ -93,6 +96,7 @@ class PsycopgMetStore:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> dict[str, Any]:
+        source_id = normalize_source_id(source_id)
         return self._fetch_one(
             """
             INSERT INTO met.forecast_cycle (
@@ -154,6 +158,7 @@ class PsycopgMetStore:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> dict[str, Any] | None:
+        source_id = normalize_source_id(source_id)
         assignments: list[str] = []
         parameters: list[Any] = []
         for column, value in (
@@ -182,6 +187,7 @@ class PsycopgMetStore:
         )
 
     def get_forecast_cycle(self, *, source_id: str, cycle_time: datetime) -> dict[str, Any] | None:
+        source_id = normalize_source_id(source_id)
         return self._fetch_optional(
             """
             SELECT *

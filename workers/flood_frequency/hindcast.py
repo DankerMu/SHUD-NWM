@@ -12,6 +12,7 @@ from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import HttpSlurmGatewayClient
 from services.orchestrator.persistence import PipelineStore
 from workers.flood_frequency.config import HindcastConfig
@@ -108,7 +109,7 @@ def submit_hindcast(
 ) -> HindcastSubmitResult:
     _validate_model_id(model_id)
     years = calendar_years(start_time, end_time)
-    source_id = source_id.upper()
+    source_id = normalize_source_id(source_id)
     model = _load_model_context(db_session, model_id)
     run_ids: list[str] = []
     skipped_years: list[int] = []
@@ -216,7 +217,7 @@ def produce_hindcast_forcing(
     db_session: Session,
 ) -> HindcastForcingResult:
     _validate_model_id(model_id)
-    source_id = source_id.upper()
+    source_id = normalize_source_id(source_id)
     if source_id != "ERA5":
         raise HindcastError("UNSUPPORTED_SOURCE", "Hindcast replay currently supports ERA5 only.")
     model = _load_model_context(db_session, model_id)
@@ -398,7 +399,7 @@ def submit_hindcast_slurm(
             "run_id": run_id_for_year(model_id, year),
             "model_id": model_id,
             "basin_version_id": basin_version_id,
-            "source_id": source_id.upper(),
+            "source_id": normalize_source_id(source_id),
             "year": year,
             "workspace_root": str(config.workspace_root),
         }
@@ -412,7 +413,7 @@ def submit_hindcast_slurm(
             "run_id": f"hindcast_era5_{model_id}",
             "model_id": model_id,
             "basin_version_id": basin_version_id,
-            "source_id": source_id.upper(),
+            "source_id": normalize_source_id(source_id),
             "years": years,
             "workspace_root": str(config.workspace_root),
         },
@@ -831,7 +832,7 @@ def _write_hindcast_manifest(run_id: str, model_id: str, source_id: str, year: i
         "run_id": run_id,
         "run_type": "hindcast",
         "scenario_id": HINDCAST_SCENARIO_ID,
-        "source_id": source_id.upper(),
+        "source_id": normalize_source_id(source_id),
         "cycle_time": _format_time(start_time),
         "start_time": _format_time(start_time),
         "end_time": _format_time(end_time),

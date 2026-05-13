@@ -13,6 +13,7 @@ import httpx
 
 from packages.common.best_available import BestAvailableManager
 from packages.common.object_store import LocalObjectStore
+from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
@@ -37,8 +38,11 @@ ANALYSIS_SCENARIO_ID = "analysis_true_field"
 
 
 def scenario_for_source(source_id: str) -> str:
-    normalized_source_id = source_id.upper()
-    if normalized_source_id == "GFS":
+    try:
+        normalized_source_id = normalize_source_id(source_id)
+    except ValueError:
+        normalized_source_id = source_id
+    if normalized_source_id == "gfs":
         return "forecast_gfs_deterministic"
     if normalized_source_id == "IFS":
         return "forecast_ifs_deterministic"
@@ -173,7 +177,7 @@ class OrchestratorConfig:
     templates_dir: Path | str | None = None
     poll_interval_seconds: float = 30.0
     job_timeout_seconds: float = 3600.0
-    source_id: str = "GFS"
+    source_id: str = "gfs"
     forecast_horizon_hours: int = 168
     scenario_id: str | None = None
     scenario_id_explicit: bool = field(init=False, default=False, repr=False, compare=False)
@@ -184,6 +188,7 @@ class OrchestratorConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
         object.__setattr__(self, "object_store_root", Path(self.object_store_root).expanduser().resolve())
+        object.__setattr__(self, "source_id", normalize_source_id(self.source_id))
         object.__setattr__(self, "poll_interval_seconds", max(float(self.poll_interval_seconds), 1.0))
         object.__setattr__(self, "scenario_id_explicit", self.scenario_id is not None)
         if self.scenario_id is None:
@@ -204,7 +209,7 @@ class OrchestratorConfig:
             slurm_gateway_url=os.getenv("SLURM_GATEWAY_URL", "http://localhost:8000"),
             poll_interval_seconds=float(os.getenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "30")),
             job_timeout_seconds=float(os.getenv("ORCHESTRATOR_JOB_TIMEOUT_SECONDS", "3600")),
-            source_id=os.getenv("FORECAST_SOURCE_ID", "GFS"),
+            source_id=os.getenv("FORECAST_SOURCE_ID", "gfs"),
             forecast_horizon_hours=int(os.getenv("FORECAST_HORIZON_HOURS", "168")),
             era5_area=os.getenv("ERA5_AREA", "55,70,15,140"),
             state_soft_stale_threshold_days=int(os.getenv("STATE_SOFT_STALE_THRESHOLD_DAYS", "7")),
@@ -596,6 +601,7 @@ class ForecastOrchestrator:
         basins: Sequence[Mapping[str, Any] | ModelContext],
     ) -> PipelineResult:
         _validate_safe_id("source", source)
+        source = normalize_source_id(source)
         parsed_cycle_time = parse_cycle_time(cycle_time)
         cycle_id = cycle_id_for(source, parsed_cycle_time)
         _validate_safe_id("cycle_id", cycle_id)
@@ -1476,6 +1482,7 @@ class ForecastOrchestrator:
         source_id: str,
         cycle_time: datetime,
     ) -> list[dict[str, Any]]:
+        source_id = normalize_source_id(source_id)
         entries: list[dict[str, Any]] = []
         compact_cycle = format_cycle_time(cycle_time)
         for index, basin in enumerate(basins):
@@ -1583,6 +1590,7 @@ class ForecastOrchestrator:
         max_lead_hours: int | None,
         stages: Sequence[StageDefinition],
     ) -> PipelineResult:
+        source_id = normalize_source_id(source_id)
         parsed_cycle_time = parse_cycle_time(cycle_time)
         if self.repository.has_active_pipeline(source_id=source_id, cycle_time=parsed_cycle_time, model_id=model_id):
             raise PipelineAlreadyActiveError(source_id, parsed_cycle_time, model_id)
@@ -1637,7 +1645,7 @@ class ForecastOrchestrator:
         model_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return self.repository.list_stage_statuses(
-            source_id=source_id,
+            source_id=normalize_source_id(source_id) if source_id is not None else None,
             cycle_time=parse_cycle_time(cycle_time),
             model_id=model_id,
         )
@@ -1649,12 +1657,12 @@ class ForecastOrchestrator:
         model_ids: Sequence[str] | None = None,
         limit: int = 100,
     ) -> tuple[PipelineResult, ...]:
-        resolved_source_id = source_id or self.config.source_id
+        resolved_source_id = normalize_source_id(source_id or self.config.source_id)
         ready_cycles = self._list_canonical_ready_cycles(source_id=resolved_source_id, limit=limit)
         selected_model_ids = tuple(model_ids) if model_ids is not None else self._list_forecast_model_ids()
         results: list[PipelineResult] = []
         for cycle in ready_cycles:
-            cycle_source_id = str(cycle.get("source_id") or resolved_source_id)
+            cycle_source_id = normalize_source_id(str(cycle.get("source_id") or resolved_source_id))
             cycle_time_value = cycle.get("cycle_time")
             if cycle_time_value is None:
                 continue
@@ -2035,6 +2043,7 @@ class ForecastOrchestrator:
         initial_state: InitialStateSelection | None = None,
         max_lead_hours: int | None = None,
     ) -> ForecastRunContext:
+        source_id = normalize_source_id(source_id)
         compact_cycle = format_cycle_time(cycle_time)
         run_id = f"fcst_{source_id.lower()}_{compact_cycle}_{model.model_id}"
         start_time = cycle_time
@@ -3137,9 +3146,10 @@ def _resolve_forecast_horizon_hours(
     max_lead_hours: int | None,
 ) -> int:
     source_max_lead_hours = max_lead_hours or forcing.max_lead_hours
-    if source_max_lead_hours is None and source_id.upper() == "IFS" and forcing.end_time is not None:
+    normalized_source_id = normalize_source_id(source_id)
+    if source_max_lead_hours is None and normalized_source_id == "IFS" and forcing.end_time is not None:
         source_max_lead_hours = _elapsed_hours(cycle_time, forcing.end_time)
-    if source_max_lead_hours is None and source_id.upper() == "IFS":
+    if source_max_lead_hours is None and normalized_source_id == "IFS":
         source_max_lead_hours = _ifs_max_lead_hours_for_cycle(cycle_time)
     if source_max_lead_hours is None:
         return int(configured_horizon_hours)

@@ -251,7 +251,7 @@ def test_era5_latency_fallback_uses_min_lead_gfs_products(tmp_path: Path) -> Non
     )
     gfs_fallback = _write_canonical_products(
         store,
-        source_id="GFS",
+        source_id="gfs",
         cycle_time_text="2026050618",
         product_id_prefix="gfs_recent",
         radiation_variable="shortwave_down",
@@ -260,7 +260,7 @@ def test_era5_latency_fallback_uses_min_lead_gfs_products(tmp_path: Path) -> Non
     )
     older_gfs = _write_canonical_products(
         store,
-        source_id="GFS",
+        source_id="gfs",
         cycle_time_text="2026050612",
         product_id_prefix="gfs_older",
         radiation_variable="shortwave_down",
@@ -279,11 +279,11 @@ def test_era5_latency_fallback_uses_min_lead_gfs_products(tmp_path: Path) -> Non
         if row.variable == "Rn" and row.valid_time == parse_cycle_time("2026050703")
     ]
     assert rn_rows_at_f003
-    assert {row.source_id for row in rn_rows_at_f003} == {"GFS"}
+    assert {row.source_id for row in rn_rows_at_f003} == {"gfs"}
     assert rn_rows_at_f003[0].value == pytest.approx(500.0)
     lineage = repository.forcing_versions[result.forcing_version_id]["lineage_json"]
     assert lineage["fallback_reason"] == "era5_latency"
-    assert lineage["fallback_source_id"] == "GFS"
+    assert lineage["fallback_source_id"] == "gfs"
     assert lineage["fallback_valid_times"] == ["2026-05-07T03:00:00Z"]
     assert any(component.canonical_product_id.startswith("gfs_recent") for component in repository.components)
     assert not any(component.canonical_product_id.startswith("gfs_older") for component in repository.components)

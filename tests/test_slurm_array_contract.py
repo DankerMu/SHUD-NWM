@@ -315,7 +315,7 @@ def test_forcing_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
 
     _invoke_main(forcing_cli.main, ["produce", "--manifest-index", str(_manifest_index(tmp_path)), "--task-id", "0"])
 
-    assert captured["source_id"] == "GFS"
+    assert captured["source_id"] == "gfs"
     assert captured["cycle_time"] == "2026051200"
     assert captured["model_id"] == "model_001"
 
@@ -364,7 +364,7 @@ def test_manifest_index_defaults_to_zero_when_no_task_id_source(monkeypatch, tmp
 
     _invoke_main(forcing_cli.main, ["produce", "--manifest-index", str(_manifest_index(tmp_path))])
 
-    assert captured["source_id"] == "GFS"
+    assert captured["source_id"] == "gfs"
     assert captured["model_id"] == "model_001"
 
 
@@ -484,7 +484,7 @@ def test_different_task_ids_invoke_worker_with_different_contexts(monkeypatch, t
     _invoke_main(forcing_cli.main, ["produce", "--manifest-index", str(manifest_index), "--task-id", "0"])
     _invoke_main(forcing_cli.main, ["produce", "--manifest-index", str(manifest_index), "--task-id", "1"])
 
-    assert captured[0]["source_id"] == "GFS"
+    assert captured[0]["source_id"] == "gfs"
     assert captured[1]["source_id"] == "IFS"
     assert captured[0]["model_id"] == "model_001"
     assert captured[1]["model_id"] == "model_002"

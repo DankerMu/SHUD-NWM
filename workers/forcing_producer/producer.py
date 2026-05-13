@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.source_identity import normalize_source_id
 
 LOGGER = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ IFS_CANONICAL_TO_FORCING: dict[str, str] = {
     "net_radiation": "Rn",
     "surface_pressure": "Press",
 }
-ERA5_FALLBACK_SOURCE_ID = "GFS"
+ERA5_FALLBACK_SOURCE_ID = "gfs"
 ERA5_LATENCY_FALLBACK_REASON = "era5_latency"
 
 
@@ -289,7 +290,7 @@ class ForcingProducer:
         if self.repository is None:
             raise ForcingProductionError("A forcing repository is required for production.")
 
-        resolved_source_id = source_id or self.config.source_id
+        resolved_source_id = normalize_source_id(source_id or self.config.source_id)
         parsed_cycle_time = parse_cycle_time(cycle_time)
         _safe_path_component(model_id)
         _safe_path_component(_object_source_segment(resolved_source_id))
@@ -1256,11 +1257,11 @@ def _product_lead_hours(product: CanonicalProduct, cycle_time: datetime) -> int:
 
 
 def _is_era5_source(source_id: str) -> bool:
-    return source_id.upper() == "ERA5"
+    return normalize_source_id(source_id) == "ERA5"
 
 
 def _is_ifs_source(source_id: str) -> bool:
-    return source_id.upper() == "IFS"
+    return normalize_source_id(source_id) == "IFS"
 
 
 def _uses_era5_latency_fallback(source_id: str) -> bool:
@@ -1489,7 +1490,7 @@ def _forcing_version_id(source_id: str, cycle_time: datetime, model_id: str) -> 
 
 
 def _object_source_segment(source_id: str) -> str:
-    return source_id.lower()
+    return normalize_source_id(source_id).lower()
 
 
 def _directory_uri(object_store: LocalObjectStore, key_prefix: str) -> str:

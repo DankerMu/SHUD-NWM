@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from packages.common.source_identity import normalize_source_id
+
 
 def ensure_utc(value: datetime) -> datetime:
     """Return a timezone-aware UTC datetime."""
@@ -41,6 +43,7 @@ def format_cycle_time(value: str | datetime) -> str:
 
 
 def cycle_id_for(source_id: str, cycle_time: str | datetime) -> str:
+    source_id = normalize_source_id(source_id)
     return f"{source_id.lower()}_{format_cycle_time(cycle_time)}"
 
 

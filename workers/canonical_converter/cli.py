@@ -4,6 +4,8 @@ import argparse
 import json
 from typing import Sequence
 
+from packages.common.source_identity import normalize_source_id
+
 from .converter import (
     CanonicalConverter,
     ERA5CanonicalConverter,
@@ -14,13 +16,7 @@ from .converter import (
 
 
 def _convert(source_id: str, cycle_time: str) -> dict[str, object]:
-    source_id_upper = source_id.upper()
-    if source_id_upper in {"ERA5", "IFS"}:
-        normalized_source_id = source_id_upper
-    elif source_id_upper == "GFS":
-        normalized_source_id = "gfs"
-    else:
-        normalized_source_id = source_id
+    normalized_source_id = normalize_source_id(source_id)
     if normalized_source_id == "ERA5":
         converter = ERA5CanonicalConverter.from_env()
     elif normalized_source_id == "IFS":
