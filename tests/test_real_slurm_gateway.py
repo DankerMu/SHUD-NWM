@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from jinja2.exceptions import SecurityError
 
+from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ManifestValidationError,
@@ -19,6 +20,23 @@ from services.slurm_gateway.gateway import (
 )
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import RealSlurmGateway
+
+
+def _assert_slurm_state_error_code(monkeypatch, tmp_path: Path, slurm_state: str, expected_error_code: str) -> None:
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        stdout = f"12345|{slurm_state}|1:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.get_job_status("12345")
+
+    assert record.status == SlurmJobStatus.FAILED
+    assert record.error_code == expected_error_code
+    assert record.manifest["slurm_raw_state"] == slurm_state
 
 
 def _write_resource_profiles(tmp_path: Path) -> Path:
@@ -143,6 +161,83 @@ def test_sacct_state_parsing(monkeypatch, tmp_path, slurm_state, expected):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert gateway.get_job_status("12345").status == expected
+
+
+@pytest.mark.parametrize(
+    ("slurm_state", "expected_error_code"),
+    [
+        ("TIMEOUT", "SLURM_TIMEOUT"),
+        ("NODE_FAIL", "NODE_FAILURE"),
+        ("PREEMPTED", "NODE_FAILURE"),
+        ("OUT_OF_MEMORY", "OUT_OF_MEMORY"),
+        ("BOOT_FAIL", "SLURM_JOB_FAILED"),
+    ],
+)
+def test_failed_sacct_states_produce_stable_error_codes(
+    monkeypatch,
+    tmp_path,
+    slurm_state: str,
+    expected_error_code: str,
+) -> None:
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        stdout = f"12345|{slurm_state}|1:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.get_job_status("12345")
+
+    assert record.status == SlurmJobStatus.FAILED
+    assert record.error_code == expected_error_code
+    assert record.manifest["slurm_raw_state"] == slurm_state
+
+
+def test_timeout_produces_slurm_timeout_error_code(monkeypatch, tmp_path) -> None:
+    _assert_slurm_state_error_code(monkeypatch, tmp_path, "TIMEOUT", "SLURM_TIMEOUT")
+
+
+def test_node_fail_produces_node_failure_error_code(monkeypatch, tmp_path) -> None:
+    _assert_slurm_state_error_code(monkeypatch, tmp_path, "NODE_FAIL", "NODE_FAILURE")
+
+
+def test_preempted_produces_node_failure_error_code(monkeypatch, tmp_path) -> None:
+    _assert_slurm_state_error_code(monkeypatch, tmp_path, "PREEMPTED", "NODE_FAILURE")
+
+
+def test_out_of_memory_produces_out_of_memory_error_code(monkeypatch, tmp_path) -> None:
+    _assert_slurm_state_error_code(monkeypatch, tmp_path, "OUT_OF_MEMORY", "OUT_OF_MEMORY")
+
+
+def test_unknown_terminal_produces_slurm_job_failed_error_code(monkeypatch, tmp_path) -> None:
+    _assert_slurm_state_error_code(monkeypatch, tmp_path, "BOOT_FAIL", "SLURM_JOB_FAILED")
+
+
+def test_cancelled_state_does_not_produce_error_code(monkeypatch, tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        stdout = "12345|CANCELLED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.get_job_status("12345")
+
+    assert record.status == SlurmJobStatus.CANCELLED
+    assert record.error_code is None
+    assert record.manifest["slurm_raw_state"] == "CANCELLED"
+
+
+def test_slurm_error_codes_align_with_retry_sets() -> None:
+    assert "SLURM_TIMEOUT" in TRANSIENT_ERROR_CODES
+    assert "NODE_FAILURE" in TRANSIENT_ERROR_CODES
+    assert "OUT_OF_MEMORY" in NON_TRANSIENT_ERROR_CODES
+    assert "SLURM_JOB_FAILED" not in TRANSIENT_ERROR_CODES
+    assert "SLURM_JOB_FAILED" not in NON_TRANSIENT_ERROR_CODES
 
 
 def test_array_task_results_parse_task_lines_only(monkeypatch, tmp_path):
@@ -374,6 +469,108 @@ def test_fetch_logs_refuses_symlink(monkeypatch, tmp_path):
 
     assert response.logs == ""
     assert response.truncated is False
+
+
+def test_fetch_logs_after_restart_uses_durable_workspace_path(monkeypatch, tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="sacct unavailable")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_001",
+        model_id="model_001",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+    )
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345.out").write_text("durable stdout", encoding="utf-8")
+
+    gateway._jobs.clear()
+    response = gateway.fetch_logs("12345")
+
+    assert response.run_id == "12345"
+    assert response.logs == "durable stdout"
+    assert response.metadata_complete is False
+
+
+def test_fetch_logs_restart_without_record_reports_incomplete_metadata(monkeypatch, tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="sacct unavailable")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    log_dir = tmp_path / "workspace" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345.out").write_text("root stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.logs == "root stdout"
+    assert response.metadata_complete is False
+
+
+def test_array_master_log_aggregates_task_logs(monkeypatch, tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_001",
+        model_id="model_001",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+    )
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("task 0 stdout", encoding="utf-8")
+    (log_dir / "12345_0.err").write_text("task 0 stderr", encoding="utf-8")
+    (log_dir / "12345_1.out").write_text("task 1 stdout", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("task 1 stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {"task_id": 0, "stdout": "task 0 stdout", "stderr": "task 0 stderr", "truncated": False},
+        {"task_id": 1, "stdout": "task 1 stdout", "stderr": "task 1 stderr", "truncated": False},
+    ]
+
+
+def test_missing_task_log_does_not_discard_existing(monkeypatch, tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_001",
+        model_id="model_001",
+        status=SlurmJobStatus.FAILED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+    )
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("task 0 stdout", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("task 1 stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {"task_id": 0, "stdout": "task 0 stdout", "stderr": "", "truncated": False},
+        {"task_id": 1, "stdout": "", "stderr": "task 1 stderr", "truncated": False},
+    ]
 
 
 def test_parse_slurm_datetime_rejects_garbage(tmp_path):

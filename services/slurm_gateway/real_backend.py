@@ -99,6 +99,21 @@ SLURM_STATE_MAP = {
 }
 
 
+def map_slurm_error_code(raw_state: str) -> str:
+    normalized = _normalize_slurm_state(raw_state)
+    if normalized == "TIMEOUT":
+        return "SLURM_TIMEOUT"
+    if normalized in {"NODE_FAIL", "PREEMPTED"}:
+        return "NODE_FAILURE"
+    if normalized == "OUT_OF_MEMORY":
+        return "OUT_OF_MEMORY"
+    return "SLURM_JOB_FAILED"
+
+
+def _normalize_slurm_state(raw_state: str) -> str:
+    return raw_state.strip().upper().split()[0].rstrip("+")
+
+
 class RealSlurmGateway(SlurmGateway):
     def __init__(self, settings: SlurmGatewaySettings) -> None:
         self.settings = settings
@@ -290,21 +305,33 @@ class RealSlurmGateway(SlurmGateway):
     def fetch_logs(self, job_id: str) -> SlurmLogsResponse:
         self._validate_job_id(job_id)
         record = self._jobs.get(job_id)
+        metadata_complete = record is not None
         if record is None:
             try:
                 record = self.get_job_status(job_id)
+                metadata_complete = True
             except SlurmGatewayError:
                 record = None
+                metadata_complete = False
 
         run_id = record.run_id if record and record.run_id else job_id
-        log_path = Path(self.settings.workspace_dir) / run_id / "logs" / f"{job_id}.out"
+        log_path = self._resolve_log_path(job_id, run_id, record)
         logs = ""
         truncated = False
-        if log_path.exists():
+        if log_path is not None and log_path.exists():
             logs, truncated = self._read_log_file(log_path)
 
+        array_task_logs = self._collect_array_task_logs(job_id, run_id, record)
         complete = bool(record and record.status in TERMINAL_STATUSES)
-        return SlurmLogsResponse(job_id=job_id, run_id=run_id, logs=logs, complete=complete, truncated=truncated)
+        return SlurmLogsResponse(
+            job_id=job_id,
+            run_id=run_id,
+            logs=logs,
+            complete=complete,
+            truncated=truncated,
+            metadata_complete=metadata_complete,
+            array_task_logs=array_task_logs,
+        )
 
     def reset(self, request: ResetRequest | None = None) -> ResetResponse:
         del request
@@ -645,15 +672,19 @@ class RealSlurmGateway(SlurmGateway):
         job_id: str,
         job_name: str | None = None,
     ) -> SlurmJobRecord:
-        state = self._map_slurm_state(fields[1])
+        raw_state = fields[1]
+        state = self._map_slurm_state(raw_state)
         exit_code = self._parse_exit_code(fields[2])
         started_at = self._parse_slurm_datetime(fields[3])
         finished_at = self._parse_slurm_datetime(fields[4]) if state in TERMINAL_STATUSES else None
         existing = self._jobs.get(job_id)
         now = self._now()
         manifest = dict(existing.manifest) if existing else {}
+        normalized_state = _normalize_slurm_state(raw_state)
+        manifest["slurm_raw_state"] = normalized_state
         if job_name:
             manifest["job_name"] = job_name
+        error_code = map_slurm_error_code(raw_state) if state == SlurmJobStatus.FAILED else None
         return SlurmJobRecord(
             job_id=job_id,
             run_id=existing.run_id if existing else "",
@@ -664,16 +695,109 @@ class RealSlurmGateway(SlurmGateway):
             finished_at=finished_at,
             updated_at=now,
             exit_code=exit_code,
+            error_code=error_code,
             manifest=manifest,
         )
 
     def _map_slurm_state(self, raw_state: str) -> SlurmJobStatus:
-        normalized = raw_state.strip().upper().split()[0].rstrip("+")
+        normalized = _normalize_slurm_state(raw_state)
         status = SLURM_STATE_MAP.get(normalized)
         if status is None:
-            LOGGER.warning("Unmapped Slurm state: %r, treating as RUNNING", raw_state)
-            return SlurmJobStatus.RUNNING
+            LOGGER.warning("Unmapped Slurm state: %r, treating as FAILED", raw_state)
+            return SlurmJobStatus.FAILED
         return status
+
+    def _resolve_log_path(self, job_id: str, run_id: str, record: SlurmJobRecord | None) -> Path | None:
+        workspace_dir = Path(self.settings.workspace_dir)
+        candidates = [
+            workspace_dir / run_id / "logs" / f"{job_id}.out",
+            workspace_dir / "logs" / f"{job_id}.out",
+        ]
+        if record is None:
+            candidates.extend(sorted(workspace_dir.glob(f"*/logs/{job_id}.out")))
+        if record is not None:
+            manifest_run_id = record.manifest.get("run_id")
+            if manifest_run_id and str(manifest_run_id) != run_id:
+                candidates.insert(0, workspace_dir / str(manifest_run_id) / "logs" / f"{job_id}.out")
+        if "_" in job_id:
+            master_job_id, task_id = job_id.rsplit("_", maxsplit=1)
+            if task_id.isdigit():
+                candidates.extend(
+                    [
+                        workspace_dir / run_id / "logs" / f"{master_job_id}_{task_id}.out",
+                        workspace_dir / "logs" / f"{master_job_id}_{task_id}.out",
+                    ]
+                )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0] if candidates else None
+
+    def _collect_array_task_logs(
+        self,
+        job_id: str,
+        run_id: str,
+        record: SlurmJobRecord | None,
+    ) -> list[dict[str, Any]] | None:
+        if "_" in job_id:
+            return None
+        workspace_dir = Path(self.settings.workspace_dir)
+        log_dirs = [workspace_dir / run_id / "logs", workspace_dir / "logs"]
+        if record is None:
+            discovered_dirs = {
+                candidate.parent for candidate in workspace_dir.glob(f"*/logs/{job_id}_*.out")
+            } | {
+                candidate.parent for candidate in workspace_dir.glob(f"*/logs/{job_id}_*.err")
+            }
+            log_dirs.extend(sorted(discovered_dirs))
+        if record is not None:
+            manifest_run_id = record.manifest.get("run_id")
+            if manifest_run_id and str(manifest_run_id) != run_id:
+                log_dirs.insert(0, workspace_dir / str(manifest_run_id) / "logs")
+
+        task_ids: set[int] = set()
+        for log_dir in log_dirs:
+            if not log_dir.exists():
+                continue
+            for candidate in log_dir.glob(f"{job_id}_*.out"):
+                match = re.fullmatch(rf"{re.escape(job_id)}_(\d+)\.out", candidate.name)
+                if match:
+                    task_ids.add(int(match.group(1)))
+            for candidate in log_dir.glob(f"{job_id}_*.err"):
+                match = re.fullmatch(rf"{re.escape(job_id)}_(\d+)\.err", candidate.name)
+                if match:
+                    task_ids.add(int(match.group(1)))
+
+        if not task_ids:
+            return None
+
+        entries: list[dict[str, Any]] = []
+        for task_id in sorted(task_ids):
+            stdout, stdout_truncated = self._read_first_existing_task_log(log_dirs, job_id, task_id, "out")
+            stderr, stderr_truncated = self._read_first_existing_task_log(log_dirs, job_id, task_id, "err")
+            entries.append(
+                {
+                    "task_id": task_id,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "truncated": stdout_truncated or stderr_truncated,
+                }
+            )
+        return entries
+
+    def _read_first_existing_task_log(
+        self,
+        log_dirs: Sequence[Path],
+        job_id: str,
+        task_id: int,
+        suffix: str,
+    ) -> tuple[str, bool]:
+        filename = f"{job_id}_{task_id}.{suffix}"
+        for log_dir in log_dirs:
+            candidate = log_dir / filename
+            if candidate.exists():
+                return self._read_log_file(candidate)
+        return "", False
 
     def _parse_exit_code(self, raw_exit_code: str) -> int | None:
         if not raw_exit_code:

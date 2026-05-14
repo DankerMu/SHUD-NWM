@@ -13,6 +13,7 @@ from services.slurm_gateway.config import SlurmGatewaySettings
 
 TRANSIENT_ERROR_CODES: set[str] = {
     "SLURM_TIMEOUT",
+    "SLURM_JOB_TIMEOUT",
     "NODE_FAILURE",
     "STORAGE_WRITE_FAILED",
     "SBATCH_SUBMISSION_FAILED",

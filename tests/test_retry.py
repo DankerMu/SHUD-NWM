@@ -47,6 +47,14 @@ def test_should_auto_retry_transient() -> None:
         assert service.should_auto_retry(job) is True
 
 
+def test_should_auto_retry_poll_timeout() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="SLURM_JOB_TIMEOUT")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        assert service.should_auto_retry(job) is True
+
+
 def test_should_auto_retry_non_transient() -> None:
     with _store() as store:
         job = _create_job(store, error_code="INVALID_MANIFEST")

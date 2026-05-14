@@ -1142,10 +1142,13 @@ class ForecastOrchestrator:
         deadline = time.monotonic() + self.config.job_timeout_seconds
         while _status_from_gateway_job(job) not in TERMINAL_JOB_STATUSES:
             if time.monotonic() >= deadline:
-                raise OrchestratorError(
-                    "SLURM_JOB_TIMEOUT",
-                    f"Stage {stage.stage} did not reach a terminal status before timeout.",
-                    {"stage": stage.stage, "cycle_id": context.cycle_id, "slurm_job_id": job["job_id"]},
+                return self._record_cycle_stage_poll_timeout(
+                    stage=stage,
+                    context=context,
+                    pipeline_job_id=pipeline_job_id,
+                    job=job,
+                    current_status=current_status,
+                    log_uri=log_uri,
                 )
             time.sleep(self.config.poll_interval_seconds)
             job = _coerce_mapping(self.slurm_client.get_job_status(str(job["job_id"])))
@@ -1189,6 +1192,61 @@ class ForecastOrchestrator:
             )
             current_status = new_status
         return job
+
+    def _record_cycle_stage_poll_timeout(
+        self,
+        *,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        pipeline_job_id: str,
+        job: dict[str, Any],
+        current_status: str,
+        log_uri: str | None,
+    ) -> dict[str, Any]:
+        message = f"Stage {stage.stage} did not reach a terminal status before timeout."
+        terminal = dict(job)
+        terminal.update(
+            {
+                "status": "failed",
+                "finished_at": _format_time(_utcnow()),
+                "error_code": "SLURM_JOB_TIMEOUT",
+                "error_message": message,
+            }
+        )
+        previous_status, record = self.repository.update_pipeline_job_status(
+            pipeline_job_id,
+            "failed",
+            finished_at=_utcnow(),
+            exit_code=terminal.get("exit_code"),
+            error_code="SLURM_JOB_TIMEOUT",
+            error_message=message,
+            log_uri=log_uri,
+        )
+        terminal.update(record)
+        self.repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=pipeline_job_id,
+            event_type="timeout",
+            status_from=previous_status or current_status,
+            status_to="failed",
+            message=message,
+            details={
+                "stage": stage.stage,
+                "job_type": stage.job_type,
+                "cycle_id": context.cycle_id,
+                "slurm_job_id": job["job_id"],
+                "timeout_seconds": self.config.job_timeout_seconds,
+                "error_code": "SLURM_JOB_TIMEOUT",
+            },
+        )
+        self.repository.update_forecast_cycle_status(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            status=stage.failure_cycle_status,
+            error_code="SLURM_JOB_TIMEOUT",
+            error_message=message,
+        )
+        return terminal
 
     def _submit_array_stage(
         self,
@@ -1820,10 +1878,12 @@ class ForecastOrchestrator:
         deadline = time.monotonic() + self.config.job_timeout_seconds
         while _status_from_gateway_job(job) not in TERMINAL_JOB_STATUSES:
             if time.monotonic() >= deadline:
-                raise OrchestratorError(
-                    "SLURM_JOB_TIMEOUT",
-                    f"Stage {stage.stage} did not reach a terminal status before timeout.",
-                    {"stage": stage.stage, "run_id": context.run_id, "slurm_job_id": job["job_id"]},
+                return self._record_stage_poll_timeout(
+                    stage=stage,
+                    context=context,
+                    pipeline_job_id=pipeline_job_id,
+                    job=dict(job),
+                    current_status=current_status,
                 )
             time.sleep(self.config.poll_interval_seconds)
             job = self.slurm_client.get_job_status(str(job["job_id"]))
@@ -1886,6 +1946,66 @@ class ForecastOrchestrator:
             )
             self._after_stage_status_change(stage, context, previous_status or current_status, terminal_status, job)
         return job
+
+    def _record_stage_poll_timeout(
+        self,
+        *,
+        stage: StageDefinition,
+        context: ForecastRunContext | AnalysisRunContext,
+        pipeline_job_id: str,
+        job: dict[str, Any],
+        current_status: str,
+    ) -> dict[str, Any]:
+        message = f"Stage {stage.stage} did not reach a terminal status before timeout."
+        terminal = dict(job)
+        terminal.update(
+            {
+                "status": "failed",
+                "finished_at": _format_time(_utcnow()),
+                "error_code": "SLURM_JOB_TIMEOUT",
+                "error_message": message,
+            }
+        )
+        previous_status, record = self.repository.update_pipeline_job_status(
+            pipeline_job_id,
+            "failed",
+            finished_at=_utcnow(),
+            exit_code=terminal.get("exit_code"),
+            error_code="SLURM_JOB_TIMEOUT",
+            error_message=message,
+        )
+        terminal.update(record)
+        entity_type, entity_id = self._pipeline_event_target(context, pipeline_job_id)
+        self.repository.insert_pipeline_event(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            event_type="timeout",
+            status_from=previous_status or current_status,
+            status_to="failed",
+            message=message,
+            details={
+                "stage": stage.stage,
+                "job_type": stage.job_type,
+                "run_id": context.run_id,
+                "slurm_job_id": job["job_id"],
+                "timeout_seconds": self.config.job_timeout_seconds,
+                "error_code": "SLURM_JOB_TIMEOUT",
+            },
+        )
+        self.repository.update_forecast_cycle_status(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            status=stage.failure_cycle_status,
+            error_code="SLURM_JOB_TIMEOUT",
+            error_message=message,
+        )
+        self.repository.update_hydro_run_status(
+            context.run_id,
+            "failed",
+            error_code="SLURM_JOB_TIMEOUT",
+            error_message=message,
+        )
+        return terminal
 
     def _before_stage_submit(
         self,
