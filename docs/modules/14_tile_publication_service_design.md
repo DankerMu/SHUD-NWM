@@ -13,12 +13,14 @@
 |---|---|
 | 上游 | PostGIS、TimescaleDB、canonical raster/COG、return_period_result。 |
 | 下游 | 前端地图。 |
-| 主要数据表/存储 | `map.tile_layer`, `map.tile_asset`, `hydro.river_timeseries`, `flood.return_period_result` |
+| 主要数据表/存储 | `map.tile_layer`, `map.tile_cache`, `hydro.river_timeseries`, `flood.return_period_result` |
 
 ## 3. 职责边界
 
 - 发布流域边界和河网矢量瓦片。
 - 按 run_id/valid_time 生成水文属性瓦片。
+- 本版本洪水重现期地图数据通过 GeoJSON 接口发布；MVT/PBF 需要 PostGIS tile clipping
+  和编码能力，作为后续生产级优化。
 - 发布降雨/温度栅格瓦片。
 - 维护 tile layer index。
 - 缓存和失效管理。
@@ -47,6 +49,9 @@
 ## 6. 主要接口
 
 - `GET /api/v1/tiles/...`
+- `GET /api/v1/tiles/flood-return-period?run_id=&duration=&valid_time=&bbox=&return_period=`
+  返回 GeoJSON `FeatureCollection`，属性包含 `segment_id`、`value`、`unit`、
+  `quality_flag`、`return_period`、`warning_level`。
 - `CLI nhms-tiles publish --run-id`
 - `map.layer_catalog`
 
@@ -82,8 +87,10 @@ UNKNOWN_ERROR
 ## 9. 验收标准
 
 - 全国河网不通过全量 GeoJSON 加载。
+- 洪水重现期 GeoJSON 是短期发布格式，必须在文档和 OpenAPI 中标注全国尺度性能限制；
+  全国尺度高频浏览应升级为按 z/x/y 裁剪、简化和缓存的 MVT/PBF。
 - 新 run published 后图层索引可发现。
-- 瓦片属性包含 segment_id、value、unit、quality_flag。
+- 瓦片/地图属性包含 segment_id、value、unit、quality_flag、return_period、warning_level。
 - 时间切换不触发全量数据下载。
 
 ## 10. 与其它模块的契约

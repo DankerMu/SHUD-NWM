@@ -327,15 +327,18 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf": {
+    "/api/v1/tiles/flood-return-period": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get flood return period vector tile */
-        get: operations["getFloodReturnPeriodTile"];
+        /**
+         * Get flood return period GeoJSON map data
+         * @description Returns a GeoJSON FeatureCollection for flood return-period map rendering. This release uses GeoJSON rather than `.pbf` vector tiles because MVT encoding and tile clipping require a PostGIS-specific implementation that is out of scope for the current release.
+         */
+        get: operations["getFloodReturnPeriodMap"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1125,6 +1128,47 @@ export interface components {
             frequency_thresholds: Record<string, never> | null;
             quality_note: string | null;
         };
+        /** @description GeoJSON FeatureCollection for flood return-period map rendering. */
+        FloodReturnPeriodFeatureCollection: {
+            /** @enum {string} */
+            type: "FeatureCollection";
+            features: components["schemas"]["FloodReturnPeriodFeature"][];
+        };
+        FloodReturnPeriodFeature: {
+            /** @enum {string} */
+            type: "Feature";
+            properties: components["schemas"]["FloodReturnPeriodFeatureProperties"];
+            geometry: (components["schemas"]["GeoJSONLineString"] | components["schemas"]["GeoJSONMultiLineString"] | components["schemas"]["GeoJSONPoint"]) | null;
+        };
+        FloodReturnPeriodFeatureProperties: {
+            /** @description River segment identifier. */
+            segment_id: string;
+            /** @description Displayed return-period flow value. */
+            value: number;
+            /** @description Measurement unit, for example m³/s. */
+            unit: string;
+            /** @description Data quality indicator from flood.return_period_result. */
+            quality_flag: string;
+            /** @description Return period in years. */
+            return_period: number;
+            /** @description Alert level such as normal, warning, danger, or unavailable. */
+            warning_level: string;
+        };
+        GeoJSONPoint: {
+            /** @enum {string} */
+            type: "Point";
+            coordinates: number[];
+        };
+        GeoJSONLineString: {
+            /** @enum {string} */
+            type: "LineString";
+            coordinates: number[][];
+        };
+        GeoJSONMultiLineString: {
+            /** @enum {string} */
+            type: "MultiLineString";
+            coordinates: number[][][];
+        };
         LineageResponse: {
             target_type: string;
             target_id: string;
@@ -1739,30 +1783,32 @@ export interface operations {
             "5XX": components["responses"]["Error"];
         };
     };
-    getFloodReturnPeriodTile: {
+    getFloodReturnPeriodMap: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                run_id: components["parameters"]["RunId"];
+            query: {
+                run_id: components["parameters"]["RunIdQuery"];
                 /** @description Aggregation duration such as 1h, 3h, or 24h. */
-                duration: string;
-                valid_time: components["parameters"]["ValidTimePath"];
-                z: components["parameters"]["TileZ"];
-                x: components["parameters"]["TileX"];
-                y: components["parameters"]["TileY"];
+                duration?: string;
+                /** @description Forecast valid time to render. */
+                valid_time: string;
+                /** @description Optional minLon,minLat,maxLon,maxLat spatial filter. */
+                bbox?: string;
+                /** @description Optional minimum return period in years. */
+                return_period?: number;
             };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Raw Mapbox vector tile */
+            /** @description GeoJSON flood return-period FeatureCollection */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/x-protobuf": string;
+                    "application/json": components["schemas"]["FloodReturnPeriodFeatureCollection"];
                 };
             };
             "4XX": components["responses"]["Error"];

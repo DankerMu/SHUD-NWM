@@ -146,21 +146,86 @@ def test_forecast_series_embeds_frequency_thresholds() -> None:
     }
 
 
-def test_tile_endpoint_returns_geojson_features() -> None:
+def test_flood_tile_returns_json_content_type() -> None:
     with _client() as client:
         response = client.get(
-            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf"
+            f"/api/v1/tiles/flood-return-period?run_id={RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
         )
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/json")
+
+
+def test_flood_tile_returns_geojson_feature_collection() -> None:
+    with _client() as client:
+        response = client.get(
+            f"/api/v1/tiles/flood-return-period?run_id={RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+        )
+        assert response.status_code == 200
         data = response.json()
         assert data["type"] == "FeatureCollection"
-        assert {feature["properties"]["river_segment_id"] for feature in data["features"]} == {
+        assert {feature["properties"]["segment_id"] for feature in data["features"]} == {
             "seg_001",
             "seg_002",
             "seg_no_curve",
         }
         assert data["features"][0]["geometry"]["type"] == "LineString"
+
+
+def test_flood_tile_feature_properties_complete() -> None:
+    with _client() as client:
+        response = client.get(
+            f"/api/v1/tiles/flood-return-period?run_id={RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+        )
+        assert response.status_code == 200
+        features = response.json()["features"]
+        assert features
+        for feature in features:
+            properties = feature["properties"]
+            assert set(properties) == {
+                "segment_id",
+                "value",
+                "unit",
+                "quality_flag",
+                "return_period",
+                "warning_level",
+            }
+            assert isinstance(properties["segment_id"], str)
+            assert isinstance(properties["value"], float)
+            assert properties["unit"] == "m3/s"
+            assert isinstance(properties["quality_flag"], str)
+
+
+def test_flood_tile_not_frequency_ready_returns_error_envelope() -> None:
+    with _client() as client:
+        response = client.get(
+            f"/api/v1/tiles/flood-return-period?run_id=run_pending&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+        )
+        assert response.status_code == 409
+        assert response.headers["content-type"].startswith("application/json")
+        data = response.json()
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
+
+
+def test_flood_tile_spatial_and_return_period_filters() -> None:
+    with _client() as client:
+        response = client.get(
+            "/api/v1/tiles/flood-return-period"
+            f"?run_id={RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+            "&bbox=109,29,111.75,31.75&return_period=4"
+        )
+        assert response.status_code == 200
+        assert {feature["properties"]["segment_id"] for feature in response.json()["features"]} == {"seg_002"}
+
+
+def test_flood_tile_legacy_pbf_route_redirects_to_geojson_endpoint() -> None:
+    with _client() as client:
+        response = client.get(
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf",
+            follow_redirects=False,
+        )
+        assert response.status_code == 307
+        assert response.headers["location"].startswith("/api/v1/tiles/flood-return-period?")
 
 
 class ThresholdForecastStore(PsycopgForecastStore):

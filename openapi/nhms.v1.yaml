@@ -602,31 +602,53 @@ paths:
           $ref: "#/components/responses/Error"
         "5XX":
           $ref: "#/components/responses/Error"
-  /api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf:
+  /api/v1/tiles/flood-return-period:
     get:
-      operationId: getFloodReturnPeriodTile
-      summary: Get flood return period vector tile
+      operationId: getFloodReturnPeriodMap
+      summary: Get flood return period GeoJSON map data
+      description: >
+        Returns a GeoJSON FeatureCollection for flood return-period map rendering.
+        This release uses GeoJSON rather than `.pbf` vector tiles because MVT
+        encoding and tile clipping require a PostGIS-specific implementation that
+        is out of scope for the current release.
       tags: [tiles]
       parameters:
-        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/RunIdQuery"
         - name: duration
-          in: path
+          in: query
+          required: false
+          schema:
+            type: string
+            default: 1h
+          description: Aggregation duration such as 1h, 3h, or 24h.
+        - name: valid_time
+          in: query
           required: true
           schema:
             type: string
-          description: Aggregation duration such as 1h, 3h, or 24h.
-        - $ref: "#/components/parameters/ValidTimePath"
-        - $ref: "#/components/parameters/TileZ"
-        - $ref: "#/components/parameters/TileX"
-        - $ref: "#/components/parameters/TileY"
+            format: date-time
+          description: Forecast valid time to render.
+        - name: bbox
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?$"
+          description: Optional minLon,minLat,maxLon,maxLat spatial filter.
+        - name: return_period
+          in: query
+          required: false
+          schema:
+            type: number
+            minimum: 0
+          description: Optional minimum return period in years.
       responses:
         "200":
-          description: Raw Mapbox vector tile
+          description: GeoJSON flood return-period FeatureCollection
           content:
-            application/x-protobuf:
+            application/json:
               schema:
-                type: string
-                format: binary
+                $ref: "#/components/schemas/FloodReturnPeriodFeatureCollection"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -2514,6 +2536,100 @@ components:
         quality_note:
           type: string
           nullable: true
+    FloodReturnPeriodFeatureCollection:
+      type: object
+      description: GeoJSON FeatureCollection for flood return-period map rendering.
+      required: [type, features]
+      properties:
+        type:
+          type: string
+          enum: [FeatureCollection]
+        features:
+          type: array
+          items:
+            $ref: "#/components/schemas/FloodReturnPeriodFeature"
+    FloodReturnPeriodFeature:
+      type: object
+      required: [type, properties, geometry]
+      properties:
+        type:
+          type: string
+          enum: [Feature]
+        properties:
+          $ref: "#/components/schemas/FloodReturnPeriodFeatureProperties"
+        geometry:
+          nullable: true
+          oneOf:
+            - $ref: "#/components/schemas/GeoJSONLineString"
+            - $ref: "#/components/schemas/GeoJSONMultiLineString"
+            - $ref: "#/components/schemas/GeoJSONPoint"
+    FloodReturnPeriodFeatureProperties:
+      type: object
+      required: [segment_id, value, unit, quality_flag, return_period, warning_level]
+      properties:
+        segment_id:
+          type: string
+          description: River segment identifier.
+        value:
+          type: number
+          description: Displayed return-period flow value.
+        unit:
+          type: string
+          description: Measurement unit, for example m³/s.
+        quality_flag:
+          type: string
+          description: Data quality indicator from flood.return_period_result.
+        return_period:
+          type: number
+          description: Return period in years.
+        warning_level:
+          type: string
+          description: Alert level such as normal, warning, danger, or unavailable.
+    GeoJSONPoint:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [Point]
+        coordinates:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: number
+    GeoJSONLineString:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [LineString]
+        coordinates:
+          type: array
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items:
+              type: number
+    GeoJSONMultiLineString:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [MultiLineString]
+        coordinates:
+          type: array
+          items:
+            type: array
+            items:
+              type: array
+              minItems: 2
+              maxItems: 2
+              items:
+                type: number
     LineageResponse:
       type: object
       required: [target_type, target_id, nodes, edges]

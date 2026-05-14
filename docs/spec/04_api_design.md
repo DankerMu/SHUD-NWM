@@ -93,9 +93,31 @@ GET /api/v1/pipeline/status?source=&cycle_time=
 ```http
 GET /api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf
 GET /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf
-GET /api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf
+GET /api/v1/tiles/flood-return-period?run_id=&duration=1h&valid_time=&bbox=&return_period=
 GET /api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png
 ```
+
+洪水重现期地图数据本版本发布为 GeoJSON，而不是 MVT/PBF。原因是 `.pbf`
+瓦片需要 PostGIS tile clipping 和 MVT 编码能力，本阶段不把该实现作为发布范围。
+`/api/v1/tiles/flood-return-period` 返回 `application/json` 的 GeoJSON
+`FeatureCollection`，前端以 MapLibre `geojson` source 加载。旧的
+`/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf`
+路径仅作为兼容入口重定向到 GeoJSON 查询接口，不表达真实 z/x/y 瓦片语义。
+
+洪水重现期 GeoJSON feature properties：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `segment_id` | string | 河段标识。 |
+| `value` | number | 用于展示的流量值。 |
+| `unit` | string | 流量单位，例如 `m³/s` 或 `m3/s`。 |
+| `quality_flag` | string | 数据质量标识。 |
+| `return_period` | number | 重现期年数；无可用曲线时为 `0`。 |
+| `warning_level` | string | 告警等级，例如 `normal`、`warning`、`danger`；无可用曲线时为 `unavailable`。 |
+
+GeoJSON 在全国尺度会产生较大的单次响应，适合本阶段的功能验证和受限范围浏览。
+生产级全国无级缩放仍应优先使用 MVT/PBF，并按 z/x/y 进行裁剪、简化和缓存。
+瓦片发布缓存表以迁移文件为准，命名为 `map.tile_cache`。
 
 ## 6. 模型资产管理接口
 
