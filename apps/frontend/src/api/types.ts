@@ -739,6 +739,12 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        MetStationPage: {
+            items: components["schemas"]["MetStation"][];
+            total_count: number;
+            limit: number;
+            offset: number;
+        };
         DataSource: {
             source_id: string;
             source_name: string;
@@ -751,6 +757,12 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        DataSourcePage: {
+            items: components["schemas"]["DataSource"][];
+            total_count: number;
+            limit: number;
+            offset: number;
+        };
         ForecastCycle: {
             cycle_id: string;
             source_id: string;
@@ -761,6 +773,12 @@ export interface components {
             status: string;
             /** Format: date-time */
             created_at: string;
+        };
+        ForecastCyclePage: {
+            items: components["schemas"]["ForecastCycle"][];
+            total_count: number;
+            limit: number;
+            offset: number;
         };
         ForcingVersion: {
             forcing_version_id: string;
@@ -834,6 +852,24 @@ export interface components {
                 q50: number;
                 q100: number;
             };
+        };
+        /** @description Returned when include_analysis=true splices analysis-period data before the forecast window into a unified segments array. */
+        SplicedForecastResponse: {
+            river_segment_id: string;
+            segments: {
+                scenario: string;
+                source: string;
+                data: {
+                    /** Format: date-time */
+                    valid_time: string;
+                    value: number;
+                }[];
+            }[];
+            /** Format: date-time */
+            issue_time: string;
+            variable: string;
+            unit: string;
+            frequency_thresholds?: Record<string, never> | null;
         };
         SeriesSegment: {
             scenario_id: string;
@@ -1318,7 +1354,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["DataSource"][];
+                        data: components["schemas"]["DataSourcePage"];
                     };
                 };
             };
@@ -1332,6 +1368,8 @@ export interface operations {
                 from?: components["parameters"]["FromTime"];
                 to?: components["parameters"]["ToTime"];
                 status?: components["parameters"]["CycleStatus"];
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
             };
             header?: never;
             path: {
@@ -1348,7 +1386,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ForecastCycle"][];
+                        data: components["schemas"]["ForecastCyclePage"];
                     };
                 };
             };
@@ -1476,7 +1514,8 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    active_flag: boolean;
+                    /** @description Set model active flag. The legacy key name active_flag is also accepted by the backend for backward compatibility. */
+                    active: boolean;
                 };
             };
         };
@@ -1531,6 +1570,10 @@ export interface operations {
                 variables?: string;
                 /** @description Comma-separated scenario identifiers. */
                 scenarios?: string;
+                /** @description Include analysis period data before the forecast window. */
+                include_analysis?: boolean;
+                /** @description Comma-separated run types to include (e.g. forecast,hindcast). */
+                run_types?: string;
             };
             header?: never;
             path: {
@@ -1541,15 +1584,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description River forecast time series */
+            /** @description River forecast time series. Returns RiverSeriesResponse for forecast-only requests, or SplicedForecastResponse when include_analysis=true splices analysis data before the forecast. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["RiverSeriesResponse"];
-                    };
+                    "application/json": components["schemas"]["RiverSeriesResponse"] | components["schemas"]["SplicedForecastResponse"];
                 };
             };
             "4XX": components["responses"]["Error"];
@@ -1577,7 +1618,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["MetStation"][];
+                        data: components["schemas"]["MetStationPage"];
                     };
                 };
             };

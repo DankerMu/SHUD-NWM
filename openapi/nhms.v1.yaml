@@ -29,7 +29,7 @@ info:
     - Pagination: limit/offset query parameters
     - Rate limiting: placeholder (not enforced in M0)
 servers:
-  - url: /api/v1
+  - url: /
 security:
   - BearerAuth: []
 tags:
@@ -129,9 +129,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/DataSource"
+                        $ref: "#/components/schemas/DataSourcePage"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -146,6 +144,8 @@ paths:
         - $ref: "#/components/parameters/FromTime"
         - $ref: "#/components/parameters/ToTime"
         - $ref: "#/components/parameters/CycleStatus"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: Forecast cycle list
@@ -158,9 +158,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/ForecastCycle"
+                        $ref: "#/components/schemas/ForecastCyclePage"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -288,10 +286,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [active_flag]
+              required: [active]
               properties:
-                active_flag:
+                active:
                   type: boolean
+                  description: >
+                    Set model active flag. The legacy key name active_flag is
+                    also accepted by the backend for backward compatibility.
       responses:
         "200":
           description: Updated model instance
@@ -355,19 +356,31 @@ paths:
           schema:
             type: string
           description: Comma-separated scenario identifiers.
+        - name: include_analysis
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include analysis period data before the forecast window.
+        - name: run_types
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated run types to include (e.g. forecast,hindcast).
       responses:
         "200":
-          description: River forecast time series
+          description: >
+            River forecast time series. Returns RiverSeriesResponse for
+            forecast-only requests, or SplicedForecastResponse when
+            include_analysis=true splices analysis data before the forecast.
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: "#/components/schemas/SuccessEnvelope"
-                  - type: object
-                    required: [data]
-                    properties:
-                      data:
-                        $ref: "#/components/schemas/RiverSeriesResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RiverSeriesResponse"
+                  - $ref: "#/components/schemas/SplicedForecastResponse"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -394,9 +407,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/MetStation"
+                        $ref: "#/components/schemas/MetStationPage"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1608,6 +1619,20 @@ components:
         created_at:
           type: string
           format: date-time
+    MetStationPage:
+      type: object
+      required: [items, total_count, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MetStation"
+        total_count:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
     DataSource:
       type: object
       required: [source_id, source_name, source_type, status, adapter_name, config_json, created_at]
@@ -1628,6 +1653,20 @@ components:
         created_at:
           type: string
           format: date-time
+    DataSourcePage:
+      type: object
+      required: [items, total_count, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataSource"
+        total_count:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
     ForecastCycle:
       type: object
       required: [cycle_id, source_id, cycle_time, issue_time, status, created_at]
@@ -1647,6 +1686,20 @@ components:
         created_at:
           type: string
           format: date-time
+    ForecastCyclePage:
+      type: object
+      required: [items, total_count, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ForecastCycle"
+        total_count:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
     ForcingVersion:
       type: object
       required:
@@ -1829,6 +1882,46 @@ components:
               type: number
             q100:
               type: number
+    SplicedForecastResponse:
+      type: object
+      description: >
+        Returned when include_analysis=true splices analysis-period data
+        before the forecast window into a unified segments array.
+      required: [river_segment_id, segments, issue_time, variable, unit]
+      properties:
+        river_segment_id:
+          type: string
+        segments:
+          type: array
+          items:
+            type: object
+            required: [scenario, source, data]
+            properties:
+              scenario:
+                type: string
+              source:
+                type: string
+              data:
+                type: array
+                items:
+                  type: object
+                  required: [valid_time, value]
+                  properties:
+                    valid_time:
+                      type: string
+                      format: date-time
+                    value:
+                      type: number
+        issue_time:
+          type: string
+          format: date-time
+        variable:
+          type: string
+        unit:
+          type: string
+        frequency_thresholds:
+          type: object
+          nullable: true
     SeriesSegment:
       type: object
       required: [scenario_id, segment_role, points]

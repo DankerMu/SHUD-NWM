@@ -542,8 +542,22 @@ def test_array_master_log_aggregates_task_logs(monkeypatch, tmp_path) -> None:
     response = gateway.fetch_logs("12345")
 
     assert response.array_task_logs == [
-        {"task_id": 0, "stdout": "task 0 stdout", "stderr": "task 0 stderr", "truncated": False, "missing_stdout": False, "missing_stderr": False},
-        {"task_id": 1, "stdout": "task 1 stdout", "stderr": "task 1 stderr", "truncated": False, "missing_stdout": False, "missing_stderr": False},
+        {
+            "task_id": 0,
+            "stdout": "task 0 stdout",
+            "stderr": "task 0 stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+        },
+        {
+            "task_id": 1,
+            "stdout": "task 1 stdout",
+            "stderr": "task 1 stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+        },
     ]
 
 
@@ -568,8 +582,22 @@ def test_missing_task_log_does_not_discard_existing(monkeypatch, tmp_path) -> No
     response = gateway.fetch_logs("12345")
 
     assert response.array_task_logs == [
-        {"task_id": 0, "stdout": "task 0 stdout", "stderr": "", "truncated": False, "missing_stdout": False, "missing_stderr": True},
-        {"task_id": 1, "stdout": "", "stderr": "task 1 stderr", "truncated": False, "missing_stdout": True, "missing_stderr": False},
+        {
+            "task_id": 0,
+            "stdout": "task 0 stdout",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+        },
+        {
+            "task_id": 1,
+            "stdout": "",
+            "stderr": "task 1 stderr",
+            "truncated": False,
+            "missing_stdout": True,
+            "missing_stderr": False,
+        },
     ]
 
 

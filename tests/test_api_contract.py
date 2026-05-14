@@ -8,7 +8,9 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
+from apps.api.routes.models import get_model_registry_store
 from tests.test_monitoring_api import (
     _client,
     _create_job,
@@ -118,6 +120,92 @@ def test_queue_depth_contract_uses_success_envelope() -> None:
     data = _assert_success_envelope(response.json())
     assert set(data) == {"running", "pending", "idle"}
     assert data == {"running": 2, "pending": 3, "idle": 1}
+
+
+def test_data_sources_contract_uses_success_envelope() -> None:
+    app.dependency_overrides[get_data_source_store] = lambda: _DataSourceStore()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/data-sources", params={"limit": 5, "offset": 0})
+    finally:
+        app.dependency_overrides.pop(get_data_source_store, None)
+
+    assert response.status_code == 200
+    data = _assert_success_envelope(response.json())
+    assert data == {
+        "items": [{"source_id": "GFS", "provider": "NOAA/NCEP", "format": "GRIB2"}],
+        "total_count": 1,
+        "limit": 5,
+        "offset": 0,
+    }
+
+
+def test_data_source_cycles_contract_uses_success_envelope() -> None:
+    app.dependency_overrides[get_data_source_store] = lambda: _DataSourceStore()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/data-sources/GFS/cycles", params={"limit": 5, "offset": 0})
+    finally:
+        app.dependency_overrides.pop(get_data_source_store, None)
+
+    assert response.status_code == 200
+    data = _assert_success_envelope(response.json())
+    assert data["items"] == [{"cycle_id": "GFS_2026051400", "source_id": "GFS", "status": "raw_complete"}]
+    assert data["limit"] == 5
+    assert data["offset"] == 0
+
+
+def test_met_stations_contract_uses_success_envelope() -> None:
+    app.dependency_overrides[get_data_source_store] = lambda: _DataSourceStore()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/met/stations", params={"basin_version_id": "basin_v1"})
+    finally:
+        app.dependency_overrides.pop(get_data_source_store, None)
+
+    assert response.status_code == 200
+    data = _assert_success_envelope(response.json())
+    assert data["items"] == [{"station_id": "station_1", "basin_version_id": "basin_v1", "active_flag": True}]
+
+
+def test_model_active_contract_accepts_active_and_active_flag() -> None:
+    store = _ModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            active_response = client.put("/api/v1/models/model_1/active", json={"active": True})
+            active_flag_response = client.put("/api/v1/models/model_1/active", json={"active_flag": False})
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert active_response.status_code == 200
+    assert active_response.json()["active_flag"] is True
+    assert active_flag_response.status_code == 200
+    assert active_flag_response.json()["active_flag"] is False
+    assert store.calls == [("model_1", True), ("model_1", False)]
+
+
+def test_forecast_series_contract_accepts_include_analysis_query() -> None:
+    app.dependency_overrides[get_forecast_store] = lambda: _ForecastSeriesStore()
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_1/forecast-series",
+                params={"include_analysis": "true", "run_types": "forecast"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_forecast_store, None)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["river_segment_id"] == "seg_1"
+    assert data["segments"] == [
+        {
+            "scenario": "analysis_true_field",
+            "source": "ERA5",
+            "data": [{"valid_time": "2026-05-14T00:00:00Z", "value": 10.0}],
+        }
+    ]
 
 
 def test_stage_duration_metrics_contract_uses_success_envelope() -> None:
@@ -251,4 +339,81 @@ class _RunStore:
             "total_count": 1,
             "limit": kwargs["limit"],
             "offset": kwargs["offset"],
+        }
+
+
+class _DataSourceStore:
+    def list_data_sources(self, *, limit: int, offset: int) -> dict[str, Any]:
+        return {
+            "items": [{"source_id": "GFS", "provider": "NOAA/NCEP", "format": "GRIB2"}],
+            "total_count": 1,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def list_cycles(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "items": [
+                {
+                    "cycle_id": f"{kwargs['source_id']}_2026051400",
+                    "source_id": kwargs["source_id"],
+                    "status": "raw_complete",
+                }
+            ],
+            "total_count": 1,
+            "limit": kwargs["limit"],
+            "offset": kwargs["offset"],
+        }
+
+    def list_met_stations(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "items": [
+                {
+                    "station_id": "station_1",
+                    "basin_version_id": kwargs["basin_version_id"],
+                    "active_flag": True,
+                }
+            ],
+            "total_count": 1,
+            "limit": kwargs["limit"],
+            "offset": kwargs["offset"],
+        }
+
+
+class _ModelRegistryStore:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    def set_model_active(self, model_id: str, active: bool) -> dict[str, Any]:
+        self.calls.append((model_id, active))
+        return {
+            "model_id": model_id,
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": "network_v1",
+            "mesh_version_id": "mesh_v1",
+            "calibration_version_id": "calibration_v1",
+            "shud_code_version": "2.0",
+            "model_package_uri": "s3://nhms/models/model_1/package/",
+            "active_flag": active,
+            "resource_profile": {},
+            "created_at": "2026-05-14T00:00:00Z",
+        }
+
+
+class _ForecastSeriesStore:
+    def forecast_series(self, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["include_analysis"] is True
+        assert kwargs["run_types"] == ["forecast"]
+        return {
+            "segments": [
+                {
+                    "scenario": "analysis_true_field",
+                    "source": "ERA5",
+                    "data": [{"valid_time": "2026-05-14T00:00:00Z", "value": 10.0}],
+                }
+            ],
+            "issue_time": "2026-05-14T00:00:00Z",
+            "river_segment_id": kwargs["segment_id"],
+            "variable": "discharge",
+            "unit": "m3/s",
         }
