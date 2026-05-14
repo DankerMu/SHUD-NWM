@@ -329,13 +329,12 @@ def register_flood_tile_layer(run_id: str, db_session: Session) -> None:
     context = _load_run_context(run_id, db_session)
     layer_id = f"flood_return_period_{run_id}"
     tile_uri_template = (
-        f"/api/v1/tiles/flood-return-period/{run_id}/{{duration}}/{{valid_time}}/{{z}}/{{x}}/{{y}}.pbf"
+        f"/api/v1/tiles/flood-return-period?run_id={run_id}&duration={{duration}}&valid_time={{valid_time}}"
     )
     style_json = {
-        "source_layer": "flood_return_period",
+        "type": "geojson",
         "warning_level_property": "warning_level",
         "return_period_property": "return_period",
-        "zoom": {"min": 0, "max": 14},
     }
     values: dict[str, Any] = {
         "layer_id": layer_id,
@@ -344,7 +343,7 @@ def register_flood_tile_layer(run_id: str, db_session: Session) -> None:
         "source_product_id": None,
         "variable": "return_period",
         "valid_time": None,
-        "tile_format": "pbf",
+        "tile_format": "geojson",
         "tile_uri_template": tile_uri_template,
         "min_zoom": 0,
         "max_zoom": 14,

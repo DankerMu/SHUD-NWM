@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Layer, Source, type LayerProps } from 'react-map-gl/maplibre'
 import type { FilterSpecification } from 'maplibre-gl'
 
@@ -6,7 +7,6 @@ import {
   FLOOD_TILE_LAYER_ID,
   FLOOD_TILE_SELECTED_LAYER_ID,
   FLOOD_TILE_SOURCE_ID,
-  FLOOD_TILE_SOURCE_LAYER,
   floodTileLayerPaint,
   type AlertLevel,
 } from '@/components/flood/alertLevels'
@@ -19,14 +19,22 @@ interface FloodReturnPeriodLayerProps {
   selectedSegmentId?: string | null
 }
 
+interface GeoJsonFeatureCollection {
+  type: 'FeatureCollection'
+  features: unknown[]
+}
+
 function segmentFilter(segmentId?: string | null): FilterSpecification {
-  return ['==', ['get', 'river_segment_id'], segmentId ?? ''] as FilterSpecification
+  return ['==', ['get', 'segment_id'], segmentId ?? ''] as FilterSpecification
 }
 
 export function floodTileUrl(runId: string, validTime: string) {
-  return `/api/v1/tiles/flood-return-period/${encodeURIComponent(runId)}/1h/${encodeURIComponent(
-    validTime,
-  )}/{z}/{x}/{y}.pbf`
+  const params = new URLSearchParams({
+    run_id: runId,
+    duration: '1h',
+    valid_time: validTime,
+  })
+  return `/api/v1/tiles/flood-return-period?${params.toString()}`
 }
 
 export function floodReturnPeriodLayer(selectedLevel?: AlertLevel | null): LayerProps {
@@ -34,7 +42,6 @@ export function floodReturnPeriodLayer(selectedLevel?: AlertLevel | null): Layer
     id: FLOOD_TILE_LAYER_ID,
     type: 'line',
     source: FLOOD_TILE_SOURCE_ID,
-    'source-layer': FLOOD_TILE_SOURCE_LAYER,
     paint: floodTileLayerPaint(selectedLevel),
   }
 }
@@ -46,11 +53,34 @@ export function FloodReturnPeriodLayer({
   hoveredSegmentId,
   selectedSegmentId,
 }: FloodReturnPeriodLayerProps) {
+  const [data, setData] = useState<GeoJsonFeatureCollection | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setData(null)
+
+    fetch(floodTileUrl(runId, validTime), { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) return null
+        const payload = (await response.json()) as GeoJsonFeatureCollection
+        return payload.type === 'FeatureCollection' ? payload : null
+      })
+      .then((payload) => {
+        if (!controller.signal.aborted) setData(payload)
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && !(error instanceof DOMException && error.name === 'AbortError')) {
+          setData(null)
+        }
+      })
+
+    return () => controller.abort()
+  }, [runId, validTime])
+
   const hoverLayer: LayerProps = {
     id: FLOOD_TILE_HOVER_LAYER_ID,
     type: 'line',
     source: FLOOD_TILE_SOURCE_ID,
-    'source-layer': FLOOD_TILE_SOURCE_LAYER,
     filter: segmentFilter(hoveredSegmentId),
     paint: {
       'line-color': '#111827',
@@ -63,7 +93,6 @@ export function FloodReturnPeriodLayer({
     id: FLOOD_TILE_SELECTED_LAYER_ID,
     type: 'line',
     source: FLOOD_TILE_SOURCE_ID,
-    'source-layer': FLOOD_TILE_SOURCE_LAYER,
     filter: segmentFilter(selectedSegmentId),
     paint: {
       'line-color': '#2266cc',
@@ -72,14 +101,14 @@ export function FloodReturnPeriodLayer({
     },
   }
 
+  if (!data) return null
+
   return (
     <Source
       id={FLOOD_TILE_SOURCE_ID}
-      type="vector"
-      tiles={[floodTileUrl(runId, validTime)]}
-      minzoom={0}
-      maxzoom={14}
-      promoteId="river_segment_id"
+      type="geojson"
+      data={data}
+      promoteId="segment_id"
     >
       <Layer {...floodReturnPeriodLayer(selectedLevel)} />
       <Layer {...hoverLayer} />

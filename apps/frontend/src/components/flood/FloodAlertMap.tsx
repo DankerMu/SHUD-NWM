@@ -76,14 +76,14 @@ function formatNumber(value: number | null | undefined) {
 function readFloodProperties(properties: unknown): FloodMapSegment | null {
   if (!properties || typeof properties !== 'object') return null
   const record = properties as Record<string, unknown>
-  const riverSegmentId = String(record.river_segment_id ?? record.segment_id ?? '')
+  const riverSegmentId = String(record.segment_id ?? record.river_segment_id ?? '')
   if (!riverSegmentId) return null
 
   const warningLevel = isAlertLevel(record.warning_level) ? record.warning_level : null
   return {
     riverSegmentId,
     segmentName: typeof record.segment_name === 'string' ? record.segment_name : null,
-    qValue: numberOrNull(record.q_value),
+    qValue: numberOrNull(record.value ?? record.q_value),
     returnPeriod: numberOrNull(record.return_period),
     warningLevel,
   }

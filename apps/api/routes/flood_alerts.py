@@ -6,9 +6,10 @@ from collections.abc import Generator
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
@@ -379,25 +380,46 @@ def flood_alert_timeline(
 
 
 @router.get(
-    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    "/api/v1/tiles/flood-return-period",
     response_model=TileFeatureCollection,
 )
-def flood_return_period_tile(
-    run_id: str,
-    duration: str,
-    valid_time: datetime,
-    z: int,
-    x: int,
-    y: int,
+def flood_return_period_map(
+    run_id: str = Query(...),
+    duration: str = Query(default="1h"),
+    valid_time: datetime = Query(...),
+    bbox: str | None = Query(default=None, description="Optional minLon,minLat,maxLon,maxLat filter."),
+    return_period: float | None = Query(default=None, ge=0),
     session: Session = Depends(get_flood_alert_session),
 ) -> JSONResponse:
-    del z, x, y
+    """Return flood return-period map data as GeoJSON.
+
+    GeoJSON is the selected release format for this endpoint. The previous
+    `.pbf` z/x/y route did not perform vector-tile clipping or protobuf
+    encoding, so this route avoids misleading tile semantics until a true MVT
+    implementation with PostGIS-specific encoding is added.
+    """
     _require_frequency_ready(session, run_id)
     geom_sql, _centroid_sql = _geometry_select_sql(session)
+    bounds = _parse_bbox(bbox)
+    bbox_filter = ""
+    if bounds is not None:
+        bbox_filter = """
+              AND EXISTS (
+                SELECT 1
+                FROM json_each(json_extract(rs.geom, '$.coordinates')) AS point
+                WHERE json_extract(point.value, '$[0]') BETWEEN :min_lon AND :max_lon
+                  AND json_extract(point.value, '$[1]') BETWEEN :min_lat AND :max_lat
+              )
+        """
+        if session.get_bind().dialect.name != "sqlite":
+            bbox_filter = """
+              AND rs.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+            """
     rows = session.execute(
         text(
             f"""
-            SELECT r.river_segment_id, r.return_period, r.warning_level, r.q_value, {geom_sql} AS geom_json
+            SELECT r.river_segment_id, r.return_period, r.warning_level, r.q_value,
+                   r.q_unit, r.quality_flag, {geom_sql} AS geom_json
             FROM flood.return_period_result r
             LEFT JOIN core.river_segment rs
               ON rs.river_segment_id = r.river_segment_id
@@ -405,19 +427,29 @@ def flood_return_period_tile(
             WHERE r.run_id = :run_id
               AND r.duration = :duration
               AND r.valid_time = :valid_time
+              AND (:return_period IS NULL OR r.return_period >= :return_period)
+              {bbox_filter}
             ORDER BY r.river_segment_id
             """
         ),
-        {"run_id": run_id, "duration": duration, "valid_time": valid_time},
+        {
+            "run_id": run_id,
+            "duration": duration,
+            "valid_time": valid_time,
+            "return_period": return_period,
+            **(_bbox_params(bounds) if bounds is not None else {}),
+        },
     ).mappings()
     payload = TileFeatureCollection(
         features=[
             TileFeature(
                 properties={
-                    "river_segment_id": str(row["river_segment_id"]),
-                    "return_period": _optional_float(row["return_period"]),
-                    "warning_level": _optional_str(row["warning_level"]),
-                    "q_value": float(row["q_value"]),
+                    "segment_id": str(row["river_segment_id"]),
+                    "value": float(row["q_value"]),
+                    "unit": str(row["q_unit"] or "m³/s"),
+                    "quality_flag": str(row["quality_flag"]),
+                    "return_period": _optional_float(row["return_period"]) or 0.0,
+                    "warning_level": _optional_str(row["warning_level"]) or "unavailable",
                 },
                 geometry=_geojson_geometry(row.get("geom_json")),
             )
@@ -425,6 +457,23 @@ def flood_return_period_tile(
         ]
     )
     return JSONResponse(content=payload.model_dump(), media_type="application/json")
+
+
+@router.get("/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf")
+def flood_return_period_tile_legacy_redirect(
+    run_id: str,
+    duration: str,
+    valid_time: datetime,
+    z: int,
+    x: int,
+    y: int,
+) -> RedirectResponse:
+    del z, x, y
+    query_string = urlencode({"run_id": run_id, "duration": duration, "valid_time": _format_time(valid_time)})
+    return RedirectResponse(
+        url=f"/api/v1/tiles/flood-return-period?{query_string}",
+        status_code=307,
+    )
 
 
 def _require_frequency_ready(session: Session, run_id: str) -> dict[str, Any]:
@@ -673,6 +722,41 @@ def _split_csv(value: str | None) -> list[str]:
     if value is None:
         return []
     return [token.strip() for token in value.split(",") if token.strip()]
+
+
+def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
+    if value is None:
+        return None
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 4:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="bbox must contain minLon,minLat,maxLon,maxLat.",
+            details={"bbox": value},
+        )
+    try:
+        min_lon, min_lat, max_lon, max_lat = (float(part) for part in parts)
+    except ValueError as error:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="bbox values must be numeric.",
+            details={"bbox": value},
+        ) from error
+    if min_lon > max_lon or min_lat > max_lat:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="bbox minimum coordinates must not exceed maximum coordinates.",
+            details={"bbox": value},
+        )
+    return min_lon, min_lat, max_lon, max_lat
+
+
+def _bbox_params(bounds: tuple[float, float, float, float]) -> dict[str, float]:
+    min_lon, min_lat, max_lon, max_lat = bounds
+    return {"min_lon": min_lon, "min_lat": min_lat, "max_lon": max_lon, "max_lat": max_lat}
 
 
 def _optional_float(value: Any) -> float | None:
