@@ -1138,7 +1138,8 @@ export interface components {
             /** @enum {string} */
             type: "Feature";
             properties: components["schemas"]["FloodReturnPeriodFeatureProperties"];
-            geometry: (components["schemas"]["GeoJSONLineString"] | components["schemas"]["GeoJSONMultiLineString"] | components["schemas"]["GeoJSONPoint"]) | null;
+            /** @description GeoJSON geometry (LineString, MultiLineString, or Point), or null */
+            geometry: Record<string, never> | null;
         };
         FloodReturnPeriodFeatureProperties: {
             /** @description River segment identifier. */

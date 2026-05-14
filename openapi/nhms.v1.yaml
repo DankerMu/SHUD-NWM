@@ -2559,10 +2559,8 @@ components:
           $ref: "#/components/schemas/FloodReturnPeriodFeatureProperties"
         geometry:
           nullable: true
-          oneOf:
-            - $ref: "#/components/schemas/GeoJSONLineString"
-            - $ref: "#/components/schemas/GeoJSONMultiLineString"
-            - $ref: "#/components/schemas/GeoJSONPoint"
+          type: object
+          description: "GeoJSON geometry (LineString, MultiLineString, or Point), or null"
     FloodReturnPeriodFeatureProperties:
       type: object
       required: [segment_id, value, unit, quality_flag, return_period, warning_level]
