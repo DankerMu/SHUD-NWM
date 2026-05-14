@@ -131,6 +131,8 @@ class SlurmLogsResponse(BaseModel):
     logs: str
     complete: bool
     truncated: bool = False
+    metadata_complete: bool = True
+    array_task_logs: list[dict[str, Any]] | None = None
 
 
 class SlurmHealthResponse(BaseModel):

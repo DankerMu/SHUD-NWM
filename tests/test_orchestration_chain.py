@@ -16,11 +16,13 @@ class FakeCycleSlurmClient:
         self,
         *,
         fail_stage: str | None = None,
+        never_terminal_stage: str | None = None,
         array_results_by_stage: dict[str, list[str] | list[list[str]]] | None = None,
         failures_before_success_by_stage: dict[str, int] | None = None,
         error_code_by_stage: dict[str, str] | None = None,
     ) -> None:
         self.fail_stage = fail_stage
+        self.never_terminal_stage = never_terminal_stage
         self.array_results_by_stage = array_results_by_stage or {}
         self.failures_before_success_by_stage = failures_before_success_by_stage or {}
         self.error_code_by_stage = error_code_by_stage or {}
@@ -53,6 +55,8 @@ class FakeCycleSlurmClient:
         if count == 1:
             job["status"] = "running"
             job["started_at"] = _fmt(submitted_at + timedelta(minutes=1))
+        elif self.never_terminal_stage == job["stage"]:
+            job["status"] = "running"
         else:
             remaining_failures = self.failures_before_success_by_stage.get(job["stage"], 0)
             failed = self.fail_stage == job["stage"] or job["stage_attempt"] < remaining_failures
@@ -323,6 +327,38 @@ def test_failed_stage_auto_retries_before_downstream_stages(tmp_path: Path) -> N
     assert [submission["stage"] for submission in client.submissions[:3]] == ["download", "download", "convert"]
     assert [stage.status for stage in result.stages] == ["succeeded"] * 7
     assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_download"]
+
+
+def test_poll_timeout_persists_failed_job_and_is_retry_eligible(monkeypatch, tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(never_terminal_stage="download")
+    retry_service = FakeRetryService(max_retries=0)
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=1,
+        job_timeout_seconds=1,
+    )
+    monotonic_values = iter([0.0, 0.0, 2.0, 2.0])
+    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    assert result.status == "failed"
+    assert timed_out_job["status"] == "failed"
+    assert timed_out_job["error_code"] == "SLURM_JOB_TIMEOUT"
+    assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_download"]
+    assert any(
+        event["event_type"] == "timeout"
+        and event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        and event["status_to"] == "failed"
+        and event["details"]["error_code"] == "SLURM_JOB_TIMEOUT"
+        for event in repository.events
+    )
 
 
 def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -> None:
