@@ -771,8 +771,9 @@ class RealSlurmGateway(SlurmGateway):
         if not task_ids:
             return None
 
+        max_task_logs = 200
         entries: list[dict[str, Any]] = []
-        for task_id in sorted(task_ids):
+        for task_id in sorted(task_ids)[:max_task_logs]:
             stdout, stdout_truncated = self._read_first_existing_task_log(log_dirs, job_id, task_id, "out")
             stderr, stderr_truncated = self._read_first_existing_task_log(log_dirs, job_id, task_id, "err")
             entries.append(
@@ -781,6 +782,8 @@ class RealSlurmGateway(SlurmGateway):
                     "stdout": stdout,
                     "stderr": stderr,
                     "truncated": stdout_truncated or stderr_truncated,
+                    "missing_stdout": not stdout and not stdout_truncated,
+                    "missing_stderr": not stderr and not stderr_truncated,
                 }
             )
         return entries

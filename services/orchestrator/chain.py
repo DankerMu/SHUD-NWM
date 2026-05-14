@@ -1047,7 +1047,12 @@ class ForecastOrchestrator:
         )
         self._persist_gateway_logs(slurm_job_id, log_uri)
 
-        aggregation = self._aggregate_array_stage(stage, context, slurm_job_id, terminal) if stage.is_array else None
+        poll_timed_out = isinstance(terminal, dict) and terminal.get("error_code") == "SLURM_JOB_TIMEOUT"
+        aggregation = (
+            self._aggregate_array_stage(stage, context, slurm_job_id, terminal)
+            if stage.is_array and not poll_timed_out
+            else None
+        )
         result_status = aggregation.status if aggregation is not None else _status_from_gateway_job(terminal)
         if aggregation is not None:
             self._record_cycle_stage_status_override(stage, context, pipeline_job_id, terminal, aggregation, log_uri)
