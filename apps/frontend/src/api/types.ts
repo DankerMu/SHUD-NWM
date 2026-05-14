@@ -853,6 +853,24 @@ export interface components {
                 q100: number;
             };
         };
+        /** @description Returned when include_analysis=true splices analysis-period data before the forecast window into a unified segments array. */
+        SplicedForecastResponse: {
+            river_segment_id: string;
+            segments: {
+                scenario: string;
+                source: string;
+                data: {
+                    /** Format: date-time */
+                    valid_time: string;
+                    value: number;
+                }[];
+            }[];
+            /** Format: date-time */
+            issue_time: string;
+            variable: string;
+            unit: string;
+            frequency_thresholds?: Record<string, never> | null;
+        };
         SeriesSegment: {
             scenario_id: string;
             /** @example GFS */
@@ -1566,13 +1584,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description River forecast time series */
+            /** @description River forecast time series. Returns RiverSeriesResponse for forecast-only requests, or SplicedForecastResponse when include_analysis=true splices analysis data before the forecast. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RiverSeriesResponse"];
+                    "application/json": components["schemas"]["RiverSeriesResponse"] | components["schemas"]["SplicedForecastResponse"];
                 };
             };
             "4XX": components["responses"]["Error"];

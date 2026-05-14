@@ -371,11 +371,16 @@ paths:
           description: Comma-separated run types to include (e.g. forecast,hindcast).
       responses:
         "200":
-          description: River forecast time series
+          description: >
+            River forecast time series. Returns RiverSeriesResponse for
+            forecast-only requests, or SplicedForecastResponse when
+            include_analysis=true splices analysis data before the forecast.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RiverSeriesResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RiverSeriesResponse"
+                  - $ref: "#/components/schemas/SplicedForecastResponse"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1877,6 +1882,46 @@ components:
               type: number
             q100:
               type: number
+    SplicedForecastResponse:
+      type: object
+      description: >
+        Returned when include_analysis=true splices analysis-period data
+        before the forecast window into a unified segments array.
+      required: [river_segment_id, segments, issue_time, variable, unit]
+      properties:
+        river_segment_id:
+          type: string
+        segments:
+          type: array
+          items:
+            type: object
+            required: [scenario, source, data]
+            properties:
+              scenario:
+                type: string
+              source:
+                type: string
+              data:
+                type: array
+                items:
+                  type: object
+                  required: [valid_time, value]
+                  properties:
+                    valid_time:
+                      type: string
+                      format: date-time
+                    value:
+                      type: number
+        issue_time:
+          type: string
+          format: date-time
+        variable:
+          type: string
+        unit:
+          type: string
+        frequency_thresholds:
+          type: object
+          nullable: true
     SeriesSegment:
       type: object
       required: [scenario_id, segment_role, points]
