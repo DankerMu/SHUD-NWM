@@ -435,6 +435,8 @@ class RealSlurmGateway(SlurmGateway):
             resolved_job_type = job_type.resolved_job_type()
         elif isinstance(job_type, ArraySubmitJobRequest):
             base_manifest.update(job_type.manifest)
+            if job_type.model_extra:
+                base_manifest.update(job_type.model_extra)
             base_manifest["job_type"] = job_type.job_type
             base_manifest["cycle_id"] = job_type.cycle_id
             if job_type.stage_name is not None:

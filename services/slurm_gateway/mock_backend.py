@@ -75,6 +75,8 @@ class MockSlurmGateway(SlurmGateway):
             manifest = request.normalized_manifest()
         elif isinstance(request, ArraySubmitJobRequest):
             manifest = dict(request.manifest)
+            if request.model_extra:
+                manifest.update(request.model_extra)
             manifest["job_type"] = request.job_type
             manifest["cycle_id"] = request.cycle_id
             if request.stage_name is not None:

@@ -101,6 +101,8 @@ class SubmitJobRequest(BaseModel):
 
 
 class ArraySubmitJobRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     job_type: str
     cycle_id: str
     stage_name: str | None = None
