@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Annotated
 from uuid import uuid4
 
@@ -5,7 +7,13 @@ from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 
 from services.slurm_gateway.gateway import SlurmGatewayError, create_gateway
-from services.slurm_gateway.models import ErrorBody, ErrorResponse, ResetRequest, SubmitJobRequest
+from services.slurm_gateway.models import (
+    ArraySubmitJobRequest,
+    ErrorBody,
+    ErrorResponse,
+    ResetRequest,
+    SubmitJobRequest,
+)
 
 router = APIRouter(prefix="/api/v1/slurm", tags=["slurm"])
 slurm_gateway = create_gateway()
@@ -33,7 +41,7 @@ async def submit_job(request: SubmitJobRequest):
 
 
 @router.post("/job-arrays", status_code=201)
-async def submit_job_array(request: Annotated[dict, Body()]):
+async def submit_job_array(request: Annotated[ArraySubmitJobRequest, Body()]):
     try:
         submit_array = getattr(slurm_gateway, "submit_job_array")
         return submit_array(request)

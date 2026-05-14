@@ -100,6 +100,16 @@ class SubmitJobRequest(BaseModel):
         return payload
 
 
+class ArraySubmitJobRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    job_type: str
+    cycle_id: str
+    stage_name: str | None = None
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
+    manifest: dict[str, Any] = Field(default_factory=dict)
+
+
 class SlurmJobRecord(BaseModel):
     job_id: str
     run_id: str

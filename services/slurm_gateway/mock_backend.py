@@ -8,6 +8,7 @@ from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
 from services.slurm_gateway.models import (
     TERMINAL_STATUSES,
+    ArraySubmitJobRequest,
     ResetRequest,
     ResetResponse,
     SlurmHealthResponse,
@@ -69,9 +70,18 @@ class MockSlurmGateway(SlurmGateway):
             self._refresh_job_locked(job, now)
             return job.model_copy(deep=True)
 
-    def submit_job_array(self, request: dict | SubmitJobRequest) -> SlurmJobRecord:
+    def submit_job_array(self, request: ArraySubmitJobRequest | dict | SubmitJobRequest) -> SlurmJobRecord:
         if isinstance(request, SubmitJobRequest):
             manifest = request.normalized_manifest()
+        elif isinstance(request, ArraySubmitJobRequest):
+            manifest = dict(request.manifest)
+            if request.model_extra:
+                manifest.update(request.model_extra)
+            manifest["job_type"] = request.job_type
+            manifest["cycle_id"] = request.cycle_id
+            if request.stage_name is not None:
+                manifest["stage_name"] = request.stage_name
+            manifest["tasks"] = request.tasks
         else:
             manifest = dict(request.get("manifest") or request)
             if "job_type" in request:
