@@ -13,6 +13,7 @@ from services.slurm_gateway.gateway import (
     SlurmGatewayError,
     SlurmParseError,
     SlurmTimeoutError,
+    TemplateNotFoundError,
     TemplateSecurityError,
     create_gateway,
 )
@@ -235,6 +236,46 @@ def test_manifest_injection_rejected(monkeypatch, tmp_path):
         gateway.submit_job(
             SubmitJobRequest(run_id="run_001;rm", model_id="model_001", job_type="run_shud_forecast_array")
         )
+
+
+def test_unsupported_legacy_job_type_rejected_before_submission(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for unsupported job_type")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(TemplateNotFoundError):
+        gateway.submit_job(SubmitJobRequest(run_id="run_001", model_id="model_001", job_type="legacy_unsupported"))
+
+
+def test_hindcast_single_job_type_resolves_configured_template(monkeypatch, tmp_path):
+    template_dir = _write_template(tmp_path, name="hindcast.sbatch")
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir=str(template_dir),
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            job_type_templates={"hindcast": "hindcast.sbatch"},
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job(SubmitJobRequest(run_id="run_001", model_id="model_001", job_type="hindcast"))
+
+    assert record.job_id == "12345"
+    assert record.manifest["job_type"] == "hindcast"
+    assert calls[0][0] == "sbatch"
 
 
 def test_sandboxed_environment_restricts_template_access(tmp_path):

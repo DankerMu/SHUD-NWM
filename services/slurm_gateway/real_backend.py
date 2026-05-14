@@ -31,6 +31,7 @@ from services.slurm_gateway.gateway import (
 )
 from services.slurm_gateway.models import (
     TERMINAL_STATUSES,
+    ArraySubmitJobRequest,
     ResetRequest,
     ResetResponse,
     SlurmHealthResponse,
@@ -109,6 +110,8 @@ class RealSlurmGateway(SlurmGateway):
         run_id = request.resolved_run_id()
         model_id = request.resolved_model_id()
         job_type = request.resolved_job_type()
+        if job_type and job_type not in self.settings.job_type_templates:
+            raise TemplateNotFoundError(job_type)
         if run_id:
             manifest["run_id"] = run_id
         if model_id:
@@ -135,7 +138,7 @@ class RealSlurmGateway(SlurmGateway):
 
     def submit_job_array(
         self,
-        job_type: str | SubmitJobRequest | Mapping[str, Any],
+        job_type: str | SubmitJobRequest | ArraySubmitJobRequest | Mapping[str, Any],
         cycle_id: str | None = None,
         stage_name: str | None = None,
         tasks: Sequence[Mapping[str, Any]] | None = None,
@@ -419,7 +422,7 @@ class RealSlurmGateway(SlurmGateway):
 
     def _normalize_array_request(
         self,
-        job_type: str | SubmitJobRequest | Mapping[str, Any],
+        job_type: str | SubmitJobRequest | ArraySubmitJobRequest | Mapping[str, Any],
         cycle_id: str | None,
         stage_name: str | None,
         tasks: Sequence[Mapping[str, Any]] | None,
@@ -430,8 +433,30 @@ class RealSlurmGateway(SlurmGateway):
         if isinstance(job_type, SubmitJobRequest):
             base_manifest.update(job_type.normalized_manifest())
             resolved_job_type = job_type.resolved_job_type()
+        elif isinstance(job_type, ArraySubmitJobRequest):
+            base_manifest.update(job_type.manifest)
+            base_manifest["job_type"] = job_type.job_type
+            base_manifest["cycle_id"] = job_type.cycle_id
+            if job_type.stage_name is not None:
+                base_manifest["stage_name"] = job_type.stage_name
+            base_manifest["tasks"] = [dict(item) for item in job_type.tasks]
+            resolved_job_type = job_type.job_type
         elif isinstance(job_type, Mapping):
-            base_manifest.update(job_type)
+            request_mapping = dict(job_type)
+            nested_manifest = request_mapping.get("manifest")
+            if nested_manifest is not None:
+                if not isinstance(nested_manifest, Mapping):
+                    raise ManifestValidationError(
+                        "Array job request manifest must be a mapping.",
+                        {"field": "manifest", "type": type(nested_manifest).__name__},
+                    )
+                base_manifest.update(nested_manifest)
+            else:
+                base_manifest.update(request_mapping)
+
+            for key in ("job_type", "cycle_id", "stage_name", "stage", "tasks", "basins"):
+                if key in request_mapping and request_mapping[key] is not None:
+                    base_manifest[key] = request_mapping[key]
             resolved_job_type = str(base_manifest.get("job_type") or "")
         else:
             resolved_job_type = job_type

@@ -5,6 +5,7 @@ from typing import Any
 
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.models import (
+    ArraySubmitJobRequest,
     ResetRequest,
     ResetResponse,
     SlurmHealthResponse,
@@ -85,6 +86,10 @@ ValidationError = SlurmValidationError
 class SlurmGateway(ABC):
     @abstractmethod
     def submit_job(self, request: SubmitJobRequest) -> SlurmJobRecord:
+        raise NotImplementedError
+
+    @abstractmethod
+    def submit_job_array(self, request: ArraySubmitJobRequest | SubmitJobRequest | dict[str, Any]) -> SlurmJobRecord:
         raise NotImplementedError
 
     @abstractmethod
