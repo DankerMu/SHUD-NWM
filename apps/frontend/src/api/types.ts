@@ -1476,7 +1476,13 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    active_flag: boolean;
+                    /** @description Canonical active flag field. */
+                    active: boolean;
+                    /**
+                     * @deprecated
+                     * @description Legacy compatibility alias accepted by the backend; use active for new clients.
+                     */
+                    active_flag?: boolean;
                 };
             };
         };
@@ -1531,6 +1537,10 @@ export interface operations {
                 variables?: string;
                 /** @description Comma-separated scenario identifiers. */
                 scenarios?: string;
+                /** @description Include analysis period data before the forecast window. */
+                include_analysis?: boolean;
+                /** @description Comma-separated run types to include (e.g. forecast,hindcast). */
+                run_types?: string;
             };
             header?: never;
             path: {

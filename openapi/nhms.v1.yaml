@@ -29,7 +29,7 @@ info:
     - Pagination: limit/offset query parameters
     - Rate limiting: placeholder (not enforced in M0)
 servers:
-  - url: /api/v1
+  - url: /
 security:
   - BearerAuth: []
 tags:
@@ -288,10 +288,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [active_flag]
+              required: [active]
               properties:
+                active:
+                  type: boolean
+                  description: Canonical active flag field.
                 active_flag:
                   type: boolean
+                  deprecated: true
+                  description: Legacy compatibility alias accepted by the backend; use active for new clients.
       responses:
         "200":
           description: Updated model instance
@@ -355,6 +360,19 @@ paths:
           schema:
             type: string
           description: Comma-separated scenario identifiers.
+        - name: include_analysis
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include analysis period data before the forecast window.
+        - name: run_types
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated run types to include (e.g. forecast,hindcast).
       responses:
         "200":
           description: River forecast time series

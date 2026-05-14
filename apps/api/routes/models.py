@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from packages.common.model_registry import (
     DuplicateResourceError,
@@ -106,7 +106,10 @@ class ModelCreatePayload(BaseModel):
 class ActiveFlagPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    active: bool
+    active: bool = Field(
+        validation_alias=AliasChoices("active", "active_flag"),
+        description="Canonical active flag. The legacy active_flag key is accepted for compatibility.",
+    )
 
 
 class CrosswalkEntryPayload(BaseModel):
