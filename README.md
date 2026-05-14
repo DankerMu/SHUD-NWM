@@ -72,7 +72,7 @@ pnpm install
 pnpm dev
 ```
 
-Use `pnpm build` for the production bundle, `pnpm test` for unit tests, and `pnpm test:e2e` for Playwright E2E tests. The Vite dev server proxies `/api` and `/health` to `http://localhost:8000`; production builds are served by FastAPI from `apps/frontend/dist/`. The default frontend API base is documented in `apps/frontend/.env.example` as `VITE_API_BASE_URL=/api/v1`.
+Use `pnpm build` for the production bundle, `pnpm test` for unit tests, and `pnpm test:e2e` for Playwright E2E tests. The Vite dev server proxies `/api` and `/health` to `http://localhost:8000`; production builds are served by FastAPI from `apps/frontend/dist/`. The default frontend API base is empty (same-origin); set `VITE_API_BASE_URL` in `.env` only for cross-origin deployments.
 
 ## Runtime Source Layout
 
