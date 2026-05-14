@@ -739,6 +739,12 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        MetStationPage: {
+            items: components["schemas"]["MetStation"][];
+            total_count: number;
+            limit: number;
+            offset: number;
+        };
         DataSource: {
             source_id: string;
             source_name: string;
@@ -751,6 +757,12 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        DataSourcePage: {
+            items: components["schemas"]["DataSource"][];
+            total_count: number;
+            limit: number;
+            offset: number;
+        };
         ForecastCycle: {
             cycle_id: string;
             source_id: string;
@@ -761,6 +773,12 @@ export interface components {
             status: string;
             /** Format: date-time */
             created_at: string;
+        };
+        ForecastCyclePage: {
+            items: components["schemas"]["ForecastCycle"][];
+            total_count: number;
+            limit: number;
+            offset: number;
         };
         ForcingVersion: {
             forcing_version_id: string;
@@ -1318,7 +1336,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["DataSource"][];
+                        data: components["schemas"]["DataSourcePage"];
                     };
                 };
             };
@@ -1332,6 +1350,8 @@ export interface operations {
                 from?: components["parameters"]["FromTime"];
                 to?: components["parameters"]["ToTime"];
                 status?: components["parameters"]["CycleStatus"];
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
             };
             header?: never;
             path: {
@@ -1348,7 +1368,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ForecastCycle"][];
+                        data: components["schemas"]["ForecastCyclePage"];
                     };
                 };
             };
@@ -1476,13 +1496,8 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    /** @description Canonical active flag field. */
+                    /** @description Set model active flag. The legacy key name active_flag is also accepted by the backend for backward compatibility. */
                     active: boolean;
-                    /**
-                     * @deprecated
-                     * @description Legacy compatibility alias accepted by the backend; use active for new clients.
-                     */
-                    active_flag?: boolean;
                 };
             };
         };
@@ -1557,9 +1572,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["RiverSeriesResponse"];
-                    };
+                    "application/json": components["schemas"]["RiverSeriesResponse"];
                 };
             };
             "4XX": components["responses"]["Error"];
@@ -1587,7 +1600,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["MetStation"][];
+                        data: components["schemas"]["MetStationPage"];
                     };
                 };
             };
