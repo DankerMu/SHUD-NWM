@@ -13,9 +13,11 @@ from packages.common.manifest_index import ManifestValidationError, load_manifes
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
 from workers.flood_frequency.hindcast import (
+    HINDCAST_FORCING_PACKAGE_UNAVAILABLE,
     HindcastError,
     hindcast_status,
     hindcast_year,
+    mark_hindcast_runs_failed,
     submit_hindcast,
     submit_hindcast_slurm,
 )
@@ -34,20 +36,25 @@ def _hindcast_submit(model_id: str, source_id: str, start_time: str, end_time: s
         result = submit_hindcast(model_id, source_id, start_time, end_time, purpose, session)
         years = _years_from_run_ids(result.run_ids)
         config = HindcastConfig.from_env()
-        slurm = submit_hindcast_slurm(
-            model_id,
-            source_id,
-            years,
-            HindcastConfig(
-                workspace_root=config.workspace_root,
-                object_store_root=config.object_store_root,
-                object_store_prefix=config.object_store_prefix,
-                slurm_gateway_url=config.slurm_gateway_url,
-                slurm_client=config.slurm_client,
-                db_session=session,
-                era5_required_variables=config.era5_required_variables,
-            ),
-        )
+        try:
+            slurm = submit_hindcast_slurm(
+                model_id,
+                source_id,
+                years,
+                HindcastConfig(
+                    workspace_root=config.workspace_root,
+                    object_store_root=config.object_store_root,
+                    object_store_prefix=config.object_store_prefix,
+                    slurm_gateway_url=config.slurm_gateway_url,
+                    slurm_client=config.slurm_client,
+                    db_session=session,
+                    era5_required_variables=config.era5_required_variables,
+                ),
+            )
+        except HindcastError as error:
+            if error.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE:
+                mark_hindcast_runs_failed(session, result.run_ids, error.error_code, error.message)
+            raise
         return {
             "total_runs": result.total_runs,
             "run_ids": result.run_ids,

@@ -15,8 +15,10 @@ from apps.api.errors import ApiError
 from apps.api.routes.pipeline import _ok
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.hindcast import (
+    HINDCAST_FORCING_PACKAGE_UNAVAILABLE,
     HindcastError,
     calendar_years,
+    mark_hindcast_runs_failed,
     submit_hindcast,
     submit_hindcast_slurm,
 )
@@ -90,17 +92,22 @@ def submit_hindcast_api(
             slurm_client=config.slurm_client,
             db_session=session,
         )
-        slurm = (
-            submit_hindcast_slurm(
-                body.model_id,
-                body.source_id,
-                years,
-                slurm_config,
-                basin_version_id=basin_version_id,
+        try:
+            slurm = (
+                submit_hindcast_slurm(
+                    body.model_id,
+                    body.source_id,
+                    years,
+                    slurm_config,
+                    basin_version_id=basin_version_id,
+                )
+                if years
+                else None
             )
-            if years
-            else None
-        )
+        except HindcastError as error:
+            if error.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE:
+                mark_hindcast_runs_failed(session, result.run_ids, error.error_code, error.message)
+            raise
     except HindcastError as error:
         raise _api_error(error) from error
 

@@ -153,18 +153,36 @@ M3_STAGES: tuple[StageDefinition, ...] = (
 STAGES: tuple[StageDefinition, ...] = M3_STAGES
 
 ANALYSIS_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition("era5_download", "download", "download_era5.sbatch", "raw_complete", "failed_download"),
+    StageDefinition(
+        "era5_download",
+        "analysis_download_source_cycle",
+        "analysis_download_source_cycle.sbatch",
+        "raw_complete",
+        "failed_download",
+    ),
     StageDefinition(
         "canonical_convert",
-        "canonical",
-        "convert_canonical_era5.sbatch",
+        "analysis_convert_canonical",
+        "analysis_convert_canonical.sbatch",
         "canonical_ready",
         "failed_convert",
     ),
-    StageDefinition("forcing_produce", "forcing", "produce_forcing_analysis.sbatch", "forcing_ready", "failed_forcing"),
-    StageDefinition("analysis_run", "analysis", "run_shud_analysis.sbatch", "forecast_running", "failed_run"),
-    StageDefinition("parse_output", "parse", "parse_analysis_output.sbatch", "complete", "failed_parse"),
-    StageDefinition("state_save_qc", "state", "save_state_snapshot.sbatch", "complete", "failed_publish"),
+    StageDefinition(
+        "forcing_produce",
+        "analysis_produce_forcing",
+        "analysis_produce_forcing.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+    ),
+    StageDefinition("analysis_run", "run_shud_analysis", "run_shud_analysis.sbatch", "forecast_running", "failed_run"),
+    StageDefinition(
+        "parse_output",
+        "parse_analysis_output",
+        "parse_analysis_output.sbatch",
+        "complete",
+        "failed_parse",
+    ),
+    StageDefinition("state_save_qc", "save_state_snapshot", "save_state_snapshot.sbatch", "complete", "failed_publish"),
 )
 
 
@@ -195,7 +213,7 @@ class OrchestratorConfig:
             object.__setattr__(self, "scenario_id", scenario_for_source(self.source_id))
         if self.templates_dir is None:
             repo_root = Path(__file__).resolve().parents[2]
-            object.__setattr__(self, "templates_dir", repo_root / "workers" / "sbatch_templates")
+            object.__setattr__(self, "templates_dir", repo_root / "infra" / "sbatch")
         else:
             object.__setattr__(self, "templates_dir", Path(self.templates_dir).expanduser().resolve())
 
@@ -1955,20 +1973,12 @@ class ForecastOrchestrator:
     ) -> StageRunResult:
         self._before_stage_submit(stage, context)
 
-        rendered_script = self.render_stage_template(stage, context)
+        manifest = self._build_stage_submission_manifest(stage, context)
         payload = {
             "run_id": context.run_id,
             "model_id": context.model_id,
-            "script": rendered_script,
-            "manifest": {
-                "run_id": context.run_id,
-                "model_id": context.model_id,
-                "stage": stage.stage,
-                "job_type": stage.job_type,
-                "source_id": context.source_id,
-                "cycle_time": _format_time(context.cycle_time),
-                "script": rendered_script,
-            },
+            "job_type": stage.job_type,
+            "manifest": manifest,
         }
         submitted = self.slurm_client.submit_job(payload)
         slurm_job_id = str(submitted["job_id"])
@@ -2031,6 +2041,64 @@ class ForecastOrchestrator:
             error_code=terminal.get("error_code"),
             error_message=terminal.get("error_message"),
         )
+
+    def _build_stage_submission_manifest(
+        self,
+        stage: StageDefinition,
+        context: ForecastRunContext | AnalysisRunContext,
+    ) -> dict[str, Any]:
+        manifest = {
+            "run_id": context.run_id,
+            "model_id": context.model_id,
+            "stage": stage.stage,
+            "stage_name": stage.stage,
+            "job_type": stage.job_type,
+            "source_id": context.source_id,
+            "cycle_id": context.cycle_id,
+            "cycle_time": _format_time(context.cycle_time),
+            "start_time": _format_time(context.start_time),
+            "end_time": _format_time(context.end_time),
+            "basin_id": context.basin_id,
+            "basin_version_id": context.basin_version_id,
+            "river_network_version_id": context.river_network_version_id,
+            "segment_count": context.segment_count,
+            "model_package_uri": context.model_package_uri,
+            "forcing_version_id": context.forcing_version_id,
+            "forcing_package_uri": context.forcing_package_uri,
+            "run_manifest_uri": context.run_manifest_uri,
+            "output_uri": context.output_uri,
+            "log_uri": context.log_uri,
+            "workspace_dir": str(Path(self.config.workspace_root)),
+            "object_store_root": str(Path(self.config.object_store_root)),
+            "object_store_prefix": self.config.object_store_prefix,
+        }
+        if isinstance(context, AnalysisRunContext):
+            self._validate_analysis_template_context(context)
+            manifest.update(
+                {
+                    "analysis_date": context.start_time.strftime("%Y-%m-%d"),
+                    "analysis_start_time": _format_time(context.start_time),
+                    "analysis_end_time": _format_time(context.end_time),
+                    "analysis_date_range": f"{_format_time(context.start_time)}/{_format_time(context.end_time)}",
+                    "era5_area": self.config.era5_area,
+                }
+            )
+        return manifest
+
+    def _validate_analysis_template_context(self, context: AnalysisRunContext) -> None:
+        for label, val in [
+            ("source_id", context.source_id),
+            ("model_id", context.model_id),
+            ("run_id", context.run_id),
+            ("basin_version_id", context.basin_version_id),
+            ("river_network_version_id", context.river_network_version_id),
+        ]:
+            if not _SAFE_ID_RE.match(val):
+                raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"{label} contains unsafe characters: {val!r}")
+        if context.basin_id and not _SAFE_ID_RE.match(context.basin_id):
+            raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"basin_id unsafe: {context.basin_id!r}")
+        if not _SAFE_AREA_RE.match(self.config.era5_area):
+            raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"era5_area unsafe: {self.config.era5_area!r}")
 
     def _poll_until_terminal(
         self,
@@ -2269,6 +2337,8 @@ class ForecastOrchestrator:
             raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"basin_id unsafe: {context.basin_id!r}")
         if hasattr(self.config, "era5_area") and not _SAFE_AREA_RE.match(self.config.era5_area):
             raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"era5_area unsafe: {self.config.era5_area!r}")
+        if isinstance(context, AnalysisRunContext):
+            self._validate_analysis_template_context(context)
         run_manifest_path = self._workspace_path("runs", context.run_id, "input", "manifest.json")
         template_context = {
             "source_id": context.source_id,

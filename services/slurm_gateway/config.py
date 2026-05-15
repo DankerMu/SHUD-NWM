@@ -20,6 +20,12 @@ DEFAULT_JOB_TYPE_TEMPLATES = {
     "parse_output_array": "parse_output_array.sbatch",
     "compute_frequency_array": "compute_frequency_array.sbatch",
     "publish_tiles": "publish_tiles.sbatch",
+    "analysis_download_source_cycle": "analysis_download_source_cycle.sbatch",
+    "analysis_convert_canonical": "analysis_convert_canonical.sbatch",
+    "analysis_produce_forcing": "analysis_produce_forcing.sbatch",
+    "run_shud_analysis": "run_shud_analysis.sbatch",
+    "parse_analysis_output": "parse_analysis_output.sbatch",
+    "save_state_snapshot": "save_state_snapshot.sbatch",
     "hindcast": "hindcast.sbatch",
 }
 
