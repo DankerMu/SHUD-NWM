@@ -237,6 +237,7 @@ def retry_run(
     run_id: str,
     request: Request,
     service: RetryService = Depends(get_retry_service),
+    gateway: SlurmGateway = Depends(get_slurm_gateway),
 ) -> dict[str, Any]:
     _require_operator_role(request)
     if not _SAFE_RUN_ID_RE.fullmatch(run_id):
@@ -247,7 +248,8 @@ def retry_run(
         )
 
     try:
-        job = service.attempt_manual_retry(run_id)
+        retry_gateway = gateway if callable(getattr(gateway, "submit_job", None)) else None
+        job = service.attempt_manual_retry(run_id, gateway=retry_gateway)
     except RetryConflictError as error:
         raise _api_error(error) from error
     except RetryNotFoundError as error:

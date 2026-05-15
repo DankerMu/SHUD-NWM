@@ -119,6 +119,21 @@ class FakeCycleSlurmClient:
         return dict(job)
 
 
+class PublishFailureSlurmClient(FakeCycleSlurmClient):
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        job = self.jobs[job_id]
+        if job["stage"] == "publish":
+            self.poll_counts[job_id] += 1
+            submitted_at = datetime.fromisoformat(job["submitted_at"].replace("Z", "+00:00"))
+            job["status"] = "failed"
+            job["finished_at"] = _fmt(submitted_at + timedelta(minutes=1))
+            job["exit_code"] = 1
+            job["error_code"] = "publish_tiles_not_implemented"
+            job["error_message"] = "publish-tiles is not yet implemented"
+            return dict(job)
+        return super().get_job_status(job_id)
+
+
 class FakeCycleRepository:
     def __init__(self, *, active: bool = False) -> None:
         self.active = active
@@ -619,6 +634,20 @@ def test_partial_success_reindexes_downstream_and_keeps_partial_status(tmp_path:
         "excluded_basins": ["basin_1"],
     }
     assert repository.cycle_statuses[-1] == "parsed_partial"
+
+
+def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = PublishFailureSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert result.stages[-1].stage == "publish"
+    assert result.stages[-1].status == "failed"
+    assert result.stages[-1].error_code == "publish_tiles_not_implemented"
+    assert repository.cycle_statuses[-1] == "failed_publish"
 
 
 def _orchestrator(

@@ -33,7 +33,7 @@ def _trigger_analysis(*, model_id: str, date_range: str) -> dict[str, object]:
 
 def _publish_tiles(*, cycle_id: str) -> dict[str, object]:
     del cycle_id
-    return {"status": "skipped", "reason": "publish_tiles_not_implemented"}
+    return {"status": "failed_publish", "reason": "publish_tiles_not_implemented"}
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:
@@ -58,6 +58,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     def publish_tiles(cycle_id: str) -> None:
         click.echo("publish-tiles is not yet implemented", err=True)
         click.echo(json.dumps(_publish_tiles(cycle_id=cycle_id), sort_keys=True))
+        raise SystemExit(1)
 
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
@@ -83,7 +84,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     if args.command == "publish-tiles":
         print("publish-tiles is not yet implemented", file=sys.stderr)
         print(json.dumps(_publish_tiles(cycle_id=args.cycle_id), sort_keys=True))
-        return 0
+        return 1
     parser.error(f"Unsupported command: {args.command}")
     return 2
 

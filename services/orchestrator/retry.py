@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
 from uuid import uuid4
 
 from sqlalchemy import inspect, select, text
@@ -10,6 +11,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
+from services.slurm_gateway.gateway import SlurmGatewayError
+from services.slurm_gateway.models import SubmitJobRequest
 
 TRANSIENT_ERROR_CODES: set[str] = {
     "SLURM_TIMEOUT",
@@ -91,6 +94,11 @@ class RetryNotFoundError(RetryError):
         )
 
 
+class RetrySubmitter(Protocol):
+    def submit_job(self, request: SubmitJobRequest) -> Any:
+        raise NotImplementedError
+
+
 class RetryService:
     def __init__(self, store: PipelineStore, config: RetryConfig) -> None:
         self.store = store
@@ -170,7 +178,7 @@ class RetryService:
         )
         return job
 
-    def attempt_manual_retry(self, run_id: str) -> PipelineJob:
+    def attempt_manual_retry(self, run_id: str, gateway: RetrySubmitter | None = None) -> PipelineJob:
         has_hydro_run_table = _has_hydro_run_table(self.store)
         with self.store.session.begin_nested():
             lock_statement = (
@@ -223,6 +231,8 @@ class RetryService:
                 },
                 commit=False,
             )
+            if gateway is not None:
+                self._submit_retry_job(retry_job, gateway)
             if failed_job.run_id and has_hydro_run_table:
                 self.store.session.execute(
                     text(
@@ -241,9 +251,145 @@ class RetryService:
         self.store.session.refresh(retry_job)
         return retry_job
 
+    def expire_stale_retries(self, max_age_seconds: int) -> list[PipelineJob]:
+        cutoff = datetime.now(UTC) - timedelta(seconds=max_age_seconds)
+        statement = (
+            select(PipelineJob)
+            .where(PipelineJob.status == "pending")
+            .where(PipelineJob.created_at < cutoff)
+            .order_by(PipelineJob.created_at.asc())
+        )
+        expired = list(self.store.session.scalars(statement))
+        for job in expired:
+            status_from = job.status
+            job.status = "failed"
+            job.error_code = "RETRY_STALE_PENDING"
+            job.error_message = f"Pending retry exceeded max age of {max_age_seconds} seconds."
+            job.finished_at = datetime.now(UTC)
+            job.updated_at = job.finished_at
+            self.store.session.add(job)
+            self.store.insert_event(
+                entity_type="pipeline_job",
+                entity_id=job.job_id,
+                event_type="retry_expired",
+                status_from=status_from,
+                status_to="failed",
+                message="Pending retry expired before Slurm submission.",
+                details={
+                    "run_id": job.run_id,
+                    "max_age_seconds": max_age_seconds,
+                    "error_code": "RETRY_STALE_PENDING",
+                },
+                commit=False,
+            )
+        self.store.session.commit()
+        for job in expired:
+            self.store.session.refresh(job)
+        return expired
+
+    def _submit_retry_job(self, retry_job: PipelineJob, gateway: RetrySubmitter) -> None:
+        try:
+            submitted = gateway.submit_job(
+                SubmitJobRequest(
+                    run_id=retry_job.run_id,
+                    model_id=retry_job.model_id,
+                    job_type=retry_job.job_type,
+                    manifest={
+                        "run_id": retry_job.run_id,
+                        "model_id": retry_job.model_id,
+                        "cycle_id": retry_job.cycle_id,
+                        "job_type": retry_job.job_type,
+                        "stage": retry_job.stage,
+                        "pipeline_job_id": retry_job.job_id,
+                        "retry_count": retry_job.retry_count,
+                    },
+                )
+            )
+        except Exception as error:
+            retry_job.status = "submission_failed"
+            retry_job.error_code = _retry_submission_error_code(error)
+            retry_job.error_message = str(getattr(error, "message", None) or error)
+            retry_job.finished_at = datetime.now(UTC)
+            retry_job.updated_at = retry_job.finished_at
+            self.store.session.add(retry_job)
+            self.store.insert_event(
+                entity_type="pipeline_job",
+                entity_id=retry_job.job_id,
+                event_type="submission",
+                status_from="pending",
+                status_to="submission_failed",
+                message=f"Manual retry submission failed: {retry_job.error_message}",
+                details={
+                    "trigger": "manual",
+                    "error_code": retry_job.error_code,
+                    "error_message": retry_job.error_message,
+                },
+                commit=False,
+            )
+            return
+
+        submitted_payload = _coerce_gateway_payload(submitted)
+        slurm_job_id = submitted_payload.get("job_id") or submitted_payload.get("slurm_job_id")
+        retry_job.slurm_job_id = str(slurm_job_id) if slurm_job_id is not None else None
+        retry_job.submitted_at = _parse_gateway_time(submitted_payload.get("submitted_at")) or datetime.now(UTC)
+        retry_job.started_at = _parse_gateway_time(submitted_payload.get("started_at"))
+        retry_job.finished_at = _parse_gateway_time(submitted_payload.get("finished_at"))
+        retry_job.status = "submitted"
+        retry_job.error_code = None
+        retry_job.error_message = None
+        retry_job.updated_at = datetime.now(UTC)
+        self.store.session.add(retry_job)
+        self.store.insert_event(
+            entity_type="pipeline_job",
+            entity_id=retry_job.job_id,
+            event_type="submission",
+            status_from="pending",
+            status_to="submitted",
+            message=f"Manual retry submitted as Slurm job {retry_job.slurm_job_id}.",
+            details={
+                "trigger": "manual",
+                "slurm_job_id": retry_job.slurm_job_id,
+                "gateway_status": _gateway_status(submitted_payload),
+            },
+            commit=False,
+        )
+
 
 def _has_hydro_run_table(store: PipelineStore) -> bool:
     try:
         return inspect(store.session.get_bind()).has_table("hydro_run", schema="hydro")
     except SQLAlchemyError:
         return False
+
+
+def _coerce_gateway_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return dict(model_dump(mode="json"))
+    if hasattr(value, "__dict__"):
+        return dict(value.__dict__)
+    raise TypeError(f"Expected mapping-like Slurm submission payload, got {type(value).__name__}")
+
+
+def _parse_gateway_time(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    return None
+
+
+def _gateway_status(payload: dict[str, Any]) -> str | None:
+    status = payload.get("status")
+    value = getattr(status, "value", status)
+    return str(value) if value is not None else None
+
+
+def _retry_submission_error_code(error: Exception) -> str:
+    if isinstance(error, SlurmGatewayError):
+        return error.code
+    return "SBATCH_SUBMISSION_FAILED"
