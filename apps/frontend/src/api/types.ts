@@ -649,9 +649,6 @@ export interface components {
              * @enum {string}
              */
             status: "ok";
-            data: {
-                [key: string]: unknown;
-            };
         };
         ErrorResponse: {
             /** @example req_01J0NHMS */
@@ -1247,7 +1244,8 @@ export interface components {
         CycleTimeQuery: string;
         CycleTimeQueryRequired: string;
         FromTime: string;
-        IssueTime: string;
+        /** @description Use `latest` to resolve to the most recent available issue time, or provide an ISO 8601 datetime. */
+        IssueTime: "latest" | string;
         JobId: string;
         Limit: number;
         ModelId: string;
@@ -1565,6 +1563,7 @@ export interface operations {
     getRiverSegmentForecastSeries: {
         parameters: {
             query?: {
+                /** @description Use `latest` to resolve to the most recent available issue time, or provide an ISO 8601 datetime. */
                 issue_time?: components["parameters"]["IssueTime"];
                 /** @description Comma-separated hydrological variables. */
                 variables?: string;

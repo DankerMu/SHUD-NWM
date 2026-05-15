@@ -1273,9 +1273,13 @@ components:
       name: issue_time
       in: query
       required: false
+      description: Use `latest` to resolve to the most recent available issue time, or provide an ISO 8601 datetime.
       schema:
-        type: string
-        format: date-time
+        oneOf:
+          - type: string
+            enum: [latest]
+          - type: string
+            format: date-time
     JobId:
       name: job_id
       in: path
@@ -1437,7 +1441,7 @@ components:
     SuccessEnvelope:
       type: object
       description: Standard success envelope returned by API endpoints using the `_ok()` response pattern.
-      required: [request_id, status, data]
+      required: [request_id, status]
       properties:
         request_id:
           type: string
@@ -1446,9 +1450,6 @@ components:
           type: string
           enum: [ok]
           example: ok
-        data:
-          type: object
-          additionalProperties: true
     ErrorResponse:
       type: object
       required: [request_id, status, error]

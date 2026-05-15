@@ -17,6 +17,7 @@ from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import PsycopgForecastStore
 
 RUN_ID = "fcst_gfs_2026050300_all"
+PUBLISHED_RUN_ID = "fcst_gfs_2026050300_published"
 VALID_TIME_1 = datetime(2026, 5, 3, 6, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 12, tzinfo=UTC)
 
@@ -65,6 +66,58 @@ def test_summary_errors_and_zero_usable_curves() -> None:
         assert data["usable_curves"] == 0
         assert data["quality_note"] == "No usable frequency curves available"
         assert all(level["count"] == 0 for level in data["levels"])
+
+
+def test_ready_status_set_is_explicit_contract() -> None:
+    assert flood_alert_routes.FLOOD_PRODUCT_READY_STATUSES == {"frequency_done", "published"}
+
+
+def test_flood_product_ready_statuses_with_rows_are_readable() -> None:
+    for run_id in (RUN_ID, PUBLISHED_RUN_ID):
+        with _client() as client:
+            response = client.get(f"/api/v1/flood-alerts/summary?run_id={run_id}")
+            assert response.status_code == 200
+            assert response.json()["data"]["total_segments"] == 4
+
+
+def test_published_run_rows_are_readable_through_alert_and_map_endpoints() -> None:
+    with _client() as client:
+        summary = client.get(f"/api/v1/flood-alerts/summary?run_id={PUBLISHED_RUN_ID}")
+        ranking = client.get(f"/api/v1/flood-alerts/ranking?run_id={PUBLISHED_RUN_ID}&limit=2")
+        segments = client.get(f"/api/v1/flood-alerts/segments?run_id={PUBLISHED_RUN_ID}&min_return_period=20")
+        timeline = client.get(f"/api/v1/flood-alerts/timeline?run_id={PUBLISHED_RUN_ID}&segment_id=seg_002")
+        tile = client.get(
+            "/api/v1/tiles/flood-return-period"
+            f"?run_id={PUBLISHED_RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+        )
+
+    for response in (summary, ranking, segments, timeline, tile):
+        assert response.status_code == 200
+        assert response.json().get("error", {}).get("code") != "FREQUENCY_NOT_COMPUTED"
+
+    assert summary.json()["data"]["total_segments"] == 4
+    assert ranking.json()["data"]["items"]
+    assert {segment["river_segment_id"] for segment in segments.json()["data"]["segments"]} == {"seg_003", "seg_004"}
+    assert timeline.json()["data"]["peak"]["warning_level"] == "warning"
+    assert tile.json()["features"]
+
+
+def test_non_ready_without_rows_is_rejected() -> None:
+    with _client() as client:
+        response = client.get("/api/v1/flood-alerts/summary?run_id=run_pending")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
+
+
+def test_non_ready_with_stray_rows_is_rejected_before_data_query() -> None:
+    with _client() as client:
+        response = client.get("/api/v1/flood-alerts/summary?run_id=run_stray")
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
+    assert body["error"]["details"]["status"] == "parsed"
 
 
 def test_ranking_pagination_basin_filter_and_valid_time() -> None:
@@ -144,6 +197,25 @@ def test_forecast_series_embeds_frequency_thresholds() -> None:
         "Q50": 3700.0,
         "Q100": 4500.0,
     }
+
+
+def test_forecast_series_issue_time_latest_resolves_most_recent_available_issue_time() -> None:
+    store = ThresholdForecastStore()
+    app.dependency_overrides[get_forecast_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_002/forecast-series",
+                params={"issue_time": "latest", "variables": "q_down", "scenarios": "GFS"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_forecast_store, None)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["issue_time"] == _iso(VALID_TIME_1)
+    assert data["series"][0]["cycle_time"] == _iso(VALID_TIME_1)
+    assert data["series"][0]["points"][0][0] == int(VALID_TIME_1.timestamp() * 1000)
 
 
 def test_flood_tile_returns_json_content_type() -> None:
@@ -462,7 +534,13 @@ def _seed_data(connection: Any) -> None:
                 "properties": f'{{"name":"{name}"}}',
             },
         )
-    for run_id, status in [(RUN_ID, "frequency_done"), ("run_pending", "parsed"), ("run_empty", "frequency_done")]:
+    for run_id, status in [
+        (RUN_ID, "frequency_done"),
+        (PUBLISHED_RUN_ID, "published"),
+        ("run_pending", "parsed"),
+        ("run_empty", "frequency_done"),
+        ("run_stray", "parsed"),
+    ]:
         connection.execute(
             text(
                 """
@@ -512,6 +590,102 @@ def _seed_data(connection: Any) -> None:
         None,
         False,
         quality_flag="no_usable_frequency_curve",
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2,
+        100.0,
+        1.5,
+        "normal",
+        True,
+        run_id=PUBLISHED_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_002",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2 + timedelta(hours=1),
+        250.0,
+        12.0,
+        "watch",
+        True,
+        run_id=PUBLISHED_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_003",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2,
+        350.0,
+        55.0,
+        "severe",
+        True,
+        run_id=PUBLISHED_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_004",
+        "basin_v2",
+        "rnv_v2",
+        VALID_TIME_2,
+        300.0,
+        25.0,
+        "high_risk",
+        True,
+        run_id=PUBLISHED_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        110.0,
+        3.0,
+        "elevated",
+        False,
+        run_id=PUBLISHED_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_002",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        210.0,
+        4.0,
+        "elevated",
+        False,
+        run_id=PUBLISHED_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_002",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2,
+        260.0,
+        22.0,
+        "warning",
+        False,
+        run_id=PUBLISHED_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_003",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2,
+        350.0,
+        55.0,
+        "severe",
+        True,
+        run_id="run_stray",
     )
     _insert_result(
         connection,

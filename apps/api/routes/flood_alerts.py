@@ -31,6 +31,7 @@ WARNING_COLORS = {
 }
 WARNING_LEVELS = tuple(WARNING_COLORS)
 USABLE_CURVE_FLAGS = {"ok", "partial_sample", "monotonicity_corrected"}
+FLOOD_PRODUCT_READY_STATUSES = {"frequency_done", "published"}
 NO_USABLE_CURVE_NOTE = "No usable frequency curves available"
 NO_SEGMENT_CURVE_NOTE = "No frequency curve available for this segment"
 
@@ -496,7 +497,7 @@ def _require_frequency_ready(session: Session, run_id: str) -> dict[str, Any]:
             message=f"Run not found: {run_id}",
             details={"run_id": run_id},
         )
-    if str(row["status"]) != "frequency_done":
+    if str(row["status"]) not in FLOOD_PRODUCT_READY_STATUSES:
         raise ApiError(
             status_code=409,
             code="FREQUENCY_NOT_COMPUTED",
