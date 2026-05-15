@@ -324,6 +324,8 @@ def test_hindcast_runs_do_not_create_state_snapshot(monkeypatch: pytest.MonkeyPa
 
 def test_hindcast_submit_api_returns_slurm_job_array_id() -> None:
     with _store() as session, _api_client(session) as client:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+
         response = client.post(
             "/api/v1/hindcast/submit",
             json=_submit_body(),
@@ -341,6 +343,7 @@ def test_hindcast_submit_api_returns_slurm_job_array_id() -> None:
 
 def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path) -> None:
     with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
         config = HindcastConfig(
             workspace_root=tmp_path / "workspace",
             object_store_root=tmp_path / "object-store",
@@ -353,6 +356,43 @@ def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path)
 
         assert result.slurm_job_array_id == "slurm_array_1"
         assert result.job_ids == ["hindcast_era5_yangtze_shud_v12_1993_hindcast_0"]
+
+
+def test_submit_hindcast_slurm_requires_real_forcing_before_submission(tmp_path: Path) -> None:
+    with _store() as session:
+        slurm_client = _FakeSlurmClient()
+        config = HindcastConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            object_store_prefix="hindcast/prod",
+            db_session=session,
+            slurm_client=slurm_client,
+        )
+
+        with pytest.raises(HindcastError) as exc_info:
+            submit_hindcast_slurm("yangtze_shud_v12", "ERA5", [1993], config)
+
+        assert exc_info.value.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
+        assert slurm_client.submissions == 0
+
+
+def test_submit_hindcast_slurm_rejects_metadata_only_forcing_before_submission(tmp_path: Path) -> None:
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="")
+        slurm_client = _FakeSlurmClient()
+        config = HindcastConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=tmp_path / "object-store",
+            object_store_prefix="hindcast/prod",
+            db_session=session,
+            slurm_client=slurm_client,
+        )
+
+        with pytest.raises(HindcastError) as exc_info:
+            submit_hindcast_slurm("yangtze_shud_v12", "ERA5", [1993], config)
+
+        assert exc_info.value.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
+        assert slurm_client.submissions == 0
 
 
 def test_produce_hindcast_forcing_success_lineage() -> None:
@@ -505,7 +545,11 @@ def test_hindcast_run_uris_use_plain_object_keys() -> None:
 
 
 class _FakeSlurmClient:
+    def __init__(self) -> None:
+        self.submissions = 0
+
     def submit_job_array(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.submissions += 1
         assert payload["job_type"] == "hindcast"
         assert payload["tasks"][0]["array_task_id"] == 0
         assert payload["tasks"][0]["run_id"] == "hindcast_era5_yangtze_shud_v12_1993"
@@ -515,7 +559,7 @@ class _FakeSlurmClient:
         assert payload["tasks"][0]["basin_version_id"] == "basin_v1"
         assert payload["tasks"][0]["river_network_version_id"] == "rnv_v1"
         assert payload["tasks"][0]["forcing_version_id"] == "forc_era5_hindcast_yangtze_shud_v12_1993"
-        assert "forcing_package_uri" in payload["tasks"][0]
+        assert payload["tasks"][0]["forcing_package_uri"] == "object://forcing/package/1993"
         assert "object_store_root" in payload["tasks"][0]
         assert "object_store_prefix" in payload["tasks"][0]
         assert "workspace_dir" in payload["tasks"][0]
@@ -794,6 +838,36 @@ def _insert_hydro_run(
             "run_manifest_uri": f"runs/{run_id}/input/manifest.json",
             "error_code": error_code,
             "error_message": error_code,
+        },
+    )
+    session.commit()
+
+
+def _insert_forcing_version(
+    session: Session,
+    year: int,
+    *,
+    forcing_package_uri: str | None,
+) -> None:
+    start_time = datetime(year, 1, 1, tzinfo=UTC)
+    session.execute(
+        text(
+            """
+            INSERT INTO met.forcing_version (
+                forcing_version_id, model_id, source_id, cycle_time, start_time, end_time,
+                station_count, forcing_package_uri, checksum, lineage_json
+            )
+            VALUES (
+                :forcing_version_id, 'yangtze_shud_v12', 'ERA5', :start_time, :start_time, :end_time,
+                1, :forcing_package_uri, 'abc', '{}'
+            )
+            """
+        ),
+        {
+            "forcing_version_id": f"forc_era5_hindcast_yangtze_shud_v12_{year}",
+            "forcing_package_uri": forcing_package_uri,
+            "start_time": start_time,
+            "end_time": datetime(year + 1, 1, 1, tzinfo=UTC),
         },
     )
     session.commit()

@@ -388,6 +388,7 @@ def submit_hindcast_slurm(
     config: HindcastConfig,
     basin_version_id: str | None = None,
     river_network_version_id: str | None = None,
+    forcing_package_uris: dict[int, str] | None = None,
 ) -> HindcastSlurmResult:
     _validate_model_id(model_id)
     years = [int(year) for year in years]
@@ -399,6 +400,7 @@ def submit_hindcast_slurm(
         basin_version_id=basin_version_id,
         river_network_version_id=river_network_version_id,
     )
+    forcing_package_uris_by_year = forcing_package_uris or {}
 
     slurm_client = config.slurm_client or HttpSlurmGatewayClient(config.slurm_gateway_url)
     tasks = [
@@ -411,14 +413,22 @@ def submit_hindcast_slurm(
             "source_id": normalize_source_id(source_id),
             "year": year,
             "cycle_time": f"{year}-01-01T00:00:00Z",
-            "forcing_version_id": forcing_version_id_for_year(model_id, year),
-            "forcing_package_uri": "",
+            "forcing_version_id": forcing_version_id,
+            "forcing_package_uri": forcing_package_uri,
             "object_store_root": str(config.object_store_root),
             "object_store_prefix": config.object_store_prefix,
             "workspace_dir": str(config.workspace_root),
             "workspace_root": str(config.workspace_root),
         }
         for index, year in enumerate(years)
+        for forcing_version_id in (forcing_version_id_for_year(model_id, year),)
+        for forcing_package_uri in (
+            _resolve_slurm_forcing_package_uri(
+                config.db_session,
+                forcing_version_id,
+                forcing_package_uris_by_year.get(year),
+            ),
+        )
     ]
     payload = {
         "job_type": "hindcast",
@@ -954,6 +964,22 @@ def _require_real_forcing_package_uri(db_session: Session, forcing_version_id: s
     raise HindcastError(
         HINDCAST_FORCING_PACKAGE_UNAVAILABLE,
         "Hindcast SHUD runtime requires a real forcing package; metadata-only forcing is unavailable.",
+        {"forcing_version_id": forcing_version_id},
+    )
+
+
+def _resolve_slurm_forcing_package_uri(
+    db_session: Session | None,
+    forcing_version_id: str,
+    forcing_package_uri: str | None = None,
+) -> str:
+    if forcing_package_uri:
+        return str(forcing_package_uri)
+    if db_session is not None:
+        return _require_real_forcing_package_uri(db_session, forcing_version_id)
+    raise HindcastError(
+        HINDCAST_FORCING_PACKAGE_UNAVAILABLE,
+        "Hindcast Slurm submission requires a real forcing package URI.",
         {"forcing_version_id": forcing_version_id},
     )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,8 +8,13 @@ from pathlib import Path
 import pytest
 import yaml
 from jinja2.exceptions import SecurityError
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
+from services.orchestrator.persistence import Base
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
@@ -22,6 +28,8 @@ from services.slurm_gateway.gateway import (
 )
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import RealSlurmGateway
+from workers.flood_frequency.config import HindcastConfig
+from workers.flood_frequency.hindcast import submit_hindcast_slurm
 
 
 def _assert_slurm_state_error_code(monkeypatch, tmp_path: Path, slurm_state: str, expected_error_code: str) -> None:
@@ -135,6 +143,92 @@ def _production_manifest(tmp_path: Path, job_type: str) -> dict[str, object]:
         "year": 1993,
         "manifest_index_path": str(tmp_path / "manifest_index.json"),
     }
+
+
+def _hindcast_store() -> Session:
+    engine = create_engine(
+        "sqlite://",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    _attach_hindcast_schemas(engine)
+    session = Session(engine)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE core.model_instance (
+                    model_id TEXT PRIMARY KEY,
+                    basin_version_id TEXT NOT NULL,
+                    river_network_version_id TEXT NOT NULL,
+                    model_package_uri TEXT NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE met.forcing_version (
+                    forcing_version_id TEXT PRIMARY KEY,
+                    model_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    cycle_time DATETIME,
+                    start_time DATETIME NOT NULL,
+                    end_time DATETIME NOT NULL,
+                    station_count INTEGER NOT NULL,
+                    forcing_package_uri TEXT,
+                    checksum TEXT,
+                    lineage_json TEXT NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO core.model_instance (
+                    model_id, basin_version_id, river_network_version_id, model_package_uri
+                )
+                VALUES ('yangtze_shud_v12', 'basin_v1', 'rnv_v1', 'object://models/yangtze')
+                """
+            )
+        )
+    return session
+
+
+def _attach_hindcast_schemas(engine: Engine) -> None:
+    @event.listens_for(engine, "connect")
+    def _attach(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS core")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS met")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
+
+
+def _insert_hindcast_forcing_version(session: Session, year: int, forcing_package_uri: str) -> None:
+    session.execute(
+        text(
+            """
+            INSERT INTO met.forcing_version (
+                forcing_version_id, model_id, source_id, cycle_time, start_time, end_time,
+                station_count, forcing_package_uri, checksum, lineage_json
+            )
+            VALUES (
+                :forcing_version_id, 'yangtze_shud_v12', 'ERA5', :start_time, :start_time, :end_time,
+                1, :forcing_package_uri, 'abc', '{}'
+            )
+            """
+        ),
+        {
+            "forcing_version_id": f"forc_era5_hindcast_yangtze_shud_v12_{year}",
+            "start_time": datetime(year, 1, 1, tzinfo=UTC),
+            "end_time": datetime(year + 1, 1, 1, tzinfo=UTC),
+            "forcing_package_uri": forcing_package_uri,
+        },
+    )
+    session.commit()
 
 
 def test_submit_job_parses_sbatch_stdout(monkeypatch, tmp_path):
@@ -497,6 +591,39 @@ def test_hindcast_single_job_type_resolves_configured_template(monkeypatch, tmp_
     assert record.job_id == "12345"
     assert record.manifest["job_type"] == "hindcast"
     assert calls[0][0] == "sbatch"
+
+
+def test_submit_hindcast_slurm_payload_writes_real_forcing_manifest_index(monkeypatch, tmp_path: Path) -> None:
+    with _hindcast_store() as session:
+        _insert_hindcast_forcing_version(session, 1993, "object://forcing/package/1993")
+        gateway = _production_gateway(tmp_path)
+
+        def fake_run(command, **kwargs):
+            del kwargs
+            assert Path(command[0]).name == "sbatch"
+            return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        result = submit_hindcast_slurm(
+            "yangtze_shud_v12",
+            "ERA5",
+            [1993],
+            HindcastConfig(
+                workspace_root=tmp_path / "workspace",
+                object_store_root=tmp_path / "object-store",
+                object_store_prefix="hindcast/prod",
+                db_session=session,
+                slurm_client=gateway,
+            ),
+        )
+
+    record = gateway._jobs[result.slurm_job_array_id or ""]
+    manifest_index = json.loads(Path(record.manifest["manifest_index_path"]).read_text(encoding="utf-8"))
+
+    assert result.slurm_job_array_id == "12345"
+    assert manifest_index[0]["forcing_version_id"] == "forc_era5_hindcast_yangtze_shud_v12_1993"
+    assert manifest_index[0]["forcing_package_uri"] == "object://forcing/package/1993"
 
 
 def test_sandboxed_environment_restricts_template_access(tmp_path):
