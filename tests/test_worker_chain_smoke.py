@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +18,8 @@ from tests.integration_helpers import (
     MODEL_ID,
     RIVER_NETWORK_VERSION_ID,
     SOURCE_ID,
+    VALID_TIME_1,
+    VALID_TIME_2,
     apply_migrations_from_zero,
     seed_issue_126_data,
     sqlalchemy_engine,
@@ -190,8 +191,8 @@ def _runtime_manifest(forcing_version_id: str, forcing_package_uri: str) -> dict
         "scenario_id": "forecast_gfs_deterministic",
         "source_id": SOURCE_ID,
         "cycle_time": CYCLE_TIME.isoformat(),
-        "start_time": datetime(2026, 5, 3, 1, tzinfo=UTC).isoformat(),
-        "end_time": datetime(2026, 5, 3, 2, tzinfo=UTC).isoformat(),
+        "start_time": VALID_TIME_1.isoformat(),
+        "end_time": (VALID_TIME_2 + (VALID_TIME_2 - VALID_TIME_1)).isoformat(),
         "model": {
             "model_id": MODEL_ID,
             "basin_version_id": BASIN_VERSION_ID,
