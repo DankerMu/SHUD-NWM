@@ -5,8 +5,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
-from pathlib import Path
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
