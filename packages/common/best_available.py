@@ -43,6 +43,7 @@ class ForcingInputSelection:
 
 @dataclass(frozen=True)
 class BestAvailableSelection:
+    forcing_version_id: str
     valid_time: datetime
     variable: str
     selected_source: str
@@ -84,7 +85,13 @@ class BestAvailableManager:
         enabled_sources = self.repository.list_enabled_sources()
         forcing_inputs = self.repository.list_forcing_inputs(forcing_version_id)
         selections = [
-            selection_from_forcing_input(row, enabled_sources=enabled_sources, now=now) for row in forcing_inputs
+            selection_from_forcing_input(
+                row,
+                forcing_version_id=forcing_version_id,
+                enabled_sources=enabled_sources,
+                now=now,
+            )
+            for row in forcing_inputs
         ]
         for selection in selections:
             self.repository.upsert_selection(selection)
@@ -170,6 +177,7 @@ class PsycopgBestAvailableRepository:
         rows = self._fetch_all(
             """
             INSERT INTO met.best_available_selection (
+                forcing_version_id,
                 valid_time,
                 variable,
                 selected_source,
@@ -177,8 +185,8 @@ class PsycopgBestAvailableRepository:
                 fallback_order,
                 quality_flag
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (valid_time, variable) DO UPDATE SET
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (forcing_version_id, valid_time, variable) DO UPDATE SET
                 selected_source = EXCLUDED.selected_source,
                 source_cycle_time = EXCLUDED.source_cycle_time,
                 fallback_order = EXCLUDED.fallback_order,
@@ -198,6 +206,7 @@ class PsycopgBestAvailableRepository:
             RETURNING *
             """,
             (
+                selection.forcing_version_id,
                 valid_time,
                 selection.variable,
                 selection.selected_source,
@@ -212,10 +221,11 @@ class PsycopgBestAvailableRepository:
             """
             SELECT *
             FROM met.best_available_selection
-            WHERE valid_time = %s
+            WHERE forcing_version_id = %s
+              AND valid_time = %s
               AND variable = %s
             """,
-            (valid_time, selection.variable),
+            (selection.forcing_version_id, valid_time, selection.variable),
         )
 
     def list_selections(
@@ -234,6 +244,7 @@ class PsycopgBestAvailableRepository:
             f"""
             SELECT
                 valid_time,
+                forcing_version_id,
                 variable,
                 selected_source,
                 source_cycle_time,
@@ -241,7 +252,7 @@ class PsycopgBestAvailableRepository:
                 quality_flag
             FROM met.best_available_selection
             WHERE {" AND ".join(filters)}
-            ORDER BY valid_time, variable
+            ORDER BY valid_time, forcing_version_id, variable
             """,
             tuple(parameters),
         )
@@ -287,6 +298,7 @@ class PsycopgBestAvailableRepository:
 def selection_from_forcing_input(
     row: ForcingInputSelection,
     *,
+    forcing_version_id: str,
     enabled_sources: Sequence[str],
     now: datetime | None = None,
 ) -> BestAvailableSelection:
@@ -302,6 +314,7 @@ def selection_from_forcing_input(
         )
     )
     return BestAvailableSelection(
+        forcing_version_id=forcing_version_id,
         valid_time=_ensure_utc(row.valid_time),
         variable=row.variable,
         selected_source=selected_source,
@@ -346,6 +359,7 @@ def source_priority(source_id: str) -> int:
 
 def _selection_row_response(row: dict[str, Any]) -> dict[str, Any]:
     return {
+        "forcing_version_id": row["forcing_version_id"],
         "valid_time": _format_time(row["valid_time"]),
         "variable": row["variable"],
         "selected_source": row["selected_source"],

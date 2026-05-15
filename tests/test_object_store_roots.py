@@ -60,6 +60,36 @@ def test_object_store_uses_object_store_root_not_workspace(tmp_path: Path) -> No
     assert not (workspace_root / "runs" / "run_001" / "logs" / "job.log").exists()
 
 
+def test_object_store_accepts_matching_s3_prefix_and_bare_keys(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path, "s3://bucket/prefix")
+
+    assert store.normalize_key("s3://bucket/prefix/raw/gfs/2026050700/manifest.json") == (
+        "raw/gfs/2026050700/manifest.json"
+    )
+    assert store.normalize_key("raw/gfs/2026050700/manifest.json") == "raw/gfs/2026050700/manifest.json"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://other/prefix/raw/gfs/2026050700/manifest.json",
+        "s3://bucket/prefix-other/raw/gfs/2026050700/manifest.json",
+    ],
+)
+def test_object_store_rejects_mismatched_s3_prefix(tmp_path: Path, uri: str) -> None:
+    store = LocalObjectStore(tmp_path, "s3://bucket/prefix")
+
+    with pytest.raises(ValueError, match="configured object store prefix|bucket does not match"):
+        store.normalize_key(uri)
+
+
+def test_object_store_rejects_path_traversal_in_s3_uri(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path, "s3://bucket/prefix")
+
+    with pytest.raises(ValueError, match="must not contain '..'"):
+        store.normalize_key("s3://bucket/prefix/raw/gfs/%2E%2E/manifest.json")
+
+
 def test_split_root_forcing_uses_object_store_root(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     object_store_root = tmp_path / "object-store"

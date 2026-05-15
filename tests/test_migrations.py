@@ -17,6 +17,7 @@ EXPECTED_MIGRATIONS = [
     "000011_pipeline_job_model_id.sql",
     "000012_pipeline_job_array_task.sql",
     "000013_enum_remediation.sql",
+    "000014_best_available_lineage.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}

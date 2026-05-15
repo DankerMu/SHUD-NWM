@@ -21,7 +21,7 @@ class FakeBestAvailableRepository:
     def __init__(self, *, enabled_sources: tuple[str, ...] = ("ERA5", "GFS")) -> None:
         self.enabled_sources = enabled_sources
         self.forcing_inputs: list[ForcingInputSelection] = []
-        self.selections: dict[tuple[datetime, str], BestAvailableSelection] = {}
+        self.selections: dict[tuple[str, datetime, str], BestAvailableSelection] = {}
         self.upsert_count = 0
 
     def list_enabled_sources(self) -> tuple[str, ...]:
@@ -32,7 +32,7 @@ class FakeBestAvailableRepository:
 
     def upsert_selection(self, selection: BestAvailableSelection) -> dict[str, Any]:
         self.upsert_count += 1
-        key = (_dt(selection.valid_time), selection.variable)
+        key = (selection.forcing_version_id, _dt(selection.valid_time), selection.variable)
         existing = self.selections.get(key)
         if existing is None or source_priority(selection.selected_source) >= source_priority(existing.selected_source):
             self.selections[key] = selection
@@ -51,7 +51,7 @@ class FakeBestAvailableRepository:
             if _dt(from_time) <= _dt(selection.valid_time) <= _dt(to_time)
             and (variable is None or selection.variable == variable)
         ]
-        rows.sort(key=lambda selection: (selection.valid_time, selection.variable))
+        rows.sort(key=lambda selection: (selection.valid_time, selection.forcing_version_id, selection.variable))
         return [_selection_response(selection) for selection in rows]
 
 
@@ -98,10 +98,32 @@ def test_era5_overwrites_existing_gfs_selection() -> None:
 
     manager.write_forcing_version("forcing_era5", now=_dt("2026-05-08T00:00:00Z"))
 
-    selection = repository.selections[(valid_time, "air_temperature_2m")]
+    selection = repository.selections[("forcing_era5", valid_time, "air_temperature_2m")]
     assert selection.selected_source == "ERA5"
     assert selection.quality_flag == "best_available_realtime"
     assert selection.fallback_order == ("ERA5",)
+
+
+def test_best_available_preserves_different_forcing_versions_with_same_time_and_variable() -> None:
+    repository = FakeBestAvailableRepository()
+    manager = BestAvailableManager(repository)
+    valid_time = _dt("2026-05-04T00:00:00Z")
+    repository.forcing_inputs = [
+        ForcingInputSelection(valid_time, "prcp_rate_or_amount", "GFS", _dt("2026-05-01T00:00:00Z"))
+    ]
+    manager.write_forcing_version("forcing_model_a", now=_dt("2026-05-08T00:00:00Z"))
+    repository.forcing_inputs = [
+        ForcingInputSelection(valid_time, "prcp_rate_or_amount", "GFS", _dt("2026-05-02T00:00:00Z"))
+    ]
+
+    manager.write_forcing_version("forcing_model_b", now=_dt("2026-05-08T00:00:00Z"))
+
+    assert set(repository.selections) == {
+        ("forcing_model_a", valid_time, "prcp_rate_or_amount"),
+        ("forcing_model_b", valid_time, "prcp_rate_or_amount"),
+    }
+    rows = repository.list_selections(from_time=valid_time, to_time=valid_time, variable="prcp_rate_or_amount")
+    assert [row["forcing_version_id"] for row in rows] == ["forcing_model_a", "forcing_model_b"]
 
 
 def test_fallback_order_filters_to_enabled_sources_by_time_window() -> None:
@@ -128,7 +150,8 @@ def test_fallback_order_filters_to_enabled_sources_by_time_window() -> None:
 async def test_best_available_api_query_returns_filtered_rows() -> None:
     repository = FakeBestAvailableRepository()
     valid_time = _dt("2026-04-20T00:00:00Z")
-    repository.selections[(valid_time, "prcp_rate_or_amount")] = BestAvailableSelection(
+    repository.selections[("forcing_era5", valid_time, "prcp_rate_or_amount")] = BestAvailableSelection(
+        forcing_version_id="forcing_era5",
         valid_time=valid_time,
         variable="prcp_rate_or_amount",
         selected_source="ERA5",
@@ -143,6 +166,7 @@ async def test_best_available_api_query_returns_filtered_rows() -> None:
     assert response.status_code == 200
     assert response.json() == [
         {
+            "forcing_version_id": "forcing_era5",
             "valid_time": "2026-04-20T00:00:00Z",
             "variable": "prcp_rate_or_amount",
             "selected_source": "ERA5",
@@ -161,6 +185,7 @@ async def _get(path: str) -> Any:
 
 def _selection_response(selection: BestAvailableSelection) -> dict[str, Any]:
     return {
+        "forcing_version_id": selection.forcing_version_id,
         "valid_time": _format_time(selection.valid_time),
         "variable": selection.variable,
         "selected_source": selection.selected_source,
