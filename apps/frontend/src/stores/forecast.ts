@@ -80,9 +80,10 @@ interface SplicedForecastSegment {
 interface SplicedForecastResponse {
   river_segment_id?: string
   segment_id?: string
-  issue_time?: string
+  issue_time?: string | null
   unit?: string
   segments?: SplicedForecastSegment[]
+  frequency_thresholds?: components['schemas']['SplicedForecastResponse']['frequency_thresholds']
 }
 
 type RiverSeriesResponse = components['schemas']['RiverSeriesResponse']
@@ -169,6 +170,7 @@ function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastDat
     series,
     sourceAttribution: buildSourceAttribution(series),
     cycleAttribution: buildCycleAttribution(series, payload.issue_time ?? null),
+    frequencyThresholds: payload.frequency_thresholds,
   }
 }
 

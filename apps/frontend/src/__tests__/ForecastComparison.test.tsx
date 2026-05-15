@@ -129,6 +129,31 @@ describe('forecast comparison UI', () => {
     expect(query).toMatchObject({ scenarios: 'GFS,IFS', include_analysis: true })
   })
 
+  it('preserves spliced forecast thresholds from include-analysis responses', async () => {
+    vi.mocked(client.GET).mockResolvedValue(
+      success({
+        river_segment_id: 'seg-1',
+        issue_time: '2026-05-03T00:00:00Z',
+        variable: 'discharge',
+        unit: 'm3/s',
+        frequency_thresholds: { Q2: 1, Q20: 4, Q100: 6 },
+        segments: [],
+      }) as never,
+    )
+    resetForecastStore({
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1' },
+      selectedScenarios: ['GFS'],
+    })
+
+    await useForecastStore.getState().fetchForecast({ includeAnalysis: true })
+
+    expect(useForecastStore.getState().forecastData?.frequencyThresholds).toEqual({
+      Q2: 1,
+      Q20: 4,
+      Q100: 6,
+    })
+  })
+
   it('renders GFS and IFS curves with the comparison colors', () => {
     render(
       <ForecastChart
