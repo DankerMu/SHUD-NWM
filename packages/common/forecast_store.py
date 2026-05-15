@@ -932,7 +932,7 @@ def _empty_forecast_response(*, segment_id: str, issue_time: datetime | None) ->
         "issue_time": _format_time(issue_time),
         "unit": "m3/s",
         "series": [],
-        "frequency_thresholds": {},
+        "frequency_thresholds": None,
     }
 
 

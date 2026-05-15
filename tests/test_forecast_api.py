@@ -151,6 +151,7 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
             "forecast_gfs_deterministic": _dt("2026-05-07T00:00:00Z"),
             "forecast_ifs_deterministic": _dt("2026-05-07T18:00:00Z"),
         }
+        self.latest_analysis_issue_time: datetime | None = _dt("2026-05-07T18:00:00Z")
         self.forecast_fetches: list[dict[str, Any]] = []
         self.analysis_rows = [
             {
@@ -192,7 +193,7 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
 
     def _latest_analysis_issue_time(self, cursor: Any, **_kwargs: Any) -> datetime | None:
         del cursor
-        return _dt("2026-05-07T18:00:00Z")
+        return self.latest_analysis_issue_time
 
     def _fetch_analysis_segment_rows(self, cursor: Any, **_kwargs: Any) -> list[dict[str, Any]]:
         del cursor
@@ -267,6 +268,16 @@ async def test_forecast_series_returns_timestamp_value_tuples_and_q_down_filter(
 
 
 @pytest.mark.asyncio
+async def test_forecast_series_allows_null_frequency_thresholds(fake_store: FakeForecastStore) -> None:
+    fake_store.response["frequency_thresholds"] = None
+
+    response = await _get("/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series")
+
+    assert response.status_code == 200
+    assert response.json()["frequency_thresholds"] is None
+
+
+@pytest.mark.asyncio
 async def test_forecast_series_include_analysis_true_returns_spliced_segments(fake_store: FakeForecastStore) -> None:
     response = await _get(
         "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
@@ -338,6 +349,62 @@ async def test_forecast_series_multi_source_latest_returns_per_source_metadata()
         [_timestamp_ms(_dt("2026-05-07T00:00:00Z")), 11.0]
     ]
     assert store.forecast_fetches[-1]["cycle_times_by_scenario"] == store.latest_cycles
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_empty_store_path_returns_null_frequency_thresholds() -> None:
+    store = InMemoryForecastSeriesStore()
+    store.latest_cycles = {"forecast_gfs_deterministic": _dt("2026-05-07T00:00:00Z")}
+    store.forecast_rows = []
+    app.dependency_overrides[get_forecast_store] = lambda: store
+
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?issue_time=latest&variables=q_down&scenarios=GFS"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["series"] == []
+    assert data["frequency_thresholds"] is None
+    assert store.forecast_fetches[-1]["cycle_times_by_scenario"] == store.latest_cycles
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_empty_no_latest_data_response_allows_null_issue_time() -> None:
+    store = InMemoryForecastSeriesStore()
+    store.latest_cycles = {}
+    app.dependency_overrides[get_forecast_store] = lambda: store
+
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?issue_time=latest&variables=q_down&scenarios=GFS"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["issue_time"] is None
+    assert data["series"] == []
+    assert data["frequency_thresholds"] is None
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_empty_spliced_no_latest_data_response_allows_null_issue_time() -> None:
+    store = InMemoryForecastSeriesStore()
+    store.latest_cycles = {}
+    store.latest_analysis_issue_time = None
+    app.dependency_overrides[get_forecast_store] = lambda: store
+
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?issue_time=latest&variables=q_down&scenarios=GFS&include_analysis=true"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["issue_time"] is None
+    assert data["segments"] == []
+    assert data["variable"] == "discharge"
 
 
 @pytest.mark.asyncio

@@ -709,6 +709,12 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        ModelInstancePage: {
+            items: components["schemas"]["ModelInstance"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
         RiverSegment: {
             river_segment_id: string;
             river_network_version_id: string;
@@ -838,24 +844,30 @@ export interface components {
         RiverSeriesResponse: {
             segment_id: string;
             /** Format: date-time */
-            issue_time: string;
+            issue_time: string | null;
             unit: string;
             series: components["schemas"]["SeriesSegment"][];
-            frequency_thresholds: {
-                q2: number;
-                q5: number;
-                q10: number;
-                q20: number;
-                q50: number;
-                q100: number;
-            };
+            frequency_thresholds: components["schemas"]["FloodFrequencyThresholds"] | null;
         };
         /** @description Returned when include_analysis=true splices analysis-period data before the forecast window into a unified segments array. */
         SplicedForecastResponse: {
             river_segment_id: string;
             segments: {
                 scenario: string;
+                /** @description Canonical scenario identifier. */
+                scenario_id?: string;
                 source: string;
+                /** @description Forecast source identifier when available. */
+                source_id?: string | null;
+                /**
+                 * Format: date-time
+                 * @description Forecast source cycle time when available.
+                 */
+                cycle_time?: string | null;
+                /** @description Available forecast lead time in hours when available. */
+                available_lead_hours?: number | null;
+                /** @enum {string} */
+                segment_role: "past_7_days" | "future_7_days";
                 data: {
                     /** Format: date-time */
                     valid_time: string;
@@ -863,10 +875,10 @@ export interface components {
                 }[];
             }[];
             /** Format: date-time */
-            issue_time: string;
+            issue_time: string | null;
             variable: string;
             unit: string;
-            frequency_thresholds?: Record<string, never> | null;
+            frequency_thresholds?: components["schemas"]["FloodFrequencyThresholds"] | null;
         };
         SeriesSegment: {
             scenario_id: string;
@@ -1156,9 +1168,9 @@ export interface components {
             timesteps: components["schemas"]["FloodAlertTimelinePoint"][];
             timeline: components["schemas"]["FloodAlertTimelinePoint"][];
             /** @description Peak timeline point, or null */
-            peak: Record<string, never> | null;
+            peak: components["schemas"]["FloodAlertTimelinePoint"] | null;
             /** @description Flood frequency thresholds, or null */
-            frequency_thresholds: Record<string, never> | null;
+            frequency_thresholds: components["schemas"]["FloodFrequencyThresholds"] | null;
             quality_note: string | null;
         };
         /** @description GeoJSON FeatureCollection for flood return-period map rendering. */
@@ -1396,9 +1408,9 @@ export interface operations {
         parameters: {
             query?: {
                 basin_version_id?: components["parameters"]["BasinVersionIdQuery"];
-                /** @description Filter by active model flag. */
-                active?: boolean;
-                limit?: components["parameters"]["Limit"];
+                /** @description Filter by active model flag. Omitted defaults to active models only; use all for no active filter. */
+                active?: "true" | "false" | "all";
+                limit?: number;
                 offset?: components["parameters"]["Offset"];
             };
             header?: never;
@@ -1414,7 +1426,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelInstance"][];
+                        data: components["schemas"]["ModelInstancePage"];
                     };
                 };
             };

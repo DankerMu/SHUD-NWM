@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,10 @@ from apps.api.main import app
 from apps.api.routes.models import get_model_registry_store
 from packages.common.model_registry import (
     DuplicateResourceError,
+    InvalidPayloadError,
     InvalidReferenceError,
+    MissingResourceError,
+    ModelRegistryError,
     PsycopgModelRegistryStore,
     geometry_to_wkt,
 )
@@ -60,6 +64,8 @@ class FakeModelRegistryStore:
         }
 
     def create_basin_version(self, basin_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if basin_id == "missing":
+            raise MissingResourceError("basin_id not found: missing")
         return {"basin_id": basin_id, "basin_version_id": payload.get("basin_version_id") or f"{basin_id}_v01"}
 
     def create_river_network(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -68,15 +74,25 @@ class FakeModelRegistryStore:
         return {"river_network_version": {"river_network_version_id": "basin_rivnet_v01"}, "segment_count": 1}
 
     def create_mesh_version(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["version_label"] == "":
+            raise InvalidPayloadError("version_label must contain at least one alphanumeric character.")
         return {"mesh_version_id": payload.get("mesh_version_id") or "basin_mesh_v01"}
 
     def create_model(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["model_id"] == "registry_error":
+            raise ModelRegistryError(
+                "DATABASE_URL=postgresql://nhms:secret@localhost:5432/nhms failed in /srv/nhms/registry.py"
+            )
+        if payload["model_id"] == "unexpected_error":
+            raise RuntimeError("psycopg OperationalError: password leaked in raw driver diagnostics")
         record = dict(payload)
         record.setdefault("active_flag", False)
         self.models[record["model_id"]] = record
         return record
 
     def set_model_active(self, model_id: str, active: bool) -> dict[str, Any]:
+        if model_id not in self.models:
+            raise MissingResourceError(f"model_id not found: {model_id}")
         model = self.models[model_id]
         if model["active_flag"] == active:
             raise DuplicateResourceError(f"model_id {model_id} is already active.")
@@ -136,7 +152,12 @@ async def test_create_basin_rejects_duplicate(fake_store: FakeModelRegistryStore
 
     assert fake_store is not None
     assert response.status_code == 409
-    assert "already exists" in response.json()["detail"]
+    _assert_error_envelope(
+        response.json(),
+        code="MODEL_REGISTRY_DUPLICATE",
+        message_contains="already exists",
+        error_type="DuplicateResourceError",
+    )
 
 
 @pytest.mark.asyncio
@@ -160,22 +181,195 @@ async def test_river_network_invalid_reference_returns_422(fake_store: FakeModel
 
     assert fake_store is not None
     assert response.status_code == 422
-    assert "basin_version_id" in response.json()["detail"]
+    _assert_error_envelope(
+        response.json(),
+        code="MODEL_REGISTRY_INVALID_REFERENCE",
+        message_contains="basin_version_id",
+        error_type="InvalidReferenceError",
+    )
 
 
 @pytest.mark.asyncio
-async def test_active_toggle_and_default_model_listing(fake_store: FakeModelRegistryStore) -> None:
+async def test_model_listing_active_filter_vectors(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        default_response = await client.get("/api/v1/models")
+        active_response_list = await client.get("/api/v1/models", params={"active": "true", "limit": 10, "offset": 0})
+        inactive_response = await client.get("/api/v1/models", params={"active": "false", "limit": 10, "offset": 0})
+        all_response = await client.get("/api/v1/models", params={"active": "all", "limit": 10, "offset": 0})
+
+    assert fake_store is not None
+    _assert_model_page(default_response.json(), expected_ids={"active_model"}, expected_limit=100)
+    _assert_model_page(active_response_list.json(), expected_ids={"active_model"}, expected_limit=10)
+    _assert_model_page(inactive_response.json(), expected_ids={"inactive_model"}, expected_limit=10)
+    _assert_model_page(all_response.json(), expected_ids={"inactive_model", "active_model"}, expected_limit=10)
+
+
+@pytest.mark.asyncio
+async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeModelRegistryStore) -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         active_response = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
         conflict_response = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
-        list_response = await client.get("/api/v1/models")
 
     assert fake_store.models["inactive_model"]["active_flag"] is True
     assert active_response.status_code == 200
+    active_body = active_response.json()
+    assert active_body["status"] == "ok"
+    assert active_body["data"]["active_flag"] is True
     assert conflict_response.status_code == 409
-    assert list_response.status_code == 200
-    assert {item["model_id"] for item in list_response.json()["items"]} == {"inactive_model", "active_model"}
+    _assert_error_envelope(
+        conflict_response.json(),
+        code="MODEL_REGISTRY_DUPLICATE",
+        message_contains="already active",
+        error_type="DuplicateResourceError",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_method", "path", "payload", "expected_status", "expected_code", "message_contains", "error_type"),
+    [
+        (
+            "put",
+            "/api/v1/models/missing_model/active",
+            {"active": True},
+            404,
+            "MODEL_REGISTRY_NOT_FOUND",
+            "missing_model",
+            "MissingResourceError",
+        ),
+        (
+            "post",
+            "/api/v1/mesh-versions",
+            {
+                "basin_version_id": "basin_v01",
+                "version_label": "",
+                "mesh_uri": "s3://nhms/mesh",
+            },
+            422,
+            "MODEL_REGISTRY_INVALID_PAYLOAD",
+            "version_label",
+            "InvalidPayloadError",
+        ),
+        (
+            "post",
+            "/api/v1/models",
+            {
+                "model_id": "registry_error",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/registry_error/package/",
+            },
+            500,
+            "MODEL_REGISTRY_ERROR",
+            "Model registry operation failed.",
+            "ModelRegistryError",
+        ),
+        (
+            "post",
+            "/api/v1/models",
+            {
+                "model_id": "unexpected_error",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/unexpected_error/package/",
+            },
+            500,
+            "MODEL_REGISTRY_ERROR",
+            "Model registry operation failed.",
+            "RuntimeError",
+        ),
+    ],
+)
+async def test_model_registry_error_envelope_vectors(
+    fake_store: FakeModelRegistryStore,
+    caplog: pytest.LogCaptureFixture,
+    request_method: str,
+    path: str,
+    payload: dict[str, Any],
+    expected_status: int,
+    expected_code: str,
+    message_contains: str,
+    error_type: str,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="apps.api.routes.models")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await getattr(client, request_method)(path, json=payload)
+
+    assert fake_store is not None
+    assert response.status_code == expected_status
+    _assert_error_envelope(
+        response.json(),
+        code=expected_code,
+        message_contains=message_contains,
+        error_type=error_type,
+    )
+    if expected_status == 500:
+        rendered = str(response.json())
+        log_records = [record for record in caplog.records if record.name == "apps.api.routes.models"]
+        rendered_logs = "\n".join(
+            f"{record.getMessage()} {getattr(record, 'error_type', '')} {record.exc_text or ''}"
+            for record in log_records
+        )
+        assert log_records
+        assert all(record.exc_info is None for record in log_records)
+        assert error_type in rendered_logs
+        for unsafe in (
+            "DATABASE_URL",
+            "postgresql://",
+            "nhms:secret",
+            "/srv/nhms/registry.py",
+            "OperationalError",
+            "driver diagnostics",
+            "password leaked",
+        ):
+            assert unsafe not in rendered
+            assert unsafe not in rendered_logs
+
+
+@pytest.mark.asyncio
+async def test_model_package_validation_error_uses_error_envelope(
+    fake_store: FakeModelRegistryStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = tmp_path / "object-store"
+    object_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models",
+            json={
+                "model_id": "bad_package",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/missing/package/",
+            },
+        )
+
+    assert fake_store is not None
+    assert response.status_code == 422
+    _assert_error_envelope(
+        response.json(),
+        code="MODEL_PACKAGE_VALIDATION_ERROR",
+        message_contains="model_package_uri",
+        error_type="ModelPackageValidationError",
+    )
 
 
 def test_geometry_to_wkt_accepts_expected_geojson_shapes() -> None:
@@ -289,3 +483,30 @@ def test_create_model_rejects_mesh_version_from_different_basin(
         )
 
     assert not any("INSERT INTO core.model_instance" in statement for statement in cursor.statements)
+
+
+def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:
+    assert set(body) == {"request_id", "status", "data"}
+    assert body["request_id"]
+    assert body["status"] == "ok"
+    data = body["data"]
+    assert set(data) == {"total", "items", "limit", "offset"}
+    assert data["total"] == len(expected_ids)
+    assert data["limit"] == expected_limit
+    assert data["offset"] == 0
+    assert {item["model_id"] for item in data["items"]} == expected_ids
+
+
+def _assert_error_envelope(
+    body: dict[str, Any],
+    *,
+    code: str,
+    message_contains: str,
+    error_type: str,
+) -> None:
+    assert set(body) == {"request_id", "status", "error"}
+    assert body["request_id"]
+    assert body["status"] == "error"
+    assert body["error"]["code"] == code
+    assert message_contains in body["error"]["message"]
+    assert body["error"]["details"] == {"error_type": error_type}

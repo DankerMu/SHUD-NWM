@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import yaml
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
@@ -179,10 +180,44 @@ def test_model_active_contract_accepts_active_and_active_flag() -> None:
         app.dependency_overrides.pop(get_model_registry_store, None)
 
     assert active_response.status_code == 200
-    assert active_response.json()["active_flag"] is True
+    assert active_response.json()["status"] == "ok"
+    assert active_response.json()["data"]["active_flag"] is True
     assert active_flag_response.status_code == 200
-    assert active_flag_response.json()["active_flag"] is False
+    assert active_flag_response.json()["status"] == "ok"
+    assert active_flag_response.json()["data"]["active_flag"] is False
     assert store.calls == [("model_1", True), ("model_1", False)]
+
+
+def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
+    app.dependency_overrides[get_model_registry_store] = lambda: _ModelRegistryStore()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/models", params={"active": "all", "limit": 10, "offset": 0})
+            limit_boundary_response = client.get("/api/v1/models", params={"limit": 501})
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert response.status_code == 200
+    assert limit_boundary_response.status_code == 422
+    data = _assert_success_envelope(response.json())
+    assert set(data) == {"items", "total", "limit", "offset"}
+    assert data["total"] == 2
+    assert data["limit"] == 10
+    assert data["offset"] == 0
+    assert {item["model_id"] for item in data["items"]} == {"active_model", "inactive_model"}
+
+    spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
+    list_models = spec["paths"]["/api/v1/models"]["get"]
+    active_parameter = next(parameter for parameter in list_models["parameters"] if parameter.get("name") == "active")
+    assert active_parameter["schema"] == {
+        "type": "string",
+        "enum": ["true", "false", "all"],
+        "default": "true",
+    }
+    limit_parameter = next(parameter for parameter in list_models["parameters"] if parameter.get("name") == "limit")
+    assert limit_parameter["schema"]["maximum"] == 500
+    response_schema = list_models["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response_schema["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/ModelInstancePage"
 
 
 def test_forecast_series_contract_accepts_include_analysis_query() -> None:
@@ -301,6 +336,93 @@ def test_generated_frontend_types_match_openapi(tmp_path: Path) -> None:
     assert committed.read_text(encoding="utf-8") == generated.read_text(encoding="utf-8")
 
 
+def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes() -> None:
+    types_path = Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    generated_types = types_path.read_text(encoding="utf-8")
+
+    assert "active?: \"true\" | \"false\" | \"all\";" in generated_types
+    assert 'data: components["schemas"]["ModelInstancePage"];' in generated_types
+    assert "FloodFrequencyThresholds" in generated_types
+    assert "Q2?: number | null;" in generated_types
+    assert "Q20?: number | null;" in generated_types
+    assert "Q100?: number | null;" in generated_types
+    assert "frequency_thresholds: {" not in generated_types
+    assert "frequency_thresholds: components[\"schemas\"][\"FloodFrequencyThresholds\"] | null;" in generated_types
+    assert "frequency_thresholds?: components[\"schemas\"][\"FloodFrequencyThresholds\"] | null;" in generated_types
+    assert "frequency_thresholds: Record<string, never> | null;" not in generated_types
+    assert "frequency_thresholds?: Record<string, never> | null;" not in generated_types
+
+
+def test_forecast_response_issue_time_contract_allows_runtime_nulls() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+
+    for schema_name in ("RiverSeriesResponse", "SplicedForecastResponse"):
+        issue_time = schemas[schema_name]["properties"]["issue_time"]
+        assert issue_time == {
+            "type": "string",
+            "format": "date-time",
+            "nullable": True,
+        }
+
+    types_path = Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    generated_types = types_path.read_text(encoding="utf-8")
+    river_start = generated_types.index("RiverSeriesResponse:")
+    spliced_start = generated_types.index("SplicedForecastResponse:")
+    series_segment_start = generated_types.index("SeriesSegment:")
+    assert "issue_time: string | null;" in generated_types[river_start:spliced_start]
+    assert "issue_time: string | null;" in generated_types[spliced_start:series_segment_start]
+
+
+def test_spliced_forecast_segment_metadata_is_in_public_contract() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    segment_schema = spec["components"]["schemas"]["SplicedForecastResponse"]["properties"]["segments"]["items"]
+
+    assert "segment_role" in segment_schema["required"]
+    properties = segment_schema["properties"]
+    assert properties["scenario_id"]["type"] == "string"
+    assert properties["source_id"]["nullable"] is True
+    assert properties["cycle_time"] == {
+        "type": "string",
+        "format": "date-time",
+        "nullable": True,
+        "description": "Forecast source cycle time when available.",
+    }
+    assert properties["available_lead_hours"]["type"] == "integer"
+    assert properties["available_lead_hours"]["nullable"] is True
+    assert properties["segment_role"]["enum"] == ["past_7_days", "future_7_days"]
+
+    types_path = Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    generated_types = types_path.read_text(encoding="utf-8")
+    spliced_start = generated_types.index("SplicedForecastResponse:")
+    series_segment_start = generated_types.index("SeriesSegment:")
+    spliced_types = generated_types[spliced_start:series_segment_start]
+    assert "scenario_id?: string;" in spliced_types
+    assert "source_id?: string | null;" in spliced_types
+    assert "cycle_time?: string | null;" in spliced_types
+    assert "available_lead_hours?: number | null;" in spliced_types
+    assert 'segment_role: "past_7_days" | "future_7_days";' in spliced_types
+
+
+def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+
+    threshold_schema = schemas["FloodFrequencyThresholds"]
+    assert "required" not in threshold_schema
+    assert threshold_schema["properties"]["Q20"]["nullable"] is True
+
+    river_thresholds = schemas["RiverSeriesResponse"]["properties"]["frequency_thresholds"]
+    assert river_thresholds == {
+        "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/FloodFrequencyThresholds"}],
+        "nullable": True,
+    }
+
+
 def _assert_success_envelope(body: dict[str, Any]) -> Any:
     assert set(body) == {"request_id", "status", "data"}
     assert body["request_id"]
@@ -395,6 +517,32 @@ class _DataSourceStore:
 class _ModelRegistryStore:
     def __init__(self) -> None:
         self.calls: list[tuple[str, bool]] = []
+        self.models = [
+            {
+                "model_id": "active_model",
+                "basin_version_id": "basin_v1",
+                "river_network_version_id": "network_v1",
+                "mesh_version_id": "mesh_v1",
+                "calibration_version_id": "calibration_v1",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/active_model/package/",
+                "active_flag": True,
+                "resource_profile": {},
+                "created_at": "2026-05-14T00:00:00Z",
+            },
+            {
+                "model_id": "inactive_model",
+                "basin_version_id": "basin_v1",
+                "river_network_version_id": "network_v1",
+                "mesh_version_id": "mesh_v1",
+                "calibration_version_id": "calibration_v1",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/inactive_model/package/",
+                "active_flag": False,
+                "resource_profile": {},
+                "created_at": "2026-05-14T00:00:00Z",
+            },
+        ]
 
     def set_model_active(self, model_id: str, active: bool) -> dict[str, Any]:
         self.calls.append((model_id, active))
@@ -410,6 +558,20 @@ class _ModelRegistryStore:
             "resource_profile": {},
             "created_at": "2026-05-14T00:00:00Z",
         }
+
+    def list_models(
+        self,
+        *,
+        basin_version_id: str | None,
+        active: bool | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        del basin_version_id
+        items = self.models
+        if active is not None:
+            items = [item for item in items if item["active_flag"] == active]
+        return {"items": items[offset : offset + limit], "total": len(items), "limit": limit, "offset": offset}
 
 
 class _ForecastSeriesStore:

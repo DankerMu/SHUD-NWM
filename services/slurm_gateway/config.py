@@ -43,6 +43,7 @@ class SlurmGatewaySettings(BaseSettings):
     subprocess_timeout_seconds: int = Field(default=30, ge=1)
     max_retries: int = Field(default=3, ge=0)
     retry_backoff_seconds: list[int] = Field(default_factory=lambda: [60, 300, 900])
+    allow_internal_reset: bool = False
 
     model_config = SettingsConfigDict(
         env_prefix="SLURM_GATEWAY_",
