@@ -17,9 +17,11 @@ export default defineConfig({
     chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
+        // Keep intentionally large visualization dependencies in named vendor
+        // chunks so CI can enforce the app bundle budget separately.
         manualChunks: {
-          map: ['maplibre-gl', 'react-map-gl'],
-          charts: ['echarts', 'echarts-for-react'],
+          'vendor-map': ['maplibre-gl', 'react-map-gl'],
+          'vendor-charts': ['echarts', 'echarts-for-react'],
           react: ['react', 'react-dom', 'react-router-dom', 'zustand'],
           vendor: ['@radix-ui/react-dialog', '@radix-ui/react-select', '@radix-ui/react-toast', 'openapi-fetch'],
         },
