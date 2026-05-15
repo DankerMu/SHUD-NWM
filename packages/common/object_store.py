@@ -5,7 +5,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from packages.common.storage import validate_object_path
 
@@ -101,10 +101,10 @@ class LocalObjectStore:
         if not candidate:
             raise ValueError("Object key is empty.")
 
-        if self.object_store_prefix and candidate.startswith(self.object_store_prefix.rstrip("/") + "/"):
+        if candidate.startswith("s3://"):
+            candidate = self._normalize_s3_uri(candidate)
+        elif self.object_store_prefix and candidate.startswith(self.object_store_prefix.rstrip("/") + "/"):
             candidate = candidate[len(self.object_store_prefix.rstrip("/")) + 1 :]
-        elif candidate.startswith("s3://"):
-            candidate = urlparse(candidate).path.strip("/")
 
         candidate = candidate.strip("/")
         if ".." in Path(candidate).parts:
@@ -116,3 +116,24 @@ class LocalObjectStore:
         if not self.object_store_prefix:
             return normalized_key
         return f"{self.object_store_prefix.rstrip('/')}/{normalized_key}"
+
+    def _normalize_s3_uri(self, uri: str) -> str:
+        parsed = urlparse(uri)
+        if parsed.scheme != "s3" or not parsed.netloc:
+            raise ValueError(f"Invalid S3 URI: {uri}")
+
+        decoded_path = unquote(parsed.path).strip("/")
+        if self.object_store_prefix:
+            prefix = urlparse(self.object_store_prefix.rstrip("/"))
+            if prefix.scheme != "s3" or not prefix.netloc:
+                raise ValueError(f"OBJECT_STORE_PREFIX must be an S3 URI when normalizing S3 URI inputs: {uri}")
+            expected_path = unquote(prefix.path).strip("/")
+            if parsed.netloc != prefix.netloc:
+                raise ValueError(f"S3 URI bucket does not match configured object store prefix: {uri}")
+            if expected_path:
+                if decoded_path == expected_path:
+                    raise ValueError(f"S3 URI must include an object key below configured prefix: {uri}")
+                if not decoded_path.startswith(f"{expected_path}/"):
+                    raise ValueError(f"S3 URI is outside configured object store prefix: {uri}")
+                return decoded_path[len(expected_path) + 1 :]
+        return decoded_path

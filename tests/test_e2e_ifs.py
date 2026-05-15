@@ -85,7 +85,7 @@ def test_ifs_06z_144h_manifest_context_and_forcing_limit(tmp_path: Path) -> None
         store,
         object_root,
         cycle_time,
-        forecast_hours=[0, 3, 144, 147],
+        forecast_hours=[0, 3, 144],
     )
     grid_definition_uri = _write_grid_definition(store, "canonical/IFS/2026050106/grid/ifs_0p25.json")
     _run_ifs_canonical_converter(repository, store, object_root, manifest, grid_definition_uri)
@@ -95,7 +95,6 @@ def test_ifs_06z_144h_manifest_context_and_forcing_limit(tmp_path: Path) -> None
         row.valid_time for row in repository.forcing_rows if row.forcing_version_id == forcing.forcing_version_id
     }
     assert max(valid_times) == cycle_time + timedelta(hours=144)
-    assert cycle_time + timedelta(hours=147) not in valid_times
     assert repository.forcing_versions[forcing.forcing_version_id]["lineage_json"]["max_lead_hours"] == 144
 
     orchestrator = ForecastOrchestrator(

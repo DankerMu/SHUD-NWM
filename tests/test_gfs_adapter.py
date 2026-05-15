@@ -132,6 +132,14 @@ def test_manifest_contains_57_forecast_hours_times_7_variables(tmp_path: Path) -
     assert adapter.object_store.exists("raw/gfs/2026050700/manifest.json")
 
 
+@pytest.mark.parametrize("forecast_hours", [[-3], [1], [171]])
+def test_build_manifest_rejects_invalid_forecast_hours(tmp_path: Path, forecast_hours: list[int]) -> None:
+    adapter = build_adapter(tmp_path)
+
+    with pytest.raises(ValueError, match="GFS forecast hour"):
+        adapter.build_manifest("2026050700", forecast_hours=forecast_hours)
+
+
 def test_verify_manifest_checksum_match_and_mismatch(tmp_path: Path) -> None:
     content = b"GRIB checksum payload 7777"
     checksum = sha256_bytes(content)

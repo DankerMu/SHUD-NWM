@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 
+import pytest
+
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 
 base = importlib.import_module("workers.data_adapters.base")
@@ -145,6 +147,26 @@ def test_build_manifest_uses_cycle_specific_lead_policy_and_custom_hours(tmp_pat
 
     assert len(custom.entries) == 3 * 8
     assert sorted({entry.forecast_hour for entry in custom.entries}) == [0, 3, 6]
+
+
+@pytest.mark.parametrize(
+    ("cycle_time", "forecast_hours"),
+    [
+        ("2026050106", [147]),
+        ("2026050118", [147]),
+        ("2026050100", [171]),
+        ("2026050112", [171]),
+    ],
+)
+def test_build_manifest_rejects_cycle_specific_invalid_forecast_hours(
+    tmp_path: Path,
+    cycle_time: str,
+    forecast_hours: list[int],
+) -> None:
+    adapter = build_adapter(tmp_path)
+
+    with pytest.raises(ValueError, match="IFS forecast hour"):
+        adapter.build_manifest(cycle_time, forecast_hours=forecast_hours)
 
 
 def test_download_plan_normal_idempotent_retry_and_mirror_switch(tmp_path: Path) -> None:

@@ -49,7 +49,7 @@ class E2ERepository:
         self.hydro_runs: dict[str, dict[str, Any]] = {}
         self.river_timeseries: list[RiverTimeseriesRow] = []
         self.state_snapshots: dict[str, StateSnapshot] = {}
-        self.best_available_selections: dict[tuple[datetime, str], BestAvailableSelection] = {}
+        self.best_available_selections: dict[tuple[str, datetime, str], BestAvailableSelection] = {}
         self.qc_results: list[Any] = []
 
     def ensure_data_source(self, **kwargs: Any) -> dict[str, Any]:
@@ -421,8 +421,11 @@ class E2ERepository:
         return selections
 
     def upsert_selection(self, selection: BestAvailableSelection) -> dict[str, Any]:
-        self.best_available_selections[(_utc(selection.valid_time), selection.variable)] = selection
+        self.best_available_selections[
+            (selection.forcing_version_id, _utc(selection.valid_time), selection.variable)
+        ] = selection
         return {
+            "forcing_version_id": selection.forcing_version_id,
             "valid_time": selection.valid_time,
             "variable": selection.variable,
             "selected_source": selection.selected_source,
@@ -446,6 +449,7 @@ class E2ERepository:
                 continue
             rows.append(
                 {
+                    "forcing_version_id": selection.forcing_version_id,
                     "valid_time": selection.valid_time,
                     "variable": selection.variable,
                     "selected_source": selection.selected_source,

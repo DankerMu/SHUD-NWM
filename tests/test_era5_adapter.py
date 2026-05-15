@@ -130,6 +130,14 @@ def test_manifest_contains_8_variables_times_24_hourly_steps(tmp_path: Path) -> 
     assert adapter.object_store.exists("raw/ERA5/2026-04-20/manifest.json")
 
 
+@pytest.mark.parametrize("forecast_hours", [[24], [-1]])
+def test_build_manifest_rejects_invalid_forecast_hours(tmp_path: Path, forecast_hours: list[int]) -> None:
+    adapter = build_adapter(tmp_path)
+
+    with pytest.raises(ValueError, match="ERA5 forecast hour"):
+        adapter.build_manifest("2026-04-20", forecast_hours=forecast_hours)
+
+
 def test_cds_request_construction_for_download(tmp_path: Path) -> None:
     client = MockCDSClient()
     adapter = build_adapter(tmp_path, cds_client=client)

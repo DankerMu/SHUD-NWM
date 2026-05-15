@@ -28,6 +28,7 @@ from .base import (
     VerificationResult,
     cycle_id_for,
     parse_cycle_date,
+    validate_forecast_hours,
 )
 from .gfs_adapter import ForecastCycleRepository
 
@@ -512,7 +513,13 @@ class ERA5Adapter(DataSourceAdapter):
         variables = tuple(self.config.variables)
         if not variables:
             raise ERA5AdapterError("ERA5 manifest requires at least one variable.")
-        hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        hours = validate_forecast_hours(
+            list(forecast_hours if forecast_hours is not None else self.config.forecast_hours()),
+            source_id=self.config.source_id,
+            min_hour=0,
+            max_hour=23,
+            step_hours=1,
+        )
         if not hours:
             raise ERA5AdapterError("ERA5 manifest requires at least one forecast hour.")
         entries: list[ManifestEntry] = []

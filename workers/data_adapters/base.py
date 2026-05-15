@@ -51,6 +51,36 @@ def valid_time_for(cycle_time: str | datetime, forecast_hour: int) -> datetime:
     return parse_cycle_time(cycle_time) + timedelta(hours=forecast_hour)
 
 
+def validate_forecast_hours(
+    forecast_hours: list[int],
+    *,
+    source_id: str,
+    min_hour: int,
+    max_hour: int,
+    step_hours: int,
+) -> list[int]:
+    """Validate caller-supplied lead hours before manifest path generation."""
+    if step_hours <= 0:
+        raise ValueError(f"{source_id} forecast-hour step must be positive.")
+
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for forecast_hour in forecast_hours:
+        if not isinstance(forecast_hour, int) or isinstance(forecast_hour, bool):
+            raise ValueError(f"{source_id} forecast hour must be an integer: {forecast_hour!r}")
+        if forecast_hour in seen:
+            raise ValueError(f"{source_id} forecast hours must be unique: {forecast_hour}")
+        if forecast_hour < min_hour:
+            raise ValueError(f"{source_id} forecast hour {forecast_hour} is below minimum {min_hour}.")
+        if forecast_hour > max_hour:
+            raise ValueError(f"{source_id} forecast hour {forecast_hour} exceeds maximum {max_hour}.")
+        if (forecast_hour - min_hour) % step_hours != 0:
+            raise ValueError(f"{source_id} forecast hour {forecast_hour} is not aligned to {step_hours}h steps.")
+        seen.add(forecast_hour)
+        normalized.append(forecast_hour)
+    return normalized
+
+
 @dataclass(frozen=True)
 class CycleDiscovery:
     cycle_id: str
