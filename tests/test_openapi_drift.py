@@ -10,53 +10,93 @@ from apps.api.main import app
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 RouteKey = tuple[str, str]
 
-# Documented in the public OpenAPI contract, but deferred until the backing
-# registry, lineage, layer, and tile implementations are promoted to the API.
-DEFERRED_ROUTES: set[RouteKey] = {
-    ("GET", "/api/v1/basins"),
-    ("GET", "/api/v1/basins/{basin_id}/versions"),
-    ("GET", "/api/v1/models/{model_id}"),
-    ("GET", "/api/v1/models/{model_id}/flood-frequency-curves"),
-    ("GET", "/api/v1/basin-versions/{basin_version_id}/river-network-versions"),
-    ("GET", "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}"),
-    ("GET", "/api/v1/met/stations/{station_id}/series"),
-    ("GET", "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf"),
-    ("GET", "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf"),
-    ("GET", "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png"),
-    ("GET", "/api/v1/lineage/river-point"),
-    ("GET", "/api/v1/lineage/forcing-point"),
-    ("GET", "/api/v1/lineage/product/{product_id}"),
-    ("GET", "/api/v1/layers"),
-    ("GET", "/api/v1/layers/{layer_id}/valid-times"),
+# Issue #123 leaves these documented routes deferred because the fixture
+# explicitly excludes implementing future registry read, lineage, layer, and
+# legacy tile backing stores. Each entry carries a narrow reason so future drift
+# cannot hide behind a broad allowlist.
+DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
+    ("GET", "/api/v1/basins"): "issue-123 future registry read surface; backing read store is out of scope",
+    ("GET", "/api/v1/basins/{basin_id}/versions"): (
+        "issue-123 future registry read surface; backing read store is out of scope"
+    ),
+    ("GET", "/api/v1/models/{model_id}"): (
+        "issue-123 future model detail read; only list/active convergence is in scope"
+    ),
+    (
+        "GET",
+        "/api/v1/models/{model_id}/flood-frequency-curves",
+    ): "issue-123 future model frequency metadata read; no promoted backing store yet",
+    (
+        "GET",
+        "/api/v1/basin-versions/{basin_version_id}/river-network-versions",
+    ): "issue-123 future registry read surface; backing read store is out of scope",
+    (
+        "GET",
+        "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}",
+    ): "issue-123 future river segment read surface; backing read store is out of scope",
+    ("GET", "/api/v1/met/stations/{station_id}/series"): (
+        "issue-123 future station time-series read; data-source migration is out of scope"
+    ),
+    (
+        "GET",
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+    ): "issue-123 future vector tile route; tile publisher promotion is out of scope",
+    (
+        "GET",
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+    ): "issue-123 future vector tile route; tile publisher promotion is out of scope",
+    (
+        "GET",
+        "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png",
+    ): "issue-123 future raster tile route; tile publisher promotion is out of scope",
+    ("GET", "/api/v1/lineage/river-point"): "issue-123 future lineage route; lineage store promotion is out of scope",
+    ("GET", "/api/v1/lineage/forcing-point"): "issue-123 future lineage route; lineage store promotion is out of scope",
+    ("GET", "/api/v1/lineage/product/{product_id}"): (
+        "issue-123 future lineage route; lineage store promotion is out of scope"
+    ),
+    ("GET", "/api/v1/layers"): "issue-123 future layer catalog route; layer service promotion is out of scope",
+    (
+        "GET",
+        "/api/v1/layers/{layer_id}/valid-times",
+    ): "issue-123 future layer catalog route; layer service promotion is out of scope",
 }
+DEFERRED_ROUTES = set(DEFERRED_ROUTE_REASONS)
 
-# Implemented by FastAPI, but intentionally excluded from the public OpenAPI
-# contract because they are internal/admin surfaces, write-side registry APIs,
-# compatibility shims, root health checks, or frontend SPA fallback routes.
-INTERNAL_ROUTES: set[RouteKey] = {
-    ("GET", "/api/v1/slurm/health"),
-    ("POST", "/api/v1/slurm/jobs"),
-    ("GET", "/api/v1/slurm/jobs"),
-    ("POST", "/api/v1/slurm/job-arrays"),
-    ("GET", "/api/v1/slurm/jobs/{job_id}"),
-    ("DELETE", "/api/v1/slurm/jobs/{job_id}"),
-    ("GET", "/api/v1/slurm/jobs/{job_id}/array-tasks"),
-    ("GET", "/api/v1/slurm/jobs/{job_id}/logs"),
-    ("POST", "/api/v1/slurm/internal/reset"),
-    ("GET", "/api/v1/met/best-available"),
-    ("GET", "/api/v1/state-snapshots"),
-    ("GET", "/api/v1/state-snapshots/{state_id}"),
-    ("POST", "/api/v1/basins"),
-    ("POST", "/api/v1/basins/{basin_id}/versions"),
-    ("POST", "/api/v1/river-networks"),
-    ("POST", "/api/v1/mesh-versions"),
-    ("POST", "/api/v1/models"),
-    ("POST", "/api/v1/river-segment-crosswalks"),
-    ("POST", "/api/v1/hindcast/submit"),
-    ("GET", "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf"),
-    ("GET", "/health"),
-    ("GET", "/{full_path}"),
+# Issue #123 keeps these implemented FastAPI routes outside the public OpenAPI
+# because they are internal/admin, write-side registry, compatibility, health,
+# or SPA fallback surfaces.
+INTERNAL_ROUTE_REASONS: dict[RouteKey, str] = {
+    ("GET", "/api/v1/slurm/health"): "issue-123 internal Slurm gateway health surface",
+    ("POST", "/api/v1/slurm/jobs"): "issue-123 internal Slurm gateway command surface",
+    ("GET", "/api/v1/slurm/jobs"): "issue-123 internal Slurm gateway inspection surface",
+    ("POST", "/api/v1/slurm/job-arrays"): "issue-123 internal Slurm gateway command surface",
+    ("GET", "/api/v1/slurm/jobs/{job_id}"): "issue-123 internal Slurm gateway inspection surface",
+    ("DELETE", "/api/v1/slurm/jobs/{job_id}"): "issue-123 internal Slurm gateway command surface",
+    ("GET", "/api/v1/slurm/jobs/{job_id}/array-tasks"): "issue-123 internal Slurm gateway inspection surface",
+    ("GET", "/api/v1/slurm/jobs/{job_id}/logs"): "issue-123 internal Slurm gateway inspection surface",
+    ("POST", "/api/v1/slurm/internal/reset"): (
+        "issue-123 test/admin reset surface kept internal to non-production workflows"
+    ),
+    ("GET", "/api/v1/met/best-available"): (
+        "issue-123 internal compatibility route until data-source public contract is promoted"
+    ),
+    ("GET", "/api/v1/state-snapshots"): "issue-123 internal state snapshot surface",
+    ("GET", "/api/v1/state-snapshots/{state_id}"): "issue-123 internal state snapshot surface",
+    ("POST", "/api/v1/basins"): "issue-123 write-side registry API remains internal",
+    ("POST", "/api/v1/basins/{basin_id}/versions"): "issue-123 write-side registry API remains internal",
+    ("POST", "/api/v1/river-networks"): "issue-123 write-side registry API remains internal",
+    ("POST", "/api/v1/mesh-versions"): "issue-123 write-side registry API remains internal",
+    ("POST", "/api/v1/models"): "issue-123 write-side registry API remains internal",
+    ("POST", "/api/v1/river-segment-crosswalks"): "issue-123 write-side registry API remains internal",
+    ("POST", "/api/v1/hindcast/submit"): "issue-123 hindcast submission public contract is out of scope",
+    (
+        "GET",
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    ): "issue-123 legacy compatibility redirect; query GeoJSON endpoint is the public contract",
+    ("GET", "/health"): "issue-123 root service health endpoint, not versioned public API",
+    ("GET", "/{full_path}"): "issue-123 frontend SPA fallback, not an API contract",
 }
+INTERNAL_ROUTES = set(INTERNAL_ROUTE_REASONS)
 
 
 def test_openapi_public_routes_match_fastapi_routes_except_explicit_allowlists() -> None:
@@ -71,6 +111,14 @@ def test_openapi_public_routes_match_fastapi_routes_except_explicit_allowlists()
     assert not implemented_but_undocumented - INTERNAL_ROUTES
     assert not INTERNAL_ROUTES - implemented_but_undocumented
     assert DEFERRED_ROUTES.isdisjoint(INTERNAL_ROUTES)
+
+
+def test_openapi_drift_allowlists_have_issue_scoped_reasons() -> None:
+    for route, reason in {**DEFERRED_ROUTE_REASONS, **INTERNAL_ROUTE_REASONS}.items():
+        assert route[0].lower() in HTTP_METHODS
+        assert route[1].startswith("/")
+        assert "issue-123" in reason
+        assert len(reason) >= 40
 
 
 def test_openapi_success_envelope_does_not_constrain_data_shape() -> None:

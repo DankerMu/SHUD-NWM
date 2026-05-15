@@ -174,8 +174,10 @@ paths:
           in: query
           required: false
           schema:
-            type: boolean
-          description: Filter by active model flag.
+            type: string
+            enum: ["true", "false", "all"]
+            default: "true"
+          description: Filter by active model flag. Omitted defaults to active models only; use all for no active filter.
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
       responses:
@@ -190,9 +192,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: "#/components/schemas/ModelInstance"
+                        $ref: "#/components/schemas/ModelInstancePage"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1568,6 +1568,24 @@ components:
         created_at:
           type: string
           format: date-time
+    ModelInstancePage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelInstance"
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 500
+        offset:
+          type: integer
+          minimum: 0
     RiverSegment:
       type: object
       required: [river_segment_id, river_network_version_id, geom, properties_json, created_at]
@@ -1869,19 +1887,19 @@ components:
             $ref: "#/components/schemas/SeriesSegment"
         frequency_thresholds:
           type: object
-          required: [q2, q5, q10, q20, q50, q100]
+          required: [Q2, Q5, Q10, Q20, Q50, Q100]
           properties:
-            q2:
+            Q2:
               type: number
-            q5:
+            Q5:
               type: number
-            q10:
+            Q10:
               type: number
-            q20:
+            Q20:
               type: number
-            q50:
+            Q50:
               type: number
-            q100:
+            Q100:
               type: number
     SplicedForecastResponse:
       type: object
@@ -1921,7 +1939,8 @@ components:
         unit:
           type: string
         frequency_thresholds:
-          type: object
+          allOf:
+            - $ref: "#/components/schemas/FloodFrequencyThresholds"
           nullable: true
     SeriesSegment:
       type: object
@@ -2620,12 +2639,14 @@ components:
           items:
             $ref: "#/components/schemas/FloodAlertTimelinePoint"
         peak:
+          allOf:
+            - $ref: "#/components/schemas/FloodAlertTimelinePoint"
           nullable: true
-          type: object
           description: "Peak timeline point, or null"
         frequency_thresholds:
+          allOf:
+            - $ref: "#/components/schemas/FloodFrequencyThresholds"
           nullable: true
-          type: object
           description: "Flood frequency thresholds, or null"
         quality_note:
           type: string

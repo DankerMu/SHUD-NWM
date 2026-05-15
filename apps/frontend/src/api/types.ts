@@ -709,6 +709,12 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        ModelInstancePage: {
+            items: components["schemas"]["ModelInstance"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
         RiverSegment: {
             river_segment_id: string;
             river_network_version_id: string;
@@ -842,12 +848,12 @@ export interface components {
             unit: string;
             series: components["schemas"]["SeriesSegment"][];
             frequency_thresholds: {
-                q2: number;
-                q5: number;
-                q10: number;
-                q20: number;
-                q50: number;
-                q100: number;
+                Q2: number;
+                Q5: number;
+                Q10: number;
+                Q20: number;
+                Q50: number;
+                Q100: number;
             };
         };
         /** @description Returned when include_analysis=true splices analysis-period data before the forecast window into a unified segments array. */
@@ -866,7 +872,7 @@ export interface components {
             issue_time: string;
             variable: string;
             unit: string;
-            frequency_thresholds?: Record<string, never> | null;
+            frequency_thresholds?: components["schemas"]["FloodFrequencyThresholds"] | null;
         };
         SeriesSegment: {
             scenario_id: string;
@@ -1156,9 +1162,9 @@ export interface components {
             timesteps: components["schemas"]["FloodAlertTimelinePoint"][];
             timeline: components["schemas"]["FloodAlertTimelinePoint"][];
             /** @description Peak timeline point, or null */
-            peak: Record<string, never> | null;
+            peak: components["schemas"]["FloodAlertTimelinePoint"] | null;
             /** @description Flood frequency thresholds, or null */
-            frequency_thresholds: Record<string, never> | null;
+            frequency_thresholds: components["schemas"]["FloodFrequencyThresholds"] | null;
             quality_note: string | null;
         };
         /** @description GeoJSON FeatureCollection for flood return-period map rendering. */
@@ -1396,8 +1402,8 @@ export interface operations {
         parameters: {
             query?: {
                 basin_version_id?: components["parameters"]["BasinVersionIdQuery"];
-                /** @description Filter by active model flag. */
-                active?: boolean;
+                /** @description Filter by active model flag. Omitted defaults to active models only; use all for no active filter. */
+                active?: "true" | "false" | "all";
                 limit?: components["parameters"]["Limit"];
                 offset?: components["parameters"]["Offset"];
             };
@@ -1414,7 +1420,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelInstance"][];
+                        data: components["schemas"]["ModelInstancePage"];
                     };
                 };
             };
