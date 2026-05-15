@@ -74,6 +74,24 @@ pnpm dev
 
 Use `pnpm build` for the production bundle, `pnpm test` for unit tests, and `pnpm test:e2e` for Playwright E2E tests. The Vite dev server proxies `/api` and `/health` to `http://localhost:8000`; production builds are served by FastAPI from `apps/frontend/dist/`. The default frontend API base is empty (same-origin); set `VITE_API_BASE_URL` in `.env` only for cross-origin deployments.
 
+## Validation
+
+Fast backend checks do not require external services:
+
+```bash
+uv run pytest -q
+uv run ruff check .
+```
+
+Real PostgreSQL/PostGIS/TimescaleDB coverage is opt-in:
+
+```bash
+docker compose -f infra/docker-compose.dev.yml up -d db
+NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms uv run pytest -q -m integration
+```
+
+See [`docs/VALIDATION.md`](docs/VALIDATION.md) for the full backend, integration, frontend, E2E, and OpenSpec matrix.
+
 ## Runtime Source Layout
 
 Active source paths use the package names below:

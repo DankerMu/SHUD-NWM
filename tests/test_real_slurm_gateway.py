@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -96,6 +97,122 @@ def _gateway(tmp_path: Path, template_name: str = "run.sbatch") -> RealSlurmGate
             workspace_dir=str(tmp_path / "workspace"),
         )
     )
+
+
+def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    command_log = tmp_path / "slurm-commands.jsonl"
+    _write_fake_slurm_binary(bin_dir / "sbatch", command_log)
+    _write_fake_slurm_binary(bin_dir / "sacct", command_log)
+    _write_fake_slurm_binary(bin_dir / "scancel", command_log)
+    _write_fake_slurm_binary(bin_dir / "sinfo", command_log)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    gateway = _gateway(tmp_path)
+    request = SubmitJobRequest(
+        run_id="run_001",
+        model_id="model_001",
+        job_type="run_shud_forecast_array",
+        manifest={"run_id": "run_001", "model_id": "model_001", "job_type": "run_shud_forecast_array"},
+    )
+    submitted = gateway.submit_job(request)
+    assert submitted.job_id == "12345"
+
+    array = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=[
+            _fake_array_task("run_001", "model_001"),
+            _fake_array_task("run_002", "model_002"),
+        ],
+    )
+    assert array.job_id == "12345"
+    assert array.manifest["array_task_count"] == 2
+    assert array.manifest["max_concurrent"] == 2
+
+    status = gateway.get_job_status("12345")
+    assert status.status == SlurmJobStatus.SUCCEEDED
+    tasks = gateway.get_array_task_results("12345")
+    assert tasks == [
+        {"task_id": 0, "job_id": "12345_0", "state": "COMPLETED", "exit_code": 0},
+        {"task_id": 1, "job_id": "12345_1", "state": "FAILED", "exit_code": 1},
+    ]
+    jobs = gateway.list_jobs(limit=10, offset=0)
+    assert [job.job_id for job in jobs] == ["12345", "12346"]
+    assert gateway.health().status == "healthy"
+    cancelled = gateway.cancel_job("12345")
+    assert cancelled.status == SlurmJobStatus.CANCELLED
+
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345.out").write_text("master stdout\n", encoding="utf-8")
+    (log_dir / "12345_0.out").write_text("task zero stdout\n", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("task one stderr\n", encoding="utf-8")
+    logs = gateway.fetch_logs("12345")
+    assert logs.logs == "master stdout\n"
+    assert logs.array_task_logs is not None
+    assert logs.array_task_logs[0]["stdout"] == "task zero stdout\n"
+    assert logs.array_task_logs[1]["stderr"] == "task one stderr\n"
+
+    command_records = [
+        json.loads(line) for line in command_log.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    assert {record["program"] for record in command_records} == {"sbatch", "sacct", "sinfo", "scancel"}
+    assert all(isinstance(arg, str) and "\n" not in arg for record in command_records for arg in record["argv"])
+    assert any("--array=0-1%2" in record["argv"] for record in command_records if record["program"] == "sbatch")
+
+
+def _write_fake_slurm_binary(path: Path, command_log: Path) -> None:
+    path.write_text(
+        f"""#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+program = Path(sys.argv[0]).name
+argv = sys.argv[1:]
+Path({str(command_log)!r}).open("a", encoding="utf-8").write(json.dumps({{"program": program, "argv": argv}}) + "\\n")
+if program == "sbatch":
+    print("Submitted batch job 12345")
+elif program == "sacct" and "--format=JobID,State,ExitCode,Start,End" in argv:
+    print("12345|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00")
+    print("12345_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00")
+    print("12345_1|FAILED|1:0|2026-05-08T12:00:00|2026-05-08T12:04:00")
+elif program == "sacct" and "--format=JobID,State,ExitCode" in argv:
+    print("12345|COMPLETED|0:0")
+    print("12345_0|COMPLETED|0:0")
+    print("12345_1|FAILED|1:0")
+elif program == "sacct":
+    print("12345|run_001|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00")
+    print("12346|run_002|RUNNING|0:0|2026-05-08T12:00:00|")
+elif program == "sinfo":
+    print("slurm 24.05.0")
+elif program == "scancel":
+    sys.exit(0)
+else:
+    sys.exit(2)
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _fake_array_task(run_id: str, model_id: str) -> dict[str, str]:
+    return {
+        "run_id": run_id,
+        "model_id": model_id,
+        "basin_version_id": "basin_v1",
+        "river_network_version_id": "rnv_v1",
+        "source_id": "GFS",
+        "cycle_time": "2026-05-08T12:00:00Z",
+    }
 
 
 def _production_gateway(tmp_path: Path) -> RealSlurmGateway:

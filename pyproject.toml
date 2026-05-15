@@ -62,6 +62,9 @@ select = ["E", "F", "I"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: requires explicitly configured external services such as PostgreSQL/PostGIS/TimescaleDB",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
