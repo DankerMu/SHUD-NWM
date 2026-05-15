@@ -351,6 +351,25 @@ async def test_forecast_series_multi_source_latest_returns_per_source_metadata()
 
 
 @pytest.mark.asyncio
+async def test_forecast_series_empty_store_path_returns_null_frequency_thresholds() -> None:
+    store = InMemoryForecastSeriesStore()
+    store.latest_cycles = {"forecast_gfs_deterministic": _dt("2026-05-07T00:00:00Z")}
+    store.forecast_rows = []
+    app.dependency_overrides[get_forecast_store] = lambda: store
+
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+        "?issue_time=latest&variables=q_down&scenarios=GFS"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["series"] == []
+    assert data["frequency_thresholds"] is None
+    assert store.forecast_fetches[-1]["cycle_times_by_scenario"] == store.latest_cycles
+
+
+@pytest.mark.asyncio
 async def test_forecast_series_include_analysis_multi_source_has_one_analysis_segment() -> None:
     store = InMemoryForecastSeriesStore()
     app.dependency_overrides[get_forecast_store] = lambda: store

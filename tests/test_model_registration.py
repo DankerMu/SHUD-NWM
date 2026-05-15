@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -289,6 +290,7 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
 )
 async def test_model_registry_error_envelope_vectors(
     fake_store: FakeModelRegistryStore,
+    caplog: pytest.LogCaptureFixture,
     request_method: str,
     path: str,
     payload: dict[str, Any],
@@ -297,6 +299,8 @@ async def test_model_registry_error_envelope_vectors(
     message_contains: str,
     error_type: str,
 ) -> None:
+    caplog.set_level(logging.ERROR, logger="apps.api.routes.models")
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await getattr(client, request_method)(path, json=payload)
@@ -311,6 +315,14 @@ async def test_model_registry_error_envelope_vectors(
     )
     if expected_status == 500:
         rendered = str(response.json())
+        log_records = [record for record in caplog.records if record.name == "apps.api.routes.models"]
+        rendered_logs = "\n".join(
+            f"{record.getMessage()} {getattr(record, 'error_type', '')} {record.exc_text or ''}"
+            for record in log_records
+        )
+        assert log_records
+        assert all(record.exc_info is None for record in log_records)
+        assert error_type in rendered_logs
         for unsafe in (
             "DATABASE_URL",
             "postgresql://",
@@ -321,6 +333,7 @@ async def test_model_registry_error_envelope_vectors(
             "password leaked",
         ):
             assert unsafe not in rendered
+            assert unsafe not in rendered_logs
 
 
 @pytest.mark.asyncio

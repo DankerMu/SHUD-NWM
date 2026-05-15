@@ -179,14 +179,20 @@ def _handle_registry_error(error: Exception) -> ApiError:
             details={"error_type": error.__class__.__name__},
         )
     if isinstance(error, ModelRegistryError):
-        logger.exception("Model registry operation failed.")
+        logger.error(
+            "Model registry operation failed.",
+            extra={"error_type": error.__class__.__name__},
+        )
         return ApiError(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             code="MODEL_REGISTRY_ERROR",
             message=SAFE_MODEL_REGISTRY_ERROR_MESSAGE,
             details={"error_type": error.__class__.__name__},
         )
-    logger.exception("Unexpected model registry error.")
+    logger.error(
+        "Unexpected model registry error.",
+        extra={"error_type": error.__class__.__name__},
+    )
     return ApiError(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         code="MODEL_REGISTRY_ERROR",
