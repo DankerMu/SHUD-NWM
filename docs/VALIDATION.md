@@ -17,11 +17,17 @@ Requires a reachable PostgreSQL database with PostGIS and TimescaleDB available.
 
 ```bash
 docker compose -f infra/docker-compose.dev.yml up -d db
+export NHMS_RUN_INTEGRATION=1
 export NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
 uv run pytest -q -m integration
 ```
 
-`DATABASE_URL` is also accepted for CI compatibility. Without either URL, integration tests are intentionally skipped and the fast command remains self-contained.
+Integration tests are skipped unless `NHMS_RUN_INTEGRATION=1` is set.
+Use `NHMS_INTEGRATION_DATABASE_URL` for the service database.
+Generic `DATABASE_URL` is ignored for destructive create/drop setup unless
+`NHMS_ALLOW_DATABASE_URL_INTEGRATION=1` is also set for a guarded compatibility
+run. Plain `uv run pytest -q`, even with `DATABASE_URL` in the shell, remains
+self-contained.
 
 ## Frontend
 

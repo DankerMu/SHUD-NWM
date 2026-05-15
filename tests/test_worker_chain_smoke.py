@@ -14,6 +14,7 @@ from tests.integration_helpers import (
     BASIN_VERSION_ID,
     CYCLE_TIME,
     FORECAST_RUN_ID,
+    ISSUE_126_PREFIX,
     MODEL_ID,
     RIVER_NETWORK_VERSION_ID,
     SOURCE_ID,
@@ -105,7 +106,10 @@ def test_worker_chain_smoke_uses_real_schema_and_local_object_store(
         engine.dispose()
 
     assert stats.rows_written >= 4
-    assert {row["river_segment_id"] for row in rows} >= {"seg_0001", "seg_0002"}
+    assert {row["river_segment_id"] for row in rows} >= {
+        f"{ISSUE_126_PREFIX}_seg_inside",
+        f"{ISSUE_126_PREFIX}_seg_outside",
+    }
 
 
 def _write_raw_manifest(store: LocalObjectStore) -> dict[str, Any]:
@@ -243,8 +247,8 @@ class _OutputRepository:
     def load_river_segments(self, river_network_version_id: str) -> tuple[RiverSegmentOrder, ...]:
         del river_network_version_id
         return (
-            RiverSegmentOrder("seg_0001", RIVER_NETWORK_VERSION_ID, 1),
-            RiverSegmentOrder("seg_0002", RIVER_NETWORK_VERSION_ID, 2),
+            RiverSegmentOrder(f"{ISSUE_126_PREFIX}_seg_inside", RIVER_NETWORK_VERSION_ID, 1),
+            RiverSegmentOrder(f"{ISSUE_126_PREFIX}_seg_outside", RIVER_NETWORK_VERSION_ID, 2),
         )
 
     def __getattr__(self, name: str) -> Any:

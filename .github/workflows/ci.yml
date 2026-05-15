@@ -90,6 +90,7 @@ jobs:
           --health-start-period 15s
     env:
       DATABASE_URL: postgresql://nhms:nhms_dev@localhost:5432/nhms
+      NHMS_RUN_INTEGRATION: "1"
       NHMS_INTEGRATION_DATABASE_URL: postgresql://nhms:nhms_dev@localhost:5432/nhms
     steps:
       - uses: actions/checkout@v4

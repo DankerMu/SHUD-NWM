@@ -87,7 +87,7 @@ Real PostgreSQL/PostGIS/TimescaleDB coverage is opt-in:
 
 ```bash
 docker compose -f infra/docker-compose.dev.yml up -d db
-NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms uv run pytest -q -m integration
+NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms uv run pytest -q -m integration
 ```
 
 See [`docs/VALIDATION.md`](docs/VALIDATION.md) for the full backend, integration, frontend, E2E, and OpenSpec matrix.

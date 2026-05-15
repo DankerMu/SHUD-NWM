@@ -43,7 +43,8 @@ Must add/change:
 ## Decisions
 
 1. Use pytest markers/environment gates for real integration tests.
-   - Rationale: default fast tests stay self-contained, while CI can opt in with `DATABASE_URL` / integration env.
+   - Rationale: default fast tests stay self-contained, while CI can opt in with `NHMS_RUN_INTEGRATION=1` and `NHMS_INTEGRATION_DATABASE_URL`.
+   - Generic `DATABASE_URL` is not used for destructive integration database create/drop setup unless `NHMS_ALLOW_DATABASE_URL_INTEGRATION=1` is set for a guarded compatibility run.
    - Alternative considered: always start Docker from pytest. Rejected because it makes local fast tests slow and brittle.
 
 2. Reuse the existing TimescaleDB HA image and migration entrypoint.

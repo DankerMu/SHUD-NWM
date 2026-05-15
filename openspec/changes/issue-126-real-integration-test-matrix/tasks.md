@@ -26,7 +26,7 @@
 
 - [x] 5.1 `openspec validate issue-126-real-integration-test-matrix --strict --no-interactive`
 - [x] 5.2 `uv run pytest -q`
-- [x] 5.3 `uv run pytest -q -m integration` is wired for PostgreSQL/PostGIS/TimescaleDB service variables; local no-URL gate was verified and CI provides the real service run
+- [x] 5.3 `NHMS_RUN_INTEGRATION=1 uv run pytest -q -m integration` is wired for PostgreSQL/PostGIS/TimescaleDB service variables; local no-opt-in gate was verified and CI provides the real service run
 - [x] 5.4 `uv run ruff check .`
 - [x] 5.5 `cd apps/frontend && corepack pnpm test`
 - [x] 5.6 `cd apps/frontend && corepack pnpm build`

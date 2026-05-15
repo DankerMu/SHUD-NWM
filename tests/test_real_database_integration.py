@@ -159,6 +159,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
 
     with TestClient(app) as client:
         models = client.get("/api/v1/models", params={"active": "all"})
+        active_models = client.get("/api/v1/models")
         segments = client.get(f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments")
         forecast = client.get(
             f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments/it126_seg_inside/forecast-series",
@@ -197,6 +198,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
 
     for response in (
         models,
+        active_models,
         segments,
         forecast,
         status,
@@ -213,6 +215,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
         assert response.status_code == 200, response.text
 
     assert any(item["model_id"] == MODEL_ID for item in models.json()["data"]["items"])
+    assert any(item["model_id"] == MODEL_ID for item in active_models.json()["data"]["items"])
     assert {feature["properties"]["segment_id"] for feature in segments.json()["data"]["features"]} == {
         "it126_seg_inside",
         "it126_seg_outside",

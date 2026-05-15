@@ -416,7 +416,7 @@ def flood_return_period_map(
             bbox_filter = """
               AND rs.geom && ST_Transform(
                 ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326),
-                ST_SRID(rs.geom)
+                4490
               )
             """
     rows = session.execute(

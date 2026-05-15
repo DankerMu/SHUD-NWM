@@ -6,12 +6,12 @@ The system SHALL provide an integration test lane that applies all `db/migration
 
 #### Scenario: Fresh real database migration
 
-- **WHEN** the integration lane runs with a real PostgreSQL/PostGIS/TimescaleDB `DATABASE_URL`
+- **WHEN** the integration lane runs with `NHMS_RUN_INTEGRATION=1` and a real PostgreSQL/PostGIS/TimescaleDB `NHMS_INTEGRATION_DATABASE_URL`
 - **THEN** every migration is applied in filename order, required extensions/schemas/enums/tables/indexes/constraints exist, PostGIS geometry columns have the expected SRID/type, Timescale hypertables exist where required, and a second migration pass skips already applied migrations without error
 
 #### Scenario: Integration database unavailable in fast local tests
 
-- **WHEN** the normal fast test command runs without an integration database URL
+- **WHEN** the normal fast test command runs without `NHMS_RUN_INTEGRATION=1`
 - **THEN** external-service integration tests are skipped or excluded intentionally, and fast unit/API tests continue to run without Docker or PostgreSQL
 
 ### Requirement: Real-schema API smoke covers production surfaces
@@ -21,7 +21,7 @@ The system SHALL provide real-schema API smoke tests for models, forecast-series
 #### Scenario: Core API smoke succeeds on real schema
 
 - **WHEN** seeded records exist in the migrated real database for a model, river segment, hydro run, pipeline jobs, flood results, and a state snapshot
-- **THEN** API requests for model listing/detail, river forecast-series, pipeline status/stages/jobs, flood alert summary/ranking/timeline/map, and state snapshot list/detail return successful responses with expected identifiers and data fields
+- **THEN** API requests for model listing/active-model discovery, river forecast-series, pipeline status/stages/jobs, flood alert summary/ranking/timeline/map, and state snapshot list/detail return successful responses with expected identifiers and data fields
 
 ### Requirement: Flood spatial queries use PostGIS behavior
 
@@ -57,4 +57,4 @@ The repository SHALL document and/or encode separate validation commands for fas
 #### Scenario: CI and developer command matrix is explicit
 
 - **WHEN** a developer or CI runner needs to validate the project
-- **THEN** it can run a documented fast command without external services, an integration command with PostgreSQL/PostGIS/TimescaleDB service variables, frontend unit/build commands, and targeted E2E commands without guessing which services are required
+- **THEN** it can run a documented fast command without external services, an explicit opt-in integration command with PostgreSQL/PostGIS/TimescaleDB service variables, frontend unit/build commands, and targeted E2E commands without guessing which services are required
