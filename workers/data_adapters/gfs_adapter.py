@@ -30,8 +30,8 @@ from .base import (
     format_cycle_time,
     parse_cycle_date,
     parse_cycle_time,
-    validate_forecast_hours,
     valid_time_for,
+    validate_forecast_hours,
 )
 
 LOGGER = logging.getLogger(__name__)

@@ -651,6 +651,18 @@ wheels = [
 ]
 
 [[package]]
+name = "ecmwf-opendata"
+version = "0.3.29"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "multiurl" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/ab/b2c74dcffd462fa2e5d6a2144be63ad4bb6ddc608c4a8bfe2033e1acdede/ecmwf_opendata-0.3.29.tar.gz", hash = "sha256:bf8a78ea71eb704884870bd234069d59caf9fb7edca794641e9be0a7d359df98", size = 29741, upload-time = "2026-04-23T17:12:38.253Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6a/2a/b2a925b4e2830901f6e9064b90892eb3aba4b4ca8564bbaa5acc18666727/ecmwf_opendata-0.3.29-py3-none-any.whl", hash = "sha256:2bbfab8a7fe2dc3d2d835e296f338be0f35872cbfa1d485c286f51e230de7df1", size = 22313, upload-time = "2026-04-23T17:12:37.265Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.136.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1469,6 +1481,7 @@ dependencies = [
     { name = "cfgrib" },
     { name = "click" },
     { name = "eccodes" },
+    { name = "ecmwf-opendata" },
     { name = "fastapi" },
     { name = "gcsfs" },
     { name = "httpx" },
@@ -1503,6 +1516,7 @@ requires-dist = [
     { name = "cfgrib", specifier = ">=0.9.10.4" },
     { name = "click", specifier = ">=8.1.7" },
     { name = "eccodes", specifier = ">=1.7.0" },
+    { name = "ecmwf-opendata", specifier = ">=0.3.19" },
     { name = "fastapi", specifier = ">=0.110.0" },
     { name = "gcsfs", specifier = ">=2024.2.0" },
     { name = "httpx", specifier = ">=0.27.0" },
