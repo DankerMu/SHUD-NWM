@@ -99,7 +99,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         try:
             resolved_manifest = _resolve_execute_manifest(manifest, manifest_index, task_id)
             click.echo(json.dumps(_execute(resolved_manifest, dry_run=dry_run), sort_keys=True))
-        except (ManifestValidationError, SHUDRuntimeError, OSError, json.JSONDecodeError) as error:
+        except (ManifestValidationError, SHUDRuntimeError, OSError, json.JSONDecodeError, KeyError) as error:
             error_code, message = _cli_error(error)
             click.echo(f"{error_code}: {message}", err=True)
             raise SystemExit(1) from error
@@ -140,7 +140,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         try:
             resolved_manifest = _resolve_execute_manifest(args.manifest, args.manifest_index, args.task_id)
             print(json.dumps(_execute(resolved_manifest, dry_run=args.dry_run), sort_keys=True))
-        except (ManifestValidationError, SHUDRuntimeError, OSError, json.JSONDecodeError) as error:
+        except (ManifestValidationError, SHUDRuntimeError, OSError, json.JSONDecodeError, KeyError) as error:
             error_code, message = _cli_error(error)
             print(f"{error_code}: {message}", file=sys.stderr)
             return 1
@@ -166,6 +166,8 @@ def _cli_error(error: Exception) -> tuple[str, str]:
         return "RUNTIME_MANIFEST_MISSING", str(error)
     if isinstance(error, json.JSONDecodeError):
         return "RUNTIME_MANIFEST_INVALID_JSON", str(error)
+    if isinstance(error, KeyError):
+        return "RUNTIME_MANIFEST_INVALID", f"Missing required manifest field: {error}"
     return "RUNTIME_MANIFEST_READ_FAILED", str(error)
 
 

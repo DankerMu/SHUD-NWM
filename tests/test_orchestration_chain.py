@@ -418,7 +418,9 @@ def test_forecast_manifest_write_failure_marks_pipeline_failed(tmp_path: Path) -
 
     assert result.status == "failed"
     assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
-    assert repository.jobs["job_cycle_gfs_2026050100_forecast"]["status"] == "submission_failed"
+    job = repository.jobs["job_cycle_gfs_2026050100_forecast"]
+    assert job["status"] == "submission_failed"
+    assert job["error_code"] == "RUNTIME_MANIFEST_WRITE_FAILED"
     assert repository.cycle_statuses[-1] == "failed_run"
 
 
@@ -459,7 +461,9 @@ def test_unreadable_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> 
 
     assert result.status == "failed"
     assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
-    assert repository.jobs["job_cycle_gfs_2026050100_forecast"]["status"] == "submission_failed"
+    job = repository.jobs["job_cycle_gfs_2026050100_forecast"]
+    assert job["status"] == "submission_failed"
+    assert job["error_code"] == "RUNTIME_MANIFEST_READ_FAILED"
     assert "publish" not in [submission["stage"] for submission in client.submissions]
     assert repository.cycle_statuses[-1] == "failed_run"
 

@@ -1431,6 +1431,7 @@ class ForecastOrchestrator:
         pipeline_job_id = pipeline_job_id or _pipeline_job_id(context.run_id, stage.stage)
         now = _utcnow()
         message = str(error)
+        error_code = getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED"
         self.repository.upsert_pipeline_job(
             {
                 "job_id": pipeline_job_id,
@@ -1445,7 +1446,7 @@ class ForecastOrchestrator:
                 "started_at": None,
                 "finished_at": now,
                 "exit_code": None,
-                "error_code": "SBATCH_SUBMISSION_FAILED",
+                "error_code": error_code,
                 "error_message": message,
                 "log_uri": None,
             }
@@ -1463,7 +1464,7 @@ class ForecastOrchestrator:
             source_id=context.source_id,
             cycle_time=context.cycle_time,
             status=stage.failure_cycle_status,
-            error_code="SBATCH_SUBMISSION_FAILED",
+            error_code=error_code,
             error_message=message,
         )
         return StageRunResult(
@@ -1472,7 +1473,7 @@ class ForecastOrchestrator:
             pipeline_job_id=pipeline_job_id,
             slurm_job_id="",
             status="submission_failed",
-            error_code="SBATCH_SUBMISSION_FAILED",
+            error_code=error_code,
             error_message=message,
         )
 
@@ -1558,11 +1559,25 @@ class ForecastOrchestrator:
             manifest = self._build_forecast_runtime_manifest(context, basin)
             content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
             manifest_uri = manifest["outputs"]["run_manifest_uri"]
-            self.object_store.write_bytes_atomic(manifest_uri, content)
+            try:
+                self.object_store.write_bytes_atomic(manifest_uri, content)
+            except OSError as exc:
+                raise OrchestratorError(
+                    "RUNTIME_MANIFEST_WRITE_FAILED",
+                    f"Failed to write runtime manifest to object store for task {index}: {exc}",
+                    {"task_id": index, "manifest_uri": manifest_uri},
+                ) from exc
 
             manifest_path = self._workspace_path("runs", str(basin["run_id"]), "input", "manifest.json")
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            manifest_path.write_bytes(content)
+            try:
+                manifest_path.write_bytes(content)
+            except OSError as exc:
+                raise OrchestratorError(
+                    "RUNTIME_MANIFEST_WRITE_FAILED",
+                    f"Failed to write runtime manifest for task {index}: {exc}",
+                    {"task_id": index, "manifest_path": str(manifest_path)},
+                ) from exc
 
             self._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=index)
             self.repository.create_hydro_run_from_basin(basin, manifest)
