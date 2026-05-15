@@ -22,7 +22,7 @@ from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryError, RetryNotFoundError, RetryService
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+from workers.data_adapters.base import format_cycle_time, parse_cycle_time
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
@@ -90,7 +90,7 @@ def pipeline_status(
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     parsed_cycle_time = _parse_cycle_time(cycle_time)
-    cycle_id = cycle_id_for(source, parsed_cycle_time)
+    cycle_id = _cycle_id_for_source(source, parsed_cycle_time)
     cycle = _fetch_forecast_cycle(store, source=source, cycle_time=parsed_cycle_time, cycle_id=cycle_id)
     if cycle is None:
         raise ApiError(
@@ -122,7 +122,7 @@ def pipeline_stages(
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     parsed_cycle_time = _parse_cycle_time(cycle_time)
-    cycle_id = cycle_id_for(source, parsed_cycle_time)
+    cycle_id = _cycle_id_for_source(source, parsed_cycle_time)
     cycle = _fetch_forecast_cycle(store, source=source, cycle_time=parsed_cycle_time, cycle_id=cycle_id)
     if cycle is None:
         raise ApiError(
@@ -157,7 +157,7 @@ def list_jobs(
     if cycle_time is not None:
         parsed_cycle_time = _parse_cycle_time(cycle_time)
         if source is not None:
-            statement = statement.where(PipelineJob.cycle_id == cycle_id_for(source, parsed_cycle_time))
+            statement = statement.where(PipelineJob.cycle_id == _cycle_id_for_source(source, parsed_cycle_time))
         else:
             statement = statement.where(PipelineJob.cycle_id.like(f"%_{format_cycle_time(parsed_cycle_time)}"))
     elif source is not None:
@@ -699,7 +699,23 @@ def _require_operator_role(request: Request) -> None:
 
 
 def _cycle_id_prefix_for_source(source: str) -> str:
-    return f"{normalize_source_id(source).lower()}_"
+    return f"{_normalize_source_for_query(source).lower()}_"
+
+
+def _cycle_id_for_source(source: str, cycle_time: datetime) -> str:
+    return f"{_normalize_source_for_query(source).lower()}_{format_cycle_time(cycle_time)}"
+
+
+def _normalize_source_for_query(source: str) -> str:
+    try:
+        return normalize_source_id(source)
+    except ValueError as error:
+        raise ApiError(
+            status_code=422,
+            code="INVALID_SOURCE",
+            message="source must be a supported monitoring source.",
+            details={"source": source, "supported_sources": ["GFS", "IFS", "ERA5"]},
+        ) from error
 
 
 def _parse_cycle_time(value: str) -> datetime:

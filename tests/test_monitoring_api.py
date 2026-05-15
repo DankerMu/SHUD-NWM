@@ -83,6 +83,25 @@ def test_pipeline_stages_missing_cycle() -> None:
         assert response.json()["error"]["code"] == "PIPELINE_CYCLE_NOT_FOUND"
 
 
+def test_monitoring_endpoints_reject_invalid_source() -> None:
+    cycle_time = _cycle_time()
+    endpoints = [
+        ("/api/v1/pipeline/status", {"source": "UNKNOWN", "cycle_time": cycle_time.isoformat()}),
+        ("/api/v1/pipeline/stages", {"source": "UNKNOWN", "cycle_time": cycle_time.isoformat()}),
+        ("/api/v1/jobs", {"source": "UNKNOWN", "cycle_time": cycle_time.isoformat()}),
+        ("/api/v1/jobs", {"source": "UNKNOWN"}),
+        ("/api/v1/metrics/stage-duration", {"source": "UNKNOWN", "days": 30}),
+        ("/api/v1/metrics/success-rate", {"source": "UNKNOWN", "days": 30}),
+    ]
+    with _store() as store:
+        with _client(store) as client:
+            responses = [client.get(path, params=params) for path, params in endpoints]
+
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "INVALID_SOURCE"
+
+
 def test_pipeline_stages_submitted_display_status_running() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
