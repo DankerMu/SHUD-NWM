@@ -194,7 +194,12 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                     checksum,
                     lineage_json
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, 1, 's3://nhms/forcing/it126/', 'forcing-sha', %s)
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, 1,
+                    's3://nhms/forcing/gfs/2026050300/it126_basin_v1/it126_model/',
+                    'forcing-sha',
+                    %s
+                )
                 """,
                 (
                     FORCING_VERSION_ID,
