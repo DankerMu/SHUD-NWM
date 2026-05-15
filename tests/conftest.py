@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Iterator
 from urllib.parse import urlsplit, urlunsplit
 
@@ -31,10 +32,9 @@ def integration_database_url() -> Iterator[str]:
         pytest.skip(skip_reason)
     base_url = _integration_database_url()
 
-    db_name = f"nhms_it_{os.getpid()}"
+    db_name = _integration_database_name()
     admin_url = _database_url_with_name(base_url, "postgres")
     target_url = _database_url_with_name(base_url, db_name)
-    _drop_database(admin_url, db_name)
     _create_database(admin_url, db_name)
     try:
         yield target_url
@@ -73,6 +73,10 @@ def _env_flag(name: str) -> bool:
 def _database_url_with_name(database_url: str, database_name: str) -> str:
     parsed = urlsplit(database_url)
     return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", parsed.query, parsed.fragment))
+
+
+def _integration_database_name() -> str:
+    return f"nhms_it_{uuid.uuid4().hex}"
 
 
 def _create_database(admin_url: str, database_name: str) -> None:

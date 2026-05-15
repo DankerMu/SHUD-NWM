@@ -90,7 +90,19 @@ def test_worker_chain_smoke_uses_real_schema_and_local_object_store(
         _runtime_manifest(forcing_result.forcing_version_id, forcing_result.forcing_package_uri)
     )
     assert runtime_result.status == "succeeded"
-    assert store.exists(runtime_result.output_uri)
+    output_uri = runtime_result.output_uri.rstrip("/") if runtime_result.output_uri is not None else ""
+    log_uri = runtime_result.log_uri.rstrip("/") if runtime_result.log_uri is not None else ""
+    rivqdown_uri = f"{output_uri}/demo.rivqdown"
+    state_uri = f"{output_uri}/demo.cfg.ic"
+    stdout_uri = f"{log_uri}/shud_stdout.log"
+    stderr_uri = f"{log_uri}/shud_stderr.log"
+    assert store.exists(rivqdown_uri)
+    assert b"seg_0001" in store.read_bytes(rivqdown_uri)
+    assert store.exists(state_uri)
+    assert b"STATE_TIME" in store.read_bytes(state_uri)
+    assert store.exists(stdout_uri)
+    assert b"mock_shud_omp wrote" in store.read_bytes(stdout_uri)
+    assert store.exists(stderr_uri)
 
     parser = OutputParser(
         config=OutputParserConfig(object_store_root=object_root, object_store_prefix="s3://nhms", batch_size=10),
