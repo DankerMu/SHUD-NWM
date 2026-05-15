@@ -14,11 +14,25 @@ found_count=0
 total_bytes=0
 included_count=0
 
+is_excluded_vendor_chunk() {
+  local name="$1"
+
+  # These exact prefixes are produced by vite.config.ts manualChunks for
+  # production-ready heavy visualization libraries. Do not skip arbitrary app
+  # chunks that merely contain "map" or "chart" in their names.
+  [[ "$name" =~ ^vendor-(map|charts)-[A-Za-z0-9_-]+\.js$ ]] && return 0
+
+  # Rollup can still emit MapLibre package subchunks alongside vendor-map.
+  [[ "$name" =~ ^maplibre-gl-[A-Za-z0-9_-]+\.(js|css)$ ]] && return 0
+
+  return 1
+}
+
 while IFS= read -r file; do
   found_count=$((found_count + 1))
   name="$(basename "$file")"
-  if [[ "$name" == *maplibre* ]]; then
-    echo "skip ${name} (MapLibre GL chunk)"
+  if is_excluded_vendor_chunk "$name"; then
+    echo "skip ${name} (intentional heavy vendor chunk)"
     continue
   fi
 
@@ -34,7 +48,7 @@ if [[ "$found_count" -eq 0 ]]; then
 fi
 
 if [[ "$included_count" -eq 0 ]]; then
-  echo "Bundle size check failed: no non-MapLibre JS or CSS assets were included." >&2
+  echo "Bundle size check failed: no budgeted JS or CSS assets were included." >&2
   exit 1
 fi
 

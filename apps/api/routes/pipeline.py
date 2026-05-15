@@ -17,11 +17,12 @@ from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
+from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryError, RetryNotFoundError, RetryService
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+from workers.data_adapters.base import format_cycle_time, parse_cycle_time
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
@@ -45,6 +46,10 @@ _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "frequenc
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024
 LOG_ROOT = Path(os.getenv("LOG_ROOT", "workspace"))
+
+
+def _allow_dev_role_header() -> bool:
+    return os.getenv("ALLOW_DEV_ROLE_HEADER", "").strip().lower() == "true"
 
 
 @lru_cache
@@ -85,7 +90,7 @@ def pipeline_status(
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     parsed_cycle_time = _parse_cycle_time(cycle_time)
-    cycle_id = cycle_id_for(source, parsed_cycle_time)
+    cycle_id = _cycle_id_for_source(source, parsed_cycle_time)
     cycle = _fetch_forecast_cycle(store, source=source, cycle_time=parsed_cycle_time, cycle_id=cycle_id)
     if cycle is None:
         raise ApiError(
@@ -117,7 +122,7 @@ def pipeline_stages(
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     parsed_cycle_time = _parse_cycle_time(cycle_time)
-    cycle_id = cycle_id_for(source, parsed_cycle_time)
+    cycle_id = _cycle_id_for_source(source, parsed_cycle_time)
     cycle = _fetch_forecast_cycle(store, source=source, cycle_time=parsed_cycle_time, cycle_id=cycle_id)
     if cycle is None:
         raise ApiError(
@@ -152,11 +157,11 @@ def list_jobs(
     if cycle_time is not None:
         parsed_cycle_time = _parse_cycle_time(cycle_time)
         if source is not None:
-            statement = statement.where(PipelineJob.cycle_id == cycle_id_for(source, parsed_cycle_time))
+            statement = statement.where(PipelineJob.cycle_id == _cycle_id_for_source(source, parsed_cycle_time))
         else:
             statement = statement.where(PipelineJob.cycle_id.like(f"%_{format_cycle_time(parsed_cycle_time)}"))
     elif source is not None:
-        statement = statement.where(PipelineJob.cycle_id.like(f"{source.lower()}_%"))
+        statement = statement.where(PipelineJob.cycle_id.like(f"{_cycle_id_prefix_for_source(source)}%"))
 
     if status is not None:
         statement = statement.where(PipelineJob.status == status)
@@ -434,6 +439,8 @@ def cancel_run(
 def stage_duration_metrics(
     request: Request,
     days: int = Query(default=7, ge=1, le=365),
+    source: str | None = Query(default=None),
+    scenario: str | None = Query(default=None),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     cutoff = datetime.now(UTC) - timedelta(days=days)
@@ -442,6 +449,15 @@ def stage_duration_metrics(
         PipelineJob.finished_at.is_not(None),
         PipelineJob.finished_at >= cutoff,
     )
+    if source is not None:
+        statement = statement.where(PipelineJob.cycle_id.like(f"{_cycle_id_prefix_for_source(source)}%"))
+    run_ids = _run_ids_matching_filters(store, run_type=None, scenario=scenario)
+    if run_ids is not None:
+        if not run_ids:
+            return _ok(request, [])
+        statement = statement.where(PipelineJob.run_id.in_(run_ids))
+    elif scenario is not None:
+        statement = statement.where(PipelineJob.run_id.like(f"%{scenario}%"))
     jobs = list(store.session.scalars(statement))
     buckets: dict[tuple[str, str], list[int]] = defaultdict(list)
     for job in jobs:
@@ -468,10 +484,21 @@ def stage_duration_metrics(
 def success_rate_metrics(
     request: Request,
     days: int = Query(default=7, ge=1, le=365),
+    source: str | None = Query(default=None),
+    scenario: str | None = Query(default=None),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     cutoff = datetime.now(UTC) - timedelta(days=days)
     statement = select(PipelineJob).where(PipelineJob.created_at >= cutoff)
+    if source is not None:
+        statement = statement.where(PipelineJob.cycle_id.like(f"{_cycle_id_prefix_for_source(source)}%"))
+    run_ids = _run_ids_matching_filters(store, run_type=None, scenario=scenario)
+    if run_ids is not None:
+        if not run_ids:
+            return _ok(request, [])
+        statement = statement.where(PipelineJob.run_id.in_(run_ids))
+    elif scenario is not None:
+        statement = statement.where(PipelineJob.run_id.like(f"%{scenario}%"))
     jobs = list(store.session.scalars(statement))
     cycle_jobs: dict[str, list[PipelineJob]] = defaultdict(list)
     for job in jobs:
@@ -662,13 +689,33 @@ def _ok(request: Request, data: Any) -> dict[str, Any]:
 
 def _require_operator_role(request: Request) -> None:
     role = request.headers.get("X-User-Role")
-    if role is not None and role.strip().lower() in _OPERATOR_ROLES:
+    if _allow_dev_role_header() and role is not None and role.strip().lower() in _OPERATOR_ROLES:
         return
     raise ApiError(
         status_code=403,
         code="FORBIDDEN",
         message="Operator role required.",
     )
+
+
+def _cycle_id_prefix_for_source(source: str) -> str:
+    return f"{_normalize_source_for_query(source).lower()}_"
+
+
+def _cycle_id_for_source(source: str, cycle_time: datetime) -> str:
+    return f"{_normalize_source_for_query(source).lower()}_{format_cycle_time(cycle_time)}"
+
+
+def _normalize_source_for_query(source: str) -> str:
+    try:
+        return normalize_source_id(source)
+    except ValueError as error:
+        raise ApiError(
+            status_code=422,
+            code="INVALID_SOURCE",
+            message="source must be a supported monitoring source.",
+            details={"source": source, "supported_sources": ["GFS", "IFS", "ERA5"]},
+        ) from error
 
 
 def _parse_cycle_time(value: str) -> datetime:

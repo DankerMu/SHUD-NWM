@@ -32,6 +32,7 @@ export function MonitoringPage() {
   const stages = useMonitoringStore((state) => state.stages)
   const queue = useMonitoringStore((state) => state.queue)
   const queueError = useMonitoringStore((state) => state.queueError)
+  const jobFilters = useMonitoringStore((state) => state.jobFilters)
   const isPolling = useMonitoringStore((state) => state.isPolling)
   const error = useMonitoringStore((state) => state.error)
   const setSource = useMonitoringStore((state) => state.setSource)
@@ -144,7 +145,7 @@ export function MonitoringPage() {
         <StageList stages={stages} />
         <JobsTable />
         <div className="min-[800px]:col-span-2 min-[1200px]:col-span-1">
-          <TrendPanel refreshKey={trendRefreshKey} />
+          <TrendPanel refreshKey={trendRefreshKey} source={source} scenario={jobFilters.scenario ?? null} />
         </div>
       </div>
     </div>

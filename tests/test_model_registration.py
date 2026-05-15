@@ -73,6 +73,38 @@ class FakeModelRegistryStore:
             raise InvalidReferenceError("basin_version_id does not exist: missing")
         return {"river_network_version": {"river_network_version_id": "basin_rivnet_v01"}, "segment_count": 1}
 
+    def list_river_segments(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        assert basin_version_id == "basin_v01"
+        assert river_network_version_id == "basin_rivnet_v01"
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "segment_id": "seg_001",
+                        "river_segment_id": "seg_001",
+                        "basin_version_id": "basin_v01",
+                        "river_network_version_id": "basin_rivnet_v01",
+                        "name": "Segment 001",
+                        "stream_order": 2,
+                    },
+                    "geometry": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+                }
+            ],
+            "total": 1,
+            "feature_total": 1,
+            "limit": limit,
+            "offset": offset,
+        }
+
     def create_mesh_version(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload["version_label"] == "":
             raise InvalidPayloadError("version_label must contain at least one alphanumeric character.")
@@ -116,6 +148,27 @@ class FakeModelRegistryStore:
 
     def create_crosswalk_entries(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {"count": len(payload["entries"]), "items": payload["entries"]}
+
+
+class NullGeometryModelRegistryStore(FakeModelRegistryStore):
+    def list_river_segments(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        assert basin_version_id == "basin_v01"
+        assert river_network_version_id == "basin_rivnet_v01"
+        return {
+            "type": "FeatureCollection",
+            "features": [],
+            "total": 1,
+            "feature_total": 0,
+            "limit": limit,
+            "offset": offset,
+        }
 
 
 @pytest.fixture
@@ -187,6 +240,48 @@ async def test_river_network_invalid_reference_returns_422(fake_store: FakeModel
         message_contains="basin_version_id",
         error_type="InvalidReferenceError",
     )
+
+
+@pytest.mark.asyncio
+async def test_list_river_segments_returns_backend_geojson(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments",
+            params={"river_network_version_id": "basin_rivnet_v01", "limit": 100, "offset": 0},
+        )
+
+    assert fake_store is not None
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["type"] == "FeatureCollection"
+    expected_properties = {
+        "segment_id": "seg_001",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "basin_rivnet_v01",
+    }
+    assert expected_properties.items() <= payload["features"][0]["properties"].items()
+    assert payload["features"][0]["geometry"]["type"] == "LineString"
+    assert payload["total"] == 1
+    assert payload["feature_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_river_segments_can_omit_null_geometry_features() -> None:
+    store = NullGeometryModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments",
+            params={"river_network_version_id": "basin_rivnet_v01", "limit": 100, "offset": 0},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["total"] == 1
+    assert payload["feature_total"] == 0
+    assert payload["features"] == []
 
 
 @pytest.mark.asyncio

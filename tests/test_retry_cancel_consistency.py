@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -414,16 +415,23 @@ class _client:
         self.gateway = gateway or _MockGateway()
         self.retry_service = retry_service
         self.client: TestClient | None = None
+        self.previous_allow_dev_role_header: str | None = None
 
     def __enter__(self) -> TestClient:
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: self.store
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: self.gateway
         if self.retry_service is not None:
             app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: self.retry_service
+        self.previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
         self.client = TestClient(app)
         return self.client
 
     def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        if self.previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = self.previous_allow_dev_role_header
         app.dependency_overrides.pop(pipeline_routes.get_pipeline_store, None)
         app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
         app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)

@@ -7,9 +7,9 @@ import {
 import type { FilterSpecification } from 'maplibre-gl'
 
 export const RIVER_SOURCE_ID = 'demo-rivers'
-export const RIVER_LAYER_ID = 'demo-rivers-line'
-export const RIVER_HOVER_LAYER_ID = 'demo-rivers-hover'
-export const RIVER_SELECTED_LAYER_ID = 'demo-rivers-selected'
+export const RIVER_LAYER_ID = 'river-network-line'
+export const RIVER_HOVER_LAYER_ID = 'river-network-hover'
+export const RIVER_SELECTED_LAYER_ID = 'river-network-selected'
 
 export interface RiverFeatureProperties {
   segment_id: string
@@ -31,6 +31,10 @@ export interface RiverFeature {
 export interface RiverFeatureCollection {
   type: 'FeatureCollection'
   features: RiverFeature[]
+  total?: number
+  feature_total?: number
+  limit?: number
+  offset?: number
 }
 
 const DEMO_BASIN_VERSION_ID = 'yangtze_v2026_01'

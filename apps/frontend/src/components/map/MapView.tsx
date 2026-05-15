@@ -8,6 +8,10 @@ import Map, {
 } from 'react-map-gl/maplibre'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
+import { buildApiUrl } from '@/api/base'
+import { client } from '@/api/client'
+import { getApiErrorMessage, unwrapApiData } from '@/api/response'
+import type { components } from '@/api/types'
 import {
   demoRivers,
   RIVER_HOVER_LAYER_ID,
@@ -39,6 +43,10 @@ const RIVER_INTERACTIVE_LAYER_IDS = [
   RIVER_HOVER_LAYER_ID,
   RIVER_SELECTED_LAYER_ID,
 ]
+const RIVER_SEGMENT_PAGE_LIMIT = 500
+const RIVER_SEGMENT_INITIAL_PAGE_COUNT = 2
+
+const allowDemoRiverFallback = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_RIVERS === 'true'
 
 interface TooltipState {
   x: number
@@ -54,8 +62,119 @@ interface MapViewProps {
   className?: string
 }
 
+type ModelPage = components['schemas']['ModelInstancePage']
+
+function validateRiverCollection(payload: unknown): RiverFeatureCollection {
+  const collection = unwrapApiData<RiverFeatureCollection>(payload, '河网数据加载失败')
+  if (collection.type !== 'FeatureCollection' || !Array.isArray(collection.features)) {
+    throw new Error('河网数据格式无效')
+  }
+  return collection
+}
+
+function paginationTotal(value: number | undefined, fallback: number) {
+  return Number.isFinite(value) && value !== undefined && value >= 0 ? value : fallback
+}
+
+async function fetchRiverSegmentPage(
+  basinVersionId: string,
+  riverNetworkVersionId: string,
+  offset: number,
+): Promise<RiverFeatureCollection> {
+  const params = new URLSearchParams({
+    river_network_version_id: riverNetworkVersionId,
+    limit: String(RIVER_SEGMENT_PAGE_LIMIT),
+    offset: String(offset),
+  })
+  const response = await fetch(
+    buildApiUrl(`/api/v1/basin-versions/${encodeURIComponent(basinVersionId)}/river-segments?${params}`),
+  )
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    if (allowDemoRiverFallback) return demoRivers
+    throw new Error(getApiErrorMessage(payload, response.statusText || '河网数据加载失败'))
+  }
+
+  return validateRiverCollection(payload)
+}
+
+async function loadRiverSegmentPages(
+  basinVersionId: string,
+  riverNetworkVersionId: string,
+): Promise<RiverFeatureCollection> {
+  let merged: RiverFeatureCollection | null = null
+  const features: RiverFeatureCollection['features'] = []
+
+  for (let pageIndex = 0; pageIndex < RIVER_SEGMENT_INITIAL_PAGE_COUNT; pageIndex += 1) {
+    const offset = pageIndex * RIVER_SEGMENT_PAGE_LIMIT
+    const page = await fetchRiverSegmentPage(basinVersionId, riverNetworkVersionId, offset)
+    const featureTotal = paginationTotal(page.feature_total, page.features.length)
+    const total = paginationTotal(page.total, featureTotal)
+
+    if (!merged) {
+      merged = {
+        ...page,
+        features,
+        total,
+        feature_total: featureTotal,
+        limit: 0,
+        offset: 0,
+      }
+    } else {
+      merged.total = total
+      merged.feature_total = featureTotal
+    }
+
+    if (page.features.length === 0) break
+    features.push(...page.features)
+
+    if (features.length >= featureTotal || page.features.length < RIVER_SEGMENT_PAGE_LIMIT) break
+  }
+
+  if (!merged) {
+    return {
+      type: 'FeatureCollection',
+      features: [],
+      total: 0,
+      feature_total: 0,
+      limit: 0,
+      offset: 0,
+    }
+  }
+
+  merged.limit = features.length
+  return merged
+}
+
 async function loadRiverNetwork(): Promise<RiverFeatureCollection> {
-  return demoRivers
+  const { data, error } = await client.GET('/api/v1/models', {
+    params: { query: { active: 'true', limit: 1, offset: 0 } },
+  })
+  if (error) {
+    if (allowDemoRiverFallback) return demoRivers
+    throw new Error(getApiErrorMessage(error, '模型版本加载失败'))
+  }
+
+  const models = unwrapApiData<ModelPage>(data, '模型版本加载失败')
+  const model = models.items[0]
+  if (!model?.basin_version_id || !model.river_network_version_id) {
+    if (allowDemoRiverFallback) return demoRivers
+    throw new Error('未找到活动模型的 basin_version_id 或 river_network_version_id')
+  }
+
+  return loadRiverSegmentPages(model.basin_version_id, model.river_network_version_id)
+}
+
+function loadedRiverFeatureCount(data: RiverFeatureCollection) {
+  return data.features.length
+}
+
+function totalRiverFeatureCount(data: RiverFeatureCollection) {
+  return paginationTotal(data.feature_total, loadedRiverFeatureCount(data))
+}
+
+function hasPartialRiverData(data: RiverFeatureCollection) {
+  return totalRiverFeatureCount(data) > loadedRiverFeatureCount(data)
 }
 
 function readRiverProperties(properties: unknown): RiverFeatureProperties | null {
@@ -195,6 +314,9 @@ export function MapView({
     }),
     [],
   )
+  const riverPreviewStatus = riverData && hasPartialRiverData(riverData)
+    ? `河网预览：当前显示前 ${loadedRiverFeatureCount(riverData).toLocaleString()} / ${totalRiverFeatureCount(riverData).toLocaleString()} 条河段，完整视口/瓦片加载将在后续版本提供。`
+    : null
 
   return (
     <div className={cn('relative h-full min-h-[32rem] overflow-hidden', className)}>
@@ -204,6 +326,15 @@ export function MapView({
           role="status"
         >
           {mapError ?? riverError}
+        </div>
+      ) : null}
+
+      {riverPreviewStatus ? (
+        <div
+          className="absolute right-3 top-3 z-10 max-w-[min(30rem,calc(100%-1.5rem))] rounded-md border border-amber-500/35 bg-panel/95 px-3 py-2 text-sm text-foreground shadow-sm"
+          role="status"
+        >
+          {riverPreviewStatus}
         </div>
       ) : null}
 

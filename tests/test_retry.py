@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 
 import pytest
@@ -380,6 +381,8 @@ def test_retry_api_endpoint() -> None:
         service = RetryService(store, RetryConfig(max_retries=3))
         app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: _RecordingGateway(job_id="slurm_api_1")
+        previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
         try:
             client = TestClient(app)
             headers = {"X-User-Role": "operator"}
@@ -418,6 +421,10 @@ def test_retry_api_endpoint() -> None:
             assert invalid.status_code == 400
             assert invalid.json()["error"]["code"] == "INVALID_RUN_ID"
         finally:
+            if previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
             app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
 
@@ -428,6 +435,8 @@ def test_retry_api_without_gateway_returns_503() -> None:
         service = RetryService(store, RetryConfig(max_retries=3))
         app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: _NoSubmitGateway()
+        previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
         try:
             client = TestClient(app)
 
@@ -438,6 +447,10 @@ def test_retry_api_without_gateway_returns_503() -> None:
             assert response.json()["error"]["message"] == "Retry execution path unavailable."
             assert len(store.query_jobs_by_run("run_api")) == 1
         finally:
+            if previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
             app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
 
@@ -449,6 +462,8 @@ def test_retry_api_submitted_response_contract() -> None:
         gateway = _RecordingGateway(job_id="slurm_api_1")
         app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
         try:
             client = TestClient(app)
 
@@ -460,6 +475,10 @@ def test_retry_api_submitted_response_contract() -> None:
             assert data["execution_status"] == "submitted"
             assert data["slurm_job_id"] == "slurm_api_1"
         finally:
+            if previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
             app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
 
@@ -471,6 +490,8 @@ def test_retry_api_submission_error_response_contract() -> None:
         gateway = _RecordingGateway(error=RuntimeError("no execution path"))
         app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
         try:
             client = TestClient(app)
 
@@ -482,6 +503,10 @@ def test_retry_api_submission_error_response_contract() -> None:
             assert error["message"] == "no execution path"
             assert error["details"]["status"] == "submission_failed"
         finally:
+            if previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
             app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
 

@@ -263,7 +263,7 @@ def test_stage_duration_metrics_contract_uses_success_envelope() -> None:
 def test_retry_contract_documents_pipeline_job_and_execution_status_fields() -> None:
     with _store() as store:
         _create_job(store, job_id="job_retry_contract", run_id="run_retry_contract", status="failed")
-        with _client(store, _RetryGateway()) as client:
+        with _client(store, _RetryGateway(), allow_dev_role_header=True) as client:
             response = client.post("/api/v1/runs/run_retry_contract/retry", headers={"X-User-Role": "operator"})
 
     assert response.status_code == 200
@@ -293,7 +293,7 @@ def test_cancel_contract_documents_cancelled_jobs_and_slurm_failures() -> None:
             status="running",
             slurm_job_id="slurm_cancel_contract",
         )
-        with _client(store, gateway) as client:
+        with _client(store, gateway, allow_dev_role_header=True) as client:
             response = client.post("/api/v1/runs/run_cancel_contract/cancel", headers={"X-User-Role": "operator"})
 
     assert response.status_code == 200
