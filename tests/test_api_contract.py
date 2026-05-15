@@ -375,6 +375,37 @@ def test_forecast_response_issue_time_contract_allows_runtime_nulls() -> None:
     assert "issue_time: string | null;" in generated_types[spliced_start:series_segment_start]
 
 
+def test_spliced_forecast_segment_metadata_is_in_public_contract() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    segment_schema = spec["components"]["schemas"]["SplicedForecastResponse"]["properties"]["segments"]["items"]
+
+    assert "segment_role" in segment_schema["required"]
+    properties = segment_schema["properties"]
+    assert properties["scenario_id"]["type"] == "string"
+    assert properties["source_id"]["nullable"] is True
+    assert properties["cycle_time"] == {
+        "type": "string",
+        "format": "date-time",
+        "nullable": True,
+        "description": "Forecast source cycle time when available.",
+    }
+    assert properties["available_lead_hours"]["type"] == "integer"
+    assert properties["available_lead_hours"]["nullable"] is True
+    assert properties["segment_role"]["enum"] == ["past_7_days", "future_7_days"]
+
+    types_path = Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    generated_types = types_path.read_text(encoding="utf-8")
+    spliced_start = generated_types.index("SplicedForecastResponse:")
+    series_segment_start = generated_types.index("SeriesSegment:")
+    spliced_types = generated_types[spliced_start:series_segment_start]
+    assert "scenario_id?: string;" in spliced_types
+    assert "source_id?: string | null;" in spliced_types
+    assert "cycle_time?: string | null;" in spliced_types
+    assert "available_lead_hours?: number | null;" in spliced_types
+    assert 'segment_role: "past_7_days" | "future_7_days";' in spliced_types
+
+
 def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))

@@ -1910,12 +1910,31 @@ components:
           type: array
           items:
             type: object
-            required: [scenario, source, data]
+            required: [scenario, source, segment_role, data]
             properties:
               scenario:
                 type: string
+              scenario_id:
+                type: string
+                description: Canonical scenario identifier.
               source:
                 type: string
+              source_id:
+                type: string
+                nullable: true
+                description: Forecast source identifier when available.
+              cycle_time:
+                type: string
+                format: date-time
+                nullable: true
+                description: Forecast source cycle time when available.
+              available_lead_hours:
+                type: integer
+                nullable: true
+                description: Available forecast lead time in hours when available.
+              segment_role:
+                type: string
+                enum: [past_7_days, future_7_days]
               data:
                 type: array
                 items:

@@ -854,7 +854,20 @@ export interface components {
             river_segment_id: string;
             segments: {
                 scenario: string;
+                /** @description Canonical scenario identifier. */
+                scenario_id?: string;
                 source: string;
+                /** @description Forecast source identifier when available. */
+                source_id?: string | null;
+                /**
+                 * Format: date-time
+                 * @description Forecast source cycle time when available.
+                 */
+                cycle_time?: string | null;
+                /** @description Available forecast lead time in hours when available. */
+                available_lead_hours?: number | null;
+                /** @enum {string} */
+                segment_role: "past_7_days" | "future_7_days";
                 data: {
                     /** Format: date-time */
                     valid_time: string;
