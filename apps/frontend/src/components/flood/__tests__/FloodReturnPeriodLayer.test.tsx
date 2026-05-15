@@ -7,6 +7,14 @@ import {
   floodTileUrl,
 } from '@/components/flood/FloodReturnPeriodLayer'
 
+vi.mock('@/api/base', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/base')>()
+  return {
+    ...actual,
+    buildApiUrl: (path: string) => actual.buildApiUrl(path, 'https://api.example.test'),
+  }
+})
+
 const sourceProps: unknown[] = []
 const layerProps: unknown[] = []
 
@@ -25,7 +33,7 @@ describe('FloodReturnPeriodLayer', () => {
   it('uses the GeoJSON endpoint URL without z/x/y or pbf semantics', () => {
     const url = floodTileUrl('run 1', '2026-05-03T06:00:00Z')
 
-    expect(url).toContain('/api/v1/tiles/flood-return-period?')
+    expect(url).toContain('https://api.example.test/api/v1/tiles/flood-return-period?')
     expect(url).toContain('run_id=run+1')
     expect(url).toContain('duration=1h')
     expect(url).not.toContain('{z}')

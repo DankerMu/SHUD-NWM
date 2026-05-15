@@ -140,6 +140,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/basin-versions/{basin_version_id}/river-segments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List river segments as GeoJSON */
+        get: operations["listRiverSegments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{model_id}/active": {
         parameters: {
             query?: never;
@@ -728,6 +745,32 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        RiverSegmentFeature: {
+            /** @enum {string} */
+            type: "Feature";
+            properties: {
+                segment_id: string;
+                river_segment_id: string;
+                basin_version_id: string;
+                river_network_version_id: string;
+                name: string;
+                stream_order: number;
+                segment_order?: number | null;
+                downstream_segment_id?: string | null;
+                length_m?: number | null;
+            } & {
+                [key: string]: unknown;
+            };
+            geometry: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
+        };
+        RiverSegmentFeatureCollection: {
+            /** @enum {string} */
+            type: "FeatureCollection";
+            features: components["schemas"]["RiverSegmentFeature"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
         MetStation: {
             station_id: string;
             basin_version_id: string;
@@ -984,6 +1027,11 @@ export interface components {
             /** @enum {string} */
             type: "LineString";
             coordinates: number[][];
+        };
+        GeoJsonMultiLineString: {
+            /** @enum {string} */
+            type: "MultiLineString";
+            coordinates: number[][][];
         };
         GeoJsonMultiPolygon: {
             /** @enum {string} */
@@ -1505,6 +1553,36 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["RiverNetworkVersion"][];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    listRiverSegments: {
+        parameters: {
+            query?: {
+                river_network_version_id?: string;
+                limit?: number;
+                offset?: components["parameters"]["Offset"];
+            };
+            header?: never;
+            path: {
+                basin_version_id: components["parameters"]["BasinVersionId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description River segment GeoJSON feature collection */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["RiverSegmentFeatureCollection"];
                     };
                 };
             };
@@ -2041,6 +2119,8 @@ export interface operations {
         parameters: {
             query?: {
                 days?: number;
+                source?: components["parameters"]["SourceQuery"];
+                scenario?: string;
             };
             header?: never;
             path?: never;
@@ -2067,6 +2147,8 @@ export interface operations {
         parameters: {
             query?: {
                 days?: number;
+                source?: components["parameters"]["SourceQuery"];
+                scenario?: string;
             };
             header?: never;
             path?: never;

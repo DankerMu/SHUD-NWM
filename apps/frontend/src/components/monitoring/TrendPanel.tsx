@@ -9,27 +9,29 @@ import type { StageDurationMetric, SuccessRateMetric } from '@/stores/monitoring
 
 interface TrendPanelProps {
   refreshKey?: number
+  source?: string
+  scenario?: string | null
 }
 
 const stageOrder = Object.keys(STAGE_NAMES) as Array<keyof typeof STAGE_NAMES>
 
-async function fetchStageDurationMetrics() {
+async function fetchStageDurationMetrics(source?: string, scenario?: string | null) {
   const { data, error } = await client.GET('/api/v1/metrics/stage-duration', {
-    params: { query: { days: 7 } },
+    params: { query: { days: 7, source, scenario: scenario ?? undefined } },
   })
   if (error) throw new Error(getApiErrorMessage(error, '阶段耗时趋势加载失败'))
   return unwrapApiData<StageDurationMetric[]>(data, '阶段耗时趋势加载失败')
 }
 
-async function fetchSuccessRateMetrics() {
+async function fetchSuccessRateMetrics(source?: string, scenario?: string | null) {
   const { data, error } = await client.GET('/api/v1/metrics/success-rate', {
-    params: { query: { days: 7 } },
+    params: { query: { days: 7, source, scenario: scenario ?? undefined } },
   })
   if (error) throw new Error(getApiErrorMessage(error, '成功率趋势加载失败'))
   return unwrapApiData<SuccessRateMetric[]>(data, '成功率趋势加载失败')
 }
 
-export function TrendPanel({ refreshKey = 0 }: TrendPanelProps) {
+export function TrendPanel({ refreshKey = 0, source, scenario }: TrendPanelProps) {
   const [stageRows, setStageRows] = useState<StageDurationMetric[]>([])
   const [successRows, setSuccessRows] = useState<SuccessRateMetric[]>([])
   const [loading, setLoading] = useState(false)
@@ -40,7 +42,7 @@ export function TrendPanel({ refreshKey = 0 }: TrendPanelProps) {
     setLoading(true)
     setError(null)
 
-    Promise.all([fetchStageDurationMetrics(), fetchSuccessRateMetrics()])
+    Promise.all([fetchStageDurationMetrics(source, scenario), fetchSuccessRateMetrics(source, scenario)])
       .then(([stageDuration, successRate]) => {
         if (!active) return
         setStageRows(stageDuration)
@@ -57,7 +59,7 @@ export function TrendPanel({ refreshKey = 0 }: TrendPanelProps) {
     return () => {
       active = false
     }
-  }, [refreshKey])
+  }, [refreshKey, scenario, source])
 
   const stageTrend = useMemo(() => {
     const dates = [...new Set(stageRows.map((row) => row.date))].sort()

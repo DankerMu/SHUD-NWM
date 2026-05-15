@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 
+import { buildApiUrl } from '@/api/base'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
@@ -119,7 +120,7 @@ async function fetchJson<T>(path: string, query: Record<string, string | number 
     if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
   })
 
-  const response = await fetch(`${path}?${params.toString()}`)
+  const response = await fetch(buildApiUrl(`${path}?${params.toString()}`))
   const payload = await response.json().catch(() => null)
   if (!response.ok) throw new Error(getApiErrorMessage(payload, response.statusText || '请求失败'))
   return unwrapApiData<T>(payload, '请求失败')
@@ -194,6 +195,21 @@ function normalizeTimelinePoint(point: ApiFloodAlertTimelinePoint): FloodAlertTi
   }
 }
 
+function normalizeFrequencyThresholds(
+  thresholds: ApiFloodFrequencyThresholds | null | undefined,
+): FloodFrequencyThresholds | null {
+  if (!thresholds) return null
+  return {
+    ...thresholds,
+    q2: numberOrNull(thresholds.Q2),
+    q5: numberOrNull(thresholds.Q5),
+    q10: numberOrNull(thresholds.Q10),
+    q20: numberOrNull(thresholds.Q20),
+    q50: numberOrNull(thresholds.Q50),
+    q100: numberOrNull(thresholds.Q100),
+  }
+}
+
 function normalizeTimeline(payload: ApiFloodAlertTimeline): FloodAlertTimeline {
   const timesteps = payload.timesteps.map(normalizeTimelinePoint)
   return {
@@ -202,7 +218,7 @@ function normalizeTimeline(payload: ApiFloodAlertTimeline): FloodAlertTimeline {
     riverSegmentId: payload.river_segment_id,
     timesteps,
     peak: payload.peak ? normalizeTimelinePoint(payload.peak) : null,
-    frequencyThresholds: payload.frequency_thresholds,
+    frequencyThresholds: normalizeFrequencyThresholds(payload.frequency_thresholds),
     qualityNote: stringOrNull(payload.quality_note),
   }
 }

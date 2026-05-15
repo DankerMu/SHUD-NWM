@@ -225,6 +225,95 @@ class PsycopgModelRegistryStore:
                 )
         return {"river_network_version": network, "segment_count": segment_count}
 
+    def list_river_segments(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str | None = None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        filters = ["rnv.basin_version_id = %s"]
+        params: list[Any] = [basin_version_id]
+        if river_network_version_id is not None:
+            filters.append("rnv.river_network_version_id = %s")
+            params.append(river_network_version_id)
+
+        where_clause = " AND ".join(filters)
+        with self._transaction() as cursor:
+            cursor.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM core.river_segment rs
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_id = rs.river_network_version_id
+                WHERE {where_clause}
+                """,
+                tuple(params),
+            )
+            total = int(cursor.fetchone()["total"])
+            cursor.execute(
+                f"""
+                SELECT
+                    rs.river_segment_id,
+                    rs.river_network_version_id,
+                    rnv.basin_version_id,
+                    rs.segment_order,
+                    rs.downstream_segment_id,
+                    rs.length_m,
+                    rs.properties_json,
+                    ST_AsGeoJSON(rs.geom)::json AS geometry
+                FROM core.river_segment rs
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_id = rs.river_network_version_id
+                WHERE {where_clause}
+                ORDER BY COALESCE(rs.segment_order, 2147483647), rs.river_segment_id
+                LIMIT %s OFFSET %s
+                """,
+                tuple([*params, limit, offset]),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+
+        features = []
+        for row in rows:
+            properties_json = row.get("properties_json") or {}
+            if isinstance(properties_json, str):
+                try:
+                    properties_json = json.loads(properties_json)
+                except json.JSONDecodeError:
+                    properties_json = {}
+            properties = dict(properties_json) if isinstance(properties_json, Mapping) else {}
+            stream_order = row.get("segment_order")
+            name = properties.get("name") or properties.get("segment_name") or row["river_segment_id"]
+            properties.update(
+                {
+                    "segment_id": str(row["river_segment_id"]),
+                    "river_segment_id": str(row["river_segment_id"]),
+                    "basin_version_id": str(row["basin_version_id"]),
+                    "river_network_version_id": str(row["river_network_version_id"]),
+                    "name": str(name),
+                    "stream_order": int(stream_order) if stream_order is not None else 1,
+                    "segment_order": int(stream_order) if stream_order is not None else None,
+                    "downstream_segment_id": row.get("downstream_segment_id"),
+                    "length_m": float(row["length_m"]) if row.get("length_m") is not None else None,
+                }
+            )
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": properties,
+                    "geometry": row["geometry"],
+                }
+            )
+
+        return {
+            "type": "FeatureCollection",
+            "features": features,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
     def create_mesh_version(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         mesh_version_id = build_versioned_id(
             f"{payload['basin_version_id']}_mesh",

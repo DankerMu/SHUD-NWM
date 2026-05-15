@@ -365,6 +365,53 @@ def test_metrics_success_rate() -> None:
         ]
 
 
+def test_metrics_filter_by_source_and_scenario() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        gfs_cycle = cycle_id_for("GFS", cycle_time)
+        ifs_cycle = cycle_id_for("IFS", cycle_time)
+        _seed_monitoring_jobs(store, cycle_id=gfs_cycle)
+        _create_job(
+            store,
+            job_id="job_ifs_success",
+            run_id="forecast_ifs_deterministic_run",
+            cycle_id=ifs_cycle,
+            stage="download",
+            status="succeeded",
+            submitted_at=cycle_time,
+            started_at=cycle_time,
+            finished_at=cycle_time + timedelta(minutes=2),
+        )
+        with _client(store) as client:
+            stage_response = client.get(
+                "/api/v1/metrics/stage-duration",
+                params={"days": 30, "source": "IFS", "scenario": "forecast_ifs_deterministic"},
+            )
+            success_response = client.get(
+                "/api/v1/metrics/success-rate",
+                params={"days": 30, "source": "IFS", "scenario": "forecast_ifs_deterministic"},
+            )
+
+        assert stage_response.status_code == 200
+        assert stage_response.json()["data"] == [
+            {
+                "date": cycle_time.date().isoformat(),
+                "stage": "download",
+                "average_duration_seconds": 120.0,
+                "job_count": 1,
+            }
+        ]
+        assert success_response.status_code == 200
+        assert success_response.json()["data"] == [
+            {
+                "date": cycle_time.date().isoformat(),
+                "success_rate": 1.0,
+                "succeeded_cycles": 1,
+                "total_cycles": 1,
+            }
+        ]
+
+
 def test_queue_depth() -> None:
     with _store() as store:
         gateway = _MockGateway(depth={"running": 2, "pending": 3, "idle": 1})

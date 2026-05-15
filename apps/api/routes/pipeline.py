@@ -434,6 +434,8 @@ def cancel_run(
 def stage_duration_metrics(
     request: Request,
     days: int = Query(default=7, ge=1, le=365),
+    source: str | None = Query(default=None),
+    scenario: str | None = Query(default=None),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     cutoff = datetime.now(UTC) - timedelta(days=days)
@@ -442,6 +444,15 @@ def stage_duration_metrics(
         PipelineJob.finished_at.is_not(None),
         PipelineJob.finished_at >= cutoff,
     )
+    if source is not None:
+        statement = statement.where(PipelineJob.cycle_id.like(f"{source.lower()}_%"))
+    run_ids = _run_ids_matching_filters(store, run_type=None, scenario=scenario)
+    if run_ids is not None:
+        if not run_ids:
+            return _ok(request, [])
+        statement = statement.where(PipelineJob.run_id.in_(run_ids))
+    elif scenario is not None:
+        statement = statement.where(PipelineJob.run_id.like(f"%{scenario}%"))
     jobs = list(store.session.scalars(statement))
     buckets: dict[tuple[str, str], list[int]] = defaultdict(list)
     for job in jobs:
@@ -468,10 +479,21 @@ def stage_duration_metrics(
 def success_rate_metrics(
     request: Request,
     days: int = Query(default=7, ge=1, le=365),
+    source: str | None = Query(default=None),
+    scenario: str | None = Query(default=None),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     cutoff = datetime.now(UTC) - timedelta(days=days)
     statement = select(PipelineJob).where(PipelineJob.created_at >= cutoff)
+    if source is not None:
+        statement = statement.where(PipelineJob.cycle_id.like(f"{source.lower()}_%"))
+    run_ids = _run_ids_matching_filters(store, run_type=None, scenario=scenario)
+    if run_ids is not None:
+        if not run_ids:
+            return _ok(request, [])
+        statement = statement.where(PipelineJob.run_id.in_(run_ids))
+    elif scenario is not None:
+        statement = statement.where(PipelineJob.run_id.like(f"%{scenario}%"))
     jobs = list(store.session.scalars(statement))
     cycle_jobs: dict[str, list[PipelineJob]] = defaultdict(list)
     for job in jobs:

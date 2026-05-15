@@ -135,8 +135,14 @@ async function mockMonitoringApi(page: Page, options: MonitoringApiMockOptions =
     if (url.pathname === '/api/v1/pipeline/status') return fulfill(route, cycle)
     if (url.pathname === '/api/v1/pipeline/stages') return fulfill(route, stages)
     if (url.pathname === '/api/v1/queue/depth') return fulfill(route, { running: 2, pending: 4, idle: 6 })
-    if (url.pathname === '/api/v1/metrics/stage-duration') return fulfill(route, stageDurationMetrics)
-    if (url.pathname === '/api/v1/metrics/success-rate') return fulfill(route, successRateMetrics)
+    if (url.pathname === '/api/v1/metrics/stage-duration') {
+      expect(url.searchParams.get('source')).toBe('GFS')
+      return fulfill(route, stageDurationMetrics)
+    }
+    if (url.pathname === '/api/v1/metrics/success-rate') {
+      expect(url.searchParams.get('source')).toBe('GFS')
+      return fulfill(route, successRateMetrics)
+    }
     if (url.pathname === '/api/v1/jobs/job-failed/logs') {
       return fulfill(route, {
         job_id: 'job-failed',
@@ -164,6 +170,7 @@ async function mockMonitoringApi(page: Page, options: MonitoringApiMockOptions =
 }
 
 async function selectRole(page: Page, roleName: 'Viewer' | 'Operator' | 'Model Admin' | 'Sys Admin') {
+  await expect(page.getByLabel('Role')).toBeVisible()
   await page.getByLabel('Role').click()
   await page.getByRole('option', { name: roleName }).click()
 }
@@ -171,11 +178,29 @@ async function selectRole(page: Page, roleName: 'Viewer' | 'Operator' | 'Model A
 async function openMonitoringAsOperator(page: Page, mockOptions?: MonitoringApiMockOptions) {
   await mockMonitoringApi(page, mockOptions)
   await page.goto('/monitoring')
+  await expect(page.getByText('权限不足')).toBeVisible()
   await selectRole(page, 'Operator')
   await expect(page.getByRole('heading', { name: '监控工作台' })).toBeVisible()
 }
 
 test.describe('monitoring page', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/monitoring')
+    await expect(
+      page.getByLabel('Role'),
+      'monitoring E2E requires the explicit dev/test role override; use the Playwright webServer or run the target server with VITE_ENABLE_ROLE_OVERRIDE=true',
+    ).toBeVisible()
+  })
+
+  test('keeps viewer as the default role before local dev override is used', async ({ page }) => {
+    await mockMonitoringApi(page)
+    await page.goto('/monitoring')
+
+    await expect(page.getByLabel('Role')).toHaveText('Viewer')
+    await expect(page.getByText('权限不足')).toBeVisible()
+    await expect(page.getByRole('heading', { name: '监控工作台' })).toHaveCount(0)
+  })
+
   test('loads summary bar, stage cards, jobs table, and trend charts', async ({ page }) => {
     await openMonitoringAsOperator(page)
 
@@ -204,11 +229,18 @@ test.describe('monitoring page', () => {
   test('expands a failed stage to show basin failures', async ({ page }) => {
     await openMonitoringAsOperator(page)
 
-    await page.getByRole('button', { name: /强迫场.*partially_failed/ }).click()
+    const stageSection = page.locator('section, div').filter({
+      has: page.getByRole('heading', { name: '七阶段流水线' }),
+    }).first()
 
-    await expect(page.getByText('model-b')).toBeVisible()
-    await expect(page.getByText('FORCING_MISSING')).toBeVisible()
-    await expect(page.getByText('forcing input missing')).toBeVisible()
+    await stageSection.getByRole('button', { name: /强迫场.*partially_failed/ }).click()
+
+    const basinFailures = stageSection.locator('div').filter({
+      hasText: 'FORCING_MISSING',
+    }).last()
+    await expect(basinFailures).toContainText('model-b')
+    await expect(basinFailures).toContainText('FORCING_MISSING')
+    await expect(basinFailures).toContainText('forcing input missing')
   })
 
   test('updates the jobs table when filters change', async ({ page }) => {
@@ -249,7 +281,7 @@ test.describe('monitoring page', () => {
     await expect.poll(() => retryRequests).toEqual([
       { method: 'POST', pathname: '/api/v1/runs/run-failed/retry' },
     ])
-    await expect(page.getByText('重试已提交')).toBeVisible()
+    await expect(page.getByRole('listitem').filter({ hasText: '重试已提交' })).toBeVisible()
 
     await selectRole(page, 'Viewer')
 
@@ -263,5 +295,13 @@ test.describe('monitoring page', () => {
 
     await expect(page.getByText('权限不足')).toBeVisible()
     await expect(page.getByRole('heading', { name: '监控工作台' })).toHaveCount(0)
+  })
+
+  test('serves monitoring deep link through the SPA fallback', async ({ page }) => {
+    await mockMonitoringApi(page)
+    await page.goto('/monitoring')
+
+    await expect(page.getByText('NHMS')).toBeVisible()
+    await expect(page.getByText('权限不足')).toBeVisible()
   })
 })

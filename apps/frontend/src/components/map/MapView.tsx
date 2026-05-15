@@ -8,6 +8,10 @@ import Map, {
 } from 'react-map-gl/maplibre'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
+import { buildApiUrl } from '@/api/base'
+import { client } from '@/api/client'
+import { getApiErrorMessage, unwrapApiData } from '@/api/response'
+import type { components } from '@/api/types'
 import {
   demoRivers,
   RIVER_HOVER_LAYER_ID,
@@ -40,6 +44,8 @@ const RIVER_INTERACTIVE_LAYER_IDS = [
   RIVER_SELECTED_LAYER_ID,
 ]
 
+const allowDemoRiverFallback = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_RIVERS === 'true'
+
 interface TooltipState {
   x: number
   y: number
@@ -54,8 +60,42 @@ interface MapViewProps {
   className?: string
 }
 
+type ModelPage = components['schemas']['ModelInstancePage']
+
 async function loadRiverNetwork(): Promise<RiverFeatureCollection> {
-  return demoRivers
+  const { data, error } = await client.GET('/api/v1/models', {
+    params: { query: { active: 'true', limit: 1, offset: 0 } },
+  })
+  if (error) {
+    if (allowDemoRiverFallback) return demoRivers
+    throw new Error(getApiErrorMessage(error, '模型版本加载失败'))
+  }
+
+  const models = unwrapApiData<ModelPage>(data, '模型版本加载失败')
+  const model = models.items[0]
+  if (!model?.basin_version_id || !model.river_network_version_id) {
+    if (allowDemoRiverFallback) return demoRivers
+    throw new Error('未找到活动模型的 basin_version_id 或 river_network_version_id')
+  }
+
+  const params = new URLSearchParams({
+    river_network_version_id: model.river_network_version_id,
+    limit: '50000',
+  })
+  const response = await fetch(
+    buildApiUrl(`/api/v1/basin-versions/${encodeURIComponent(model.basin_version_id)}/river-segments?${params}`),
+  )
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    if (allowDemoRiverFallback) return demoRivers
+    throw new Error(getApiErrorMessage(payload, response.statusText || '河网数据加载失败'))
+  }
+
+  const collection = unwrapApiData<RiverFeatureCollection>(payload, '河网数据加载失败')
+  if (collection.type !== 'FeatureCollection' || !Array.isArray(collection.features)) {
+    throw new Error('河网数据格式无效')
+  }
+  return collection
 }
 
 function readRiverProperties(properties: unknown): RiverFeatureProperties | null {

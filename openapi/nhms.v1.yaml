@@ -280,6 +280,44 @@ paths:
           $ref: "#/components/responses/Error"
         "5XX":
           $ref: "#/components/responses/Error"
+  /api/v1/basin-versions/{basin_version_id}/river-segments:
+    get:
+      operationId: listRiverSegments
+      summary: List river segments as GeoJSON
+      tags: [models]
+      parameters:
+        - $ref: "#/components/parameters/BasinVersionId"
+        - name: river_network_version_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50000
+            default: 10000
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: River segment GeoJSON feature collection
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RiverSegmentFeatureCollection"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
   /api/v1/models/{model_id}/active:
     put:
       operationId: setModelActive
@@ -882,6 +920,12 @@ paths:
             minimum: 1
             maximum: 365
             default: 7
+        - $ref: "#/components/parameters/SourceQuery"
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
       responses:
         "200":
           description: Stage duration metrics
@@ -915,6 +959,12 @@ paths:
             minimum: 1
             maximum: 365
             default: 7
+        - $ref: "#/components/parameters/SourceQuery"
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
       responses:
         "200":
           description: Success rate metrics
@@ -1618,6 +1668,63 @@ components:
         created_at:
           type: string
           format: date-time
+    RiverSegmentFeature:
+      type: object
+      required: [type, properties, geometry]
+      properties:
+        type:
+          type: string
+          enum: [Feature]
+        properties:
+          type: object
+          required: [segment_id, river_segment_id, basin_version_id, river_network_version_id, name, stream_order]
+          properties:
+            segment_id:
+              type: string
+            river_segment_id:
+              type: string
+            basin_version_id:
+              type: string
+            river_network_version_id:
+              type: string
+            name:
+              type: string
+            stream_order:
+              type: integer
+            segment_order:
+              type: integer
+              nullable: true
+            downstream_segment_id:
+              type: string
+              nullable: true
+            length_m:
+              type: number
+              nullable: true
+          additionalProperties: true
+        geometry:
+          oneOf:
+            - $ref: "#/components/schemas/GeoJsonLineString"
+            - $ref: "#/components/schemas/GeoJsonMultiLineString"
+    RiverSegmentFeatureCollection:
+      type: object
+      required: [type, features, total, limit, offset]
+      properties:
+        type:
+          type: string
+          enum: [FeatureCollection]
+        features:
+          type: array
+          items:
+            $ref: "#/components/schemas/RiverSegmentFeature"
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+        offset:
+          type: integer
+          minimum: 0
     MetStation:
       type: object
       required: [station_id, basin_version_id, geom, station_role, active_flag, created_at]
@@ -2225,6 +2332,24 @@ components:
             maxItems: 3
             items:
               type: number
+    GeoJsonMultiLineString:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [MultiLineString]
+        coordinates:
+          type: array
+          items:
+            type: array
+            minItems: 2
+            items:
+              type: array
+              minItems: 2
+              maxItems: 3
+              items:
+                type: number
     GeoJsonMultiPolygon:
       type: object
       required: [type, coordinates]

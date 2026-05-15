@@ -17,7 +17,7 @@ import {
   ToastViewport,
 } from '@/components/ui/toast'
 import { cn } from '@/lib/cn'
-import { type AuthRole, useAuthStore } from '@/stores/auth'
+import { isRoleOverrideEnabled, type AuthRole, useAuthStore } from '@/stores/auth'
 import { useToast } from '@/hooks/useToast'
 
 const roleOptions: Array<{ value: AuthRole; label: string }> = [
@@ -45,18 +45,20 @@ export function AppShell({ children }: AppShellProps) {
               <div className="text-base font-semibold text-foreground">NHMS</div>
               <NavBar />
             </div>
-            <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
-              <SelectTrigger className="w-36" aria-label="Role">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align="end">
-                {roleOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {isRoleOverrideEnabled ? (
+              <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
+                <SelectTrigger className="w-36" aria-label="Role">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  {roleOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : null}
           </div>
         </header>
         <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</main>

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Layer, Source, type LayerProps } from 'react-map-gl/maplibre'
 import type { FilterSpecification } from 'maplibre-gl'
 
+import { apiFetch, buildApiUrl } from '@/api/base'
 import {
   FLOOD_TILE_HOVER_LAYER_ID,
   FLOOD_TILE_LAYER_ID,
@@ -34,7 +35,7 @@ export function floodTileUrl(runId: string, validTime: string) {
     duration: '1h',
     valid_time: validTime,
   })
-  return `/api/v1/tiles/flood-return-period?${params.toString()}`
+  return buildApiUrl(`/api/v1/tiles/flood-return-period?${params.toString()}`)
 }
 
 export function floodReturnPeriodLayer(selectedLevel?: AlertLevel | null): LayerProps {
@@ -59,7 +60,7 @@ export function FloodReturnPeriodLayer({
     const controller = new AbortController()
     setData(null)
 
-    fetch(floodTileUrl(runId, validTime), { signal: controller.signal })
+    apiFetch(floodTileUrl(runId, validTime), { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) return null
         const payload = (await response.json()) as GeoJsonFeatureCollection
