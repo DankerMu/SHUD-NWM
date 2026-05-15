@@ -51,7 +51,7 @@
 ## 5. 数据库/存储影响
 
 - `map.tile_layer`
-- `map.tile_asset`
+- `map.tile_cache`
 - `hydro.river_timeseries`
 - `flood.return_period_result`
 
@@ -60,8 +60,23 @@
 ## 6. 接口
 
 - `GET /api/v1/tiles/...`
-- `CLI nhms-tiles publish --run-id`
-- `map.layer_catalog`
+- `CLI nhms-pipeline publish-tiles --cycle-id <cycle_id>`
+- `map.tile_layer` / `map.tile_cache`
+
+### 6.1 Issue #122 已实现发布契约
+
+`nhms-pipeline publish-tiles --cycle-id <cycle_id>` 是 Forecast M3 的 Slurm/local 统一入口。
+本 release 的最小支持 artifact 是洪水重现期 GeoJSON delivery metadata，而不是完整 MVT/PBF 生成：
+
+- 成功条件：指定 cycle 下存在 `hydro.hydro_run.status IN ('frequency_done', 'published')` 的 forecast run，
+  且 `flood.return_period_result` 存在对应行。
+- 副作用：upsert `map.tile_layer`，确定性 `layer_id=flood_return_period_<run_id>`，
+  `tile_format=geojson`，`published_flag=true`，`tile_uri_template` 指向
+  `/api/v1/tiles/flood-return-period`。
+- 幂等性：同一 cycle 重复发布返回同一 logical layer，不新增重复 layer，也不写冲突 cache row。
+- 失败：缺少环境/数据库 schema/产品或对象存储 artifact 时输出 JSON `status=failed_publish`，
+  带稳定 `error_code` 和 `error_message`，并以非 0 退出；编排器将 publish 失败映射为
+  `failed_publish`。
 
 ## 7. 配置项
 
