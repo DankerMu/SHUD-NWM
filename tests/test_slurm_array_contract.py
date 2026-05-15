@@ -7,11 +7,16 @@ from types import SimpleNamespace
 from typing import Any, Callable, Sequence
 
 import pytest
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from services.orchestrator import cli as orchestrator_cli
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.real_backend import RealSlurmGateway
+from services.tile_publisher import publisher as tile_publisher_module
 from workers.canonical_converter import cli as canonical_cli
 from workers.data_adapters import cli as data_cli
 from workers.flood_frequency import cli as flood_cli
@@ -716,21 +721,252 @@ def test_explicit_task_id_overrides_slurm_array_task_id(monkeypatch, tmp_path):
 
 
 def test_publish_tiles_command_exists(capsys):
-    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "test_cycle"])
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "missing_cycle"])
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "publish-tiles is not yet implemented" in captured.err
-    assert json.loads(captured.out) == {
-        "status": "failed_publish",
-        "reason": "publish_tiles_not_implemented",
-    }
+    payload = json.loads(captured.out)
+    assert captured.err == ""
+    assert payload["status"] == "failed_publish"
+    assert payload["cycle_id"] == "missing_cycle"
+    assert payload["error_code"] in {"WORKSPACE_ROOT_MISSING", "OBJECT_STORE_ROOT_MISSING", "DATABASE_URL_MISSING"}
+    assert payload["layers"] == []
 
 
-def test_publish_tiles_noop_would_falsely_complete_pipeline(capsys):
-    result = orchestrator_cli._publish_tiles(cycle_id="test_cycle")
-    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "test_cycle"])
+def test_publish_tiles_success_registers_layer_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine()
+    _seed_publish_product(engine, cycle_id="GFS_2026050100", run_id="fcst_gfs_2026050100_model_001")
+    _set_publish_env(monkeypatch, tmp_path, engine)
 
-    capsys.readouterr()
-    assert result["status"] == "failed_publish"
-    assert exit_code != 0
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "GFS_2026050100"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["status"] == "published"
+    assert payload["cycle_id"] == "GFS_2026050100"
+    assert payload["layers"][0]["layer_id"] == "flood_return_period_fcst_gfs_2026050100_model_001"
+    assert payload["layers"][0]["tile_format"] == "geojson"
+    with Session(engine) as session:
+        layer = _layer_row(session)
+        run_status = session.execute(
+            text("SELECT status FROM hydro.hydro_run WHERE run_id = 'fcst_gfs_2026050100_model_001'")
+        ).scalar_one()
+    assert layer["published_flag"] in (True, 1)
+    assert layer["tile_uri_template"].startswith("/api/v1/tiles/flood-return-period")
+    assert run_status == "published"
+
+
+def test_publish_tiles_missing_product_fails_without_layer_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine()
+    _set_publish_env(monkeypatch, tmp_path, engine)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "missing_cycle"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "NO_PUBLISHABLE_PRODUCTS"
+    with Session(engine) as session:
+        count = session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one()
+    assert count == 0
+
+
+def test_publish_tiles_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine()
+    _seed_publish_product(engine, cycle_id="GFS_2026050100", run_id="fcst_gfs_2026050100_model_001")
+    _set_publish_env(monkeypatch, tmp_path, engine)
+
+    first_exit = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "GFS_2026050100"])
+    first_payload = json.loads(capsys.readouterr().out)
+    second_exit = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "GFS_2026050100"])
+    second_payload = json.loads(capsys.readouterr().out)
+
+    assert first_exit == second_exit == 0
+    assert first_payload["layers"][0]["layer_id"] == second_payload["layers"][0]["layer_id"]
+    with Session(engine) as session:
+        count = session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one()
+    assert count == 1
+
+
+def test_publish_tiles_rejects_unsafe_object_store_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    outside = tmp_path / "object-store" / "tiles" / "hydro" / "other_cycle" / "flood-return-period"
+    outside.mkdir(parents=True)
+    (outside / "metadata.json").write_text("{}", encoding="utf-8")
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "missing_cycle"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "DATABASE_URL_MISSING"
+
+
+def _set_publish_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: Engine) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("DATABASE_URL", str(engine.url))
+    monkeypatch.setattr(tile_publisher_module, "create_engine", lambda _url, future=True: engine)
+
+
+def _publish_engine() -> Engine:
+    engine = create_engine(
+        "sqlite://",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    _attach_publish_schemas(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE hydro.hydro_run (
+                    run_id TEXT PRIMARY KEY,
+                    run_type TEXT NOT NULL,
+                    scenario_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    basin_version_id TEXT NOT NULL,
+                    source_id TEXT,
+                    cycle_time DATETIME,
+                    start_time DATETIME NOT NULL,
+                    end_time DATETIME NOT NULL,
+                    status TEXT NOT NULL,
+                    updated_at DATETIME
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE flood.return_period_result (
+                    run_id TEXT NOT NULL,
+                    scenario_id TEXT NOT NULL,
+                    basin_version_id TEXT NOT NULL,
+                    river_network_version_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    river_segment_id TEXT NOT NULL,
+                    valid_time DATETIME NOT NULL,
+                    duration TEXT NOT NULL,
+                    q_value REAL NOT NULL,
+                    q_unit TEXT NOT NULL DEFAULT 'm3/s',
+                    return_period REAL,
+                    warning_level TEXT,
+                    source_id TEXT,
+                    cycle_time DATETIME,
+                    max_over_window BOOLEAN DEFAULT 0,
+                    quality_flag TEXT NOT NULL DEFAULT 'ok',
+                    PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE map.tile_layer (
+                    layer_id TEXT PRIMARY KEY,
+                    layer_type TEXT NOT NULL,
+                    source_run_id TEXT,
+                    source_product_id TEXT,
+                    variable TEXT,
+                    valid_time DATETIME,
+                    tile_format TEXT NOT NULL,
+                    tile_uri_template TEXT NOT NULL,
+                    min_zoom INTEGER NOT NULL DEFAULT 0,
+                    max_zoom INTEGER NOT NULL DEFAULT 14,
+                    style_json TEXT,
+                    published_flag BOOLEAN NOT NULL DEFAULT 0,
+                    publish_time DATETIME,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE map.tile_cache (
+                    layer_id TEXT NOT NULL,
+                    z INTEGER NOT NULL,
+                    x INTEGER NOT NULL,
+                    y INTEGER NOT NULL,
+                    tile_data BLOB,
+                    tile_uri TEXT,
+                    etag TEXT,
+                    created_at DATETIME,
+                    PRIMARY KEY (layer_id, z, x, y)
+                )
+                """
+            )
+        )
+    return engine
+
+
+def _attach_publish_schemas(engine: Engine) -> None:
+    @event.listens_for(engine, "connect")
+    def _attach(dbapi_connection: Any, _connection_record: Any) -> None:
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS hydro")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS flood")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
+
+
+def _seed_publish_product(engine: Engine, *, cycle_id: str, run_id: str) -> None:
+    del cycle_id
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id,
+                    cycle_time, start_time, end_time, status
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_001', 'basin_001', 'GFS',
+                    '2026-05-01 00:00:00', '2026-05-01 00:00:00', '2026-05-08 00:00:00', 'frequency_done'
+                )
+                """
+            ),
+            {"run_id": run_id},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO flood.return_period_result (
+                    run_id, scenario_id, basin_version_id, river_network_version_id, model_id,
+                    river_segment_id, valid_time, duration, q_value, return_period, warning_level,
+                    source_id, cycle_time, max_over_window, quality_flag
+                )
+                VALUES (
+                    :run_id, 'forecast_gfs_deterministic', 'basin_001', 'rnv_001', 'model_001',
+                    'seg_001', '2026-05-01 01:00:00', '1h', 120.0, 5.0, 'watch',
+                    'GFS', '2026-05-01 00:00:00', 1, 'ok'
+                )
+                """
+            ),
+            {"run_id": run_id},
+        )
+
+
+def _layer_row(session: Session) -> dict[str, Any]:
+    return dict(session.execute(text("SELECT * FROM map.tile_layer")).mappings().one())

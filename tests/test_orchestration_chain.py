@@ -128,8 +128,8 @@ class PublishFailureSlurmClient(FakeCycleSlurmClient):
             job["status"] = "failed"
             job["finished_at"] = _fmt(submitted_at + timedelta(minutes=1))
             job["exit_code"] = 1
-            job["error_code"] = "publish_tiles_not_implemented"
-            job["error_message"] = "publish-tiles is not yet implemented"
+            job["error_code"] = "NO_PUBLISHABLE_PRODUCTS"
+            job["error_message"] = "No publishable flood return-period products found for cycle_id=gfs_2026050100."
             return dict(job)
         return super().get_job_status(job_id)
 
@@ -646,7 +646,7 @@ def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Pat
     assert result.status == "failed"
     assert result.stages[-1].stage == "publish"
     assert result.stages[-1].status == "failed"
-    assert result.stages[-1].error_code == "publish_tiles_not_implemented"
+    assert result.stages[-1].error_code == "NO_PUBLISHABLE_PRODUCTS"
     assert repository.cycle_statuses[-1] == "failed_publish"
 
 

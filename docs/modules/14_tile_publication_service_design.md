@@ -52,8 +52,25 @@
 - `GET /api/v1/tiles/flood-return-period?run_id=&duration=&valid_time=&bbox=&return_period=`
   返回 GeoJSON `FeatureCollection`，属性包含 `segment_id`、`value`、`unit`、
   `quality_flag`、`return_period`、`warning_level`。
-- `CLI nhms-tiles publish --run-id`
-- `map.layer_catalog`
+- `CLI nhms-pipeline publish-tiles --cycle-id <cycle_id>`
+- `map.tile_layer` / `map.tile_cache`
+
+### 6.1 Issue #122 release behavior
+
+Forecast M3 发布阶段使用 `nhms-pipeline publish-tiles --cycle-id <cycle_id>`。本版本不生成完整全国
+MVT/PBF 金字塔；最小发布产物是洪水重现期 GeoJSON delivery metadata：
+
+- 从 `hydro.hydro_run` + `flood.return_period_result` 中发现指定 cycle 的 `frequency_done` 或
+  `published` forecast run。
+- 以确定性 `layer_id=flood_return_period_<run_id>` upsert `map.tile_layer`，`tile_format=geojson`，
+  `tile_uri_template=/api/v1/tiles/flood-return-period?run_id=<run_id>&duration={duration}&valid_time={valid_time}`。
+- 重复执行同一 cycle 必须返回相同 logical layer，不产生重复 `map.tile_layer` 或冲突 cache row。
+- 成功后 run 可标记为 `published`；M3 cycle 仍保持既有最终语义：全量成功为 `complete`，上游部分流域成功为
+  `parsed_partial`。
+- 找不到产品、缺少 `DATABASE_URL` 且对象存储中也没有
+  `tiles/hydro/<cycle_id>/flood-return-period/metadata.json` 时，CLI 返回非 0 JSON：
+  `status=failed_publish`、稳定 `error_code`/`error_message`。Slurm 模板不吞掉该失败，编排器映射为
+  `failed_publish`。
 
 ## 7. 状态与错误
 
