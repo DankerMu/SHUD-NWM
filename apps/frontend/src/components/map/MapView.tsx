@@ -43,6 +43,7 @@ const RIVER_INTERACTIVE_LAYER_IDS = [
   RIVER_HOVER_LAYER_ID,
   RIVER_SELECTED_LAYER_ID,
 ]
+const RIVER_SEGMENT_PAGE_LIMIT = 500
 
 const allowDemoRiverFallback = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_RIVERS === 'true'
 
@@ -80,7 +81,7 @@ async function loadRiverNetwork(): Promise<RiverFeatureCollection> {
 
   const params = new URLSearchParams({
     river_network_version_id: model.river_network_version_id,
-    limit: '50000',
+    limit: String(RIVER_SEGMENT_PAGE_LIMIT),
   })
   const response = await fetch(
     buildApiUrl(`/api/v1/basin-versions/${encodeURIComponent(model.basin_version_id)}/river-segments?${params}`),

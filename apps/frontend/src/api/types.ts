@@ -761,13 +761,16 @@ export interface components {
             } & {
                 [key: string]: unknown;
             };
-            geometry: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
+            geometry: components["schemas"]["GeoJsonLineString"];
         };
         RiverSegmentFeatureCollection: {
             /** @enum {string} */
             type: "FeatureCollection";
             features: components["schemas"]["RiverSegmentFeature"][];
+            /** @description Total matching stored river segment rows, including rows omitted from features because geom is null. */
             total: number;
+            /** @description Total matching river segment rows with non-null LineString geometry that can be emitted as GeoJSON features. */
+            feature_total: number;
             limit: number;
             offset: number;
         };

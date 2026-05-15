@@ -127,6 +127,40 @@ describe('useMonitoringStore', () => {
     expect(stagesQuery).toMatchObject({ source: 'GFS', cycle_time: TEST_CYCLE_TIME })
   })
 
+  it('routes monitoring status, stages, jobs, and trends through the OpenAPI client', async () => {
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } } | undefined
+      calls.push({ path, query: options?.params?.query })
+      if (path === '/api/v1/pipeline/status') return success(cycle) as never
+      if (path === '/api/v1/pipeline/stages') return success(stages) as never
+      if (path === '/api/v1/queue/depth') return success(queue) as never
+      if (path === '/api/v1/jobs') {
+        return success({ items: [makeJob()], total: 1, limit: 12, offset: 0 }) as never
+      }
+      if (path === '/api/v1/metrics/stage-duration') return success([]) as never
+      if (path === '/api/v1/metrics/success-rate') return success([]) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await useMonitoringStore.getState().fetchAll()
+    await useMonitoringStore.getState().fetchJobs()
+    await client.GET('/api/v1/metrics/stage-duration', { params: { query: { source: 'GFS', days: 30 } } })
+    await client.GET('/api/v1/metrics/success-rate', { params: { query: { source: 'GFS', days: 30 } } })
+
+    expect(calls.map((call) => call.path)).toEqual([
+      '/api/v1/pipeline/status',
+      '/api/v1/pipeline/stages',
+      '/api/v1/queue/depth',
+      '/api/v1/jobs',
+      '/api/v1/metrics/stage-duration',
+      '/api/v1/metrics/success-rate',
+    ])
+    expect(calls[3].query).toMatchObject({ source: 'GFS', cycle_time: TEST_CYCLE_TIME })
+  })
+
   it('fetchJobs sends filters and pagination and stores normalized jobs', async () => {
     const jobPage: PipelineJobPage = {
       items: [makeJob({ run_id: 'analysis-run-1', job_type: 'analysis' })],

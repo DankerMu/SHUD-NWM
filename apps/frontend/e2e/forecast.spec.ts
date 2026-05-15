@@ -91,6 +91,7 @@ async function mockForecastApi(page: Page) {
 
     if (url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments') {
       expect(url.searchParams.get('river_network_version_id')).toBe('backend-rivnet-v1')
+      expect(url.searchParams.get('limit')).toBe('500')
       return fulfill(route, riverSegments)
     }
 
@@ -141,6 +142,47 @@ test.describe('forecast page', () => {
 
     await expect(page.getByLabel('河网地图')).toBeVisible()
     await expect(page.locator('.maplibregl-canvas').first()).toBeVisible()
+  })
+
+  test('uses the configured API base for model, river segment, and forecast series requests', async ({ page }) => {
+    const apiBase = 'https://api.example.test'
+    const origins: string[] = []
+    await page.route('**/api/v1/**', async (route) => {
+      const url = new URL(route.request().url())
+      origins.push(url.origin)
+      if (url.pathname === '/api/v1/models') {
+        return fulfill(route, {
+          items: [
+            {
+              model_id: 'model-1',
+              basin_version_id: 'backend-basin-v1',
+              river_network_version_id: 'backend-rivnet-v1',
+              mesh_version_id: 'mesh-1',
+              calibration_version_id: 'cal-1',
+              shud_code_version: '2.0',
+              active_flag: true,
+              model_package_uri: 's3://models/model-1',
+              resource_profile: {},
+              created_at: '2026-05-09T00:00:00Z',
+            },
+          ],
+          total: 1,
+          limit: 1,
+          offset: 0,
+        })
+      }
+      if (url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments') {
+        expect(url.searchParams.get('limit')).toBe('500')
+        return fulfill(route, riverSegments)
+      }
+      if (url.pathname.endsWith('/forecast-series')) return fulfill(route, forecastPayload)
+      throw new Error(`Unhandled mocked API route: ${url.pathname}`)
+    })
+
+    await gotoForecastPage(page)
+    await clickRiverSegment(page)
+
+    expect(new Set(origins)).toEqual(new Set([apiBase]))
   })
 
   test('selects a segment and loads the forecast panel', async ({ page }) => {

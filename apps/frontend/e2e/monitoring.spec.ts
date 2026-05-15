@@ -85,6 +85,25 @@ const jobs = [
     log_uri: 's3://logs/job-success.log',
     duration_seconds: 30,
   },
+  {
+    job_id: 'job-running',
+    run_id: 'run-running',
+    cycle_id: 'cycle-1',
+    job_type: 'forecast',
+    slurm_job_id: '1003',
+    model_id: 'model-c',
+    status: 'running',
+    stage: 'forecast',
+    submitted_at: '2026-05-09T00:07:00Z',
+    started_at: '2026-05-09T00:08:00Z',
+    finished_at: null,
+    exit_code: null,
+    retry_count: 0,
+    error_code: null,
+    error_message: null,
+    log_uri: 's3://logs/job-running.log',
+    duration_seconds: null,
+  },
 ]
 
 const stageDurationMetrics = [
@@ -101,6 +120,8 @@ const successRateMetrics = [
 
 interface MonitoringApiMockOptions {
   onRetryRequest?: (request: Request) => void
+  onCancelRequest?: (request: Request) => void
+  onApiRequest?: (request: Request) => void
 }
 
 function success<T>(data: T) {
@@ -130,6 +151,7 @@ async function fulfill(route: Route, data: unknown) {
 async function mockMonitoringApi(page: Page, options: MonitoringApiMockOptions = {}) {
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
+    options.onApiRequest?.(request)
     const url = new URL(request.url())
 
     if (url.pathname === '/api/v1/pipeline/status') return fulfill(route, cycle)
@@ -153,6 +175,20 @@ async function mockMonitoringApi(page: Page, options: MonitoringApiMockOptions =
     if (url.pathname === '/api/v1/runs/run-failed/retry' && request.method() === 'POST') {
       options.onRetryRequest?.(request)
       return fulfill(route, { job_id: 'job-failed-retry', run_id: 'run-failed', retry_count: 1, status: 'pending' })
+    }
+    if (url.pathname === '/api/v1/runs/run-running/cancel' && request.method() === 'POST') {
+      options.onCancelRequest?.(request)
+      return fulfill(route, {
+        run_id: 'run-running',
+        cancelled_jobs: [{ ...jobs[2], status: 'cancelled' }],
+        cancelled: [{ ...jobs[2], status: 'cancelled' }],
+        failed_jobs: [],
+        slurm_failures: [],
+        partial_failure: false,
+        idempotent_jobs: [],
+        hydro_run: null,
+        forecast_cycle: null,
+      })
     }
     if (url.pathname === '/api/v1/jobs') {
       const status = url.searchParams.get('status')
@@ -287,6 +323,62 @@ test.describe('monitoring page', () => {
 
     await expect(page.getByText('权限不足')).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
+  })
+
+  test('shows cancel for operator and hides it when role becomes viewer', async ({ page }) => {
+    const cancelRequests: Array<{ method: string; pathname: string; role: string | null }> = []
+    await openMonitoringAsOperator(page, {
+      onCancelRequest: (request) => {
+        cancelRequests.push({
+          method: request.method(),
+          pathname: new URL(request.url()).pathname,
+          role: request.headers()['x-user-role'] ?? null,
+        })
+      },
+    })
+
+    const cancelButton = page.getByRole('row', { name: /run-running/ }).getByRole('button', { name: /取消/ })
+    await expect(cancelButton).toBeVisible()
+    await cancelButton.click()
+
+    await expect.poll(() => cancelRequests).toEqual([
+      { method: 'POST', pathname: '/api/v1/runs/run-running/cancel', role: 'operator' },
+    ])
+    await expect(page.getByRole('listitem').filter({ hasText: '取消请求已提交' })).toBeVisible()
+
+    await selectRole(page, 'Viewer')
+
+    await expect(page.getByText('权限不足')).toBeVisible()
+    await expect(page.getByRole('button', { name: /取消/ })).toHaveCount(0)
+  })
+
+  test('uses the configured API base for monitoring reads and operator actions', async ({ page }) => {
+    const origins: Array<{ origin: string; pathname: string; method: string }> = []
+    await openMonitoringAsOperator(page, {
+      onApiRequest: (request) => {
+        const url = new URL(request.url())
+        origins.push({ origin: url.origin, pathname: url.pathname, method: request.method() })
+      },
+    })
+
+    await expect.poll(() => origins.map((call) => call.pathname)).toContain('/api/v1/metrics/stage-duration')
+    await expect.poll(() => origins.map((call) => call.pathname)).toContain('/api/v1/metrics/success-rate')
+    await page.getByRole('row', { name: /run-failed/ }).getByRole('button', { name: /重试/ }).click()
+    await page.getByRole('row', { name: /run-running/ }).getByRole('button', { name: /取消/ }).click()
+
+    const expectedPaths = new Set([
+      '/api/v1/pipeline/status',
+      '/api/v1/pipeline/stages',
+      '/api/v1/queue/depth',
+      '/api/v1/metrics/stage-duration',
+      '/api/v1/metrics/success-rate',
+      '/api/v1/jobs',
+      '/api/v1/runs/run-failed/retry',
+      '/api/v1/runs/run-running/cancel',
+    ])
+    for (const path of expectedPaths) {
+      expect(origins.some((call) => call.origin === 'https://api.example.test' && call.pathname === path)).toBe(true)
+    }
   })
 
   test('denies monitoring access to viewer role', async ({ page }) => {

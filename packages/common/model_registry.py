@@ -243,7 +243,8 @@ class PsycopgModelRegistryStore:
         with self._transaction() as cursor:
             cursor.execute(
                 f"""
-                SELECT COUNT(*) AS total
+                SELECT COUNT(*) AS total,
+                       COUNT(rs.geom) AS feature_total
                 FROM core.river_segment rs
                 JOIN core.river_network_version rnv
                   ON rnv.river_network_version_id = rs.river_network_version_id
@@ -251,7 +252,9 @@ class PsycopgModelRegistryStore:
                 """,
                 tuple(params),
             )
-            total = int(cursor.fetchone()["total"])
+            counts = cursor.fetchone()
+            total = int(counts["total"])
+            feature_total = int(counts["feature_total"])
             cursor.execute(
                 f"""
                 SELECT
@@ -267,6 +270,7 @@ class PsycopgModelRegistryStore:
                 JOIN core.river_network_version rnv
                   ON rnv.river_network_version_id = rs.river_network_version_id
                 WHERE {where_clause}
+                  AND rs.geom IS NOT NULL
                 ORDER BY COALESCE(rs.segment_order, 2147483647), rs.river_segment_id
                 LIMIT %s OFFSET %s
                 """,
@@ -310,6 +314,7 @@ class PsycopgModelRegistryStore:
             "type": "FeatureCollection",
             "features": features,
             "total": total,
+            "feature_total": feature_total,
             "limit": limit,
             "offset": offset,
         }

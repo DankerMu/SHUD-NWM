@@ -22,7 +22,7 @@ Must preserve:
 - Playwright mocked tests continue to work without a live backend.
 
 Must add/change:
-- Forecast river network loader must call backend data rather than returning `demoRivers`; loaded features must carry `segment_id`, `basin_version_id`, `river_network_version_id`, stream order/name where available, and valid GeoJSON LineString/MultiLineString geometry.
+- Forecast river network loader must call backend data rather than returning `demoRivers`; loaded features must carry `segment_id`, `basin_version_id`, `river_network_version_id`, stream order/name where available, and valid GeoJSON LineString geometry matching current river segment storage.
 - Flood alert store/layers must use the shared API base. Direct `fetch('/api/...')` calls must be replaced or wrapped so `VITE_API_BASE_URL=https://api.example.test` sends requests to that base.
 - Auth/RBAC must have an explicit production boundary. Production builds must not expose a role dropdown that can grant operator/model_admin/sys_admin locally. If demo switching remains, it must be gated by a dev/test flag and default production role source must be headers/config/auth context.
 - Monitoring metrics endpoints and frontend calls must support source/scenario filters consistently. Jobs and trend charts should use the same selected source/scenario context where applicable.

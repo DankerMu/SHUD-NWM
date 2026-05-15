@@ -23,14 +23,18 @@ export interface RiverFeature {
   type: 'Feature'
   properties: RiverFeatureProperties
   geometry: {
-    type: 'LineString' | 'MultiLineString'
-    coordinates: [number, number][] | [number, number][][]
+    type: 'LineString'
+    coordinates: [number, number][]
   }
 }
 
 export interface RiverFeatureCollection {
   type: 'FeatureCollection'
   features: RiverFeature[]
+  total?: number
+  feature_total?: number
+  limit?: number
+  offset?: number
 }
 
 const DEMO_BASIN_VERSION_ID = 'yangtze_v2026_01'

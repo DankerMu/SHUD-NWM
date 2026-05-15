@@ -19,7 +19,7 @@ import {
 import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
 import { formatDate, formatDuration } from '@/lib/format'
-import { useAuthStore } from '@/stores/auth'
+import { isRoleOverrideEnabled, useAuthStore } from '@/stores/auth'
 import { type JobFilters as JobFilterState, type PipelineJob, useMonitoringStore } from '@/stores/monitoring'
 
 type SortKey = 'submitted_at' | 'duration_seconds'
@@ -87,7 +87,9 @@ export function JobsTable() {
       const { error } = await client.POST(path, {
         params: {
           path: { run_id: job.run_id },
-          header: { 'X-User-Role': role as 'operator' | 'model_admin' | 'sys_admin' },
+          header: isRoleOverrideEnabled
+            ? { 'X-User-Role': role as 'operator' | 'model_admin' | 'sys_admin' }
+            : undefined,
         },
       })
       if (error) throw new Error(getApiErrorMessage(error, action === 'retry' ? '重试失败' : '取消失败'))

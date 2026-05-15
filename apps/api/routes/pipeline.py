@@ -17,6 +17,7 @@ from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
+from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryError, RetryNotFoundError, RetryService
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
@@ -45,6 +46,10 @@ _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "frequenc
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024
 LOG_ROOT = Path(os.getenv("LOG_ROOT", "workspace"))
+
+
+def _allow_dev_role_header() -> bool:
+    return os.getenv("ALLOW_DEV_ROLE_HEADER", "").strip().lower() == "true"
 
 
 @lru_cache
@@ -445,7 +450,7 @@ def stage_duration_metrics(
         PipelineJob.finished_at >= cutoff,
     )
     if source is not None:
-        statement = statement.where(PipelineJob.cycle_id.like(f"{source.lower()}_%"))
+        statement = statement.where(PipelineJob.cycle_id.like(f"{_cycle_id_prefix_for_source(source)}%"))
     run_ids = _run_ids_matching_filters(store, run_type=None, scenario=scenario)
     if run_ids is not None:
         if not run_ids:
@@ -486,7 +491,7 @@ def success_rate_metrics(
     cutoff = datetime.now(UTC) - timedelta(days=days)
     statement = select(PipelineJob).where(PipelineJob.created_at >= cutoff)
     if source is not None:
-        statement = statement.where(PipelineJob.cycle_id.like(f"{source.lower()}_%"))
+        statement = statement.where(PipelineJob.cycle_id.like(f"{_cycle_id_prefix_for_source(source)}%"))
     run_ids = _run_ids_matching_filters(store, run_type=None, scenario=scenario)
     if run_ids is not None:
         if not run_ids:
@@ -684,13 +689,17 @@ def _ok(request: Request, data: Any) -> dict[str, Any]:
 
 def _require_operator_role(request: Request) -> None:
     role = request.headers.get("X-User-Role")
-    if role is not None and role.strip().lower() in _OPERATOR_ROLES:
+    if _allow_dev_role_header() and role is not None and role.strip().lower() in _OPERATOR_ROLES:
         return
     raise ApiError(
         status_code=403,
         code="FORBIDDEN",
         message="Operator role required.",
     )
+
+
+def _cycle_id_prefix_for_source(source: str) -> str:
+    return f"{normalize_source_id(source)}_"
 
 
 def _parse_cycle_time(value: str) -> datetime:

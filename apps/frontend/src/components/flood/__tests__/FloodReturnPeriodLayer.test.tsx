@@ -40,6 +40,24 @@ describe('FloodReturnPeriodLayer', () => {
     expect(url).not.toContain('.pbf')
   })
 
+  it('routes flood tile fetches through the configured API base', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({ type: 'FeatureCollection', features: [] }),
+      }),
+    )
+
+    render(<FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" />)
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+    expect(fetch).toHaveBeenCalledWith(
+      'https://api.example.test/api/v1/tiles/flood-return-period?run_id=run-1&duration=1h&valid_time=2026-05-03T06%3A00%3A00Z',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+  })
+
   it('configures a geojson source instead of a vector source', async () => {
     vi.stubGlobal(
       'fetch',

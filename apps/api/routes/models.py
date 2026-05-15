@@ -246,7 +246,7 @@ def list_river_segments(
     request: Request,
     basin_version_id: str,
     river_network_version_id: str | None = None,
-    limit: int = Query(default=10000, ge=1, le=50000),
+    limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:

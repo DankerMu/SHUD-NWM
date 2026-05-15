@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -251,7 +252,7 @@ def test_job_logs_not_found(tmp_path: Path, monkeypatch) -> None:
 def test_retry_rbac() -> None:
     with _store() as store:
         _create_job(store, job_id="job_retry", run_id="run_retry", status="failed", error_code="SLURM_TIMEOUT")
-        with _client(store) as client:
+        with _client(store, allow_dev_role_header=True) as client:
             allowed = client.post("/api/v1/runs/run_retry/retry", headers={"X-User-Role": "operator"})
             denied = client.post("/api/v1/runs/run_retry/retry", headers={"X-User-Role": "viewer"})
 
@@ -272,13 +273,24 @@ def test_retry_no_role_header() -> None:
         assert response.json()["error"]["message"] == "Operator role required."
 
 
+def test_retry_denies_spoofed_role_header_by_default() -> None:
+    with _store() as store:
+        _create_job(store, job_id="job_retry_prod", run_id="run_retry_prod", status="failed")
+        with _client(store) as client:
+            response = client.post("/api/v1/runs/run_retry_prod/retry", headers={"X-User-Role": "operator"})
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert store.get_job("job_retry_prod").status == "failed"
+
+
 def test_cancel_endpoint() -> None:
     with _store() as store:
         gateway = _MockGateway()
         _create_job(store, job_id="job_cancel_pending", run_id="run_cancel", status="pending", slurm_job_id="slurm_1")
         _create_job(store, job_id="job_cancel_running", run_id="run_cancel", status="running", slurm_job_id="slurm_2")
         _create_job(store, job_id="job_cancel_done", run_id="run_cancel", status="succeeded", slurm_job_id="slurm_3")
-        with _client(store, gateway) as client:
+        with _client(store, gateway, allow_dev_role_header=True) as client:
             response = client.post("/api/v1/runs/run_cancel/cancel", headers={"X-User-Role": "operator"})
 
         assert response.status_code == 200
@@ -297,7 +309,7 @@ def test_cancel_rbac() -> None:
     with _store() as store:
         gateway = _MockGateway()
         _create_job(store, job_id="job_cancel_denied", run_id="run_cancel_denied", status="running")
-        with _client(store, gateway) as client:
+        with _client(store, gateway, allow_dev_role_header=True) as client:
             response = client.post("/api/v1/runs/run_cancel_denied/cancel", headers={"X-User-Role": "viewer"})
 
         assert response.status_code == 403
@@ -318,6 +330,25 @@ def test_cancel_no_role_header() -> None:
         assert response.json()["error"]["message"] == "Operator role required."
         assert gateway.cancelled == []
         assert store.get_job("job_cancel_no_role").status == "running"
+
+
+def test_cancel_denies_spoofed_role_header_by_default() -> None:
+    with _store() as store:
+        gateway = _MockGateway()
+        _create_job(
+            store,
+            job_id="job_cancel_prod",
+            run_id="run_cancel_prod",
+            status="running",
+            slurm_job_id="slurm_prod",
+        )
+        with _client(store, gateway) as client:
+            response = client.post("/api/v1/runs/run_cancel_prod/cancel", headers={"X-User-Role": "operator"})
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert gateway.cancelled == []
+        assert store.get_job("job_cancel_prod").status == "running"
 
 
 def test_metrics_stage_duration() -> None:
@@ -369,7 +400,7 @@ def test_metrics_filter_by_source_and_scenario() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
         gfs_cycle = cycle_id_for("GFS", cycle_time)
-        ifs_cycle = cycle_id_for("IFS", cycle_time)
+        ifs_cycle = f"IFS_{cycle_time:%Y%m%d%H}"
         _seed_monitoring_jobs(store, cycle_id=gfs_cycle)
         _create_job(
             store,
@@ -398,6 +429,63 @@ def test_metrics_filter_by_source_and_scenario() -> None:
                 "date": cycle_time.date().isoformat(),
                 "stage": "download",
                 "average_duration_seconds": 120.0,
+                "job_count": 1,
+            }
+        ]
+        assert success_response.status_code == 200
+        assert success_response.json()["data"] == [
+            {
+                "date": cycle_time.date().isoformat(),
+                "success_rate": 1.0,
+                "succeeded_cycles": 1,
+                "total_cycles": 1,
+            }
+        ]
+
+
+def test_metrics_filter_by_era5_canonical_source_prefix() -> None:
+    with _store() as store:
+        store.session.execute(text("PRAGMA case_sensitive_like = ON"))
+        cycle_time = _cycle_time()
+        era5_cycle = f"ERA5_{cycle_time:%Y%m%d%H}"
+        _create_job(
+            store,
+            job_id="job_era5_success",
+            run_id="analysis_true_field_run",
+            cycle_id=era5_cycle,
+            stage="era5_download",
+            status="succeeded",
+            submitted_at=cycle_time,
+            started_at=cycle_time,
+            finished_at=cycle_time + timedelta(minutes=3),
+        )
+        _create_job(
+            store,
+            job_id="job_lowercase_era5_legacy",
+            run_id="analysis_true_field_legacy",
+            cycle_id=f"era5_{cycle_time:%Y%m%d%H}",
+            stage="era5_download",
+            status="succeeded",
+            submitted_at=cycle_time,
+            started_at=cycle_time,
+            finished_at=cycle_time + timedelta(minutes=1),
+        )
+        with _client(store) as client:
+            stage_response = client.get(
+                "/api/v1/metrics/stage-duration",
+                params={"days": 30, "source": "era5", "scenario": "analysis_true_field"},
+            )
+            success_response = client.get(
+                "/api/v1/metrics/success-rate",
+                params={"days": 30, "source": "era5", "scenario": "analysis_true_field"},
+            )
+
+        assert stage_response.status_code == 200
+        assert stage_response.json()["data"] == [
+            {
+                "date": cycle_time.date().isoformat(),
+                "stage": "era5_download",
+                "average_duration_seconds": 180.0,
                 "job_count": 1,
             }
         ]
@@ -512,20 +600,36 @@ class _MockGateway:
 
 
 class _client:
-    def __init__(self, store: PipelineStore, gateway: _MockGateway | None = None) -> None:
+    def __init__(
+        self,
+        store: PipelineStore,
+        gateway: _MockGateway | None = None,
+        *,
+        allow_dev_role_header: bool = False,
+    ) -> None:
         self.store = store
         self.gateway = gateway or _MockGateway()
+        self.allow_dev_role_header = allow_dev_role_header
         self.client: TestClient | None = None
+        self.previous_allow_dev_role_header: str | None = None
 
     def __enter__(self) -> TestClient:
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: self.store
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: self.gateway
+        if self.allow_dev_role_header:
+            self.previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
         self.client = TestClient(app)
         return self.client
 
     def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
         app.dependency_overrides.pop(pipeline_routes.get_pipeline_store, None)
         app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
+        if self.allow_dev_role_header:
+            if self.previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = self.previous_allow_dev_role_header
         if self.client is not None:
             self.client.close()
 

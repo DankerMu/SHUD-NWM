@@ -298,8 +298,8 @@ paths:
           schema:
             type: integer
             minimum: 1
-            maximum: 50000
-            default: 10000
+            maximum: 5000
+            default: 500
         - $ref: "#/components/parameters/Offset"
       responses:
         "200":
@@ -1702,12 +1702,10 @@ components:
               nullable: true
           additionalProperties: true
         geometry:
-          oneOf:
-            - $ref: "#/components/schemas/GeoJsonLineString"
-            - $ref: "#/components/schemas/GeoJsonMultiLineString"
+          $ref: "#/components/schemas/GeoJsonLineString"
     RiverSegmentFeatureCollection:
       type: object
-      required: [type, features, total, limit, offset]
+      required: [type, features, total, feature_total, limit, offset]
       properties:
         type:
           type: string
@@ -1719,6 +1717,11 @@ components:
         total:
           type: integer
           minimum: 0
+          description: Total matching stored river segment rows, including rows omitted from features because geom is null.
+        feature_total:
+          type: integer
+          minimum: 0
+          description: Total matching river segment rows with non-null LineString geometry that can be emitted as GeoJSON features.
         limit:
           type: integer
           minimum: 1
