@@ -59,14 +59,14 @@ def test_characterization_manual_retry_writes_pending_to_hydro_run() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_retry", status="failed")
         _create_job(store, job_id="job_failed", run_id="run_retry", status="failed", error_code="NODE_FAILURE")
+        gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_retry")
+        retry = service.attempt_manual_retry("run_retry", gateway=gateway)
 
-        # Characterization: before enum remediation, SQLite allowed this value even though PostgreSQL did not.
-        assert retry.status == "pending"
+        assert retry.status == "submitted"
         assert _hydro_status(store, "run_retry") == "pending"
-        assert store.get_job(retry.job_id).status == "pending"
+        assert store.get_job(retry.job_id).status == "submitted"
 
 
 def test_manual_retry_response_includes_execution_status() -> None:
@@ -80,9 +80,9 @@ def test_manual_retry_response_includes_execution_status() -> None:
         assert response.status_code == 200
         data = response.json()["data"]
         assert data["job_id"] == data["pipeline_job_id"]
-        assert data["slurm_job_id"] is None
-        assert data["execution_status"] == "queued"
-        assert data["status"] == "pending"
+        assert data["slurm_job_id"] == "slurm_retry"
+        assert data["execution_status"] == "submitted"
+        assert data["status"] == "submitted"
 
 
 def test_duplicate_retry_returns_conflict() -> None:
@@ -107,9 +107,10 @@ def test_retry_event_records_trigger_and_previous_error() -> None:
             status="failed",
             error_code="SBATCH_SUBMISSION_FAILED",
         )
+        gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_retry_event")
+        retry = service.attempt_manual_retry("run_retry_event", gateway=gateway)
 
         event = _events(store)[0]
         assert event.entity_id == retry.job_id
@@ -267,9 +268,10 @@ def test_retry_status_is_valid_hydro_enum() -> None:
             status="failed",
             error_code="NODE_FAILURE",
         )
+        gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        service.attempt_manual_retry("run_retry_valid_enum")
+        service.attempt_manual_retry("run_retry_valid_enum", gateway=gateway)
 
         assert _hydro_status(store, "run_retry_valid_enum") == "pending"
         assert _hydro_status(store, "run_retry_valid_enum") in HYDRO_RUN_STATUS_ENUM
@@ -323,11 +325,12 @@ def test_retry_preserves_terminal_hydro_status() -> None:
             status="failed",
             error_code="NODE_FAILURE",
         )
+        gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_retry_terminal")
+        retry = service.attempt_manual_retry("run_retry_terminal", gateway=gateway)
 
-        assert retry.status == "pending"
+        assert retry.status == "submitted"
         assert _hydro_status(store, "run_retry_terminal") == "published"
         assert _hydro_status(store, "run_retry_terminal") in HYDRO_RUN_STATUS_ENUM
 
@@ -353,10 +356,11 @@ def test_cancel_preserves_terminal_hydro_run() -> None:
 
 def test_retry_nonexistent_run_raises_not_found_without_enum_write() -> None:
     with _store() as store:
+        gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
         with pytest.raises(RetryNotFoundError):
-            service.attempt_manual_retry("run_missing")
+            service.attempt_manual_retry("run_missing", gateway=gateway)
 
         assert _events(store) == []
 
@@ -377,7 +381,19 @@ class _ClosingStore(PipelineStore):
 class _MockGateway:
     def __init__(self, failures: dict[str, SlurmGatewayError] | None = None) -> None:
         self.cancelled: list[str] = []
+        self.submissions: list[Any] = []
         self.failures = failures or {}
+
+    def submit_job(self, request: Any) -> dict[str, Any]:
+        self.submissions.append(request)
+        return {
+            "job_id": "slurm_retry",
+            "run_id": request.run_id,
+            "model_id": request.model_id,
+            "status": "submitted",
+            "submitted_at": "2026-05-15T00:00:00Z",
+            "updated_at": "2026-05-15T00:00:00Z",
+        }
 
     def cancel_job(self, job_id: str) -> dict[str, str]:
         if job_id in self.failures:

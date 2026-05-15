@@ -256,7 +256,7 @@ def test_retry_rbac() -> None:
             denied = client.post("/api/v1/runs/run_retry/retry", headers={"X-User-Role": "viewer"})
 
         assert allowed.status_code == 200
-        assert allowed.json()["data"]["status"] == "pending"
+        assert allowed.json()["data"]["status"] == "submitted"
         assert denied.status_code == 403
         assert denied.json()["error"]["code"] == "FORBIDDEN"
 
@@ -442,7 +442,19 @@ class _ClosingStore(PipelineStore):
 class _MockGateway:
     def __init__(self, depth: dict[str, int] | None = None) -> None:
         self.cancelled: list[str] = []
+        self.submissions: list[Any] = []
         self.depth = depth or {"running": 0, "pending": 0, "idle": 0}
+
+    def submit_job(self, request: Any) -> dict[str, Any]:
+        self.submissions.append(request)
+        return {
+            "job_id": "slurm_retry",
+            "run_id": request.run_id,
+            "model_id": request.model_id,
+            "status": "submitted",
+            "submitted_at": "2026-05-15T00:00:00Z",
+            "updated_at": "2026-05-15T00:00:00Z",
+        }
 
     def cancel_job(self, job_id: str) -> dict[str, str]:
         self.cancelled.append(job_id)

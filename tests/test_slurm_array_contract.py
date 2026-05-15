@@ -116,6 +116,14 @@ def _invoke_main_expect_failure(main: Callable[[Sequence[str]], int], argv: Sequ
         assert result == 1
 
 
+def _main_exit_code(main: Callable[[Sequence[str]], int], argv: Sequence[str]) -> int:
+    try:
+        result = main(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    return int(result)
+
+
 def _rendered_command_argv(rendered: str, *, manifest_index_path: Path) -> list[str]:
     command = [
         line.strip()
@@ -708,8 +716,21 @@ def test_explicit_task_id_overrides_slurm_array_task_id(monkeypatch, tmp_path):
 
 
 def test_publish_tiles_command_exists(capsys):
-    _invoke_main(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "test_cycle"])
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "test_cycle"])
 
     captured = capsys.readouterr()
+    assert exit_code == 1
     assert "publish-tiles is not yet implemented" in captured.err
-    assert json.loads(captured.out) == {"status": "skipped", "reason": "publish_tiles_not_implemented"}
+    assert json.loads(captured.out) == {
+        "status": "failed_publish",
+        "reason": "publish_tiles_not_implemented",
+    }
+
+
+def test_publish_tiles_noop_would_falsely_complete_pipeline(capsys):
+    result = orchestrator_cli._publish_tiles(cycle_id="test_cycle")
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "test_cycle"])
+
+    capsys.readouterr()
+    assert result["status"] == "failed_publish"
+    assert exit_code != 0
