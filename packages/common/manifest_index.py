@@ -20,6 +20,7 @@ REQUIRED_MANIFEST_ENTRY_FIELDS = (
     "cycle_time",
     "workspace_dir",
 )
+OPTIONAL_MANIFEST_ENTRY_FIELDS = ("manifest_path",)
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 MAX_MANIFEST_INDEX_BYTES = 50_000_000
 MAX_MANIFEST_INDEX_ENTRIES = 10_000
@@ -126,6 +127,12 @@ def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any
             raise ManifestValidationError(
                 f"Manifest entry field {field} contains unsafe characters: {value!r}",
                 {"manifest_index_path": manifest_index_path, "task_id": task_id, "field": field, "value": value},
+            )
+    for field in OPTIONAL_MANIFEST_ENTRY_FIELDS:
+        if field in result and not isinstance(result[field], str):
+            raise ManifestValidationError(
+                f"Manifest entry field {field} must be a string when present.",
+                {"manifest_index_path": manifest_index_path, "task_id": task_id, "field": field},
             )
     try:
         stored_task_id = int(result["task_id"])

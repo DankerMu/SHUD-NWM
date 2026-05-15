@@ -417,6 +417,13 @@ class OrchestratorRepository(Protocol):
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def create_hydro_run_from_basin(
+        self,
+        basin: Mapping[str, Any],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
     def update_hydro_run_status(
         self,
         run_id: str,
@@ -982,6 +989,7 @@ class ForecastOrchestrator:
         manifest_index_path: Path | None = None
         stage_manifest = self._build_cycle_stage_manifest(stage, context)
         try:
+            self._prepare_forecast_runtime_manifests(stage, context)
             if stage.is_array:
                 tasks = self._reindexed_manifest_entries(context.active_basins)
                 manifest_index_path = self._write_cycle_manifest_index(context, stage, tasks)
@@ -1537,6 +1545,146 @@ class ForecastOrchestrator:
         manifest_path = self._workspace_path("runs", context.run_id, "input", f"{stage.stage}_manifest_index.json")
         manifest_path.write_text(json.dumps(tasks, indent=2, sort_keys=True), encoding="utf-8")
         return manifest_path
+
+    def _prepare_forecast_runtime_manifests(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+    ) -> None:
+        if stage.stage != "forecast":
+            return
+
+        for index, basin in enumerate(context.active_basins):
+            manifest = self._build_forecast_runtime_manifest(context, basin)
+            content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
+            manifest_uri = manifest["outputs"]["run_manifest_uri"]
+            self.object_store.write_bytes_atomic(manifest_uri, content)
+
+            manifest_path = self._workspace_path("runs", str(basin["run_id"]), "input", "manifest.json")
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_bytes(content)
+
+            self._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=index)
+            self.repository.create_hydro_run_from_basin(basin, manifest)
+            basin["manifest_path"] = str(manifest_path)
+
+    def _build_forecast_runtime_manifest(
+        self,
+        context: CycleOrchestrationContext,
+        basin: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        run_id = str(basin["run_id"])
+        model_id = str(basin["model_id"])
+        compact_cycle = format_cycle_time(context.cycle_time)
+        forecast_horizon_hours = int(basin.get("forecast_horizon_hours") or self.config.forecast_horizon_hours)
+        start_time = context.cycle_time
+        end_time = start_time + timedelta(hours=forecast_horizon_hours)
+        forcing_uri = (
+            basin.get("forcing_package_uri")
+            or basin.get("forcing_uri")
+            or f"forcing/{context.source_id.lower()}/{compact_cycle}/{basin['basin_version_id']}/{model_id}/"
+        )
+        return {
+            "run_id": run_id,
+            "run_type": "forecast",
+            "scenario_id": self._forecast_scenario_id(context.source_id),
+            "source_id": context.source_id,
+            "cycle_time": _format_time(context.cycle_time),
+            "start_time": _format_time(start_time),
+            "end_time": _format_time(end_time),
+            "forecast_horizon_hours": forecast_horizon_hours,
+            "workspace_dir": str(Path(self.config.workspace_root)),
+            "object_store_root": str(Path(self.config.object_store_root)),
+            "object_store_prefix": self.config.object_store_prefix,
+            "model": {
+                "model_id": model_id,
+                "basin_id": basin.get("basin_id"),
+                "basin_version_id": str(basin["basin_version_id"]),
+                "river_network_version_id": str(basin["river_network_version_id"]),
+                "model_package_uri": basin.get("model_package_uri") or f"models/{model_id}/",
+                "segment_count": int(basin.get("segment_count") or 1),
+            },
+            "forcing": {
+                "forcing_version_id": basin.get("forcing_version_id"),
+                "forcing_uri": str(forcing_uri),
+            },
+            "initial_state": {
+                "state_id": basin.get("init_state_id"),
+                "ic_file_uri": basin.get("init_state_uri"),
+                "valid_time": _format_time_or_none(_parse_gateway_time(basin.get("init_state_valid_time"))),
+                "checksum": basin.get("init_state_checksum"),
+                "quality": basin.get("init_state_quality") or "cold_start_no_state",
+            },
+            "runtime": {
+                "output_interval_minutes": 60,
+                "init_mode": 3 if basin.get("init_state_id") or basin.get("init_state_uri") else 1,
+            },
+            "outputs": {
+                "run_manifest_uri": self.object_store.uri_for_key(f"runs/{run_id}/input/manifest.json"),
+                "output_uri": self.object_store.uri_for_key(f"runs/{run_id}/output/"),
+                "log_uri": self.object_store.uri_for_key(f"runs/{run_id}/logs/"),
+            },
+        }
+
+    def _validate_forecast_runtime_manifest(
+        self,
+        manifest_path: Path,
+        manifest: Mapping[str, Any],
+        *,
+        task_index: int,
+    ) -> None:
+        if not manifest_path.exists():
+            raise OrchestratorError(
+                "RUNTIME_MANIFEST_MISSING",
+                f"Forecast runtime manifest was not written for task {task_index}.",
+                {"manifest_path": str(manifest_path), "task_id": task_index},
+            )
+        try:
+            persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise OrchestratorError(
+                "RUNTIME_MANIFEST_INVALID_JSON",
+                f"Forecast runtime manifest is not valid JSON for task {task_index}.",
+                {"manifest_path": str(manifest_path), "task_id": task_index, "error": str(exc)},
+            ) from exc
+        except OSError as exc:
+            raise OrchestratorError(
+                "RUNTIME_MANIFEST_READ_FAILED",
+                f"Forecast runtime manifest cannot be read for task {task_index}: {exc}",
+                {"manifest_path": str(manifest_path), "task_id": task_index},
+            ) from exc
+        required_paths = (
+            ("run_id",),
+            ("run_type",),
+            ("scenario_id",),
+            ("source_id",),
+            ("cycle_time",),
+            ("start_time",),
+            ("end_time",),
+            ("model", "model_id"),
+            ("model", "basin_version_id"),
+            ("model", "river_network_version_id"),
+            ("model", "model_package_uri"),
+            ("forcing", "forcing_uri"),
+            ("outputs", "run_manifest_uri"),
+            ("outputs", "output_uri"),
+            ("outputs", "log_uri"),
+            ("workspace_dir",),
+            ("object_store_root",),
+        )
+        missing = [".".join(path) for path in required_paths if _nested_value(persisted, path) in (None, "")]
+        if missing:
+            raise OrchestratorError(
+                "RUNTIME_MANIFEST_INVALID",
+                f"Forecast runtime manifest is missing required fields for task {task_index}: {', '.join(missing)}.",
+                {"manifest_path": str(manifest_path), "task_id": task_index, "missing_fields": missing},
+            )
+        if persisted.get("run_id") != manifest.get("run_id"):
+            raise OrchestratorError(
+                "RUNTIME_MANIFEST_INVALID",
+                f"Forecast runtime manifest run_id mismatch for task {task_index}.",
+                {"manifest_path": str(manifest_path), "task_id": task_index},
+            )
 
     def _reindexed_manifest_entries(self, basins: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         return build_reindexed_manifest([dict(basin) for basin in basins], range(len(basins)))
@@ -2768,6 +2916,69 @@ class PsycopgOrchestratorRepository:
             missing_message=f"hydro_run already exists and is not retriable: {context.run_id}",
         )
 
+    def create_hydro_run_from_basin(
+        self,
+        basin: Mapping[str, Any],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        run_id = str(manifest["run_id"])
+        model = _coerce_mapping(manifest["model"])
+        forcing = _coerce_mapping(manifest.get("forcing") or {})
+        outputs = _coerce_mapping(manifest.get("outputs") or {})
+        initial_state = _coerce_mapping(manifest.get("initial_state") or {})
+        return self._fetch_one(
+            """
+            INSERT INTO hydro.hydro_run (
+                run_id,
+                run_type,
+                scenario_id,
+                model_id,
+                basin_version_id,
+                forcing_version_id,
+                init_state_id,
+                source_id,
+                cycle_time,
+                start_time,
+                end_time,
+                status,
+                run_manifest_uri,
+                output_uri,
+                log_uri
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'created', %s, %s, %s)
+            ON CONFLICT (run_id) DO UPDATE SET
+                status = 'created',
+                forcing_version_id = EXCLUDED.forcing_version_id,
+                init_state_id = EXCLUDED.init_state_id,
+                run_manifest_uri = EXCLUDED.run_manifest_uri,
+                output_uri = EXCLUDED.output_uri,
+                log_uri = EXCLUDED.log_uri,
+                error_code = NULL,
+                error_message = NULL,
+                updated_at = now()
+            WHERE hydro.hydro_run.status IN ('failed', 'cancelled', 'pending')
+            RETURNING *
+            """,
+            (
+                run_id,
+                manifest.get("run_type", "forecast"),
+                manifest["scenario_id"],
+                model["model_id"],
+                model["basin_version_id"],
+                forcing.get("forcing_version_id"),
+                initial_state.get("state_id") or basin.get("init_state_id"),
+                manifest.get("source_id") or basin.get("source_id"),
+                parse_cycle_time(manifest["cycle_time"]),
+                _parse_gateway_time(manifest["start_time"]),
+                _parse_gateway_time(manifest["end_time"]),
+                outputs.get("run_manifest_uri"),
+                outputs.get("output_uri"),
+                outputs.get("log_uri"),
+            ),
+            missing_code="HYDRO_RUN_NOT_RETRIABLE",
+            missing_message=f"hydro_run already exists and is not retriable: {run_id}",
+        )
+
     def update_hydro_run_status(
         self,
         run_id: str,
@@ -3163,6 +3374,15 @@ def build_reindexed_manifest(
         entry["original_task_id"] = int(entry.get("original_task_id", previous_task_id))
         reindexed.append(entry)
     return reindexed
+
+
+def _nested_value(value: Mapping[str, Any], path: Sequence[str]) -> Any:
+    current: Any = value
+    for part in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return current
 
 
 def parse_sacct_array_results(stdout: str, master_job_id: str) -> ArrayAggregation:

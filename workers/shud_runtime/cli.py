@@ -39,6 +39,8 @@ def _resolve_execute_manifest(manifest: str | None, manifest_index: str | None, 
     if manifest_index is not None:
         resolved_task_id = resolve_task_id(task_id)
         entry = load_manifest_entry(manifest_index, resolved_task_id)
+        if entry.get("manifest_path"):
+            return str(entry["manifest_path"])
         workspace = os.getenv("WORKSPACE_ROOT") or str(entry["workspace_dir"])
         return str(Path(workspace) / "runs" / str(entry["run_id"]) / "input" / "manifest.json")
     if not manifest:
@@ -65,8 +67,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         try:
             resolved_manifest = _resolve_execute_manifest(manifest, manifest_index, task_id)
             click.echo(json.dumps(_execute(resolved_manifest, dry_run=dry_run), sort_keys=True))
-        except (ManifestValidationError, SHUDRuntimeError) as error:
-            click.echo(f"{error.error_code}: {error.message}", err=True)
+        except (ManifestValidationError, SHUDRuntimeError, OSError, json.JSONDecodeError) as error:
+            error_code, message = _cli_error(error)
+            click.echo(f"{error_code}: {message}", err=True)
             raise SystemExit(1) from error
 
     @cli.command("run")
@@ -105,8 +108,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         try:
             resolved_manifest = _resolve_execute_manifest(args.manifest, args.manifest_index, args.task_id)
             print(json.dumps(_execute(resolved_manifest, dry_run=args.dry_run), sort_keys=True))
-        except (ManifestValidationError, SHUDRuntimeError) as error:
-            print(f"{error.error_code}: {error.message}", file=sys.stderr)
+        except (ManifestValidationError, SHUDRuntimeError, OSError, json.JSONDecodeError) as error:
+            error_code, message = _cli_error(error)
+            print(f"{error_code}: {message}", file=sys.stderr)
             return 1
         return 0
     if args.command == "run":
@@ -121,6 +125,16 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2
+
+
+def _cli_error(error: Exception) -> tuple[str, str]:
+    if isinstance(error, (ManifestValidationError, SHUDRuntimeError)):
+        return error.error_code, error.message
+    if isinstance(error, FileNotFoundError):
+        return "RUNTIME_MANIFEST_MISSING", str(error)
+    if isinstance(error, json.JSONDecodeError):
+        return "RUNTIME_MANIFEST_INVALID_JSON", str(error)
+    return "RUNTIME_MANIFEST_READ_FAILED", str(error)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

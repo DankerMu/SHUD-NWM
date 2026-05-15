@@ -384,6 +384,60 @@ class _SqliteCycleRepository:
             return []
         return self.query_pipeline_jobs_by_cycle(cycle_id_for(source_id, cycle_time))
 
+    def create_hydro_run_from_basin(self, basin: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(manifest["run_id"])
+        model = manifest["model"]
+        self.store.session.execute(
+            text(
+                """
+                INSERT OR IGNORE INTO hydro.hydro_run (
+                    run_id,
+                    run_type,
+                    scenario_id,
+                    model_id,
+                    basin_version_id,
+                    source_id,
+                    cycle_time,
+                    start_time,
+                    end_time,
+                    status,
+                    run_manifest_uri
+                )
+                VALUES (
+                    :run_id,
+                    :run_type,
+                    :scenario_id,
+                    :model_id,
+                    :basin_version_id,
+                    :source_id,
+                    :cycle_time,
+                    :start_time,
+                    :end_time,
+                    'created',
+                    :run_manifest_uri
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "run_type": manifest.get("run_type", "forecast"),
+                "scenario_id": manifest["scenario_id"],
+                "model_id": model["model_id"],
+                "basin_version_id": model["basin_version_id"],
+                "source_id": manifest["source_id"],
+                "cycle_time": _parse_time(manifest["cycle_time"]),
+                "start_time": _parse_time(manifest["start_time"]),
+                "end_time": _parse_time(manifest["end_time"]),
+                "run_manifest_uri": manifest["outputs"]["run_manifest_uri"],
+            },
+        )
+        self.store.session.commit()
+        row = self.store.session.execute(
+            text("SELECT * FROM hydro.hydro_run WHERE run_id = :run_id"),
+            {"run_id": run_id},
+        ).mappings().one()
+        return dict(row)
+
     def _ensure_hydro_run(self, *, source_id: str, cycle_time: datetime) -> None:
         run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
         self.store.session.execute(
@@ -539,6 +593,7 @@ def _basins(count: int) -> list[dict[str, Any]]:
             "basin_id": f"basin_{index}",
             "basin_version_id": f"basin_v{index}",
             "run_id": f"run_{index}",
+            "river_network_version_id": f"river_v{index}",
         }
         for index in range(count)
     ]
@@ -551,4 +606,8 @@ def _scenario_for_source(source_id: str) -> str:
 
 
 def _dt(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
