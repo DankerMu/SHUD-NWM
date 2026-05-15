@@ -211,6 +211,42 @@ def submit_hindcast(
     )
 
 
+def mark_hindcast_runs_failed(
+    db_session: Session,
+    run_ids: Sequence[str],
+    error_code: str,
+    error_message: str,
+) -> None:
+    run_ids = [str(run_id) for run_id in run_ids]
+    if not run_ids:
+        return
+    try:
+        statement = (
+            text(
+                """
+                UPDATE hydro.hydro_run
+                SET status = 'failed',
+                    error_code = :error_code,
+                    error_message = :error_message
+                WHERE run_id IN :run_ids
+                  AND status = 'created'
+                """
+            )
+            .bindparams(bindparam("run_ids", expanding=True))
+        )
+        db_session.execute(
+            statement,
+            {"run_ids": run_ids, "error_code": error_code, "error_message": error_message},
+        )
+        db_session.commit()
+    except SQLAlchemyError as error:
+        db_session.rollback()
+        raise HindcastError(
+            "HINDCAST_SUBMIT_DB_ERROR",
+            f"Failed to mark hindcast runs failed after submit preflight failure: {error}",
+        ) from error
+
+
 def produce_hindcast_forcing(
     model_id: str,
     source_id: str,

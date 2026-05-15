@@ -21,6 +21,7 @@ from apps.api.routes import hindcast as hindcast_routes
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
+from workers.flood_frequency import cli as flood_cli
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.hindcast import (
     HINDCAST_FORCING_PACKAGE_UNAVAILABLE,
@@ -339,6 +340,60 @@ def test_hindcast_submit_api_returns_slurm_job_array_id() -> None:
         jobs = list(session.scalars(select(PipelineJob)))
         assert len(jobs) == 1
         assert jobs[0].array_task_id == 0
+
+
+def test_hindcast_submit_api_marks_created_run_failed_when_forcing_preflight_fails() -> None:
+    with _store() as session, _api_client(session) as client:
+        response = client.post(
+            "/api/v1/hindcast/submit",
+            json=_submit_body(),
+            headers={"X-User-Role": "operator"},
+        )
+
+        assert response.status_code == 400
+        payload = response.json()["error"]
+        assert payload["code"] == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
+        assert list(session.scalars(select(PipelineJob))) == []
+
+        run = _hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993))
+        assert run["status"] == "failed"
+        assert run["error_code"] == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
+        assert run["error_message"] == payload["message"]
+
+
+def test_hindcast_submit_cli_marks_created_run_failed_when_forcing_preflight_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(
+            HindcastConfig,
+            "from_env",
+            staticmethod(
+                lambda: HindcastConfig(
+                    workspace_root=Path(".").resolve(),
+                    object_store_root=Path(".").resolve(),
+                    slurm_client=_FakeSlurmClient(),
+                )
+            ),
+        )
+
+        with pytest.raises(HindcastError) as exc_info:
+            flood_cli._hindcast_submit(
+                "yangtze_shud_v12",
+                "ERA5",
+                "1993-01-01T00:00:00Z",
+                "1993-12-31T23:00:00Z",
+                "flood_frequency_sample",
+            )
+
+        assert exc_info.value.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
+        assert list(session.scalars(select(PipelineJob))) == []
+
+        run = _hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993))
+        assert run["status"] == "failed"
+        assert run["error_code"] == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
+        assert run["error_message"] == exc_info.value.message
 
 
 def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path) -> None:
