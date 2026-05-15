@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,10 +41,16 @@ def test_worker_chain_smoke_uses_real_schema_and_local_object_store(
     seed_issue_126_data(integration_database_url, object_root=object_root)
     store = LocalObjectStore(object_root, "s3://nhms")
     _seed_worker_support_rows(integration_database_url)
+    grid_definition_uri = _write_grid_definition(store)
     manifest = _write_raw_manifest(store)
 
     canonical = CanonicalConverter(
-        config=CanonicalConverterConfig(workspace_root=tmp_path, object_store_root=object_root, object_store_prefix="s3://nhms"),
+        config=CanonicalConverterConfig(
+            workspace_root=tmp_path,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            grid_definition_uri=grid_definition_uri,
+        ),
         repository=_PsycopgCanonicalRepository(integration_database_url),
         object_store=store,
     )
@@ -119,6 +126,13 @@ def _write_raw_manifest(store: LocalObjectStore) -> dict[str, Any]:
         store.write_bytes_atomic(key, encode_test_netcdf4(variable, 0, values=[300.0], cycle_time=CYCLE_TIME))
         entries.append({"local_key": key, "variable": variable, "forecast_hour": 0, "remote_url": f"mock://{variable}"})
     return {"source_id": SOURCE_ID, "cycle_time": CYCLE_TIME.isoformat(), "entries": entries}
+
+
+def _write_grid_definition(store: LocalObjectStore) -> str:
+    return store.write_bytes_atomic(
+        "canonical/gfs/2026050300/grid/gfs_0p25.json",
+        json.dumps({"cells": [{"grid_cell_id": "0", "longitude": 110.2, "latitude": 30.2}]}).encode("utf-8"),
+    )
 
 
 def _seed_worker_support_rows(database_url: str) -> None:

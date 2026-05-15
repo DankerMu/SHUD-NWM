@@ -220,7 +220,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
         "it126_seg_inside",
         "it126_seg_outside",
     }
-    assert forecast.json()["river_segment_id"] == "it126_seg_inside"
+    assert forecast.json()["segment_id"] == "it126_seg_inside"
     assert forecast.json()["frequency_thresholds"]["Q20"] == 220.0
     assert status.json()["data"]["current_state"] == "complete"
     assert {stage["stage"] for stage in stages.json()["data"]} >= {"download", "forecast"}
