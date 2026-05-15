@@ -2285,6 +2285,7 @@ class ForecastOrchestrator:
             "workspace_dir": str(Path(self.config.workspace_root)),
             "object_store_root": str(Path(self.config.object_store_root)),
             "object_store_prefix": self.config.object_store_prefix,
+            "database_url": os.getenv("DATABASE_URL", ""),
             "run_manifest_path": str(run_manifest_path),
             "run_type": getattr(
                 context,

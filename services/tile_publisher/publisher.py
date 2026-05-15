@@ -83,13 +83,13 @@ class TilePublisher:
                     return self._publish_from_database(session, cycle_id)
             except PublishError:
                 raise
-            except SQLAlchemyError as error:
+            except (SQLAlchemyError, OSError, ValueError) as error:
                 raise PublishError("DATABASE_PUBLISH_FAILED", f"Database publish failed: {error}") from error
         try:
             return self._publish_from_object_store(cycle_id)
         except PublishError:
             raise
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, json.JSONDecodeError) as error:
             raise PublishError("OBJECT_STORE_PUBLISH_FAILED", f"Object-store publish failed: {error}") from error
 
     def _publish_from_database(self, session: Session, cycle_id: str) -> PublishResult:
@@ -144,24 +144,31 @@ class TilePublisher:
 
     def _discover_publishable_runs(self, session: Session, cycle_id: str) -> list[dict[str, Any]]:
         hydro_columns = _table_columns(session, "hydro", "hydro_run")
+        cycle = _cycle_filter(cycle_id)
+        if cycle is None:
+            raise PublishError(
+                "NON_CANONICAL_CYCLE_ID",
+                f"cycle_id must use canonical <source>_YYYYMMDDHH lineage: {cycle_id}.",
+                {"cycle_id": cycle_id},
+            )
+        if not {"source_id", "cycle_time"}.issubset(hydro_columns):
+            raise PublishError(
+                "DELIVERY_LINEAGE_COLUMNS_MISSING",
+                "hydro.hydro_run source_id and cycle_time columns are required for cycle-scoped tile publication.",
+                {"required_columns": ["source_id", "cycle_time"]},
+            )
         where_clauses = [
             "h.run_type = 'forecast'" if "run_type" in hydro_columns else "1 = 1",
             "h.status IN ('frequency_done', 'published')",
         ]
-        params: dict[str, Any] = {"cycle_id": cycle_id}
-        cycle = _cycle_filter(cycle_id)
-        if cycle is not None and {"source_id", "cycle_time"}.issubset(hydro_columns):
-            where_clauses.append("lower(h.source_id) = :source_id")
-            if session.get_bind().dialect.name == "sqlite":
-                where_clauses.append("strftime('%Y%m%d%H', h.cycle_time) = :compact_time")
-                params["compact_time"] = cycle["compact_time"]
-            else:
-                where_clauses.append("h.cycle_time = :cycle_time")
-                params["cycle_time"] = cycle["cycle_time"]
-            params["source_id"] = cycle["source_id"].lower()
+        params: dict[str, Any] = {"source_id": cycle["source_id"].lower()}
+        where_clauses.append("lower(h.source_id) = :source_id")
+        if session.get_bind().dialect.name == "sqlite":
+            where_clauses.append("strftime('%Y%m%d%H', h.cycle_time) = :compact_time")
+            params["compact_time"] = cycle["compact_time"]
         else:
-            where_clauses.append("h.run_id LIKE :run_id_prefix")
-            params["run_id_prefix"] = f"%{cycle_id}%"
+            where_clauses.append("h.cycle_time = :cycle_time")
+            params["cycle_time"] = cycle["cycle_time"]
 
         rows = session.execute(
             text(
@@ -174,7 +181,6 @@ class TilePublisher:
                 WHERE {' AND '.join(where_clauses)}
                 GROUP BY h.run_id, h.scenario_id, h.model_id, h.basin_version_id, h.source_id, h.cycle_time
                 ORDER BY h.run_id
-                LIMIT 256
                 """
             ),
             params,
@@ -264,20 +270,54 @@ class TilePublisher:
                 "DATABASE_URL is required unless documented tile metadata already exists in the object store.",
                 {"expected_artifact": self.object_store.uri_for_key(artifact_key)},
             )
+        metadata_uri = self.object_store.uri_for_key(artifact_key)
+        metadata = self._read_publish_metadata(artifact_key, metadata_uri, cycle_id)
+        layers = tuple(_normalize_metadata_items(metadata.get("layers"), item_id_key="layer_id"))
+        artifacts = tuple(_normalize_metadata_items(metadata.get("artifacts"), item_id_key="artifact_id"))
+        _validate_metadata_artifact_uris(self.object_store, artifacts, metadata_uri=metadata_uri)
+        if not layers and not artifacts:
+            raise PublishError(
+                "INVALID_PUBLISH_METADATA",
+                "Publish metadata must include at least one layer or artifact.",
+                {"metadata_uri": metadata_uri},
+            )
         artifact_uri = self.object_store.uri_for_key(artifact_key)
-        artifact = {
-            "artifact_id": f"flood_return_period_{cycle_id}",
-            "artifact_type": "metadata_json",
-            "uri": artifact_uri,
-            "tile_format": "geojson",
-        }
         return PublishResult(
             cycle_id=cycle_id,
             status="published",
-            layers=(),
-            artifacts=(artifact,),
-            lineage={"cycle_id": cycle_id, "published_basins": 0, "source_run_ids": []},
+            layers=layers,
+            artifacts=artifacts,
+            lineage=_publish_metadata_lineage(metadata, cycle_id, artifact_uri),
         )
+
+    def _read_publish_metadata(self, artifact_key: str, metadata_uri: str, cycle_id: str) -> dict[str, Any]:
+        try:
+            metadata = json.loads(self.object_store.read_bytes(artifact_key).decode("utf-8"))
+        except json.JSONDecodeError as error:
+            raise PublishError(
+                "INVALID_PUBLISH_METADATA",
+                f"Publish metadata is not valid JSON: {error.msg}.",
+                {"metadata_uri": metadata_uri},
+            ) from error
+        except UnicodeDecodeError as error:
+            raise PublishError(
+                "INVALID_PUBLISH_METADATA",
+                "Publish metadata must be UTF-8 JSON.",
+                {"metadata_uri": metadata_uri},
+            ) from error
+        if not isinstance(metadata, dict):
+            raise PublishError(
+                "INVALID_PUBLISH_METADATA",
+                "Publish metadata must be a JSON object.",
+                {"metadata_uri": metadata_uri},
+            )
+        if metadata.get("cycle_id") != cycle_id:
+            raise PublishError(
+                "INVALID_PUBLISH_METADATA",
+                "Publish metadata cycle_id does not match the requested cycle.",
+                {"expected_cycle_id": cycle_id, "metadata_uri": metadata_uri},
+            )
+        return metadata
 
 
 def failure_payload(cycle_id: str, error: PublishError) -> dict[str, Any]:
@@ -300,6 +340,70 @@ def _validate_cycle_id(cycle_id: str) -> str:
     return cycle_id
 
 
+def _normalize_metadata_items(raw_items: Any, *, item_id_key: str) -> list[dict[str, Any]]:
+    if raw_items is None:
+        return []
+    if not isinstance(raw_items, list):
+        raise PublishError(
+            "INVALID_PUBLISH_METADATA",
+            f"Publish metadata field for {item_id_key} entries must be a list.",
+        )
+
+    items: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, dict):
+            raise PublishError(
+                "INVALID_PUBLISH_METADATA",
+                "Publish metadata layer/artifact entries must be objects.",
+                {"index": index},
+            )
+        item = dict(raw_item)
+        identifiers = [
+            item.get(item_id_key),
+            item.get("uri"),
+            item.get("tile_uri"),
+            item.get("tile_uri_template"),
+        ]
+        if not any(isinstance(identifier, str) and identifier.strip() for identifier in identifiers):
+            raise PublishError(
+                "INVALID_PUBLISH_METADATA",
+                "Publish metadata layer/artifact entries must include an identifier or URI.",
+                {"index": index},
+            )
+        items.append(item)
+    return items
+
+
+def _publish_metadata_lineage(metadata: dict[str, Any], cycle_id: str, artifact_uri: str) -> dict[str, Any]:
+    raw_lineage = metadata.get("lineage")
+    lineage = dict(raw_lineage) if isinstance(raw_lineage, dict) else {}
+    lineage["cycle_id"] = cycle_id
+    lineage.setdefault("metadata_uri", artifact_uri)
+    lineage.setdefault("published_basins", 0)
+    lineage.setdefault("source_run_ids", [])
+    return lineage
+
+
+def _validate_metadata_artifact_uris(
+    object_store: LocalObjectStore,
+    items: tuple[dict[str, Any], ...],
+    *,
+    metadata_uri: str,
+) -> None:
+    for index, item in enumerate(items):
+        uri = item.get("uri") or item.get("tile_uri")
+        if not isinstance(uri, str) or not uri.strip() or not uri.startswith("s3://"):
+            continue
+        try:
+            object_store.normalize_key(uri)
+        except ValueError as error:
+            raise PublishError(
+                "INVALID_PUBLISH_METADATA",
+                "Publish metadata artifact URI is outside the configured object-store prefix.",
+                {"index": index, "metadata_uri": metadata_uri},
+            ) from error
+
+
 def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:
     parts = cycle_id.split("_", 1)
     if len(parts) != 2:
@@ -320,12 +424,11 @@ def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:
 
 
 def _has_table(session: Session, schema: str, table_name: str) -> bool:
-    return inspect(session.get_bind()).has_table(table_name, schema=schema)
+    return inspect(session.connection()).has_table(table_name, schema=schema)
 
 
 def _table_columns(session: Session, schema: str, table_name: str) -> set[str]:
-    bind = session.get_bind()
     try:
-        return {column["name"] for column in inspect(bind).get_columns(table_name, schema=schema)}
+        return {column["name"] for column in inspect(session.connection()).get_columns(table_name, schema=schema)}
     except Exception:
         return set()

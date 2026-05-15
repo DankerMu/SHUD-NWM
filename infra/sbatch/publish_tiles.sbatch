@@ -14,6 +14,7 @@ set -euo pipefail
 export WORKSPACE_ROOT="{{workspace_dir}}"
 export OBJECT_STORE_ROOT="{{object_store_root | default(workspace_dir)}}"
 export OBJECT_STORE_PREFIX="{{object_store_prefix | default('')}}"
+export DATABASE_URL="{{database_url | default('', true)}}"
 export NHMS_RUN_ID="{{run_id}}"
 export NHMS_MODEL_ID="{{model_id}}"
 export NHMS_CYCLE_ID="{{cycle_id | default('')}}"

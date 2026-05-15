@@ -35,8 +35,13 @@ def _trigger_analysis(*, model_id: str, date_range: str) -> dict[str, object]:
 
 
 def _publish_tiles(*, cycle_id: str) -> dict[str, object]:
-    publisher = TilePublisher.from_env()
-    return publisher.publish_cycle(cycle_id).to_dict()
+    try:
+        publisher = TilePublisher.from_env()
+        return publisher.publish_cycle(cycle_id).to_dict()
+    except PublishError:
+        raise
+    except (OSError, RuntimeError, ValueError) as error:
+        raise PublishError("PUBLISH_TILES_FAILED", f"Tile publication failed: {error}") from error
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:

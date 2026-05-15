@@ -232,6 +232,21 @@ def test_real_templates_render_supported_cli_commands(tmp_path, job_type, expect
     assert expected_command in rendered
 
 
+def test_publish_tiles_template_exports_database_url_from_manifest(tmp_path: Path) -> None:
+    manifest = {
+        **_render_manifest(tmp_path, "publish_tiles"),
+        "database_url": "postgresql://nhms:secret@example.invalid/nhms",
+    }
+
+    rendered = _gateway(tmp_path).render_template(
+        "publish_tiles",
+        manifest,
+        str(tmp_path / "manifest_index.json"),
+    )
+
+    assert 'export DATABASE_URL="postgresql://nhms:secret@example.invalid/nhms"' in rendered
+
+
 def test_download_source_cycle_cli_accepts_template_args(monkeypatch):
     class FakeAdapter:
         config = SimpleNamespace(source_id="gfs")
@@ -769,7 +784,7 @@ def test_publish_tiles_missing_product_fails_without_layer_metadata(
     engine = _publish_engine()
     _set_publish_env(monkeypatch, tmp_path, engine)
 
-    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "missing_cycle"])
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050200"])
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 1
@@ -778,6 +793,77 @@ def test_publish_tiles_missing_product_fails_without_layer_metadata(
     with Session(engine) as session:
         count = session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one()
     assert count == 0
+
+
+def test_publish_tiles_rejects_noncanonical_cycle_without_substring_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine()
+    _seed_publish_product(engine, cycle_id="GFS_2026050100", run_id="fcst_contains_not_a_cycle_model_001")
+    _set_publish_env(monkeypatch, tmp_path, engine)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "not_a_cycle"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "NON_CANONICAL_CYCLE_ID"
+    with Session(engine) as session:
+        count = session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one()
+        run_status = session.execute(
+            text("SELECT status FROM hydro.hydro_run WHERE run_id = 'fcst_contains_not_a_cycle_model_001'")
+        ).scalar_one()
+    assert count == 0
+    assert run_status == "frequency_done"
+
+
+def test_publish_tiles_rejects_schema_without_cycle_lineage_columns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine(include_lineage_columns=False)
+    _seed_publish_product(engine, cycle_id="GFS_2026050100", run_id="fcst_gfs_2026050100_model_001")
+    _set_publish_env(monkeypatch, tmp_path, engine)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "DELIVERY_LINEAGE_COLUMNS_MISSING"
+    with Session(engine) as session:
+        count = session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one()
+    assert count == 0
+
+
+def test_publish_tiles_processes_more_than_256_publishable_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine()
+    for index in range(260):
+        _seed_publish_product(
+            engine,
+            cycle_id="GFS_2026050100",
+            run_id=f"fcst_gfs_2026050100_model_{index:03d}",
+            segment_id=f"seg_{index:03d}",
+        )
+    _set_publish_env(monkeypatch, tmp_path, engine)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "published"
+    assert len(payload["layers"]) == 260
+    assert payload["lineage"]["published_basins"] == 260
+    with Session(engine) as session:
+        layer_count = session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one()
+    assert layer_count == 260
 
 
 def test_publish_tiles_is_idempotent(
@@ -821,6 +907,124 @@ def test_publish_tiles_rejects_unsafe_object_store_discovery(
     assert payload["error_code"] == "DATABASE_URL_MISSING"
 
 
+def test_publish_tiles_object_store_metadata_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_object_store_publish_env(monkeypatch, tmp_path)
+    _write_publish_metadata(
+        tmp_path,
+        "gfs_2026050100",
+        {
+            "cycle_id": "gfs_2026050100",
+            "layers": [
+                {
+                    "layer_id": "flood_return_period_fcst_gfs_2026050100_model_001",
+                    "tile_uri_template": "/api/v1/tiles/flood-return-period?run_id=fcst_gfs_2026050100_model_001",
+                    "tile_format": "geojson",
+                }
+            ],
+            "artifacts": [
+                {
+                    "artifact_id": "metadata_gfs_2026050100",
+                    "artifact_type": "metadata_json",
+                    "uri": "tiles/hydro/gfs_2026050100/flood-return-period/metadata.json",
+                }
+            ],
+            "lineage": {"published_basins": 1, "source_run_ids": ["fcst_gfs_2026050100_model_001"]},
+        },
+    )
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "published"
+    assert payload["cycle_id"] == "gfs_2026050100"
+    assert payload["layers"][0]["layer_id"] == "flood_return_period_fcst_gfs_2026050100_model_001"
+    assert payload["artifacts"][0]["artifact_id"] == "metadata_gfs_2026050100"
+    assert payload["lineage"]["published_basins"] == 1
+
+
+@pytest.mark.parametrize(
+    ("metadata_text", "expected_detail"),
+    [
+        ("{", "valid JSON"),
+        (json.dumps({"cycle_id": "other_cycle", "artifacts": [{"artifact_id": "artifact_001"}]}), "does not match"),
+        (json.dumps({"cycle_id": "gfs_2026050100", "layers": [], "artifacts": []}), "at least one"),
+    ],
+)
+def test_publish_tiles_invalid_object_store_metadata_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    metadata_text: str,
+    expected_detail: str,
+) -> None:
+    _set_object_store_publish_env(monkeypatch, tmp_path)
+    metadata_path = _publish_metadata_path(tmp_path, "gfs_2026050100")
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(metadata_text, encoding="utf-8")
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "INVALID_PUBLISH_METADATA"
+    assert expected_detail in payload["error_message"]
+
+
+def test_publish_tiles_rejects_object_store_metadata_prefix_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_object_store_publish_env(monkeypatch, tmp_path, object_store_prefix="s3://bucket/prefix")
+    _write_publish_metadata(
+        tmp_path,
+        "gfs_2026050100",
+        {
+            "cycle_id": "gfs_2026050100",
+            "artifacts": [
+                {
+                    "artifact_id": "artifact_001",
+                    "uri": "s3://other/prefix/tiles/hydro/gfs_2026050100/flood-return-period/metadata.json",
+                }
+            ],
+        },
+    )
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "INVALID_PUBLISH_METADATA"
+    assert "outside the configured object-store prefix" in payload["error_message"]
+
+
+def test_publish_tiles_cli_generic_runtime_failure_returns_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class BrokenPublisher:
+        def publish_cycle(self, cycle_id: str) -> None:
+            raise RuntimeError(f"bad config for {cycle_id}")
+
+    monkeypatch.setattr(orchestrator_cli.TilePublisher, "from_env", staticmethod(lambda: BrokenPublisher()))
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["cycle_id"] == "gfs_2026050100"
+    assert payload["error_code"] == "PUBLISH_TILES_FAILED"
+    assert "bad config for gfs_2026050100" in payload["error_message"]
+
+
 def _set_publish_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: Engine) -> None:
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
@@ -828,7 +1032,29 @@ def _set_publish_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: En
     monkeypatch.setattr(tile_publisher_module, "create_engine", lambda _url, future=True: engine)
 
 
-def _publish_engine() -> Engine:
+def _set_object_store_publish_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    object_store_prefix: str = "",
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", object_store_prefix)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+
+def _publish_metadata_path(tmp_path: Path, cycle_id: str) -> Path:
+    return tmp_path / "object-store" / "tiles" / "hydro" / cycle_id / "flood-return-period" / "metadata.json"
+
+
+def _write_publish_metadata(tmp_path: Path, cycle_id: str, metadata: dict[str, Any]) -> None:
+    metadata_path = _publish_metadata_path(tmp_path, cycle_id)
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def _publish_engine(*, include_lineage_columns: bool = True) -> Engine:
     engine = create_engine(
         "sqlite://",
         future=True,
@@ -836,18 +1062,19 @@ def _publish_engine() -> Engine:
         poolclass=StaticPool,
     )
     _attach_publish_schemas(engine)
+    hydro_lineage_columns = "source_id TEXT, cycle_time DATETIME," if include_lineage_columns else ""
+    flood_lineage_columns = "source_id TEXT, cycle_time DATETIME," if include_lineage_columns else ""
     with engine.begin() as connection:
         connection.execute(
             text(
-                """
+                f"""
                 CREATE TABLE hydro.hydro_run (
                     run_id TEXT PRIMARY KEY,
                     run_type TEXT NOT NULL,
                     scenario_id TEXT NOT NULL,
                     model_id TEXT NOT NULL,
                     basin_version_id TEXT NOT NULL,
-                    source_id TEXT,
-                    cycle_time DATETIME,
+                    {hydro_lineage_columns}
                     start_time DATETIME NOT NULL,
                     end_time DATETIME NOT NULL,
                     status TEXT NOT NULL,
@@ -858,7 +1085,7 @@ def _publish_engine() -> Engine:
         )
         connection.execute(
             text(
-                """
+                f"""
                 CREATE TABLE flood.return_period_result (
                     run_id TEXT NOT NULL,
                     scenario_id TEXT NOT NULL,
@@ -872,8 +1099,7 @@ def _publish_engine() -> Engine:
                     q_unit TEXT NOT NULL DEFAULT 'm3/s',
                     return_period REAL,
                     warning_level TEXT,
-                    source_id TEXT,
-                    cycle_time DATETIME,
+                    {flood_lineage_columns}
                     max_over_window BOOLEAN DEFAULT 0,
                     quality_flag TEXT NOT NULL DEFAULT 'ok',
                     PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
@@ -931,40 +1157,68 @@ def _attach_publish_schemas(engine: Engine) -> None:
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
 
 
-def _seed_publish_product(engine: Engine, *, cycle_id: str, run_id: str) -> None:
-    del cycle_id
+def _seed_publish_product(
+    engine: Engine,
+    *,
+    cycle_id: str,
+    run_id: str,
+    segment_id: str = "seg_001",
+) -> None:
+    cycle = tile_publisher_module._cycle_filter(cycle_id)
+    source_id = cycle["source_id"].upper() if cycle else "GFS"
+    cycle_time = "2026-05-01 00:00:00"
+    with Session(engine) as session:
+        hydro_columns = tile_publisher_module._table_columns(session, "hydro", "hydro_run")
+        flood_columns = tile_publisher_module._table_columns(session, "flood", "return_period_result")
     with engine.begin() as connection:
+        hydro_values = {
+            "run_id": run_id,
+            "run_type": "forecast",
+            "scenario_id": "forecast_gfs_deterministic",
+            "model_id": "model_001",
+            "basin_version_id": "basin_001",
+            "start_time": "2026-05-01 00:00:00",
+            "end_time": "2026-05-08 00:00:00",
+            "status": "frequency_done",
+        }
+        if {"source_id", "cycle_time"}.issubset(hydro_columns):
+            hydro_values["source_id"] = source_id
+            hydro_values["cycle_time"] = cycle_time
         connection.execute(
             text(
-                """
-                INSERT INTO hydro.hydro_run (
-                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id,
-                    cycle_time, start_time, end_time, status
-                )
-                VALUES (
-                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_001', 'basin_001', 'GFS',
-                    '2026-05-01 00:00:00', '2026-05-01 00:00:00', '2026-05-08 00:00:00', 'frequency_done'
-                )
+                f"""
+                INSERT INTO hydro.hydro_run ({', '.join(hydro_values)})
+                VALUES ({', '.join(f':{column}' for column in hydro_values)})
                 """
             ),
-            {"run_id": run_id},
+            hydro_values,
         )
+        flood_values = {
+            "run_id": run_id,
+            "scenario_id": "forecast_gfs_deterministic",
+            "basin_version_id": "basin_001",
+            "river_network_version_id": "rnv_001",
+            "model_id": "model_001",
+            "river_segment_id": segment_id,
+            "valid_time": "2026-05-01 01:00:00",
+            "duration": "1h",
+            "q_value": 120.0,
+            "return_period": 5.0,
+            "warning_level": "watch",
+            "max_over_window": 1,
+            "quality_flag": "ok",
+        }
+        if {"source_id", "cycle_time"}.issubset(flood_columns):
+            flood_values["source_id"] = source_id
+            flood_values["cycle_time"] = cycle_time
         connection.execute(
             text(
-                """
-                INSERT INTO flood.return_period_result (
-                    run_id, scenario_id, basin_version_id, river_network_version_id, model_id,
-                    river_segment_id, valid_time, duration, q_value, return_period, warning_level,
-                    source_id, cycle_time, max_over_window, quality_flag
-                )
-                VALUES (
-                    :run_id, 'forecast_gfs_deterministic', 'basin_001', 'rnv_001', 'model_001',
-                    'seg_001', '2026-05-01 01:00:00', '1h', 120.0, 5.0, 'watch',
-                    'GFS', '2026-05-01 00:00:00', 1, 'ok'
-                )
+                f"""
+                INSERT INTO flood.return_period_result ({', '.join(flood_values)})
+                VALUES ({', '.join(f':{column}' for column in flood_values)})
                 """
             ),
-            {"run_id": run_id},
+            flood_values,
         )
 
 
