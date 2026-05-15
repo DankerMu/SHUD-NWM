@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -124,6 +125,7 @@ class FakeCycleRepository:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.cycle_statuses: list[str] = []
+        self.hydro_runs: dict[str, dict[str, Any]] = {}
 
     def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
         del source_id, cycle_time
@@ -204,6 +206,70 @@ class FakeCycleRepository:
             key=lambda job: str(job["submitted_at"]),
         )
 
+    def create_hydro_run_from_basin(self, basin: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(manifest["run_id"])
+        existing = self.hydro_runs.get(run_id)
+        if existing is not None and existing["status"] not in {"failed", "cancelled"}:
+            return dict(existing)
+        record = {
+            "run_id": run_id,
+            "status": "created",
+            "model_id": manifest["model"]["model_id"],
+            "basin_version_id": manifest["model"]["basin_version_id"],
+            "source_id": manifest["source_id"],
+            "cycle_time": manifest["cycle_time"],
+            "run_manifest": dict(manifest),
+            "basin": dict(basin),
+        }
+        self.hydro_runs[run_id] = record
+        return dict(record)
+
+
+class WriteFailingObjectStore(LocalObjectStore):
+    def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
+        if key_or_uri.endswith("/input/manifest.json"):
+            raise OSError("permission denied")
+        return super().write_bytes_atomic(key_or_uri, content)
+
+
+class InvalidJsonForecastOrchestrator(ForecastOrchestrator):
+    def _validate_forecast_runtime_manifest(
+        self,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+        *,
+        task_index: int,
+    ) -> None:
+        manifest_path.write_text("{bad json", encoding="utf-8")
+        super()._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=task_index)
+
+
+class MissingManifestForecastOrchestrator(ForecastOrchestrator):
+    def _validate_forecast_runtime_manifest(
+        self,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+        *,
+        task_index: int,
+    ) -> None:
+        manifest_path.unlink(missing_ok=True)
+        super()._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=task_index)
+
+
+class UnreadableManifestForecastOrchestrator(ForecastOrchestrator):
+    def _validate_forecast_runtime_manifest(
+        self,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+        *,
+        task_index: int,
+    ) -> None:
+        raise OrchestratorError(
+            "RUNTIME_MANIFEST_READ_FAILED",
+            f"Forecast runtime manifest cannot be read for task {task_index}: permission denied",
+            {"manifest_path": str(manifest_path), "task_id": task_index},
+        )
+
 
 class FakeRetryService:
     def __init__(self, *, max_retries: int = 1) -> None:
@@ -236,6 +302,64 @@ def test_m3_cycle_orchestration_submits_all_seven_stages_lazily(tmp_path: Path) 
     assert [stage.status for stage in result.stages] == ["succeeded"] * 7
     assert repository.cycle_statuses[-1] == "complete"
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
+
+
+def test_forecast_stage_writes_runtime_manifests_and_manifest_index_paths(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    assert result.status == "complete"
+    assert set(repository.hydro_runs) == {"run_0", "run_1"}
+    for task in forecast_submission["tasks"]:
+        manifest_path = Path(task["manifest_path"])
+        assert manifest_path == tmp_path / "workspace" / "runs" / task["run_id"] / "input" / "manifest.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["run_id"] == task["run_id"]
+        assert manifest["run_type"] == "forecast"
+        assert manifest["scenario_id"] == "forecast_gfs_deterministic"
+        assert manifest["source_id"] == "gfs"
+        assert manifest["start_time"] == "2026-05-01T00:00:00Z"
+        assert manifest["end_time"] == "2026-05-08T00:00:00Z"
+        assert manifest["model"]["model_id"] == task["model_id"]
+        assert manifest["model"]["basin_version_id"] == task["basin_version_id"]
+        assert manifest["model"]["river_network_version_id"] == task["river_network_version_id"]
+        assert manifest["forcing"]["forcing_uri"]
+        assert manifest["outputs"]["run_manifest_uri"].endswith(f"runs/{task['run_id']}/input/manifest.json")
+        assert repository.hydro_runs[task["run_id"]]["status"] == "created"
+
+    index_path = Path(forecast_submission["manifest"]["manifest_index_path"])
+    index_entries = json.loads(index_path.read_text(encoding="utf-8"))
+    assert [entry["manifest_path"] for entry in index_entries] == [
+        str(tmp_path / "workspace" / "runs" / "run_0" / "input" / "manifest.json"),
+        str(tmp_path / "workspace" / "runs" / "run_1" / "input" / "manifest.json"),
+    ]
+
+
+def test_hydro_run_creation_is_idempotent_for_existing_created_status() -> None:
+    repository = FakeCycleRepository()
+    basin = _basins(1)[0]
+    manifest = {
+        "run_id": "run_0",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-01T00:00:00Z",
+        "model": {
+            "model_id": "model_0",
+            "basin_version_id": "basin_v0",
+            "river_network_version_id": "model_0_river",
+        },
+    }
+
+    first = repository.create_hydro_run_from_basin(basin, manifest)
+    second = repository.create_hydro_run_from_basin(basin, manifest)
+
+    assert first["run_id"] == second["run_id"] == "run_0"
+    assert len(repository.hydro_runs) == 1
+    assert repository.hydro_runs["run_0"]["status"] == "created"
 
 
 def test_cycle_orchestration_rejects_db_active_duplicate(tmp_path: Path) -> None:
@@ -278,6 +402,70 @@ def test_stage_three_failure_blocks_downstream_stages(tmp_path: Path) -> None:
     assert result.status == "failed"
     assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
     assert repository.cycle_statuses[-1] == "failed_forcing"
+
+
+def test_forecast_manifest_write_failure_marks_pipeline_failed(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        object_store=WriteFailingObjectStore(tmp_path / "object-store", "s3://nhms"),
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    job = repository.jobs["job_cycle_gfs_2026050100_forecast"]
+    assert job["status"] == "submission_failed"
+    assert job["error_code"] == "RUNTIME_MANIFEST_WRITE_FAILED"
+    assert repository.cycle_statuses[-1] == "failed_run"
+
+
+def test_invalid_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, orchestrator_cls=InvalidJsonForecastOrchestrator)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert repository.jobs["job_cycle_gfs_2026050100_forecast"]["status"] == "submission_failed"
+    assert "publish" not in [submission["stage"] for submission in client.submissions]
+    assert repository.cycle_statuses[-1] == "failed_run"
+
+
+def test_missing_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, orchestrator_cls=MissingManifestForecastOrchestrator)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert repository.jobs["job_cycle_gfs_2026050100_forecast"]["status"] == "submission_failed"
+    assert "publish" not in [submission["stage"] for submission in client.submissions]
+    assert repository.cycle_statuses[-1] == "failed_run"
+
+
+def test_unreadable_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, orchestrator_cls=UnreadableManifestForecastOrchestrator)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    job = repository.jobs["job_cycle_gfs_2026050100_forecast"]
+    assert job["status"] == "submission_failed"
+    assert job["error_code"] == "RUNTIME_MANIFEST_READ_FAILED"
+    assert "publish" not in [submission["stage"] for submission in client.submissions]
+    assert repository.cycle_statuses[-1] == "failed_run"
 
 
 def test_permanently_failed_stage_blocks_downstream_stages(tmp_path: Path) -> None:
@@ -439,6 +627,8 @@ def _orchestrator(
     client: FakeCycleSlurmClient,
     *,
     retry_service: Any | None = None,
+    object_store: LocalObjectStore | None = None,
+    orchestrator_cls: type[ForecastOrchestrator] = ForecastOrchestrator,
 ) -> ForecastOrchestrator:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "object-store"
@@ -449,11 +639,11 @@ def _orchestrator(
         poll_interval_seconds=0,
         job_timeout_seconds=5,
     )
-    return ForecastOrchestrator(
+    return orchestrator_cls(
         config=config,
         repository=repository,
         slurm_client=client,
-        object_store=LocalObjectStore(object_root, "s3://nhms"),
+        object_store=object_store or LocalObjectStore(object_root, "s3://nhms"),
         retry_service=retry_service,
     )
 
@@ -464,6 +654,7 @@ def _basins(count: int) -> list[dict[str, Any]]:
             "model_id": f"model_{index}",
             "basin_id": f"basin_{index}",
             "basin_version_id": f"basin_v{index}",
+            "river_network_version_id": f"river_v{index}",
             "run_id": f"run_{index}",
         }
         for index in range(count)

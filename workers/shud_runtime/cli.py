@@ -40,13 +40,47 @@ def _resolve_execute_manifest(manifest: str | None, manifest_index: str | None, 
         resolved_task_id = resolve_task_id(task_id)
         entry = load_manifest_entry(manifest_index, resolved_task_id)
         workspace = os.getenv("WORKSPACE_ROOT") or str(entry["workspace_dir"])
-        return str(Path(workspace) / "runs" / str(entry["run_id"]) / "input" / "manifest.json")
+        default_path = Path(workspace) / "runs" / str(entry["run_id"]) / "input" / "manifest.json"
+        manifest_path = entry.get("manifest_path")
+        if manifest_path and _is_safe_index_manifest_path(
+            Path(str(manifest_path)),
+            workspace_root=Path(workspace),
+            run_id=str(entry["run_id"]),
+        ):
+            return str(manifest_path)
+        return str(default_path)
     if not manifest:
         raise ManifestValidationError(
             "Explicit runtime execution requires --manifest.",
             {"missing_fields": ["manifest"]},
         )
     return manifest
+
+
+def _is_safe_index_manifest_path(path: Path, *, workspace_root: Path, run_id: str) -> bool:
+    resolved_workspace = workspace_root.resolve(strict=False)
+    resolved_path = path.resolve(strict=False)
+    if _has_symlink_component(workspace_root) or _has_symlink_component(path):
+        return False
+    try:
+        relative = resolved_path.relative_to(resolved_workspace)
+    except ValueError:
+        return False
+    return relative.parts == ("runs", run_id, "input", "manifest.json")
+
+
+def _has_symlink_component(path: Path) -> bool:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts:
+        if part == path.anchor:
+            continue
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:
@@ -65,8 +99,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         try:
             resolved_manifest = _resolve_execute_manifest(manifest, manifest_index, task_id)
             click.echo(json.dumps(_execute(resolved_manifest, dry_run=dry_run), sort_keys=True))
-        except (ManifestValidationError, SHUDRuntimeError) as error:
-            click.echo(f"{error.error_code}: {error.message}", err=True)
+        except (ManifestValidationError, SHUDRuntimeError, OSError, json.JSONDecodeError, KeyError) as error:
+            error_code, message = _cli_error(error)
+            click.echo(f"{error_code}: {message}", err=True)
             raise SystemExit(1) from error
 
     @cli.command("run")
@@ -105,8 +140,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         try:
             resolved_manifest = _resolve_execute_manifest(args.manifest, args.manifest_index, args.task_id)
             print(json.dumps(_execute(resolved_manifest, dry_run=args.dry_run), sort_keys=True))
-        except (ManifestValidationError, SHUDRuntimeError) as error:
-            print(f"{error.error_code}: {error.message}", file=sys.stderr)
+        except (ManifestValidationError, SHUDRuntimeError, OSError, json.JSONDecodeError, KeyError) as error:
+            error_code, message = _cli_error(error)
+            print(f"{error_code}: {message}", file=sys.stderr)
             return 1
         return 0
     if args.command == "run":
@@ -121,6 +157,18 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2
+
+
+def _cli_error(error: Exception) -> tuple[str, str]:
+    if isinstance(error, (ManifestValidationError, SHUDRuntimeError)):
+        return error.error_code, error.message
+    if isinstance(error, FileNotFoundError):
+        return "RUNTIME_MANIFEST_MISSING", str(error)
+    if isinstance(error, json.JSONDecodeError):
+        return "RUNTIME_MANIFEST_INVALID_JSON", str(error)
+    if isinstance(error, KeyError):
+        return "RUNTIME_MANIFEST_INVALID", f"Missing required manifest field: {error}"
+    return "RUNTIME_MANIFEST_READ_FAILED", str(error)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

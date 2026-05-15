@@ -396,6 +396,62 @@ def test_runtime_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
     assert captured["manifest"] == str(tmp_path / "workspace" / "runs" / "run_001" / "input" / "manifest.json")
 
 
+def test_runtime_array_cli_fails_stably_when_runtime_manifest_is_missing(tmp_path, capsys):
+    manifest_index = _manifest_index(tmp_path)
+
+    _invoke_main_expect_failure(
+        runtime_cli.main,
+        ["execute", "--manifest-index", str(manifest_index), "--task-id", "0", "--dry-run"],
+    )
+
+    captured = capsys.readouterr()
+    assert "RUNTIME_MANIFEST_MISSING:" in captured.err
+    assert "run_001" in captured.err
+
+
+def test_runtime_array_cli_uses_manifest_path_override(monkeypatch, tmp_path):
+    captured: dict[str, str] = {}
+    manifest_path = tmp_path / "workspace" / "runs" / "run_001" / "input" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("{}", encoding="utf-8")
+    index_path = tmp_path / "manifest_index.json"
+    index_path.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": 0,
+                    "model_id": "model_001",
+                    "basin_version_id": "basin_001",
+                    "river_network_version_id": "river_001",
+                    "run_id": "run_001",
+                    "workspace_dir": str(tmp_path / "workspace"),
+                    "source_id": "GFS",
+                    "cycle_time": "2026051200",
+                    "manifest_path": str(manifest_path),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeRuntime:
+        def execute_manifest_path(self, manifest: str):
+            captured["manifest"] = manifest
+            return SimpleNamespace(
+                run_id="run_001",
+                status="succeeded",
+                output_uri="file:///output",
+                log_uri="file:///log",
+                rivqdown_file="rivqdown.txt",
+            )
+
+    monkeypatch.setattr(runtime_cli.SHUDRuntime, "from_env", staticmethod(lambda dry_run=False: FakeRuntime()))
+
+    _invoke_main(runtime_cli.main, ["execute", "--manifest-index", str(index_path), "--task-id", "0"])
+
+    assert captured["manifest"] == str(manifest_path)
+
+
 def test_parse_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
     captured: dict[str, str] = {}
 
@@ -583,6 +639,31 @@ def test_manifest_entry_rejects_path_traversal_run_id(tmp_path):
     )
 
     with pytest.raises(ManifestValidationError, match="unsafe characters"):
+        load_manifest_entry(str(path), 0)
+
+
+def test_manifest_entry_rejects_path_traversal_manifest_path(tmp_path):
+    path = tmp_path / "manifest_index.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": 0,
+                    "model_id": "model_001",
+                    "basin_version_id": "basin_001",
+                    "river_network_version_id": "river_001",
+                    "run_id": "run_001",
+                    "workspace_dir": str(tmp_path / "workspace"),
+                    "source_id": "GFS",
+                    "cycle_time": "2026051200",
+                    "manifest_path": "runs/run_001/../evil/manifest.json",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestValidationError, match="path traversal"):
         load_manifest_entry(str(path), 0)
 
 
