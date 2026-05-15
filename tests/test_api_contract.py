@@ -193,10 +193,12 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
     try:
         with TestClient(app) as client:
             response = client.get("/api/v1/models", params={"active": "all", "limit": 10, "offset": 0})
+            limit_boundary_response = client.get("/api/v1/models", params={"limit": 501})
     finally:
         app.dependency_overrides.pop(get_model_registry_store, None)
 
     assert response.status_code == 200
+    assert limit_boundary_response.status_code == 422
     data = _assert_success_envelope(response.json())
     assert set(data) == {"items", "total", "limit", "offset"}
     assert data["total"] == 2
@@ -212,6 +214,8 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
         "enum": ["true", "false", "all"],
         "default": "true",
     }
+    limit_parameter = next(parameter for parameter in list_models["parameters"] if parameter.get("name") == "limit")
+    assert limit_parameter["schema"]["maximum"] == 500
     response_schema = list_models["responses"]["200"]["content"]["application/json"]["schema"]
     assert response_schema["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/ModelInstancePage"
 

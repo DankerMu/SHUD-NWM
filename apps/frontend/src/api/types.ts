@@ -1397,7 +1397,7 @@ export interface operations {
                 basin_version_id?: components["parameters"]["BasinVersionIdQuery"];
                 /** @description Filter by active model flag. Omitted defaults to active models only; use all for no active filter. */
                 active?: "true" | "false" | "all";
-                limit?: components["parameters"]["Limit"];
+                limit?: number;
                 offset?: components["parameters"]["Offset"];
             };
             header?: never;
