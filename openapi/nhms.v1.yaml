@@ -1886,21 +1886,9 @@ components:
           items:
             $ref: "#/components/schemas/SeriesSegment"
         frequency_thresholds:
-          type: object
-          required: [Q2, Q5, Q10, Q20, Q50, Q100]
-          properties:
-            Q2:
-              type: number
-            Q5:
-              type: number
-            Q10:
-              type: number
-            Q20:
-              type: number
-            Q50:
-              type: number
-            Q100:
-              type: number
+          allOf:
+            - $ref: "#/components/schemas/FloodFrequencyThresholds"
+          nullable: true
     SplicedForecastResponse:
       type: object
       description: >

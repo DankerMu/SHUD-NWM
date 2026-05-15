@@ -2,6 +2,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from apps.api.main import app
+from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.models import ResetRequest
 from services.slurm_gateway.routes import slurm_gateway
 
@@ -15,9 +16,13 @@ def reset_mock_gateway():
 
 @pytest.fixture
 async def client():
+    app.dependency_overrides[get_settings] = lambda: SlurmGatewaySettings(allow_internal_reset=True)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
-        yield async_client
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+            yield async_client
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
 
 
 @pytest.mark.asyncio
@@ -26,6 +31,16 @@ async def test_health(client):
 
     assert response.status_code == 200
     assert response.json() == {"backend": "mock", "version": "0.1.0", "status": "ok", "error": None}
+
+
+@pytest.mark.asyncio
+async def test_reset_rejects_by_default():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        response = await async_client.post("/api/v1/slurm/internal/reset")
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "SLURM_INTERNAL_RESET_DISABLED"
 
 
 @pytest.mark.asyncio

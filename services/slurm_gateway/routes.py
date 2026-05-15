@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 
+from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGatewayError, create_gateway
 from services.slurm_gateway.models import (
     ArraySubmitJobRequest,
@@ -93,5 +94,16 @@ async def fetch_logs(job_id: str):
 
 
 @router.post("/internal/reset")
-async def reset_registry(request: Annotated[ResetRequest | None, Body()] = None):
+async def reset_registry(
+    settings: Annotated[SlurmGatewaySettings, Depends(get_settings)],
+    request: Annotated[ResetRequest | None, Body()] = None,
+):
+    if not settings.allow_internal_reset:
+        exc = SlurmGatewayError(
+            403,
+            "SLURM_INTERNAL_RESET_DISABLED",
+            "Internal Slurm reset is disabled.",
+            {"setting": "SLURM_GATEWAY_ALLOW_INTERNAL_RESET"},
+        )
+        return _gateway_error_response(exc)
     return slurm_gateway.reset(request)

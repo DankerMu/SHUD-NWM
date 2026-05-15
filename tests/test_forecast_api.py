@@ -267,6 +267,16 @@ async def test_forecast_series_returns_timestamp_value_tuples_and_q_down_filter(
 
 
 @pytest.mark.asyncio
+async def test_forecast_series_allows_null_frequency_thresholds(fake_store: FakeForecastStore) -> None:
+    fake_store.response["frequency_thresholds"] = None
+
+    response = await _get("/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series")
+
+    assert response.status_code == 200
+    assert response.json()["frequency_thresholds"] is None
+
+
+@pytest.mark.asyncio
 async def test_forecast_series_include_analysis_true_returns_spliced_segments(fake_store: FakeForecastStore) -> None:
     response = await _get(
         "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
@@ -19,6 +20,8 @@ from packages.common.model_registry import (
 from workers.model_registry.validator import ModelPackageValidationError, validate_model_package_uri
 
 router = APIRouter(prefix="/api/v1", tags=["models"])
+logger = logging.getLogger(__name__)
+SAFE_MODEL_REGISTRY_ERROR_MESSAGE = "Model registry operation failed."
 
 
 Geometry = dict[str, Any] | str
@@ -135,6 +138,8 @@ def get_model_registry_store() -> PsycopgModelRegistryStore:
         return PsycopgModelRegistryStore.from_env()
     except ModelRegistryError as error:
         raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
 
 
 def _handle_registry_error(error: Exception) -> ApiError:
@@ -174,16 +179,18 @@ def _handle_registry_error(error: Exception) -> ApiError:
             details={"error_type": error.__class__.__name__},
         )
     if isinstance(error, ModelRegistryError):
+        logger.exception("Model registry operation failed.")
         return ApiError(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             code="MODEL_REGISTRY_ERROR",
-            message=str(error),
+            message=SAFE_MODEL_REGISTRY_ERROR_MESSAGE,
             details={"error_type": error.__class__.__name__},
         )
+    logger.exception("Unexpected model registry error.")
     return ApiError(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         code="MODEL_REGISTRY_ERROR",
-        message="Unexpected model registry error.",
+        message=SAFE_MODEL_REGISTRY_ERROR_MESSAGE,
         details={"error_type": error.__class__.__name__},
     )
 
@@ -197,6 +204,8 @@ def create_basin(
         return store.create_basin_with_version(payload.model_dump())
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
 
 
 @router.post("/basins/{basin_id}/versions", status_code=status.HTTP_201_CREATED)
@@ -209,6 +218,8 @@ def create_basin_version(
         return store.create_basin_version(basin_id, payload.model_dump())
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
 
 
 @router.post("/river-networks", status_code=status.HTTP_201_CREATED)
@@ -220,6 +231,8 @@ def create_river_network(
         return store.create_river_network(payload.model_dump())
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
 
 
 @router.post("/mesh-versions", status_code=status.HTTP_201_CREATED)
@@ -230,6 +243,8 @@ def create_mesh_version(
     try:
         return store.create_mesh_version(payload.model_dump())
     except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
         raise _handle_registry_error(error) from error
 
 
@@ -243,6 +258,8 @@ def create_model(
         return store.create_model(payload.model_dump())
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
 
 
 @router.put("/models/{model_id}/active")
@@ -255,6 +272,8 @@ def set_model_active(
     try:
         return _ok(request, store.set_model_active(model_id, payload.active))
     except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
         raise _handle_registry_error(error) from error
 
 
@@ -289,6 +308,8 @@ def list_models(
         )
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
 
 
 @router.post("/river-segment-crosswalks", status_code=status.HTTP_201_CREATED)
@@ -299,6 +320,8 @@ def create_river_segment_crosswalks(
     try:
         return store.create_crosswalk_entries(payload.model_dump())
     except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
         raise _handle_registry_error(error) from error
 
 

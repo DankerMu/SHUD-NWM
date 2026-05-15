@@ -847,14 +847,7 @@ export interface components {
             issue_time: string;
             unit: string;
             series: components["schemas"]["SeriesSegment"][];
-            frequency_thresholds: {
-                Q2: number;
-                Q5: number;
-                Q10: number;
-                Q20: number;
-                Q50: number;
-                Q100: number;
-            };
+            frequency_thresholds: components["schemas"]["FloodFrequencyThresholds"] | null;
         };
         /** @description Returned when include_analysis=true splices analysis-period data before the forecast window into a unified segments array. */
         SplicedForecastResponse: {

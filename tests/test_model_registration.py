@@ -79,7 +79,11 @@ class FakeModelRegistryStore:
 
     def create_model(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload["model_id"] == "registry_error":
-            raise ModelRegistryError("DATABASE_URL is required for model registry operations.")
+            raise ModelRegistryError(
+                "DATABASE_URL=postgresql://nhms:secret@localhost:5432/nhms failed in /srv/nhms/registry.py"
+            )
+        if payload["model_id"] == "unexpected_error":
+            raise RuntimeError("psycopg OperationalError: password leaked in raw driver diagnostics")
         record = dict(payload)
         record.setdefault("active_flag", False)
         self.models[record["model_id"]] = record
@@ -261,8 +265,25 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
             },
             500,
             "MODEL_REGISTRY_ERROR",
-            "DATABASE_URL",
+            "Model registry operation failed.",
             "ModelRegistryError",
+        ),
+        (
+            "post",
+            "/api/v1/models",
+            {
+                "model_id": "unexpected_error",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/unexpected_error/package/",
+            },
+            500,
+            "MODEL_REGISTRY_ERROR",
+            "Model registry operation failed.",
+            "RuntimeError",
         ),
     ],
 )
@@ -288,6 +309,18 @@ async def test_model_registry_error_envelope_vectors(
         message_contains=message_contains,
         error_type=error_type,
     )
+    if expected_status == 500:
+        rendered = str(response.json())
+        for unsafe in (
+            "DATABASE_URL",
+            "postgresql://",
+            "nhms:secret",
+            "/srv/nhms/registry.py",
+            "OperationalError",
+            "driver diagnostics",
+            "password leaked",
+        ):
+            assert unsafe not in rendered
 
 
 @pytest.mark.asyncio

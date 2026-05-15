@@ -340,12 +340,29 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert 'data: components["schemas"]["ModelInstancePage"];' in generated_types
     assert "FloodFrequencyThresholds" in generated_types
     assert "Q2?: number | null;" in generated_types
-    assert "Q20: number;" in generated_types
+    assert "Q20?: number | null;" in generated_types
     assert "Q100?: number | null;" in generated_types
+    assert "frequency_thresholds: {" not in generated_types
     assert "frequency_thresholds: components[\"schemas\"][\"FloodFrequencyThresholds\"] | null;" in generated_types
     assert "frequency_thresholds?: components[\"schemas\"][\"FloodFrequencyThresholds\"] | null;" in generated_types
     assert "frequency_thresholds: Record<string, never> | null;" not in generated_types
     assert "frequency_thresholds?: Record<string, never> | null;" not in generated_types
+
+
+def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+
+    threshold_schema = schemas["FloodFrequencyThresholds"]
+    assert "required" not in threshold_schema
+    assert threshold_schema["properties"]["Q20"]["nullable"] is True
+
+    river_thresholds = schemas["RiverSeriesResponse"]["properties"]["frequency_thresholds"]
+    assert river_thresholds == {
+        "allOf": [{"$ref": "#/components/schemas/FloodFrequencyThresholds"}],
+        "nullable": True,
+    }
 
 
 def _assert_success_envelope(body: dict[str, Any]) -> Any:
