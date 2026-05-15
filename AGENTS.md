@@ -47,5 +47,5 @@ pnpm build
 - Common post-migration checks:
   - `uv run ruff check .` must pass
   - `uv run pytest -q tests/test_api.py tests/test_gateway.py` must pass
-  - `corepack pnpm test` must pass
-  - `corepack pnpm build` must pass
+  - `cd apps/frontend && corepack pnpm test` must pass
+  - `cd apps/frontend && corepack pnpm build` must pass

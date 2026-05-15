@@ -313,8 +313,10 @@ class IFSAdapter(DataSourceAdapter):
         parsed_cycle_time = parse_cycle_time(cycle_time)
         compact_cycle = format_cycle_time(parsed_cycle_time)
         max_lead_hours = self.config.forecast_end_hour_for_cycle(parsed_cycle_time.hour)
-        configured_forecast_hours = self.config.forecast_hours_for_cycle(parsed_cycle_time)
-        selected_forecast_hours = forecast_hours if forecast_hours is not None else configured_forecast_hours
+        if forecast_hours is not None:
+            selected_forecast_hours = forecast_hours
+        else:
+            selected_forecast_hours = self.config.forecast_hours_for_cycle(parsed_cycle_time)
         hours = validate_forecast_hours(
             list(selected_forecast_hours),
             source_id=self.config.source_id,
