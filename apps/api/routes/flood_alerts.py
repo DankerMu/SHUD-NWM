@@ -414,7 +414,10 @@ def flood_return_period_map(
         """
         if session.get_bind().dialect.name != "sqlite":
             bbox_filter = """
-              AND rs.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+              AND rs.geom && ST_Transform(
+                ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326),
+                ST_SRID(rs.geom)
+              )
             """
     rows = session.execute(
         text(
