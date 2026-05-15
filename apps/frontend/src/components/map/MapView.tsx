@@ -44,7 +44,7 @@ const RIVER_INTERACTIVE_LAYER_IDS = [
   RIVER_SELECTED_LAYER_ID,
 ]
 const RIVER_SEGMENT_PAGE_LIMIT = 500
-const RIVER_SEGMENT_MAX_FEATURES = 50_000
+const RIVER_SEGMENT_INITIAL_PAGE_COUNT = 2
 
 const allowDemoRiverFallback = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_RIVERS === 'true'
 
@@ -105,7 +105,8 @@ async function loadRiverSegmentPages(
   let merged: RiverFeatureCollection | null = null
   const features: RiverFeatureCollection['features'] = []
 
-  for (let offset = 0; offset < RIVER_SEGMENT_MAX_FEATURES; offset += RIVER_SEGMENT_PAGE_LIMIT) {
+  for (let pageIndex = 0; pageIndex < RIVER_SEGMENT_INITIAL_PAGE_COUNT; pageIndex += 1) {
+    const offset = pageIndex * RIVER_SEGMENT_PAGE_LIMIT
     const page = await fetchRiverSegmentPage(basinVersionId, riverNetworkVersionId, offset)
     const featureTotal = paginationTotal(page.feature_total, page.features.length)
     const total = paginationTotal(page.total, featureTotal)
@@ -127,7 +128,7 @@ async function loadRiverSegmentPages(
     if (page.features.length === 0) break
     features.push(...page.features)
 
-    if (features.length >= featureTotal || features.length >= RIVER_SEGMENT_MAX_FEATURES) break
+    if (features.length >= featureTotal || page.features.length < RIVER_SEGMENT_PAGE_LIMIT) break
   }
 
   if (!merged) {
@@ -162,6 +163,18 @@ async function loadRiverNetwork(): Promise<RiverFeatureCollection> {
   }
 
   return loadRiverSegmentPages(model.basin_version_id, model.river_network_version_id)
+}
+
+function loadedRiverFeatureCount(data: RiverFeatureCollection) {
+  return data.features.length
+}
+
+function totalRiverFeatureCount(data: RiverFeatureCollection) {
+  return paginationTotal(data.feature_total, loadedRiverFeatureCount(data))
+}
+
+function hasPartialRiverData(data: RiverFeatureCollection) {
+  return totalRiverFeatureCount(data) > loadedRiverFeatureCount(data)
 }
 
 function readRiverProperties(properties: unknown): RiverFeatureProperties | null {
@@ -301,6 +314,9 @@ export function MapView({
     }),
     [],
   )
+  const riverPreviewStatus = riverData && hasPartialRiverData(riverData)
+    ? `河网预览：当前显示前 ${loadedRiverFeatureCount(riverData).toLocaleString()} / ${totalRiverFeatureCount(riverData).toLocaleString()} 条河段，完整视口/瓦片加载将在后续版本提供。`
+    : null
 
   return (
     <div className={cn('relative h-full min-h-[32rem] overflow-hidden', className)}>
@@ -310,6 +326,15 @@ export function MapView({
           role="status"
         >
           {mapError ?? riverError}
+        </div>
+      ) : null}
+
+      {riverPreviewStatus ? (
+        <div
+          className="absolute right-3 top-3 z-10 max-w-[min(30rem,calc(100%-1.5rem))] rounded-md border border-amber-500/35 bg-panel/95 px-3 py-2 text-sm text-foreground shadow-sm"
+          role="status"
+        >
+          {riverPreviewStatus}
         </div>
       ) : null}
 

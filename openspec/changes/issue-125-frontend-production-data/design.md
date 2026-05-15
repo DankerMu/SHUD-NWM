@@ -23,6 +23,7 @@ Must preserve:
 
 Must add/change:
 - Forecast river network loader must call backend data rather than returning `demoRivers`; loaded features must carry `segment_id`, `basin_version_id`, `river_network_version_id`, stream order/name where available, and valid GeoJSON LineString geometry matching current river segment storage.
+- Forecast river network initial loading must remain bounded. As a stopgap before viewport/tile loading, the map may load only the first two 500-feature pages and must expose a partial-result notice when `feature_total` is greater than the loaded feature count.
 - Flood alert store/layers must use the shared API base. Direct `fetch('/api/...')` calls must be replaced or wrapped so `VITE_API_BASE_URL=https://api.example.test` sends requests to that base.
 - Auth/RBAC must have an explicit production boundary. Production builds must not expose a role dropdown that can grant operator/model_admin/sys_admin locally. If demo switching remains, it must be gated by `VITE_ENABLE_ROLE_OVERRIDE=true` in dev/test and paired with backend `ALLOW_DEV_ROLE_HEADER=true` for retry/cancel tests. The configured production role may gate read-only pages, but it is not a trusted action credential and must not be sent as or imply an accepted production authorization header.
 - Monitoring metrics endpoints and frontend calls must support source/scenario filters consistently. Jobs and trend charts should use the same selected source/scenario context where applicable.
@@ -61,6 +62,7 @@ Must add/change:
 - Full authentication provider integration beyond removing/gating frontend-only privilege escalation and honoring configured role input for read-only gating. Production retry/cancel authorization is a non-goal until a real trusted backend auth/session mechanism is introduced.
 - Redesign of backend authorization policy.
 - New map styling beyond what is necessary for real river/flood data.
+- Full river-network hydration on forecast map mount is a non-goal. Complete production-scale river navigation is deferred to viewport-, bbox-, or vector-tile-based loading work.
 
 ## Review Focus
 

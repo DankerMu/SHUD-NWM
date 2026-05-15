@@ -12,6 +12,13 @@ The forecast map SHALL use backend river segment/network data for production seg
 - **AND** clicking a feature MUST request forecast series using the clicked backend identifiers
 - **AND** the production default MUST NOT depend on hard-coded demo river IDs
 
+#### Scenario: Initial river network loading is bounded
+
+- **WHEN** the backend reports more river features than the bounded initial map window
+- **THEN** the frontend MUST NOT drain every river segment page on mount
+- **AND** it MUST limit initial river segment requests to the accepted preview window
+- **AND** it MUST show or record partial-result metadata that the displayed river network is a preview until viewport, bbox, or tile loading is implemented
+
 ### Requirement: Frontend API base applies consistently
 
 All frontend backend requests SHALL honor the configured `VITE_API_BASE_URL`.

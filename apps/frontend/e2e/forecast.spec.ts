@@ -96,6 +96,18 @@ const secondRiverSegmentPage = {
   features: riverSegments.features,
 }
 
+const largeFirstRiverSegmentPage = {
+  ...firstRiverSegmentPage,
+  total: 2500,
+  feature_total: 2500,
+}
+
+const largeSecondRiverSegmentPage = {
+  ...secondRiverSegmentPage,
+  total: 2500,
+  feature_total: 2500,
+}
+
 function success<T>(data: T) {
   return { status: 'success', data }
 }
@@ -177,7 +189,7 @@ async function gotoForecastPage(page: Page) {
     return url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments' && response.status() === 200
   })
 
-  await page.goto('/')
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
   await riverSegmentsLoaded
 }
 
@@ -305,5 +317,55 @@ test.describe('forecast page', () => {
     expect(forecastRequests).toEqual([
       '/api/v1/basin-versions/backend-basin-v1/river-segments/backend-seg-7/forecast-series',
     ])
+  })
+
+  test('bounds initial river pagination and shows a partial river preview notice', async ({ page }) => {
+    const riverPageOffsets: string[] = []
+
+    await page.route('**/api/v1/**', async (route) => {
+      const url = new URL(route.request().url())
+
+      if (url.pathname === '/api/v1/models') {
+        return fulfill(route, {
+          items: [
+            {
+              model_id: 'model-1',
+              basin_version_id: 'backend-basin-v1',
+              river_network_version_id: 'backend-rivnet-v1',
+              mesh_version_id: 'mesh-1',
+              calibration_version_id: 'cal-1',
+              shud_code_version: '2.0',
+              active_flag: true,
+              model_package_uri: 's3://models/model-1',
+              resource_profile: {},
+              created_at: '2026-05-09T00:00:00Z',
+            },
+          ],
+          total: 1,
+          limit: 1,
+          offset: 0,
+        })
+      }
+
+      if (url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments') {
+        expect(url.searchParams.get('river_network_version_id')).toBe('backend-rivnet-v1')
+        expect(url.searchParams.get('limit')).toBe('500')
+        const offset = url.searchParams.get('offset') ?? ''
+        riverPageOffsets.push(offset)
+        if (offset === '0') return fulfill(route, largeFirstRiverSegmentPage)
+        if (offset === '500') return fulfill(route, largeSecondRiverSegmentPage)
+        throw new Error(`Initial river loading must remain bounded; unexpected offset ${offset}`)
+      }
+
+      throw new Error(`Unhandled mocked API route: ${url.pathname}`)
+    })
+
+    await gotoForecastPage(page)
+
+    await expect(page.getByRole('status').filter({ hasText: '河网预览' })).toContainText(
+      '当前显示前 501 / 2,500 条河段',
+    )
+    expect(new Set(riverPageOffsets)).toEqual(new Set(['0', '500']))
+    expect(riverPageOffsets.every((offset) => offset === '0' || offset === '500')).toBe(true)
   })
 })

@@ -148,6 +148,8 @@ async function mockFloodApi(page: Page, onRequest?: (request: Request) => void) 
 
 test.describe('flood alerts page', () => {
   test('loads latest run, summary, ranking, tile, and selected segment timeline through configured API base', async ({ page }) => {
+    const apiBase = 'https://api.example.test'
+    const forecastSeriesPath = '/api/v1/basin-versions/basin-v1/river-segments/seg-1/forecast-series'
     const calls: Array<{ origin: string; pathname: string }> = []
     await mockFloodApi(page, (request) => {
       const url = new URL(request.url())
@@ -162,7 +164,12 @@ test.describe('flood alerts page', () => {
     const rankingRow = page.getByRole('row', { name: /Flood Segment 1/ })
     await expect(rankingRow).toBeVisible()
 
+    const forecastSeriesResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return url.origin === apiBase && url.pathname === forecastSeriesPath && response.status() === 200
+    })
     await rankingRow.click()
+    await forecastSeriesResponse
 
     await expect(page.getByRole('heading', { name: 'Flood Segment 1' })).toBeVisible()
     await expect.poll(() => calls.map((call) => call.pathname)).toContain('/api/v1/flood-alerts/timeline')
@@ -173,9 +180,9 @@ test.describe('flood alerts page', () => {
       '/api/v1/flood-alerts/ranking',
       '/api/v1/tiles/flood-return-period',
       '/api/v1/flood-alerts/timeline',
-      '/api/v1/basin-versions/basin-v1/river-segments/seg-1/forecast-series',
+      forecastSeriesPath,
     ]) {
-      expect(calls.some((call) => call.origin === 'https://api.example.test' && call.pathname === path)).toBe(true)
+      expect(calls.some((call) => call.origin === apiBase && call.pathname === path)).toBe(true)
     }
   })
 })
