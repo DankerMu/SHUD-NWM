@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 from jinja2.exceptions import SecurityError
 
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
@@ -183,6 +184,37 @@ def test_analysis_production_templates_submit_without_script_payload(monkeypatch
     assert f'export NHMS_JOB_TYPE="{stage.job_type}"' in captured["script"]
 
 
+def test_analysis_download_template_uses_configured_area(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured["script"] = Path(command[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    manifest = {
+        **_production_manifest(tmp_path, "analysis_download_source_cycle"),
+        "analysis_date": "2026-05-12",
+        "analysis_start_time": "2026-05-12T00:00:00Z",
+        "analysis_end_time": "2026-05-13T00:00:00Z",
+        "analysis_date_range": "2026-05-12T00:00:00Z/2026-05-13T00:00:00Z",
+        "era5_area": "45,80,5,135",
+    }
+    gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_001",
+            model_id="model_001",
+            job_type="analysis_download_source_cycle",
+            manifest=manifest,
+        )
+    )
+
+    assert 'nhms-era5 download --date "2026-05-12" --area "45,80,5,135"' in captured["script"]
+
+
 def test_production_mapping_file_defaults_and_templates_are_complete() -> None:
     template_dir = Path("infra/sbatch")
     production_job_types = {stage.job_type for stage in (*M3_STAGES, *ANALYSIS_STAGES)} | {"hindcast"}
@@ -190,6 +222,16 @@ def test_production_mapping_file_defaults_and_templates_are_complete() -> None:
     assert SlurmGatewaySettings().job_type_templates == DEFAULT_JOB_TYPE_TEMPLATES
     assert production_job_types.issubset(DEFAULT_JOB_TYPE_TEMPLATES)
     assert all((template_dir / DEFAULT_JOB_TYPE_TEMPLATES[job_type]).is_file() for job_type in production_job_types)
+
+
+def test_job_type_template_mapping_file_matches_defaults_and_templates_exist() -> None:
+    template_dir = Path("infra/sbatch")
+    production_job_types = {stage.job_type for stage in (*M3_STAGES, *ANALYSIS_STAGES)} | {"hindcast"}
+    mapping = yaml.safe_load(Path("config/job_type_templates.yaml").read_text(encoding="utf-8"))
+
+    assert mapping["job_type_templates"] == DEFAULT_JOB_TYPE_TEMPLATES
+    assert production_job_types.issubset(mapping["job_type_templates"])
+    assert all((template_dir / mapping["job_type_templates"][job_type]).is_file() for job_type in production_job_types)
 
 
 def test_submit_job_accepts_nested_model_id_and_script_manifest(monkeypatch, tmp_path):

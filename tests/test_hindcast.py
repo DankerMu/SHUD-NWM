@@ -513,12 +513,14 @@ class _FakeSlurmClient:
         assert payload["tasks"][0]["source_id"] == "ERA5"
         assert payload["tasks"][0]["year"] == 1993
         assert payload["tasks"][0]["basin_version_id"] == "basin_v1"
+        assert payload["tasks"][0]["river_network_version_id"] == "rnv_v1"
         assert payload["tasks"][0]["forcing_version_id"] == "forc_era5_hindcast_yangtze_shud_v12_1993"
         assert "forcing_package_uri" in payload["tasks"][0]
         assert "object_store_root" in payload["tasks"][0]
         assert "object_store_prefix" in payload["tasks"][0]
         assert "workspace_dir" in payload["tasks"][0]
         assert payload["manifest"]["basin_version_id"] == "basin_v1"
+        assert payload["manifest"]["river_network_version_id"] == "rnv_v1"
         assert payload["manifest"]["object_store_root"]
         assert "object_store_prefix" in payload["manifest"]
         return {"job_id": "slurm_array_1", "status": "submitted"}

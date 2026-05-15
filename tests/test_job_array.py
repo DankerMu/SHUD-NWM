@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from services.slurm_gateway.config import SlurmGatewaySettings
+from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import ConfigurationError, SlurmValidationError
 from services.slurm_gateway.real_backend import RealSlurmGateway
 
@@ -71,6 +71,18 @@ def _gateway(tmp_path: Path, profiles: str | None = None) -> RealSlurmGateway:
     )
 
 
+def _production_gateway(tmp_path: Path) -> RealSlurmGateway:
+    return RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_profiles(tmp_path, _profiles())),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+
+
 def _tasks(count: int) -> list[dict[str, str]]:
     return [
         {
@@ -82,6 +94,43 @@ def _tasks(count: int) -> list[dict[str, str]]:
             "cycle_time": "2026050100",
         }
         for index in range(count)
+    ]
+
+
+def _hindcast_tasks(tmp_path: Path) -> list[dict[str, str | int]]:
+    return [
+        {
+            "array_task_id": 0,
+            "run_id": "hindcast_era5_yangtze_shud_v12_1993",
+            "model_id": "yangtze_shud_v12",
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": "rnv_v1",
+            "source_id": "ERA5",
+            "year": 1993,
+            "cycle_time": "1993-01-01T00:00:00Z",
+            "forcing_version_id": "forc_era5_hindcast_yangtze_shud_v12_1993",
+            "forcing_package_uri": "forcing/era5/1993/package",
+            "object_store_root": str(tmp_path / "object-store"),
+            "object_store_prefix": "hindcast/prod",
+            "workspace_dir": str(tmp_path / "workspace"),
+            "workspace_root": str(tmp_path / "workspace"),
+        },
+        {
+            "array_task_id": 1,
+            "run_id": "hindcast_era5_yangtze_shud_v12_1994",
+            "model_id": "yangtze_shud_v12",
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": "rnv_v1",
+            "source_id": "ERA5",
+            "year": 1994,
+            "cycle_time": "1994-01-01T00:00:00Z",
+            "forcing_version_id": "forc_era5_hindcast_yangtze_shud_v12_1994",
+            "forcing_package_uri": "forcing/era5/1994/package",
+            "object_store_root": str(tmp_path / "object-store"),
+            "object_store_prefix": "hindcast/prod",
+            "workspace_dir": str(tmp_path / "workspace"),
+            "workspace_root": str(tmp_path / "workspace"),
+        },
     ]
 
 
@@ -229,3 +278,46 @@ def test_array_sbatch_command_construction(monkeypatch, tmp_path):
     assert calls[0][0] == "sbatch"
     assert calls[0][1] == "--array=0-2%3"
     assert calls[0][2].endswith(".sbatch")
+
+
+def test_hindcast_production_array_submission_writes_required_manifest_fields(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+    captured: dict[str, str] = {}
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        captured["script"] = Path(command[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job_array(
+        {
+            "job_type": "hindcast",
+            "cycle_id": "hindcast_yangtze_shud_v12_1993_1994",
+            "stage_name": "hindcast",
+            "manifest": {
+                "run_id": "hindcast_era5_yangtze_shud_v12",
+                "model_id": "yangtze_shud_v12",
+                "basin_version_id": "basin_v1",
+                "river_network_version_id": "rnv_v1",
+                "source_id": "ERA5",
+                "years": [1993, 1994],
+                "object_store_root": str(tmp_path / "object-store"),
+                "object_store_prefix": "hindcast/prod",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "workspace_root": str(tmp_path / "workspace"),
+            },
+            "tasks": _hindcast_tasks(tmp_path),
+        }
+    )
+
+    manifest_index = Path(record.manifest["manifest_index_path"])
+    tasks = json.loads(manifest_index.read_text(encoding="utf-8"))
+    assert "--array=0-1%2" in calls[0]
+    assert tasks[0]["river_network_version_id"] == "rnv_v1"
+    assert tasks[1]["river_network_version_id"] == "rnv_v1"
+    assert 'export NHMS_MANIFEST_INDEX="' in captured["script"]
+    assert str(manifest_index) in captured["script"]

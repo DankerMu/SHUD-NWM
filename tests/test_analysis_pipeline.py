@@ -79,6 +79,52 @@ class FakeSlurmClient:
         return {"job_id": job_id, "run_id": job["run_id"], "complete": True, "logs": f"log for {job['stage']}"}
 
 
+class GatewayBackedAnalysisSlurmClient:
+    def __init__(self, gateway: Any) -> None:
+        self.gateway = gateway
+        self.submissions: list[dict[str, Any]] = []
+        self.rendered_scripts: list[str] = []
+        self.next_job = 2000
+
+    def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from services.slurm_gateway.models import SubmitJobRequest
+
+        self.submissions.append(payload)
+        record = self.gateway.submit_job(SubmitJobRequest(**payload))
+        self.rendered_scripts.append(self.gateway.rendered_script)
+        self.next_job += 1
+        return {
+            "job_id": str(record.job_id),
+            "run_id": payload["run_id"],
+            "model_id": payload["model_id"],
+            "stage": payload["manifest"]["stage"],
+            "status": "submitted",
+            "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+            "started_at": None,
+            "finished_at": None,
+            "exit_code": None,
+            "error_code": None,
+            "error_message": None,
+        }
+
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        stage = self.submissions[-1]["manifest"]["stage"]
+        return {
+            "job_id": job_id,
+            "stage": stage,
+            "status": "succeeded",
+            "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+            "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+            "finished_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+            "exit_code": 0,
+            "error_code": None,
+            "error_message": None,
+        }
+
+    def fetch_logs(self, job_id: str) -> dict[str, Any]:
+        return {"job_id": job_id, "run_id": self.submissions[-1]["run_id"], "complete": True, "logs": "ok"}
+
+
 class FakeStateManager:
     def __init__(self, state: StateSnapshot | None = None) -> None:
         self.state = state
@@ -361,6 +407,48 @@ def test_analysis_production_mapping_is_explicit_and_canonical() -> None:
     assert OrchestratorConfig(workspace_root=".", object_store_root=".").templates_dir == template_dir.resolve()
 
 
+def test_analysis_real_gateway_submission_uses_configured_era5_area(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from services.slurm_gateway.real_backend import RealSlurmGateway
+
+    class CapturingGateway(RealSlurmGateway):
+        def __init__(self) -> None:
+            super().__init__(
+                SlurmGatewaySettings(
+                    backend="slurm",
+                    template_dir="infra/sbatch",
+                    resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+                    job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                    workspace_dir=str(tmp_path / "workspace"),
+                )
+            )
+            self.rendered_script = ""
+
+        def _submit_rendered_script(self, rendered_script: str, array_spec: str | None = None) -> str:
+            del array_spec
+            self.rendered_script = rendered_script
+            return "12345"
+
+    gateway_client = GatewayBackedAnalysisSlurmClient(CapturingGateway())
+    repository = FakeAnalysisRepository()
+    orchestrator = _build_orchestrator(
+        tmp_path,
+        repository,
+        gateway_client,
+        FakeStateManager(),
+        era5_area="45,80,5,135",
+    )
+
+    result = orchestrator.trigger_analysis(model_id="demo_model", date_range="2026-05-01/2026-05-02")
+
+    assert result.status == "succeeded"
+    assert gateway_client.submissions[0]["manifest"]["era5_area"] == "45,80,5,135"
+    assert gateway_client.submissions[0]["manifest"]["analysis_date"] == "2026-05-01"
+    assert 'nhms-era5 download --date "2026-05-01" --area "45,80,5,135"' in gateway_client.rendered_scripts[0]
+
+
 def test_analysis_output_parser_uses_null_lead_time(tmp_path: Path) -> None:
     rivqdown = tmp_path / "demo.rivqdown"
     rivqdown.write_text("time,seg_a\n2026-05-01T00:00:00Z,86400\n", encoding="utf-8")
@@ -388,6 +476,8 @@ def _build_orchestrator(
     repository: FakeAnalysisRepository,
     client: FakeSlurmClient,
     state_manager: FakeStateManager,
+    *,
+    era5_area: str = "55,70,15,140",
 ) -> AnalysisOrchestrator:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "object-store"
@@ -397,6 +487,7 @@ def _build_orchestrator(
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
         job_timeout_seconds=5,
+        era5_area=era5_area,
     )
     return AnalysisOrchestrator(
         config=config,
@@ -419,3 +510,24 @@ def _dt(value: str | datetime) -> datetime:
 
 def _fmt(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _write_resource_profiles(tmp_path: Path) -> Path:
+    path = tmp_path / "resource_profiles.yaml"
+    path.write_text(
+        """
+resource_profiles:
+  default:
+    partition: compute
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 32
+    memory_gb: 128
+    walltime: "06:00:00"
+    max_concurrent: 4
+    shud_threads: 32
+  overrides: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return path

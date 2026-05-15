@@ -387,12 +387,18 @@ def submit_hindcast_slurm(
     years: Sequence[int],
     config: HindcastConfig,
     basin_version_id: str | None = None,
+    river_network_version_id: str | None = None,
 ) -> HindcastSlurmResult:
     _validate_model_id(model_id)
     years = [int(year) for year in years]
     if not years:
         return HindcastSlurmResult(slurm_job_array_id=None, job_ids=[])
-    basin_version_id = basin_version_id or _load_basin_version_for_slurm(config.db_session, model_id)
+    basin_version_id, river_network_version_id = _load_model_versions_for_slurm(
+        config.db_session,
+        model_id,
+        basin_version_id=basin_version_id,
+        river_network_version_id=river_network_version_id,
+    )
 
     slurm_client = config.slurm_client or HttpSlurmGatewayClient(config.slurm_gateway_url)
     tasks = [
@@ -401,6 +407,7 @@ def submit_hindcast_slurm(
             "run_id": run_id_for_year(model_id, year),
             "model_id": model_id,
             "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
             "source_id": normalize_source_id(source_id),
             "year": year,
             "cycle_time": f"{year}-01-01T00:00:00Z",
@@ -421,6 +428,7 @@ def submit_hindcast_slurm(
             "run_id": f"hindcast_era5_{model_id}",
             "model_id": model_id,
             "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
             "source_id": normalize_source_id(source_id),
             "years": years,
             "object_store_root": str(config.object_store_root),
@@ -968,16 +976,34 @@ def _load_run_forcing_version_id(db_session: Session, run_id: str) -> str | None
 
 
 def _load_basin_version_for_slurm(db_session: Session | None, model_id: str) -> str:
+    basin_version_id, _river_network_version_id = _load_model_versions_for_slurm(db_session, model_id)
+    return basin_version_id
+
+
+def _load_model_versions_for_slurm(
+    db_session: Session | None,
+    model_id: str,
+    *,
+    basin_version_id: str | None = None,
+    river_network_version_id: str | None = None,
+) -> tuple[str, str]:
+    if basin_version_id and river_network_version_id:
+        return basin_version_id, river_network_version_id
     if db_session is None:
+        missing = []
+        if basin_version_id is None:
+            missing.append("basin_version_id")
+        if river_network_version_id is None:
+            missing.append("river_network_version_id")
         raise HindcastError(
-            "BASIN_VERSION_REQUIRED",
-            "basin_version_id is required when no database session is configured.",
-            {"model_id": model_id},
+            "MODEL_VERSION_REQUIRED",
+            "basin_version_id and river_network_version_id are required when no database session is configured.",
+            {"model_id": model_id, "missing_fields": missing},
         )
     row = db_session.execute(
         text(
             """
-            SELECT basin_version_id
+            SELECT basin_version_id, river_network_version_id
             FROM core.model_instance
             WHERE model_id = :model_id
             LIMIT 1
@@ -985,22 +1011,33 @@ def _load_basin_version_for_slurm(db_session: Session | None, model_id: str) -> 
         ),
         {"model_id": model_id},
     ).mappings().first()
-    if row is not None:
-        return str(row["basin_version_id"])
-    row = db_session.execute(
+    if row is not None and row["basin_version_id"] is not None and row["river_network_version_id"] is not None:
+        return (
+            basin_version_id or str(row["basin_version_id"]),
+            river_network_version_id or str(row["river_network_version_id"]),
+        )
+    run_row = db_session.execute(
         text(
             """
-            SELECT basin_version_id
-            FROM hydro.hydro_run
-            WHERE model_id = :model_id
+            SELECT h.basin_version_id, mi.river_network_version_id
+            FROM hydro.hydro_run h
+            LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
+            WHERE h.model_id = :model_id
             ORDER BY created_at DESC
             LIMIT 1
             """
         ),
         {"model_id": model_id},
     ).mappings().first()
-    if row is not None:
-        return str(row["basin_version_id"])
+    if (
+        run_row is not None
+        and (basin_version_id or run_row["basin_version_id"] is not None)
+        and (river_network_version_id or run_row["river_network_version_id"] is not None)
+    ):
+        return (
+            basin_version_id or str(run_row["basin_version_id"]),
+            river_network_version_id or str(run_row["river_network_version_id"]),
+        )
     raise HindcastError("MODEL_NOT_FOUND", f"Model not found: {model_id}", {"model_id": model_id})
 
 
