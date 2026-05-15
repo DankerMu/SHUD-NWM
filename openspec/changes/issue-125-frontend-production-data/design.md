@@ -16,7 +16,7 @@ Change surface:
 Must preserve:
 - Forecast series requests keep using `GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series`.
 - Flood alert summary/ranking/timeline UI behavior and warning-level filters remain compatible.
-- Monitoring retry/cancel still sends role headers accepted by backend tests, but production UI must not let arbitrary users pick those roles locally.
+- Monitoring retry/cancel still sends role headers accepted by backend tests only in explicit dev/test override mode. Production UI must not let arbitrary users pick those roles locally, and `VITE_AUTH_ROLE` alone must not expose actionable retry/cancel controls until a trusted backend auth/session mechanism exists.
 - `corepack pnpm test` and `corepack pnpm build` stay green.
 - Existing API envelopes and generated OpenAPI types remain the source of truth.
 - Playwright mocked tests continue to work without a live backend.
@@ -24,7 +24,7 @@ Must preserve:
 Must add/change:
 - Forecast river network loader must call backend data rather than returning `demoRivers`; loaded features must carry `segment_id`, `basin_version_id`, `river_network_version_id`, stream order/name where available, and valid GeoJSON LineString geometry matching current river segment storage.
 - Flood alert store/layers must use the shared API base. Direct `fetch('/api/...')` calls must be replaced or wrapped so `VITE_API_BASE_URL=https://api.example.test` sends requests to that base.
-- Auth/RBAC must have an explicit production boundary. Production builds must not expose a role dropdown that can grant operator/model_admin/sys_admin locally. If demo switching remains, it must be gated by a dev/test flag and default production role source must be headers/config/auth context.
+- Auth/RBAC must have an explicit production boundary. Production builds must not expose a role dropdown that can grant operator/model_admin/sys_admin locally. If demo switching remains, it must be gated by `VITE_ENABLE_ROLE_OVERRIDE=true` in dev/test and paired with backend `ALLOW_DEV_ROLE_HEADER=true` for retry/cancel tests. The configured production role may gate read-only pages, but it is not a trusted action credential and must not be sent as or imply an accepted production authorization header.
 - Monitoring metrics endpoints and frontend calls must support source/scenario filters consistently. Jobs and trend charts should use the same selected source/scenario context where applicable.
 - Flood alert local threshold/timeline types must not contradict OpenAPI-generated schemas; any local convenience type must be a narrow normalized view with tests proving API shape compatibility.
 - Vite build chunk warning must be intentionally handled by manual chunks for MapLibre/ECharts/vendor or an explicit checked threshold.
@@ -50,7 +50,7 @@ Must add/change:
 
 - Forecast map test: mocked backend river network -> MapView renders features and clicked segment request contains backend `basin_version_id`/`segment_id`.
 - API-base test: `VITE_API_BASE_URL` -> forecast/flood/monitoring/tile requests target the configured base.
-- RBAC test: production mode -> no role dropdown grants operator privileges; retry/cancel headers use configured/auth role only.
+- RBAC test: production mode -> no role dropdown grants operator privileges; configured operator read access does not show retry/cancel action buttons without the dev/test override; dev/test override operator actions send `X-User-Role`; backend denies spoofed role headers by default and accepts them only when `ALLOW_DEV_ROLE_HEADER=true`.
 - Monitoring test: selected source/scenario -> metrics endpoints receive matching query params and backend filters results.
 - Flood alert type test: API timeline/threshold payload -> normalized frontend state matches generated OpenAPI fields without local drift.
 - Build/deploy evidence: `corepack pnpm test`, `corepack pnpm build`, and targeted E2E/preview fallback pass.
@@ -58,7 +58,7 @@ Must add/change:
 ## Non-Goals
 
 - Real Postgres/PostGIS/TimescaleDB integration matrix from #126.
-- Full authentication provider integration beyond removing/gating frontend-only privilege escalation and honoring configured role input.
+- Full authentication provider integration beyond removing/gating frontend-only privilege escalation and honoring configured role input for read-only gating. Production retry/cancel authorization is a non-goal until a real trusted backend auth/session mechanism is introduced.
 - Redesign of backend authorization policy.
 - New map styling beyond what is necessary for real river/flood data.
 

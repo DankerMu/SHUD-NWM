@@ -19,13 +19,12 @@ import {
 import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
 import { formatDate, formatDuration } from '@/lib/format'
-import { isRoleOverrideEnabled, useAuthStore } from '@/stores/auth'
+import { canUseDevRoleActions, useAuthStore } from '@/stores/auth'
 import { type JobFilters as JobFilterState, type PipelineJob, useMonitoringStore } from '@/stores/monitoring'
 
 type SortKey = 'submitted_at' | 'duration_seconds'
 type SortDirection = 'asc' | 'desc'
 
-const operatorRoles = new Set(['operator', 'model_admin', 'sys_admin'])
 const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
 const retryableStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'partially_failed'])
 const activeStatuses = new Set(['pending', 'submitted', 'running'])
@@ -65,7 +64,7 @@ export function JobsTable() {
     void fetchJobs().catch(() => undefined)
   }, [fetchJobs])
 
-  const canOperate = operatorRoles.has(role)
+  const actionRole = canUseDevRoleActions(role) ? role : null
 
   const updateFilters = (nextFilters: JobFilterState) => {
     void fetchJobs({ ...nextFilters, page: 1, pageSize }).catch(() => undefined)
@@ -78,7 +77,7 @@ export function JobsTable() {
 
   const runAction = async (job: PipelineJob, action: 'retry' | 'cancel') => {
     if (!job.run_id) return
-    if (!canOperate) return
+    if (!actionRole) return
 
     const actionKey = `${action}:${job.run_id}`
     setPendingAction(actionKey)
@@ -87,9 +86,7 @@ export function JobsTable() {
       const { error } = await client.POST(path, {
         params: {
           path: { run_id: job.run_id },
-          header: isRoleOverrideEnabled
-            ? { 'X-User-Role': role as 'operator' | 'model_admin' | 'sys_admin' }
-            : undefined,
+          header: { 'X-User-Role': actionRole },
         },
       })
       if (error) throw new Error(getApiErrorMessage(error, action === 'retry' ? '重试失败' : '取消失败'))
@@ -169,7 +166,7 @@ export function JobsTable() {
                           <Terminal className="size-3.5" />
                           查看日志
                         </Button>
-                        {canOperate && retryableStatuses.has(job.status) && job.run_id ? (
+                        {actionRole && retryableStatuses.has(job.status) && job.run_id ? (
                           <Button
                             variant="outline"
                             size="sm"
@@ -180,7 +177,7 @@ export function JobsTable() {
                             重试
                           </Button>
                         ) : null}
-                        {canOperate && activeStatuses.has(job.status) && job.run_id ? (
+                        {actionRole && activeStatuses.has(job.status) && job.run_id ? (
                           <Button
                             variant="destructive"
                             size="sm"

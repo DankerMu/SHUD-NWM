@@ -207,8 +207,8 @@ async function mockMonitoringApi(page: Page, options: MonitoringApiMockOptions =
 
 async function selectRole(page: Page, roleName: 'Viewer' | 'Operator' | 'Model Admin' | 'Sys Admin') {
   await expect(page.getByLabel('Role')).toBeVisible()
-  await page.getByLabel('Role').click()
-  await page.getByRole('option', { name: roleName }).click()
+  await page.getByLabel('Role').click({ force: true })
+  await page.getByRole('option', { name: roleName }).click({ force: true })
 }
 
 async function openMonitoringAsOperator(page: Page, mockOptions?: MonitoringApiMockOptions) {
@@ -299,13 +299,14 @@ test.describe('monitoring page', () => {
     await expect(page.getByRole('dialog')).toContainText('forecast stderr: model failed')
   })
 
-  test('shows retry for operator and hides it when role becomes viewer', async ({ page }) => {
-    const retryRequests: Array<{ method: string; pathname: string }> = []
+  test('shows retry for dev override operator and sends the role header', async ({ page }) => {
+    const retryRequests: Array<{ method: string; pathname: string; role: string | null }> = []
     await openMonitoringAsOperator(page, {
       onRetryRequest: (request) => {
         retryRequests.push({
           method: request.method(),
           pathname: new URL(request.url()).pathname,
+          role: request.headers()['x-user-role'] ?? null,
         })
       },
     })
@@ -315,7 +316,7 @@ test.describe('monitoring page', () => {
     await retryButton.click()
 
     await expect.poll(() => retryRequests).toEqual([
-      { method: 'POST', pathname: '/api/v1/runs/run-failed/retry' },
+      { method: 'POST', pathname: '/api/v1/runs/run-failed/retry', role: 'operator' },
     ])
     await expect(page.getByRole('listitem').filter({ hasText: '重试已提交' })).toBeVisible()
 
@@ -325,7 +326,7 @@ test.describe('monitoring page', () => {
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
   })
 
-  test('shows cancel for operator and hides it when role becomes viewer', async ({ page }) => {
+  test('shows cancel for dev override operator and hides it when role becomes viewer', async ({ page }) => {
     const cancelRequests: Array<{ method: string; pathname: string; role: string | null }> = []
     await openMonitoringAsOperator(page, {
       onCancelRequest: (request) => {

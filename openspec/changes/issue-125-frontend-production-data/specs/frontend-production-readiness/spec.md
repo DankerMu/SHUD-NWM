@@ -31,7 +31,8 @@ The frontend SHALL NOT expose a production control that lets users grant themsel
 - **WHEN** the app runs in production mode without an explicit dev/test role override
 - **THEN** the role selector MUST NOT be shown
 - **AND** retry/cancel controls MUST be hidden or disabled for a viewer role
-- **AND** operator action headers MUST come from the configured/auth-provided role source rather than arbitrary local dropdown state
+- **AND** retry/cancel controls MUST NOT be shown or actionable solely because `VITE_AUTH_ROLE` is configured as an operator/admin role
+- **AND** operator action headers MUST only be sent by the explicit dev/test role override path until a trusted production backend auth/session mechanism exists
 
 ### Requirement: Flood alert types match the API contract
 

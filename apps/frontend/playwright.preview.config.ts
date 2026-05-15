@@ -14,7 +14,7 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
   },
   webServer: {
-    command: `VITE_API_BASE_URL=${apiBaseURL} corepack pnpm build && VITE_API_BASE_URL=${apiBaseURL} corepack pnpm preview --host 127.0.0.1 --port ${previewPort} --strictPort`,
+    command: `VITE_API_BASE_URL=${apiBaseURL} VITE_AUTH_ROLE=operator corepack pnpm build && VITE_API_BASE_URL=${apiBaseURL} VITE_AUTH_ROLE=operator corepack pnpm preview --host 127.0.0.1 --port ${previewPort} --strictPort`,
     url: baseURL,
     reuseExistingServer: false,
     timeout: 120_000,
