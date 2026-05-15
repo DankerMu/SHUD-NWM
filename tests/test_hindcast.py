@@ -207,11 +207,12 @@ def test_failure_retry_resets_failed_hindcast_run() -> None:
             stage="hindcast",
             status="failed",
         )
+        gateway = _RecordingGateway(job_id="slurm_retry")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry(run_id)
+        retry = service.attempt_manual_retry(run_id, gateway=gateway)
 
-        assert retry.status == "pending"
+        assert retry.status == "submitted"
         assert retry.job_type == "hindcast"
         assert _hydro_run(session, run_id)["status"] == "pending"
 
@@ -755,6 +756,23 @@ def _hydro_run(session: Session, run_id: str) -> dict[str, Any]:
         .mappings()
         .one()
     )
+
+
+class _RecordingGateway:
+    def __init__(self, *, job_id: str = "slurm_retry") -> None:
+        self.job_id = job_id
+        self.submissions: list[Any] = []
+
+    def submit_job(self, request: Any) -> dict[str, Any]:
+        self.submissions.append(request)
+        return {
+            "job_id": self.job_id,
+            "run_id": request.run_id,
+            "model_id": request.model_id,
+            "status": "submitted",
+            "submitted_at": "2026-05-15T00:00:00Z",
+            "updated_at": "2026-05-15T00:00:00Z",
+        }
 
 
 def _count(session: Session, table: str) -> int:

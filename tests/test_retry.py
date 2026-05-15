@@ -16,6 +16,7 @@ from services.orchestrator.retry import (
     TRANSIENT_ERROR_CODES,
     RetryConfig,
     RetryConflictError,
+    RetryError,
     RetryNotFoundError,
     RetryService,
     compute_backoff_seconds,
@@ -157,9 +158,10 @@ def test_mark_permanently_failed() -> None:
 def test_manual_retry_creates_new_job() -> None:
     with _store() as store:
         original = _create_job(store, run_id="run_1", error_code="NODE_FAILURE", retry_count=2)
+        gateway = _RecordingGateway(job_id="slurm_retry_1")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_1")
+        retry = service.attempt_manual_retry("run_1", gateway=gateway)
 
         store.session.refresh(original)
         assert retry.job_id != original.job_id
@@ -169,26 +171,25 @@ def test_manual_retry_creates_new_job() -> None:
         assert retry.job_type == original.job_type
         assert retry.model_id == original.model_id
         assert retry.stage == original.stage
-        assert retry.status == "pending"
+        assert retry.status == "submitted"
         assert retry.retry_count == 3
-        assert retry.slurm_job_id is None
+        assert retry.slurm_job_id == "slurm_retry_1"
         assert retry.error_code is None
         assert original.status == "failed"
         assert original.retry_count == 2
         assert original.slurm_job_id == "123"
 
 
-def test_manual_retry_without_gateway_creates_pending_without_execution() -> None:
+def test_manual_retry_without_gateway_raises_execution_unavailable() -> None:
     with _store() as store:
         _create_job(store, run_id="run_1", error_code="NODE_FAILURE", retry_count=2)
-        gateway = _RecordingGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_1")
+        with pytest.raises(RetryError) as exc_info:
+            service.attempt_manual_retry("run_1")
 
-        assert retry.status == "pending"
-        assert retry.slurm_job_id is None
-        assert gateway.submissions == []
+        assert exc_info.value.code == "RETRY_EXECUTION_UNAVAILABLE"
+        assert store.query_jobs_by_run("run_1")[0].status == "failed"
 
 
 def test_manual_retry_submits_to_slurm_when_gateway_available() -> None:
@@ -230,10 +231,11 @@ def test_manual_retry_conflict_409() -> None:
     with _store() as store:
         _create_job(store, job_id="job_failed", run_id="run_1", status="failed")
         _create_job(store, job_id="job_pending", run_id="run_1", status="pending")
+        gateway = _RecordingGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
         with pytest.raises(RetryConflictError) as exc_info:
-            service.attempt_manual_retry("run_1")
+            service.attempt_manual_retry("run_1", gateway=gateway)
 
         assert exc_info.value.message == "A retry is already in progress for this run."
         assert exc_info.value.details["active_job_id"] == "job_pending"
@@ -243,24 +245,26 @@ def test_manual_retry_conflict_409() -> None:
 def test_second_manual_retry_attempt_gets_conflict() -> None:
     with _store() as store:
         _create_job(store, job_id="job_failed", run_id="run_1", status="failed")
+        gateway = _RecordingGateway(job_id="slurm_retry_1")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        first = service.attempt_manual_retry("run_1")
+        first = service.attempt_manual_retry("run_1", gateway=gateway)
         with pytest.raises(RetryConflictError) as exc_info:
-            service.attempt_manual_retry("run_1")
+            service.attempt_manual_retry("run_1", gateway=gateway)
 
         assert exc_info.value.details["active_job_id"] == first.job_id
-        assert exc_info.value.details["active_status"] == "pending"
+        assert exc_info.value.details["active_status"] == "submitted"
 
 
 def test_manual_retry_conflicts_with_submitted_job() -> None:
     with _store() as store:
         _create_job(store, job_id="job_failed", run_id="run_1", status="failed")
         _create_job(store, job_id="job_submitted", run_id="run_1", status="submitted")
+        gateway = _RecordingGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
         with pytest.raises(RetryConflictError) as exc_info:
-            service.attempt_manual_retry("run_1")
+            service.attempt_manual_retry("run_1", gateway=gateway)
 
         assert exc_info.value.details["active_job_id"] == "job_submitted"
         assert exc_info.value.details["active_status"] == "submitted"
@@ -269,30 +273,56 @@ def test_manual_retry_conflicts_with_submitted_job() -> None:
 def test_manual_retry_no_failed_job() -> None:
     with _store() as store:
         _create_job(store, run_id="run_1", status="succeeded", error_code=None)
+        gateway = _RecordingGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
         with pytest.raises(RetryNotFoundError):
-            service.attempt_manual_retry("run_1")
+            service.attempt_manual_retry("run_1", gateway=gateway)
 
 
 def test_expire_stale_retries_allows_new_retry() -> None:
     with _store() as store:
         _create_job(store, job_id="job_failed", run_id="run_1", status="failed", error_code="NODE_FAILURE")
+        pending = _create_job(
+            store,
+            job_id="job_pending",
+            run_id="run_1",
+            status="pending",
+            error_code=None,
+            retry_count=1,
+        )
+        pending.slurm_job_id = None
+        pending.created_at = datetime(2026, 5, 1, tzinfo=UTC)
+        store.session.add(pending)
+        store.session.commit()
+        gateway = _RecordingGateway(job_id="slurm_retry_1")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        expired = service.expire_stale_retries(max_age_seconds=1)
+        retry = service.attempt_manual_retry("run_1", gateway=gateway)
+
+        assert [job.job_id for job in expired] == ["job_pending"]
+        assert expired[0].status == "failed"
+        assert expired[0].error_code == "RETRY_STALE_PENDING"
+        assert retry.status == "submitted"
+        assert retry.job_id != "job_pending"
+        assert _events(store)[0].event_type == "retry_expired"
+
+
+def test_expire_stale_retries_ignores_non_retry_pending_jobs() -> None:
+    with _store() as store:
         pending = _create_job(store, job_id="job_pending", run_id="run_1", status="pending", error_code=None)
+        pending.slurm_job_id = None
         pending.created_at = datetime(2026, 5, 1, tzinfo=UTC)
         store.session.add(pending)
         store.session.commit()
         service = RetryService(store, RetryConfig(max_retries=3))
 
         expired = service.expire_stale_retries(max_age_seconds=1)
-        retry = service.attempt_manual_retry("run_1")
 
-        assert [job.job_id for job in expired] == ["job_pending"]
-        assert expired[0].status == "failed"
-        assert expired[0].error_code == "RETRY_STALE_PENDING"
-        assert retry.status == "pending"
-        assert retry.job_id != "job_pending"
-        assert _events(store)[0].event_type == "retry_expired"
+        assert expired == []
+        store.session.refresh(pending)
+        assert pending.status == "pending"
 
 
 def test_audit_event_auto() -> None:
@@ -316,9 +346,10 @@ def test_audit_event_auto() -> None:
 def test_audit_event_manual() -> None:
     with _store() as store:
         failed = _create_job(store, run_id="run_1", error_code="SBATCH_SUBMISSION_FAILED")
+        gateway = _RecordingGateway(job_id="slurm_retry_1")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        service.attempt_manual_retry("run_1")
+        service.attempt_manual_retry("run_1", gateway=gateway)
 
         event = _events(store)[0]
         assert event.details == {
@@ -333,9 +364,10 @@ def test_audit_event_manual() -> None:
 def test_manual_retry_audit_has_previous_job_id() -> None:
     with _store() as store:
         failed = _create_job(store, run_id="run_1", error_code="SBATCH_SUBMISSION_FAILED")
+        gateway = _RecordingGateway(job_id="slurm_retry_1")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_1")
+        retry = service.attempt_manual_retry("run_1", gateway=gateway)
 
         event = _events(store)[0]
         assert event.entity_id == retry.job_id
@@ -347,7 +379,7 @@ def test_retry_api_endpoint() -> None:
         failed = _create_job(store, run_id="run_api", error_code="SLURM_UNAVAILABLE")
         service = RetryService(store, RetryConfig(max_retries=3))
         app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
-        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: _NoSubmitGateway()
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: _RecordingGateway(job_id="slurm_api_1")
         try:
             client = TestClient(app)
             headers = {"X-User-Role": "operator"}
@@ -361,9 +393,9 @@ def test_retry_api_endpoint() -> None:
                 "pipeline_job_id": data["job_id"],
                 "run_id": "run_api",
                 "retry_count": 1,
-                "status": "pending",
-                "slurm_job_id": None,
-                "execution_status": "queued",
+                "status": "submitted",
+                "slurm_job_id": "slurm_api_1",
+                "execution_status": "submitted",
             }
             assert data["job_id"].startswith("run_api_retry_")
             store.session.refresh(failed)
@@ -385,6 +417,26 @@ def test_retry_api_endpoint() -> None:
             invalid = client.post("/api/v1/runs/-bad/retry", headers=headers)
             assert invalid.status_code == 400
             assert invalid.json()["error"]["code"] == "INVALID_RUN_ID"
+        finally:
+            app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
+            app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
+
+
+def test_retry_api_without_gateway_returns_503() -> None:
+    with _store() as store:
+        _create_job(store, run_id="run_api", error_code="SLURM_UNAVAILABLE")
+        service = RetryService(store, RetryConfig(max_retries=3))
+        app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: _NoSubmitGateway()
+        try:
+            client = TestClient(app)
+
+            response = client.post("/api/v1/runs/run_api/retry", headers={"X-User-Role": "operator"})
+
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "RETRY_EXECUTION_UNAVAILABLE"
+            assert response.json()["error"]["message"] == "Retry execution path unavailable."
+            assert len(store.query_jobs_by_run("run_api")) == 1
         finally:
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
             app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
@@ -424,11 +476,11 @@ def test_retry_api_submission_error_response_contract() -> None:
 
             response = client.post("/api/v1/runs/run_api/retry", headers={"X-User-Role": "operator"})
 
-            assert response.status_code == 200
-            data = response.json()["data"]
-            assert data["status"] == "submission_failed"
-            assert data["execution_status"] == "submission_failed"
-            assert data["slurm_job_id"] is None
+            assert response.status_code == 503
+            error = response.json()["error"]
+            assert error["code"] == "SBATCH_SUBMISSION_FAILED"
+            assert error["message"] == "no execution path"
+            assert error["details"]["status"] == "submission_failed"
         finally:
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
             app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
 from services.orchestrator.persistence import PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryNotFoundError, RetryService
+from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryError, RetryNotFoundError, RetryService
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
@@ -249,11 +249,36 @@ def retry_run(
 
     try:
         retry_gateway = gateway if callable(getattr(gateway, "submit_job", None)) else None
+        if retry_gateway is None:
+            raise ApiError(
+                status_code=503,
+                code="RETRY_EXECUTION_UNAVAILABLE",
+                message="Retry execution path unavailable.",
+                details={"run_id": run_id},
+            )
         job = service.attempt_manual_retry(run_id, gateway=retry_gateway)
     except RetryConflictError as error:
         raise _api_error(error) from error
     except RetryNotFoundError as error:
         raise _api_error(error) from error
+    except RetryError as error:
+        raise _api_error(error) from error
+
+    if job.status == "submission_failed":
+        raise ApiError(
+            status_code=503,
+            code=job.error_code or "RETRY_SUBMISSION_FAILED",
+            message=job.error_message or "Retry submission failed.",
+            details={
+                "run_id": job.run_id,
+                "job_id": job.job_id,
+                "pipeline_job_id": job.job_id,
+                "status": job.status,
+                "slurm_job_id": job.slurm_job_id,
+                "error_code": job.error_code,
+                "error_message": job.error_message,
+            },
+        )
 
     return _ok(
         request,
@@ -508,7 +533,7 @@ def queue_depth(
     )
 
 
-def _api_error(error: RetryConflictError | RetryNotFoundError) -> ApiError:
+def _api_error(error: RetryError) -> ApiError:
     return ApiError(
         status_code=error.status_code,
         code=error.code,

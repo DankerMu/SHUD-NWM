@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import uuid4
 
-from sqlalchemy import inspect, select, text
+from sqlalchemy import inspect, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from services.orchestrator.persistence import PipelineJob, PipelineStore
@@ -99,6 +100,17 @@ class RetrySubmitter(Protocol):
         raise NotImplementedError
 
 
+@dataclass(frozen=True)
+class _RetrySubmissionJob:
+    job_id: str
+    run_id: str | None
+    cycle_id: str | None
+    job_type: str
+    model_id: str | None
+    stage: str | None
+    retry_count: int
+
+
 class RetryService:
     def __init__(self, store: PipelineStore, config: RetryConfig) -> None:
         self.store = store
@@ -179,6 +191,13 @@ class RetryService:
         return job
 
     def attempt_manual_retry(self, run_id: str, gateway: RetrySubmitter | None = None) -> PipelineJob:
+        if gateway is None:
+            raise RetryError(
+                "RETRY_EXECUTION_UNAVAILABLE",
+                "No Slurm gateway available for retry submission.",
+                {"run_id": run_id},
+            )
+
         has_hydro_run_table = _has_hydro_run_table(self.store)
         with self.store.session.begin_nested():
             lock_statement = (
@@ -231,9 +250,34 @@ class RetryService:
                 },
                 commit=False,
             )
-            if gateway is not None:
-                self._submit_retry_job(retry_job, gateway)
-            if failed_job.run_id and has_hydro_run_table:
+            submission_job = _RetrySubmissionJob(
+                job_id=retry_job.job_id,
+                run_id=retry_job.run_id,
+                cycle_id=retry_job.cycle_id,
+                job_type=retry_job.job_type,
+                model_id=self._resolve_retry_model_id(retry_job),
+                stage=retry_job.stage,
+                retry_count=retry_job.retry_count,
+            )
+            retry_job_id = retry_job.job_id
+            retry_run_id = failed_job.run_id
+
+        self.store.session.commit()
+
+        try:
+            submitted_payload = self._submit_retry_job(submission_job, gateway)
+        except Exception as error:
+            with self.store.session.begin_nested():
+                retry_job = self._locked_retry_job(retry_job_id)
+                self._record_retry_submission_failure(retry_job, error)
+            self.store.session.commit()
+            self.store.session.refresh(retry_job)
+            return retry_job
+
+        with self.store.session.begin_nested():
+            retry_job = self._locked_retry_job(retry_job_id)
+            self._record_retry_submission_success(retry_job, submitted_payload)
+            if retry_run_id and has_hydro_run_table and retry_job.status in {"submitted", "running"}:
                 self.store.session.execute(
                     text(
                         """
@@ -245,7 +289,7 @@ class RetryService:
                           AND status = 'failed'
                         """
                     ),
-                    {"run_id": failed_job.run_id},
+                    {"run_id": retry_run_id},
                 )
         self.store.session.commit()
         self.store.session.refresh(retry_job)
@@ -256,18 +300,30 @@ class RetryService:
         statement = (
             select(PipelineJob)
             .where(PipelineJob.status == "pending")
+            .where(PipelineJob.retry_count > 0)
+            .where(PipelineJob.slurm_job_id.is_(None))
             .where(PipelineJob.created_at < cutoff)
             .order_by(PipelineJob.created_at.asc())
         )
-        expired = list(self.store.session.scalars(statement))
-        for job in expired:
+        candidates = list(self.store.session.scalars(statement))
+        expired: list[PipelineJob] = []
+        for job in candidates:
             status_from = job.status
-            job.status = "failed"
-            job.error_code = "RETRY_STALE_PENDING"
-            job.error_message = f"Pending retry exceeded max age of {max_age_seconds} seconds."
-            job.finished_at = datetime.now(UTC)
-            job.updated_at = job.finished_at
-            self.store.session.add(job)
+            finished_at = datetime.now(UTC)
+            result = self.store.session.execute(
+                update(PipelineJob)
+                .where(PipelineJob.job_id == job.job_id)
+                .where(PipelineJob.status == "pending")
+                .values(
+                    status="failed",
+                    error_code="RETRY_STALE_PENDING",
+                    error_message=f"Pending retry exceeded max age of {max_age_seconds} seconds.",
+                    finished_at=finished_at,
+                    updated_at=finished_at,
+                )
+            )
+            if result.rowcount != 1:
+                continue
             self.store.insert_event(
                 entity_type="pipeline_job",
                 entity_id=job.job_id,
@@ -282,53 +338,55 @@ class RetryService:
                 },
                 commit=False,
             )
+            expired.append(job)
         self.store.session.commit()
         for job in expired:
             self.store.session.refresh(job)
         return expired
 
-    def _submit_retry_job(self, retry_job: PipelineJob, gateway: RetrySubmitter) -> None:
-        try:
-            submitted = gateway.submit_job(
-                SubmitJobRequest(
-                    run_id=retry_job.run_id,
-                    model_id=retry_job.model_id,
-                    job_type=retry_job.job_type,
-                    manifest={
-                        "run_id": retry_job.run_id,
-                        "model_id": retry_job.model_id,
-                        "cycle_id": retry_job.cycle_id,
-                        "job_type": retry_job.job_type,
-                        "stage": retry_job.stage,
-                        "pipeline_job_id": retry_job.job_id,
-                        "retry_count": retry_job.retry_count,
-                    },
-                )
-            )
-        except Exception as error:
-            retry_job.status = "submission_failed"
-            retry_job.error_code = _retry_submission_error_code(error)
-            retry_job.error_message = str(getattr(error, "message", None) or error)
-            retry_job.finished_at = datetime.now(UTC)
-            retry_job.updated_at = retry_job.finished_at
-            self.store.session.add(retry_job)
-            self.store.insert_event(
-                entity_type="pipeline_job",
-                entity_id=retry_job.job_id,
-                event_type="submission",
-                status_from="pending",
-                status_to="submission_failed",
-                message=f"Manual retry submission failed: {retry_job.error_message}",
-                details={
-                    "trigger": "manual",
-                    "error_code": retry_job.error_code,
-                    "error_message": retry_job.error_message,
+    def _submit_retry_job(self, retry_job: _RetrySubmissionJob, gateway: RetrySubmitter) -> dict[str, Any]:
+        model_id = retry_job.model_id or _model_id_from_run_id(retry_job.run_id) or "unknown"
+        submitted = gateway.submit_job(
+            SubmitJobRequest(
+                run_id=retry_job.run_id,
+                model_id=model_id,
+                job_type=retry_job.job_type,
+                manifest={
+                    "run_id": retry_job.run_id,
+                    "model_id": model_id,
+                    "cycle_id": retry_job.cycle_id,
+                    "job_type": retry_job.job_type,
+                    "stage": retry_job.stage,
+                    "pipeline_job_id": retry_job.job_id,
+                    "retry_count": retry_job.retry_count,
                 },
-                commit=False,
             )
-            return
+        )
+        return _coerce_gateway_payload(submitted)
 
-        submitted_payload = _coerce_gateway_payload(submitted)
+    def _record_retry_submission_failure(self, retry_job: PipelineJob, error: Exception) -> None:
+        retry_job.status = "submission_failed"
+        retry_job.error_code = _retry_submission_error_code(error)
+        retry_job.error_message = str(getattr(error, "message", None) or error)
+        retry_job.finished_at = datetime.now(UTC)
+        retry_job.updated_at = retry_job.finished_at
+        self.store.session.add(retry_job)
+        self.store.insert_event(
+            entity_type="pipeline_job",
+            entity_id=retry_job.job_id,
+            event_type="submission",
+            status_from="pending",
+            status_to="submission_failed",
+            message=f"Manual retry submission failed: {retry_job.error_message}",
+            details={
+                "trigger": "manual",
+                "error_code": retry_job.error_code,
+                "error_message": retry_job.error_message,
+            },
+            commit=False,
+        )
+
+    def _record_retry_submission_success(self, retry_job: PipelineJob, submitted_payload: dict[str, Any]) -> None:
         slurm_job_id = submitted_payload.get("job_id") or submitted_payload.get("slurm_job_id")
         retry_job.slurm_job_id = str(slurm_job_id) if slurm_job_id is not None else None
         retry_job.submitted_at = _parse_gateway_time(submitted_payload.get("submitted_at")) or datetime.now(UTC)
@@ -354,12 +412,48 @@ class RetryService:
             commit=False,
         )
 
+    def _locked_retry_job(self, job_id: str) -> PipelineJob:
+        statement = select(PipelineJob).where(PipelineJob.job_id == job_id).with_for_update()
+        retry_job = self.store.session.scalars(statement).one()
+        return retry_job
+
+    def _resolve_retry_model_id(self, retry_job: PipelineJob) -> str | None:
+        if retry_job.model_id:
+            return retry_job.model_id
+        return _model_id_from_hydro_run(self.store, retry_job.run_id) or _model_id_from_run_id(retry_job.run_id)
+
 
 def _has_hydro_run_table(store: PipelineStore) -> bool:
     try:
         return inspect(store.session.get_bind()).has_table("hydro_run", schema="hydro")
     except SQLAlchemyError:
         return False
+
+
+def _model_id_from_hydro_run(store: PipelineStore, run_id: str | None) -> str | None:
+    if not run_id:
+        return None
+    try:
+        inspector = inspect(store.session.get_bind())
+        column_names = {column["name"] for column in inspector.get_columns("hydro_run", schema="hydro")}
+        if "run_id" not in column_names or "model_id" not in column_names:
+            return None
+        value = store.session.execute(
+            text("SELECT model_id FROM hydro.hydro_run WHERE run_id = :run_id LIMIT 1"),
+            {"run_id": run_id},
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        return None
+    return str(value) if value else None
+
+
+def _model_id_from_run_id(run_id: str | None) -> str | None:
+    if not run_id:
+        return None
+    match = re.search(r"(?:^|_)(model(?:_[A-Za-z0-9.-]+)+)$", run_id)
+    if match is None:
+        return None
+    return match.group(1)
 
 
 def _coerce_gateway_payload(value: Any) -> dict[str, Any]:

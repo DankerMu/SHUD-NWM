@@ -228,7 +228,7 @@ def test_stage_duration_metrics_contract_uses_success_envelope() -> None:
 def test_retry_contract_documents_pipeline_job_and_execution_status_fields() -> None:
     with _store() as store:
         _create_job(store, job_id="job_retry_contract", run_id="run_retry_contract", status="failed")
-        with _client(store) as client:
+        with _client(store, _RetryGateway()) as client:
             response = client.post("/api/v1/runs/run_retry_contract/retry", headers={"X-User-Role": "operator"})
 
     assert response.status_code == 200
@@ -244,8 +244,8 @@ def test_retry_contract_documents_pipeline_job_and_execution_status_fields() -> 
     }
     assert data["pipeline_job_id"] == data["job_id"]
     assert data["run_id"] == "run_retry_contract"
-    assert data["execution_status"] == "queued"
-    assert data["slurm_job_id"] is None
+    assert data["execution_status"] == "submitted"
+    assert data["slurm_job_id"] == "slurm_retry_contract"
 
 
 def test_cancel_contract_documents_cancelled_jobs_and_slurm_failures() -> None:
@@ -306,6 +306,18 @@ def _assert_success_envelope(body: dict[str, Any]) -> Any:
     assert body["request_id"]
     assert body["status"] == "ok"
     return body["data"]
+
+
+class _RetryGateway(_MockGateway):
+    def submit_job(self, request: Any) -> dict[str, Any]:
+        return {
+            "job_id": "slurm_retry_contract",
+            "run_id": request.run_id,
+            "model_id": request.model_id,
+            "status": "submitted",
+            "submitted_at": "2026-05-15T00:00:00Z",
+            "updated_at": "2026-05-15T00:00:00Z",
+        }
 
 
 class _RunStore:
