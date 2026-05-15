@@ -349,6 +349,28 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert "frequency_thresholds?: Record<string, never> | null;" not in generated_types
 
 
+def test_forecast_response_issue_time_contract_allows_runtime_nulls() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+
+    for schema_name in ("RiverSeriesResponse", "SplicedForecastResponse"):
+        issue_time = schemas[schema_name]["properties"]["issue_time"]
+        assert issue_time == {
+            "type": "string",
+            "format": "date-time",
+            "nullable": True,
+        }
+
+    types_path = Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    generated_types = types_path.read_text(encoding="utf-8")
+    river_start = generated_types.index("RiverSeriesResponse:")
+    spliced_start = generated_types.index("SplicedForecastResponse:")
+    series_segment_start = generated_types.index("SeriesSegment:")
+    assert "issue_time: string | null;" in generated_types[river_start:spliced_start]
+    assert "issue_time: string | null;" in generated_types[spliced_start:series_segment_start]
+
+
 def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))

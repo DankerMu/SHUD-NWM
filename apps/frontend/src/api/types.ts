@@ -844,7 +844,7 @@ export interface components {
         RiverSeriesResponse: {
             segment_id: string;
             /** Format: date-time */
-            issue_time: string;
+            issue_time: string | null;
             unit: string;
             series: components["schemas"]["SeriesSegment"][];
             frequency_thresholds: components["schemas"]["FloodFrequencyThresholds"] | null;
@@ -862,7 +862,7 @@ export interface components {
                 }[];
             }[];
             /** Format: date-time */
-            issue_time: string;
+            issue_time: string | null;
             variable: string;
             unit: string;
             frequency_thresholds?: components["schemas"]["FloodFrequencyThresholds"] | null;

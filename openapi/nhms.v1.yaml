@@ -1879,6 +1879,7 @@ components:
         issue_time:
           type: string
           format: date-time
+          nullable: true
         unit:
           type: string
         series:
@@ -1922,6 +1923,7 @@ components:
         issue_time:
           type: string
           format: date-time
+          nullable: true
         variable:
           type: string
         unit:
