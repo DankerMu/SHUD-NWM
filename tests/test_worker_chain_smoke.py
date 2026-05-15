@@ -130,7 +130,7 @@ def _write_raw_manifest(store: LocalObjectStore) -> dict[str, Any]:
 
 def _write_grid_definition(store: LocalObjectStore) -> str:
     return store.write_bytes_atomic(
-        "canonical/gfs/2026050300/grid/gfs_0p25.json",
+        "canonical/gfs/2026050300/grid/gfs_0p25.json/data.json",
         json.dumps({"cells": [{"grid_cell_id": "0", "longitude": 110.2, "latitude": 30.2}]}).encode("utf-8"),
     )
 

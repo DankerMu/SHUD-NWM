@@ -224,7 +224,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     assert forecast.json()["frequency_thresholds"]["Q20"] == 220.0
     assert status.json()["data"]["current_state"] == "complete"
     assert {stage["stage"] for stage in stages.json()["data"]} >= {"download", "forecast"}
-    assert jobs.json()["data"]["items"][0]["array_task_id"] == 0
+    assert jobs.json()["data"]["items"][0]["slurm_job_id"] == "8101"
     assert summary.json()["data"]["total_segments"] == 2
     assert ranking.json()["data"]["items"][0]["river_segment_id"] == "it126_seg_inside"
     assert timeline.json()["data"]["peak"]["warning_level"] == "high_risk"
