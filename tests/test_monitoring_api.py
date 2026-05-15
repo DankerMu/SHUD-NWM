@@ -398,9 +398,10 @@ def test_metrics_success_rate() -> None:
 
 def test_metrics_filter_by_source_and_scenario() -> None:
     with _store() as store:
+        store.session.execute(text("PRAGMA case_sensitive_like = ON"))
         cycle_time = _cycle_time()
         gfs_cycle = cycle_id_for("GFS", cycle_time)
-        ifs_cycle = f"IFS_{cycle_time:%Y%m%d%H}"
+        ifs_cycle = cycle_id_for("IFS", cycle_time)
         _seed_monitoring_jobs(store, cycle_id=gfs_cycle)
         _create_job(
             store,
@@ -447,7 +448,7 @@ def test_metrics_filter_by_era5_canonical_source_prefix() -> None:
     with _store() as store:
         store.session.execute(text("PRAGMA case_sensitive_like = ON"))
         cycle_time = _cycle_time()
-        era5_cycle = f"ERA5_{cycle_time:%Y%m%d%H}"
+        era5_cycle = cycle_id_for("ERA5", cycle_time)
         _create_job(
             store,
             job_id="job_era5_success",
@@ -461,9 +462,9 @@ def test_metrics_filter_by_era5_canonical_source_prefix() -> None:
         )
         _create_job(
             store,
-            job_id="job_lowercase_era5_legacy",
+            job_id="job_uppercase_era5_legacy",
             run_id="analysis_true_field_legacy",
-            cycle_id=f"era5_{cycle_time:%Y%m%d%H}",
+            cycle_id=f"ERA5_{cycle_time:%Y%m%d%H}",
             stage="era5_download",
             status="succeeded",
             submitted_at=cycle_time,
@@ -486,6 +487,92 @@ def test_metrics_filter_by_era5_canonical_source_prefix() -> None:
                 "date": cycle_time.date().isoformat(),
                 "stage": "era5_download",
                 "average_duration_seconds": 180.0,
+                "job_count": 1,
+            }
+        ]
+        assert success_response.status_code == 200
+        assert success_response.json()["data"] == [
+            {
+                "date": cycle_time.date().isoformat(),
+                "success_rate": 1.0,
+                "succeeded_cycles": 1,
+                "total_cycles": 1,
+            }
+        ]
+
+
+def test_monitoring_filters_use_cycle_id_for_source_prefixes() -> None:
+    with _store() as store:
+        store.session.execute(text("PRAGMA case_sensitive_like = ON"))
+        cycle_time = _cycle_time()
+        ifs_cycle = cycle_id_for("IFS", cycle_time)
+        era5_cycle = cycle_id_for("ERA5", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time, source="IFS", current_state="forecast_running")
+        _create_job(
+            store,
+            job_id="job_ifs_download",
+            run_id="forecast_ifs_deterministic_run",
+            cycle_id=ifs_cycle,
+            stage="download",
+            status="succeeded",
+            submitted_at=cycle_time,
+            started_at=cycle_time,
+            finished_at=cycle_time + timedelta(minutes=4),
+        )
+        _create_job(
+            store,
+            job_id="job_era5_download",
+            run_id="analysis_true_field_run",
+            cycle_id=era5_cycle,
+            stage="era5_download",
+            status="succeeded",
+            submitted_at=cycle_time,
+            started_at=cycle_time,
+            finished_at=cycle_time + timedelta(minutes=2),
+        )
+        _create_job(
+            store,
+            job_id="job_uppercase_ifs_legacy",
+            run_id="forecast_ifs_deterministic_legacy",
+            cycle_id=f"IFS_{cycle_time:%Y%m%d%H}",
+            stage="download",
+            status="succeeded",
+            submitted_at=cycle_time,
+            started_at=cycle_time,
+            finished_at=cycle_time + timedelta(minutes=1),
+        )
+        with _client(store) as client:
+            status_response = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "IFS", "cycle_time": cycle_time.isoformat()},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "IFS", "cycle_time": cycle_time.isoformat()},
+            )
+            jobs_response = client.get("/api/v1/jobs", params={"source": "IFS"})
+            stage_response = client.get("/api/v1/metrics/stage-duration", params={"days": 30, "source": "IFS"})
+            success_response = client.get("/api/v1/metrics/success-rate", params={"days": 30, "source": "IFS"})
+
+        assert status_response.status_code == 200
+        assert status_response.json()["data"]["cycle_id"] == ifs_cycle
+        assert stages_response.status_code == 200
+        stages = stages_response.json()["data"]
+        assert next(stage for stage in stages if stage["stage"] == "download")["basin_progress"] == {
+            "completed": 1,
+            "total": 1,
+            "failed": 0,
+        }
+        assert jobs_response.status_code == 200
+        jobs_page = jobs_response.json()["data"]
+        assert jobs_page["total"] == 1
+        assert jobs_page["items"][0]["job_id"] == "job_ifs_download"
+        assert stage_response.status_code == 200
+        assert stage_response.json()["data"] == [
+            {
+                "date": cycle_time.date().isoformat(),
+                "stage": "download",
+                "average_duration_seconds": 240.0,
                 "job_count": 1,
             }
         ]

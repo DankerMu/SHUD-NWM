@@ -161,7 +161,7 @@ def list_jobs(
         else:
             statement = statement.where(PipelineJob.cycle_id.like(f"%_{format_cycle_time(parsed_cycle_time)}"))
     elif source is not None:
-        statement = statement.where(PipelineJob.cycle_id.like(f"{source.lower()}_%"))
+        statement = statement.where(PipelineJob.cycle_id.like(f"{_cycle_id_prefix_for_source(source)}%"))
 
     if status is not None:
         statement = statement.where(PipelineJob.status == status)
@@ -699,7 +699,7 @@ def _require_operator_role(request: Request) -> None:
 
 
 def _cycle_id_prefix_for_source(source: str) -> str:
-    return f"{normalize_source_id(source)}_"
+    return f"{normalize_source_id(source).lower()}_"
 
 
 def _parse_cycle_time(value: str) -> datetime:
