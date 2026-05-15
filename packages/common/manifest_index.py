@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from pathlib import PurePath
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
@@ -133,6 +134,18 @@ def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any
             raise ManifestValidationError(
                 f"Manifest entry field {field} must be a string when present.",
                 {"manifest_index_path": manifest_index_path, "task_id": task_id, "field": field},
+            )
+    if "manifest_path" in result:
+        manifest_path = result["manifest_path"]
+        if ".." in PurePath(manifest_path).parts:
+            raise ManifestValidationError(
+                "Manifest entry field manifest_path contains path traversal segments.",
+                {
+                    "manifest_index_path": manifest_index_path,
+                    "task_id": task_id,
+                    "field": "manifest_path",
+                    "value": manifest_path,
+                },
             )
     try:
         stored_task_id = int(result["task_id"])

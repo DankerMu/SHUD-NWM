@@ -31,7 +31,7 @@ TERMINAL_JOB_STATUSES = {
     "submission_failed",
     "permanently_failed",
 }
-ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running", "succeeded"}
+ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running", "succeeded"}
 COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "published", "complete"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
@@ -2893,7 +2893,7 @@ class PsycopgOrchestratorRepository:
                 error_code = NULL,
                 error_message = NULL,
                 updated_at = now()
-            WHERE hydro.hydro_run.status IN ('failed', 'cancelled', 'pending')
+            WHERE hydro.hydro_run.status IN ('failed', 'cancelled')
             RETURNING *
             """,
             (
@@ -2926,8 +2926,7 @@ class PsycopgOrchestratorRepository:
         forcing = _coerce_mapping(manifest.get("forcing") or {})
         outputs = _coerce_mapping(manifest.get("outputs") or {})
         initial_state = _coerce_mapping(manifest.get("initial_state") or {})
-        return self._fetch_one(
-            """
+        statement = """
             INSERT INTO hydro.hydro_run (
                 run_id,
                 run_type,
@@ -2956,28 +2955,41 @@ class PsycopgOrchestratorRepository:
                 error_code = NULL,
                 error_message = NULL,
                 updated_at = now()
-            WHERE hydro.hydro_run.status IN ('failed', 'cancelled', 'pending')
+            WHERE hydro.hydro_run.status IN ('failed', 'cancelled')
             RETURNING *
-            """,
-            (
-                run_id,
-                manifest.get("run_type", "forecast"),
-                manifest["scenario_id"],
-                model["model_id"],
-                model["basin_version_id"],
-                forcing.get("forcing_version_id"),
-                initial_state.get("state_id") or basin.get("init_state_id"),
-                manifest.get("source_id") or basin.get("source_id"),
-                parse_cycle_time(manifest["cycle_time"]),
-                _parse_gateway_time(manifest["start_time"]),
-                _parse_gateway_time(manifest["end_time"]),
-                outputs.get("run_manifest_uri"),
-                outputs.get("output_uri"),
-                outputs.get("log_uri"),
-            ),
-            missing_code="HYDRO_RUN_NOT_RETRIABLE",
-            missing_message=f"hydro_run already exists and is not retriable: {run_id}",
+            """
+        parameters = (
+            run_id,
+            manifest.get("run_type", "forecast"),
+            manifest["scenario_id"],
+            model["model_id"],
+            model["basin_version_id"],
+            forcing.get("forcing_version_id"),
+            initial_state.get("state_id") or basin.get("init_state_id"),
+            manifest.get("source_id") or basin.get("source_id"),
+            parse_cycle_time(manifest["cycle_time"]),
+            _parse_gateway_time(manifest["start_time"]),
+            _parse_gateway_time(manifest["end_time"]),
+            outputs.get("run_manifest_uri"),
+            outputs.get("output_uri"),
+            outputs.get("log_uri"),
         )
+        try:
+            return self._fetch_one(
+                statement,
+                parameters,
+                missing_code="HYDRO_RUN_NOT_RETRIABLE",
+                missing_message=f"hydro_run already exists and is not retriable: {run_id}",
+            )
+        except OrchestratorError as exc:
+            if exc.error_code != "HYDRO_RUN_NOT_RETRIABLE":
+                raise
+            return self._fetch_one(
+                "SELECT * FROM hydro.hydro_run WHERE run_id = %s",
+                (run_id,),
+                missing_code="HYDRO_RUN_NOT_FOUND",
+                missing_message=f"hydro_run not found after conflict: {run_id}",
+            )
 
     def update_hydro_run_status(
         self,

@@ -39,16 +39,48 @@ def _resolve_execute_manifest(manifest: str | None, manifest_index: str | None, 
     if manifest_index is not None:
         resolved_task_id = resolve_task_id(task_id)
         entry = load_manifest_entry(manifest_index, resolved_task_id)
-        if entry.get("manifest_path"):
-            return str(entry["manifest_path"])
         workspace = os.getenv("WORKSPACE_ROOT") or str(entry["workspace_dir"])
-        return str(Path(workspace) / "runs" / str(entry["run_id"]) / "input" / "manifest.json")
+        default_path = Path(workspace) / "runs" / str(entry["run_id"]) / "input" / "manifest.json"
+        manifest_path = entry.get("manifest_path")
+        if manifest_path and _is_safe_index_manifest_path(
+            Path(str(manifest_path)),
+            workspace_root=Path(workspace),
+            run_id=str(entry["run_id"]),
+        ):
+            return str(manifest_path)
+        return str(default_path)
     if not manifest:
         raise ManifestValidationError(
             "Explicit runtime execution requires --manifest.",
             {"missing_fields": ["manifest"]},
         )
     return manifest
+
+
+def _is_safe_index_manifest_path(path: Path, *, workspace_root: Path, run_id: str) -> bool:
+    resolved_workspace = workspace_root.resolve(strict=False)
+    resolved_path = path.resolve(strict=False)
+    if _has_symlink_component(workspace_root) or _has_symlink_component(path):
+        return False
+    try:
+        relative = resolved_path.relative_to(resolved_workspace)
+    except ValueError:
+        return False
+    return relative.parts == ("runs", run_id, "input", "manifest.json")
+
+
+def _has_symlink_component(path: Path) -> bool:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts:
+        if part == path.anchor:
+            continue
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:

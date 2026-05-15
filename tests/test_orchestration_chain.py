@@ -209,7 +209,7 @@ class FakeCycleRepository:
     def create_hydro_run_from_basin(self, basin: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
         run_id = str(manifest["run_id"])
         existing = self.hydro_runs.get(run_id)
-        if existing is not None and existing["status"] not in {"failed", "cancelled", "pending"}:
+        if existing is not None and existing["status"] not in {"failed", "cancelled"}:
             return dict(existing)
         record = {
             "run_id": run_id,
@@ -254,6 +254,21 @@ class MissingManifestForecastOrchestrator(ForecastOrchestrator):
     ) -> None:
         manifest_path.unlink(missing_ok=True)
         super()._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=task_index)
+
+
+class UnreadableManifestForecastOrchestrator(ForecastOrchestrator):
+    def _validate_forecast_runtime_manifest(
+        self,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+        *,
+        task_index: int,
+    ) -> None:
+        raise OrchestratorError(
+            "RUNTIME_MANIFEST_READ_FAILED",
+            f"Forecast runtime manifest cannot be read for task {task_index}: permission denied",
+            {"manifest_path": str(manifest_path), "task_id": task_index},
+        )
 
 
 class FakeRetryService:
@@ -425,6 +440,20 @@ def test_missing_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> Non
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
     orchestrator = _orchestrator(tmp_path, repository, client, orchestrator_cls=MissingManifestForecastOrchestrator)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert repository.jobs["job_cycle_gfs_2026050100_forecast"]["status"] == "submission_failed"
+    assert "publish" not in [submission["stage"] for submission in client.submissions]
+    assert repository.cycle_statuses[-1] == "failed_run"
+
+
+def test_unreadable_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, orchestrator_cls=UnreadableManifestForecastOrchestrator)
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
