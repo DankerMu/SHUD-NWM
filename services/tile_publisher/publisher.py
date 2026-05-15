@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from sqlalchemy import bindparam, create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -483,29 +483,17 @@ def _is_valid_tile_api_reference(reference: str, *, cycle_id: str, source_run_id
     parsed = urlparse(reference)
     if parsed.path != _FLOOD_TILE_API_PATH:
         return False
-    reference_lower = reference.lower()
-    cycle_id_lower = cycle_id.lower()
-    if cycle_id_lower in reference_lower and not _contains_other_cycle_token(reference, cycle_id):
-        return True
-
-    run_ids = [run_id for values in parse_qs(parsed.query).get("run_id", []) for run_id in [values.strip()] if run_id]
-    return any(
-        run_id in source_run_ids and _run_id_belongs_to_cycle(run_id, cycle_id=cycle_id)
-        for run_id in run_ids
-    )
-
-
-def _contains_other_cycle_token(value: str, cycle_id: str) -> bool:
-    cycle_id_lower = cycle_id.lower()
-    return any(match.group(0).lower() != cycle_id_lower for match in _CYCLE_TOKEN_RE.finditer(value))
+    run_ids = [value.strip() for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key == "run_id"]
+    if len(run_ids) != 1 or not run_ids[0]:
+        return False
+    run_id = run_ids[0]
+    return run_id in source_run_ids and _run_id_belongs_to_cycle(run_id, cycle_id=cycle_id)
 
 
 def _run_id_belongs_to_cycle(run_id: str, *, cycle_id: str) -> bool:
     cycle_id_lower = cycle_id.lower()
     run_id_lower = run_id.lower()
-    if cycle_id_lower in run_id_lower:
-        return True
-    return not any(match.group(0).lower() != cycle_id_lower for match in _CYCLE_TOKEN_RE.finditer(run_id))
+    return any(match.group(0).lower() == cycle_id_lower for match in _CYCLE_TOKEN_RE.finditer(run_id_lower))
 
 
 def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:

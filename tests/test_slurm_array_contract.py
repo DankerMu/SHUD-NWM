@@ -1065,6 +1065,95 @@ def test_publish_tiles_rejects_object_store_metadata_delivery_reference_outside_
     assert "delivery reference" in payload["error_message"]
 
 
+@pytest.mark.parametrize(
+    ("tile_uri_template", "source_run_ids"),
+    [
+        (
+            "/api/v1/tiles/flood-return-period?run_id=legacy_run&cycle_id=gfs_2026050100",
+            ["fcst_gfs_2026050100_model_001"],
+        ),
+        ("/api/v1/tiles/flood-return-period?run_id=legacy_run", ["legacy_run"]),
+        (
+            "/api/v1/tiles/flood-return-period?run_id=fcst_gfs_2026050100_model_001"
+            "&run_id=fcst_gfs_2026050100_model_001",
+            ["fcst_gfs_2026050100_model_001"],
+        ),
+    ],
+)
+def test_publish_tiles_rejects_invalid_tile_api_run_id_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tile_uri_template: str,
+    source_run_ids: list[str],
+) -> None:
+    _set_object_store_publish_env(monkeypatch, tmp_path)
+    _write_publish_metadata(
+        tmp_path,
+        "gfs_2026050100",
+        {
+            "cycle_id": "gfs_2026050100",
+            "layers": [
+                {
+                    "layer_id": "flood_return_period",
+                    "tile_uri_template": tile_uri_template,
+                }
+            ],
+            "artifacts": [
+                {
+                    "artifact_id": "metadata_gfs_2026050100",
+                    "uri": "tiles/hydro/gfs_2026050100/flood-return-period/metadata.json",
+                }
+            ],
+            "lineage": {"source_run_ids": source_run_ids},
+        },
+    )
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "INVALID_PUBLISH_METADATA"
+    assert "delivery reference" in payload["error_message"]
+
+
+def test_publish_tiles_accepts_tile_api_run_id_with_matching_cycle_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_object_store_publish_env(monkeypatch, tmp_path)
+    _write_publish_metadata(
+        tmp_path,
+        "gfs_2026050100",
+        {
+            "cycle_id": "gfs_2026050100",
+            "layers": [
+                {
+                    "layer_id": "flood_return_period_fcst_gfs_2026050100_model_001",
+                    "tile_uri_template": "/api/v1/tiles/flood-return-period"
+                    "?run_id=fcst_gfs_2026050100_model_001",
+                }
+            ],
+            "artifacts": [
+                {
+                    "artifact_id": "metadata_gfs_2026050100",
+                    "uri": "tiles/hydro/gfs_2026050100/flood-return-period/metadata.json",
+                }
+            ],
+            "lineage": {"source_run_ids": ["fcst_gfs_2026050100_model_001"]},
+        },
+    )
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "published"
+    assert payload["layers"][0]["tile_uri_template"].endswith("run_id=fcst_gfs_2026050100_model_001")
+
+
 def test_publish_tiles_cli_generic_runtime_failure_returns_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
