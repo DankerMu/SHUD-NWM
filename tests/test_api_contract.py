@@ -417,6 +417,7 @@ def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> Non
 
     river_thresholds = schemas["RiverSeriesResponse"]["properties"]["frequency_thresholds"]
     assert river_thresholds == {
+        "type": "object",
         "allOf": [{"$ref": "#/components/schemas/FloodFrequencyThresholds"}],
         "nullable": True,
     }

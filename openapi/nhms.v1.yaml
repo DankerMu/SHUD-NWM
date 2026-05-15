@@ -1894,6 +1894,7 @@ components:
           items:
             $ref: "#/components/schemas/SeriesSegment"
         frequency_thresholds:
+          type: object
           allOf:
             - $ref: "#/components/schemas/FloodFrequencyThresholds"
           nullable: true
@@ -1955,6 +1956,7 @@ components:
         unit:
           type: string
         frequency_thresholds:
+          type: object
           allOf:
             - $ref: "#/components/schemas/FloodFrequencyThresholds"
           nullable: true
@@ -2655,11 +2657,13 @@ components:
           items:
             $ref: "#/components/schemas/FloodAlertTimelinePoint"
         peak:
+          type: object
           allOf:
             - $ref: "#/components/schemas/FloodAlertTimelinePoint"
           nullable: true
           description: "Peak timeline point, or null"
         frequency_thresholds:
+          type: object
           allOf:
             - $ref: "#/components/schemas/FloodFrequencyThresholds"
           nullable: true
