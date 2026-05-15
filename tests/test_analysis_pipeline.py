@@ -17,6 +17,7 @@ from services.orchestrator.chain import (
     ModelContext,
     OrchestratorConfig,
 )
+from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from workers.output_parser.parser import HydroRunContext, RiverSegmentOrder, parse_rivqdown_file
 
 
@@ -283,6 +284,21 @@ def test_analysis_lazy_submission_runs_six_stages_in_order(tmp_path: Path) -> No
     assert [payload["manifest"]["stage"] for payload in client.submissions] == [
         stage.stage for stage in ANALYSIS_STAGES
     ]
+    assert [payload["job_type"] for payload in client.submissions] == [
+        "analysis_download_source_cycle",
+        "analysis_convert_canonical",
+        "analysis_produce_forcing",
+        "run_shud_analysis",
+        "parse_analysis_output",
+        "save_state_snapshot",
+    ]
+    assert all("script" not in payload for payload in client.submissions)
+    assert all("script" not in payload["manifest"] for payload in client.submissions)
+    assert all(
+        payload["manifest"]["object_store_root"] == str(tmp_path / "object-store")
+        for payload in client.submissions
+    )
+    assert all(payload["manifest"]["object_store_prefix"] == "s3://nhms" for payload in client.submissions)
     assert [stage.status for stage in result.stages] == ["succeeded"] * 6
     assert [event["entity_type"] for event in repository.events] == ["analysis_pipeline"] * 18
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
@@ -322,6 +338,27 @@ def test_analysis_run_timeout_maps_to_slurm_timeout(tmp_path: Path) -> None:
 
     assert repository.hydro_updates[-1]["status"] == "failed"
     assert repository.hydro_updates[-1]["error_code"] == "SLURM_TIMEOUT"
+
+
+def test_analysis_production_mapping_is_explicit_and_canonical() -> None:
+    expected = {
+        "analysis_download_source_cycle": "analysis_download_source_cycle.sbatch",
+        "analysis_convert_canonical": "analysis_convert_canonical.sbatch",
+        "analysis_produce_forcing": "analysis_produce_forcing.sbatch",
+        "run_shud_analysis": "run_shud_analysis.sbatch",
+        "parse_analysis_output": "parse_analysis_output.sbatch",
+        "save_state_snapshot": "save_state_snapshot.sbatch",
+    }
+    template_dir = Path("infra/sbatch")
+
+    assert {stage.job_type: stage.template_name for stage in ANALYSIS_STAGES} == expected
+    assert {job_type: DEFAULT_JOB_TYPE_TEMPLATES[job_type] for job_type in expected} == expected
+    assert {
+        job_type: SlurmGatewaySettings().job_type_templates[job_type]
+        for job_type in expected
+    } == expected
+    assert all((template_dir / template_name).is_file() for template_name in expected.values())
+    assert OrchestratorConfig(workspace_root=".", object_store_root=".").templates_dir == template_dir.resolve()
 
 
 def test_analysis_output_parser_uses_null_lead_time(tmp_path: Path) -> None:

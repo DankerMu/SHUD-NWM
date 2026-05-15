@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 from jinja2.exceptions import SecurityError
 
+from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
-from services.slurm_gateway.config import SlurmGatewaySettings
+from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ManifestValidationError,
     SlurmGatewayError,
@@ -88,6 +89,53 @@ def _gateway(tmp_path: Path, template_name: str = "run.sbatch") -> RealSlurmGate
     )
 
 
+def _production_gateway(tmp_path: Path) -> RealSlurmGateway:
+    return RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+
+
+def _production_manifest(tmp_path: Path, job_type: str) -> dict[str, object]:
+    analysis_job_types = {
+        "run_shud_analysis",
+        "parse_analysis_output",
+        "save_state_snapshot",
+    }
+    return {
+        "run_id": "run_001",
+        "model_id": "model_001",
+        "basin_id": "basin_001",
+        "basin_version_id": "basin_001",
+        "river_network_version_id": "river_001",
+        "job_type": job_type,
+        "stage": job_type,
+        "stage_name": job_type,
+        "cycle_id": "cycle_001",
+        "source_id": "ERA5" if job_type.startswith("analysis") or job_type in analysis_job_types else "GFS",
+        "cycle_time": "2026-05-12T00:00:00Z",
+        "start_time": "2026-05-12T00:00:00Z",
+        "end_time": "2026-05-13T00:00:00Z",
+        "segment_count": 2,
+        "model_package_uri": "models/model_001/package",
+        "forcing_version_id": "forcing_001",
+        "forcing_package_uri": "forcing/package",
+        "run_manifest_uri": "runs/run_001/input/manifest.json",
+        "output_uri": "runs/run_001/output/",
+        "log_uri": "runs/run_001/logs/",
+        "workspace_dir": str(tmp_path / "workspace"),
+        "object_store_root": str(tmp_path / "object-store"),
+        "object_store_prefix": "prod",
+        "year": 1993,
+        "manifest_index_path": str(tmp_path / "manifest_index.json"),
+    }
+
+
 def test_submit_job_parses_sbatch_stdout(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path)
     calls: list[tuple[list[str], dict]] = []
@@ -106,6 +154,42 @@ def test_submit_job_parses_sbatch_stdout(monkeypatch, tmp_path):
     assert record.status == SlurmJobStatus.SUBMITTED
     assert calls[0][0][0] == "sbatch"
     assert calls[0][1]["shell"] is False
+
+
+@pytest.mark.parametrize("stage", ANALYSIS_STAGES)
+def test_analysis_production_templates_submit_without_script_payload(monkeypatch, tmp_path, stage) -> None:
+    gateway = _production_gateway(tmp_path)
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured["script"] = Path(command[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_001",
+            model_id="model_001",
+            job_type=stage.job_type,
+            manifest={**_production_manifest(tmp_path, stage.job_type), "script": "echo ignored"},
+        )
+    )
+
+    assert record.job_id == "12345"
+    assert record.manifest["script"] == "echo ignored"
+    assert "echo ignored" not in captured["script"]
+    assert f'export NHMS_JOB_TYPE="{stage.job_type}"' in captured["script"]
+
+
+def test_production_mapping_file_defaults_and_templates_are_complete() -> None:
+    template_dir = Path("infra/sbatch")
+    production_job_types = {stage.job_type for stage in (*M3_STAGES, *ANALYSIS_STAGES)} | {"hindcast"}
+
+    assert SlurmGatewaySettings().job_type_templates == DEFAULT_JOB_TYPE_TEMPLATES
+    assert production_job_types.issubset(DEFAULT_JOB_TYPE_TEMPLATES)
+    assert all((template_dir / DEFAULT_JOB_TYPE_TEMPLATES[job_type]).is_file() for job_type in production_job_types)
 
 
 def test_submit_job_accepts_nested_model_id_and_script_manifest(monkeypatch, tmp_path):
@@ -621,3 +705,75 @@ def test_list_jobs_defaults_to_lookback_start_time(monkeypatch, tmp_path):
 
     assert gateway.list_jobs(limit=100, offset=0) == []
     assert any(arg.startswith("--starttime=") for arg in calls[0])
+
+
+def test_fake_slurm_command_matrix_for_production_job_types(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    commands: list[list[str]] = []
+    submitted_job_ids = iter(("12345", "12346"))
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        executable = Path(command[0]).name
+        if executable == "sbatch":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"Submitted batch job {next(submitted_job_ids)}\n",
+                stderr="",
+            )
+        if executable == "sacct" and "--format=JobID,State,ExitCode,Start,End" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="12345|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n",
+                stderr="",
+            )
+        if executable == "sacct" and "--format=JobID,State,ExitCode" in command:
+            requested_job = next(arg.removeprefix("--jobs=") for arg in command if arg.startswith("--jobs="))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"{requested_job}_0|COMPLETED|0:0\n{requested_job}_1|FAILED|1:0\n",
+                stderr="",
+            )
+        if executable == "scancel":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if executable == "sinfo":
+            return subprocess.CompletedProcess(command, 0, stdout="slurm 24.05.1\n", stderr="")
+        raise AssertionError(f"unexpected fake Slurm command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    analysis_record = gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_001",
+            model_id="model_001",
+            job_type="run_shud_analysis",
+            manifest=_production_manifest(tmp_path, "run_shud_analysis"),
+        )
+    )
+    hindcast_record = gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_002",
+            model_id="model_001",
+            job_type="hindcast",
+            manifest=_production_manifest(tmp_path, "hindcast"),
+        )
+    )
+    status = gateway.get_job_status(analysis_record.job_id)
+    tasks = gateway.get_array_task_results(hindcast_record.job_id)
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / f"{analysis_record.job_id}.out").write_text("analysis log", encoding="utf-8")
+    logs = gateway.fetch_logs(analysis_record.job_id)
+    cancelled = gateway.cancel_job(hindcast_record.job_id)
+    health = gateway.health()
+
+    assert status.status == SlurmJobStatus.SUCCEEDED
+    assert tasks[0]["task_id"] == 0
+    assert logs.logs == "analysis log"
+    assert cancelled.status == SlurmJobStatus.CANCELLED
+    assert health.status == "healthy"
+    assert {"sbatch", "sacct", "scancel", "sinfo"}.issubset({Path(command[0]).name for command in commands})

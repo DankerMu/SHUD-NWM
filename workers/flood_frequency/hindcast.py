@@ -19,6 +19,7 @@ from workers.flood_frequency.config import HindcastConfig
 
 HINDCAST_SCENARIO_ID = "hindcast_replay"
 INSUFFICIENT_ERA5_COVERAGE = "INSUFFICIENT_ERA5_COVERAGE"
+HINDCAST_FORCING_PACKAGE_UNAVAILABLE = "HINDCAST_FORCING_PACKAGE_UNAVAILABLE"
 TERMINAL_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
 ACTIVE_HINDCAST_STATUSES = {"created", "submitted", "running", "staged"}
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
@@ -271,6 +272,7 @@ def produce_hindcast_forcing(
             forcing_version_id = str(production_result.forcing_version_id)
             forcing_package_uri = str(production_result.forcing_package_uri)
         else:
+            forcing_package_uri = ""
             station_count = _station_count(db_session, model_id)
             lineage = {
                 "purpose": "hindcast",
@@ -332,7 +334,7 @@ def hindcast_year(
         )
         forcing = produce_hindcast_forcing(model_id, source_id, year, db_session)
         forcing_version_id = forcing.forcing_version_id
-        _set_run_forcing(db_session, run_id, forcing_version_id)
+        _set_run_forcing(db_session, run_id, forcing_version_id, forcing.forcing_package_uri)
         shud_result = run_shud_hindcast(run_id, model_id, source_id, year, db_session)
         parse_result = parse_hindcast_output(run_id)
         _update_hydro_run(db_session, run_id, status="parsed", error_code=None, error_message=None)
@@ -401,6 +403,12 @@ def submit_hindcast_slurm(
             "basin_version_id": basin_version_id,
             "source_id": normalize_source_id(source_id),
             "year": year,
+            "cycle_time": f"{year}-01-01T00:00:00Z",
+            "forcing_version_id": forcing_version_id_for_year(model_id, year),
+            "forcing_package_uri": "",
+            "object_store_root": str(config.object_store_root),
+            "object_store_prefix": config.object_store_prefix,
+            "workspace_dir": str(config.workspace_root),
             "workspace_root": str(config.workspace_root),
         }
         for index, year in enumerate(years)
@@ -415,6 +423,9 @@ def submit_hindcast_slurm(
             "basin_version_id": basin_version_id,
             "source_id": normalize_source_id(source_id),
             "years": years,
+            "object_store_root": str(config.object_store_root),
+            "object_store_prefix": config.object_store_prefix,
+            "workspace_dir": str(config.workspace_root),
             "workspace_root": str(config.workspace_root),
         },
         "tasks": tasks,
@@ -794,7 +805,53 @@ def _update_hydro_run(
     db_session.commit()
 
 
-def _set_run_forcing(db_session: Session, run_id: str, forcing_version_id: str) -> None:
+def _set_run_forcing(
+    db_session: Session,
+    run_id: str,
+    forcing_version_id: str,
+    forcing_package_uri: str | None = None,
+) -> None:
+    if forcing_package_uri:
+        db_session.execute(
+            text(
+                """
+                INSERT INTO met.forcing_version (
+                    forcing_version_id,
+                    model_id,
+                    source_id,
+                    cycle_time,
+                    start_time,
+                    end_time,
+                    station_count,
+                    forcing_package_uri,
+                    checksum,
+                    lineage_json
+                )
+                SELECT
+                    :forcing_version_id,
+                    model_id,
+                    source_id,
+                    start_time,
+                    start_time,
+                    end_time,
+                    0,
+                    :forcing_package_uri,
+                    '',
+                    :lineage_json
+                FROM hydro.hydro_run
+                WHERE run_id = :run_id
+                ON CONFLICT (forcing_version_id) DO UPDATE SET
+                    forcing_package_uri = EXCLUDED.forcing_package_uri,
+                    lineage_json = EXCLUDED.lineage_json
+                """
+            ),
+            {
+                "run_id": run_id,
+                "forcing_version_id": forcing_version_id,
+                "forcing_package_uri": forcing_package_uri,
+                "lineage_json": _json_param(db_session, {"purpose": "hindcast", "producer_result": True}),
+            },
+        )
     db_session.execute(
         text(
             """
@@ -833,14 +890,14 @@ def _write_hindcast_manifest(run_id: str, model_id: str, source_id: str, year: i
         "run_type": "hindcast",
         "scenario_id": HINDCAST_SCENARIO_ID,
         "source_id": normalize_source_id(source_id),
+        "year": int(year),
         "cycle_time": _format_time(start_time),
         "start_time": _format_time(start_time),
         "end_time": _format_time(end_time),
         "model": model_section,
         "forcing": {
             "forcing_version_id": forcing_version_id,
-            "forcing_uri": _load_forcing_package_uri(db_session, forcing_version_id)
-            or _hindcast_forcing_package_uri(forcing_version_id),
+            "forcing_uri": _require_real_forcing_package_uri(db_session, forcing_version_id),
         },
         "initial_state": {
             "state_id": None,
@@ -877,7 +934,20 @@ def _load_forcing_package_uri(db_session: Session, forcing_version_id: str) -> s
     ).mappings().first()
     if row is None:
         return None
+    if row["forcing_package_uri"] in (None, ""):
+        return None
     return str(row["forcing_package_uri"])
+
+
+def _require_real_forcing_package_uri(db_session: Session, forcing_version_id: str) -> str:
+    forcing_package_uri = _load_forcing_package_uri(db_session, forcing_version_id)
+    if forcing_package_uri:
+        return forcing_package_uri
+    raise HindcastError(
+        HINDCAST_FORCING_PACKAGE_UNAVAILABLE,
+        "Hindcast SHUD runtime requires a real forcing package; metadata-only forcing is unavailable.",
+        {"forcing_version_id": forcing_version_id},
+    )
 
 
 def _load_run_forcing_version_id(db_session: Session, run_id: str) -> str | None:

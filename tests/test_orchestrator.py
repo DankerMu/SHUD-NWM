@@ -8,14 +8,16 @@ import pytest
 
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.chain import (
+    ANALYSIS_STAGES,
     LEGACY_FORECAST_STAGES,
-    STAGES,
+    M3_STAGES,
     ForcingContext,
     ForecastOrchestrator,
     ModelContext,
     OrchestratorConfig,
     PipelineAlreadyActiveError,
 )
+from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 
 
 class FakeSlurmClient:
@@ -284,13 +286,20 @@ def test_stage_status_query_returns_ordered_stage_records(tmp_path: Path) -> Non
     assert [status["status"] for status in statuses] == ["succeeded"] * len(LEGACY_FORECAST_STAGES)
 
 
-def test_sbatch_templates_are_seven_lazy_submit_scripts() -> None:
+def test_sbatch_templates_cover_production_stage_mappings() -> None:
     template_dir = Path("infra/sbatch")
     names = sorted(path.name for path in template_dir.glob("*.sbatch"))
 
-    forecast_templates = {stage.template_name for stage in STAGES}
-    assert forecast_templates.issubset(set(names))
-    for path in (template_dir / name for name in forecast_templates):
+    production_stages = (*M3_STAGES, *ANALYSIS_STAGES)
+    production_templates = {stage.template_name for stage in production_stages} | {
+        DEFAULT_JOB_TYPE_TEMPLATES["hindcast"]
+    }
+    production_job_types = {stage.job_type for stage in production_stages} | {"hindcast"}
+    assert production_templates.issubset(set(names))
+    assert all(job_type in DEFAULT_JOB_TYPE_TEMPLATES for job_type in production_job_types)
+    assert SlurmGatewaySettings().job_type_templates == DEFAULT_JOB_TYPE_TEMPLATES
+    assert OrchestratorConfig(workspace_root=".", object_store_root=".").templates_dir == template_dir.resolve()
+    for path in (template_dir / name for name in production_templates):
         content = path.read_text(encoding="utf-8")
         assert content.startswith("#!/usr/bin/env bash")
         assert "#SBATCH --job-name=" in content

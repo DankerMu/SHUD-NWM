@@ -153,18 +153,36 @@ M3_STAGES: tuple[StageDefinition, ...] = (
 STAGES: tuple[StageDefinition, ...] = M3_STAGES
 
 ANALYSIS_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition("era5_download", "download", "download_era5.sbatch", "raw_complete", "failed_download"),
+    StageDefinition(
+        "era5_download",
+        "analysis_download_source_cycle",
+        "analysis_download_source_cycle.sbatch",
+        "raw_complete",
+        "failed_download",
+    ),
     StageDefinition(
         "canonical_convert",
-        "canonical",
-        "convert_canonical_era5.sbatch",
+        "analysis_convert_canonical",
+        "analysis_convert_canonical.sbatch",
         "canonical_ready",
         "failed_convert",
     ),
-    StageDefinition("forcing_produce", "forcing", "produce_forcing_analysis.sbatch", "forcing_ready", "failed_forcing"),
-    StageDefinition("analysis_run", "analysis", "run_shud_analysis.sbatch", "forecast_running", "failed_run"),
-    StageDefinition("parse_output", "parse", "parse_analysis_output.sbatch", "complete", "failed_parse"),
-    StageDefinition("state_save_qc", "state", "save_state_snapshot.sbatch", "complete", "failed_publish"),
+    StageDefinition(
+        "forcing_produce",
+        "analysis_produce_forcing",
+        "analysis_produce_forcing.sbatch",
+        "forcing_ready",
+        "failed_forcing",
+    ),
+    StageDefinition("analysis_run", "run_shud_analysis", "run_shud_analysis.sbatch", "forecast_running", "failed_run"),
+    StageDefinition(
+        "parse_output",
+        "parse_analysis_output",
+        "parse_analysis_output.sbatch",
+        "complete",
+        "failed_parse",
+    ),
+    StageDefinition("state_save_qc", "save_state_snapshot", "save_state_snapshot.sbatch", "complete", "failed_publish"),
 )
 
 
@@ -195,7 +213,7 @@ class OrchestratorConfig:
             object.__setattr__(self, "scenario_id", scenario_for_source(self.source_id))
         if self.templates_dir is None:
             repo_root = Path(__file__).resolve().parents[2]
-            object.__setattr__(self, "templates_dir", repo_root / "workers" / "sbatch_templates")
+            object.__setattr__(self, "templates_dir", repo_root / "infra" / "sbatch")
         else:
             object.__setattr__(self, "templates_dir", Path(self.templates_dir).expanduser().resolve())
 
@@ -1955,19 +1973,34 @@ class ForecastOrchestrator:
     ) -> StageRunResult:
         self._before_stage_submit(stage, context)
 
-        rendered_script = self.render_stage_template(stage, context)
         payload = {
             "run_id": context.run_id,
             "model_id": context.model_id,
-            "script": rendered_script,
+            "job_type": stage.job_type,
             "manifest": {
                 "run_id": context.run_id,
                 "model_id": context.model_id,
                 "stage": stage.stage,
+                "stage_name": stage.stage,
                 "job_type": stage.job_type,
                 "source_id": context.source_id,
+                "cycle_id": context.cycle_id,
                 "cycle_time": _format_time(context.cycle_time),
-                "script": rendered_script,
+                "start_time": _format_time(context.start_time),
+                "end_time": _format_time(context.end_time),
+                "basin_id": context.basin_id,
+                "basin_version_id": context.basin_version_id,
+                "river_network_version_id": context.river_network_version_id,
+                "segment_count": context.segment_count,
+                "model_package_uri": context.model_package_uri,
+                "forcing_version_id": context.forcing_version_id,
+                "forcing_package_uri": context.forcing_package_uri,
+                "run_manifest_uri": context.run_manifest_uri,
+                "output_uri": context.output_uri,
+                "log_uri": context.log_uri,
+                "workspace_dir": str(Path(self.config.workspace_root)),
+                "object_store_root": str(Path(self.config.object_store_root)),
+                "object_store_prefix": self.config.object_store_prefix,
             },
         }
         submitted = self.slurm_client.submit_job(payload)
