@@ -29,6 +29,10 @@ const forecastPayload = {
 
 const riverSegments = {
   type: 'FeatureCollection',
+  total: 1,
+  feature_total: 1,
+  limit: 500,
+  offset: 0,
   features: [
     {
       type: 'Feature',
@@ -49,6 +53,47 @@ const riverSegments = {
       },
     },
   ],
+}
+
+function riverFeature(segmentId: string, coordinates: [number, number][], streamOrder = 2) {
+  return {
+    type: 'Feature',
+    properties: {
+      segment_id: segmentId,
+      river_segment_id: segmentId,
+      basin_version_id: 'backend-basin-v1',
+      river_network_version_id: 'backend-rivnet-v1',
+      name: `Backend Segment ${segmentId}`,
+      stream_order: streamOrder,
+    },
+    geometry: {
+      type: 'LineString',
+      coordinates,
+    },
+  }
+}
+
+const firstRiverSegmentPage = {
+  type: 'FeatureCollection',
+  total: 501,
+  feature_total: 501,
+  limit: 500,
+  offset: 0,
+  features: Array.from({ length: 500 }, (_, index) =>
+    riverFeature(`backend-seg-${index + 1}`, [
+      [96 + index * 0.01, 33.5],
+      [96.005 + index * 0.01, 33.5],
+    ]),
+  ),
+}
+
+const secondRiverSegmentPage = {
+  type: 'FeatureCollection',
+  total: 501,
+  feature_total: 501,
+  limit: 500,
+  offset: 500,
+  features: riverSegments.features,
 }
 
 function success<T>(data: T) {
@@ -92,6 +137,7 @@ async function mockForecastApi(page: Page) {
     if (url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments') {
       expect(url.searchParams.get('river_network_version_id')).toBe('backend-rivnet-v1')
       expect(url.searchParams.get('limit')).toBe('500')
+      expect(url.searchParams.get('offset')).toBe('0')
       return fulfill(route, riverSegments)
     }
 
@@ -173,6 +219,7 @@ test.describe('forecast page', () => {
       }
       if (url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments') {
         expect(url.searchParams.get('limit')).toBe('500')
+        expect(url.searchParams.get('offset')).toBe('0')
         return fulfill(route, riverSegments)
       }
       if (url.pathname.endsWith('/forecast-series')) return fulfill(route, forecastPayload)
@@ -204,5 +251,59 @@ test.describe('forecast page', () => {
     await expect(page.locator('aside').getByText('数据源')).toBeVisible()
     await expect(page.locator('aside').locator('div').filter({ hasText: /^数据源\s*GFS$/ })).toBeVisible()
     await expect(page.locator('aside canvas').first()).toBeVisible()
+  })
+
+  test('paginates river segments before selecting a forecast segment', async ({ page }) => {
+    const riverPageOffsets: string[] = []
+    const forecastRequests: string[] = []
+
+    await page.route('**/api/v1/**', async (route) => {
+      const url = new URL(route.request().url())
+
+      if (url.pathname === '/api/v1/models') {
+        return fulfill(route, {
+          items: [
+            {
+              model_id: 'model-1',
+              basin_version_id: 'backend-basin-v1',
+              river_network_version_id: 'backend-rivnet-v1',
+              mesh_version_id: 'mesh-1',
+              calibration_version_id: 'cal-1',
+              shud_code_version: '2.0',
+              active_flag: true,
+              model_package_uri: 's3://models/model-1',
+              resource_profile: {},
+              created_at: '2026-05-09T00:00:00Z',
+            },
+          ],
+          total: 1,
+          limit: 1,
+          offset: 0,
+        })
+      }
+
+      if (url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments') {
+        expect(url.searchParams.get('river_network_version_id')).toBe('backend-rivnet-v1')
+        expect(url.searchParams.get('limit')).toBe('500')
+        const offset = url.searchParams.get('offset') ?? ''
+        riverPageOffsets.push(offset)
+        return fulfill(route, offset === '0' ? firstRiverSegmentPage : secondRiverSegmentPage)
+      }
+
+      if (url.pathname.endsWith('/forecast-series')) {
+        forecastRequests.push(url.pathname)
+        return fulfill(route, forecastPayload)
+      }
+
+      throw new Error(`Unhandled mocked API route: ${url.pathname}`)
+    })
+
+    await gotoForecastPage(page)
+    await expect.poll(() => [...new Set(riverPageOffsets)]).toEqual(['0', '500'])
+    await clickRiverSegment(page)
+
+    expect(forecastRequests).toEqual([
+      '/api/v1/basin-versions/backend-basin-v1/river-segments/backend-seg-7/forecast-series',
+    ])
   })
 })
