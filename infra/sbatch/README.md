@@ -20,6 +20,10 @@ environment variables:
 Templates must export both variables so workers write durable artifacts to the
 configured object store path instead of silently falling back to the workspace.
 
+`publish_tiles.sbatch` does not render `DATABASE_URL` into script text. Slurm
+runtime must provide `DATABASE_URL` through a protected execution environment so
+`nhms-pipeline publish-tiles` can read it directly.
+
 ## Job Type Mapping
 
 The authoritative mapping is `DEFAULT_JOB_TYPE_TEMPLATES` in

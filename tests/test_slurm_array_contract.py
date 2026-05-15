@@ -232,10 +232,11 @@ def test_real_templates_render_supported_cli_commands(tmp_path, job_type, expect
     assert expected_command in rendered
 
 
-def test_publish_tiles_template_exports_database_url_from_manifest(tmp_path: Path) -> None:
+def test_publish_tiles_template_does_not_render_database_url_secret(tmp_path: Path) -> None:
+    secret_database_url = "postgresql://nhms:secret@example.invalid/nhms"
     manifest = {
         **_render_manifest(tmp_path, "publish_tiles"),
-        "database_url": "postgresql://nhms:secret@example.invalid/nhms",
+        "database_url": secret_database_url,
     }
 
     rendered = _gateway(tmp_path).render_template(
@@ -244,7 +245,10 @@ def test_publish_tiles_template_exports_database_url_from_manifest(tmp_path: Pat
         str(tmp_path / "manifest_index.json"),
     )
 
-    assert 'export DATABASE_URL="postgresql://nhms:secret@example.invalid/nhms"' in rendered
+    assert secret_database_url not in rendered
+    assert "DATABASE_URL" not in rendered
+    assert 'nhms-pipeline publish-tiles --cycle-id "$NHMS_CYCLE_ID"' in rendered
+    assert "set -euo pipefail" in rendered
 
 
 def test_download_source_cycle_cli_accepts_template_args(monkeypatch):
@@ -1003,6 +1007,62 @@ def test_publish_tiles_rejects_object_store_metadata_prefix_mismatch(
     assert payload["status"] == "failed_publish"
     assert payload["error_code"] == "INVALID_PUBLISH_METADATA"
     assert "outside the configured object-store prefix" in payload["error_message"]
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "reference"),
+    [
+        ("layers", "uri", "tiles/hydro/gfs_2026050200/flood-return-period/layer.json"),
+        ("layers", "tile_uri", "tiles/hydro/gfs_2026050200/flood-return-period/tile.geojson"),
+        (
+            "layers",
+            "tile_uri_template",
+            "/api/v1/tiles/flood-return-period?run_id=fcst_gfs_2026050200_model_001",
+        ),
+        ("artifacts", "uri", "tiles/hydro/gfs_2026050200/flood-return-period/metadata.json"),
+        ("artifacts", "uri", "tiles/hydro/gfs_2026050100/../gfs_2026050100/flood-return-period/metadata.json"),
+        ("artifacts", "uri", "tiles/hydro/gfs_2026050100-other/flood-return-period/metadata.json"),
+    ],
+)
+def test_publish_tiles_rejects_object_store_metadata_delivery_reference_outside_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    section: str,
+    field: str,
+    reference: str,
+) -> None:
+    _set_object_store_publish_env(monkeypatch, tmp_path)
+    layer = {
+        "layer_id": "flood_return_period_fcst_gfs_2026050100_model_001",
+        "tile_uri_template": "/api/v1/tiles/flood-return-period?run_id=fcst_gfs_2026050100_model_001",
+    }
+    artifact = {
+        "artifact_id": "metadata_gfs_2026050100",
+        "uri": "tiles/hydro/gfs_2026050100/flood-return-period/metadata.json",
+    }
+    if section == "layers":
+        layer[field] = reference
+    else:
+        artifact[field] = reference
+    _write_publish_metadata(
+        tmp_path,
+        "gfs_2026050100",
+        {
+            "cycle_id": "gfs_2026050100",
+            "layers": [layer],
+            "artifacts": [artifact],
+            "lineage": {"source_run_ids": ["fcst_gfs_2026050100_model_001"]},
+        },
+    )
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "gfs_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "INVALID_PUBLISH_METADATA"
+    assert "delivery reference" in payload["error_message"]
 
 
 def test_publish_tiles_cli_generic_runtime_failure_returns_json(

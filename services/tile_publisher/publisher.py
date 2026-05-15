@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import bindparam, create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,6 +17,9 @@ from packages.common.object_store import LocalObjectStore
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_CYCLE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*_\d{10}")
+_FLOOD_TILE_API_PATH = "/api/v1/tiles/flood-return-period"
+_DELIVERY_REFERENCE_FIELDS = ("uri", "tile_uri", "tile_uri_template")
 
 
 class PublishError(RuntimeError):
@@ -274,7 +278,14 @@ class TilePublisher:
         metadata = self._read_publish_metadata(artifact_key, metadata_uri, cycle_id)
         layers = tuple(_normalize_metadata_items(metadata.get("layers"), item_id_key="layer_id"))
         artifacts = tuple(_normalize_metadata_items(metadata.get("artifacts"), item_id_key="artifact_id"))
-        _validate_metadata_artifact_uris(self.object_store, artifacts, metadata_uri=metadata_uri)
+        _validate_metadata_delivery_references(
+            self.object_store,
+            layers=layers,
+            artifacts=artifacts,
+            cycle_id=cycle_id,
+            metadata_uri=metadata_uri,
+            source_run_ids=_metadata_source_run_ids(metadata),
+        )
         if not layers and not artifacts:
             raise PublishError(
                 "INVALID_PUBLISH_METADATA",
@@ -384,24 +395,117 @@ def _publish_metadata_lineage(metadata: dict[str, Any], cycle_id: str, artifact_
     return lineage
 
 
-def _validate_metadata_artifact_uris(
+def _metadata_source_run_ids(metadata: dict[str, Any]) -> set[str]:
+    raw_lineage = metadata.get("lineage")
+    if not isinstance(raw_lineage, dict):
+        return set()
+    raw_source_run_ids = raw_lineage.get("source_run_ids")
+    if not isinstance(raw_source_run_ids, list):
+        return set()
+    return {run_id.strip() for run_id in raw_source_run_ids if isinstance(run_id, str) and run_id.strip()}
+
+
+def _validate_metadata_delivery_references(
     object_store: LocalObjectStore,
-    items: tuple[dict[str, Any], ...],
     *,
+    layers: tuple[dict[str, Any], ...],
+    artifacts: tuple[dict[str, Any], ...],
+    cycle_id: str,
+    source_run_ids: set[str],
     metadata_uri: str,
 ) -> None:
-    for index, item in enumerate(items):
-        uri = item.get("uri") or item.get("tile_uri")
-        if not isinstance(uri, str) or not uri.strip() or not uri.startswith("s3://"):
-            continue
-        try:
-            object_store.normalize_key(uri)
-        except ValueError as error:
-            raise PublishError(
-                "INVALID_PUBLISH_METADATA",
-                "Publish metadata artifact URI is outside the configured object-store prefix.",
-                {"index": index, "metadata_uri": metadata_uri},
-            ) from error
+    expected_prefix = f"tiles/hydro/{cycle_id}/"
+    for item_type, items in (("layer", layers), ("artifact", artifacts)):
+        for index, item in enumerate(items):
+            for field in _DELIVERY_REFERENCE_FIELDS:
+                if field not in item:
+                    continue
+                value = item[field]
+                if not isinstance(value, str) or not value.strip():
+                    raise PublishError(
+                        "INVALID_PUBLISH_METADATA",
+                        f"Publish metadata {item_type} {field} must be a non-empty string.",
+                        {"field": field, "index": index, "item_type": item_type, "metadata_uri": metadata_uri},
+                    )
+                _validate_metadata_delivery_reference(
+                    object_store,
+                    value.strip(),
+                    cycle_id=cycle_id,
+                    expected_prefix=expected_prefix,
+                    source_run_ids=source_run_ids,
+                    field=field,
+                    index=index,
+                    item_type=item_type,
+                    metadata_uri=metadata_uri,
+                )
+
+
+def _validate_metadata_delivery_reference(
+    object_store: LocalObjectStore,
+    reference: str,
+    *,
+    cycle_id: str,
+    expected_prefix: str,
+    source_run_ids: set[str],
+    field: str,
+    index: int,
+    item_type: str,
+    metadata_uri: str,
+) -> None:
+    if _is_valid_tile_api_reference(reference, cycle_id=cycle_id, source_run_ids=source_run_ids):
+        return
+
+    try:
+        normalized_key = object_store.normalize_key(reference)
+    except ValueError as error:
+        raise PublishError(
+            "INVALID_PUBLISH_METADATA",
+            "Publish metadata delivery reference is outside the configured object-store prefix.",
+            {"field": field, "index": index, "item_type": item_type, "metadata_uri": metadata_uri},
+        ) from error
+    if not normalized_key.startswith(expected_prefix):
+        raise PublishError(
+            "INVALID_PUBLISH_METADATA",
+            "Publish metadata delivery reference is outside the requested cycle object-store prefix.",
+            {
+                "expected_prefix": expected_prefix,
+                "field": field,
+                "index": index,
+                "item_type": item_type,
+                "metadata_uri": metadata_uri,
+            },
+        )
+
+
+def _is_valid_tile_api_reference(reference: str, *, cycle_id: str, source_run_ids: set[str]) -> bool:
+    if not reference.startswith(_FLOOD_TILE_API_PATH):
+        return False
+    parsed = urlparse(reference)
+    if parsed.path != _FLOOD_TILE_API_PATH:
+        return False
+    reference_lower = reference.lower()
+    cycle_id_lower = cycle_id.lower()
+    if cycle_id_lower in reference_lower and not _contains_other_cycle_token(reference, cycle_id):
+        return True
+
+    run_ids = [run_id for values in parse_qs(parsed.query).get("run_id", []) for run_id in [values.strip()] if run_id]
+    return any(
+        run_id in source_run_ids and _run_id_belongs_to_cycle(run_id, cycle_id=cycle_id)
+        for run_id in run_ids
+    )
+
+
+def _contains_other_cycle_token(value: str, cycle_id: str) -> bool:
+    cycle_id_lower = cycle_id.lower()
+    return any(match.group(0).lower() != cycle_id_lower for match in _CYCLE_TOKEN_RE.finditer(value))
+
+
+def _run_id_belongs_to_cycle(run_id: str, *, cycle_id: str) -> bool:
+    cycle_id_lower = cycle_id.lower()
+    run_id_lower = run_id.lower()
+    if cycle_id_lower in run_id_lower:
+        return True
+    return not any(match.group(0).lower() != cycle_id_lower for match in _CYCLE_TOKEN_RE.finditer(run_id))
 
 
 def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:
