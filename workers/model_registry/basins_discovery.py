@@ -40,7 +40,7 @@ GIS_REQUIRED_FILES: tuple[tuple[str, str], ...] = tuple(
 )
 
 CHECKSUM_LIMIT_BYTES = 16 * 1024 * 1024
-BLOCKING_WARNING_CODES = {"BASINS_SYMLINK_OUTSIDE_ROOT"}
+BLOCKING_WARNING_CODES = {"BASINS_SYMLINK_OUTSIDE_ROOT", "BASINS_SYMLINK_UNRESOLVABLE"}
 
 
 class BasinsDiscoveryError(RuntimeError):
@@ -187,9 +187,7 @@ def _inventory_for_model(
     else:
         forcing_count = 0
 
-    unsafe_descendant = any(
-        warning.code in BLOCKING_WARNING_CODES for warning in warnings[warning_start:]
-    )
+    unsafe_descendant = any(warning.code in BLOCKING_WARNING_CODES for warning in warnings[warning_start:])
     if unsafe_descendant:
         quirks.append("unsafe_symlink_outside_root")
     status = "valid" if not missing_required_files and not unsafe_descendant else "partial"
@@ -395,11 +393,7 @@ def _iter_child_dirs(root: Path) -> list[Path]:
     try:
         with os.scandir(root) as entries:
             return sorted(
-                (
-                    Path(entry.path)
-                    for entry in entries
-                    if entry.is_dir(follow_symlinks=False) or entry.is_symlink()
-                ),
+                (Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False) or entry.is_symlink()),
                 key=lambda path: path.name.lower(),
             )
     except PermissionError as error:
@@ -428,7 +422,18 @@ def _safe_resolve_under_root(
     resolved_root: Path,
     warnings: list[DiscoveryWarning],
 ) -> Path | None:
-    resolved = path.resolve()
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        _append_warning_once(
+            warnings,
+            DiscoveryWarning(
+                "BASINS_SYMLINK_UNRESOLVABLE",
+                "Basins descendant cannot be resolved and was skipped.",
+                path=str(path),
+            ),
+        )
+        return None
     try:
         resolved.relative_to(resolved_root)
     except ValueError:

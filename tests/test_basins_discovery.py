@@ -189,6 +189,27 @@ def test_symlinked_input_alias_outside_root_is_not_read_or_importable(tmp_path: 
     assert inventory["warnings"][0]["path"] == str(input_parent / "external")
 
 
+def test_symlink_loop_descendant_is_skipped_with_stable_warning(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    model_dir = root / "loop"
+    make_valid_model(model_dir, "loop")
+    loop = model_dir / "forcing"
+    try:
+        loop.symlink_to(loop)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert inventory["importable"] is False
+    assert model["status"] == "partial"
+    assert model["default_import_eligible"] is False
+    assert "unsafe_symlink_outside_root" in model["quirks"]
+    assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_SYMLINK_UNRESOLVABLE"]
+    assert inventory["warnings"][0]["path"] == str(loop)
+
+
 def test_symlinked_forcing_outside_root_is_not_counted_or_importable(tmp_path: Path) -> None:
     root = tmp_path / "basins"
     model_dir = root / "forcing-escape"

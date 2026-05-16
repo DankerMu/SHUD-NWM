@@ -76,6 +76,7 @@
 - 已实现结构化 inventory JSON，包含 root/symlink 元数据、直接与 `zhaochen/*` 嵌套模型、basin slug 与 `input/<shud_input_name>` alias、必需 SHUD/GIS 文件、轻量 checksum、建议 registry IDs、forcing/CALIB 计数、status/quirks 和默认 publish/import eligibility。
 - 已兼容 `forcing/` 与 legacy `focing/`；冲突时优先 `forcing/` 并记录 `BASINS_FORCING_DIR_CONFLICT` warning；缺 `*.tsd.rl` 默认标记 `partial` 且不可默认发布/导入。
 - 已递归忽略 `.DS_Store`、`@eaDir`、`*@SynoEAStream`，并对模型目录、`input/<alias>`、GIS 必需文件、`CALIB/`、`forcing/focing` 和 checksum 路径统一执行 Basins root containment；越界 symlink 使用 `BASINS_SYMLINK_OUTSIDE_ROOT`，不会读取外部文件且 inventory 不可导入。
+- 已将 Basins root 内不可解析后代（例如 symlink loop）收敛为 `BASINS_SYMLINK_UNRESOLVABLE` 阻断 warning；发现流程不会读取/计数/checksum 该路径，inventory 不可导入。
 - `forcing/` 与 `CALIB/` 计数已改为流式文件遍历，避免生产规模目录发现时一次性物化全部文件路径。
 - 已补 synthetic discovery 测试矩阵和 opt-in 真实 `data/Basins` smoke；真实 smoke 仅在 `NHMS_RUN_BASINS_SMOKE=1` 且路径存在时运行，预期 13 个模型。
 
