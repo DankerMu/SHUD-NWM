@@ -110,6 +110,24 @@ def test_column_mismatch_marks_run_failed_without_writing_rows(tmp_path: Path) -
     assert "file has 3 columns" in repository.failures[0][1]
 
 
+@pytest.mark.parametrize("bad_value", ["NaN", "Inf", "-Infinity"])
+def test_non_finite_flow_marks_run_failed_without_writing_rows(tmp_path: Path, bad_value: str) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        f"time,seg_a,seg_b\n2026-05-01T00:00:00Z,{bad_value},2\n".encode("utf-8"),
+    )
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        parser.parse_run("run_001")
+
+    assert exc_info.value.error_code == "NON_FINITE_FLOW"
+    assert repository.rows == {}
+    assert repository.qc_results == []
+    assert repository.statuses == ["failed"]
+    assert repository.failures[0][0] == "NON_FINITE_FLOW"
+
+
 def test_qc_failures_are_advisory_and_flag_inserted_rows(tmp_path: Path) -> None:
     store, parser, repository = _build_parser(tmp_path, max_flow_m3s=1.0)
     store.write_bytes_atomic(

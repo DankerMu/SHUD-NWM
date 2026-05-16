@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -244,6 +245,11 @@ def parse_rivqdown_file(
                     "NON_NUMERIC_FLOW",
                     f"Row {line_number} contains non-numeric flow value {value_token!r}",
                 ) from error
+            if not math.isfinite(value_m3d):
+                raise OutputParsingError(
+                    "NON_FINITE_FLOW",
+                    f"Row {line_number} contains non-finite flow value {value_token!r}",
+                )
 
             rows.append(
                 RiverTimeseriesRow(
