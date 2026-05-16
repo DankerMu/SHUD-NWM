@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,8 @@ def publish_basins_package(
     copy_forcing: bool = False,
     object_store: LocalObjectStore | None = None,
 ) -> dict[str, Any]:
+    _validate_object_key_segment(model_id, "model_id", model_id=model_id, version=version)
+    _validate_object_key_segment(version, "version", model_id=model_id, version=version)
     inventory, inventory_bytes = _read_inventory(inventory_path)
     model = _find_publishable_model(inventory, model_id, version)
     store = object_store or _object_store_from_env(model_id=model_id, version=version)
@@ -543,7 +546,7 @@ def _validate_canonical_required_files(
         matching_paths = []
         for relative_name in relative_names:
             relative_path = _normalize_relative_path(str(relative_name))
-            if Path(relative_path).match(pattern):
+            if len(Path(relative_path).parts) == 1 and fnmatchcase(relative_path, pattern):
                 matching_paths.append(relative_path)
         if not matching_paths:
             missing.append(role)
@@ -1044,6 +1047,36 @@ def _normalize_relative_path(value: str) -> str:
     if not normalized:
         raise BasinsPackageError("BASINS_PACKAGE_PATH_UNSAFE", "Package relative path is empty.")
     return normalized
+
+
+def _validate_object_key_segment(
+    value: str,
+    field_name: str,
+    *,
+    model_id: str,
+    version: str,
+) -> None:
+    if value != value.strip():
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_IDENTIFIER_INVALID",
+            f"Basins package {field_name} must not contain leading or trailing whitespace.",
+            model_id=model_id,
+            version=version,
+        )
+    if value in {"", ".", ".."}:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_IDENTIFIER_INVALID",
+            f"Basins package {field_name} must be a non-empty safe object-key segment.",
+            model_id=model_id,
+            version=version,
+        )
+    if not all(character.isascii() and (character.isalnum() or character in {"_", "-", "."}) for character in value):
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_IDENTIFIER_INVALID",
+            f"Basins package {field_name} must be a single safe object-key segment.",
+            model_id=model_id,
+            version=version,
+        )
 
 
 def _walk_source_files(root: Path, source_root: Path) -> Iterator[Path]:

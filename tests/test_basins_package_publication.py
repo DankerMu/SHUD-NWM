@@ -9,7 +9,7 @@ import pytest
 
 import workers.model_registry.basins_package as basins_package
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
-from workers.model_registry.cli import _argparse_main
+from workers.model_registry.cli import DEFAULT_BASINS_MIGRATION_SOURCE_URI, _argparse_main, _click_main
 
 
 def test_publish_basins_writes_manifest_package_and_success_payload(
@@ -582,6 +582,57 @@ def test_publish_basins_rejects_partial_model_with_structured_error(
     assert "tailanhe" in error["path"]
 
 
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("model_id", "basins/basin-a/shud"),
+        ("model_id", " basins_basin_a_shud"),
+        ("version", "vbasins/test"),
+        ("version", "vbasins\\test"),
+        ("version", "."),
+        ("version", "vbasins\x1ftest"),
+    ],
+)
+def test_publish_basins_rejects_unsafe_model_id_and_version_segments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    field: str,
+    unsafe_value: str,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    version = "vbasins-test"
+    if field == "model_id":
+        model_id = unsafe_value
+    else:
+        version = unsafe_value
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            version,
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_IDENTIFIER_INVALID"
+    assert error["model_id"] == model_id
+    assert error["version"] == version
+    assert not (tmp_path / "manifest.json").exists()
+    assert not (object_root / "models").exists()
+
+
 def test_publish_basins_rejects_tampered_required_files_despite_valid_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -621,6 +672,48 @@ def test_publish_basins_rejects_tampered_required_files_despite_valid_status(
     assert error["version"] == "vbasins-tampered-required"
     assert "tsd_rl" in error["message"]
     assert "gis_domain_shp" in error["message"]
+    assert not (tmp_path / "manifest.json").exists()
+
+
+def test_publish_basins_rejects_nested_runtime_required_file_despite_valid_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    fake_runtime = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "gis" / "fake.cfg.para"
+    fake_runtime.write_text("nested runtime impostor\n", encoding="utf-8")
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model["status"] = "valid"
+    model["default_publish_eligible"] = True
+    model["missing_required_files"] = []
+    model["required_files"]["cfg_para"] = ["gis/fake.cfg.para"]
+    write_inventory(inventory, inventory_path)
+    _object_store_env(tmp_path, monkeypatch)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-nested-runtime",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_REQUIRED_FILES_MISSING"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-nested-runtime"
+    assert "cfg_para" in error["message"]
     assert not (tmp_path / "manifest.json").exists()
 
 
@@ -988,8 +1081,6 @@ def test_basins_migration_report_rejects_symlink_target(
             "basins-migration-report",
             "--basins-root",
             str(linked_root),
-            "--source-uri",
-            "/volume/data/nwm/Basins",
             "--output",
             str(output),
         ]
@@ -999,6 +1090,37 @@ def test_basins_migration_report_rejects_symlink_target(
     assert exit_code == 1
     assert error["error_code"] == "BASINS_MIGRATION_SYMLINK_TARGET"
     assert error["path"] == str(linked_root)
+    assert not output.exists()
+
+
+def test_click_basins_migration_report_rejects_symlink_target_without_source_uri(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pytest.importorskip("click")
+    real_root = tmp_path / "real-basins"
+    _make_valid_model(real_root / "basin-a", "alias-a")
+    linked_root = tmp_path / "linked-basins"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    output = tmp_path / "report.json"
+
+    exit_code = _invoke_click(
+        [
+            "basins-migration-report",
+            "--basins-root",
+            str(linked_root),
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_MIGRATION_SYMLINK_TARGET"
+    assert error["path"] == str(linked_root)
+    assert "Missing option" not in captured.err
     assert not output.exists()
 
 
@@ -1020,8 +1142,6 @@ def test_basins_migration_report_rejects_unresolvable_symlink_descendant_as_json
             "basins-migration-report",
             "--basins-root",
             str(real_root),
-            "--source-uri",
-            "/volume/data/nwm/Basins",
             "--output",
             str(output),
         ]
@@ -1129,7 +1249,7 @@ def test_basins_migration_report_accepts_real_copied_root(
     assert payload["status"] == "ok"
     assert payload["production_ready"] is True
     assert report["schema_version"] == "basins.migration.v1"
-    assert report["source_uri"] == "/volume/data/nwm/Basins"
+    assert report["source_uri"] == DEFAULT_BASINS_MIGRATION_SOURCE_URI
     assert report["target_path"] == str(real_root)
     assert report["source_is_symlink"] is False
     assert report["file_count"] > 0
@@ -1223,6 +1343,15 @@ def _manifest_payload_checksum(manifest: dict[str, object]) -> str:
     ]
     content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
     return hashlib.sha256(content).hexdigest()
+
+
+def _invoke_click(argv: list[str]) -> int:
+    try:
+        return _click_main(argv)
+    except SystemExit as error:
+        if isinstance(error.code, int):
+            return error.code
+        return 1
 
 
 def _make_valid_model(

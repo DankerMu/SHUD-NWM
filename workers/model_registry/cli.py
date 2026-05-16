@@ -9,6 +9,8 @@ from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory, r
 from .basins_package import BasinsPackageError, publish_basins_package, write_basins_migration_report
 from .validator import ModelPackageValidationError, validate_model_package_path
 
+DEFAULT_BASINS_MIGRATION_SOURCE_URI = "/volume/data/nwm/Basins"
+
 
 def _validate_package(package_path: str) -> dict[str, object]:
     result = validate_model_package_path(package_path)
@@ -98,7 +100,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--basins-root", required=True, help="Copied Basins root path to inspect.")
     @click.option(
         "--source-uri",
-        required=True,
+        default=DEFAULT_BASINS_MIGRATION_SOURCE_URI,
+        show_default=True,
         help="Original production source URI/path, e.g. /volume/data/nwm/Basins.",
     )
     @click.option("--output", required=True, help="Path to write migration report JSON.")
@@ -144,7 +147,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     publish_parser.add_argument("--copy-forcing", action="store_true")
     migration_parser = subparsers.add_parser("basins-migration-report")
     migration_parser.add_argument("--basins-root", required=True)
-    migration_parser.add_argument("--source-uri", required=True)
+    migration_parser.add_argument("--source-uri", default=DEFAULT_BASINS_MIGRATION_SOURCE_URI)
     migration_parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
 
