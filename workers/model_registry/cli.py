@@ -6,7 +6,10 @@ import sys
 from typing import Sequence
 
 from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory, resolve_basins_root, write_inventory
+from .basins_package import BasinsPackageError, publish_basins_package, write_basins_migration_report
 from .validator import ModelPackageValidationError, validate_model_package_path
+
+DEFAULT_BASINS_MIGRATION_SOURCE_URI = "/volume/data/nwm/Basins"
 
 
 def _validate_package(package_path: str) -> dict[str, object]:
@@ -67,6 +70,63 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             )
         )
 
+    @cli.command("publish-basins")
+    @click.option("--inventory", required=True, help="Path to Basins discovery inventory JSON.")
+    @click.option("--model-id", required=True, help="Basins model_id to publish.")
+    @click.option("--version", required=True, help="Immutable package version to publish.")
+    @click.option("--output", required=True, help="Path to write package manifest JSON.")
+    @click.option("--copy-forcing", is_flag=True, help="Copy historical forcing CSV payloads explicitly.")
+    def publish_basins(
+        inventory: str,
+        model_id: str,
+        version: str,
+        output: str,
+        copy_forcing: bool,
+    ) -> None:
+        try:
+            result = publish_basins_package(
+                inventory_path=inventory,
+                model_id=model_id,
+                version=version,
+                output_path=output,
+                copy_forcing=copy_forcing,
+            )
+        except BasinsPackageError as error:
+            click.echo(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), err=True)
+            raise SystemExit(1) from error
+        click.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+    @cli.command("basins-migration-report")
+    @click.option("--basins-root", required=True, help="Copied Basins root path to inspect.")
+    @click.option(
+        "--source-uri",
+        default=DEFAULT_BASINS_MIGRATION_SOURCE_URI,
+        show_default=True,
+        help="Original production source URI/path, e.g. /volume/data/nwm/Basins.",
+    )
+    @click.option("--output", required=True, help="Path to write migration report JSON.")
+    def basins_migration_report(basins_root: str, source_uri: str, output: str) -> None:
+        try:
+            report = write_basins_migration_report(basins_root=basins_root, source_uri=source_uri, output_path=output)
+        except BasinsPackageError as error:
+            click.echo(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), err=True)
+            raise SystemExit(1) from error
+        click.echo(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "path": report["target_path"],
+                    "output": output,
+                    "production_ready": report["production_ready"],
+                    "inventory_checksum": report["inventory_checksum"],
+                    "file_count": report["file_count"],
+                    "byte_count": report["byte_count"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -79,6 +139,16 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     discover_parser = subparsers.add_parser("discover-basins")
     discover_parser.add_argument("--basins-root", default=None)
     discover_parser.add_argument("--output", required=True)
+    publish_parser = subparsers.add_parser("publish-basins")
+    publish_parser.add_argument("--inventory", required=True)
+    publish_parser.add_argument("--model-id", required=True)
+    publish_parser.add_argument("--version", required=True)
+    publish_parser.add_argument("--output", required=True)
+    publish_parser.add_argument("--copy-forcing", action="store_true")
+    migration_parser = subparsers.add_parser("basins-migration-report")
+    migration_parser.add_argument("--basins-root", required=True)
+    migration_parser.add_argument("--source-uri", default=DEFAULT_BASINS_MIGRATION_SOURCE_URI)
+    migration_parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
 
     if args.command == "validate-package":
@@ -103,6 +173,46 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                     "resolved_root": inventory["resolved_root"],
                     "model_count": inventory["model_count"],
                     "output": args.output,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.command == "publish-basins":
+        try:
+            result = publish_basins_package(
+                inventory_path=args.inventory,
+                model_id=args.model_id,
+                version=args.version,
+                output_path=args.output,
+                copy_forcing=args.copy_forcing,
+            )
+        except BasinsPackageError as error:
+            print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "basins-migration-report":
+        try:
+            report = write_basins_migration_report(
+                basins_root=args.basins_root,
+                source_uri=args.source_uri,
+                output_path=args.output,
+            )
+        except BasinsPackageError as error:
+            print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+            return 1
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "path": report["target_path"],
+                    "output": args.output,
+                    "production_ready": report["production_ready"],
+                    "inventory_checksum": report["inventory_checksum"],
+                    "file_count": report["file_count"],
+                    "byte_count": report["byte_count"],
                 },
                 ensure_ascii=False,
                 sort_keys=True,

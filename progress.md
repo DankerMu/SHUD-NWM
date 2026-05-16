@@ -63,7 +63,7 @@
 - `CALIB/` 提供约 20 组优选率定参数；`forcing/` 提供 CMFD 历史气象格点 CSV（`tailanhe` 目录名为 `focing`，接入时需清洗或兼容）。
 - 这些数据可把当前 `model_package_uri`、mesh/river network/model registry、SHUD runtime dry/smoke、forcing 文件格式校验从 placeholder 推进到真实资产样例。
 - 后续生产环境迁移必须复制 `/volume/data/nwm/Basins` 的实际数据到目标环境，不能只迁移软链接。
-- 仓库内仍未内置这些真实资产；生产对象存储打包、校验和、版本登记和迁移脚本尚未实现。
+- 仓库内仍未内置这些真实资产；基于 `LocalObjectStore` 的 Basins 打包、校验和与迁移报告已实现，真实对象存储闭环、registry 登记和生产迁移脚本仍待后续。
 - 外部真实气象下载通过 adapter/mock 测试覆盖；没有提交可作为生产 fixture 的 live GFS/IFS/ERA5 数据包。
 - CLDAS 仍是权限受限/后续工作；未实现 CLDAS adapter、数据质量检查、best_available 生产路径。
 - Worker-chain smoke 使用本地 `LocalObjectStore`，未覆盖真实 MinIO/S3。
@@ -79,6 +79,35 @@
 - 已将 Basins root 内不可解析后代（例如 symlink loop）收敛为 `BASINS_SYMLINK_UNRESOLVABLE` 阻断 warning；发现流程不会读取/计数/checksum 该路径，inventory 不可导入。
 - `forcing/` 与 `CALIB/` 计数已改为流式文件遍历，避免生产规模目录发现时一次性物化全部文件路径。
 - 已补 synthetic discovery 测试矩阵和 opt-in 真实 `data/Basins` smoke；真实 smoke 仅在 `NHMS_RUN_BASINS_SMOKE=1` 且路径存在时运行，预期 13 个模型。
+
+## M9 Basins 打包与迁移证据进展
+
+- 已新增 `nhms-model publish-basins`：消费 discovery inventory，将 valid/publishable 模型发布到 `OBJECT_STORE_ROOT` + `OBJECT_STORE_PREFIX` 的 `models/<model_id>/<version>/`。
+- 发布 manifest 使用 `basins.package.v1`，记录 source path/resolved path/symlink、inventory checksum、runtime/GIS/CALIB per-file checksum、forcing 元数据、package checksum、`model_package_uri` 与 `manifest_uri`。
+- runtime SHUD input、GIS sidecar 和 selected `CALIB/` 默认写入 `models/<model_id>/<version>/package/`；历史 forcing CSV 默认不复制，只记录 count/header/time coverage/byte count/aggregate checksum。
+- `--copy-forcing` 会显式复制 forcing CSV 到 `models/<model_id>/<version>/forcing/`，并记录 `forcing_payload_uri`、复制文件数、字节数和 checksum 证据。
+- 同一 model/version 重跑未变化 source 返回 `already_done`；同版本 source checksum 变化返回 `BASINS_PACKAGE_CHECKSUM_CONFLICT`，#135 不提供 force overwrite。
+- partial 或不可默认发布模型返回结构化 JSON 错误 `BASINS_MODEL_NOT_PUBLISHABLE`；publish/migration CLI 失败均向 stderr 输出 `error_code`、`message` 和相关上下文。
+- Basins 打包已兼容 `data/Basins` 为软链接根的 inventory：CALIB 文件用解析后的模型根计算相对路径，manifest/object store 仍保留 `CALIB/...` 路径，真实 opt-in smoke 已通过。
+- Basins package manifest 的 `included_files` 已补入 `role=manifest` 自条目；`package_checksum` 稳定覆盖源 package/forcing 证据，manifest 自条目单独记录 manifest 载荷校验和最终对象字节数，避免递归 checksum。
+- Basins package 的 `package_checksum` 已不再包含原始 inventory checksum；`source_inventory_checksum` 仅作为 manifest 证据保留，inventory 格式、无关字段或其它模型记录变更不会触发同版本冲突。
+- Basins package 发布会基于 inventory `resolved_root`、root-relative 字段和模型身份复核 `resolved_source_path`、canonical `input/<shud_input_name>`、`gis/` 与 `forcing|focing`，绝对路径或同根路径篡改会返回 `BASINS_INVENTORY_PATH_MISMATCH` 或 `BASINS_PACKAGE_PATH_UNSAFE`。
+- Basins package 发布新增本地对象存储 `.publish.lock`、写入后对象 size/SHA 校验和流式文件复制；已有未变 manifest 可不加锁返回 `already_done`，并发锁冲突返回 `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`。
+- Basins package 与 migration 输出路径写入失败已收敛为 JSON 错误：`BASINS_PACKAGE_OUTPUT_WRITE_FAILED`、`BASINS_MIGRATION_REPORT_WRITE_FAILED`；不会在 CLI 暴露 traceback。
+- Basins forcing 处理已改为流式遍历和 copy，header/time evidence 只做有上限采样，manifest 记录 sample file/byte/line limits。
+- Basins package 与 migration 文件遍历已统一拒绝源树内 symlink 后代，显式 `input_dir`、`forcing_dir`、`CALIB` 和 required runtime/GIS symlink 也会返回 `BASINS_PACKAGE_PATH_UNSAFE`；Basins discovery root 自身为 symlink 仍兼容。
+- Basins package 对象写后校验已改为从对象路径分块读取计算 size/SHA，不再通过 `LocalObjectStore.checksum()` 整体读取对象；forcing 采样上限按已采样文件数计算，重复 header 不会扩大 time evidence 读取次数。
+- Basins package 发布新增 Phase 6 审查修复：发布前按 canonical SHUD/GIS 必需角色复核 `required_files`，拒绝篡改为 `valid` 的不完整 inventory；本地 `--output` manifest 仅在对象存储 manifest 写入并校验成功后落盘。
+- Basins package Phase 6 集成修复已补齐 stale inventory/source 文件在 planning/checksum 阶段消失或不可读时的结构化 JSON 错误，包含 `model_id`、`version`、源 `path` 与 `manifest_uri`，且不写本地 manifest。
+- 已新增 `nhms-model basins-migration-report`：symlink Basins root 返回 `BASINS_MIGRATION_SYMLINK_TARGET`；真实 copied root 输出 file count、byte count、inventory checksum、source-to-target metadata、`production_ready=true`。
+- #135 Phase 6 follow-up 已补齐：`basins-migration-report` 默认 `source_uri=/volume/data/nwm/Basins` 并按文档命令返回 JSON 错误；`publish-basins` 先校验单段安全 `model_id/version`；canonical runtime 必需文件只接受 `input_dir` 直接子文件，GIS 仍固定为 `gis/<file>`；inventory 非 UTF-8 字节返回 `BASINS_INVENTORY_INVALID` JSON；`required_files` 中 canonical 以外的额外条目返回 `BASINS_REQUIRED_FILES_NON_CANONICAL` 且不写本地 manifest 或额外 package entry。
+- #135 Phase 6 round 7 已补齐：早期 stale required source 错误携带 `manifest_uri`；migration evidence stat/read 失败收敛为 `BASINS_MIGRATION_EVIDENCE_READ_FAILED` JSON；最终 package hash/copy 前会重新执行 symlink/containment 校验并用 no-follow 打开源文件，防止规划后替换为 symlink。
+- #135 Phase 6 round 8 已补齐：migration evidence size/hash 与 forcing CSV header/time 采样复用最终 no-follow 源文件读校验；遍历后替换为 symlink 会返回结构化 JSON，且不写 report 或本地 manifest。
+- #135 Phase 6 round 9 已补齐：相对 `input_dir/gis_dir/forcing_dir` 发布时按 inventory/source canonical 上下文解析，支持相对 Basins root inventory 跨 CWD 发布；最终源文件读取改为从 `source_root` 目录 fd 逐段 no-follow 打开并复核 inode，拒绝 runtime、forcing 与 migration evidence 祖先目录替换为 symlink。
+- #135 Phase 6 round 10 已补齐：runtime required_files 只接受 `<shud_input_name>.<suffix>` canonical 文件名，拒绝同模式额外直系文件；相对 `input_dir/gis_dir/forcing_dir` 只接受 canonical 相对形式，拒绝任意前缀篡改。
+- #135 Phase 6 round 11 已补齐：Basins package 发布对本地对象存储 package、manifest、lock key 执行 root 下逐组件 symlink 拒绝，避免 stale object-store symlink 被写入或校验跟随。
+- #135 Phase 6 round 12 已补齐：本地对象存储 package、manifest、lock 写入/读取/校验改为 anchored no-follow 父目录 fd 流程，拒绝 final write/replace 前对象存储祖先被替换为 symlink；publish 入口按 canonical `basin_slug` 复算 deterministic `model_id`，拒绝重标记与重复 ID inventory。
+- #135 Phase 6 round 13 已补齐：对象写后 size/SHA 校验读取复用 anchored no-follow 对象打开流程，拒绝校验 open 前对象存储祖先被替换为 symlink；canonical model identity 改为绑定 `root_relative_resolved_path/root_relative_path`，拒绝 `basin_slug`、请求 `model_id`、记录 `model_id` 与 `suggested_ids.model_id` 同步重标记但 source path 不变的 inventory。
 
 ## 已知技术风险 / 注意事项
 
@@ -101,5 +130,5 @@
 
 - 先明确下一条主线：生产数据接入、前端效果图对齐、CLDAS 启用、真实 MVT tile、生产 auth/RBAC。
 - 如果做前端对齐，优先补资产管理、气象空间展示、气象代站查询，因为这些是缺失路由，不只是样式差距。
-- 如果做数据就绪，优先基于 `data/Basins` 实现模型资产扫描/打包/登记：导入 basin、river network、mesh、model_instance，生成对象存储 package URI、checksum 和迁移清单。
+- 如果做数据就绪，优先基于 Basins inventory/package manifest 实现 registry 导入：导入 basin、river network、mesh、model_instance，并登记 package URI/checksum。
 - 如果做生产化，优先验证真实 Slurm 集群、真实对象存储、真实气象源凭据与下载稳定性。
