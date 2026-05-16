@@ -325,9 +325,22 @@ def test_publish_basins_forcing_time_evidence_samples_file_limit_not_unique_head
     sampled_paths: list[Path] = []
     original_csv_time_evidence = basins_package._csv_time_evidence
 
-    def counting_csv_time_evidence(path: Path) -> tuple[str | None, str | None, str | None, int]:
+    def counting_csv_time_evidence(
+        path: Path,
+        source_root: Path,
+        *,
+        model_id: str | None = None,
+        version: str | None = None,
+        manifest_uri: str | None = None,
+    ) -> tuple[str | None, str | None, str | None, int]:
         sampled_paths.append(path)
-        return original_csv_time_evidence(path)
+        return original_csv_time_evidence(
+            path,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
 
     monkeypatch.setattr(basins_package, "_csv_time_evidence", counting_csv_time_evidence)
 
@@ -1415,6 +1428,75 @@ def test_publish_basins_rejects_source_file_replaced_with_symlink_before_final_c
     assert not (object_root / "models" / model_id / "vbasins-symlink-final-copy" / "manifest.json").exists()
 
 
+def test_publish_basins_rejects_forcing_csv_replaced_with_symlink_before_sampling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path, forcing_count=1)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    forcing_file = tmp_path / "basins" / "basin-a" / "forcing" / "X000001.csv"
+    outside_file = tmp_path / "outside-forcing.csv"
+    outside_file.write_text("time,value\n2026-01-01,999\n", encoding="utf-8")
+    original_source_file_evidence = basins_package._source_file_evidence
+    mutated = False
+
+    def symlink_swapping_source_file_evidence(
+        path: Path,
+        source_root: Path,
+        *,
+        model_id: str | None = None,
+        version: str | None = None,
+        manifest_uri: str | None = None,
+    ) -> tuple[int, str]:
+        nonlocal mutated
+        evidence = original_source_file_evidence(
+            path,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        if path == forcing_file and not mutated:
+            mutated = True
+            path.unlink()
+            try:
+                path.symlink_to(outside_file)
+            except (NotImplementedError, OSError) as error:
+                pytest.skip(f"symlink support unavailable: {error}")
+        return evidence
+
+    monkeypatch.setattr(basins_package, "_source_file_evidence", symlink_swapping_source_file_evidence)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-forcing-symlink-sample",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-forcing-symlink-sample"
+    assert error["path"] == str(forcing_file)
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-forcing-symlink-sample" / "manifest.json").exists()
+    assert not (object_root / "models" / model_id / "vbasins-forcing-symlink-sample" / "package").exists()
+
+
 def test_publish_basins_object_verification_streams_without_store_checksum(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1615,17 +1697,17 @@ def test_basins_migration_report_reports_deleted_evidence_file_as_json(
     _make_valid_model(real_root / "basin-a", "alias-a")
     output = tmp_path / "report.json"
     stale_file = real_root / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
-    original_sha256_file = basins_package._sha256_file
+    original_migration_source_file_evidence = basins_package._migration_source_file_evidence
     deleted = False
 
-    def deleting_sha256_file(path: Path) -> str:
+    def deleting_migration_source_file_evidence(path: Path, source_root: Path) -> tuple[int, str]:
         nonlocal deleted
         if path == stale_file and not deleted:
             deleted = True
             path.unlink()
-        return original_sha256_file(path)
+        return original_migration_source_file_evidence(path, source_root)
 
-    monkeypatch.setattr(basins_package, "_sha256_file", deleting_sha256_file)
+    monkeypatch.setattr(basins_package, "_migration_source_file_evidence", deleting_migration_source_file_evidence)
 
     exit_code = _argparse_main(
         [
@@ -1645,6 +1727,56 @@ def test_basins_migration_report_reports_deleted_evidence_file_as_json(
     assert captured.out == ""
     assert error["error_code"] == "BASINS_MIGRATION_EVIDENCE_READ_FAILED"
     assert error["path"] == str(stale_file)
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+
+
+def test_basins_migration_report_rejects_file_replaced_with_symlink_before_evidence_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real_root = tmp_path / "real-basins"
+    _make_valid_model(real_root / "basin-a", "alias-a")
+    output = tmp_path / "report.json"
+    source_file = real_root / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
+    outside_file = tmp_path / "outside-secret.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    original_walk_source_files = basins_package._walk_source_files
+    mutated = False
+
+    def symlink_swapping_walk_source_files(root: Path, source_root: Path):
+        nonlocal mutated
+        for path in original_walk_source_files(root, source_root):
+            if path == source_file and not mutated:
+                mutated = True
+                path.unlink()
+                try:
+                    path.symlink_to(outside_file)
+                except (NotImplementedError, OSError) as error:
+                    pytest.skip(f"symlink support unavailable: {error}")
+            yield path
+
+    monkeypatch.setattr(basins_package, "_walk_source_files", symlink_swapping_walk_source_files)
+
+    exit_code = _argparse_main(
+        [
+            "basins-migration-report",
+            "--basins-root",
+            str(real_root),
+            "--source-uri",
+            "/volume/data/nwm/Basins",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["path"] == str(source_file)
     assert "Traceback" not in captured.err
     assert not output.exists()
 

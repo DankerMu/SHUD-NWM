@@ -849,7 +849,13 @@ def _forcing_metadata(
         digest.update(b"\0")
         total_bytes += size_bytes
         if sampled_file_count < FORCING_SAMPLE_FILE_LIMIT:
-            header, first_time, last_time, row_count = _csv_time_evidence(path)
+            header, first_time, last_time, row_count = _csv_time_evidence(
+                path,
+                source_root,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
             sampled_file_count += 1
             if header and header not in sample_headers:
                 sample_headers.append(header)
@@ -925,6 +931,36 @@ def _source_file_evidence(
     version: str | None = None,
     manifest_uri: str | None = None,
 ) -> tuple[int, str]:
+    return _verified_source_file_evidence(
+        path,
+        source_root,
+        read_error_code="BASINS_PACKAGE_WRITE_FAILED",
+        read_error_message="Failed to read Basins package source file",
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+
+
+def _migration_source_file_evidence(path: Path, source_root: Path) -> tuple[int, str]:
+    return _verified_source_file_evidence(
+        path,
+        source_root,
+        read_error_code="BASINS_MIGRATION_EVIDENCE_READ_FAILED",
+        read_error_message="Failed to read Basins migration evidence source file",
+    )
+
+
+def _verified_source_file_evidence(
+    path: Path,
+    source_root: Path,
+    *,
+    read_error_code: str,
+    read_error_message: str,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> tuple[int, str]:
     try:
         with _open_verified_source_file(
             path,
@@ -938,8 +974,8 @@ def _source_file_evidence(
             sha256 = _sha256_handle(source)
     except OSError as error:
         raise BasinsPackageError(
-            "BASINS_PACKAGE_WRITE_FAILED",
-            f"Failed to read Basins package source file: {path}: {error}",
+            read_error_code,
+            f"{read_error_message}: {path}: {error}",
             model_id=model_id,
             version=version,
             path=str(path),
@@ -1521,15 +1557,7 @@ def _directory_evidence(root: Path) -> tuple[int, int, str]:
     byte_count = 0
     for path in _walk_source_files(resolved_root, resolved_root):
         relative_path = path.relative_to(resolved_root).as_posix()
-        try:
-            size_bytes = path.stat().st_size
-            sha256 = _sha256_file(path)
-        except OSError as error:
-            raise BasinsPackageError(
-                "BASINS_MIGRATION_EVIDENCE_READ_FAILED",
-                f"Failed to read Basins migration evidence source file: {path}: {error}",
-                path=str(path),
-            ) from error
+        size_bytes, sha256 = _migration_source_file_evidence(path, resolved_root)
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(size_bytes).encode("ascii"))
@@ -1541,9 +1569,25 @@ def _directory_evidence(root: Path) -> tuple[int, int, str]:
     return file_count, byte_count, digest.hexdigest()
 
 
-def _csv_time_evidence(path: Path) -> tuple[str | None, str | None, str | None, int]:
+def _csv_time_evidence(
+    path: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> tuple[str | None, str | None, str | None, int]:
     try:
-        with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        with (
+            _open_verified_source_file(
+                path,
+                source_root,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            ) as source,
+            open(source.fileno(), "r", encoding="utf-8", errors="replace", newline="", closefd=False) as handle,
+        ):
             header = handle.readline(FORCING_SAMPLE_BYTE_LIMIT).strip()
             first_time: str | None = None
             last_time: str | None = None
@@ -1563,8 +1607,15 @@ def _csv_time_evidence(path: Path) -> tuple[str | None, str | None, str | None, 
                 last_time = value
                 row_count += 1
             return header or None, first_time, last_time, row_count
-    except OSError:
-        return None, None, None, 0
+    except OSError as error:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_WRITE_FAILED",
+            f"Failed to read Basins forcing sample file: {path}: {error}",
+            model_id=model_id,
+            version=version,
+            path=str(path),
+            manifest_uri=manifest_uri,
+        ) from error
 
 
 def _is_ignored_source_path(path: Path) -> bool:
