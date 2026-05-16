@@ -63,7 +63,7 @@
 - `CALIB/` 提供约 20 组优选率定参数；`forcing/` 提供 CMFD 历史气象格点 CSV（`tailanhe` 目录名为 `focing`，接入时需清洗或兼容）。
 - 这些数据可把当前 `model_package_uri`、mesh/river network/model registry、SHUD runtime dry/smoke、forcing 文件格式校验从 placeholder 推进到真实资产样例。
 - 后续生产环境迁移必须复制 `/volume/data/nwm/Basins` 的实际数据到目标环境，不能只迁移软链接。
-- 仓库内仍未内置这些真实资产；生产对象存储打包、校验和、版本登记和迁移脚本尚未实现。
+- 仓库内仍未内置这些真实资产；基于 `LocalObjectStore` 的 Basins 打包、校验和与迁移报告已实现，真实对象存储闭环、registry 登记和生产迁移脚本仍待后续。
 - 外部真实气象下载通过 adapter/mock 测试覆盖；没有提交可作为生产 fixture 的 live GFS/IFS/ERA5 数据包。
 - CLDAS 仍是权限受限/后续工作；未实现 CLDAS adapter、数据质量检查、best_available 生产路径。
 - Worker-chain smoke 使用本地 `LocalObjectStore`，未覆盖真实 MinIO/S3。
@@ -79,6 +79,20 @@
 - 已将 Basins root 内不可解析后代（例如 symlink loop）收敛为 `BASINS_SYMLINK_UNRESOLVABLE` 阻断 warning；发现流程不会读取/计数/checksum 该路径，inventory 不可导入。
 - `forcing/` 与 `CALIB/` 计数已改为流式文件遍历，避免生产规模目录发现时一次性物化全部文件路径。
 - 已补 synthetic discovery 测试矩阵和 opt-in 真实 `data/Basins` smoke；真实 smoke 仅在 `NHMS_RUN_BASINS_SMOKE=1` 且路径存在时运行，预期 13 个模型。
+
+## M9 Basins 打包与迁移证据进展
+
+- 已新增 `nhms-model publish-basins`：消费 discovery inventory，将 valid/publishable 模型发布到 `OBJECT_STORE_ROOT` + `OBJECT_STORE_PREFIX` 的 `models/<model_id>/<version>/`。
+- 发布 manifest 使用 `basins.package.v1`，记录 source path/resolved path/symlink、inventory checksum、runtime/GIS/CALIB per-file checksum、forcing 元数据、package checksum、`model_package_uri` 与 `manifest_uri`。
+- runtime SHUD input、GIS sidecar 和 selected `CALIB/` 默认写入 `models/<model_id>/<version>/package/`；历史 forcing CSV 默认不复制，只记录 count/header/time coverage/byte count/aggregate checksum。
+- `--copy-forcing` 会显式复制 forcing CSV 到 `models/<model_id>/<version>/forcing/`，并记录 `forcing_payload_uri`、复制文件数、字节数和 checksum 证据。
+- 同一 model/version 重跑未变化 source 返回 `already_done`；同版本 source checksum 变化返回 `BASINS_PACKAGE_CHECKSUM_CONFLICT`，#135 不提供 force overwrite。
+- partial 或不可默认发布模型返回结构化 JSON 错误 `BASINS_MODEL_NOT_PUBLISHABLE`；publish/migration CLI 失败均向 stderr 输出 `error_code`、`message` 和相关上下文。
+- Basins 打包已兼容 `data/Basins` 为软链接根的 inventory：CALIB 文件用解析后的模型根计算相对路径，manifest/object store 仍保留 `CALIB/...` 路径，真实 opt-in smoke 已通过。
+- Basins package manifest 的 `included_files` 已补入 `role=manifest` 自条目；`package_checksum` 稳定覆盖源 package/forcing 证据，manifest 自条目单独记录 manifest 载荷校验和最终对象字节数，避免递归 checksum。
+- Basins package 与 migration 遍历已将不可解析源后代（例如 symlink loop）收敛为 `BASINS_PACKAGE_PATH_UNRESOLVABLE` JSON 错误，不泄露原始 traceback。
+- Basins package 与 migration 文件遍历已对目录软链接循环做防护：根内目录软链接不下钻，避免重复计数/打包和 ancestor 循环；普通文件仍保留 source root containment 校验。
+- 已新增 `nhms-model basins-migration-report`：symlink Basins root 返回 `BASINS_MIGRATION_SYMLINK_TARGET`；真实 copied root 输出 file count、byte count、inventory checksum、source-to-target metadata、`production_ready=true`。
 
 ## 已知技术风险 / 注意事项
 
@@ -101,5 +115,5 @@
 
 - 先明确下一条主线：生产数据接入、前端效果图对齐、CLDAS 启用、真实 MVT tile、生产 auth/RBAC。
 - 如果做前端对齐，优先补资产管理、气象空间展示、气象代站查询，因为这些是缺失路由，不只是样式差距。
-- 如果做数据就绪，优先基于 `data/Basins` 实现模型资产扫描/打包/登记：导入 basin、river network、mesh、model_instance，生成对象存储 package URI、checksum 和迁移清单。
+- 如果做数据就绪，优先基于 Basins inventory/package manifest 实现 registry 导入：导入 basin、river network、mesh、model_instance，并登记 package URI/checksum。
 - 如果做生产化，优先验证真实 Slurm 集群、真实对象存储、真实气象源凭据与下载稳定性。

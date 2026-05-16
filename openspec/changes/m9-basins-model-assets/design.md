@@ -50,6 +50,12 @@ The model package should include SHUD runtime-required `input/<shud_input_name>/
 
 Rationale: runtime staging needs compact model inputs; historical forcing can be large and should not be duplicated unintentionally.
 
+For #135, package publication is immutable and does not implement a force-overwrite path. If source checksums differ for an existing `<model_id>/<version>` manifest, the command must fail with `BASINS_PACKAGE_CHECKSUM_CONFLICT`; operators must publish a new version instead. Object-store keys are deterministic:
+
+- runtime package files: `models/<model_id>/<version>/package/<relative_path>`
+- package manifest: `models/<model_id>/<version>/manifest.json`
+- explicit forcing copy: `models/<model_id>/<version>/forcing/<relative_path>`
+
 ### 4. Preserve existing registry contracts
 
 Use the current tables and APIs:
