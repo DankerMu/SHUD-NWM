@@ -699,6 +699,11 @@ def _sanitize_audit_uri(value: Any) -> str:
     return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
+def _is_uri_like(value: Any) -> bool:
+    parsed = urlsplit(str(value))
+    return bool(parsed.scheme or parsed.netloc)
+
+
 def _basins_lineage_details(resource_profile: Any) -> dict[str, Any]:
     if isinstance(resource_profile, str):
         try:
@@ -750,7 +755,7 @@ def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
         if detail.get(key) not in (None, ""):
             detail[key] = _sanitize_audit_uri(detail[key])
     for key in MODEL_ASSET_URI_OR_PATH_KEYS:
-        if detail.get(key) not in (None, "") and urlsplit(str(detail[key])).scheme:
+        if detail.get(key) not in (None, "") and _is_uri_like(detail[key]):
             detail[key] = _sanitize_audit_uri(detail[key])
 
     model_name = _first_non_empty(
@@ -770,7 +775,7 @@ def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:
         if detail.get(key) not in (None, ""):
             detail[key] = _sanitize_audit_uri(detail[key])
     for key in MODEL_ASSET_URI_OR_PATH_KEYS:
-        if detail.get(key) not in (None, "") and urlsplit(str(detail[key])).scheme:
+        if detail.get(key) not in (None, "") and _is_uri_like(detail[key]):
             detail[key] = _sanitize_audit_uri(detail[key])
     return detail
 
@@ -782,7 +787,7 @@ def _sanitize_public_json_value(value: Any) -> Any:
         return [_sanitize_public_json_value(child) for child in value]
     if isinstance(value, tuple):
         return [_sanitize_public_json_value(child) for child in value]
-    if isinstance(value, str) and urlsplit(value).scheme:
+    if isinstance(value, str) and _is_uri_like(value):
         return _sanitize_audit_uri(value)
     return value
 

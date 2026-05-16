@@ -46,7 +46,9 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     activated = activation.json()["data"]
     assert activated["active_flag"] is True
     assert activated["resource_profile"]["basin_slug"] == "it137-basin"
-    assert "token=secret" in activated["resource_profile"]["manifest_uri"]
+    assert activated["resource_profile"]["manifest_uri"] == (
+        "s3://nhms/models/it137_basins_model/v1/manifest.json"
+    )
 
     with psycopg_connection(integration_database_url) as connection:
         with connection.cursor() as cursor:

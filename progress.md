@@ -130,6 +130,7 @@
 - #138 已补齐 Basins runtime/API consumption：SHUDRuntime fast smoke 使用本地对象存储 Basins-style `model_package_uri` 直接验证 staging 与 `cfg.para` 生成，不依赖真实 solver 或 `/volume/data/nwm/Basins`；river-segment API smoke 覆盖 Basins paginated GeoJSON FeatureCollection；新增 `GET /api/v1/models/{model_id}` 实现，返回 success envelope 内的 basin/model 名称、basin/model/version IDs、segment count、mesh URI/checksum、package checksum、active flag 和 Basins lineage，缺失模型保持 `MODEL_REGISTRY_NOT_FOUND`。
 - #138 已同步 OpenAPI `ModelInstance` 和前端生成类型，移除 model detail deferred drift allowlist，并增加前端类型 fixture，资产管理页后续可消费真实 Basins-backed metadata 而不是本地 placeholder。
 - #138 PR #144 review 修复已补齐：模型公共投影对 `manifest_uri`、mesh/package URI、URI-valued source lineage 与 `resource_profile` 内嵌 URI 字符串递归执行稳定 URI 清洗，移除 userinfo/query/fragment；新增 nullable `source_path`、`resolved_source_path`、`source_uri`、`source_is_symlink` API/OpenAPI/前端类型契约，DB/internal row 保留原始 lineage。
+- #138 PR #144 follow-up 已补齐：公共模型响应与资产详情现在把 protocol-relative URI 引用也视为 URI-like，清洗 userinfo/query/fragment，同时保留普通 `/volume/...` 本地绝对路径。
 
 ## 已知技术风险 / 注意事项
 

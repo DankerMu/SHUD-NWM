@@ -965,16 +965,18 @@ def test_get_model_joins_asset_metadata_and_lineage(
                     ),
                     "package_checksum": "package-sha-1",
                     "source_inventory_checksum": "inventory-sha-1",
-                    "source_path": "/volume/data/nwm/Basins/basin-a",
-                    "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
+                    "source_path": "//user:pass@nhms/source-path?token=secret#frag",
+                    "resolved_source_path": "//user:pass@nhms/resolved-source-path?token=secret#frag",
                     "source_uri": "s3://user:pass@nhms/sources/basin-a?token=secret#frag",
                     "source_is_symlink": False,
                     "source_lineage": {
                         "uris": [
                             "s3://user:pass@nhms/sources/nested?token=secret#frag",
+                            "//user:pass@nhms/protocol-relative?token=secret#frag",
                             "/volume/data/nwm/Basins/local-source",
                         ],
                         "label": "s3 path label, not a URI",
+                        "local_path": "/volume/data/nwm/Basins/ordinary",
                     },
                 },
                 "created_at": "2026-05-14T00:00:00Z",
@@ -1021,8 +1023,8 @@ def test_get_model_joins_asset_metadata_and_lineage(
     assert detail["source_inventory_checksum"] == "inventory-sha-1"
     assert detail["basin_slug"] == "basin-a"
     assert detail["shud_input_name"] == "alias-a"
-    assert detail["source_path"] == "/volume/data/nwm/Basins/basin-a"
-    assert detail["resolved_source_path"] == "/volume/data/nwm/Basins/basin-a"
+    assert detail["source_path"] == "//nhms/source-path"
+    assert detail["resolved_source_path"] == "//nhms/resolved-source-path"
     assert detail["source_uri"] == "s3://nhms/sources/basin-a"
     assert detail["source_is_symlink"] is False
     assert detail["resource_profile"]["manifest_uri"] == (
@@ -1031,9 +1033,11 @@ def test_get_model_joins_asset_metadata_and_lineage(
     assert detail["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
     assert detail["resource_profile"]["source_lineage"]["uris"] == [
         "s3://nhms/sources/nested",
+        "//nhms/protocol-relative",
         "/volume/data/nwm/Basins/local-source",
     ]
     assert detail["resource_profile"]["source_lineage"]["label"] == "s3 path label, not a URI"
+    assert detail["resource_profile"]["source_lineage"]["local_path"] == "/volume/data/nwm/Basins/ordinary"
     public_profile_json = json.dumps(detail["resource_profile"])
     assert "token=secret" not in public_profile_json
     assert "user:pass@" not in public_profile_json
@@ -1122,12 +1126,14 @@ def test_list_models_returns_public_safe_resource_profile(
                         "active_flag": False,
                         "resource_profile": {
                             "manifest_uri": (
-                                "s3://user:pass@nhms/models/basins_basin_a_shud/manifest.json?token=secret#frag"
+                                "//user:pass@nhms/models/basins_basin_a_shud/manifest.json?token=secret#frag"
                             ),
                             "source_uri": "s3://user:pass@nhms/sources/basin-a?token=secret#frag",
                             "source_path": "/volume/data/nwm/Basins/basin-a",
+                            "resolved_source_path": "//user:pass@nhms/resolved-source-path?token=secret#frag",
                             "nested": [
                                 {"uri": "s3://user:pass@nhms/nested?token=secret#frag"},
+                                {"uri": "//user:pass@nhms/nested-protocol-relative?token=secret#frag"},
                                 "normal string",
                             ],
                         },
@@ -1155,10 +1161,15 @@ def test_list_models_returns_public_safe_resource_profile(
 
     item = page["items"][0]
     assert item["model_package_uri"] == "s3://nhms/models/basins_basin_a_shud/package/"
-    assert item["resource_profile"]["manifest_uri"] == "s3://nhms/models/basins_basin_a_shud/manifest.json"
+    assert item["resource_profile"]["manifest_uri"] == "//nhms/models/basins_basin_a_shud/manifest.json"
     assert item["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
     assert item["resource_profile"]["source_path"] == "/volume/data/nwm/Basins/basin-a"
-    assert item["resource_profile"]["nested"] == [{"uri": "s3://nhms/nested"}, "normal string"]
+    assert item["resource_profile"]["resolved_source_path"] == "//nhms/resolved-source-path"
+    assert item["resource_profile"]["nested"] == [
+        {"uri": "s3://nhms/nested"},
+        {"uri": "//nhms/nested-protocol-relative"},
+        "normal string",
+    ]
     public_item_json = json.dumps(item)
     assert "token=secret" not in public_item_json
     assert "user:pass@" not in public_item_json
