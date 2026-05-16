@@ -202,6 +202,7 @@ Fixture P2 - structured failure payload:
 - Expected: all `publish-basins` and `basins-migration-report` command failures print JSON to stderr with at least `error_code`, `message`, and whichever of `model_id`, `version`, `path`, or `manifest_uri` is relevant. Commands must not claim `status=published` after a failure; checksum-conflict failures must preserve the previous manifest/package.
 - Output write failures use `BASINS_PACKAGE_OUTPUT_WRITE_FAILED` for package manifest output and `BASINS_MIGRATION_REPORT_WRITE_FAILED` for migration report output.
 - Invalid UTF-8 inventory bytes fail with `BASINS_INVENTORY_INVALID` JSON stderr and no traceback.
+- Stale inventory source files that disappear before planning/checksum calculation fail with structured JSON including source `path`, `model_id`, `version`, and `manifest_uri`; no local manifest is written.
 
 Fixture P3 - inventory churn does not drive package conflicts:
 

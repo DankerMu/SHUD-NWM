@@ -112,10 +112,19 @@ def publish_basins_package(
         copy_forcing=copy_forcing,
         model_id=model_id,
         version=version,
+        manifest_uri=manifest_uri,
     )
     source_files = [*package_files, *(forcing_files if copy_forcing else [])]
     planned_included_files = sorted(
-        [_planned_file_entry(source_file) for source_file in source_files],
+        [
+            _planned_file_entry(
+                source_file,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
+            for source_file in source_files
+        ],
         key=lambda item: (item["role"], item["relative_path"]),
     )
     checksum_material = {
@@ -735,6 +744,7 @@ def _forcing_metadata(
     copy_forcing: bool,
     model_id: str,
     version: str,
+    manifest_uri: str | None = None,
 ) -> tuple[dict[str, Any], list[SourceFile]]:
     forcing_dir_value = model.get("forcing_dir")
     if not isinstance(forcing_dir_value, str) or not forcing_dir_value:
@@ -782,8 +792,12 @@ def _forcing_metadata(
             continue
         csv_count += 1
         relative_path = _normalize_relative_path(path.relative_to(forcing_dir).as_posix())
-        size_bytes = path.stat().st_size
-        sha256 = _sha256_file(path)
+        size_bytes, sha256 = _source_file_evidence(
+            path,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(size_bytes).encode("ascii"))
@@ -837,13 +851,47 @@ def _forcing_metadata(
     return metadata, source_files
 
 
-def _planned_file_entry(source_file: SourceFile) -> dict[str, Any]:
+def _planned_file_entry(
+    source_file: SourceFile,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str,
+) -> dict[str, Any]:
+    size_bytes, sha256 = _source_file_evidence(
+        source_file.source_path,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
     return {
         "relative_path": source_file.relative_path,
         "role": source_file.role,
-        "size_bytes": source_file.source_path.stat().st_size,
-        "sha256": _sha256_file(source_file.source_path),
+        "size_bytes": size_bytes,
+        "sha256": sha256,
     }
+
+
+def _source_file_evidence(
+    path: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> tuple[int, str]:
+    try:
+        size_bytes = path.stat().st_size
+        sha256 = _sha256_file(path)
+    except OSError as error:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_WRITE_FAILED",
+            f"Failed to read Basins package source file: {path}: {error}",
+            model_id=model_id,
+            version=version,
+            path=str(path),
+            manifest_uri=manifest_uri,
+        ) from error
+    return size_bytes, sha256
 
 
 def _manifest_file_entry_for_source_file(source_file: SourceFile, *, size_bytes: int, sha256: str) -> dict[str, Any]:

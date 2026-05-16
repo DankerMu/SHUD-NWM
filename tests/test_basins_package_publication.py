@@ -864,6 +864,58 @@ def test_publish_basins_reports_output_write_failure_as_json(
     assert not (object_root / "models" / model_id / "vbasins-output-fail" / "manifest.json").exists()
 
 
+def test_publish_basins_reports_stale_required_file_planning_failure_as_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    original_package_source_files = basins_package._package_source_files
+    deleted_paths: list[Path] = []
+
+    def stale_package_source_files(*args: object, **kwargs: object) -> list[basins_package.SourceFile]:
+        files = original_package_source_files(*args, **kwargs)
+        required_file = next(
+            source_file
+            for source_file in files
+            if source_file.role == "runtime_input" and source_file.relative_path.endswith(".cfg.para")
+        )
+        required_file.source_path.unlink()
+        deleted_paths.append(required_file.source_path)
+        return files
+
+    monkeypatch.setattr(basins_package, "_package_source_files", stale_package_source_files)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-stale-source",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_WRITE_FAILED"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-stale-source"
+    assert error["path"] == str(deleted_paths[0])
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-stale-source/manifest.json"
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-stale-source" / "manifest.json").exists()
+
+
 def test_publish_basins_does_not_write_local_output_when_manifest_verify_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

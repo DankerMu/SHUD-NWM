@@ -82,6 +82,7 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 - **AND** the command does not emit a success payload claiming `status=published`
 - **AND** requested local output JSON write failures SHALL use stable error code `BASINS_PACKAGE_OUTPUT_WRITE_FAILED`
 - **AND** malformed or non-UTF-8 inventory input SHALL use stable error code `BASINS_INVENTORY_INVALID` rather than an uncaught traceback
+- **AND** stale inventory source-file stat/read failures during planning or checksum calculation SHALL fail with structured JSON including `model_id`, `version`, source `path`, and `manifest_uri`
 
 ### Requirement: Historical forcing is represented without accidental bulk duplication
 
