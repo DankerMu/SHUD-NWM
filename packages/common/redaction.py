@@ -8,12 +8,14 @@ from urllib.parse import urlsplit, urlunsplit
 REDACTION_MARKER = "[redacted]"
 
 SENSITIVE_KEY_RE = re.compile(
-    r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature)",
+    r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature|"
+    r"accountingstoragepass|storagepass)",
     re.IGNORECASE,
 )
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"\b([A-Za-z0-9_.-]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|"
-    r"access[_-]?key|session[_-]?key|signature)[A-Za-z0-9_.-]*)(\s*[:=]\s*)([^\s,;&]+)",
+    r"access[_-]?key|session[_-]?key|signature|accountingstoragepass|storagepass)"
+    r"[A-Za-z0-9_.-]*)(\s*[:=]\s*)([^\s,;&]+)",
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"(?:(?:[A-Za-z][A-Za-z0-9+.-]*)://|//)[^\s\"'<>]+", re.IGNORECASE)

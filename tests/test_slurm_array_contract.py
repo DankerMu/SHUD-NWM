@@ -257,6 +257,7 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
         **_render_manifest(tmp_path, "run_shud_forecast_array"),
         "object_store_root": secret_uri,
         "object_store_prefix": "s3://user:pass@bucket/prefix?token=secret",
+        "account": "friends",
     }
 
     rendered = _gateway(tmp_path).render_template(
@@ -270,6 +271,7 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
     assert "#SBATCH --error=" in rendered
     assert "/logs/%A_%a.err" in rendered
     assert "#SBATCH --cpus-per-task=8" in rendered
+    assert "#SBATCH --account=friends" in rendered
     assert "#SBATCH --mem=32G" in rendered
     assert "#SBATCH --time=01:00:00" in rendered
     assert "export SHUD_THREADS=8" in rendered
