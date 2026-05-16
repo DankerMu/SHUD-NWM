@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -205,6 +206,12 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
     assert data["limit"] == 10
     assert data["offset"] == 0
     assert {item["model_id"] for item in data["items"]} == {"active_model", "inactive_model"}
+    inactive_item = next(item for item in data["items"] if item["model_id"] == "inactive_model")
+    assert inactive_item["resource_profile"]["manifest_uri"] == "s3://nhms/models/inactive_model/vbasins/manifest.json"
+    public_listing_profile_json = json.dumps(inactive_item["resource_profile"])
+    assert "token=secret" not in public_listing_profile_json
+    assert "user:pass@" not in public_listing_profile_json
+    assert "#frag" not in public_listing_profile_json
 
     spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
     list_models = spec["paths"]["/api/v1/models"]["get"]
@@ -256,7 +263,17 @@ def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
         "source_uri": "s3://nhms/sources/basin-a",
         "source_is_symlink": False,
     }.items() <= data.items()
-    assert "token=secret" in data["resource_profile"]["manifest_uri"]
+    assert data["resource_profile"]["manifest_uri"] == "s3://nhms/models/inactive_model/vbasins/manifest.json"
+    assert data["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
+    assert data["resource_profile"]["lineage"]["source_uris"] == [
+        "s3://nhms/sources/nested",
+        "/volume/data/nwm/Basins/local-source",
+    ]
+    assert data["resource_profile"]["lineage"]["note"] == "s3 label only"
+    public_profile_json = json.dumps(data["resource_profile"])
+    assert "token=secret" not in public_profile_json
+    assert "user:pass@" not in public_profile_json
+    assert "#frag" not in public_profile_json
 
     assert missing_response.status_code == 404
     assert missing_response.json()["error"]["code"] == "MODEL_REGISTRY_NOT_FOUND"
@@ -646,8 +663,15 @@ class _ModelRegistryStore:
                 "source_is_symlink": False,
                 "active_flag": False,
                 "resource_profile": {
-                    "manifest_uri": "s3://user:pass@nhms/models/inactive_model/vbasins/manifest.json?token=secret#frag",
-                    "source_uri": "s3://user:pass@nhms/sources/basin-a?token=secret#frag",
+                    "manifest_uri": "s3://nhms/models/inactive_model/vbasins/manifest.json",
+                    "source_uri": "s3://nhms/sources/basin-a",
+                    "lineage": {
+                        "source_uris": [
+                            "s3://nhms/sources/nested",
+                            "/volume/data/nwm/Basins/local-source",
+                        ],
+                        "note": "s3 label only",
+                    },
                 },
                 "created_at": "2026-05-14T00:00:00Z",
             },

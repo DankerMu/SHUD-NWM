@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -867,6 +868,8 @@ def test_set_model_active_writes_audit_details_after_successful_update(
     result = store.set_model_active("basins_model", True)
 
     assert result["active_flag"] is True
+    assert result["model_package_uri"] == "s3://nhms/models/basins_model/package/"
+    assert result["resource_profile"]["manifest_uri"] == "s3://nhms/models/basins_model/v1/manifest.json"
     assert sum("INSERT INTO ops.audit_log" in statement for statement in cursor.statements) == 1
     audit_parameters = cursor.parameters[-1]
     assert audit_parameters[:3] == ("nhms-api", "model-registry", "basins_model")
@@ -966,6 +969,13 @@ def test_get_model_joins_asset_metadata_and_lineage(
                     "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
                     "source_uri": "s3://user:pass@nhms/sources/basin-a?token=secret#frag",
                     "source_is_symlink": False,
+                    "source_lineage": {
+                        "uris": [
+                            "s3://user:pass@nhms/sources/nested?token=secret#frag",
+                            "/volume/data/nwm/Basins/local-source",
+                        ],
+                        "label": "s3 path label, not a URI",
+                    },
                 },
                 "created_at": "2026-05-14T00:00:00Z",
                 "basin_id": "basins_basin_a",
@@ -1015,7 +1025,19 @@ def test_get_model_joins_asset_metadata_and_lineage(
     assert detail["resolved_source_path"] == "/volume/data/nwm/Basins/basin-a"
     assert detail["source_uri"] == "s3://nhms/sources/basin-a"
     assert detail["source_is_symlink"] is False
-    assert "token=secret" in detail["resource_profile"]["manifest_uri"]
+    assert detail["resource_profile"]["manifest_uri"] == (
+        "s3://nhms/models/basins_basin_a_shud/vbasins/manifest.json"
+    )
+    assert detail["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
+    assert detail["resource_profile"]["source_lineage"]["uris"] == [
+        "s3://nhms/sources/nested",
+        "/volume/data/nwm/Basins/local-source",
+    ]
+    assert detail["resource_profile"]["source_lineage"]["label"] == "s3 path label, not a URI"
+    public_profile_json = json.dumps(detail["resource_profile"])
+    assert "token=secret" not in public_profile_json
+    assert "user:pass@" not in public_profile_json
+    assert "#frag" not in public_profile_json
     assert "mesh_properties_json" not in detail
 
 
@@ -1073,6 +1095,74 @@ def test_get_model_uses_sanitized_mesh_lineage_fallbacks(
     assert detail["resolved_source_path"] == "s3://nhms/resolved-source-path"
     assert detail["source_uri"] == "s3://nhms/source-uri"
     assert detail["source_is_symlink"] is True
+
+
+def test_list_models_returns_public_safe_resource_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self._result: Any = None
+
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            if "SELECT COUNT" in statement:
+                self._result = {"total": 1}
+            else:
+                self._result = [
+                    {
+                        "model_id": "basins_basin_a_shud",
+                        "basin_version_id": "basins_basin_a_vbasins",
+                        "river_network_version_id": "basins_basin_a_rivnet_vbasins",
+                        "mesh_version_id": "basins_basin_a_mesh_vbasins",
+                        "calibration_version_id": "basins_basin_a_shud_calib_vbasins",
+                        "shud_code_version": "basins-shud",
+                        "model_package_uri": (
+                            "s3://user:pass@nhms/models/basins_basin_a_shud/package/?token=secret#frag"
+                        ),
+                        "active_flag": False,
+                        "resource_profile": {
+                            "manifest_uri": (
+                                "s3://user:pass@nhms/models/basins_basin_a_shud/manifest.json?token=secret#frag"
+                            ),
+                            "source_uri": "s3://user:pass@nhms/sources/basin-a?token=secret#frag",
+                            "source_path": "/volume/data/nwm/Basins/basin-a",
+                            "nested": [
+                                {"uri": "s3://user:pass@nhms/nested?token=secret#frag"},
+                                "normal string",
+                            ],
+                        },
+                        "created_at": "2026-05-14T00:00:00Z",
+                    }
+                ]
+
+        def fetchone(self) -> dict[str, Any]:
+            return self._result
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self._result
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    page = store.list_models(basin_version_id=None, active=None, limit=10, offset=0)
+
+    item = page["items"][0]
+    assert item["model_package_uri"] == "s3://nhms/models/basins_basin_a_shud/package/"
+    assert item["resource_profile"]["manifest_uri"] == "s3://nhms/models/basins_basin_a_shud/manifest.json"
+    assert item["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
+    assert item["resource_profile"]["source_path"] == "/volume/data/nwm/Basins/basin-a"
+    assert item["resource_profile"]["nested"] == [{"uri": "s3://nhms/nested"}, "normal string"]
+    public_item_json = json.dumps(item)
+    assert "token=secret" not in public_item_json
+    assert "user:pass@" not in public_item_json
+    assert "#frag" not in public_item_json
 
 
 def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:

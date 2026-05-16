@@ -32,7 +32,7 @@ describe('model asset API types', () => {
       source_is_symlink: false,
       resource_profile: {
         lineage: 'basins_registry_import',
-        manifest_uri: 's3://user:pass@nhms/models/basins_basin_a_shud/vbasins/manifest.json?token=secret#frag',
+        manifest_uri: 's3://nhms/models/basins_basin_a_shud/vbasins/manifest.json',
       },
       created_at: '2026-05-14T00:00:00Z',
     }

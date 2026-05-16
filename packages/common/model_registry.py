@@ -457,7 +457,7 @@ class PsycopgModelRegistryStore:
                 updated=updated,
                 active=active,
             )
-            return updated
+            return _model_public_projection(updated)
 
     def list_models(
         self,
@@ -490,7 +490,7 @@ class PsycopgModelRegistryStore:
                 """,
                 tuple([*parameters, limit, offset]),
             )
-            items = [dict(row) for row in cursor.fetchall()]
+            items = [_model_public_projection(row) for row in cursor.fetchall()]
         return {"total": total, "items": items, "limit": limit, "offset": offset}
 
     def get_model(self, model_id: str) -> dict[str, Any]:
@@ -742,6 +742,7 @@ def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     detail = dict(row)
     resource_profile = _json_mapping(detail.get("resource_profile"))
     mesh_properties = _json_mapping(detail.pop("mesh_properties_json", None))
+    detail["resource_profile"] = _sanitize_public_json_value(resource_profile)
 
     for key in MODEL_ASSET_LINEAGE_KEYS:
         detail[key] = _first_non_empty(resource_profile.get(key), mesh_properties.get(key))
@@ -760,6 +761,30 @@ def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     detail["model_name"] = str(model_name) if model_name is not None else None
     detail["segment_count"] = int(detail["segment_count"]) if detail.get("segment_count") is not None else None
     return detail
+
+
+def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    detail = dict(row)
+    detail["resource_profile"] = _sanitize_public_json_value(_json_mapping(detail.get("resource_profile")))
+    for key in MODEL_ASSET_URI_KEYS:
+        if detail.get(key) not in (None, ""):
+            detail[key] = _sanitize_audit_uri(detail[key])
+    for key in MODEL_ASSET_URI_OR_PATH_KEYS:
+        if detail.get(key) not in (None, "") and urlsplit(str(detail[key])).scheme:
+            detail[key] = _sanitize_audit_uri(detail[key])
+    return detail
+
+
+def _sanitize_public_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _sanitize_public_json_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_public_json_value(child) for child in value]
+    if isinstance(value, tuple):
+        return [_sanitize_public_json_value(child) for child in value]
+    if isinstance(value, str) and urlsplit(value).scheme:
+        return _sanitize_audit_uri(value)
+    return value
 
 
 def _json_mapping(value: Any) -> dict[str, Any]:
