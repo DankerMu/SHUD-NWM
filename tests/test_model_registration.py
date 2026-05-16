@@ -957,18 +957,26 @@ def test_get_model_joins_asset_metadata_and_lineage(
                 "resource_profile": {
                     "basin_slug": "basin-a",
                     "shud_input_name": "alias-a",
-                    "manifest_uri": "s3://nhms/models/basins_basin_a_shud/vbasins/manifest.json",
+                    "manifest_uri": (
+                        "s3://user:pass@nhms/models/basins_basin_a_shud/vbasins/manifest.json?token=secret#frag"
+                    ),
                     "package_checksum": "package-sha-1",
                     "source_inventory_checksum": "inventory-sha-1",
+                    "source_path": "/volume/data/nwm/Basins/basin-a",
+                    "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
+                    "source_uri": "s3://user:pass@nhms/sources/basin-a?token=secret#frag",
+                    "source_is_symlink": False,
                 },
                 "created_at": "2026-05-14T00:00:00Z",
                 "basin_id": "basins_basin_a",
                 "basin_name": "Basin A",
                 "segment_count": 2,
-                "mesh_uri": "s3://nhms/models/basins_basin_a_shud/vbasins/package/alias-a.sp.mesh",
+                "mesh_uri": "s3://user:pass@nhms/models/basins_basin_a_shud/vbasins/package/alias-a.sp.mesh?token=secret#frag",
                 "mesh_checksum": "mesh-sha-1",
                 "mesh_properties_json": {
-                    "manifest_uri": "s3://nhms/models/basins_basin_a_shud/vbasins/manifest-from-mesh.json"
+                    "manifest_uri": "s3://nhms/models/basins_basin_a_shud/vbasins/manifest-from-mesh.json",
+                    "source_path": "s3://user:pass@nhms/source-path-fallback?token=secret#frag",
+                    "resolved_source_path": "s3://user:pass@nhms/resolved-source-path-fallback?token=secret#frag",
                 },
             }
 
@@ -996,14 +1004,75 @@ def test_get_model_joins_asset_metadata_and_lineage(
     assert detail["basin_id"] == "basins_basin_a"
     assert detail["basin_name"] == "Basin A"
     assert detail["segment_count"] == 2
-    assert detail["mesh_uri"].endswith("alias-a.sp.mesh")
+    assert detail["mesh_uri"] == "s3://nhms/models/basins_basin_a_shud/vbasins/package/alias-a.sp.mesh"
     assert detail["mesh_checksum"] == "mesh-sha-1"
     assert detail["package_checksum"] == "package-sha-1"
     assert detail["manifest_uri"] == "s3://nhms/models/basins_basin_a_shud/vbasins/manifest.json"
     assert detail["source_inventory_checksum"] == "inventory-sha-1"
     assert detail["basin_slug"] == "basin-a"
     assert detail["shud_input_name"] == "alias-a"
+    assert detail["source_path"] == "/volume/data/nwm/Basins/basin-a"
+    assert detail["resolved_source_path"] == "/volume/data/nwm/Basins/basin-a"
+    assert detail["source_uri"] == "s3://nhms/sources/basin-a"
+    assert detail["source_is_symlink"] is False
+    assert "token=secret" in detail["resource_profile"]["manifest_uri"]
     assert "mesh_properties_json" not in detail
+
+
+def test_get_model_uses_sanitized_mesh_lineage_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def execute(self, _statement: str, _parameters: tuple[Any, ...]) -> None:
+            return None
+
+        def fetchone(self) -> dict[str, Any]:
+            return {
+                "model_id": "basins_basin_a_shud",
+                "basin_version_id": "basins_basin_a_vbasins",
+                "river_network_version_id": "basins_basin_a_rivnet_vbasins",
+                "mesh_version_id": "basins_basin_a_mesh_vbasins",
+                "calibration_version_id": "basins_basin_a_shud_calib_vbasins",
+                "shud_code_version": "basins-shud",
+                "rshud_code_version": None,
+                "autoshud_code_version": None,
+                "container_image": None,
+                "model_package_uri": "s3://user:pass@nhms/models/basins_basin_a_shud/vbasins/package/?token=secret#frag",
+                "active_flag": False,
+                "resource_profile": {},
+                "created_at": "2026-05-14T00:00:00Z",
+                "basin_id": "basins_basin_a",
+                "basin_name": "Basin A",
+                "segment_count": 2,
+                "mesh_uri": None,
+                "mesh_checksum": None,
+                "mesh_properties_json": {
+                    "manifest_uri": "s3://user:pass@nhms/models/basins_basin_a_shud/vbasins/manifest.json?token=secret#frag",
+                    "source_path": "s3://user:pass@nhms/source-path?token=secret#frag",
+                    "resolved_source_path": "s3://user:pass@nhms/resolved-source-path?token=secret#frag",
+                    "source_uri": "s3://user:pass@nhms/source-uri?token=secret#frag",
+                    "source_is_symlink": True,
+                },
+            }
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    detail = store.get_model("basins_basin_a_shud")
+
+    assert detail["model_package_uri"] == "s3://nhms/models/basins_basin_a_shud/vbasins/package/"
+    assert detail["manifest_uri"] == "s3://nhms/models/basins_basin_a_shud/vbasins/manifest.json"
+    assert detail["source_path"] == "s3://nhms/source-path"
+    assert detail["resolved_source_path"] == "s3://nhms/resolved-source-path"
+    assert detail["source_uri"] == "s3://nhms/source-uri"
+    assert detail["source_is_symlink"] is True
 
 
 def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:

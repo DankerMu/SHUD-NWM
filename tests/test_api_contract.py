@@ -251,7 +251,12 @@ def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
         "source_inventory_checksum": "inventory-sha-1",
         "basin_slug": "basin-a",
         "shud_input_name": "alias-a",
+        "source_path": "/volume/data/nwm/Basins/basin-a",
+        "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
+        "source_uri": "s3://nhms/sources/basin-a",
+        "source_is_symlink": False,
     }.items() <= data.items()
+    assert "token=secret" in data["resource_profile"]["manifest_uri"]
 
     assert missing_response.status_code == 404
     assert missing_response.json()["error"]["code"] == "MODEL_REGISTRY_NOT_FOUND"
@@ -273,6 +278,10 @@ def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
         "source_inventory_checksum",
         "basin_slug",
         "shud_input_name",
+        "source_path",
+        "resolved_source_path",
+        "source_uri",
+        "source_is_symlink",
     ):
         assert field in model_properties
 
@@ -405,6 +414,10 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert "mesh_uri?: string | null;" in generated_types
     assert "package_checksum?: string | null;" in generated_types
     assert "source_inventory_checksum?: string | null;" in generated_types
+    assert "source_path?: string | null;" in generated_types
+    assert "resolved_source_path?: string | null;" in generated_types
+    assert "source_uri?: string | null;" in generated_types
+    assert "source_is_symlink?: boolean | null;" in generated_types
     assert "FloodFrequencyThresholds" in generated_types
     assert "Q2?: number | null;" in generated_types
     assert "Q20?: number | null;" in generated_types
@@ -600,6 +613,10 @@ class _ModelRegistryStore:
                 "source_inventory_checksum": None,
                 "basin_slug": None,
                 "shud_input_name": None,
+                "source_path": None,
+                "resolved_source_path": None,
+                "source_uri": None,
+                "source_is_symlink": None,
                 "active_flag": True,
                 "resource_profile": {},
                 "created_at": "2026-05-14T00:00:00Z",
@@ -623,8 +640,15 @@ class _ModelRegistryStore:
                 "source_inventory_checksum": "inventory-sha-1",
                 "basin_slug": "basin-a",
                 "shud_input_name": "alias-a",
+                "source_path": "/volume/data/nwm/Basins/basin-a",
+                "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
+                "source_uri": "s3://nhms/sources/basin-a",
+                "source_is_symlink": False,
                 "active_flag": False,
-                "resource_profile": {},
+                "resource_profile": {
+                    "manifest_uri": "s3://user:pass@nhms/models/inactive_model/vbasins/manifest.json?token=secret#frag",
+                    "source_uri": "s3://user:pass@nhms/sources/basin-a?token=secret#frag",
+                },
                 "created_at": "2026-05-14T00:00:00Z",
             },
         ]

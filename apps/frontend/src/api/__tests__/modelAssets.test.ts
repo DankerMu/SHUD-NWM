@@ -26,12 +26,22 @@ describe('model asset API types', () => {
       source_inventory_checksum: 'inventory-sha-1',
       basin_slug: 'basin-a',
       shud_input_name: 'alias-a',
-      resource_profile: { lineage: 'basins_registry_import' },
+      source_path: '/volume/data/nwm/Basins/basin-a',
+      resolved_source_path: '/volume/data/nwm/Basins/basin-a',
+      source_uri: 's3://nhms/sources/basin-a',
+      source_is_symlink: false,
+      resource_profile: {
+        lineage: 'basins_registry_import',
+        manifest_uri: 's3://user:pass@nhms/models/basins_basin_a_shud/vbasins/manifest.json?token=secret#frag',
+      },
       created_at: '2026-05-14T00:00:00Z',
     }
 
     expect(basinsModel.segment_count).toBe(2)
     expect(basinsModel.package_checksum).toBe('package-sha-1')
     expect(basinsModel.source_inventory_checksum).toBe('inventory-sha-1')
+    expect(basinsModel.manifest_uri).toBe('s3://nhms/models/basins_basin_a_shud/vbasins/manifest.json')
+    expect(basinsModel.source_uri).toBe('s3://nhms/sources/basin-a')
+    expect(basinsModel.source_is_symlink).toBe(false)
   })
 })

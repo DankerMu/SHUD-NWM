@@ -731,6 +731,10 @@ export interface components {
             source_inventory_checksum?: string | null;
             basin_slug?: string | null;
             shud_input_name?: string | null;
+            source_path?: string | null;
+            resolved_source_path?: string | null;
+            source_uri?: string | null;
+            source_is_symlink?: boolean | null;
             resource_profile: {
                 [key: string]: unknown;
             };

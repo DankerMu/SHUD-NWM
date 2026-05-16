@@ -722,7 +722,20 @@ MODEL_ASSET_LINEAGE_KEYS = (
     "basin_slug",
     "shud_input_name",
     "package_checksum",
+    "source_path",
+    "resolved_source_path",
+    "source_uri",
+    "source_is_symlink",
 )
+MODEL_ASSET_URI_KEYS = frozenset(
+    {
+        "manifest_uri",
+        "mesh_uri",
+        "model_package_uri",
+        "source_uri",
+    }
+)
+MODEL_ASSET_URI_OR_PATH_KEYS = frozenset({"source_path", "resolved_source_path"})
 
 
 def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -732,6 +745,12 @@ def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
 
     for key in MODEL_ASSET_LINEAGE_KEYS:
         detail[key] = _first_non_empty(resource_profile.get(key), mesh_properties.get(key))
+    for key in MODEL_ASSET_URI_KEYS:
+        if detail.get(key) not in (None, ""):
+            detail[key] = _sanitize_audit_uri(detail[key])
+    for key in MODEL_ASSET_URI_OR_PATH_KEYS:
+        if detail.get(key) not in (None, "") and urlsplit(str(detail[key])).scheme:
+            detail[key] = _sanitize_audit_uri(detail[key])
 
     model_name = _first_non_empty(
         resource_profile.get("model_name"),

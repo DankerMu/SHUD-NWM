@@ -1653,6 +1653,18 @@ components:
         shud_input_name:
           type: string
           nullable: true
+        source_path:
+          type: string
+          nullable: true
+        resolved_source_path:
+          type: string
+          nullable: true
+        source_uri:
+          type: string
+          nullable: true
+        source_is_symlink:
+          type: boolean
+          nullable: true
         resource_profile:
           type: object
           additionalProperties: true
