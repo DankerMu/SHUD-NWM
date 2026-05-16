@@ -840,7 +840,8 @@ def test_registry_import_creates_idempotent_inactive_rows(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    basin_slug = "basin-a-idempotent"
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path, basin_slug=basin_slug)
     report_path = tmp_path / "import-report.json"
     args = [
         "import-basins-registry",
@@ -911,7 +912,7 @@ def test_registry_import_creates_idempotent_inactive_rows(
     assert row is not None
     assert row["active_flag"] is False
     assert row["resource_profile"]["package_checksum"] == "package-sha-1"
-    assert row["resource_profile"]["basin_slug"] == "basin-a"
+    assert row["resource_profile"]["basin_slug"] == basin_slug
     assert row["segment_count"] == 2
     assert row["segment_rows"] == 2
     assert row["first_downstream"] == f"{model_id}_seg_2"
@@ -941,7 +942,10 @@ def test_registry_import_checksum_conflict_rolls_back(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(
+        tmp_path,
+        basin_slug="basin-a-checksum-conflict",
+    )
     args = [
         "import-basins-registry",
         "--inventory",
@@ -978,7 +982,10 @@ def test_registry_import_conflicts_on_existing_river_segment_drift(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(
+        tmp_path,
+        basin_slug="basin-a-segment-drift",
+    )
     args = [
         "import-basins-registry",
         "--inventory",
@@ -989,7 +996,7 @@ def test_registry_import_conflicts_on_existing_river_segment_drift(
         integration_database_url,
     ]
     assert _argparse_main(args) == 0
-    capsys.readouterr()
+    report = json.loads(capsys.readouterr().out)
 
     with psycopg_connection(integration_database_url) as connection:
         with connection.cursor() as cursor:
@@ -1000,7 +1007,7 @@ def test_registry_import_conflicts_on_existing_river_segment_drift(
                 WHERE river_network_version_id = %s
                   AND river_segment_id = %s
                 """,
-                ("basins_basin_a_rivnet_vbasins", f"{model_id}_seg_1"),
+                (report["river_network_version_id"], f"{model_id}_seg_1"),
             )
 
     assert _argparse_main(args) == 1
@@ -1017,7 +1024,11 @@ def test_registry_import_mismatch_rolls_back_all_rows(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path, sp_segment_count=3)
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(
+        tmp_path,
+        basin_slug="basin-a-mismatch",
+        sp_segment_count=3,
+    )
     exit_code = _argparse_main(
         [
             "import-basins-registry",
@@ -1033,12 +1044,7 @@ def test_registry_import_mismatch_rolls_back_all_rows(
     error = json.loads(capsys.readouterr().err)
     assert exit_code == 1
     assert error["error_code"] == "BASINS_REGISTRY_SEGMENT_COUNT_MISMATCH"
-    with psycopg_connection(integration_database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) AS count FROM core.model_instance WHERE model_id = %s", (model_id,))
-            assert cursor.fetchone()["count"] == 0
-            cursor.execute("SELECT COUNT(*) AS count FROM core.basin WHERE basin_id = 'basins_basin_a'")
-            assert cursor.fetchone()["count"] == 0
+    _assert_registry_fixture_rows_absent(integration_database_url, inventory_path, model_id)
 
 
 @pytest.mark.skipif(
@@ -1153,13 +1159,14 @@ def test_real_basins_parser_smoke_reprojects_and_uses_rivseg_count(
 def _write_registry_fixture(
     tmp_path: Path,
     *,
+    basin_slug: str = "basin-a",
     sp_river_count: int | None = None,
     sp_segment_count: int = 2,
     domain_with_hole: bool = False,
 ) -> tuple[Path, Path, Path, Path, str]:
     root = tmp_path / "basins"
     input_dir = _make_valid_model(
-        root / "basin-a",
+        root / basin_slug,
         "alias-a",
         sp_river_count=sp_river_count,
         sp_segment_count=sp_segment_count,
@@ -1330,6 +1337,38 @@ def _package_manifest_for_model(
 def _sha256_inventory_document(inventory: dict[str, Any]) -> str:
     content = (json.dumps(inventory, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
     return hashlib.sha256(content).hexdigest()
+
+
+def _assert_registry_fixture_rows_absent(database_url: str, inventory_path: Path, model_id: str) -> None:
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = next(model for model in inventory["models"] if model["model_id"] == model_id)
+    ids = model["suggested_ids"]
+    with psycopg_connection(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) AS count FROM core.model_instance WHERE model_id = %s", (model_id,))
+            assert cursor.fetchone()["count"] == 0
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM core.mesh_version WHERE mesh_version_id = %s",
+                (ids["mesh_version_id"],),
+            )
+            assert cursor.fetchone()["count"] == 0
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM core.river_segment WHERE river_network_version_id = %s",
+                (ids["river_network_version_id"],),
+            )
+            assert cursor.fetchone()["count"] == 0
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM core.river_network_version WHERE river_network_version_id = %s",
+                (ids["river_network_version_id"],),
+            )
+            assert cursor.fetchone()["count"] == 0
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM core.basin_version WHERE basin_version_id = %s",
+                (ids["basin_version_id"],),
+            )
+            assert cursor.fetchone()["count"] == 0
+            cursor.execute("SELECT COUNT(*) AS count FROM core.basin WHERE basin_id = %s", (ids["basin_id"],))
+            assert cursor.fetchone()["count"] == 0
 
 
 def _sha256_file(path: Path) -> str:
