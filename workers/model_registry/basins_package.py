@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from packages.common.storage import validate_object_path
 
 from .basins_discovery import (
     GIS_REQUIRED_FILES,
@@ -122,6 +123,13 @@ def publish_basins_package(
         manifest_uri=manifest_uri,
     )
     source_files = [*package_files, *(forcing_files if copy_forcing else [])]
+    _preflight_object_store_keys(
+        store,
+        [source_file.object_key for source_file in source_files] + [manifest_key, lock_key],
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
     planned_included_files = sorted(
         [
             _planned_file_entry(
@@ -149,7 +157,7 @@ def publish_basins_package(
     }
     package_checksum = _sha256_json(checksum_material)
 
-    if store.exists(manifest_key):
+    if _object_exists_no_symlinks(store, manifest_key, model_id=model_id, version=version, manifest_uri=manifest_uri):
         existing_manifest = _read_existing_manifest(store, manifest_key, model_id, version, manifest_uri)
         if existing_manifest.get("package_checksum") != package_checksum:
             raise BasinsPackageError(
@@ -175,7 +183,13 @@ def publish_basins_package(
     try:
         _acquire_publish_lock(store, lock_key, model_id, version, manifest_uri)
         lock_acquired = True
-        if store.exists(manifest_key):
+        if _object_exists_no_symlinks(
+            store,
+            manifest_key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ):
             existing_manifest = _read_existing_manifest(store, manifest_key, model_id, version, manifest_uri)
             if existing_manifest.get("package_checksum") != package_checksum:
                 raise BasinsPackageError(
@@ -260,12 +274,22 @@ def publish_basins_package(
             manifest_key=manifest_key,
         )
         local_output_manifest = manifest
-        store.write_bytes_atomic(manifest_key, manifest_bytes)
+        _write_bytes_to_store_atomic(
+            store,
+            manifest_key,
+            manifest_bytes,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
         _verify_object_bytes(
             store,
             manifest_key,
             expected_size=len(manifest_bytes),
             expected_sha256=_sha256_bytes(manifest_bytes),
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
         )
         _write_json_file(
             output_path,
@@ -1156,8 +1180,16 @@ def _read_existing_manifest(
     manifest_uri: str,
 ) -> dict[str, Any]:
     try:
-        manifest = json.loads(store.read_bytes(manifest_key).decode("utf-8"))
-    except (ObjectStoreError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        manifest = json.loads(
+            _read_object_bytes_no_symlinks(
+                store,
+                manifest_key,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            ).decode("utf-8")
+        )
+    except (ObjectStoreError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
         raise BasinsPackageError(
             "BASINS_PACKAGE_MANIFEST_INVALID",
             f"Existing Basins package manifest cannot be read: {manifest_uri}",
@@ -1183,7 +1215,13 @@ def _acquire_publish_lock(
     version: str,
     manifest_uri: str,
 ) -> None:
-    lock_path = store.resolve_path(lock_key)
+    lock_path = _object_path_rejecting_symlinks(
+        store,
+        lock_key,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
@@ -1220,8 +1258,8 @@ def _acquire_publish_lock(
 
 def _release_publish_lock(store: LocalObjectStore, lock_key: str) -> None:
     try:
-        store.resolve_path(lock_key).unlink(missing_ok=True)
-    except (OSError, ValueError):
+        _object_path_rejecting_symlinks(store, lock_key).unlink(missing_ok=True)
+    except (BasinsPackageError, OSError, ValueError):
         pass
 
 
@@ -1242,7 +1280,15 @@ def _write_source_file_to_store(
         version=version,
         manifest_uri=manifest_uri,
     )
-    _verify_object_bytes(store, source_file.object_key, expected_size=size_bytes, expected_sha256=sha256)
+    _verify_object_bytes(
+        store,
+        source_file.object_key,
+        expected_size=size_bytes,
+        expected_sha256=sha256,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
     return _manifest_file_entry_for_source_file(source_file, size_bytes=size_bytes, sha256=sha256)
 
 
@@ -1256,7 +1302,13 @@ def _write_file_to_store_streaming(
     version: str | None = None,
     manifest_uri: str | None = None,
 ) -> tuple[int, str]:
-    target_path = store.resolve_path(key)
+    target_path = _object_path_rejecting_symlinks(
+        store,
+        key,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
     temp_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.part")
     digest = hashlib.sha256()
     size_bytes = 0
@@ -1286,6 +1338,139 @@ def _write_file_to_store_streaming(
             ) from cleanup_error
         raise ObjectStoreError(f"Failed to write object {key}: {error}") from error
     return size_bytes, digest.hexdigest()
+
+
+def _write_bytes_to_store_atomic(
+    store: LocalObjectStore,
+    key: str,
+    content: bytes,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> str:
+    target_path = _object_path_rejecting_symlinks(
+        store,
+        key,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    temp_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.part")
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.write_bytes(content)
+        os.replace(temp_path, target_path)
+    except OSError as error:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            raise ObjectStoreError(
+                f"Failed to write object {key}: {error}; cleanup also failed: {cleanup_error}"
+            ) from cleanup_error
+        raise ObjectStoreError(f"Failed to write object {key}: {error}") from error
+    return store.uri_for_key(store.normalize_key(key))
+
+
+def _preflight_object_store_keys(
+    store: LocalObjectStore,
+    keys: list[str],
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str,
+) -> None:
+    for key in keys:
+        _object_path_rejecting_symlinks(
+            store,
+            key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+
+
+def _object_exists_no_symlinks(
+    store: LocalObjectStore,
+    key: str,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str,
+) -> bool:
+    path = _object_path_rejecting_symlinks(
+        store,
+        key,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ObjectStoreError(f"Failed to check object existence for {key}: {error}") from error
+    return True
+
+
+def _read_object_bytes_no_symlinks(
+    store: LocalObjectStore,
+    key: str,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str,
+) -> bytes:
+    path = _object_path_rejecting_symlinks(
+        store,
+        key,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise ObjectStoreError(f"Failed to read object {key}: {error}") from error
+
+
+def _object_path_rejecting_symlinks(
+    store: LocalObjectStore,
+    key_or_uri: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Path:
+    key = store.normalize_key(key_or_uri)
+    validation = validate_object_path(key)
+    if not validation.valid:
+        raise ValueError(validation.error)
+    if ".." in Path(key).parts:
+        raise ValueError(f"Object key must not contain '..': {key_or_uri}")
+
+    root = Path(store.root)
+    parts = Path(key).parts
+    candidate = root
+    for part in parts:
+        candidate = candidate / part
+        try:
+            mode = candidate.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ObjectStoreError(f"Failed to inspect object path {key}: {error}") from error
+        if stat.S_ISLNK(mode):
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_OBJECT_PATH_UNSAFE",
+                "Basins package publication does not follow object-store symlink components.",
+                model_id=model_id,
+                version=version,
+                path=str(candidate),
+                manifest_uri=manifest_uri,
+            )
+    return root.joinpath(*parts)
 
 
 def _open_verified_source_file(
@@ -1492,8 +1677,17 @@ def _verify_object_bytes(
     *,
     expected_size: int,
     expected_sha256: str,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
 ) -> None:
-    actual_size, actual_sha256 = _object_size_and_checksum_streaming(store, key)
+    actual_size, actual_sha256 = _object_size_and_checksum_streaming(
+        store,
+        key,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
     if actual_size != expected_size or actual_sha256 != expected_sha256:
         raise ObjectStoreError(
             f"Object verification failed for {key}: expected {expected_size}/{expected_sha256}, "
@@ -1501,8 +1695,21 @@ def _verify_object_bytes(
         )
 
 
-def _object_size_and_checksum_streaming(store: LocalObjectStore, key: str) -> tuple[int, str]:
-    path = store.resolve_path(key)
+def _object_size_and_checksum_streaming(
+    store: LocalObjectStore,
+    key: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> tuple[int, str]:
+    path = _object_path_rejecting_symlinks(
+        store,
+        key,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
     digest = hashlib.sha256()
     size_bytes = 0
     try:

@@ -1077,6 +1077,9 @@ def test_publish_basins_does_not_write_local_output_when_manifest_verify_fails(
         *,
         expected_size: int,
         expected_sha256: str,
+        model_id: str | None = None,
+        version: str | None = None,
+        manifest_uri: str | None = None,
     ) -> None:
         if key.endswith("/manifest.json"):
             raise basins_package.ObjectStoreError("synthetic manifest verification failure")
@@ -1085,6 +1088,9 @@ def test_publish_basins_does_not_write_local_output_when_manifest_verify_fails(
             key,
             expected_size=expected_size,
             expected_sha256=expected_sha256,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
         )
 
     monkeypatch.setattr(basins_package, "_verify_object_bytes", failing_manifest_verify)
@@ -1438,6 +1444,55 @@ def test_publish_basins_rejects_in_progress_lock(
     assert error["model_id"] == model_id
     assert error["version"] == "vbasins-locked"
     assert error["path"] == str(lock_path)
+
+
+def test_publish_basins_rejects_existing_object_store_package_symlink_without_modifying_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    version = "vbasins-object-symlink"
+    target_object = object_root / "models" / model_id / "shared-target.txt"
+    target_object.parent.mkdir(parents=True)
+    target_object.write_text("do not modify\n", encoding="utf-8")
+    package_object = object_root / "models" / model_id / version / "package" / "alias-a.cfg.para"
+    package_object.parent.mkdir(parents=True)
+    try:
+        package_object.symlink_to(target_object)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            version,
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_OBJECT_PATH_UNSAFE"
+    assert error["model_id"] == model_id
+    assert error["version"] == version
+    assert error["path"] == str(package_object)
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/{version}/manifest.json"
+    assert "Traceback" not in captured.err
+    assert package_object.is_symlink()
+    assert target_object.read_text(encoding="utf-8") == "do not modify\n"
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / version / "manifest.json").exists()
 
 
 def test_publish_basins_manifest_checksums_match_mutated_bytes_written(
