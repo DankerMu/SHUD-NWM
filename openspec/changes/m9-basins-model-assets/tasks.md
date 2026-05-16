@@ -390,10 +390,30 @@ Fixture AI - model detail missing resource stays safe:
 - Invocation: `GET /api/v1/models/{missing_model_id}`.
 - Expected: API returns the existing safe `MODEL_REGISTRY_NOT_FOUND` envelope, without leaking database diagnostics.
 
+### #139 Frontend / Documentation / Final Validation Fixture Matrix
+
+Issue #139 owns the remaining frontend-adjacent and closeout tasks 4.5 and 5.1-5.5. It must not build the full model asset management UI route; the required frontend scope is API type freshness plus a store/API-level synthetic fixture proving that future asset-management views can consume Basins-backed `ModelInstance` detail/list metadata without local placeholder-only patches.
+
+Fixture AJ - frontend asset store consumes Basins model metadata:
+
+- Setup: mock `GET /api/v1/models` and `GET /api/v1/models/{model_id}` responses with sanitized Basins-backed `ModelInstance` records, including source lineage, package checksum, active flag, segment count, mesh/checksum, and resource profile metadata.
+- Invocation: call the frontend asset-management store/API helper that loads the model list and selected detail.
+- Expected: returned state preserves Basins asset fields from generated OpenAPI types, exposes a selected detail suitable for model cards/version relationship panels/package status views, and does not require any placeholder-only type patch.
+
+Fixture AK - final validation docs record commands and source quirks:
+
+- Invocation: inspect `docs/VALIDATION.md` and `progress.md` after #139.
+- Expected: docs include Basins discovery, package publication, registry import, migration report, opt-in real smoke, OpenSpec strict validation, `uv run ruff check .`, backend/API/OpenAPI/frontend checks, and generated type freshness commands; source quirks explicitly mention `tailanhe/focing`, NAS/macOS sidecars, and production copy-not-symlink requirements.
+
+Fixture AL - final validation evidence is recorded:
+
+- Invocation: run the #139 verification set or record explicit skipped status for gated real-asset/integration tests.
+- Expected: PR/work summary records OpenSpec strict validation, `uv run ruff check .`, backend discovery/package/import/runtime/API tests, gated real-asset smoke status when `data/Basins` is available, frontend type freshness, frontend tests, and build status.
+
 ## 5. Documentation and Validation
 
-- [ ] 5.1 Update `progress.md` and validation docs with Basins discovery, packaging, registry import, and production migration commands.
-- [ ] 5.2 Document known source quirks, including `tailanhe/focing` and NAS/macOS sidecar filtering.
-- [ ] 5.3 Run and record OpenSpec strict validation and `uv run ruff check .`.
-- [ ] 5.4 Run and record backend unit tests for discovery/package/import plus the gated real-asset smoke when `data/Basins` is available.
-- [ ] 5.5 Run and record relevant API/OpenAPI/frontend checks, including generated type freshness when OpenAPI changes.
+- [x] 5.1 Update `progress.md` and validation docs with Basins discovery, packaging, registry import, and production migration commands.
+- [x] 5.2 Document known source quirks, including `tailanhe/focing` and NAS/macOS sidecar filtering.
+- [x] 5.3 Run and record OpenSpec strict validation and `uv run ruff check .` in PR evidence and the Chinese work summary.
+- [x] 5.4 Run and record backend unit tests for discovery/package/import plus the gated real-asset smoke when `data/Basins` is available; record explicit skip status when the gated smoke cannot run.
+- [x] 5.5 Run and record relevant API/OpenAPI/frontend checks, including generated type freshness when OpenAPI changes, in PR evidence and the Chinese work summary.
