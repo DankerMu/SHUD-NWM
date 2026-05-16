@@ -328,11 +328,41 @@ Fixture Z - gated real Basins import smoke:
 ## 4. Runtime, API, and Frontend Consumption
 
 - [ ] 4.1 Add a SHUD runtime staging smoke that uses a Basins-backed `model_package_uri` in dry-run or mock mode and verifies staged control/input files.
-- [ ] 4.2 Add API smoke tests showing imported Basins models appear in model listing/active discovery after explicit activation.
+- [x] 4.2 Add API smoke tests showing imported Basins models appear in model listing/active discovery after explicit activation.
 - [ ] 4.3 Add river-segment API smoke showing imported Basins river features return paginated GeoJSON-compatible records for map rendering.
 - [ ] 4.4 Implement or update model asset detail API/OpenAPI contract so Basins-backed fields include basin/model names, segment count, mesh ID, calibration ID, package URI/checksum, active flag, and source lineage.
 - [ ] 4.5 Regenerate frontend API types and add frontend/store-level fixture coverage so the model asset management page can consume Basins-backed model metadata without placeholder-only data.
-- [ ] 4.6 Verify explicit activation through `PUT /api/v1/models/{model_id}/active`, including audit event or equivalent structured log plus API/DB proof.
+- [x] 4.6 Verify explicit activation through `PUT /api/v1/models/{model_id}/active`, including audit event or equivalent structured log plus API/DB proof.
+
+### #137 Activation / Audit Fixture Matrix
+
+Issue #137 owns task 4.2 and 4.6, and may add focused regression coverage for task 3.6 when needed. It must not reimplement Basins package publication or registry import; tests may seed minimal imported Basins registry rows directly or reuse #136 synthetic import helpers.
+
+Fixture AA - imported Basins model is inactive before activation:
+
+- Setup: create or import a Basins-backed `core.model_instance` whose `resource_profile` contains `basin_slug`, `shud_input_name`, `manifest_uri`, `package_checksum`, and `source_inventory_checksum`, with `active_flag=false`; also keep an unrelated active model in the registry.
+- Invocation: `GET /api/v1/models` with default active filter, `GET /api/v1/models?active=false`, and `GET /api/v1/models?active=all`.
+- Expected: the Basins model is absent from default active listing, present in inactive/all listing with Basins lineage fields intact, and the unrelated active model remains active.
+
+Fixture AB - explicit activation uses current API:
+
+- Invocation: `PUT /api/v1/models/{basins_model_id}/active` with body `{"active": true}` or compatible `{"active_flag": true}`.
+- Expected: response uses the existing success envelope and returns the activated `ModelInstance`; subsequent default `GET /api/v1/models` includes the Basins model, while `active=false` no longer includes it.
+
+Fixture AC - activation writes durable audit evidence:
+
+- Invocation: same as Fixture AB against a real PostgreSQL integration database.
+- Expected: `ops.audit_log` has exactly one new row for the successful state change with `action=model_instance.active.set`, `entity_type=model_instance`, `entity_id=<model_id>`, actor/role defaults, and `details` containing `previous_active=false`, `active=true`, `basin_version_id`, `river_network_version_id`, `mesh_version_id`, `model_package_uri`, and Basins package lineage when present.
+
+Fixture AD - duplicate activation conflict is not audited:
+
+- Invocation: call `PUT /api/v1/models/{basins_model_id}/active` with `{"active": true}` twice.
+- Expected: second call returns the existing duplicate/conflict error; `core.model_instance.active_flag` remains true and no second `ops.audit_log` row is written for the duplicate request.
+
+Fixture AE - activation failure does not mutate registry:
+
+- Invocation: activate a missing model or a model whose references are invalid in a synthetic/fake store test.
+- Expected: API returns the existing safe error envelope; no active-state mutation and no audit row occur.
 
 ## 5. Documentation and Validation
 

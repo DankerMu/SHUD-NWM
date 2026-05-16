@@ -38,7 +38,13 @@ class FakeModelRegistryStore:
                 "shud_code_version": "2.0",
                 "model_package_uri": "s3://nhms/models/inactive_model/package/",
                 "active_flag": False,
-                "resource_profile": {},
+                "resource_profile": {
+                    "basin_slug": "basin-a",
+                    "shud_input_name": "basin_a",
+                    "manifest_uri": "s3://nhms/models/inactive_model/v1/manifest.json",
+                    "package_checksum": "package-sha-1",
+                    "source_inventory_checksum": "inventory-sha-1",
+                },
                 "created_at": "2026-05-07T00:00:00Z",
             },
             "active_model": {
@@ -319,6 +325,39 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
         message_contains="already active",
         error_type="DuplicateResourceError",
     )
+
+
+@pytest.mark.asyncio
+async def test_basins_inactive_model_listing_then_explicit_activation(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        default_before = await client.get("/api/v1/models")
+        inactive_before = await client.get("/api/v1/models", params={"active": "false"})
+        all_before = await client.get("/api/v1/models", params={"active": "all"})
+        activation = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
+        default_after = await client.get("/api/v1/models")
+
+    assert fake_store is not None
+    assert default_before.status_code == 200
+    assert inactive_before.status_code == 200
+    assert all_before.status_code == 200
+    assert activation.status_code == 200
+    assert default_after.status_code == 200
+
+    assert "inactive_model" not in _model_ids(default_before.json())
+    assert "inactive_model" in _model_ids(inactive_before.json())
+    assert "inactive_model" in _model_ids(all_before.json())
+    assert "inactive_model" in _model_ids(default_after.json())
+
+    activated = activation.json()["data"]
+    assert activated["active_flag"] is True
+    assert activated["resource_profile"] == {
+        "basin_slug": "basin-a",
+        "shud_input_name": "basin_a",
+        "manifest_uri": "s3://nhms/models/inactive_model/v1/manifest.json",
+        "package_checksum": "package-sha-1",
+        "source_inventory_checksum": "inventory-sha-1",
+    }
 
 
 @pytest.mark.asyncio
@@ -607,6 +646,132 @@ def test_create_model_rejects_mesh_version_from_different_basin(
     assert not any("INSERT INTO core.model_instance" in statement for statement in cursor.statements)
 
 
+def test_set_model_active_writes_audit_details_after_successful_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = [
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": False,
+                    "resource_profile": {
+                        "basin_slug": "basin-a",
+                        "shud_input_name": "basin_a",
+                        "manifest_uri": "s3://nhms/models/basins_model/v1/manifest.json",
+                        "package_checksum": "package-sha-1",
+                        "source_inventory_checksum": "inventory-sha-1",
+                        "other": "kept-out-of-audit-lineage",
+                    },
+                },
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": True,
+                    "resource_profile": {
+                        "basin_slug": "basin-a",
+                        "shud_input_name": "basin_a",
+                        "manifest_uri": "s3://nhms/models/basins_model/v1/manifest.json",
+                        "package_checksum": "package-sha-1",
+                        "source_inventory_checksum": "inventory-sha-1",
+                        "other": "kept-out-of-audit-lineage",
+                    },
+                },
+            ]
+            self.statements: list[str] = []
+            self.parameters: list[tuple[Any, ...]] = []
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.statements.append(statement)
+            self.parameters.append(parameters)
+
+        def fetchone(self) -> dict[str, Any]:
+            return self.rows.pop(0)
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    result = store.set_model_active("basins_model", True)
+
+    assert result["active_flag"] is True
+    assert sum("INSERT INTO ops.audit_log" in statement for statement in cursor.statements) == 1
+    audit_parameters = cursor.parameters[-1]
+    assert audit_parameters[:3] == ("nhms-api", "model-registry", "basins_model")
+    details = audit_parameters[3]
+    assert details == {
+        "previous_active": False,
+        "active": True,
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "basin_rivnet_v01",
+        "mesh_version_id": "basin_mesh_v01",
+        "model_package_uri": "s3://nhms/models/basins_model/package/",
+        "basins_lineage": {
+            "basin_slug": "basin-a",
+            "shud_input_name": "basin_a",
+            "manifest_uri": "s3://nhms/models/basins_model/v1/manifest.json",
+            "package_checksum": "package-sha-1",
+            "source_inventory_checksum": "inventory-sha-1",
+        },
+    }
+
+
+def test_set_model_active_duplicate_and_missing_do_not_write_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self, row: dict[str, Any] | None) -> None:
+            self.row = row
+            self.statements: list[str] = []
+
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            self.statements.append(statement)
+
+        def fetchone(self) -> dict[str, Any] | None:
+            return self.row
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    duplicate_cursor = FakeCursor({"active_flag": True})
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(duplicate_cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+    with pytest.raises(DuplicateResourceError):
+        store.set_model_active("basins_model", True)
+    assert not any("INSERT INTO ops.audit_log" in statement for statement in duplicate_cursor.statements)
+
+    missing_cursor = FakeCursor(None)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(missing_cursor))
+    with pytest.raises(MissingResourceError):
+        store.set_model_active("missing_model", True)
+    assert not any("INSERT INTO ops.audit_log" in statement for statement in missing_cursor.statements)
+
+
 def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:
     assert set(body) == {"request_id", "status", "data"}
     assert body["request_id"]
@@ -617,6 +782,10 @@ def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected
     assert data["limit"] == expected_limit
     assert data["offset"] == 0
     assert {item["model_id"] for item in data["items"]} == expected_ids
+
+
+def _model_ids(body: dict[str, Any]) -> set[str]:
+    return {item["model_id"] for item in body["data"]["items"]}
 
 
 def _assert_error_envelope(

@@ -75,9 +75,11 @@ For production import, `input_dir/gis/domain.shp` should provide basin geometry,
 
 Suggested model IDs should use normalized source path components rather than only the input directory name, for example `basins_qhh_shud`, `basins_kashigeer_shud`, `basins_qinyijiang_shud`, and `basins_zhaochen_wem_shud`, with corresponding version IDs such as `<basin>_vbasins_YYYYMMDD`, `<basin>_rivnet_vbasins_YYYYMMDD`, and `<basin>_mesh_vbasins_YYYYMMDD`. Original path casing and `shud_input_name` must remain in metadata. The import must be idempotent and must not overwrite an active model without an explicit activation action.
 
-### 7. Use the current activation contract and lightweight audit evidence
+### 7. Use the current activation contract and persisted audit evidence
 
 Activation must use the current API/implementation contract `PUT /api/v1/models/{model_id}/active` with body `{ "active": true }` or compatible `active_flag`. This stage does not require a new audit table; acceptable audit evidence is an existing persisted event if available, otherwise structured logs plus API/DB evidence that only the requested model became active.
+
+For #137, the repository already has `ops.audit_log`, so the activation path should write a durable audit row for every successful model active-state transition. The audit row should identify the `model_instance`, requested active flag, previous active flag, actor/role defaults, and enough model lineage (`basin_version_id`, `river_network_version_id`, `mesh_version_id`, `model_package_uri`) to prove the explicit activation path was used. Repeating an already-active/already-inactive request remains a conflict and should not create a new audit row.
 
 ## Risks / Trade-offs
 

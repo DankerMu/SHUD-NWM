@@ -69,7 +69,9 @@ The system SHALL default imported Basins models to inactive unless an explicit a
 #### Scenario: Explicit activation is audited
 
 - **WHEN** an operator activates a Basins-backed model after import
-- **THEN** the active switch uses `PUT /api/v1/models/{model_id}/active` and records an audit event or equivalent evidence such as structured logs plus API/DB proof of the active transition
+- **THEN** the active switch uses `PUT /api/v1/models/{model_id}/active`
+- **AND** the system records durable audit evidence for the successful state transition, preferably in `ops.audit_log` when that table is available
+- **AND** duplicate activation conflicts do not create additional audit evidence
 
 #### Scenario: Inactive import is not used for default forecast staging
 
