@@ -339,6 +339,31 @@ def test_import_rejects_gis_sidecar_replaced_between_validation_and_reader(tmp_p
     assert model_id
 
 
+def test_import_rejects_source_bytes_mutated_between_parse_and_validation(tmp_path: Path) -> None:
+    _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    target = input_dir / "alias-a.sp.riv"
+    original = target.read_text(encoding="utf-8")
+    mutated = False
+
+    def hook(path: Path, role: str, phase: str) -> None:
+        nonlocal mutated
+        if path == target and role == "shud_evidence" and phase == "after_read" and not mutated:
+            target.write_text("999\n", encoding="utf-8")
+            mutated = True
+
+    basins_geometry._SAFE_OPEN_TEST_HOOK = hook
+    try:
+        with pytest.raises(BasinsRegistryImportError) as error:
+            prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+    finally:
+        basins_geometry._SAFE_OPEN_TEST_HOOK = None
+        target.write_text(original, encoding="utf-8")
+
+    assert error.value.error_code == "BASINS_REGISTRY_CHECKSUM_CONFLICT"
+    assert error.value.details["relative_paths"] == ["alias-a.sp.riv"]
+    assert model_id
+
+
 def test_parser_rejects_projected_prj_with_epsg(tmp_path: Path) -> None:
     _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
     projected = (
@@ -489,6 +514,35 @@ def test_import_command_reports_missing_sidecar_as_json(
     assert error["error_code"] == "BASINS_REGISTRY_GIS_SIDECAR_MISSING"
     assert error["model_id"] == model_id
     assert error["missing_sidecar"] == "gis/domain.shx"
+
+
+def test_import_command_reports_missing_gis_directory_as_json(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    shutil.rmtree(input_dir / "gis")
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    assert error["error_code"] == "BASINS_REGISTRY_GIS_SIDECAR_MISSING"
+    assert error["model_id"] == model_id
+    assert error["missing_sidecar"] == "gis/domain.shp"
 
 
 def test_import_command_reports_segment_count_mismatch_before_database(

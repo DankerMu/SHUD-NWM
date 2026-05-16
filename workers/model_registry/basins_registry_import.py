@@ -165,22 +165,19 @@ def _prepare_sources(
             "Basins inventory model record is missing required_files.",
             model_id=model_id,
         )
+    expected_checksums = _expected_manifest_checksums(manifest, model, model_id)
+    _verify_inventory_checksums_match_manifest(expected_checksums, model, model_id)
     try:
         geometry = parse_basins_geometry(
             model_id=model_id,
             input_dir=input_dir,
             shud_input_name=_required_model_str(model, "shud_input_name", model_id),
             required_files=required_files,
+            expected_checksums=expected_checksums,
         )
     except BasinsGeometryError as error:
-        raise BasinsRegistryImportError(
-            error.error_code,
-            str(error),
-            model_id=model_id,
-            path=error.path,
-            details=error.details,
-        ) from error
-    _validate_manifest_included_files(manifest, model, input_dir, model_id)
+        _raise_geometry_import_error(error, model_id)
+    _validate_manifest_included_files(manifest, model, input_dir, model_id, expected_checksums=expected_checksums)
     return ImportSources(
         inventory=inventory,
         manifest=manifest,
@@ -784,26 +781,9 @@ def _validate_manifest_included_files(
     model: dict[str, Any],
     input_dir: Path,
     model_id: str,
+    *,
+    expected_checksums: dict[str, str],
 ) -> None:
-    included_files = manifest.get("included_files")
-    if not isinstance(included_files, list):
-        raise BasinsRegistryImportError(
-            "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
-            "Basins package manifest included_files must be an array.",
-            model_id=model_id,
-        )
-    by_path: dict[str, dict[str, Any]] = {}
-    for entry in included_files:
-        if not isinstance(entry, dict) or not isinstance(entry.get("relative_path"), str):
-            raise BasinsRegistryImportError(
-                "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
-                "Basins package manifest included_files entries must include relative_path.",
-                model_id=model_id,
-            )
-        relative_path = _normalize_relative(entry["relative_path"], model_id)
-        if relative_path not in by_path:
-            by_path[relative_path] = entry
-
     shud_input_name = _required_model_str(model, "shud_input_name", model_id)
     canonical_paths = [f"{shud_input_name}{suffix}" for suffix in SHUD_CANONICAL_SUFFIXES.values()]
     canonical_paths.extend(
@@ -811,7 +791,7 @@ def _validate_manifest_included_files(
         for layer in ("domain", "river", "seg")
         for suffix in SHAPEFILE_REQUIRED_SUFFIXES
     )
-    missing = [relative_path for relative_path in canonical_paths if relative_path not in by_path]
+    missing = [relative_path for relative_path in canonical_paths if relative_path not in expected_checksums]
     if missing:
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_SOURCE_MISMATCH",
@@ -820,34 +800,13 @@ def _validate_manifest_included_files(
             details={"missing_included_files": missing},
         )
 
-    checksums = model.get("checksums")
-    known_checksums = checksums if isinstance(checksums, dict) else {}
     conflicts: list[str] = []
     for relative_path in canonical_paths:
-        entry = by_path[relative_path]
-        manifest_sha = entry.get("sha256")
-        if not isinstance(manifest_sha, str) or not manifest_sha:
-            conflicts.append(relative_path)
-            continue
-        inventory_sha = known_checksums.get(relative_path)
-        if isinstance(inventory_sha, str) and inventory_sha and inventory_sha != manifest_sha:
-            conflicts.append(relative_path)
-            continue
+        manifest_sha = expected_checksums[relative_path]
         try:
             actual_sha = safe_basins_file_sha256(input_dir / relative_path, input_dir)
         except BasinsGeometryError as error:
-            error_code = error.error_code
-            details = error.details
-            if error.error_code == "BASINS_REGISTRY_SOURCE_MISSING" and relative_path.startswith("gis/"):
-                error_code = "BASINS_REGISTRY_GIS_SIDECAR_MISSING"
-                details = {**details, "missing_sidecar": relative_path}
-            raise BasinsRegistryImportError(
-                error_code,
-                str(error),
-                model_id=model_id,
-                path=error.path,
-                details=details,
-            ) from error
+            _raise_geometry_import_error(error, model_id, relative_path=relative_path)
         if actual_sha != manifest_sha:
             conflicts.append(relative_path)
     if conflicts:
@@ -857,6 +816,102 @@ def _validate_manifest_included_files(
             model_id=model_id,
             details={"relative_paths": sorted(set(conflicts))},
         )
+
+
+def _expected_manifest_checksums(
+    manifest: dict[str, Any],
+    model: dict[str, Any],
+    model_id: str,
+) -> dict[str, str]:
+    included_files = manifest.get("included_files")
+    if not isinstance(included_files, list):
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
+            "Basins package manifest included_files must be an array.",
+            model_id=model_id,
+        )
+    expected: dict[str, str] = {}
+    conflicts: list[str] = []
+    for entry in included_files:
+        if not isinstance(entry, dict) or not isinstance(entry.get("relative_path"), str):
+            raise BasinsRegistryImportError(
+                "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
+                "Basins package manifest included_files entries must include relative_path.",
+                model_id=model_id,
+            )
+        relative_path = _normalize_relative(entry["relative_path"], model_id)
+        manifest_sha = entry.get("sha256")
+        if not isinstance(manifest_sha, str) or not manifest_sha:
+            conflicts.append(relative_path)
+            continue
+        expected.setdefault(relative_path, manifest_sha)
+
+    shud_input_name = _required_model_str(model, "shud_input_name", model_id)
+    canonical_paths = [f"{shud_input_name}{suffix}" for suffix in SHUD_CANONICAL_SUFFIXES.values()]
+    canonical_paths.extend(
+        f"gis/{layer}.{suffix}"
+        for layer in ("domain", "river", "seg")
+        for suffix in SHAPEFILE_REQUIRED_SUFFIXES
+    )
+    missing = [relative_path for relative_path in canonical_paths if relative_path not in expected]
+    if missing:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SOURCE_MISMATCH",
+            "Basins package manifest is missing canonical runtime/GIS package entries.",
+            model_id=model_id,
+            details={"missing_included_files": missing},
+        )
+    if conflicts:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_CHECKSUM_CONFLICT",
+            "Basins package manifest file checksums do not match selected inventory/source.",
+            model_id=model_id,
+            details={"relative_paths": sorted(set(conflicts))},
+        )
+    return {relative_path: expected[relative_path] for relative_path in canonical_paths}
+
+
+def _verify_inventory_checksums_match_manifest(
+    expected_checksums: dict[str, str],
+    model: dict[str, Any],
+    model_id: str,
+) -> None:
+    checksums = model.get("checksums")
+    known_checksums = checksums if isinstance(checksums, dict) else {}
+    conflicts = [
+        relative_path
+        for relative_path, manifest_sha in expected_checksums.items()
+        if isinstance(known_checksums.get(relative_path), str)
+        and known_checksums[relative_path]
+        and known_checksums[relative_path] != manifest_sha
+    ]
+    if conflicts:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_CHECKSUM_CONFLICT",
+            "Basins package manifest file checksums do not match selected inventory/source.",
+            model_id=model_id,
+            details={"relative_paths": sorted(set(conflicts))},
+        )
+
+
+def _raise_geometry_import_error(
+    error: BasinsGeometryError,
+    model_id: str,
+    *,
+    relative_path: str | None = None,
+) -> None:
+    error_code = error.error_code
+    details = dict(error.details)
+    if relative_path and error.error_code == "BASINS_REGISTRY_SOURCE_MISSING" and relative_path.startswith("gis/"):
+        error_code = "BASINS_REGISTRY_GIS_SIDECAR_MISSING"
+        details["missing_sidecar"] = relative_path
+    raise BasinsRegistryImportError(
+        error_code,
+        str(error),
+        model_id=model_id,
+        path=error.path,
+        details=details,
+    ) from error
 
 
 def _verify_model_id_matches_canonical_identity(model: dict[str, Any], model_id: str) -> None:

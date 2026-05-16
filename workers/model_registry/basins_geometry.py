@@ -9,7 +9,7 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from io import FileIO, TextIOWrapper
+from io import BytesIO, FileIO
 from pathlib import Path
 from typing import Any
 
@@ -87,12 +87,20 @@ class ParsedBasinsGeometry:
     evidence_counts: dict[str, int]
 
 
+@dataclass(frozen=True)
+class _LayerSnapshot:
+    base: Path
+    data: dict[str, bytes]
+    digests: dict[str, str]
+
+
 def parse_basins_geometry(
     *,
     model_id: str,
     input_dir: Path,
     shud_input_name: str,
     required_files: dict[str, Any],
+    expected_checksums: dict[str, str] | None = None,
 ) -> ParsedBasinsGeometry:
     """Parse domain and river geometry from inventory-referenced Basins files."""
 
@@ -101,19 +109,24 @@ def parse_basins_geometry(
     domain_base = _validated_layer_base(input_root, "domain", required_files)
     river_base = _validated_layer_base(input_root, "river", required_files)
     seg_base = _validated_layer_base(input_root, "seg", required_files)
-    _validate_prj(domain_base)
-    _validate_prj(river_base)
-    _validate_prj(seg_base)
+    domain_layer = _load_layer_snapshot(domain_base, input_root, expected_checksums)
+    river_layer = _load_layer_snapshot(river_base, input_root, expected_checksums)
+    seg_layer = _load_layer_snapshot(seg_base, input_root, expected_checksums)
+    _validate_prj(domain_layer)
+    _validate_prj(river_layer)
+    _validate_prj(seg_layer)
 
     sp_riv = _required_input_file(input_root, required_files, "sp_riv", shud_input_name)
     sp_rivseg = _required_input_file(input_root, required_files, "sp_rivseg", shud_input_name)
-    domain_wkt = _domain_multipolygon_wkt(domain_base)
+    sp_riv_count, sp_riv_digest = _shud_segment_count(sp_riv, expected_checksums)
+    sp_rivseg_count, sp_rivseg_digest = _shud_segment_count(sp_rivseg, expected_checksums)
+    domain_wkt = _domain_multipolygon_wkt(domain_layer)
 
-    river_segments = _river_segments_from_layer(seg_base, model_id=model_id)
-    selected_base = seg_base
+    river_segments = _river_segments_from_layer(seg_layer, model_id=model_id)
+    selected_layer = seg_layer
     if not river_segments:
-        river_segments = _river_segments_from_layer(river_base, model_id=model_id)
-        selected_base = river_base
+        river_segments = _river_segments_from_layer(river_layer, model_id=model_id)
+        selected_layer = river_layer
     if not river_segments:
         raise BasinsGeometryError(
             "BASINS_REGISTRY_GIS_PARSE_FAILED",
@@ -122,8 +135,8 @@ def parse_basins_geometry(
         )
 
     evidence_counts = {
-        "sp_riv": _shud_segment_count(sp_riv),
-        "sp_rivseg": _shud_segment_count(sp_rivseg),
+        "sp_riv": sp_riv_count,
+        "sp_rivseg": sp_rivseg_count,
     }
     for evidence_name, evidence_count in evidence_counts.items():
         if evidence_count != len(river_segments):
@@ -141,11 +154,15 @@ def parse_basins_geometry(
 
     return ParsedBasinsGeometry(
         domain_wkt=domain_wkt,
-        domain_checksum=_layer_checksum(domain_base, input_root),
+        domain_checksum=_layer_checksum_from_snapshot(domain_layer),
         domain_source_uri=str(domain_base.with_suffix(".shp")),
         river_segments=river_segments,
-        river_network_checksum=_river_network_checksum(selected_base, sp_riv, sp_rivseg, input_root),
-        river_network_source_uri=str(selected_base.with_suffix(".shp")),
+        river_network_checksum=_river_network_checksum_from_snapshot(
+            selected_layer,
+            sp_riv_digest=sp_riv_digest,
+            sp_rivseg_digest=sp_rivseg_digest,
+        ),
+        river_network_source_uri=str(selected_layer.base.with_suffix(".shp")),
         segment_count=len(river_segments),
         evidence_counts=evidence_counts,
     )
@@ -202,16 +219,31 @@ def _required_input_file(input_dir: Path, required_files: dict[str, Any], role: 
     return path
 
 
-def _validate_prj(layer_base: Path) -> None:
-    prj_path = layer_base.with_suffix(".prj")
-    _validate_safe_file(
-        prj_path,
-        layer_base.parent.parent,
-        role="prj",
-        error_code="BASINS_REGISTRY_GIS_CRS_UNSUPPORTED",
-    )
-    with _open_safe_text(prj_path, layer_base.parent.parent, role="prj") as handle:
-        text = handle.read()
+def _load_layer_snapshot(
+    layer_base: Path,
+    input_root: Path,
+    expected_checksums: dict[str, str] | None,
+) -> _LayerSnapshot:
+    data: dict[str, bytes] = {}
+    digests: dict[str, str] = {}
+    for suffix in SHAPEFILE_REQUIRED_SUFFIXES:
+        role = f"gis_{layer_base.name}_{suffix}"
+        path = layer_base.with_suffix(f".{suffix}")
+        payload, digest = _read_verified_binary(
+            path,
+            input_root,
+            role=role,
+            expected_checksums=expected_checksums,
+            error_code="BASINS_REGISTRY_GIS_SIDECAR_MISSING",
+        )
+        data[suffix] = payload
+        digests[suffix] = digest
+    return _LayerSnapshot(base=layer_base, data=data, digests=digests)
+
+
+def _validate_prj(layer: _LayerSnapshot) -> None:
+    prj_path = layer.base.with_suffix(".prj")
+    text = layer.data["prj"].decode("utf-8", errors="ignore")
     normalized = re.sub(r"[\s_]+", "", text.upper())
     is_projected = "PROJCS[" in normalized or "PROJCRS[" in normalized or "PROJECTION[" in normalized
     is_wgs84 = "GEOGCS[\"GCSWGS1984\"" in normalized or "DATUM[\"DWGS1984\"" in normalized
@@ -230,8 +262,8 @@ def _validate_prj(layer_base: Path) -> None:
         )
 
 
-def _domain_multipolygon_wkt(layer_base: Path) -> str:
-    reader = _shape_reader(layer_base)
+def _domain_multipolygon_wkt(layer: _LayerSnapshot) -> str:
+    reader = _shape_reader(layer)
     try:
         polygons: list[str] = []
         feature_count = 0
@@ -242,12 +274,12 @@ def _domain_multipolygon_wkt(layer_base: Path) -> str:
                 feature_count,
                 MAX_BASINS_GIS_FEATURES,
                 "features",
-                str(layer_base.with_suffix(".shp")),
+                str(layer.base.with_suffix(".shp")),
             )
             shape_rings: list[list[tuple[float, float]]] = []
             for ring in _shape_parts(shape):
                 point_count += len(ring)
-                _check_resource_limit(point_count, MAX_BASINS_GIS_POINTS, "points", str(layer_base.with_suffix(".shp")))
+                _check_resource_limit(point_count, MAX_BASINS_GIS_POINTS, "points", str(layer.base.with_suffix(".shp")))
                 closed = _closed_ring(ring)
                 if len(closed) >= 4:
                     shape_rings.append(closed)
@@ -258,13 +290,13 @@ def _domain_multipolygon_wkt(layer_base: Path) -> str:
         raise BasinsGeometryError(
             "BASINS_REGISTRY_GIS_PARSE_FAILED",
             "Basins domain shapefile did not contain a non-empty polygon.",
-            path=str(layer_base.with_suffix(".shp")),
+            path=str(layer.base.with_suffix(".shp")),
         )
     return "MULTIPOLYGON(" + ", ".join(polygons) + ")"
 
 
-def _river_segments_from_layer(layer_base: Path, *, model_id: str) -> list[RiverSegmentGeometry]:
-    reader = _shape_reader(layer_base)
+def _river_segments_from_layer(layer: _LayerSnapshot, *, model_id: str) -> list[RiverSegmentGeometry]:
+    reader = _shape_reader(layer)
     try:
         pending: list[dict[str, Any]] = []
         feature_count = 0
@@ -275,13 +307,13 @@ def _river_segments_from_layer(layer_base: Path, *, model_id: str) -> list[River
                 feature_count,
                 MAX_BASINS_GIS_FEATURES,
                 "features",
-                str(layer_base.with_suffix(".shp")),
+                str(layer.base.with_suffix(".shp")),
             )
             attrs = _record_dict(shape_record)
             parts = _shape_parts(shape_record.shape)
             for part_index, points in enumerate(parts, start=1):
                 point_count += len(points)
-                _check_resource_limit(point_count, MAX_BASINS_GIS_POINTS, "points", str(layer_base.with_suffix(".shp")))
+                _check_resource_limit(point_count, MAX_BASINS_GIS_POINTS, "points", str(layer.base.with_suffix(".shp")))
                 if len(points) < 2:
                     continue
                 order = _optional_int(_pick_attr(attrs, ("segment_order", "stream_order", "order", "ord", "seg_order")))
@@ -306,7 +338,7 @@ def _river_segments_from_layer(layer_base: Path, *, model_id: str) -> list[River
                 properties = {str(key): _jsonable(value) for key, value in attrs.items()}
                 properties.update(
                     {
-                        "source_layer": layer_base.name,
+                        "source_layer": layer.base.name,
                         "source_record_index": record_index,
                         "source_part_index": part_index,
                         "source_raw_segment_id": _jsonable(raw_id),
@@ -354,64 +386,25 @@ def _river_segments_from_layer(layer_base: Path, *, model_id: str) -> list[River
     return segments
 
 
-def _shape_reader(layer_base: Path) -> Any:
+def _shape_reader(layer: _LayerSnapshot) -> Any:
     try:
         import shapefile
     except ImportError as error:
         raise BasinsGeometryError(
             "BASINS_REGISTRY_SHAPEFILE_DEPENDENCY_MISSING",
             "pyshp is required for Basins shapefile parsing.",
-            path=str(layer_base.with_suffix(".shp")),
+            path=str(layer.base.with_suffix(".shp")),
         ) from error
     try:
-        input_root = layer_base.parent.parent
-        paths = {
-            suffix: layer_base.with_suffix(f".{suffix}")
-            for suffix in ("shp", "shx", "dbf")
-        }
-        for suffix in ("shp", "shx", "dbf"):
-            _validate_safe_file(
-                paths[suffix],
-                input_root,
-                role=f"gis_{layer_base.name}_{suffix}",
-                error_code="BASINS_REGISTRY_GIS_SIDECAR_MISSING",
-            )
-        identities = {
-            suffix: _file_identity(paths[suffix], input_root, role=f"gis_{layer_base.name}_{suffix}")
-            for suffix in ("shp", "shx", "dbf")
-        }
-        handles = {
-            suffix: _open_safe_binary_handle(
-                paths[suffix],
-                input_root,
-                role=f"gis_{layer_base.name}_{suffix}",
-                expected_identity=identities[suffix],
-            )
-            for suffix in ("shp", "shx", "dbf")
-        }
-        try:
-            reader = shapefile.Reader(shp=handles["shp"], shx=handles["shx"], dbf=handles["dbf"])
-        except Exception:
-            for handle in handles.values():
-                handle.close()
-            raise
-        for suffix in ("shp", "shx", "dbf"):
-            if _file_identity(paths[suffix], input_root, role=f"gis_{layer_base.name}_{suffix}") != identities[suffix]:
-                reader.close()
-                raise BasinsGeometryError(
-                    "BASINS_REGISTRY_PATH_UNSAFE",
-                    "Basins source path changed during shapefile reader construction.",
-                    path=str(paths[suffix]),
-                    details={"role": f"gis_{layer_base.name}_{suffix}"},
-                )
-        return reader
+        handles = {suffix: BytesIO(layer.data[suffix]) for suffix in ("shp", "shx", "dbf")}
+        return shapefile.Reader(shp=handles["shp"], shx=handles["shx"], dbf=handles["dbf"])
     except BasinsGeometryError:
         raise
     except Exception as error:
         raise BasinsGeometryError(
             "BASINS_REGISTRY_GIS_PARSE_FAILED",
             f"Failed to parse Basins shapefile: {error}",
-            path=str(layer_base.with_suffix(".shp")),
+            path=str(layer.base.with_suffix(".shp")),
         ) from error
 
 
@@ -566,42 +559,48 @@ def _point_wkt(point: tuple[float, float]) -> str:
     return f"{point[0]:.12g} {point[1]:.12g}"
 
 
-def _shud_segment_count(path: Path) -> int:
+def _shud_segment_count(path: Path, expected_checksums: dict[str, str] | None) -> tuple[int, str]:
     input_root = path.parent
-    _validate_safe_file(path, input_root, role="shud_evidence", error_code="BASINS_REGISTRY_SOURCE_MISSING")
     first: list[str] | None = None
     row_count = 0
     byte_count = 0
-    with _open_safe_text(path, input_root, role="shud_evidence") as handle:
-        for line_count, line in enumerate(handle, start=1):
-            _check_resource_limit(
-                line_count,
-                MAX_BASINS_SHUD_EVIDENCE_LINES,
-                "shud_evidence_lines",
-                str(path),
-            )
-            byte_count += len(line.encode("utf-8"))
-            _check_resource_limit(
-                byte_count,
-                MAX_BASINS_SHUD_EVIDENCE_BYTES,
-                "shud_evidence_bytes",
-                str(path),
-            )
-            stripped = line.strip()
-            if not stripped or stripped.startswith(("#", "//", "%")):
-                continue
-            tokens = re.split(r"[\s,]+", stripped)
-            if not tokens:
-                continue
-            if any(re.search(r"[A-Za-z]", token) for token in tokens):
-                continue
-            if first is None:
-                first = tokens
-                if len(first) == 1:
-                    declared = _optional_int(first[0])
-                    if declared is not None and declared >= 0:
-                        return declared
-            row_count += 1
+    payload, digest = _read_verified_binary(
+        path,
+        input_root,
+        role="shud_evidence",
+        expected_checksums=expected_checksums,
+        error_code="BASINS_REGISTRY_SOURCE_MISSING",
+        max_bytes=MAX_BASINS_SHUD_EVIDENCE_BYTES,
+    )
+    for line_count, line in enumerate(payload.decode("utf-8", errors="ignore").splitlines(), start=1):
+        _check_resource_limit(
+            line_count,
+            MAX_BASINS_SHUD_EVIDENCE_LINES,
+            "shud_evidence_lines",
+            str(path),
+        )
+        byte_count += len(line.encode("utf-8")) + 1
+        _check_resource_limit(
+            byte_count,
+            MAX_BASINS_SHUD_EVIDENCE_BYTES,
+            "shud_evidence_bytes",
+            str(path),
+        )
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "//", "%")):
+            continue
+        tokens = re.split(r"[\s,]+", stripped)
+        if not tokens:
+            continue
+        if any(re.search(r"[A-Za-z]", token) for token in tokens):
+            continue
+        if first is None:
+            first = tokens
+            if len(first) == 1:
+                declared = _optional_int(first[0])
+                if declared is not None and declared >= 0:
+                    return declared, digest
+        row_count += 1
     if first is None:
         raise BasinsGeometryError(
             "BASINS_REGISTRY_SHUD_PARSE_FAILED",
@@ -611,23 +610,28 @@ def _shud_segment_count(path: Path) -> int:
     if len(first) == 1:
         declared = _optional_int(first[0])
         if declared is not None and declared >= 0:
-            return declared
-    return row_count
+            return declared, digest
+    return row_count, digest
 
 
-def _layer_checksum(layer_base: Path, input_root: Path) -> str:
+def _layer_checksum_from_snapshot(layer: _LayerSnapshot) -> str:
     digest = hashlib.sha256()
     for suffix in SHAPEFILE_REQUIRED_SUFFIXES:
         digest.update(suffix.encode("utf-8"))
-        digest.update(_sha256_file(layer_base.with_suffix(f".{suffix}"), input_root).encode("ascii"))
+        digest.update(layer.digests[suffix].encode("ascii"))
     return digest.hexdigest()
 
 
-def _river_network_checksum(layer_base: Path, sp_riv: Path, sp_rivseg: Path, input_root: Path) -> str:
+def _river_network_checksum_from_snapshot(
+    layer: _LayerSnapshot,
+    *,
+    sp_riv_digest: str,
+    sp_rivseg_digest: str,
+) -> str:
     material = {
-        "gis": _layer_checksum(layer_base, input_root),
-        "sp_riv": _sha256_file(sp_riv, input_root),
-        "sp_rivseg": _sha256_file(sp_rivseg, input_root),
+        "gis": _layer_checksum_from_snapshot(layer),
+        "sp_riv": sp_riv_digest,
+        "sp_rivseg": sp_rivseg_digest,
     }
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -644,6 +648,55 @@ def _sha256_file(path: Path, containment_root: Path) -> str:
 def safe_basins_file_sha256(path: Path, containment_root: Path) -> str:
     _validate_safe_file(path, containment_root, role="checksum", error_code="BASINS_REGISTRY_SOURCE_MISSING")
     return _sha256_file(path, containment_root)
+
+
+def _read_verified_binary(
+    path: Path,
+    containment_root: Path,
+    *,
+    role: str,
+    expected_checksums: dict[str, str] | None,
+    error_code: str,
+    max_bytes: int | None = None,
+) -> tuple[bytes, str]:
+    _validate_safe_file(path, containment_root, role=role, error_code=error_code)
+    digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    byte_count = 0
+    with _open_safe_binary(path, containment_root, role=role) as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            byte_count += len(chunk)
+            if max_bytes is not None:
+                _check_resource_limit(byte_count, max_bytes, "shud_evidence_bytes", str(path))
+            digest.update(chunk)
+            chunks.append(chunk)
+    actual = digest.hexdigest()
+    _run_safe_open_test_hook(path, role, "after_read")
+    relative_path = _relative_to_root(path, containment_root)
+    expected = expected_checksums.get(relative_path) if expected_checksums is not None else None
+    if expected_checksums is not None and not expected:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_SOURCE_MISMATCH",
+            "Basins source file is missing an expected manifest checksum.",
+            path=str(path),
+            details={"role": role, "relative_path": relative_path},
+        )
+    if expected is not None and actual != expected:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_CHECKSUM_CONFLICT",
+            "Basins source bytes do not match the manifest-verified checksum.",
+            path=str(path),
+            details={"role": role, "relative_path": relative_path},
+        )
+    return b"".join(chunks), actual
+
+
+def _relative_to_root(path: Path, containment_root: Path) -> str:
+    candidate = path if path.is_absolute() else containment_root / path
+    try:
+        return candidate.relative_to(containment_root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _file_identity(path: Path, containment_root: Path, *, role: str) -> tuple[int, int, int]:
@@ -674,16 +727,6 @@ def _open_safe_binary(path: Path, containment_root: Path, *, role: str) -> Itera
         yield handle
     finally:
         handle.close()
-
-
-@contextmanager
-def _open_safe_text(path: Path, containment_root: Path, *, role: str) -> Iterator[TextIOWrapper]:
-    with _open_safe_binary(path, containment_root, role=role) as raw:
-        text = TextIOWrapper(raw, encoding="utf-8", errors="ignore")
-        try:
-            yield text
-        finally:
-            text.detach()
 
 
 def _open_safe_binary_handle(
@@ -790,14 +833,15 @@ def _validate_safe_file(path: Path, containment_root: Path, *, role: str, error_
         try:
             mode = current.lstat().st_mode
         except FileNotFoundError:
-            if current == candidate:
-                raise BasinsGeometryError(
-                    error_code,
-                    "Basins source file is missing.",
-                    path=str(candidate),
-                    details={"role": role},
-                ) from None
-            raise
+            details: dict[str, Any] = {"role": role}
+            if error_code == "BASINS_REGISTRY_GIS_SIDECAR_MISSING":
+                details["missing_sidecar"] = relative.as_posix()
+            raise BasinsGeometryError(
+                error_code,
+                "Basins source path component is missing.",
+                path=str(candidate),
+                details=details,
+            ) from None
         except OSError as error:
             raise BasinsGeometryError(
                 "BASINS_REGISTRY_PATH_UNSAFE",
