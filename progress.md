@@ -126,6 +126,7 @@
 - #136 PR #142 final review 修复已补齐：registry import 使用 pyproj 接受 WGS84/CGCS2000 地理坐标与真实 Basins WGS84/CGCS2000 Albers/TM 投影 PRJ，并在写入 SRID 4490 WKT 前重投影到 lon/lat；`.sp.riv` 作为 `river_count` 证据、`.sp.rivseg` 作为 `rivseg_segment_count` 与 `seg.shp` feature count 对齐，多 part polyline 记录按单个 segment 导入。
 - 已新增 fast parser/CLI 测试和 opt-in PostgreSQL/PostGIS integration 测试；真实 Basins import smoke 仅在 `NHMS_RUN_REAL_BASINS_IMPORT=1`、integration DB 配置和 `data/Basins` 存在时运行。
 - #137 已补齐 Basins-backed inactive model 显式激活证据：`PsycopgModelRegistryStore.set_model_active()` 成功变更会在同事务写入 `ops.audit_log`，记录 active 前后状态、model lineage 与 Basins package lineage；重复/缺失失败不写审计，API listing 覆盖 inactive/all/default active 发现路径。
+- #137 PR #143 review 修复已补齐：激活审计写入前清洗 `model_package_uri` 与 Basins lineage `manifest_uri`，移除 userinfo、query、fragment，仅保留稳定 scheme/host/path；fast/integration 测试覆盖敏感 URI 不落审计、重复/缺失不写审计，以及激活后 `active=false` 不再返回该 Basins 模型。
 
 ## 已知技术风险 / 注意事项
 

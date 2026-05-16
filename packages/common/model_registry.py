@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 class ModelRegistryError(RuntimeError):
@@ -623,7 +624,7 @@ class PsycopgModelRegistryStore:
             "basin_version_id": updated["basin_version_id"],
             "river_network_version_id": updated["river_network_version_id"],
             "mesh_version_id": updated["mesh_version_id"],
-            "model_package_uri": updated["model_package_uri"],
+            "model_package_uri": _sanitize_audit_uri(updated["model_package_uri"]),
         }
         basins_lineage = _basins_lineage_details(updated.get("resource_profile"))
         if basins_lineage:
@@ -659,6 +660,13 @@ BASINS_AUDIT_LINEAGE_KEYS = (
     "package_checksum",
     "source_inventory_checksum",
 )
+BASINS_AUDIT_LINEAGE_URI_KEYS = frozenset({"manifest_uri"})
+
+
+def _sanitize_audit_uri(value: Any) -> str:
+    parsed = urlsplit(str(value))
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 def _basins_lineage_details(resource_profile: Any) -> dict[str, Any]:
@@ -669,11 +677,13 @@ def _basins_lineage_details(resource_profile: Any) -> dict[str, Any]:
             return {}
     if not isinstance(resource_profile, Mapping):
         return {}
-    return {
-        key: resource_profile[key]
-        for key in BASINS_AUDIT_LINEAGE_KEYS
-        if resource_profile.get(key) not in (None, "")
-    }
+    details: dict[str, Any] = {}
+    for key in BASINS_AUDIT_LINEAGE_KEYS:
+        value = resource_profile.get(key)
+        if value in (None, ""):
+            continue
+        details[key] = _sanitize_audit_uri(value) if key in BASINS_AUDIT_LINEAGE_URI_KEYS else value
+    return details
 
 
 class _PsycopgTransaction:

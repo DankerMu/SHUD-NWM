@@ -27,10 +27,11 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
             duplicate = client.put(f"/api/v1/models/{ids['basins_model_id']}/active", json={"active": True})
             missing = client.put("/api/v1/models/it137_missing_model/active", json={"active": True})
             default_after = client.get("/api/v1/models")
+            inactive_after = client.get("/api/v1/models", params={"active": "false"})
     finally:
         app.dependency_overrides.pop(get_model_registry_store, None)
 
-    for response in (default_before, inactive_before, all_before, activation, default_after):
+    for response in (default_before, inactive_before, all_before, activation, default_after, inactive_after):
         assert response.status_code == 200, response.text
     assert duplicate.status_code == 409
     assert missing.status_code == 404
@@ -40,11 +41,12 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     assert ids["basins_model_id"] in _model_ids(inactive_before.json())
     assert {ids["active_model_id"], ids["basins_model_id"]} <= _model_ids(all_before.json())
     assert ids["basins_model_id"] in _model_ids(default_after.json())
+    assert ids["basins_model_id"] not in _model_ids(inactive_after.json())
 
     activated = activation.json()["data"]
     assert activated["active_flag"] is True
     assert activated["resource_profile"]["basin_slug"] == "it137-basin"
-    assert activated["resource_profile"]["manifest_uri"] == "s3://nhms/models/it137_basins_model/v1/manifest.json"
+    assert "token=secret" in activated["resource_profile"]["manifest_uri"]
 
     with psycopg_connection(integration_database_url) as connection:
         with connection.cursor() as cursor:
@@ -75,6 +77,8 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     assert audit["action"] == "model_instance.active.set"
     assert audit["entity_type"] == "model_instance"
     assert audit["entity_id"] == ids["basins_model_id"]
+    assert _has_no_sensitive_uri_parts(audit["details"]["model_package_uri"])
+    assert _has_no_sensitive_uri_parts(audit["details"]["basins_lineage"]["manifest_uri"])
     assert audit["details"] == {
         "previous_active": False,
         "active": True,
@@ -170,13 +174,16 @@ def _seed_issue_137_models(database_url: str) -> dict[str, str]:
                     ids["basin_version_id"],
                     ids["river_network_version_id"],
                     ids["mesh_version_id"],
-                    "s3://nhms/models/it137_basins_model/package/",
+                    "s3://user:pass@nhms/models/it137_basins_model/package/?token=secret#credential",
                     Json(
                         {
                             "fixture": "issue-137-basins",
                             "basin_slug": "it137-basin",
                             "shud_input_name": "it137_basin",
-                            "manifest_uri": "s3://nhms/models/it137_basins_model/v1/manifest.json",
+                            "manifest_uri": (
+                                "s3://user:pass@nhms/models/it137_basins_model/v1/manifest.json"
+                                "?token=secret#credential"
+                            ),
                             "package_checksum": "package-sha-it137",
                             "source_inventory_checksum": "inventory-sha-it137",
                         }
@@ -197,3 +204,7 @@ def _delete_issue_137_rows(cursor: Any) -> None:
 
 def _model_ids(body: dict[str, Any]) -> set[str]:
     return {item["model_id"] for item in body["data"]["items"]}
+
+
+def _has_no_sensitive_uri_parts(value: str) -> bool:
+    return "token=" not in value and "?" not in value and "#" not in value and "user:pass@" not in value

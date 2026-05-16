@@ -336,6 +336,7 @@ async def test_basins_inactive_model_listing_then_explicit_activation(fake_store
         all_before = await client.get("/api/v1/models", params={"active": "all"})
         activation = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
         default_after = await client.get("/api/v1/models")
+        inactive_after = await client.get("/api/v1/models", params={"active": "false"})
 
     assert fake_store is not None
     assert default_before.status_code == 200
@@ -343,11 +344,13 @@ async def test_basins_inactive_model_listing_then_explicit_activation(fake_store
     assert all_before.status_code == 200
     assert activation.status_code == 200
     assert default_after.status_code == 200
+    assert inactive_after.status_code == 200
 
     assert "inactive_model" not in _model_ids(default_before.json())
     assert "inactive_model" in _model_ids(inactive_before.json())
     assert "inactive_model" in _model_ids(all_before.json())
     assert "inactive_model" in _model_ids(default_after.json())
+    assert "inactive_model" not in _model_ids(inactive_after.json())
 
     activated = activation.json()["data"]
     assert activated["active_flag"] is True
@@ -657,12 +660,16 @@ def test_set_model_active_writes_audit_details_after_successful_update(
                     "basin_version_id": "basin_v01",
                     "river_network_version_id": "basin_rivnet_v01",
                     "mesh_version_id": "basin_mesh_v01",
-                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "model_package_uri": (
+                        "s3://user:pass@nhms/models/basins_model/package/?token=secret#credential"
+                    ),
                     "active_flag": False,
                     "resource_profile": {
                         "basin_slug": "basin-a",
                         "shud_input_name": "basin_a",
-                        "manifest_uri": "s3://nhms/models/basins_model/v1/manifest.json",
+                        "manifest_uri": (
+                            "s3://user:pass@nhms/models/basins_model/v1/manifest.json?token=secret#credential"
+                        ),
                         "package_checksum": "package-sha-1",
                         "source_inventory_checksum": "inventory-sha-1",
                         "other": "kept-out-of-audit-lineage",
@@ -673,12 +680,16 @@ def test_set_model_active_writes_audit_details_after_successful_update(
                     "basin_version_id": "basin_v01",
                     "river_network_version_id": "basin_rivnet_v01",
                     "mesh_version_id": "basin_mesh_v01",
-                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "model_package_uri": (
+                        "s3://user:pass@nhms/models/basins_model/package/?token=secret#credential"
+                    ),
                     "active_flag": True,
                     "resource_profile": {
                         "basin_slug": "basin-a",
                         "shud_input_name": "basin_a",
-                        "manifest_uri": "s3://nhms/models/basins_model/v1/manifest.json",
+                        "manifest_uri": (
+                            "s3://user:pass@nhms/models/basins_model/v1/manifest.json?token=secret#credential"
+                        ),
                         "package_checksum": "package-sha-1",
                         "source_inventory_checksum": "inventory-sha-1",
                         "other": "kept-out-of-audit-lineage",
@@ -717,6 +728,11 @@ def test_set_model_active_writes_audit_details_after_successful_update(
     audit_parameters = cursor.parameters[-1]
     assert audit_parameters[:3] == ("nhms-api", "model-registry", "basins_model")
     details = audit_parameters[3]
+    assert "other" not in str(details)
+    assert "token=" not in str(details)
+    assert "user:pass@" not in str(details)
+    assert "?" not in details["model_package_uri"]
+    assert "#" not in details["model_package_uri"]
     assert details == {
         "previous_active": False,
         "active": True,
