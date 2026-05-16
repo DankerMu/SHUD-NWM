@@ -101,6 +101,7 @@
 - Basins package Phase 6 集成修复已补齐 stale inventory/source 文件在 planning/checksum 阶段消失或不可读时的结构化 JSON 错误，包含 `model_id`、`version`、源 `path` 与 `manifest_uri`，且不写本地 manifest。
 - 已新增 `nhms-model basins-migration-report`：symlink Basins root 返回 `BASINS_MIGRATION_SYMLINK_TARGET`；真实 copied root 输出 file count、byte count、inventory checksum、source-to-target metadata、`production_ready=true`。
 - #135 Phase 6 follow-up 已补齐：`basins-migration-report` 默认 `source_uri=/volume/data/nwm/Basins` 并按文档命令返回 JSON 错误；`publish-basins` 先校验单段安全 `model_id/version`；canonical runtime 必需文件只接受 `input_dir` 直接子文件，GIS 仍固定为 `gis/<file>`；inventory 非 UTF-8 字节返回 `BASINS_INVENTORY_INVALID` JSON；`required_files` 中 canonical 以外的额外条目返回 `BASINS_REQUIRED_FILES_NON_CANONICAL` 且不写本地 manifest 或额外 package entry。
+- #135 Phase 6 round 7 已补齐：早期 stale required source 错误携带 `manifest_uri`；migration evidence stat/read 失败收敛为 `BASINS_MIGRATION_EVIDENCE_READ_FAILED` JSON；最终 package hash/copy 前会重新执行 symlink/containment 校验并用 no-follow 打开源文件，防止规划后替换为 symlink。
 
 ## 已知技术风险 / 注意事项
 

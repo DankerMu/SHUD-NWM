@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 
@@ -63,6 +64,7 @@ class BasinsPackageError(RuntimeError):
 @dataclass(frozen=True)
 class SourceFile:
     source_path: Path
+    source_root: Path
     relative_path: str
     object_key: str
     object_uri: str
@@ -102,6 +104,7 @@ def publish_basins_package(
         package_key,
         model_id=model_id,
         version=version,
+        manifest_uri=manifest_uri,
     )
     forcing, forcing_files = _forcing_metadata(
         model=model,
@@ -197,7 +200,15 @@ def publish_basins_package(
         )
         included_files = []
         for source_file in source_files:
-            included_files.append(_write_source_file_to_store(source_file, store))
+            included_files.append(
+                _write_source_file_to_store(
+                    source_file,
+                    store,
+                    model_id=model_id,
+                    version=version,
+                    manifest_uri=manifest_uri,
+                )
+            )
         included_files = sorted(included_files, key=lambda item: (item["role"], item["relative_path"]))
         if copy_forcing:
             forcing = _forcing_metadata_from_written_entries(forcing, included_files)
@@ -490,6 +501,7 @@ def _package_source_files(
     *,
     model_id: str,
     version: str,
+    manifest_uri: str,
 ) -> list[SourceFile]:
     input_dir = _safe_source_dir(
         model.get("input_dir"),
@@ -498,6 +510,7 @@ def _package_source_files(
         "input_dir",
         model_id=model_id,
         version=version,
+        manifest_uri=manifest_uri,
     )
     expected_input_dir = _expected_input_dir(model, source_root, model_id=model_id, version=version)
     _ensure_inventory_path_matches_expected(
@@ -516,6 +529,7 @@ def _package_source_files(
             "gis_dir",
             model_id=model_id,
             version=version,
+            manifest_uri=manifest_uri,
         )
         _ensure_inventory_path_matches_expected(
             gis_dir,
@@ -535,10 +549,11 @@ def _package_source_files(
         package_key,
         model_id=model_id,
         version=version,
+        manifest_uri=manifest_uri,
     )
 
     calib_path = source_root / "CALIB"
-    _reject_source_symlink_path(calib_path, source_root)
+    _reject_source_symlink_path(calib_path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
     if calib_path.is_dir():
         calib_dir = _resolve_package_path(calib_path)
         _ensure_under_source_root(calib_dir, source_root)
@@ -547,6 +562,7 @@ def _package_source_files(
             files.append(
                 SourceFile(
                     source_path=path,
+                    source_root=source_root,
                     relative_path=relative_path,
                     object_key=f"{package_key}/{relative_path}",
                     object_uri=object_store.uri_for_key(f"{package_key}/{relative_path}"),
@@ -565,6 +581,7 @@ def _validated_canonical_required_source_files(
     *,
     model_id: str,
     version: str,
+    manifest_uri: str,
 ) -> list[SourceFile]:
     missing: list[str] = []
     extras: list[str] = []
@@ -587,13 +604,20 @@ def _validated_canonical_required_source_files(
             missing.append(role)
             continue
         for relative_path in matching_paths:
-            source_path = _safe_source_file(input_dir / relative_path, source_root, model_id=model_id, version=version)
+            source_path = _safe_source_file(
+                input_dir / relative_path,
+                source_root,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
             files.append(
                 _source_file_for_package(
                     source_path,
                     relative_path,
                     object_store,
                     package_key,
+                    source_root=source_root,
                     role="runtime_input",
                 )
             )
@@ -609,8 +633,23 @@ def _validated_canonical_required_source_files(
         if expected_path not in normalized_names:
             missing.append(role)
             continue
-        source_path = _safe_source_file(input_dir / expected_path, source_root, model_id=model_id, version=version)
-        files.append(_source_file_for_package(source_path, expected_path, object_store, package_key, role="gis"))
+        source_path = _safe_source_file(
+            input_dir / expected_path,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        files.append(
+            _source_file_for_package(
+                source_path,
+                expected_path,
+                object_store,
+                package_key,
+                source_root=source_root,
+                role="gis",
+            )
+        )
 
     for role, relative_names in required_files.items():
         role_name = str(role)
@@ -648,11 +687,13 @@ def _source_file_for_package(
     object_store: LocalObjectStore,
     package_key: str,
     *,
+    source_root: Path,
     role: str,
 ) -> SourceFile:
     object_key = f"{package_key}/{relative_path}"
     return SourceFile(
         source_path=source_path,
+        source_root=source_root,
         relative_path=relative_path,
         object_key=object_key,
         object_uri=object_store.uri_for_key(object_key),
@@ -768,6 +809,7 @@ def _forcing_metadata(
         "forcing_dir",
         model_id=model_id,
         version=version,
+        manifest_uri=manifest_uri,
     )
     expected_forcing_dir = _expected_forcing_dir(model, source_root, model_id=model_id, version=version)
     _ensure_inventory_path_matches_expected(
@@ -794,6 +836,7 @@ def _forcing_metadata(
         relative_path = _normalize_relative_path(path.relative_to(forcing_dir).as_posix())
         size_bytes, sha256 = _source_file_evidence(
             path,
+            source_root,
             model_id=model_id,
             version=version,
             manifest_uri=manifest_uri,
@@ -819,6 +862,7 @@ def _forcing_metadata(
             source_files.append(
                 SourceFile(
                     source_path=path,
+                    source_root=source_root,
                     relative_path=relative_path,
                     object_key=f"{forcing_key}/{relative_path}",
                     object_uri=object_store.uri_for_key(f"{forcing_key}/{relative_path}"),
@@ -860,6 +904,7 @@ def _planned_file_entry(
 ) -> dict[str, Any]:
     size_bytes, sha256 = _source_file_evidence(
         source_file.source_path,
+        source_file.source_root,
         model_id=model_id,
         version=version,
         manifest_uri=manifest_uri,
@@ -874,14 +919,23 @@ def _planned_file_entry(
 
 def _source_file_evidence(
     path: Path,
+    source_root: Path,
     *,
     model_id: str | None = None,
     version: str | None = None,
     manifest_uri: str | None = None,
 ) -> tuple[int, str]:
     try:
-        size_bytes = path.stat().st_size
-        sha256 = _sha256_file(path)
+        with _open_verified_source_file(
+            path,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as source:
+            stat_result = os.fstat(source.fileno())
+            size_bytes = stat_result.st_size
+            sha256 = _sha256_handle(source)
     except OSError as error:
         raise BasinsPackageError(
             "BASINS_PACKAGE_WRITE_FAILED",
@@ -1082,20 +1136,53 @@ def _release_publish_lock(store: LocalObjectStore, lock_key: str) -> None:
         pass
 
 
-def _write_source_file_to_store(source_file: SourceFile, store: LocalObjectStore) -> dict[str, Any]:
-    size_bytes, sha256 = _write_file_to_store_streaming(store, source_file.object_key, source_file.source_path)
+def _write_source_file_to_store(
+    source_file: SourceFile,
+    store: LocalObjectStore,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str,
+) -> dict[str, Any]:
+    size_bytes, sha256 = _write_file_to_store_streaming(
+        store,
+        source_file.object_key,
+        source_file.source_path,
+        source_file.source_root,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
     _verify_object_bytes(store, source_file.object_key, expected_size=size_bytes, expected_sha256=sha256)
     return _manifest_file_entry_for_source_file(source_file, size_bytes=size_bytes, sha256=sha256)
 
 
-def _write_file_to_store_streaming(store: LocalObjectStore, key: str, source_path: Path) -> tuple[int, str]:
+def _write_file_to_store_streaming(
+    store: LocalObjectStore,
+    key: str,
+    source_path: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> tuple[int, str]:
     target_path = store.resolve_path(key)
     temp_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.part")
     digest = hashlib.sha256()
     size_bytes = 0
     try:
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        with source_path.open("rb") as source, temp_path.open("wb") as target:
+        with (
+            _open_verified_source_file(
+                source_path,
+                source_root,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            ) as source,
+            temp_path.open("wb") as target,
+        ):
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 target.write(chunk)
                 digest.update(chunk)
@@ -1110,6 +1197,49 @@ def _write_file_to_store_streaming(store: LocalObjectStore, key: str, source_pat
             ) from cleanup_error
         raise ObjectStoreError(f"Failed to write object {key}: {error}") from error
     return size_bytes, digest.hexdigest()
+
+
+def _open_verified_source_file(
+    path: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> BinaryIO:
+    _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
+    resolved = _resolve_package_path(path, model_id=model_id, version=version)
+    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags)
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            os.close(fd)
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_PATH_UNSAFE",
+                "Basins package source path is not a regular file.",
+                model_id=model_id,
+                version=version,
+                path=str(path),
+                manifest_uri=manifest_uri,
+            )
+        return os.fdopen(fd, "rb")
+    except BasinsPackageError:
+        raise
+    except OSError as error:
+        if path.is_symlink() or resolved.is_symlink():
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_PATH_UNSAFE",
+                "Basins package publication does not follow symlink descendants.",
+                model_id=model_id,
+                version=version,
+                path=str(path),
+                manifest_uri=manifest_uri,
+            ) from error
+        raise
 
 
 def _verify_object_bytes(
@@ -1160,6 +1290,7 @@ def _safe_source_dir(
     *,
     model_id: str | None = None,
     version: str | None = None,
+    manifest_uri: str | None = None,
 ) -> Path:
     if not isinstance(value, str) or not value:
         raise BasinsPackageError(
@@ -1167,9 +1298,10 @@ def _safe_source_dir(
             f"Basins model record is missing {field_name}.",
             model_id=model_id,
             version=version,
+            manifest_uri=manifest_uri,
         )
     path = Path(value).expanduser()
-    _reject_source_symlink_path(path, source_root)
+    _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
     resolved = _resolve_package_path(path)
     _ensure_under_root(
         resolved,
@@ -1178,8 +1310,9 @@ def _safe_source_dir(
         message=f"Basins model {field_name} resolves outside the inventory root.",
         model_id=model_id,
         version=version,
+        manifest_uri=manifest_uri,
     )
-    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version)
+    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
     if not resolved.is_dir():
         raise BasinsPackageError(
             "BASINS_SOURCE_NOT_FOUND",
@@ -1187,6 +1320,7 @@ def _safe_source_dir(
             model_id=model_id,
             version=version,
             path=str(path),
+            manifest_uri=manifest_uri,
         )
     return resolved
 
@@ -1197,10 +1331,11 @@ def _safe_source_file(
     *,
     model_id: str | None = None,
     version: str | None = None,
+    manifest_uri: str | None = None,
 ) -> Path:
-    _reject_source_symlink_path(path, source_root)
+    _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
     resolved = _resolve_package_path(path)
-    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version)
+    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
     if not resolved.is_file():
         raise BasinsPackageError(
             "BASINS_SOURCE_NOT_FOUND",
@@ -1208,11 +1343,19 @@ def _safe_source_file(
             model_id=model_id,
             version=version,
             path=str(path),
+            manifest_uri=manifest_uri,
         )
     return resolved
 
 
-def _reject_source_symlink_path(path: Path, source_root: Path) -> None:
+def _reject_source_symlink_path(
+    path: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> None:
     current = path if path.is_absolute() else Path.cwd() / path
     parts: list[Path] = []
     while True:
@@ -1234,7 +1377,10 @@ def _reject_source_symlink_path(path: Path, source_root: Path) -> None:
             raise BasinsPackageError(
                 "BASINS_PACKAGE_PATH_UNSAFE",
                 "Basins package publication does not follow symlink descendants.",
+                model_id=model_id,
+                version=version,
                 path=str(candidate),
+                manifest_uri=manifest_uri,
             )
 
 
@@ -1244,6 +1390,7 @@ def _ensure_under_source_root(
     *,
     model_id: str | None = None,
     version: str | None = None,
+    manifest_uri: str | None = None,
 ) -> None:
     _ensure_under_root(
         path,
@@ -1252,6 +1399,7 @@ def _ensure_under_source_root(
         message="Basins package source path resolves outside the model source directory.",
         model_id=model_id,
         version=version,
+        manifest_uri=manifest_uri,
     )
 
 
@@ -1263,6 +1411,7 @@ def _ensure_under_root(
     message: str,
     model_id: str | None = None,
     version: str | None = None,
+    manifest_uri: str | None = None,
 ) -> None:
     try:
         path.relative_to(root)
@@ -1273,6 +1422,7 @@ def _ensure_under_root(
             model_id=model_id,
             version=version,
             path=str(path),
+            manifest_uri=manifest_uri,
         ) from error
 
 
@@ -1371,8 +1521,15 @@ def _directory_evidence(root: Path) -> tuple[int, int, str]:
     byte_count = 0
     for path in _walk_source_files(resolved_root, resolved_root):
         relative_path = path.relative_to(resolved_root).as_posix()
-        size_bytes = path.stat().st_size
-        sha256 = _sha256_file(path)
+        try:
+            size_bytes = path.stat().st_size
+            sha256 = _sha256_file(path)
+        except OSError as error:
+            raise BasinsPackageError(
+                "BASINS_MIGRATION_EVIDENCE_READ_FAILED",
+                f"Failed to read Basins migration evidence source file: {path}: {error}",
+                path=str(path),
+            ) from error
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(size_bytes).encode("ascii"))
@@ -1477,8 +1634,12 @@ def _sha256_bytes(content: bytes) -> str:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+        return _sha256_handle(handle)
+
+
+def _sha256_handle(handle: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
     return digest.hexdigest()

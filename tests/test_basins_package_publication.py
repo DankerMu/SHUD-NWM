@@ -916,6 +916,45 @@ def test_publish_basins_reports_stale_required_file_planning_failure_as_json(
     assert not (object_root / "models" / model_id / "vbasins-stale-source" / "manifest.json").exists()
 
 
+def test_publish_basins_reports_deleted_required_file_before_planning_with_manifest_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    deleted_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
+    deleted_file.unlink()
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-deleted-before-planning",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_SOURCE_NOT_FOUND"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-deleted-before-planning"
+    assert error["path"] == str(deleted_file)
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-deleted-before-planning/manifest.json"
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-deleted-before-planning" / "manifest.json").exists()
+
+
 def test_publish_basins_does_not_write_local_output_when_manifest_verify_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1254,10 +1293,27 @@ def test_publish_basins_manifest_checksums_match_mutated_bytes_written(
     source_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
     original_writer = basins_package._write_file_to_store_streaming
 
-    def mutating_writer(store: object, key: str, path: Path) -> tuple[int, str]:
+    def mutating_writer(
+        store: object,
+        key: str,
+        path: Path,
+        source_root: Path,
+        *,
+        model_id: str | None = None,
+        version: str | None = None,
+        manifest_uri: str | None = None,
+    ) -> tuple[int, str]:
         if path == source_file:
             path.write_text("mutated-before-write\n", encoding="utf-8")
-        return original_writer(store, key, path)  # type: ignore[arg-type]
+        return original_writer(
+            store,  # type: ignore[arg-type]
+            key,
+            path,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
 
     monkeypatch.setattr(basins_package, "_write_file_to_store_streaming", mutating_writer)
 
@@ -1285,6 +1341,78 @@ def test_publish_basins_manifest_checksums_match_mutated_bytes_written(
     assert object_bytes == b"mutated-before-write\n"
     assert entry["size_bytes"] == len(object_bytes)
     assert entry["sha256"] == hashlib.sha256(object_bytes).hexdigest()
+
+
+def test_publish_basins_rejects_source_file_replaced_with_symlink_before_final_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    source_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
+    outside_file = tmp_path / "outside-secret.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    original_writer = basins_package._write_file_to_store_streaming
+    mutated = False
+
+    def symlink_swapping_writer(
+        store: object,
+        key: str,
+        path: Path,
+        source_root: Path,
+        *,
+        model_id: str | None = None,
+        version: str | None = None,
+        manifest_uri: str | None = None,
+    ) -> tuple[int, str]:
+        nonlocal mutated
+        if path == source_file and not mutated:
+            mutated = True
+            path.unlink()
+            try:
+                path.symlink_to(outside_file)
+            except (NotImplementedError, OSError) as error:
+                pytest.skip(f"symlink support unavailable: {error}")
+        return original_writer(
+            store,  # type: ignore[arg-type]
+            key,
+            path,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+
+    monkeypatch.setattr(basins_package, "_write_file_to_store_streaming", symlink_swapping_writer)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-symlink-final-copy",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-symlink-final-copy"
+    assert error["path"] == str(source_file)
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-symlink-final-copy/manifest.json"
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-symlink-final-copy" / "manifest.json").exists()
 
 
 def test_publish_basins_object_verification_streams_without_store_checksum(
@@ -1476,6 +1604,49 @@ def test_basins_migration_report_reports_output_write_failure_as_json(
     assert error["error_code"] == "BASINS_MIGRATION_REPORT_WRITE_FAILED"
     assert error["path"] == str(output_parent / "report.json")
     assert "Traceback" not in captured.err
+
+
+def test_basins_migration_report_reports_deleted_evidence_file_as_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real_root = tmp_path / "real-basins"
+    _make_valid_model(real_root / "basin-a", "alias-a")
+    output = tmp_path / "report.json"
+    stale_file = real_root / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
+    original_sha256_file = basins_package._sha256_file
+    deleted = False
+
+    def deleting_sha256_file(path: Path) -> str:
+        nonlocal deleted
+        if path == stale_file and not deleted:
+            deleted = True
+            path.unlink()
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(basins_package, "_sha256_file", deleting_sha256_file)
+
+    exit_code = _argparse_main(
+        [
+            "basins-migration-report",
+            "--basins-root",
+            str(real_root),
+            "--source-uri",
+            "/volume/data/nwm/Basins",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_MIGRATION_EVIDENCE_READ_FAILED"
+    assert error["path"] == str(stale_file)
+    assert "Traceback" not in captured.err
+    assert not output.exists()
 
 
 def test_basins_migration_report_accepts_real_copied_root(
