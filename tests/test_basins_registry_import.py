@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import Any
 
 import pytest
 
+import workers.model_registry.basins_geometry as basins_geometry
+from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.basins_geometry import parse_basins_geometry
@@ -31,7 +34,181 @@ def test_parser_reads_real_shapefiles_and_shud_evidence(tmp_path: Path) -> None:
     assert parsed.segment_count == 2
     assert parsed.evidence_counts == {"sp_riv": 2, "sp_rivseg": 2}
     assert [segment.segment_order for segment in parsed.river_segments] == [1, 2]
+    assert parsed.river_segments[0].downstream_segment_id == f"{model_id}_seg_2"
+    assert parsed.river_segments[1].downstream_segment_id is None
+    assert parsed.river_segments[0].properties["source_downstream_segment_id"] == "2"
     assert parsed.river_segments[0].geom_wkt.startswith("LINESTRING")
+
+
+def test_manifest_must_match_selected_inventory_source_before_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["shud_input_name"] = "other-alias"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_REGISTRY_SOURCE_MISMATCH"
+    assert error["model_id"] == model_id
+    assert "shud_input_name" in error["fields"]
+
+
+def test_manifest_checksum_conflict_fails_before_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    mesh_entry = next(entry for entry in manifest["included_files"] if entry["relative_path"] == "alias-a.sp.mesh")
+    mesh_entry["sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_REGISTRY_CHECKSUM_CONFLICT"
+    assert error["model_id"] == model_id
+    assert "alias-a.sp.mesh" in error["relative_paths"]
+
+
+def test_import_rejects_required_file_traversal_before_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["models"][0]["required_files"]["sp_riv"] = ["../secret.sp.riv"]
+    inventory_path.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] in {"BASINS_REQUIRED_FILES_NON_CANONICAL", "BASINS_REGISTRY_SOURCE_MISMATCH"}
+    assert error["model_id"] == model_id
+
+
+def test_import_rejects_mutated_source_symlink_before_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    target = tmp_path / "external.mesh"
+    target.write_text("external\n", encoding="utf-8")
+    (input_dir / "alias-a.sp.mesh").unlink()
+    (input_dir / "alias-a.sp.mesh").symlink_to(target)
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] in {"BASINS_REGISTRY_PATH_UNSAFE", "BASINS_REGISTRY_CHECKSUM_CONFLICT"}
+    assert error["model_id"] == model_id
+
+
+def test_parser_rejects_projected_prj_with_epsg(tmp_path: Path) -> None:
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
+    projected = (
+        'PROJCS["WGS_1984_Web_Mercator_Auxiliary_Sphere",'
+        'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
+        'SPHEROID["WGS_1984",6378137,298.257223563]],'
+        'PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]],'
+        'PROJECTION["Mercator_Auxiliary_Sphere"],AUTHORITY["EPSG","3857"]]\n'
+    )
+    (input_dir / "gis" / "domain.prj").write_text(projected, encoding="utf-8")
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+
+    with pytest.raises(basins_geometry.BasinsGeometryError) as error:
+        parse_basins_geometry(
+            model_id=model_id,
+            input_dir=input_dir,
+            shud_input_name="alias-a",
+            required_files=model["required_files"],
+        )
+
+    assert error.value.error_code == "BASINS_REGISTRY_GIS_CRS_UNSUPPORTED"
+
+
+def test_parser_preserves_domain_polygon_holes(tmp_path: Path) -> None:
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path, domain_with_hole=True)
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+
+    parsed = parse_basins_geometry(
+        model_id=model_id,
+        input_dir=input_dir,
+        shud_input_name="alias-a",
+        required_files=model["required_files"],
+    )
+
+    assert parsed.domain_wkt.startswith("MULTIPOLYGON(((")
+    assert ")), ((" not in parsed.domain_wkt
+    assert "), (" in parsed.domain_wkt
+
+
+def test_parser_enforces_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+    monkeypatch.setattr(basins_geometry, "MAX_BASINS_GIS_FEATURES", 1)
+
+    with pytest.raises(basins_geometry.BasinsGeometryError) as error:
+        parse_basins_geometry(
+            model_id=model_id,
+            input_dir=input_dir,
+            shud_input_name="alias-a",
+            required_files=model["required_files"],
+        )
+
+    assert error.value.error_code == "BASINS_REGISTRY_RESOURCE_LIMIT_EXCEEDED"
+    assert error.value.details["resource"] == "features"
 
 
 def test_import_command_requires_database_but_consumes_manifests_first(
@@ -201,6 +378,12 @@ def test_registry_import_creates_idempotent_inactive_rows(
                        mi.resource_profile,
                        rnv.segment_count,
                        COUNT(rs.river_segment_id) AS segment_rows,
+                       MAX(rs.downstream_segment_id) FILTER (
+                         WHERE rs.river_segment_id = %s
+                       ) AS first_downstream,
+                       MAX(rs.downstream_segment_id) FILTER (
+                         WHERE rs.river_segment_id = %s
+                       ) AS second_downstream,
                        ST_AsText(bv.geom) AS basin_geom
                 FROM core.model_instance mi
                 JOIN core.river_network_version rnv
@@ -212,7 +395,7 @@ def test_registry_import_creates_idempotent_inactive_rows(
                 WHERE mi.model_id = %s
                 GROUP BY mi.active_flag, mi.resource_profile, rnv.segment_count, bv.geom
                 """,
-                (model_id,),
+                (f"{model_id}_seg_1", f"{model_id}_seg_2", model_id),
             )
             row = cursor.fetchone()
     assert row is not None
@@ -221,7 +404,24 @@ def test_registry_import_creates_idempotent_inactive_rows(
     assert row["resource_profile"]["basin_slug"] == "basin-a"
     assert row["segment_count"] == 2
     assert row["segment_rows"] == 2
+    assert row["first_downstream"] == f"{model_id}_seg_2"
+    assert row["second_downstream"] is None
     assert row["basin_geom"].startswith("MULTIPOLYGON")
+
+    store = PsycopgModelRegistryStore(integration_database_url)
+    segments = store.list_river_segments(
+        basin_version_id=first["basin_version_id"],
+        river_network_version_id=first["river_network_version_id"],
+        limit=10,
+        offset=0,
+    )
+    assert segments["type"] == "FeatureCollection"
+    assert segments["total"] == 2
+    assert segments["feature_total"] == 2
+    assert segments["features"][0]["geometry"]["type"] == "LineString"
+    assert segments["features"][0]["properties"]["river_segment_id"] == f"{model_id}_seg_1"
+    assert segments["features"][0]["properties"]["river_network_version_id"] == first["river_network_version_id"]
+    assert segments["features"][0]["properties"]["basin_version_id"] == first["basin_version_id"]
 
 
 @pytest.mark.integration
@@ -344,20 +544,40 @@ def test_real_basins_import_smoke_is_gated(
     assert report["segment_count"] > 0
     assert report["active"] is False
 
+    store = PsycopgModelRegistryStore(integration_database_url)
+    segments = store.list_river_segments(
+        basin_version_id=report["basin_version_id"],
+        river_network_version_id=report["river_network_version_id"],
+        limit=5,
+        offset=0,
+    )
+    assert segments["type"] == "FeatureCollection"
+    assert segments["feature_total"] > 0
+    assert segments["features"][0]["geometry"]["type"] == "LineString"
+    assert segments["features"][0]["properties"]["river_segment_id"]
+    assert segments["features"][0]["properties"]["river_network_version_id"] == report["river_network_version_id"]
+    assert segments["features"][0]["properties"]["basin_version_id"] == report["basin_version_id"]
+
 
 def _write_registry_fixture(
     tmp_path: Path,
     *,
     sp_segment_count: int = 2,
+    domain_with_hole: bool = False,
 ) -> tuple[Path, Path, Path, Path, str]:
     root = tmp_path / "basins"
-    input_dir = _make_valid_model(root / "basin-a", "alias-a", sp_segment_count=sp_segment_count)
+    input_dir = _make_valid_model(
+        root / "basin-a",
+        "alias-a",
+        sp_segment_count=sp_segment_count,
+        domain_with_hole=domain_with_hole,
+    )
     inventory = discover_basins_inventory(root)
     inventory_path = tmp_path / "inventory.json"
     write_inventory(inventory, inventory_path)
     model = inventory["models"][0]
     model_id = model["model_id"]
-    manifest = _package_manifest_for_model(model, model_id)
+    manifest = _package_manifest_for_model(model, model_id, inventory=inventory)
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -366,7 +586,13 @@ def _write_registry_fixture(
     return root, input_dir, inventory_path, manifest_path, model_id
 
 
-def _make_valid_model(model_dir: Path, input_name: str, *, sp_segment_count: int) -> Path:
+def _make_valid_model(
+    model_dir: Path,
+    input_name: str,
+    *,
+    sp_segment_count: int,
+    domain_with_hole: bool = False,
+) -> Path:
     input_dir = model_dir / "input" / input_name
     input_dir.mkdir(parents=True)
     for suffix in (
@@ -388,7 +614,7 @@ def _make_valid_model(model_dir: Path, input_name: str, *, sp_segment_count: int
     (input_dir / f"{input_name}.sp.rivseg").write_text(f"{sp_segment_count}\n", encoding="utf-8")
     gis_dir = input_dir / "gis"
     gis_dir.mkdir()
-    _write_domain_shapefile(gis_dir / "domain")
+    _write_domain_shapefile(gis_dir / "domain", with_hole=domain_with_hole)
     _write_line_shapefile(gis_dir / "river")
     _write_line_shapefile(gis_dir / "seg")
     forcing = model_dir / "forcing"
@@ -397,12 +623,15 @@ def _make_valid_model(model_dir: Path, input_name: str, *, sp_segment_count: int
     return input_dir
 
 
-def _write_domain_shapefile(base: Path) -> None:
+def _write_domain_shapefile(base: Path, *, with_hole: bool = False) -> None:
     import shapefile
 
     writer = shapefile.Writer(str(base), shapeType=shapefile.POLYGON)
     writer.field("ID", "N")
-    writer.poly([[[100.0, 30.0], [101.0, 30.0], [101.0, 31.0], [100.0, 31.0], [100.0, 30.0]]])
+    rings = [[[100.0, 30.0], [101.0, 30.0], [101.0, 31.0], [100.0, 31.0], [100.0, 30.0]]]
+    if with_hole:
+        rings.append([[100.2, 30.2], [100.2, 30.8], [100.8, 30.8], [100.8, 30.2], [100.2, 30.2]])
+    writer.poly(rings)
     writer.record(1)
     writer.close()
     _write_prj(base.with_suffix(".prj"))
@@ -433,17 +662,23 @@ def _write_prj(path: Path) -> None:
     )
 
 
-def _package_manifest_for_model(model: dict[str, Any], model_id: str) -> dict[str, Any]:
+def _package_manifest_for_model(
+    model: dict[str, Any],
+    model_id: str,
+    *,
+    inventory: dict[str, Any],
+) -> dict[str, Any]:
     version = "vbasins-test"
     package_uri = f"s3://nhms/models/{model_id}/{version}/package/"
     included_files = [
         {
-            "relative_path": f"{model['shud_input_name']}.sp.mesh",
-            "object_uri": package_uri + f"{model['shud_input_name']}.sp.mesh",
-            "size_bytes": 8,
-            "sha256": "mesh-sha",
-            "role": "runtime_input",
+            "relative_path": relative_path,
+            "object_uri": package_uri + relative_path,
+            "size_bytes": (Path(model["input_dir"]) / relative_path).stat().st_size,
+            "sha256": checksum,
+            "role": "gis" if relative_path.startswith("gis/") else "runtime_input",
         }
+        for relative_path, checksum in sorted(model["checksums"].items())
     ]
     return {
         "schema_version": "basins.package.v1",
@@ -454,7 +689,7 @@ def _package_manifest_for_model(model: dict[str, Any], model_id: str) -> dict[st
         "model_package_uri": package_uri,
         "manifest_uri": f"s3://nhms/models/{model_id}/{version}/manifest.json",
         "package_checksum": "package-sha-1",
-        "source_inventory_checksum": "inventory-sha-1",
+        "source_inventory_checksum": _sha256_inventory_document(inventory),
         "source_inventory_schema_version": "basins.discovery.v1",
         "source_path": model["source_path"],
         "resolved_source_path": model["resolved_source_path"],
@@ -464,6 +699,19 @@ def _package_manifest_for_model(model: dict[str, Any], model_id: str) -> dict[st
         "calibration": {"source_count": 0, "included_count": 0},
         "created_at": "2026-05-16T00:00:00Z",
     }
+
+
+def _sha256_inventory_document(inventory: dict[str, Any]) -> str:
+    content = (json.dumps(inventory, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return hashlib.sha256(content).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _invoke_click(argv: list[str]) -> int:

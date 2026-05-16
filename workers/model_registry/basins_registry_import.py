@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .basins_geometry import BasinsGeometryError, ParsedBasinsGeometry, parse_basins_geometry
+from .basins_geometry import (
+    SHAPEFILE_REQUIRED_SUFFIXES,
+    SHUD_CANONICAL_SUFFIXES,
+    BasinsGeometryError,
+    ParsedBasinsGeometry,
+    parse_basins_geometry,
+    safe_basins_file_sha256,
+)
 
 BASINS_REGISTRY_IMPORT_SCHEMA_VERSION = "basins.registry_import.v1"
+RIVER_SEGMENT_INSERT_PAGE_SIZE = 1000
 
 
 class BasinsRegistryImportError(RuntimeError):
@@ -132,6 +143,8 @@ def _prepare_sources(inventory: dict[str, Any], manifest: dict[str, Any]) -> Imp
     inventory_root = _inventory_root(inventory, model_id)
     source_root = _source_root(inventory_root, model, model_id)
     input_dir = _input_dir(source_root, model, model_id)
+    _validate_manifest_source_identity(inventory, manifest, model, source_root, model_id)
+    _verify_model_id_matches_canonical_identity(model, model_id)
     required_files = model.get("required_files")
     if not isinstance(required_files, dict):
         raise BasinsRegistryImportError(
@@ -139,6 +152,7 @@ def _prepare_sources(inventory: dict[str, Any], manifest: dict[str, Any]) -> Imp
             "Basins inventory model record is missing required_files.",
             model_id=model_id,
         )
+    _validate_manifest_included_files(manifest, model, input_dir, model_id)
     try:
         geometry = parse_basins_geometry(
             model_id=model_id,
@@ -326,37 +340,41 @@ def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
             "psycopg2 is required for Basins registry import.",
             model_id=ids["model_id"],
         ) from error
-    rows = [
-        (
-            segment.river_segment_id,
-            ids["river_network_version_id"],
-            segment.segment_order,
-            segment.downstream_segment_id,
-            segment.length_m,
-            segment.geom_wkt,
-            Json(
-                {
-                    **segment.properties,
-                    "basin_slug": sources.model.get("basin_slug"),
-                    "shud_input_name": sources.model.get("shud_input_name"),
-                }
-            ),
+    inserted = 0
+    for chunk in _chunks(sources.geometry.river_segments, RIVER_SEGMENT_INSERT_PAGE_SIZE):
+        rows = [
+            (
+                segment.river_segment_id,
+                ids["river_network_version_id"],
+                segment.segment_order,
+                segment.downstream_segment_id,
+                segment.length_m,
+                segment.geom_wkt,
+                Json(
+                    {
+                        **segment.properties,
+                        "basin_slug": sources.model.get("basin_slug"),
+                        "shud_input_name": sources.model.get("shud_input_name"),
+                    }
+                ),
+            )
+            for segment in chunk
+        ]
+        execute_values(
+            cursor,
+            """
+            INSERT INTO core.river_segment (
+                river_segment_id, river_network_version_id, segment_order, downstream_segment_id,
+                length_m, geom, properties_json
+            )
+            VALUES %s
+            """,
+            rows,
+            template="(%s, %s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
+            page_size=RIVER_SEGMENT_INSERT_PAGE_SIZE,
         )
-        for segment in sources.geometry.river_segments
-    ]
-    execute_values(
-        cursor,
-        """
-        INSERT INTO core.river_segment (
-            river_segment_id, river_network_version_id, segment_order, downstream_segment_id,
-            length_m, geom, properties_json
-        )
-        VALUES %s
-        """,
-        rows,
-        template="(%s, %s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
-    )
-    return len(rows)
+        inserted += len(rows)
+    return inserted
 
 
 def _ensure_mesh(cursor: Any, sources: ImportSources) -> int:
@@ -607,6 +625,175 @@ def _registry_ids(model: dict[str, Any], model_id: str) -> dict[str, str]:
     return ids
 
 
+def _validate_manifest_source_identity(
+    inventory: dict[str, Any],
+    manifest: dict[str, Any],
+    model: dict[str, Any],
+    source_root: Path,
+    model_id: str,
+) -> None:
+    expected = {
+        "basin_slug": model.get("basin_slug"),
+        "shud_input_name": model.get("shud_input_name"),
+        "source_path": model.get("source_path"),
+        "resolved_source_path": str(source_root),
+        "source_is_symlink": bool(model.get("source_is_symlink", False)),
+        "source_inventory_schema_version": inventory.get("schema_version"),
+    }
+    mismatches = [
+        key
+        for key, expected_value in expected.items()
+        if key in manifest and manifest.get(key) != expected_value
+    ]
+    if mismatches:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SOURCE_MISMATCH",
+            "Basins package manifest source identity does not match selected inventory model.",
+            model_id=model_id,
+            details={"fields": sorted(mismatches)},
+        )
+    source_inventory_checksum = manifest.get("source_inventory_checksum")
+    if isinstance(source_inventory_checksum, str) and source_inventory_checksum:
+        actual_inventory_checksums = {_sha256_json(inventory), _sha256_inventory_document(inventory)}
+        if source_inventory_checksum not in actual_inventory_checksums:
+            raise BasinsRegistryImportError(
+                "BASINS_REGISTRY_SOURCE_MISMATCH",
+                "Basins package manifest source inventory checksum does not match selected inventory.",
+                model_id=model_id,
+                details={
+                    "field": "source_inventory_checksum",
+                    "expected": sorted(actual_inventory_checksums),
+                    "actual": source_inventory_checksum,
+                },
+            )
+
+
+def _validate_manifest_included_files(
+    manifest: dict[str, Any],
+    model: dict[str, Any],
+    input_dir: Path,
+    model_id: str,
+) -> None:
+    included_files = manifest.get("included_files")
+    if not isinstance(included_files, list):
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
+            "Basins package manifest included_files must be an array.",
+            model_id=model_id,
+        )
+    by_path: dict[str, dict[str, Any]] = {}
+    for entry in included_files:
+        if not isinstance(entry, dict) or not isinstance(entry.get("relative_path"), str):
+            raise BasinsRegistryImportError(
+                "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
+                "Basins package manifest included_files entries must include relative_path.",
+                model_id=model_id,
+            )
+        relative_path = _normalize_relative(entry["relative_path"], model_id)
+        if relative_path not in by_path:
+            by_path[relative_path] = entry
+
+    shud_input_name = _required_model_str(model, "shud_input_name", model_id)
+    canonical_paths = [f"{shud_input_name}{suffix}" for suffix in SHUD_CANONICAL_SUFFIXES.values()]
+    canonical_paths.extend(
+        f"gis/{layer}.{suffix}"
+        for layer in ("domain", "river", "seg")
+        for suffix in SHAPEFILE_REQUIRED_SUFFIXES
+    )
+    missing = [relative_path for relative_path in canonical_paths if relative_path not in by_path]
+    if missing:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SOURCE_MISMATCH",
+            "Basins package manifest is missing canonical runtime/GIS package entries.",
+            model_id=model_id,
+            details={"missing_included_files": missing},
+        )
+
+    checksums = model.get("checksums")
+    known_checksums = checksums if isinstance(checksums, dict) else {}
+    conflicts: list[str] = []
+    for relative_path in canonical_paths:
+        entry = by_path[relative_path]
+        manifest_sha = entry.get("sha256")
+        if not isinstance(manifest_sha, str) or not manifest_sha:
+            conflicts.append(relative_path)
+            continue
+        inventory_sha = known_checksums.get(relative_path)
+        if isinstance(inventory_sha, str) and inventory_sha and inventory_sha != manifest_sha:
+            conflicts.append(relative_path)
+            continue
+        try:
+            actual_sha = safe_basins_file_sha256(input_dir / relative_path, input_dir)
+        except BasinsGeometryError as error:
+            error_code = error.error_code
+            details = error.details
+            if error.error_code == "BASINS_REGISTRY_SOURCE_MISSING" and relative_path.startswith("gis/"):
+                error_code = "BASINS_REGISTRY_GIS_SIDECAR_MISSING"
+                details = {**details, "missing_sidecar": relative_path}
+            raise BasinsRegistryImportError(
+                error_code,
+                str(error),
+                model_id=model_id,
+                path=error.path,
+                details=details,
+            ) from error
+        if actual_sha != manifest_sha:
+            conflicts.append(relative_path)
+    if conflicts:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_CHECKSUM_CONFLICT",
+            "Basins package manifest file checksums do not match selected inventory/source.",
+            model_id=model_id,
+            details={"relative_paths": sorted(set(conflicts))},
+        )
+
+
+def _verify_model_id_matches_canonical_identity(model: dict[str, Any], model_id: str) -> None:
+    basin_slug = _required_model_str(model, "basin_slug", model_id)
+    root_relative = model.get("root_relative_resolved_path") or model.get("root_relative_path")
+    if not isinstance(root_relative, str) or not root_relative:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_INVENTORY_INVALID",
+            "Basins inventory model record is missing root-relative source path.",
+            model_id=model_id,
+        )
+    canonical_slug = _normalize_relative(root_relative, model_id)
+    expected_model_id = f"basins_{_slug_id(canonical_slug)}_shud"
+    suggested = model.get("suggested_ids")
+    suggested_model_id = suggested.get("model_id") if isinstance(suggested, dict) else None
+    if (
+        basin_slug != canonical_slug
+        or model.get("model_id") != expected_model_id
+        or suggested_model_id != expected_model_id
+    ):
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SOURCE_MISMATCH",
+            "Basins inventory model_id does not match canonical source identity.",
+            model_id=model_id,
+        )
+
+
+def _normalize_relative(value: str, model_id: str) -> str:
+    path = _safe_relative(value, model_id)
+    return path.as_posix()
+
+
+def _slug_id(value: str) -> str:
+    normalized = re.sub(r"[^0-9a-zA-Z]+", "_", value).strip("_").lower()
+    return normalized or "unknown"
+
+
+def _sha256_json(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _sha256_inventory_document(payload: dict[str, Any]) -> str:
+    content = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return hashlib.sha256(content).hexdigest()
+
+
 def _read_json_object(path: str | Path, *, error_code: str, not_found_code: str) -> dict[str, Any]:
     source = Path(path).expanduser()
     try:
@@ -742,6 +929,11 @@ def _fetch_optional(cursor: Any, statement: str, parameters: tuple[Any, ...]) ->
     cursor.execute(statement, parameters)
     row = cursor.fetchone()
     return dict(row) if row is not None else None
+
+
+def _chunks(items: list[Any], size: int) -> Iterator[list[Any]]:
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
 
 
 def _model_active_state(database_url: str, model_id: str) -> bool:

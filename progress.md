@@ -116,6 +116,9 @@
 - registry 导入以单模型事务写入 `core.basin`、`core.basin_version`、`core.river_network_version`、`core.river_segment`、`core.mesh_version`、`core.model_instance`；segment count mismatch、sidecar 缺失、checksum/source 冲突均返回结构化 JSON stderr 并回滚。
 - 导入模型默认 `active_flag=false`，不会改变既有 active model；`model_instance.resource_profile` 和 `mesh_version.properties_json` 记录 `manifest_uri`、`package_checksum`、`source_inventory_checksum`、`basin_slug`、`shud_input_name` 与源路径 lineage。
 - 重复未变导入返回 `already_imported` 且不增加行；同 ID/version 下 package/source checksum 或几何证据变化返回 `BASINS_REGISTRY_CHECKSUM_CONFLICT`。
+- #136 round 1 review 已补齐：registry import 绑定 package manifest 与选中 inventory/source 身份、canonical included_files 与 checksum；导入前拒绝 SHUD/GIS 非 canonical 路径、`..`/绝对路径和 input/gis symlink 后代。
+- GIS 解析已严格限制 WGS84/EPSG:4326 或 CGCS2000/EPSG:4490 兼容 PRJ，保留 domain polygon interior rings；river downstream raw ID 会映射为导入后的 segment ID，`0/-1/空/自指` 下游标记写入 null 并保留原始值用于审计。
+- registry import 已加入 GIS feature/point 默认上限、SHUD evidence 流式计数、river segment `execute_values` bounded page size；集成测试补充 `PsycopgModelRegistryStore.list_river_segments` FeatureCollection 合同覆盖，真实 Basins smoke 也执行同查询。
 - 已新增 fast parser/CLI 测试和 opt-in PostgreSQL/PostGIS integration 测试；真实 Basins import smoke 仅在 `NHMS_RUN_REAL_BASINS_IMPORT=1`、integration DB 配置和 `data/Basins` 存在时运行。
 
 ## 已知技术风险 / 注意事项
