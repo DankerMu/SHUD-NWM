@@ -17,6 +17,7 @@ The system SHALL provide API smoke coverage showing imported Basins models and t
 
 - **WHEN** an imported Basins model is explicitly activated
 - **THEN** model listing and active-model discovery return the Basins `model_id`, `basin_version_id`, `river_network_version_id`, `mesh_version_id`, and `model_package_uri`
+- **AND** inactive Basins models remain excluded from default active listings before explicit activation
 
 #### Scenario: River map pages can load Basins segments
 

@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 class ModelRegistryError(RuntimeError):
@@ -102,6 +103,8 @@ def _format_point(point: Any) -> str:
 @dataclass(frozen=True)
 class PsycopgModelRegistryStore:
     database_url: str
+    audit_actor: str = "nhms-api"
+    audit_actor_role: str = "model-registry"
 
     @classmethod
     def from_env(cls) -> PsycopgModelRegistryStore:
@@ -425,7 +428,12 @@ class PsycopgModelRegistryStore:
         with self._transaction() as cursor:
             current = self._fetch_optional(
                 cursor,
-                "SELECT active_flag FROM core.model_instance WHERE model_id = %s",
+                """
+                SELECT *
+                FROM core.model_instance
+                WHERE model_id = %s
+                FOR UPDATE
+                """,
                 (model_id,),
             )
             if current is None:
@@ -442,7 +450,14 @@ class PsycopgModelRegistryStore:
                 """,
                 (active, model_id),
             )
-            return dict(cursor.fetchone())
+            updated = dict(cursor.fetchone())
+            self._insert_model_activation_audit(
+                cursor,
+                current=current,
+                updated=updated,
+                active=active,
+            )
+            return updated
 
     def list_models(
         self,
@@ -595,8 +610,80 @@ class PsycopgModelRegistryStore:
         result = execute_values(cursor, statement, rows, template=template, page_size=1000, fetch=fetch)
         return list(result or [])
 
+    def _insert_model_activation_audit(
+        self,
+        cursor: Any,
+        *,
+        current: Mapping[str, Any],
+        updated: Mapping[str, Any],
+        active: bool,
+    ) -> None:
+        details = {
+            "previous_active": bool(current["active_flag"]),
+            "active": bool(active),
+            "basin_version_id": updated["basin_version_id"],
+            "river_network_version_id": updated["river_network_version_id"],
+            "mesh_version_id": updated["mesh_version_id"],
+            "model_package_uri": _sanitize_audit_uri(updated["model_package_uri"]),
+        }
+        basins_lineage = _basins_lineage_details(updated.get("resource_profile"))
+        if basins_lineage:
+            details["basins_lineage"] = basins_lineage
+        cursor.execute(
+            """
+            INSERT INTO ops.audit_log (
+                actor,
+                actor_role,
+                action,
+                entity_type,
+                entity_id,
+                details
+            )
+            VALUES (%s, %s, 'model_instance.active.set', 'model_instance', %s, %s)
+            """,
+            (
+                self.audit_actor,
+                self.audit_actor_role,
+                updated["model_id"],
+                self._json(details),
+            ),
+        )
+
     def _transaction(self) -> Any:
         return _PsycopgTransaction(self.database_url)
+
+
+BASINS_AUDIT_LINEAGE_KEYS = (
+    "basin_slug",
+    "shud_input_name",
+    "manifest_uri",
+    "package_checksum",
+    "source_inventory_checksum",
+)
+BASINS_AUDIT_LINEAGE_URI_KEYS = frozenset({"manifest_uri"})
+
+
+def _sanitize_audit_uri(value: Any) -> str:
+    parsed = urlsplit(str(value))
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _basins_lineage_details(resource_profile: Any) -> dict[str, Any]:
+    if isinstance(resource_profile, str):
+        try:
+            resource_profile = json.loads(resource_profile)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(resource_profile, Mapping):
+        return {}
+    details: dict[str, Any] = {}
+    for key in BASINS_AUDIT_LINEAGE_KEYS:
+        value = resource_profile.get(key)
+        if value in (None, ""):
+            continue
+        details[key] = _sanitize_audit_uri(value) if key in BASINS_AUDIT_LINEAGE_URI_KEYS else value
+    return details
 
 
 class _PsycopgTransaction:
