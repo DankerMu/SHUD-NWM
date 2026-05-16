@@ -475,9 +475,11 @@ def _verify_model_id_matches_canonical_identity(model: dict[str, Any], model_id:
             path=str(model.get("source_path") or ""),
         )
 
-    expected_model_id = f"basins_{_basins_slug_id(basin_slug)}_shud"
+    canonical_basin_slug = _canonical_basin_slug_from_source_path(model, model_id, version)
+    expected_model_id = f"basins_{_basins_slug_id(canonical_basin_slug)}_shud"
     if (
-        model.get("model_id") != expected_model_id
+        basin_slug != canonical_basin_slug
+        or model.get("model_id") != expected_model_id
         or model_id != expected_model_id
         or suggested_model_id != expected_model_id
     ):
@@ -488,6 +490,37 @@ def _verify_model_id_matches_canonical_identity(model: dict[str, Any], model_id:
             version=version,
             path=str(model.get("source_path") or ""),
         )
+
+
+def _canonical_basin_slug_from_source_path(model: dict[str, Any], model_id: str, version: str) -> str:
+    root_relative = model.get("root_relative_resolved_path") or model.get("root_relative_path")
+    if not isinstance(root_relative, str) or not root_relative:
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_INVALID",
+            "Basins model record is missing root-relative source path.",
+            model_id=model_id,
+            version=version,
+            path=str(model.get("source_path") or ""),
+        )
+    try:
+        canonical_slug = _normalize_relative_path(root_relative)
+    except BasinsPackageError as error:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_PATH_UNSAFE",
+            "Basins model root-relative source path is unsafe.",
+            model_id=model_id,
+            version=version,
+            path=root_relative,
+        ) from error
+    if Path(canonical_slug).is_absolute() or ".." in Path(canonical_slug).parts:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_PATH_UNSAFE",
+            "Basins model root-relative source path is unsafe.",
+            model_id=model_id,
+            version=version,
+            path=root_relative,
+        )
+    return canonical_slug
 
 
 def _object_store_from_env(*, model_id: str, version: str) -> LocalObjectStore:
@@ -2110,20 +2143,21 @@ def _object_size_and_checksum_streaming(
     version: str | None = None,
     manifest_uri: str | None = None,
 ) -> tuple[int, str]:
-    path = _object_path_rejecting_symlinks(
-        store,
-        key,
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
     digest = hashlib.sha256()
     size_bytes = 0
     try:
-        with path.open("rb") as handle:
+        with _open_object_file_no_symlinks(
+            store,
+            key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
                 size_bytes += len(chunk)
+    except BasinsPackageError:
+        raise
     except OSError as error:
         raise ObjectStoreError(f"Failed to verify object {key}: {error}") from error
     return size_bytes, digest.hexdigest()

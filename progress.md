@@ -107,6 +107,7 @@
 - #135 Phase 6 round 10 已补齐：runtime required_files 只接受 `<shud_input_name>.<suffix>` canonical 文件名，拒绝同模式额外直系文件；相对 `input_dir/gis_dir/forcing_dir` 只接受 canonical 相对形式，拒绝任意前缀篡改。
 - #135 Phase 6 round 11 已补齐：Basins package 发布对本地对象存储 package、manifest、lock key 执行 root 下逐组件 symlink 拒绝，避免 stale object-store symlink 被写入或校验跟随。
 - #135 Phase 6 round 12 已补齐：本地对象存储 package、manifest、lock 写入/读取/校验改为 anchored no-follow 父目录 fd 流程，拒绝 final write/replace 前对象存储祖先被替换为 symlink；publish 入口按 canonical `basin_slug` 复算 deterministic `model_id`，拒绝重标记与重复 ID inventory。
+- #135 Phase 6 round 13 已补齐：对象写后 size/SHA 校验读取复用 anchored no-follow 对象打开流程，拒绝校验 open 前对象存储祖先被替换为 symlink；canonical model identity 改为绑定 `root_relative_resolved_path/root_relative_path`，拒绝 `basin_slug`、请求 `model_id`、记录 `model_id` 与 `suggested_ids.model_id` 同步重标记但 source path 不变的 inventory。
 
 ## 已知技术风险 / 注意事项
 
