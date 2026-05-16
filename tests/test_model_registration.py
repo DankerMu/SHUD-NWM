@@ -31,12 +31,23 @@ class FakeModelRegistryStore:
         self.models: dict[str, dict[str, Any]] = {
             "inactive_model": {
                 "model_id": "inactive_model",
+                "model_name": "basin_a",
+                "basin_id": "basins_basin_a",
+                "basin_name": "Basin A",
                 "basin_version_id": "basin_v01",
                 "river_network_version_id": "basin_rivnet_v01",
                 "mesh_version_id": "basin_mesh_v01",
                 "calibration_version_id": "basin_cal_v01",
                 "shud_code_version": "2.0",
+                "mesh_uri": "s3://nhms/models/inactive_model/v1/package/basin_a.sp.mesh",
+                "mesh_checksum": "mesh-sha-1",
                 "model_package_uri": "s3://nhms/models/inactive_model/package/",
+                "package_checksum": "package-sha-1",
+                "manifest_uri": "s3://nhms/models/inactive_model/v1/manifest.json",
+                "source_inventory_checksum": "inventory-sha-1",
+                "basin_slug": "basin-a",
+                "shud_input_name": "basin_a",
+                "segment_count": 2,
                 "active_flag": False,
                 "resource_profile": {
                     "basin_slug": "basin-a",
@@ -49,12 +60,23 @@ class FakeModelRegistryStore:
             },
             "active_model": {
                 "model_id": "active_model",
+                "model_name": "active_model",
+                "basin_id": "basin",
+                "basin_name": "Basin",
                 "basin_version_id": "basin_v01",
                 "river_network_version_id": "basin_rivnet_v01",
                 "mesh_version_id": "basin_mesh_v01",
                 "calibration_version_id": "basin_cal_v01",
                 "shud_code_version": "2.0",
+                "mesh_uri": "s3://nhms/models/active_model/package/demo.sp.mesh",
+                "mesh_checksum": "mesh-sha-active",
                 "model_package_uri": "s3://nhms/models/active_model/package/",
+                "package_checksum": None,
+                "manifest_uri": None,
+                "source_inventory_checksum": None,
+                "basin_slug": None,
+                "shud_input_name": None,
+                "segment_count": 1,
                 "active_flag": True,
                 "resource_profile": {},
                 "created_at": "2026-05-07T00:00:00Z",
@@ -152,6 +174,11 @@ class FakeModelRegistryStore:
             items = [item for item in items if item["active_flag"] == active]
         return {"total": len(items), "items": items[offset : offset + limit], "limit": limit, "offset": offset}
 
+    def get_model(self, model_id: str) -> dict[str, Any]:
+        if model_id not in self.models:
+            raise MissingResourceError(f"model_id not found: {model_id}")
+        return dict(self.models[model_id])
+
     def create_crosswalk_entries(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {"count": len(payload["entries"]), "items": payload["entries"]}
 
@@ -172,6 +199,47 @@ class NullGeometryModelRegistryStore(FakeModelRegistryStore):
             "features": [],
             "total": 1,
             "feature_total": 0,
+            "limit": limit,
+            "offset": offset,
+        }
+
+
+class BasinsRiverSegmentStore(FakeModelRegistryStore):
+    def list_river_segments(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        assert basin_version_id == "basins_basin_a_vbasins"
+        assert river_network_version_id == "basins_basin_a_rivnet_vbasins"
+        assert limit == 1
+        assert offset == 0
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "segment_id": "basins_basin_a_shud_seg_1",
+                        "river_segment_id": "basins_basin_a_shud_seg_1",
+                        "basin_version_id": "basins_basin_a_vbasins",
+                        "river_network_version_id": "basins_basin_a_rivnet_vbasins",
+                        "basin_slug": "basin-a",
+                        "shud_input_name": "alias-a",
+                        "name": "Basins Segment 1",
+                        "stream_order": 1,
+                        "segment_order": 1,
+                        "downstream_segment_id": "basins_basin_a_shud_seg_2",
+                        "length_m": 1234.5,
+                    },
+                    "geometry": {"type": "LineString", "coordinates": [[90.0, 25.0], [90.5, 25.5]]},
+                }
+            ],
+            "total": 2,
+            "feature_total": 2,
             "limit": limit,
             "offset": offset,
         }
@@ -291,6 +359,32 @@ async def test_list_river_segments_can_omit_null_geometry_features() -> None:
 
 
 @pytest.mark.asyncio
+async def test_basins_river_segment_api_returns_paginated_geojson_for_map_rendering() -> None:
+    store = BasinsRiverSegmentStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basins_basin_a_vbasins/river-segments",
+            params={"river_network_version_id": "basins_basin_a_rivnet_vbasins", "limit": 1, "offset": 0},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["type"] == "FeatureCollection"
+    assert payload["total"] == 2
+    assert payload["feature_total"] == 2
+    assert payload["limit"] == 1
+    feature = payload["features"][0]
+    assert feature["geometry"]["type"] == "LineString"
+    assert feature["properties"]["river_segment_id"] == "basins_basin_a_shud_seg_1"
+    assert feature["properties"]["basin_version_id"] == "basins_basin_a_vbasins"
+    assert feature["properties"]["river_network_version_id"] == "basins_basin_a_rivnet_vbasins"
+    assert feature["properties"]["basin_slug"] == "basin-a"
+    assert feature["properties"]["shud_input_name"] == "alias-a"
+
+
+@pytest.mark.asyncio
 async def test_model_listing_active_filter_vectors(fake_store: FakeModelRegistryStore) -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -361,6 +455,55 @@ async def test_basins_inactive_model_listing_then_explicit_activation(fake_store
         "package_checksum": "package-sha-1",
         "source_inventory_checksum": "inventory-sha-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_get_basins_model_detail_returns_asset_metadata(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/models/inactive_model")
+
+    assert fake_store is not None
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    data = body["data"]
+    assert {
+        "model_id": "inactive_model",
+        "model_name": "basin_a",
+        "basin_id": "basins_basin_a",
+        "basin_name": "Basin A",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "basin_rivnet_v01",
+        "mesh_version_id": "basin_mesh_v01",
+        "calibration_version_id": "basin_cal_v01",
+        "segment_count": 2,
+        "mesh_uri": "s3://nhms/models/inactive_model/v1/package/basin_a.sp.mesh",
+        "mesh_checksum": "mesh-sha-1",
+        "model_package_uri": "s3://nhms/models/inactive_model/package/",
+        "package_checksum": "package-sha-1",
+        "active_flag": False,
+        "manifest_uri": "s3://nhms/models/inactive_model/v1/manifest.json",
+        "source_inventory_checksum": "inventory-sha-1",
+        "basin_slug": "basin-a",
+        "shud_input_name": "basin_a",
+    }.items() <= data.items()
+
+
+@pytest.mark.asyncio
+async def test_get_missing_model_detail_uses_not_found_envelope(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/models/missing_model")
+
+    assert fake_store is not None
+    assert response.status_code == 404
+    _assert_error_envelope(
+        response.json(),
+        code="MODEL_REGISTRY_NOT_FOUND",
+        message_contains="missing_model",
+        error_type="MissingResourceError",
+    )
 
 
 @pytest.mark.asyncio
@@ -786,6 +929,81 @@ def test_set_model_active_duplicate_and_missing_do_not_write_audit(
     with pytest.raises(MissingResourceError):
         store.set_model_active("missing_model", True)
     assert not any("INSERT INTO ops.audit_log" in statement for statement in missing_cursor.statements)
+
+
+def test_get_model_joins_asset_metadata_and_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            self.statements.append(statement)
+
+        def fetchone(self) -> dict[str, Any]:
+            return {
+                "model_id": "basins_basin_a_shud",
+                "basin_version_id": "basins_basin_a_vbasins",
+                "river_network_version_id": "basins_basin_a_rivnet_vbasins",
+                "mesh_version_id": "basins_basin_a_mesh_vbasins",
+                "calibration_version_id": "basins_basin_a_shud_calib_vbasins",
+                "shud_code_version": "basins-shud",
+                "rshud_code_version": None,
+                "autoshud_code_version": None,
+                "container_image": None,
+                "model_package_uri": "s3://nhms/models/basins_basin_a_shud/vbasins/package/",
+                "active_flag": False,
+                "resource_profile": {
+                    "basin_slug": "basin-a",
+                    "shud_input_name": "alias-a",
+                    "manifest_uri": "s3://nhms/models/basins_basin_a_shud/vbasins/manifest.json",
+                    "package_checksum": "package-sha-1",
+                    "source_inventory_checksum": "inventory-sha-1",
+                },
+                "created_at": "2026-05-14T00:00:00Z",
+                "basin_id": "basins_basin_a",
+                "basin_name": "Basin A",
+                "segment_count": 2,
+                "mesh_uri": "s3://nhms/models/basins_basin_a_shud/vbasins/package/alias-a.sp.mesh",
+                "mesh_checksum": "mesh-sha-1",
+                "mesh_properties_json": {
+                    "manifest_uri": "s3://nhms/models/basins_basin_a_shud/vbasins/manifest-from-mesh.json"
+                },
+            }
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    detail = store.get_model("basins_basin_a_shud")
+
+    assert "JOIN core.basin b" in cursor.statements[0]
+    assert "JOIN core.river_network_version rnv" in cursor.statements[0]
+    assert "LEFT JOIN core.mesh_version mv" in cursor.statements[0]
+    assert detail["model_id"] == "basins_basin_a_shud"
+    assert detail["model_name"] == "alias-a"
+    assert detail["basin_id"] == "basins_basin_a"
+    assert detail["basin_name"] == "Basin A"
+    assert detail["segment_count"] == 2
+    assert detail["mesh_uri"].endswith("alias-a.sp.mesh")
+    assert detail["mesh_checksum"] == "mesh-sha-1"
+    assert detail["package_checksum"] == "package-sha-1"
+    assert detail["manifest_uri"] == "s3://nhms/models/basins_basin_a_shud/vbasins/manifest.json"
+    assert detail["source_inventory_checksum"] == "inventory-sha-1"
+    assert detail["basin_slug"] == "basin-a"
+    assert detail["shud_input_name"] == "alias-a"
+    assert "mesh_properties_json" not in detail
 
 
 def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:

@@ -19,9 +19,6 @@ DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
     ("GET", "/api/v1/basins/{basin_id}/versions"): (
         "issue-123 future registry read surface; backing read store is out of scope"
     ),
-    ("GET", "/api/v1/models/{model_id}"): (
-        "issue-123 future model detail read; only list/active convergence is in scope"
-    ),
     (
         "GET",
         "/api/v1/models/{model_id}/flood-frequency-curves",

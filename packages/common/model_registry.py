@@ -493,6 +493,36 @@ class PsycopgModelRegistryStore:
             items = [dict(row) for row in cursor.fetchall()]
         return {"total": total, "items": items, "limit": limit, "offset": offset}
 
+    def get_model(self, model_id: str) -> dict[str, Any]:
+        with self._transaction() as cursor:
+            row = self._fetch_optional(
+                cursor,
+                """
+                SELECT
+                    mi.*,
+                    b.basin_id,
+                    b.basin_name,
+                    rnv.segment_count,
+                    mv.mesh_uri,
+                    mv.checksum AS mesh_checksum,
+                    mv.properties_json AS mesh_properties_json
+                FROM core.model_instance mi
+                JOIN core.basin_version bv
+                  ON bv.basin_version_id = mi.basin_version_id
+                JOIN core.basin b
+                  ON b.basin_id = bv.basin_id
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_id = mi.river_network_version_id
+                LEFT JOIN core.mesh_version mv
+                  ON mv.mesh_version_id = mi.mesh_version_id
+                WHERE mi.model_id = %s
+                """,
+                (model_id,),
+            )
+        if row is None:
+            raise MissingResourceError(f"model_id not found: {model_id}")
+        return _model_asset_detail(row)
+
     def create_crosswalk_entries(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         entries = list(payload.get("entries") or [])
         if not entries:
@@ -684,6 +714,51 @@ def _basins_lineage_details(resource_profile: Any) -> dict[str, Any]:
             continue
         details[key] = _sanitize_audit_uri(value) if key in BASINS_AUDIT_LINEAGE_URI_KEYS else value
     return details
+
+
+MODEL_ASSET_LINEAGE_KEYS = (
+    "manifest_uri",
+    "source_inventory_checksum",
+    "basin_slug",
+    "shud_input_name",
+    "package_checksum",
+)
+
+
+def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    detail = dict(row)
+    resource_profile = _json_mapping(detail.get("resource_profile"))
+    mesh_properties = _json_mapping(detail.pop("mesh_properties_json", None))
+
+    for key in MODEL_ASSET_LINEAGE_KEYS:
+        detail[key] = _first_non_empty(resource_profile.get(key), mesh_properties.get(key))
+
+    model_name = _first_non_empty(
+        resource_profile.get("model_name"),
+        resource_profile.get("shud_input_name"),
+        detail.get("model_id"),
+    )
+    detail["model_name"] = str(model_name) if model_name is not None else None
+    detail["segment_count"] = int(detail["segment_count"]) if detail.get("segment_count") is not None else None
+    return detail
+
+
+def _json_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
 
 
 class _PsycopgTransaction:

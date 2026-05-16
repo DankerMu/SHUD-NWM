@@ -52,6 +52,24 @@ def _write_package(object_root: Path) -> None:
     (package / "demo.calib").write_text("calib\n", encoding="utf-8")
 
 
+def _write_basins_package(object_root: Path) -> None:
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    package.mkdir(parents=True)
+    (package / "alias-a.sp.mesh").write_text("mesh\n", encoding="utf-8")
+    (package / "alias-a.cfg.para").write_text(
+        "START_TIME = {{START_TIME}}\n"
+        "END_TIME = {{END_TIME}}\n"
+        "OUTPUT_DIR = {{OUTPUT_DIR}}\n"
+        "MODEL_OUTPUT_INTERVAL = {{MODEL_OUTPUT_INTERVAL}}\n"
+        "SEGMENT_COUNT = {{SEGMENT_COUNT}}\n"
+        "old_ic_file = alias-a.cfg.ic\n",
+        encoding="utf-8",
+    )
+    (package / "alias-a.cfg.calib").write_text("calib\n", encoding="utf-8")
+    (package / "alias-a.sp.riv").write_text("2 1\n", encoding="utf-8")
+    (package / "alias-a.sp.rivseg").write_text("2 4\n", encoding="utf-8")
+
+
 def _write_forcing(object_root: Path) -> None:
     forcing = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
     forcing.mkdir(parents=True)
@@ -132,6 +150,42 @@ def test_runtime_executes_mock_shud_and_updates_statuses(tmp_path: Path) -> None
     assert "MODEL_OUTPUT_INTERVAL = 1440" in cfg
     assert "INIT_MODE = 1" in cfg
     assert ".cfg.ic" not in cfg
+
+
+def test_basins_package_stages_and_generates_cfg_without_live_solver(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    manifest["model"] = {
+        "model_id": "basins_basin_a_shud",
+        "basin_version_id": "basins_basin_a_vbasins",
+        "model_package_uri": "s3://nhms/models/basins_basin_a_shud/vbasins-test/package/",
+        "project_name": "alias-a",
+        "segment_count": 2,
+    }
+
+    workspace = tmp_path / "workspace" / "runs" / manifest["run_id"]
+    input_dir = workspace / "input"
+    output_dir = workspace / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(manifest, input_dir, output_dir)
+
+    assert (input_dir / "alias-a.sp.mesh").read_text(encoding="utf-8") == "mesh\n"
+    assert (input_dir / "alias-a.cfg.calib").read_text(encoding="utf-8") == "calib\n"
+    assert (input_dir / "forcing.tsd.forc").read_text(encoding="utf-8") == "forcing\n"
+    assert cfg_path == input_dir / "alias-a.cfg.para"
+    cfg = cfg_path.read_text(encoding="utf-8")
+    assert "START_TIME = 2026-05-01T00:00:00Z" in cfg
+    assert "END_TIME = 2026-05-04T00:00:00Z" in cfg
+    assert "SEGMENT_COUNT = 2" in cfg
+    assert ".cfg.ic" not in cfg
+    assert repository.statuses == []
 
 
 def test_output_verification_rejects_wrong_row_count(tmp_path: Path) -> None:

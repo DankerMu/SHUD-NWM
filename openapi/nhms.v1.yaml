@@ -1596,6 +1596,15 @@ components:
       properties:
         model_id:
           type: string
+        model_name:
+          type: string
+          nullable: true
+        basin_id:
+          type: string
+          nullable: true
+        basin_name:
+          type: string
+          nullable: true
         basin_version_id:
           type: string
         river_network_version_id:
@@ -1604,6 +1613,16 @@ components:
           type: string
         calibration_version_id:
           type: string
+        segment_count:
+          type: integer
+          nullable: true
+          minimum: 0
+        mesh_uri:
+          type: string
+          nullable: true
+        mesh_checksum:
+          type: string
+          nullable: true
         shud_code_version:
           type: string
         rshud_code_version:
@@ -1619,6 +1638,21 @@ components:
           nullable: true
         model_package_uri:
           type: string
+        package_checksum:
+          type: string
+          nullable: true
+        manifest_uri:
+          type: string
+          nullable: true
+        source_inventory_checksum:
+          type: string
+          nullable: true
+        basin_slug:
+          type: string
+          nullable: true
+        shud_input_name:
+          type: string
+          nullable: true
         resource_profile:
           type: object
           additionalProperties: true
