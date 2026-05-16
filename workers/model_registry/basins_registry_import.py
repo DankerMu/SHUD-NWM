@@ -61,6 +61,7 @@ class ImportSources:
     source_root: Path
     ids: dict[str, str]
     geometry: ParsedBasinsGeometry
+    manifest_checksums: dict[str, str]
 
 
 def import_basins_registry(
@@ -126,10 +127,14 @@ def _prepare_sources(
             "Basins package manifest schema_version must be basins.package.v1.",
             model_id=model_id,
         )
-    if manifest.get("package_checksum") in (None, "") or manifest.get("model_package_uri") in (None, ""):
+    if (
+        manifest.get("package_checksum") in (None, "")
+        or manifest.get("model_package_uri") in (None, "")
+        or manifest.get("manifest_uri") in (None, "")
+    ):
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
-            "Basins package manifest must include package_checksum and model_package_uri.",
+            "Basins package manifest must include package_checksum, model_package_uri, and manifest_uri.",
             model_id=model_id,
         )
     if model.get("status") != "valid" or model.get("default_import_eligible") is not True:
@@ -147,8 +152,9 @@ def _prepare_sources(
         )
 
     inventory_root = _inventory_root(inventory, model_id)
-    source_root = _source_root(inventory_root, model, model_id)
-    input_dir = _input_dir(inventory_root, source_root, model, model_id)
+    inventory_relative_root = _recorded_relative_inventory_root(inventory)
+    source_root = _source_root(inventory_root, inventory_relative_root, model, model_id)
+    input_dir = _input_dir(inventory_root, inventory_relative_root, source_root, model, model_id)
     _validate_manifest_source_identity(
         inventory,
         manifest,
@@ -186,6 +192,7 @@ def _prepare_sources(
         source_root=source_root,
         ids=_registry_ids(model, model_id),
         geometry=geometry,
+        manifest_checksums=expected_checksums,
     )
 
 
@@ -652,17 +659,30 @@ def _inventory_root(inventory: dict[str, Any], model_id: str) -> Path:
     return path
 
 
-def _source_root(inventory_root: Path, model: dict[str, Any], model_id: str) -> Path:
+def _source_root(
+    inventory_root: Path,
+    inventory_relative_root: Path | None,
+    model: dict[str, Any],
+    model_id: str,
+) -> Path:
     relative = _safe_relative(_required_model_str(model, "root_relative_resolved_path", model_id), model_id)
     source_root = (inventory_root / relative).resolve()
     _ensure_under_root(source_root, inventory_root, model_id)
-    recorded = Path(_required_model_str(model, "resolved_source_path", model_id)).expanduser().resolve()
-    if recorded != source_root:
+    recorded_value = _required_model_str(model, "resolved_source_path", model_id)
+    if not _recorded_path_matches_expected(recorded_value, source_root, inventory_root, inventory_relative_root):
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_SOURCE_MISMATCH",
             "Basins inventory resolved_source_path does not match root_relative_resolved_path.",
             model_id=model_id,
-            path=str(recorded),
+            path=recorded_value,
+        )
+    source_path_value = _required_model_str(model, "source_path", model_id)
+    if not _recorded_path_matches_expected(source_path_value, source_root, inventory_root, inventory_relative_root):
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SOURCE_MISMATCH",
+            "Basins inventory source_path does not match root_relative_resolved_path.",
+            model_id=model_id,
+            path=source_path_value,
         )
     if not source_root.is_dir():
         raise BasinsRegistryImportError(
@@ -674,7 +694,13 @@ def _source_root(inventory_root: Path, model: dict[str, Any], model_id: str) -> 
     return source_root
 
 
-def _input_dir(inventory_root: Path, source_root: Path, model: dict[str, Any], model_id: str) -> Path:
+def _input_dir(
+    inventory_root: Path,
+    inventory_relative_root: Path | None,
+    source_root: Path,
+    model: dict[str, Any],
+    model_id: str,
+) -> Path:
     shud_input_name = _required_model_str(model, "shud_input_name", model_id)
     expected = source_root / "input" / shud_input_name
     for role, path in (
@@ -688,14 +714,26 @@ def _input_dir(inventory_root: Path, source_root: Path, model: dict[str, Any], m
     final_resolved = expected.resolve()
     _ensure_under_root(final_resolved, inventory_root, model_id)
     _ensure_under_root(final_resolved, source_root, model_id)
-    recorded = Path(_required_model_str(model, "input_dir", model_id)).expanduser()
-    if recorded.resolve() != final_resolved:
+    recorded_value = _required_model_str(model, "input_dir", model_id)
+    if not _recorded_path_matches_expected(recorded_value, final_resolved, inventory_root, inventory_relative_root):
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_SOURCE_MISMATCH",
             "Basins inventory input_dir does not match canonical source root and shud_input_name.",
             model_id=model_id,
-            path=str(recorded),
+            path=recorded_value,
         )
+    gis_dir_value = model.get("gis_dir")
+    if isinstance(gis_dir_value, str) and gis_dir_value:
+        gis_resolved = gis_dir.resolve()
+        _ensure_under_root(gis_resolved, inventory_root, model_id)
+        _ensure_under_root(gis_resolved, source_root, model_id)
+        if not _recorded_path_matches_expected(gis_dir_value, gis_resolved, inventory_root, inventory_relative_root):
+            raise BasinsRegistryImportError(
+                "BASINS_REGISTRY_SOURCE_MISMATCH",
+                "Basins inventory gis_dir does not match canonical source root and shud_input_name.",
+                model_id=model_id,
+                path=gis_dir_value,
+            )
     if not expected.is_dir():
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_SOURCE_MISSING",
@@ -1041,6 +1079,56 @@ def _safe_relative(value: str, model_id: str) -> Path:
     return path
 
 
+def _recorded_relative_inventory_root(inventory: dict[str, Any]) -> Path | None:
+    root = inventory.get("root")
+    if not isinstance(root, str) or not root:
+        return None
+    root_path = Path(root).expanduser()
+    if root_path.is_absolute():
+        return None
+    try:
+        normalized = _safe_path_relative(root_path.as_posix())
+    except ValueError:
+        return None
+    if normalized == Path("."):
+        return None
+    return normalized
+
+
+def _recorded_path_matches_expected(
+    value: str,
+    expected_path: Path,
+    inventory_root: Path,
+    inventory_relative_root: Path | None,
+) -> bool:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve() == expected_path
+    try:
+        normalized = _safe_path_relative(path.as_posix())
+    except ValueError:
+        return False
+    expected_relative_paths: set[Path] = set()
+    for base in (expected_path, inventory_root):
+        try:
+            expected_relative_paths.add(expected_path.relative_to(base))
+        except ValueError:
+            continue
+    if inventory_relative_root is not None:
+        try:
+            expected_relative_paths.add(inventory_relative_root / expected_path.relative_to(inventory_root))
+        except ValueError:
+            pass
+    return normalized in expected_relative_paths
+
+
+def _safe_path_relative(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(value)
+    return path
+
+
 def _ensure_under_root(path: Path, root: Path, model_id: str) -> None:
     try:
         path.relative_to(root)
@@ -1095,6 +1183,9 @@ def _mesh_uri(sources: ImportSources) -> str:
 
 
 def _source_checksum(sources: ImportSources, relative_path: str) -> str | None:
+    checksum = sources.manifest_checksums.get(relative_path)
+    if isinstance(checksum, str) and checksum:
+        return checksum
     checksums = sources.model.get("checksums")
     if isinstance(checksums, dict) and isinstance(checksums.get(relative_path), str):
         return str(checksums[relative_path])

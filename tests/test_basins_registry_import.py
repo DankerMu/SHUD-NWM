@@ -97,6 +97,33 @@ def test_manifest_source_identity_fields_are_required_before_database(
     assert error["fields"] == ["source_inventory_checksum"]
 
 
+def test_manifest_uri_is_required_before_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["manifest_uri"]
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID"
+    assert error["model_id"] == model_id
+
+
 def test_import_accepts_raw_inventory_byte_checksum_for_noncanonical_json(tmp_path: Path) -> None:
     _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
@@ -362,6 +389,75 @@ def test_import_rejects_source_bytes_mutated_between_parse_and_validation(tmp_pa
     assert error.value.error_code == "BASINS_REGISTRY_CHECKSUM_CONFLICT"
     assert error.value.details["relative_paths"] == ["alias-a.sp.riv"]
     assert model_id
+
+
+def test_import_accepts_relative_inventory_paths_across_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = workspace / "basins"
+    _make_valid_model(root / "basin-a", "alias-a", sp_segment_count=2)
+    monkeypatch.chdir(workspace)
+    inventory = discover_basins_inventory(Path("basins"))
+    inventory_path = workspace / "inventory.json"
+    write_inventory(inventory, inventory_path)
+    model = inventory["models"][0]
+    model_id = model["model_id"]
+    manifest = _package_manifest_for_model(model, model_id, inventory=inventory)
+    manifest_path = workspace / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    other_cwd = tmp_path / "other-cwd"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+
+    sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+
+    assert sources.ids["model_id"] == model_id
+    assert sources.input_dir == (root / "basin-a" / "input" / "alias-a").resolve()
+
+
+def test_mesh_checksum_uses_manifest_when_inventory_checksum_is_absent(tmp_path: Path) -> None:
+    _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    del inventory["models"][0]["checksums"]["alias-a.sp.mesh"]
+    raw_inventory = (json.dumps(inventory, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    inventory_path.write_bytes(raw_inventory)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_inventory_checksum"] = hashlib.sha256(raw_inventory).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+
+    assert sources.ids["model_id"] == model_id
+    assert sources.manifest_checksums["alias-a.sp.mesh"] == _sha256_file(input_dir / "alias-a.sp.mesh")
+    assert (
+        basins_geometry.safe_basins_file_sha256(input_dir / "alias-a.sp.mesh", input_dir)
+        == sources.manifest_checksums["alias-a.sp.mesh"]
+    )
+
+
+def test_parser_enforces_gis_sidecar_byte_limit_before_buffering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+    monkeypatch.setattr(basins_geometry, "MAX_BASINS_GIS_SIDECAR_BYTES", 1)
+
+    with pytest.raises(basins_geometry.BasinsGeometryError) as error:
+        parse_basins_geometry(
+            model_id=model_id,
+            input_dir=input_dir,
+            shud_input_name="alias-a",
+            required_files=model["required_files"],
+        )
+
+    assert error.value.error_code == "BASINS_REGISTRY_RESOURCE_LIMIT_EXCEEDED"
+    assert error.value.details["resource"] == "gis_sidecar_bytes"
+    assert error.value.details["count"] > error.value.details["limit"]
 
 
 def test_parser_rejects_projected_prj_with_epsg(tmp_path: Path) -> None:

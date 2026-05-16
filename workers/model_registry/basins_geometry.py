@@ -32,6 +32,9 @@ SHUD_CANONICAL_SUFFIXES = {
 }
 MAX_BASINS_GIS_FEATURES = 250_000
 MAX_BASINS_GIS_POINTS = 5_000_000
+MAX_BASINS_GIS_SIDECAR_BYTES = 512 * 1024 * 1024
+MAX_BASINS_GIS_LAYER_BYTES = 2 * 1024 * 1024 * 1024
+MAX_BASINS_GIS_TOTAL_BYTES = 6 * 1024 * 1024 * 1024
 # SHUD segment evidence files should be tiny count/header or row-count inputs.
 # These guards keep stale or hostile local files from turning import into an
 # unbounded scan before registry writes begin.
@@ -109,6 +112,7 @@ def parse_basins_geometry(
     domain_base = _validated_layer_base(input_root, "domain", required_files)
     river_base = _validated_layer_base(input_root, "river", required_files)
     seg_base = _validated_layer_base(input_root, "seg", required_files)
+    _enforce_gis_sidecar_byte_limits((domain_base, river_base, seg_base), input_root)
     domain_layer = _load_layer_snapshot(domain_base, input_root, expected_checksums)
     river_layer = _load_layer_snapshot(river_base, input_root, expected_checksums)
     seg_layer = _load_layer_snapshot(seg_base, input_root, expected_checksums)
@@ -195,6 +199,36 @@ def _validated_layer_base(input_dir: Path, layer: str, required_files: dict[str,
                 details={"missing_sidecar": expected, "role": role},
             )
     return input_dir / "gis" / layer
+
+
+def _enforce_gis_sidecar_byte_limits(layer_bases: tuple[Path, ...], input_root: Path) -> None:
+    total_bytes = 0
+    for layer_base in layer_bases:
+        layer_bytes = 0
+        for suffix in SHAPEFILE_REQUIRED_SUFFIXES:
+            role = f"gis_{layer_base.name}_{suffix}"
+            path = layer_base.with_suffix(f".{suffix}")
+            size_bytes = _verified_file_size(path, input_root, role=role)
+            _check_resource_limit(
+                size_bytes,
+                MAX_BASINS_GIS_SIDECAR_BYTES,
+                "gis_sidecar_bytes",
+                str(path),
+            )
+            layer_bytes += size_bytes
+            total_bytes += size_bytes
+            _check_resource_limit(
+                layer_bytes,
+                MAX_BASINS_GIS_LAYER_BYTES,
+                "gis_layer_bytes",
+                str(path),
+            )
+            _check_resource_limit(
+                total_bytes,
+                MAX_BASINS_GIS_TOTAL_BYTES,
+                "gis_total_bytes",
+                str(path),
+            )
 
 
 def _required_input_file(input_dir: Path, required_files: dict[str, Any], role: str, shud_input_name: str) -> Path:
@@ -718,6 +752,27 @@ def _file_identity(path: Path, containment_root: Path, *, role: str) -> tuple[in
             details={"role": role},
         )
     return (st.st_dev, st.st_ino, st.st_mode)
+
+
+def _verified_file_size(path: Path, containment_root: Path, *, role: str) -> int:
+    _validate_safe_file(path, containment_root, role=role, error_code="BASINS_REGISTRY_SOURCE_MISSING")
+    try:
+        st = path.lstat()
+    except OSError as error:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins source path cannot be safely inspected.",
+            path=str(path),
+            details={"role": role},
+        ) from error
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins source path is not a regular no-symlink file.",
+            path=str(path),
+            details={"role": role},
+        )
+    return int(st.st_size)
 
 
 @contextmanager
