@@ -5,6 +5,7 @@ import json
 import os
 import re
 import stat
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ GIS_REQUIRED_FILES: tuple[tuple[str, str], ...] = tuple(
 )
 
 CHECKSUM_LIMIT_BYTES = 16 * 1024 * 1024
+BLOCKING_WARNING_CODES = {"BASINS_SYMLINK_OUTSIDE_ROOT"}
 
 
 class BasinsDiscoveryError(RuntimeError):
@@ -93,6 +95,7 @@ def discover_basins_inventory(basins_root: str | Path) -> dict[str, Any]:
         for candidate in _find_model_dirs(root, resolved_root, warnings)
     ]
     models.sort(key=lambda record: record["model_id"])
+    has_blocking_warnings = any(warning.code in BLOCKING_WARNING_CODES for warning in warnings)
 
     return {
         "schema_version": "basins.discovery.v1",
@@ -102,7 +105,9 @@ def discover_basins_inventory(basins_root: str | Path) -> dict[str, Any]:
         "models": models,
         "model_count": len(models),
         "warnings": [warning.as_dict() for warning in warnings],
-        "importable": not any(model["status"] != "valid" for model in models),
+        "importable": bool(models)
+        and not has_blocking_warnings
+        and not any(model["status"] != "valid" for model in models),
     }
 
 
@@ -121,7 +126,7 @@ def _find_model_dirs(root: Path, resolved_root: Path, warnings: list[DiscoveryWa
         if resolved_entry is None:
             continue
         _ensure_readable_directory(entry, "BASINS_DIRECTORY_UNREADABLE")
-        if _has_child_dir(entry, "input"):
+        if _has_child_dir(entry, "input", resolved_root, warnings):
             candidates.append(entry)
             continue
         for nested in _iter_child_dirs(entry):
@@ -131,7 +136,7 @@ def _find_model_dirs(root: Path, resolved_root: Path, warnings: list[DiscoveryWa
             if resolved_nested is None:
                 continue
             _ensure_readable_directory(nested, "BASINS_DIRECTORY_UNREADABLE")
-            if _has_child_dir(nested, "input"):
+            if _has_child_dir(nested, "input", resolved_root, warnings):
                 candidates.append(nested)
     return sorted(candidates, key=lambda path: path.relative_to(root).as_posix().lower())
 
@@ -142,6 +147,7 @@ def _inventory_for_model(
     resolved_root: Path,
     warnings: list[DiscoveryWarning],
 ) -> dict[str, Any]:
+    warning_start = len(warnings)
     basin_slug = model_dir.relative_to(root).as_posix()
     model_id = f"basins_{_slug_id(basin_slug)}_shud"
     quirks: list[str] = []
@@ -150,9 +156,14 @@ def _inventory_for_model(
         quirks.append("generated_sidecars_ignored")
 
     input_parent = model_dir / "input"
+    _safe_resolve_under_root(input_parent, resolved_root, warnings)
     _ensure_readable_directory(input_parent, "BASINS_DIRECTORY_UNREADABLE")
     input_dirs = sorted(
-        (path for path in _iter_child_dirs(input_parent) if not _is_ignored_path(path)),
+        (
+            path
+            for path in _iter_child_dirs(input_parent)
+            if not _is_ignored_path(path) and _safe_resolve_under_root(path, resolved_root, warnings) is not None
+        ),
         key=lambda path: path.name.lower(),
     )
     if not input_dirs:
@@ -167,16 +178,21 @@ def _inventory_for_model(
     _ensure_readable_directory(input_dir, "BASINS_DIRECTORY_UNREADABLE")
 
     gis_dir = input_dir / "gis"
-    required_files, missing_required_files = _match_required_files(input_dir, gis_dir)
-    checksums = _checksums_for_required_files(input_dir, gis_dir, required_files)
-    calibration_count = _count_files(model_dir / "CALIB")
-    forcing_info = _forcing_info(model_dir, quirks, warnings)
+    required_files, missing_required_files = _match_required_files(input_dir, gis_dir, resolved_root, warnings)
+    checksums = _checksums_for_required_files(input_dir, required_files, resolved_root, warnings)
+    calibration_count = _count_files(model_dir / "CALIB", resolved_root, warnings)
+    forcing_info = _forcing_info(model_dir, quirks, warnings, resolved_root)
     if forcing_info["forcing_dir"] is not None:
-        forcing_count = _count_csv_files(Path(forcing_info["forcing_dir"]))
+        forcing_count = _count_csv_files(Path(forcing_info["forcing_dir"]), resolved_root, warnings)
     else:
         forcing_count = 0
 
-    status = "valid" if not missing_required_files else "partial"
+    unsafe_descendant = any(
+        warning.code in BLOCKING_WARNING_CODES for warning in warnings[warning_start:]
+    )
+    if unsafe_descendant:
+        quirks.append("unsafe_symlink_outside_root")
+    status = "valid" if not missing_required_files and not unsafe_descendant else "partial"
     suggested_ids = {
         "basin_id": f"basins_{_slug_id(basin_slug)}",
         "basin_version_id": f"basins_{_slug_id(basin_slug)}_vbasins",
@@ -212,17 +228,26 @@ def _inventory_for_model(
     }
 
 
-def _match_required_files(input_dir: Path, gis_dir: Path) -> tuple[dict[str, list[str]], list[str]]:
+def _match_required_files(
+    input_dir: Path,
+    gis_dir: Path,
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
+) -> tuple[dict[str, list[str]], list[str]]:
     required: dict[str, list[str]] = {}
     missing: list[str] = []
     for role, pattern in SHUD_REQUIRED_PATTERNS:
-        matches = _glob_non_sidecar_files(input_dir, pattern)
+        matches = _glob_non_sidecar_files(input_dir, pattern, resolved_root, warnings)
         required[role] = [str(path.relative_to(input_dir)) for path in matches]
         if not matches:
             missing.append(pattern)
     for role, file_name in GIS_REQUIRED_FILES:
         path = gis_dir / file_name
-        if path.is_file() and not _is_ignored_path(path):
+        if (
+            not _is_ignored_path(path)
+            and _safe_resolve_under_root(path, resolved_root, warnings) is not None
+            and path.is_file()
+        ):
             required[role] = [str(path.relative_to(input_dir))]
         else:
             required[role] = []
@@ -232,16 +257,19 @@ def _match_required_files(input_dir: Path, gis_dir: Path) -> tuple[dict[str, lis
 
 def _checksums_for_required_files(
     input_dir: Path,
-    gis_dir: Path,
     required_files: dict[str, list[str]],
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
 ) -> dict[str, str]:
-    del gis_dir
     checksums: dict[str, str] = {}
     for matches in required_files.values():
         for relative_name in matches:
             path = input_dir / relative_name
             try:
-                if path.stat().st_size <= CHECKSUM_LIMIT_BYTES:
+                if (
+                    _safe_resolve_under_root(path, resolved_root, warnings) is not None
+                    and path.stat().st_size <= CHECKSUM_LIMIT_BYTES
+                ):
                     checksums[relative_name] = _sha256(path)
             except OSError:
                 continue
@@ -252,11 +280,12 @@ def _forcing_info(
     model_dir: Path,
     quirks: list[str],
     warnings: list[DiscoveryWarning],
+    resolved_root: Path,
 ) -> dict[str, str | None]:
     forcing = model_dir / "forcing"
     focing = model_dir / "focing"
-    has_forcing = forcing.is_dir() and not _is_ignored_path(forcing)
-    has_focing = focing.is_dir() and not _is_ignored_path(focing)
+    has_forcing = _is_safe_directory(forcing, resolved_root, warnings)
+    has_focing = _is_safe_directory(focing, resolved_root, warnings)
     if has_forcing:
         _ensure_readable_directory(forcing, "BASINS_DIRECTORY_UNREADABLE")
     if has_focing:
@@ -279,24 +308,33 @@ def _forcing_info(
     return {"forcing_dir": None, "forcing_dir_original_name": None}
 
 
-def _glob_non_sidecar_files(root: Path, pattern: str) -> list[Path]:
+def _glob_non_sidecar_files(
+    root: Path,
+    pattern: str,
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
+) -> list[Path]:
     if not root.exists():
         return []
     matches: list[Path] = []
     for path in root.glob(pattern):
-        if path.is_file() and not _is_ignored_path(path):
+        if (
+            not _is_ignored_path(path)
+            and _safe_resolve_under_root(path, resolved_root, warnings) is not None
+            and path.is_file()
+        ):
             matches.append(path)
     return sorted(matches, key=lambda path: path.name.lower())
 
 
-def _count_csv_files(root: Path) -> int:
-    return sum(1 for path in _walk_files(root) if path.suffix.lower() == ".csv")
+def _count_csv_files(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> int:
+    return sum(1 for path in _walk_files(root, resolved_root, warnings) if path.suffix.lower() == ".csv")
 
 
-def _count_files(root: Path) -> int:
-    if not root.is_dir():
+def _count_files(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> int:
+    if not _is_safe_directory(root, resolved_root, warnings):
         return 0
-    return sum(1 for _ in _walk_files(root))
+    return sum(1 for _ in _walk_files(root, resolved_root, warnings))
 
 
 def _count_sidecars(root: Path) -> int:
@@ -318,13 +356,14 @@ def _count_sidecars(root: Path) -> int:
     return count
 
 
-def _walk_files(root: Path) -> list[Path]:
-    if not root.is_dir():
-        return []
-    files: list[Path] = []
+def _walk_files(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> Iterator[Path]:
+    if not _is_safe_directory(root, resolved_root, warnings):
+        return
     stack = [root]
     while stack:
         directory = stack.pop()
+        if _safe_resolve_under_root(directory, resolved_root, warnings) is None:
+            continue
         _ensure_readable_directory(directory, "BASINS_DIRECTORY_UNREADABLE")
         try:
             with os.scandir(directory) as entries:
@@ -332,10 +371,12 @@ def _walk_files(root: Path) -> list[Path]:
                     path = Path(entry.path)
                     if _is_sidecar_name(entry.name):
                         continue
+                    if _safe_resolve_under_root(path, resolved_root, warnings) is None:
+                        continue
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(path)
                     elif entry.is_file(follow_symlinks=False):
-                        files.append(path)
+                        yield path
         except PermissionError as error:
             raise BasinsDiscoveryError(
                 "BASINS_DIRECTORY_UNREADABLE",
@@ -348,7 +389,6 @@ def _walk_files(root: Path) -> list[Path]:
                 f"Basins directory cannot be scanned: {directory}",
                 path=str(directory),
             ) from error
-    return files
 
 
 def _iter_child_dirs(root: Path) -> list[Path]:
@@ -370,9 +410,17 @@ def _iter_child_dirs(root: Path) -> list[Path]:
         ) from error
 
 
-def _has_child_dir(root: Path, name: str) -> bool:
+def _has_child_dir(root: Path, name: str, resolved_root: Path, warnings: list[DiscoveryWarning]) -> bool:
     child = root / name
-    return child.is_dir() and not _is_ignored_path(child)
+    return _is_safe_directory(child, resolved_root, warnings)
+
+
+def _is_safe_directory(path: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> bool:
+    return (
+        not _is_ignored_path(path)
+        and _safe_resolve_under_root(path, resolved_root, warnings) is not None
+        and path.is_dir()
+    )
 
 
 def _safe_resolve_under_root(
@@ -384,15 +432,22 @@ def _safe_resolve_under_root(
     try:
         resolved.relative_to(resolved_root)
     except ValueError:
-        warnings.append(
+        _append_warning_once(
+            warnings,
             DiscoveryWarning(
                 "BASINS_SYMLINK_OUTSIDE_ROOT",
-                "Candidate directory resolves outside the configured Basins root and was skipped.",
+                "Basins descendant resolves outside the configured Basins root and was skipped.",
                 path=str(path),
-            )
+            ),
         )
         return None
     return resolved
+
+
+def _append_warning_once(warnings: list[DiscoveryWarning], warning: DiscoveryWarning) -> None:
+    if any(existing.code == warning.code and existing.path == warning.path for existing in warnings):
+        return
+    warnings.append(warning)
 
 
 def _ensure_readable_directory(path: Path, error_code: str) -> None:

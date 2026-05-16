@@ -491,6 +491,33 @@ def test_model_package_validator_and_cli(tmp_path: Path, capsys: pytest.CaptureF
     assert "All required model package files are present" in capsys.readouterr().out
 
 
+def test_legacy_model_package_validator_entrypoints_still_accept_local_packages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_root = tmp_path / "object-store"
+    package = object_root / "models" / "demo" / "package"
+    package.mkdir(parents=True)
+    for suffix in ("mesh", "para", "calib"):
+        (package / f"basin.{suffix}").write_text("x\n", encoding="utf-8")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+
+    path_result = validate_model_package_path(package)
+    uri_result = validate_model_package_uri("s3://nhms/models/demo/package")
+    exit_code = _argparse_main(["validate-package", str(package)])
+
+    assert path_result.passed is True
+    assert path_result.package_path == str(package)
+    assert uri_result is not None
+    assert uri_result.passed is True
+    assert uri_result.package_path == str(package)
+    assert set(uri_result.matched_files) == {"basin.mesh", "basin.para", "basin.calib"}
+    assert exit_code == 0
+    assert "All required model package files are present" in capsys.readouterr().out
+
+
 def test_model_package_validator_reports_missing_files(tmp_path: Path) -> None:
     package = tmp_path / "bad_package"
     package.mkdir()

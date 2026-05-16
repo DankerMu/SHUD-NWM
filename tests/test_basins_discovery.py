@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from workers.model_registry.basins_discovery import BasinsDiscoveryError, discover_basins_inventory
+from workers.model_registry.basins_discovery import BasinsDiscoveryError, _walk_files, discover_basins_inventory
 from workers.model_registry.cli import _argparse_main
 
 
@@ -81,6 +81,17 @@ def test_valid_minimal_model_tree_inventory_fields(tmp_path: Path) -> None:
     assert model["checksums"]
 
 
+def test_empty_inventory_is_not_importable(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    root.mkdir()
+
+    inventory = discover_basins_inventory(root)
+
+    assert inventory["models"] == []
+    assert inventory["model_count"] == 0
+    assert inventory["importable"] is False
+
+
 def test_partial_missing_tsd_rl_and_legacy_focing(tmp_path: Path) -> None:
     root = tmp_path / "basins"
     make_valid_model(root / "tailanhe", "tlh", include_tsd_rl=False, forcing_dir_name="focing", forcing_count=1)
@@ -151,7 +162,54 @@ def test_symlink_escape_model_is_skipped_with_warning(tmp_path: Path) -> None:
     inventory = discover_basins_inventory(root)
 
     assert inventory["models"] == []
+    assert inventory["importable"] is False
     assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
+
+
+def test_symlinked_input_alias_outside_root_is_not_read_or_importable(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    model_dir = root / "alias-escape"
+    input_parent = model_dir / "input"
+    input_parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    external_input = make_valid_model(outside / "external", "external")
+    (input_parent / "external").symlink_to(external_input, target_is_directory=True)
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert inventory["importable"] is False
+    assert model["status"] == "partial"
+    assert model["shud_input_name"] == ""
+    assert model["required_files"]["cfg_para"] == []
+    assert model["checksums"] == {}
+    assert model["default_import_eligible"] is False
+    assert "unsafe_symlink_outside_root" in model["quirks"]
+    assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
+    assert inventory["warnings"][0]["path"] == str(input_parent / "external")
+
+
+def test_symlinked_forcing_outside_root_is_not_counted_or_importable(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    model_dir = root / "forcing-escape"
+    make_valid_model(model_dir, "forcing-escape")
+    outside = tmp_path / "outside"
+    external_forcing = outside / "forcing"
+    external_forcing.mkdir(parents=True)
+    (external_forcing / "X000001.csv").write_text("time,value\n", encoding="utf-8")
+    (model_dir / "forcing").symlink_to(external_forcing, target_is_directory=True)
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert inventory["importable"] is False
+    assert model["status"] == "partial"
+    assert model["forcing_dir"] is None
+    assert model["forcing_csv_count"] == 0
+    assert model["default_import_eligible"] is False
+    assert "unsafe_symlink_outside_root" in model["quirks"]
+    assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
+    assert inventory["warnings"][0]["path"] == str(model_dir / "forcing")
 
 
 def test_nested_zhaochen_style_models_are_discovered(tmp_path: Path) -> None:
@@ -174,6 +232,21 @@ def test_bounded_large_forcing_directory_counts_csv_without_checksums(tmp_path: 
     assert model["status"] == "valid"
     assert model["forcing_csv_count"] == 10_000
     assert all(not name.endswith(".csv") for name in model["checksums"])
+
+
+def test_walk_files_streams_paths_without_returning_list(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    root.mkdir()
+    (root / "a.csv").write_text("time,value\n", encoding="utf-8")
+    nested = root / "nested"
+    nested.mkdir()
+    (nested / "b.txt").write_text("value\n", encoding="utf-8")
+
+    traversal = _walk_files(root, root.resolve(), [])
+
+    assert not isinstance(traversal, list)
+    assert iter(traversal) is traversal
+    assert sorted(path.name for path in traversal) == ["a.csv", "b.txt"]
 
 
 def test_unreadable_root_and_subdir_when_permissions_enforced(tmp_path: Path) -> None:
