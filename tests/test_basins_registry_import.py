@@ -366,6 +366,65 @@ def test_import_rejects_gis_sidecar_replaced_between_validation_and_reader(tmp_p
     assert model_id
 
 
+def test_import_rejects_gis_sidecar_growing_after_precheck_before_buffering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    target = input_dir / "gis" / "domain.shp"
+    original_limit = max(path.stat().st_size for path in (input_dir / "gis").iterdir() if path.is_file()) + 1
+    replacement = tmp_path / "oversized-domain.shp"
+    replacement.write_bytes(b"0" * (original_limit + 1))
+    mutated = False
+    monkeypatch.setattr(basins_geometry, "MAX_BASINS_GIS_SIDECAR_BYTES", original_limit)
+
+    def hook(path: Path, role: str, phase: str) -> None:
+        nonlocal mutated
+        if path == input_dir and role == "gis_sidecar_limits" and phase == "after_precheck" and not mutated:
+            target.unlink()
+            shutil.copy2(replacement, target)
+            mutated = True
+
+    basins_geometry._SAFE_OPEN_TEST_HOOK = hook
+    try:
+        with pytest.raises(BasinsRegistryImportError) as error:
+            prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+    finally:
+        basins_geometry._SAFE_OPEN_TEST_HOOK = None
+
+    assert error.value.error_code == "BASINS_REGISTRY_RESOURCE_LIMIT_EXCEEDED"
+    assert error.value.path == str(target)
+    assert error.value.details["resource"] == "gis_sidecar_bytes"
+    assert error.value.details["count"] > error.value.details["limit"]
+    assert model_id
+
+
+def test_import_rejects_input_directory_swap_after_input_dir_resolution(tmp_path: Path) -> None:
+    _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    external_model_dir = tmp_path / "external-after-prepare" / "basin-a"
+    external_input_dir = _make_valid_model(external_model_dir, "alias-a", sp_segment_count=2)
+    _copy_matching_fixture_payload(input_dir, external_input_dir)
+    mutated = False
+
+    def hook(path: Path, role: str, phase: str) -> None:
+        nonlocal mutated
+        if path == input_dir and role == "shud_input_name" and phase == "before_parse" and not mutated:
+            _replace_directory_with_symlink(input_dir, external_input_dir)
+            mutated = True
+
+    basins_geometry._SAFE_OPEN_TEST_HOOK = hook
+    try:
+        with pytest.raises(BasinsRegistryImportError) as error:
+            prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+    finally:
+        basins_geometry._SAFE_OPEN_TEST_HOOK = None
+
+    assert error.value.error_code == "BASINS_REGISTRY_PATH_UNSAFE"
+    assert error.value.path == str(input_dir)
+    assert error.value.details["role"] == "gis_domain_shp"
+    assert model_id
+
+
 def test_import_rejects_source_bytes_mutated_between_parse_and_validation(tmp_path: Path) -> None:
     _, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
     target = input_dir / "alias-a.sp.riv"
@@ -415,7 +474,7 @@ def test_import_accepts_relative_inventory_paths_across_cwd(
     sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
 
     assert sources.ids["model_id"] == model_id
-    assert sources.input_dir == (root / "basin-a" / "input" / "alias-a").resolve()
+    assert sources.input_dir.path == (root / "basin-a" / "input" / "alias-a").resolve()
 
 
 def test_mesh_checksum_uses_manifest_when_inventory_checksum_is_absent(tmp_path: Path) -> None:

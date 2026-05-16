@@ -32,9 +32,9 @@ SHUD_CANONICAL_SUFFIXES = {
 }
 MAX_BASINS_GIS_FEATURES = 250_000
 MAX_BASINS_GIS_POINTS = 5_000_000
-MAX_BASINS_GIS_SIDECAR_BYTES = 512 * 1024 * 1024
-MAX_BASINS_GIS_LAYER_BYTES = 2 * 1024 * 1024 * 1024
-MAX_BASINS_GIS_TOTAL_BYTES = 6 * 1024 * 1024 * 1024
+MAX_BASINS_GIS_SIDECAR_BYTES = 64 * 1024 * 1024
+MAX_BASINS_GIS_LAYER_BYTES = 128 * 1024 * 1024
+MAX_BASINS_GIS_TOTAL_BYTES = 384 * 1024 * 1024
 # SHUD segment evidence files should be tiny count/header or row-count inputs.
 # These guards keep stale or hostile local files from turning import into an
 # unbounded scan before registry writes begin.
@@ -97,25 +97,66 @@ class _LayerSnapshot:
     digests: dict[str, str]
 
 
+@dataclass(frozen=True)
+class TrustedBasinsRoot:
+    path: Path
+    resolved_path: Path
+    identity: tuple[int, int, int]
+
+
+@dataclass
+class _GisReadBudget:
+    total_bytes: int = 0
+
+
+def trusted_basins_root(path: Path, *, role: str) -> TrustedBasinsRoot:
+    expanded = Path(path).expanduser()
+    root = expanded if expanded.is_absolute() else Path(os.path.abspath(expanded))
+    try:
+        st = root.lstat()
+    except OSError as error:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins trusted root cannot be safely inspected.",
+            path=str(root),
+            details={"role": role},
+        ) from error
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins trusted root is not a regular no-symlink directory.",
+            path=str(root),
+            details={"role": role},
+        )
+    return TrustedBasinsRoot(
+        path=root,
+        resolved_path=root,
+        identity=(st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode)),
+    )
+
+
 def parse_basins_geometry(
     *,
     model_id: str,
-    input_dir: Path,
+    input_dir: Path | TrustedBasinsRoot,
     shud_input_name: str,
     required_files: dict[str, Any],
     expected_checksums: dict[str, str] | None = None,
 ) -> ParsedBasinsGeometry:
     """Parse domain and river geometry from inventory-referenced Basins files."""
 
-    _validate_required_files_canonical(required_files, shud_input_name, input_dir)
-    input_root = input_dir
+    input_root = _coerce_trusted_root(input_dir, role="shud_input_name")
+    _run_safe_open_test_hook(input_root.path, "shud_input_name", "before_parse")
+    _validate_required_files_canonical(required_files, shud_input_name, input_root.path)
     domain_base = _validated_layer_base(input_root, "domain", required_files)
     river_base = _validated_layer_base(input_root, "river", required_files)
     seg_base = _validated_layer_base(input_root, "seg", required_files)
     _enforce_gis_sidecar_byte_limits((domain_base, river_base, seg_base), input_root)
-    domain_layer = _load_layer_snapshot(domain_base, input_root, expected_checksums)
-    river_layer = _load_layer_snapshot(river_base, input_root, expected_checksums)
-    seg_layer = _load_layer_snapshot(seg_base, input_root, expected_checksums)
+    _run_safe_open_test_hook(input_root.path, "gis_sidecar_limits", "after_precheck")
+    gis_budget = _GisReadBudget()
+    domain_layer = _load_layer_snapshot(domain_base, input_root, expected_checksums, gis_budget)
+    river_layer = _load_layer_snapshot(river_base, input_root, expected_checksums, gis_budget)
+    seg_layer = _load_layer_snapshot(seg_base, input_root, expected_checksums, gis_budget)
     _validate_prj(domain_layer)
     _validate_prj(river_layer)
     _validate_prj(seg_layer)
@@ -172,7 +213,14 @@ def parse_basins_geometry(
     )
 
 
-def _validated_layer_base(input_dir: Path, layer: str, required_files: dict[str, Any]) -> Path:
+def _coerce_trusted_root(root: Path | TrustedBasinsRoot, *, role: str) -> TrustedBasinsRoot:
+    if isinstance(root, TrustedBasinsRoot):
+        _validate_trusted_root(root, role=role)
+        return root
+    return trusted_basins_root(root, role=role)
+
+
+def _validated_layer_base(input_dir: TrustedBasinsRoot, layer: str, required_files: dict[str, Any]) -> Path:
     for suffix in SHAPEFILE_REQUIRED_SUFFIXES:
         role = f"gis_{layer}_{suffix}"
         expected = f"gis/{layer}.{suffix}"
@@ -181,10 +229,10 @@ def _validated_layer_base(input_dir: Path, layer: str, required_files: dict[str,
             raise BasinsGeometryError(
                 "BASINS_REGISTRY_GIS_SIDECAR_MISSING",
                 f"Basins inventory is missing required GIS sidecar role {role}.",
-                path=str(input_dir / expected),
+                path=str(input_dir.path / expected),
                 details={"missing_sidecar": expected, "role": role},
             )
-        path = input_dir / expected
+        path = input_dir.path / expected
         try:
             _validate_safe_file(path, input_dir, role=role, error_code="BASINS_REGISTRY_GIS_SIDECAR_MISSING")
         except BasinsGeometryError as error:
@@ -198,10 +246,10 @@ def _validated_layer_base(input_dir: Path, layer: str, required_files: dict[str,
                 path=str(path),
                 details={"missing_sidecar": expected, "role": role},
             )
-    return input_dir / "gis" / layer
+    return input_dir.path / "gis" / layer
 
 
-def _enforce_gis_sidecar_byte_limits(layer_bases: tuple[Path, ...], input_root: Path) -> None:
+def _enforce_gis_sidecar_byte_limits(layer_bases: tuple[Path, ...], input_root: TrustedBasinsRoot) -> None:
     total_bytes = 0
     for layer_base in layer_bases:
         layer_bytes = 0
@@ -231,17 +279,22 @@ def _enforce_gis_sidecar_byte_limits(layer_bases: tuple[Path, ...], input_root: 
             )
 
 
-def _required_input_file(input_dir: Path, required_files: dict[str, Any], role: str, shud_input_name: str) -> Path:
+def _required_input_file(
+    input_dir: TrustedBasinsRoot,
+    required_files: dict[str, Any],
+    role: str,
+    shud_input_name: str,
+) -> Path:
     values = required_files.get(role)
     expected = f"{shud_input_name}{SHUD_CANONICAL_SUFFIXES[role]}"
     if not isinstance(values, list) or values != [expected]:
         raise BasinsGeometryError(
             "BASINS_REQUIRED_FILES_NON_CANONICAL",
             f"Basins inventory source role {role} must be canonical: {expected}.",
-            path=str(input_dir),
+            path=str(input_dir.path),
             details={"role": role},
         )
-    path = input_dir / expected
+    path = input_dir.path / expected
     _validate_safe_file(path, input_dir, role=role, error_code="BASINS_REGISTRY_SOURCE_MISSING")
     if not path.is_file():
         raise BasinsGeometryError(
@@ -255,11 +308,13 @@ def _required_input_file(input_dir: Path, required_files: dict[str, Any], role: 
 
 def _load_layer_snapshot(
     layer_base: Path,
-    input_root: Path,
+    input_root: TrustedBasinsRoot,
     expected_checksums: dict[str, str] | None,
+    gis_budget: _GisReadBudget,
 ) -> _LayerSnapshot:
     data: dict[str, bytes] = {}
     digests: dict[str, str] = {}
+    layer_bytes = 0
     for suffix in SHAPEFILE_REQUIRED_SUFFIXES:
         role = f"gis_{layer_base.name}_{suffix}"
         path = layer_base.with_suffix(f".{suffix}")
@@ -269,7 +324,13 @@ def _load_layer_snapshot(
             role=role,
             expected_checksums=expected_checksums,
             error_code="BASINS_REGISTRY_GIS_SIDECAR_MISSING",
+            max_bytes=MAX_BASINS_GIS_SIDECAR_BYTES,
+            max_bytes_resource="gis_sidecar_bytes",
         )
+        layer_bytes += len(payload)
+        gis_budget.total_bytes += len(payload)
+        _check_resource_limit(layer_bytes, MAX_BASINS_GIS_LAYER_BYTES, "gis_layer_bytes", str(path))
+        _check_resource_limit(gis_budget.total_bytes, MAX_BASINS_GIS_TOTAL_BYTES, "gis_total_bytes", str(path))
         data[suffix] = payload
         digests[suffix] = digest
     return _LayerSnapshot(base=layer_base, data=data, digests=digests)
@@ -670,7 +731,7 @@ def _river_network_checksum_from_snapshot(
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _sha256_file(path: Path, containment_root: Path) -> str:
+def _sha256_file(path: Path, containment_root: Path | TrustedBasinsRoot) -> str:
     _validate_safe_file(path, containment_root, role="checksum", error_code="BASINS_REGISTRY_SOURCE_MISSING")
     digest = hashlib.sha256()
     with _open_safe_binary(path, containment_root, role="checksum") as handle:
@@ -679,19 +740,20 @@ def _sha256_file(path: Path, containment_root: Path) -> str:
     return digest.hexdigest()
 
 
-def safe_basins_file_sha256(path: Path, containment_root: Path) -> str:
+def safe_basins_file_sha256(path: Path, containment_root: Path | TrustedBasinsRoot) -> str:
     _validate_safe_file(path, containment_root, role="checksum", error_code="BASINS_REGISTRY_SOURCE_MISSING")
     return _sha256_file(path, containment_root)
 
 
 def _read_verified_binary(
     path: Path,
-    containment_root: Path,
+    containment_root: Path | TrustedBasinsRoot,
     *,
     role: str,
     expected_checksums: dict[str, str] | None,
     error_code: str,
     max_bytes: int | None = None,
+    max_bytes_resource: str = "shud_evidence_bytes",
 ) -> tuple[bytes, str]:
     _validate_safe_file(path, containment_root, role=role, error_code=error_code)
     digest = hashlib.sha256()
@@ -701,7 +763,7 @@ def _read_verified_binary(
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             byte_count += len(chunk)
             if max_bytes is not None:
-                _check_resource_limit(byte_count, max_bytes, "shud_evidence_bytes", str(path))
+                _check_resource_limit(byte_count, max_bytes, max_bytes_resource, str(path))
             digest.update(chunk)
             chunks.append(chunk)
     actual = digest.hexdigest()
@@ -725,15 +787,16 @@ def _read_verified_binary(
     return b"".join(chunks), actual
 
 
-def _relative_to_root(path: Path, containment_root: Path) -> str:
-    candidate = path if path.is_absolute() else containment_root / path
+def _relative_to_root(path: Path, containment_root: Path | TrustedBasinsRoot) -> str:
+    root = _coerce_trusted_root(containment_root, role="relative").resolved_path
+    candidate = path if path.is_absolute() else root / path
     try:
-        return candidate.relative_to(containment_root.resolve()).as_posix()
+        return candidate.relative_to(root).as_posix()
     except ValueError:
         return str(path)
 
 
-def _file_identity(path: Path, containment_root: Path, *, role: str) -> tuple[int, int, int]:
+def _file_identity(path: Path, containment_root: Path | TrustedBasinsRoot, *, role: str) -> tuple[int, int, int]:
     _validate_safe_file(path, containment_root, role=role, error_code="BASINS_REGISTRY_SOURCE_MISSING")
     try:
         st = path.lstat()
@@ -754,7 +817,7 @@ def _file_identity(path: Path, containment_root: Path, *, role: str) -> tuple[in
     return (st.st_dev, st.st_ino, st.st_mode)
 
 
-def _verified_file_size(path: Path, containment_root: Path, *, role: str) -> int:
+def _verified_file_size(path: Path, containment_root: Path | TrustedBasinsRoot, *, role: str) -> int:
     _validate_safe_file(path, containment_root, role=role, error_code="BASINS_REGISTRY_SOURCE_MISSING")
     try:
         st = path.lstat()
@@ -776,7 +839,7 @@ def _verified_file_size(path: Path, containment_root: Path, *, role: str) -> int
 
 
 @contextmanager
-def _open_safe_binary(path: Path, containment_root: Path, *, role: str) -> Iterator[FileIO]:
+def _open_safe_binary(path: Path, containment_root: Path | TrustedBasinsRoot, *, role: str) -> Iterator[FileIO]:
     handle = _open_safe_binary_handle(path, containment_root, role=role)
     try:
         yield handle
@@ -786,7 +849,7 @@ def _open_safe_binary(path: Path, containment_root: Path, *, role: str) -> Itera
 
 def _open_safe_binary_handle(
     path: Path,
-    containment_root: Path,
+    containment_root: Path | TrustedBasinsRoot,
     *,
     role: str,
     expected_identity: tuple[int, int, int] | None = None,
@@ -827,6 +890,33 @@ def _open_safe_binary_handle(
         raise
 
 
+def _validate_trusted_root(root: TrustedBasinsRoot, *, role: str) -> None:
+    if root.path != root.resolved_path:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins trusted root path is not canonical.",
+            path=str(root.path),
+            details={"role": role},
+        )
+    try:
+        st = root.path.lstat()
+    except OSError as error:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins trusted root cannot be safely inspected.",
+            path=str(root.path),
+            details={"role": role},
+        ) from error
+    actual = (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode))
+    if actual != root.identity or not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins trusted root changed during import.",
+            path=str(root.path),
+            details={"role": role},
+        )
+
+
 def _run_safe_open_test_hook(path: Path, role: str, phase: str) -> None:
     hook = _SAFE_OPEN_TEST_HOOK
     if hook is not None:
@@ -863,9 +953,11 @@ def _validate_required_files_canonical(required_files: dict[str, Any], shud_inpu
         )
 
 
-def _validate_safe_file(path: Path, containment_root: Path, *, role: str, error_code: str) -> None:
-    root = containment_root.resolve()
-    candidate = path if path.is_absolute() else containment_root / path
+def _validate_safe_file(path: Path, containment_root: Path | TrustedBasinsRoot, *, role: str, error_code: str) -> None:
+    trusted_root = _coerce_trusted_root(containment_root, role=role)
+    root = trusted_root.resolved_path
+    _validate_trusted_root(trusted_root, role=role)
+    candidate = path if path.is_absolute() else root / path
     try:
         relative = candidate.relative_to(root)
     except ValueError as error:

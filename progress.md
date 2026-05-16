@@ -122,6 +122,7 @@
 - #136 PR #142 follow-up 已补齐：registry import 拒绝 canonical `input/<alias>` 与 `gis` 目录级 symlink，SHUD evidence 加 byte/line 上限与 declared-count 早退，manifest source identity 改为必填精确匹配，既有 river segment 幂等改为字段 digest 冲突检测。
 - #136 PR #142 follow-up round 2 已补齐：registry import 使用 inventory 原始字节 SHA-256 对齐 publish-basins 的 `source_inventory_checksum`；PRJ/SHUD/checksum/GIS sidecar 读取改为 no-follow open + fstat/lstat 身份复核，pyshp 使用已安全打开的文件句柄。
 - #136 PR #142 follow-up round 4 已补齐：registry import 要求 package `manifest_uri`；相对 inventory/source/input/gis 路径支持跨 CWD prepare/import；`mesh_version.checksum` 使用 manifest-verified canonical mesh checksum；GIS sidecar 在缓冲前执行 per-file、per-layer、aggregate byte 上限。
+- #136 PR #142 follow-up round 5 已补齐：registry import 将 `input/<alias>` 固化为带 inode 身份的可信根，后续 GIS/SHUD/checksum 读取若根目录被替换会返回 `BASINS_REGISTRY_PATH_UNSAFE`；GIS sidecar 实际读循环执行 per-file/layer/aggregate byte 上限，并把默认内存上限降至 64MiB/128MiB/384MiB。
 - 已新增 fast parser/CLI 测试和 opt-in PostgreSQL/PostGIS integration 测试；真实 Basins import smoke 仅在 `NHMS_RUN_REAL_BASINS_IMPORT=1`、integration DB 配置和 `data/Basins` 存在时运行。
 
 ## 已知技术风险 / 注意事项

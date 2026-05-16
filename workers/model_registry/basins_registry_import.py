@@ -16,8 +16,10 @@ from .basins_geometry import (
     SHUD_CANONICAL_SUFFIXES,
     BasinsGeometryError,
     ParsedBasinsGeometry,
+    TrustedBasinsRoot,
     parse_basins_geometry,
     safe_basins_file_sha256,
+    trusted_basins_root,
 )
 
 BASINS_REGISTRY_IMPORT_SCHEMA_VERSION = "basins.registry_import.v1"
@@ -57,7 +59,7 @@ class ImportSources:
     inventory: dict[str, Any]
     manifest: dict[str, Any]
     model: dict[str, Any]
-    input_dir: Path
+    input_dir: TrustedBasinsRoot
     source_root: Path
     ids: dict[str, str]
     geometry: ParsedBasinsGeometry
@@ -700,7 +702,7 @@ def _input_dir(
     source_root: Path,
     model: dict[str, Any],
     model_id: str,
-) -> Path:
+) -> TrustedBasinsRoot:
     shud_input_name = _required_model_str(model, "shud_input_name", model_id)
     expected = source_root / "input" / shud_input_name
     for role, path in (
@@ -741,7 +743,11 @@ def _input_dir(
             model_id=model_id,
             path=str(expected),
         )
-    return expected
+    try:
+        return trusted_basins_root(expected, role="shud_input_name")
+    except BasinsGeometryError as error:
+        _raise_geometry_import_error(error, model_id)
+        raise AssertionError("unreachable") from error
 
 
 def _registry_ids(model: dict[str, Any], model_id: str) -> dict[str, str]:
@@ -817,7 +823,7 @@ def _validate_manifest_source_identity(
 def _validate_manifest_included_files(
     manifest: dict[str, Any],
     model: dict[str, Any],
-    input_dir: Path,
+    input_dir: TrustedBasinsRoot,
     model_id: str,
     *,
     expected_checksums: dict[str, str],
@@ -842,7 +848,7 @@ def _validate_manifest_included_files(
     for relative_path in canonical_paths:
         manifest_sha = expected_checksums[relative_path]
         try:
-            actual_sha = safe_basins_file_sha256(input_dir / relative_path, input_dir)
+            actual_sha = safe_basins_file_sha256(input_dir.path / relative_path, input_dir)
         except BasinsGeometryError as error:
             _raise_geometry_import_error(error, model_id, relative_path=relative_path)
         if actual_sha != manifest_sha:
