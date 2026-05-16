@@ -884,6 +884,55 @@ def test_publish_basins_rejects_extra_required_file_without_writing_outputs(
     assert not (object_root / "models" / model_id / "vbasins-extra-required" / "package" / "secret.txt").exists()
 
 
+def test_publish_basins_rejects_extra_same_pattern_required_file_without_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    secret_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "secret.cfg.para"
+    secret_file.write_text("do not publish\n", encoding="utf-8")
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model["status"] = "valid"
+    model["default_publish_eligible"] = True
+    model["missing_required_files"] = []
+    model["required_files"]["cfg_para"] = ["alias-a.cfg.para", "secret.cfg.para"]
+    write_inventory(inventory, inventory_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-extra-same-pattern-required",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_REQUIRED_FILES_NON_CANONICAL"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-extra-same-pattern-required"
+    assert "cfg_para:secret.cfg.para" in error["message"]
+    assert not output.exists()
+    assert not (
+        object_root / "models" / model_id / "vbasins-extra-same-pattern-required" / "manifest.json"
+    ).exists()
+    assert not (
+        object_root / "models" / model_id / "vbasins-extra-same-pattern-required" / "package" / "secret.cfg.para"
+    ).exists()
+
+
 def test_publish_basins_reports_output_write_failure_as_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1196,6 +1245,57 @@ def test_publish_basins_rejects_same_root_tampered_forcing_dir_without_outputs(
     assert not (object_root / "models" / model_id / "vbasins-same-root-forcing-tampered" / "manifest.json").exists()
     assert not (object_root / "models" / model_id / "vbasins-same-root-forcing-tampered" / "package").exists()
     assert not (object_root / "models" / model_id / "vbasins-same-root-forcing-tampered" / "forcing").exists()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "tampered_value", "version"),
+    [
+        ("input_dir", "other/basin-a/input/alias-a", "vbasins-relative-input-prefix-tampered"),
+        ("gis_dir", "other/basin-a/input/alias-a/gis", "vbasins-relative-gis-prefix-tampered"),
+        ("forcing_dir", "other/basin-a/forcing", "vbasins-relative-forcing-prefix-tampered"),
+    ],
+)
+def test_publish_basins_rejects_arbitrary_prefix_relative_inventory_path_without_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    field_name: str,
+    tampered_value: str,
+    version: str,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path, forcing_count=1)
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model[field_name] = tampered_value
+    write_inventory(inventory, inventory_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            version,
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_INVENTORY_PATH_MISMATCH"
+    assert error["model_id"] == model_id
+    assert error["version"] == version
+    assert error["path"] == str(tmp_path / "basins" / tampered_value)
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / version / "manifest.json").exists()
+    assert not (object_root / "models" / model_id / version / "package").exists()
 
 
 def test_publish_basins_rejects_unresolvable_symlink_descendant_as_json(

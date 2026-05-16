@@ -95,11 +95,13 @@ def publish_basins_package(
     model_package_uri = _directory_uri(store, package_key)
     manifest_uri = store.uri_for_key(manifest_key)
     inventory_root = _resolved_inventory_root(inventory, model_id, version)
+    inventory_relative_root = _recorded_relative_inventory_root(inventory)
     source_root = _resolved_source_root(model, inventory_root, model_id, version)
 
     package_files = _package_source_files(
         model,
         inventory_root,
+        inventory_relative_root,
         source_root,
         store,
         package_key,
@@ -110,6 +112,7 @@ def publish_basins_package(
     forcing, forcing_files = _forcing_metadata(
         model=model,
         inventory_root=inventory_root,
+        inventory_relative_root=inventory_relative_root,
         source_root=source_root,
         object_store=store,
         forcing_key=forcing_key,
@@ -434,6 +437,22 @@ def _resolved_inventory_root(inventory: dict[str, Any], model_id: str, version: 
     return inventory_root
 
 
+def _recorded_relative_inventory_root(inventory: dict[str, Any]) -> Path | None:
+    root = inventory.get("root")
+    if not isinstance(root, str) or not root:
+        return None
+    root_path = Path(root).expanduser()
+    if root_path.is_absolute():
+        return None
+    try:
+        normalized = Path(_normalize_relative_path(root_path.as_posix()))
+    except BasinsPackageError:
+        return None
+    if normalized == Path("."):
+        return None
+    return normalized
+
+
 def _resolved_source_root(model: dict[str, Any], inventory_root: Path, model_id: str, version: str) -> Path:
     root_relative = model.get("root_relative_resolved_path") or model.get("root_relative_path")
     if not isinstance(root_relative, str) or not root_relative:
@@ -496,6 +515,7 @@ def _resolved_source_root(model: dict[str, Any], inventory_root: Path, model_id:
 def _package_source_files(
     model: dict[str, Any],
     inventory_root: Path,
+    inventory_relative_root: Path | None,
     source_root: Path,
     object_store: LocalObjectStore,
     package_key: str,
@@ -508,6 +528,7 @@ def _package_source_files(
     input_dir = _safe_source_dir(
         model.get("input_dir"),
         inventory_root,
+        inventory_relative_root,
         source_root,
         "input_dir",
         expected_path=expected_input_dir,
@@ -527,6 +548,7 @@ def _package_source_files(
         gis_dir = _safe_source_dir(
             gis_dir_value,
             inventory_root,
+            inventory_relative_root,
             source_root,
             "gis_dir",
             expected_path=expected_input_dir / "gis",
@@ -590,40 +612,47 @@ def _validated_canonical_required_source_files(
     extras: list[str] = []
     files: list[SourceFile] = []
     canonical_roles = {role for role, _ in SHUD_REQUIRED_PATTERNS} | {role for role, _ in GIS_REQUIRED_FILES}
+    direct_same_pattern_extras: list[str] = []
 
     for role, pattern in SHUD_REQUIRED_PATTERNS:
         relative_names = required_files.get(role)
         if not isinstance(relative_names, list) or not relative_names:
             missing.append(role)
             continue
-        matching_paths = []
-        for relative_name in relative_names:
-            relative_path = _normalize_relative_path(str(relative_name))
-            if len(Path(relative_path).parts) == 1 and fnmatchcase(relative_path, pattern):
-                matching_paths.append(relative_path)
-            else:
-                extras.append(f"{role}:{relative_path}")
-        if not matching_paths:
+        expected_path = _canonical_shud_required_file_name(input_dir.name, pattern)
+        normalized_names = [_normalize_relative_path(str(name)) for name in relative_names]
+        expected_count = normalized_names.count(expected_path)
+        role_extras = [name for name in normalized_names if name != expected_path]
+        extras.extend(f"{role}:{name}" for name in role_extras)
+        direct_same_pattern_extras.extend(
+            f"{role}:{name}"
+            for name in role_extras
+            if len(Path(name).parts) == 1 and fnmatchcase(name, pattern)
+        )
+        if expected_count == 0:
             missing.append(role)
             continue
-        for relative_path in matching_paths:
-            source_path = _safe_source_file(
-                input_dir / relative_path,
-                source_root,
-                model_id=model_id,
-                version=version,
-                manifest_uri=manifest_uri,
+        if expected_count > 1:
+            duplicate_extras = [expected_path for _ in range(expected_count - 1)]
+            extras.extend(f"{role}:{name}" for name in duplicate_extras)
+            direct_same_pattern_extras.extend(f"{role}:{name}" for name in duplicate_extras)
+        source_path = _safe_source_file(
+            input_dir / expected_path,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        files.append(
+            _source_file_for_package(
+                source_path,
+                expected_path,
+                object_store,
+                package_key,
+                source_root=source_root,
+                role="runtime_input",
             )
-            files.append(
-                _source_file_for_package(
-                    source_path,
-                    relative_path,
-                    object_store,
-                    package_key,
-                    source_root=source_root,
-                    role="runtime_input",
-                )
-            )
+        )
 
     for role, file_name in GIS_REQUIRED_FILES:
         expected_path = _normalize_relative_path(f"gis/{file_name}")
@@ -663,6 +692,15 @@ def _validated_canonical_required_source_files(
         else:
             extras.append(f"{role_name}:<non-list>")
 
+    if direct_same_pattern_extras:
+        entries = ", ".join(sorted(set(extras)))
+        raise BasinsPackageError(
+            "BASINS_REQUIRED_FILES_NON_CANONICAL",
+            f"Basins inventory includes non-canonical required file entries: {entries}",
+            model_id=model_id or None,
+            version=version,
+            path=str(input_dir),
+        )
     if missing:
         roles = ", ".join(sorted(missing))
         raise BasinsPackageError(
@@ -682,6 +720,15 @@ def _validated_canonical_required_source_files(
             path=str(input_dir),
         )
     return files
+
+
+def _canonical_shud_required_file_name(input_name: str, pattern: str) -> str:
+    if not pattern.startswith("*"):
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_INVALID",
+            f"Unsupported SHUD required file pattern: {pattern}",
+        )
+    return f"{input_name}{pattern.removeprefix('*')}"
 
 
 def _source_file_for_package(
@@ -782,6 +829,7 @@ def _forcing_metadata(
     *,
     model: dict[str, Any],
     inventory_root: Path,
+    inventory_relative_root: Path | None,
     source_root: Path,
     object_store: LocalObjectStore,
     forcing_key: str,
@@ -809,6 +857,7 @@ def _forcing_metadata(
     forcing_dir = _safe_source_dir(
         forcing_dir_value,
         inventory_root,
+        inventory_relative_root,
         source_root,
         "forcing_dir",
         expected_path=expected_forcing_dir,
@@ -1480,6 +1529,7 @@ def _success_payload(status: str, manifest: dict[str, Any]) -> dict[str, Any]:
 def _safe_source_dir(
     value: Any,
     inventory_root: Path,
+    inventory_relative_root: Path | None,
     source_root: Path,
     field_name: str,
     *,
@@ -1501,6 +1551,7 @@ def _safe_source_dir(
         path = _source_dir_from_relative_inventory_value(
             path,
             inventory_root,
+            inventory_relative_root,
             source_root,
             expected_path,
             field_name,
@@ -1535,6 +1586,7 @@ def _safe_source_dir(
 def _source_dir_from_relative_inventory_value(
     path: Path,
     inventory_root: Path,
+    inventory_relative_root: Path | None,
     source_root: Path,
     expected_path: Path,
     field_name: str,
@@ -1544,42 +1596,44 @@ def _source_dir_from_relative_inventory_value(
     manifest_uri: str | None = None,
 ) -> Path:
     normalized = Path(_normalize_relative_path(path.as_posix()))
-    if _relative_inventory_path_matches_expected(normalized, inventory_root, source_root, expected_path):
+    if _relative_inventory_path_matches_expected(
+        normalized,
+        inventory_root,
+        inventory_relative_root,
+        source_root,
+        expected_path,
+    ):
         return expected_path
     candidate = inventory_root / normalized
-    _ensure_under_root(
-        _resolve_package_path(candidate, model_id=model_id, version=version),
-        inventory_root,
-        error_code="BASINS_INVENTORY_PATH_MISMATCH",
-        message=f"Basins model {field_name} resolves outside the inventory root.",
+    raise BasinsPackageError(
+        "BASINS_INVENTORY_PATH_MISMATCH",
+        f"Basins inventory {field_name} does not match the selected model's canonical source path.",
         model_id=model_id,
         version=version,
+        path=str(candidate),
         manifest_uri=manifest_uri,
     )
-    return candidate
 
 
 def _relative_inventory_path_matches_expected(
     relative_path: Path,
     inventory_root: Path,
+    inventory_relative_root: Path | None,
     source_root: Path,
     expected_path: Path,
 ) -> bool:
-    relative_parts = relative_path.parts
-    expected_relative_paths: list[Path] = []
+    expected_relative_paths: set[Path] = set()
     for base in (source_root, inventory_root):
         try:
-            expected_relative_paths.append(expected_path.relative_to(base))
+            expected_relative_paths.add(expected_path.relative_to(base))
         except ValueError:
             continue
-
-    for expected_relative in expected_relative_paths:
-        expected_parts = expected_relative.parts
-        if relative_parts == expected_parts:
-            return True
-        if len(relative_parts) >= len(expected_parts) and relative_parts[-len(expected_parts) :] == expected_parts:
-            return True
-    return False
+    if inventory_relative_root is not None:
+        try:
+            expected_relative_paths.add(inventory_relative_root / expected_path.relative_to(inventory_root))
+        except ValueError:
+            pass
+    return relative_path in expected_relative_paths
 
 
 def _safe_source_file(

@@ -104,6 +104,7 @@
 - #135 Phase 6 round 7 已补齐：早期 stale required source 错误携带 `manifest_uri`；migration evidence stat/read 失败收敛为 `BASINS_MIGRATION_EVIDENCE_READ_FAILED` JSON；最终 package hash/copy 前会重新执行 symlink/containment 校验并用 no-follow 打开源文件，防止规划后替换为 symlink。
 - #135 Phase 6 round 8 已补齐：migration evidence size/hash 与 forcing CSV header/time 采样复用最终 no-follow 源文件读校验；遍历后替换为 symlink 会返回结构化 JSON，且不写 report 或本地 manifest。
 - #135 Phase 6 round 9 已补齐：相对 `input_dir/gis_dir/forcing_dir` 发布时按 inventory/source canonical 上下文解析，支持相对 Basins root inventory 跨 CWD 发布；最终源文件读取改为从 `source_root` 目录 fd 逐段 no-follow 打开并复核 inode，拒绝 runtime、forcing 与 migration evidence 祖先目录替换为 symlink。
+- #135 Phase 6 round 10 已补齐：runtime required_files 只接受 `<shud_input_name>.<suffix>` canonical 文件名，拒绝同模式额外直系文件；相对 `input_dir/gis_dir/forcing_dir` 只接受 canonical 相对形式，拒绝任意前缀篡改。
 
 ## 已知技术风险 / 注意事项
 
