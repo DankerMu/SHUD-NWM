@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import workers.model_registry.basins_package as basins_package
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.cli import _argparse_main
 
@@ -160,6 +161,47 @@ def test_publish_basins_rejects_checksum_conflict_for_same_version(
     assert json.loads(object_manifest.read_text()) == previous_manifest
 
 
+def test_publish_basins_checksum_ignores_benign_inventory_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    _object_store_env(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "manifest.json"
+    args = [
+        "publish-basins",
+        "--inventory",
+        str(inventory_path),
+        "--model-id",
+        model_id,
+        "--version",
+        "vbasins-test",
+        "--output",
+        str(manifest_path),
+    ]
+    assert _argparse_main(args) == 0
+    first_payload = json.loads(capsys.readouterr().out)
+
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["benign_unrelated_field"] = {"note": "inventory-only churn"}
+    inventory["models"].append(
+        {
+            "model_id": "basins_unrelated_shud",
+            "status": "partial",
+            "default_publish_eligible": False,
+        }
+    )
+    inventory_path.write_text(json.dumps(inventory, indent=4, sort_keys=False) + "\n", encoding="utf-8")
+    assert _argparse_main(args) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    second_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert second_payload["status"] == "already_done"
+    assert second_payload["package_checksum"] == first_payload["package_checksum"]
+    assert second_manifest["package_checksum"] == first_payload["package_checksum"]
+
+
 def test_publish_basins_excludes_forcing_payloads_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -228,6 +270,49 @@ def test_publish_basins_copy_forcing_writes_explicit_payload_prefix(
     assert len([entry for entry in manifest["included_files"] if entry["role"] == "forcing"]) == 2
     assert (object_root / "models" / model_id / "vbasins-test" / "forcing" / "X000001.csv").is_file()
     assert (object_root / "models" / model_id / "vbasins-test" / "forcing" / "X000002.csv").is_file()
+
+
+def test_publish_basins_forcing_metadata_is_bounded_and_copy_uses_iterator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path, forcing_count=7)
+    _object_store_env(tmp_path, monkeypatch)
+    original_walk = basins_package._walk_source_files
+    yielded = 0
+
+    def counting_walk(root: Path, source_root: Path) -> object:
+        nonlocal yielded
+        for path in original_walk(root, source_root):
+            yielded += 1
+            yield path
+
+    monkeypatch.setattr(basins_package, "_walk_source_files", counting_walk)
+
+    assert (
+        _argparse_main(
+            [
+                "publish-basins",
+                "--inventory",
+                str(inventory_path),
+                "--model-id",
+                model_id,
+                "--version",
+                "vbasins-forcing-iter",
+                "--output",
+                str(tmp_path / "manifest.json"),
+                "--copy-forcing",
+            ]
+        )
+        == 0
+    )
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+
+    assert yielded >= 7
+    assert manifest["forcing"]["csv_count"] == 7
+    assert manifest["forcing"]["copied_file_count"] == 7
+    assert manifest["forcing"]["sample_file_limit"] == 5
+    assert len(manifest["forcing"]["sample_headers"]) == 1
 
 
 def test_publish_basins_accepts_symlink_root_with_calib_files(
@@ -309,7 +394,84 @@ def test_publish_basins_rejects_partial_model_with_structured_error(
     assert "tailanhe" in error["path"]
 
 
-def test_publish_basins_reports_unresolvable_source_descendant_as_json(
+def test_publish_basins_reports_output_write_failure_as_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output_parent = tmp_path / "not-a-dir"
+    output_parent.write_text("file blocks output parent\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-output-fail",
+            "--output",
+            str(output_parent / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_OUTPUT_WRITE_FAILED"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-output-fail"
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-output-fail/manifest.json"
+    assert error["path"] == str(output_parent / "manifest.json")
+    assert "Traceback" not in captured.err
+    assert not (object_root / "models" / model_id / "vbasins-output-fail" / "manifest.json").exists()
+
+
+def test_publish_basins_rejects_tampered_inventory_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    outside_root = tmp_path / "outside"
+    _make_valid_model(outside_root / "basin-a", "alias-a")
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model["resolved_source_path"] = str((outside_root / "basin-a").resolve())
+    model["source_path"] = str(outside_root / "basin-a")
+    model["input_dir"] = str(outside_root / "basin-a" / "input" / "alias-a")
+    write_inventory(inventory, inventory_path)
+    _object_store_env(tmp_path, monkeypatch)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-tampered",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_INVENTORY_PATH_MISMATCH"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-tampered"
+    assert error["path"] == str((outside_root / "basin-a").resolve())
+
+
+def test_publish_basins_rejects_unresolvable_symlink_descendant_as_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -341,21 +503,22 @@ def test_publish_basins_reports_unresolvable_source_descendant_as_json(
     error = json.loads(captured.err)
     assert exit_code == 1
     assert captured.out == ""
-    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNRESOLVABLE"
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
     assert error["path"] == str(loop)
     assert "Traceback" not in captured.err
 
 
-def test_publish_basins_skips_symlink_directory_cycle_without_duplicate_files(
+def test_publish_basins_rejects_symlink_descendant_with_structured_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     root = tmp_path / "basins"
     model_dir = root / "basin-a"
     _make_valid_model(model_dir, "alias-a", calibration_count=1)
-    loop = model_dir / "CALIB" / "loop-to-model"
+    linked_file = model_dir / "CALIB" / "linked.calib"
     try:
-        loop.symlink_to(model_dir, target_is_directory=True)
+        linked_file.symlink_to(model_dir / "CALIB" / "top01.calib")
     except (NotImplementedError, OSError) as error:
         pytest.skip(f"symlink support unavailable: {error}")
     inventory = discover_basins_inventory(root)
@@ -378,13 +541,119 @@ def test_publish_basins_skips_symlink_directory_cycle_without_duplicate_files(
         ]
     )
 
-    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
-    calibration_paths = [
-        entry["relative_path"] for entry in manifest["included_files"] if entry["role"] == "calibration"
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["path"] == str(linked_file)
+    assert "Traceback" not in captured.err
+
+
+def test_publish_basins_existing_manifest_does_not_require_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "manifest.json"
+    args = [
+        "publish-basins",
+        "--inventory",
+        str(inventory_path),
+        "--model-id",
+        model_id,
+        "--version",
+        "vbasins-test",
+        "--output",
+        str(manifest_path),
     ]
+    assert _argparse_main(args) == 0
+    capsys.readouterr()
+    (object_root / "models" / model_id / "vbasins-test" / ".publish.lock").write_text("stale\n", encoding="utf-8")
+
+    assert _argparse_main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "already_done"
+
+
+def test_publish_basins_rejects_in_progress_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    lock_path = object_root / "models" / model_id / "vbasins-locked" / ".publish.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("busy\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-locked",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PUBLISH_IN_PROGRESS"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-locked"
+    assert error["path"] == str(lock_path)
+
+
+def test_publish_basins_manifest_checksums_match_mutated_bytes_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    source_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
+    original_writer = basins_package._write_file_to_store_streaming
+
+    def mutating_writer(store: object, key: str, path: Path) -> tuple[int, str]:
+        if path == source_file:
+            path.write_text("mutated-before-write\n", encoding="utf-8")
+        return original_writer(store, key, path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(basins_package, "_write_file_to_store_streaming", mutating_writer)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-mutated-write",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
     assert exit_code == 0
-    assert calibration_paths == ["CALIB/top01.calib"]
-    assert all("loop-to-model" not in entry["relative_path"] for entry in manifest["included_files"])
+    capsys.readouterr()
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    entry = next(item for item in manifest["included_files"] if item["relative_path"] == "alias-a.cfg.para")
+    object_bytes = (
+        object_root / "models" / model_id / "vbasins-mutated-write" / "package" / "alias-a.cfg.para"
+    ).read_bytes()
+    assert object_bytes == b"mutated-before-write\n"
+    assert entry["size_bytes"] == len(object_bytes)
+    assert entry["sha256"] == hashlib.sha256(object_bytes).hexdigest()
 
 
 def test_basins_migration_report_rejects_symlink_target(
@@ -416,7 +685,7 @@ def test_basins_migration_report_rejects_symlink_target(
     assert not output.exists()
 
 
-def test_basins_migration_report_reports_unresolvable_descendant_as_json(
+def test_basins_migration_report_rejects_unresolvable_symlink_descendant_as_json(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -445,22 +714,22 @@ def test_basins_migration_report_reports_unresolvable_descendant_as_json(
     error = json.loads(captured.err)
     assert exit_code == 1
     assert captured.out == ""
-    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNRESOLVABLE"
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
     assert error["path"] == str(loop)
     assert "Traceback" not in captured.err
     assert not output.exists()
 
 
-def test_basins_migration_report_skips_symlink_directory_cycle_without_duplicate_files(
+def test_basins_migration_report_rejects_symlink_descendant_as_json(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     real_root = tmp_path / "real-basins"
     model_dir = real_root / "basin-a"
     _make_valid_model(model_dir, "alias-a", calibration_count=1, forcing_count=1)
-    loop = model_dir / "CALIB" / "loop-to-root"
+    linked_file = model_dir / "CALIB" / "linked.calib"
     try:
-        loop.symlink_to(real_root, target_is_directory=True)
+        linked_file.symlink_to(model_dir / "CALIB" / "top01.calib")
     except (NotImplementedError, OSError) as error:
         pytest.skip(f"symlink support unavailable: {error}")
     output = tmp_path / "report.json"
@@ -477,13 +746,44 @@ def test_basins_migration_report_skips_symlink_directory_cycle_without_duplicate
         ]
     )
 
-    payload = json.loads(capsys.readouterr().out)
-    report = json.loads(output.read_text(encoding="utf-8"))
-    assert exit_code == 0
-    assert payload["status"] == "ok"
-    assert report["file_count"] == 28
-    assert report["model_count"] == 1
-    assert report["production_ready"] is True
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["path"] == str(linked_file)
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+
+
+def test_basins_migration_report_reports_output_write_failure_as_json(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real_root = tmp_path / "real-basins"
+    _make_valid_model(real_root / "basin-a", "alias-a")
+    output_parent = tmp_path / "not-a-dir"
+    output_parent.write_text("file blocks output parent\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "basins-migration-report",
+            "--basins-root",
+            str(real_root),
+            "--source-uri",
+            "/volume/data/nwm/Basins",
+            "--output",
+            str(output_parent / "report.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_MIGRATION_REPORT_WRITE_FAILED"
+    assert error["path"] == str(output_parent / "report.json")
+    assert "Traceback" not in captured.err
 
 
 def test_basins_migration_report_accepts_real_copied_root(

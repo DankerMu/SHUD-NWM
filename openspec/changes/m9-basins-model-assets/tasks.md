@@ -145,6 +145,7 @@ Fixture J - unreadable root or model directory:
 - [x] 2.5 Add explicit historical forcing copy option that writes forcing payloads to a separate object-store prefix and records URI/checksum evidence.
 - [x] 2.6 Make publication idempotent when source file checksums and target version are unchanged, and reject checksum changes for the same version unless an explicit new `--version` is used.
 - [x] 2.7 Implement `nhms-model basins-migration-report` so production evidence fails for symlink targets and passes for real copied directories with file count, byte count, and inventory checksum.
+- [x] 2.8 Harden package publication review findings: structured local output write failures, package checksum independent of raw inventory bytes, inventory-root path revalidation, local publish lock, object checksum verification from written bytes, bounded forcing sampling/streamed copy, and symlink-descendant rejection.
 
 ### #135 Package / Migration Fixture Matrix
 
@@ -199,6 +200,32 @@ Fixture P - partial inventory rejected:
 Fixture P2 - structured failure payload:
 
 - Expected: all `publish-basins` and `basins-migration-report` command failures print JSON to stderr with at least `error_code`, `message`, and whichever of `model_id`, `version`, `path`, or `manifest_uri` is relevant. Commands must not claim `status=published` after a failure; checksum-conflict failures must preserve the previous manifest/package.
+- Output write failures use `BASINS_PACKAGE_OUTPUT_WRITE_FAILED` for package manifest output and `BASINS_MIGRATION_REPORT_WRITE_FAILED` for migration report output.
+
+Fixture P3 - inventory churn does not drive package conflicts:
+
+- Invocation: publish Fixture K, then rewrite the inventory JSON with benign formatting, an unrelated field, and an unrelated model record while leaving selected model package material unchanged; rerun same model/version.
+- Expected: second run exits `0` with `status=already_done`; `package_checksum` is unchanged; manifest still records the new `source_inventory_checksum` only when a new manifest is published.
+
+Fixture P4 - tampered inventory absolute paths rejected:
+
+- Invocation: alter a selected model record so `resolved_source_path`, `input_dir`, or `forcing_dir` points outside inventory `resolved_root` or no longer matches `root_relative_resolved_path`.
+- Expected: non-zero exit with `error_code=BASINS_INVENTORY_PATH_MISMATCH` or `BASINS_PACKAGE_PATH_UNSAFE`; no manifest is published from the tampered path.
+
+Fixture P5 - concurrent same-version publish lock:
+
+- Invocation: create `models/<model_id>/<version>/.publish.lock` before publishing when the manifest does not exist.
+- Expected: non-zero exit with `error_code=BASINS_PACKAGE_PUBLISH_IN_PROGRESS`; an existing unchanged manifest still returns `already_done` without requiring the lock.
+
+Fixture P6 - source/object write integrity:
+
+- Invocation: mutate or spy on a source file during package object write.
+- Expected: manifest file entry size and SHA-256 match the exact object bytes written and verified before final manifest publication.
+
+Fixture P7 - bounded forcing and symlink traversal:
+
+- Invocation: publish with many forcing CSV files and optional `--copy-forcing`; add a symlink descendant under calibration/forcing/source traversal.
+- Expected: forcing traversal/copy streams files without materializing all payload bytes; manifest records bounded sample limits; symlink descendants fail with `BASINS_PACKAGE_PATH_UNSAFE` and JSON stderr.
 
 Fixture Q - production migration symlink rejection:
 

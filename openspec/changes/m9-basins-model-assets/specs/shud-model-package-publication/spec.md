@@ -41,6 +41,8 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 
 - **WHEN** publication is run again for unchanged source files and the same target version
 - **THEN** it returns `already_done` or equivalent status without rewriting a different package checksum
+- **AND** benign inventory JSON formatting, unrelated inventory fields, unrelated model records, or raw inventory checksum changes SHALL NOT change the package checksum when selected model package material is unchanged
+- **AND** the manifest still records `source_inventory_checksum` as evidence separate from the package checksum
 
 #### Scenario: Source checksum changes for same target version
 
@@ -48,11 +50,26 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 - **THEN** it refuses to overwrite the package, reports stable error code `BASINS_PACKAGE_CHECKSUM_CONFLICT`, and preserves the existing manifest/package
 - **AND** #135 provides no force-overwrite behavior; users must choose a new version when source checksums change
 
+#### Scenario: Inventory source paths are revalidated
+
+- **WHEN** a Basins inventory record contains absolute source paths or input/forcing paths that do not match `resolved_root` plus the model root-relative path
+- **THEN** package publication refuses the inventory with stable error code `BASINS_INVENTORY_PATH_MISMATCH` or `BASINS_PACKAGE_PATH_UNSAFE`
+- **AND** it does not publish package files or a manifest from attacker-controlled absolute paths outside the inventory root
+
+#### Scenario: Publication uses a local object-store lock and verified writes
+
+- **WHEN** a package manifest does not already exist for `models/<model_id>/<version>/manifest.json`
+- **THEN** publication SHALL acquire an exclusive `models/<model_id>/<version>/.publish.lock` marker before writing package objects
+- **AND** an existing lock SHALL fail deterministically with `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`
+- **AND** an existing unchanged manifest SHALL still return `already_done` without requiring the lock
+- **AND** package object entries SHALL record size and SHA-256 from the exact bytes written and verified in the object store before the final manifest is written
+
 #### Scenario: Publication command failure payload
 
 - **WHEN** `publish-basins` fails
 - **THEN** stderr contains JSON with `error_code`, `message`, and relevant `model_id`, `version`, `path`, or `manifest_uri` fields
 - **AND** the command does not emit a success payload claiming `status=published`
+- **AND** requested local output JSON write failures SHALL use stable error code `BASINS_PACKAGE_OUTPUT_WRITE_FAILED`
 
 ### Requirement: Historical forcing is represented without accidental bulk duplication
 
@@ -62,6 +79,7 @@ The system SHALL record historical forcing CSV metadata separately from the runt
 
 - **WHEN** a model has CMFD forcing CSV files under `forcing/` or `focing/`
 - **THEN** the package manifest records the forcing directory, CSV count, time coverage when parsable from file headers, and aggregate checksum metadata
+- **AND** header/time evidence sampling SHALL be bounded by recorded file/byte/line limits while aggregate count, bytes, and checksum are computed by streaming file metadata and hashes
 
 #### Scenario: Runtime package excludes bulk forcing by default
 
@@ -73,6 +91,13 @@ The system SHALL record historical forcing CSV metadata separately from the runt
 
 - **WHEN** publication runs with an explicit option to copy historical forcing payloads
 - **THEN** forcing CSV files are written under a separate object-store prefix and the manifest records forcing payload URI, file count, and checksum evidence
+- **AND** copied forcing payloads SHALL be streamed to object storage without reading whole files into memory
+
+#### Scenario: Symlink descendants are rejected during package traversal
+
+- **WHEN** runtime, calibration, forcing, or migration evidence traversal encounters a symlink descendant below the selected source root
+- **THEN** the command refuses the traversal with stable error code `BASINS_PACKAGE_PATH_UNSAFE`
+- **AND** it emits structured JSON rather than an uncaught traceback
 
 ### Requirement: Production migration rejects symlink-only evidence
 
@@ -93,3 +118,4 @@ The system SHALL provide a migration report command that distinguishes developme
 
 - **WHEN** `basins-migration-report` fails
 - **THEN** stderr contains JSON with `error_code`, `message`, and the relevant `path`
+- **AND** requested local report write failures SHALL use stable error code `BASINS_MIGRATION_REPORT_WRITE_FAILED`

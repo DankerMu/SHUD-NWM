@@ -90,8 +90,12 @@
 - partial 或不可默认发布模型返回结构化 JSON 错误 `BASINS_MODEL_NOT_PUBLISHABLE`；publish/migration CLI 失败均向 stderr 输出 `error_code`、`message` 和相关上下文。
 - Basins 打包已兼容 `data/Basins` 为软链接根的 inventory：CALIB 文件用解析后的模型根计算相对路径，manifest/object store 仍保留 `CALIB/...` 路径，真实 opt-in smoke 已通过。
 - Basins package manifest 的 `included_files` 已补入 `role=manifest` 自条目；`package_checksum` 稳定覆盖源 package/forcing 证据，manifest 自条目单独记录 manifest 载荷校验和最终对象字节数，避免递归 checksum。
-- Basins package 与 migration 遍历已将不可解析源后代（例如 symlink loop）收敛为 `BASINS_PACKAGE_PATH_UNRESOLVABLE` JSON 错误，不泄露原始 traceback。
-- Basins package 与 migration 文件遍历已对目录软链接循环做防护：根内目录软链接不下钻，避免重复计数/打包和 ancestor 循环；普通文件仍保留 source root containment 校验。
+- Basins package 的 `package_checksum` 已不再包含原始 inventory checksum；`source_inventory_checksum` 仅作为 manifest 证据保留，inventory 格式、无关字段或其它模型记录变更不会触发同版本冲突。
+- Basins package 发布会基于 inventory `resolved_root` 与 root-relative 字段复核 `resolved_source_path`、`input_dir`、`forcing_dir`，篡改绝对路径会返回 `BASINS_INVENTORY_PATH_MISMATCH` 或 `BASINS_PACKAGE_PATH_UNSAFE`。
+- Basins package 发布新增本地对象存储 `.publish.lock`、写入后对象 size/SHA 校验和流式文件复制；已有未变 manifest 可不加锁返回 `already_done`，并发锁冲突返回 `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`。
+- Basins package 与 migration 输出路径写入失败已收敛为 JSON 错误：`BASINS_PACKAGE_OUTPUT_WRITE_FAILED`、`BASINS_MIGRATION_REPORT_WRITE_FAILED`；不会在 CLI 暴露 traceback。
+- Basins forcing 处理已改为流式遍历和 copy，header/time evidence 只做有上限采样，manifest 记录 sample file/byte/line limits。
+- Basins package 与 migration 文件遍历已统一拒绝源树内 symlink 后代，返回 `BASINS_PACKAGE_PATH_UNSAFE`，避免软链文件相对路径异常和目录循环。
 - 已新增 `nhms-model basins-migration-report`：symlink Basins root 返回 `BASINS_MIGRATION_SYMLINK_TARGET`；真实 copied root 输出 file count、byte count、inventory checksum、source-to-target metadata、`production_ready=true`。
 
 ## 已知技术风险 / 注意事项
