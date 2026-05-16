@@ -8,7 +8,7 @@
 
 - Epic #120 已完成并关闭；子 issue #121-#126 全部关闭。
 - 最新合并工作：PR #132，merge commit `ccc7f9bfaea4b5dfb125bdd5b8a4c36ca1ac1c88`。
-- 基于 `data/Basins` 已创建 M9 OpenSpec change：`openspec/changes/m9-basins-model-assets/`；GitHub Epic #133，子 issue #134-#139；#134 Basins discovery inventory CLI 已实现。
+- 基于 `data/Basins` 已创建并基本收口 M9 OpenSpec change：`openspec/changes/m9-basins-model-assets/`；GitHub Epic #133，子 issue #134-#139 覆盖 discovery、package、registry import、activation、runtime/API 与前端类型/文档验证。
 - CI 覆盖 markdown lint、OpenAPI lint、JSON Schema 校验、真实 PostgreSQL/PostGIS/Timescale 集成、后端测试、前端 build/test、bundle size。
 - #126 后本地基线：`uv run pytest -q` -> `586 passed, 3 skipped`；真实 DB integration 为显式 opt-in，GitHub CI 已跑通。
 - 当前有效代码入口：`apps/api`、`apps/frontend`、`services/orchestrator`、`services/slurm_gateway`、`services/tile_publisher`、`workers/*` 下划线包、`infra/sbatch`。
@@ -131,6 +131,10 @@
 - #138 已同步 OpenAPI `ModelInstance` 和前端生成类型，移除 model detail deferred drift allowlist，并增加前端类型 fixture，资产管理页后续可消费真实 Basins-backed metadata 而不是本地 placeholder。
 - #138 PR #144 review 修复已补齐：模型公共投影对 `manifest_uri`、mesh/package URI、URI-valued source lineage 与 `resource_profile` 内嵌 URI 字符串递归执行稳定 URI 清洗，移除 userinfo/query/fragment；新增 nullable `source_path`、`resolved_source_path`、`source_uri`、`source_is_symlink` API/OpenAPI/前端类型契约，DB/internal row 保留原始 lineage。
 - #138 PR #144 follow-up 已补齐：公共模型响应与资产详情现在把 protocol-relative URI 引用也视为 URI-like，清洗 userinfo/query/fragment，同时保留普通 `/volume/...` 本地绝对路径。
+- #139 已补齐前端资产 store 级 fixture：`useModelAssetsStore` 通过生成 OpenAPI client 加载 `GET /api/v1/models` 与 `GET /api/v1/models/{model_id}`，测试验证 Basins-backed `ModelInstance` 列表/详情保留 source lineage、package checksum、active flag、segment count、mesh/checksum 与 `resource_profile`，不需要本地 placeholder 类型补丁。
+- #139 PR #145 修复已补齐：前端资产 store 默认脱敏本地绝对 `source_path/resolved_source_path`（URI-like 公共值保留），详情加载失败会清空 stale `selectedModel`；fixture 覆盖本地路径脱敏、URI-like 保留与失败清空。
+- #139 已更新 `docs/VALIDATION.md`：记录 Basins discovery、publish、registry import、migration report、opt-in real smoke、OpenSpec strict、ruff、后端/API/OpenAPI/前端检查与 API 类型新鲜度命令，并明确 `tailanhe/focing`、`.DS_Store`、`@eaDir`、`*@SynoEAStream`、`input/<alias>` 和生产 copy-not-symlink 要求。
+- #139 PR #145 closeout 证据已记录到 `docs/VALIDATION.md`：2026-05-16 本地通过 OpenSpec strict、`uv run ruff check .`、targeted backend tests（173 passed, 8 skipped）、真实 Basins smoke（80 passed）、前端 API 类型 freshness、资产 fixture tests（53 passed）和 production build。
 
 ## 已知技术风险 / 注意事项
 
@@ -152,6 +156,6 @@
 ## 下一步优先级
 
 - 先明确下一条主线：生产数据接入、前端效果图对齐、CLDAS 启用、真实 MVT tile、生产 auth/RBAC。
-- 如果做前端对齐，优先补资产管理、气象空间展示、气象代站查询，因为这些是缺失路由，不只是样式差距。
-- 如果做数据就绪，下一步优先补 Basins-backed runtime/API/frontend consumption：SHUD runtime dry staging、model listing/activation、river segment API 与资产管理页字段。
+- 如果做前端对齐，优先补资产管理完整 UI 路由、气象空间展示、气象代站查询，因为这些是缺失路由，不只是样式差距。
+- 如果做数据就绪，Basins-backed runtime/API/frontend consumption 已有合约和 fixture 证据；下一步应转向真实对象存储闭环、生产迁移脚本或全国规模验证。
 - 如果做生产化，优先验证真实 Slurm 集群、真实对象存储、真实气象源凭据与下载稳定性。
