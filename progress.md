@@ -63,7 +63,7 @@
 - `CALIB/` 提供约 20 组优选率定参数；`forcing/` 提供 CMFD 历史气象格点 CSV（`tailanhe` 目录名为 `focing`，接入时需清洗或兼容）。
 - 这些数据可把当前 `model_package_uri`、mesh/river network/model registry、SHUD runtime dry/smoke、forcing 文件格式校验从 placeholder 推进到真实资产样例。
 - 后续生产环境迁移必须复制 `/volume/data/nwm/Basins` 的实际数据到目标环境，不能只迁移软链接。
-- 仓库内仍未内置这些真实资产；基于 `LocalObjectStore` 的 Basins 打包、校验和与迁移报告已实现，真实对象存储闭环、registry 登记和生产迁移脚本仍待后续。
+- 仓库内仍未内置这些真实资产；基于 `LocalObjectStore` 的 Basins 发现、打包、校验和、迁移报告与 registry 导入已实现；真实对象存储闭环和生产迁移脚本仍待后续。
 - 外部真实气象下载通过 adapter/mock 测试覆盖；没有提交可作为生产 fixture 的 live GFS/IFS/ERA5 数据包。
 - CLDAS 仍是权限受限/后续工作；未实现 CLDAS adapter、数据质量检查、best_available 生产路径。
 - Worker-chain smoke 使用本地 `LocalObjectStore`，未覆盖真实 MinIO/S3。
@@ -109,6 +109,15 @@
 - #135 Phase 6 round 12 已补齐：本地对象存储 package、manifest、lock 写入/读取/校验改为 anchored no-follow 父目录 fd 流程，拒绝 final write/replace 前对象存储祖先被替换为 symlink；publish 入口按 canonical `basin_slug` 复算 deterministic `model_id`，拒绝重标记与重复 ID inventory。
 - #135 Phase 6 round 13 已补齐：对象写后 size/SHA 校验读取复用 anchored no-follow 对象打开流程，拒绝校验 open 前对象存储祖先被替换为 symlink；canonical model identity 改为绑定 `root_relative_resolved_path/root_relative_path`，拒绝 `basin_slug`、请求 `model_id`、记录 `model_id` 与 `suggested_ids.model_id` 同步重标记但 source path 不变的 inventory。
 
+## M9 Basins registry 导入进展
+
+- 已新增 `nhms-model import-basins-registry`（click 与 argparse 路径）：只消费 discovery inventory 与 package manifest，可读取 inventory/manifest 引用的 `input/<alias>/gis/*` 和 SHUD river/mesh 文件，不会 ad hoc 扫描 `data/Basins`。
+- 新增 Basins GIS/SHUD parser：校验 `domain/river/seg.{shp,shx,dbf,prj}` sidecar，使用 pyshp 解析真实 shapefile；domain 导入为非空 SRID 4490 MultiPolygon WKT，river/seg 导入为 LineString，并从 `.sp.riv`/`.sp.rivseg` 解析 segment count 证据。
+- registry 导入以单模型事务写入 `core.basin`、`core.basin_version`、`core.river_network_version`、`core.river_segment`、`core.mesh_version`、`core.model_instance`；segment count mismatch、sidecar 缺失、checksum/source 冲突均返回结构化 JSON stderr 并回滚。
+- 导入模型默认 `active_flag=false`，不会改变既有 active model；`model_instance.resource_profile` 和 `mesh_version.properties_json` 记录 `manifest_uri`、`package_checksum`、`source_inventory_checksum`、`basin_slug`、`shud_input_name` 与源路径 lineage。
+- 重复未变导入返回 `already_imported` 且不增加行；同 ID/version 下 package/source checksum 或几何证据变化返回 `BASINS_REGISTRY_CHECKSUM_CONFLICT`。
+- 已新增 fast parser/CLI 测试和 opt-in PostgreSQL/PostGIS integration 测试；真实 Basins import smoke 仅在 `NHMS_RUN_REAL_BASINS_IMPORT=1`、integration DB 配置和 `data/Basins` 存在时运行。
+
 ## 已知技术风险 / 注意事项
 
 - 当前仍未完成生产级真实环境闭环：真实 Slurm 集群、真实对象存储、真实气象源凭据、全国规模数据和压测证据仍需专项验证。
@@ -130,5 +139,5 @@
 
 - 先明确下一条主线：生产数据接入、前端效果图对齐、CLDAS 启用、真实 MVT tile、生产 auth/RBAC。
 - 如果做前端对齐，优先补资产管理、气象空间展示、气象代站查询，因为这些是缺失路由，不只是样式差距。
-- 如果做数据就绪，优先基于 Basins inventory/package manifest 实现 registry 导入：导入 basin、river network、mesh、model_instance，并登记 package URI/checksum。
+- 如果做数据就绪，下一步优先补 Basins-backed runtime/API/frontend consumption：SHUD runtime dry staging、model listing/activation、river segment API 与资产管理页字段。
 - 如果做生产化，优先验证真实 Slurm 集群、真实对象存储、真实气象源凭据与下载稳定性。

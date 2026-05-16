@@ -7,6 +7,7 @@ from typing import Sequence
 
 from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory, resolve_basins_root, write_inventory
 from .basins_package import BasinsPackageError, publish_basins_package, write_basins_migration_report
+from .basins_registry_import import BasinsRegistryImportError, import_basins_registry
 from .validator import ModelPackageValidationError, validate_model_package_path
 
 DEFAULT_BASINS_MIGRATION_SOURCE_URI = "/volume/data/nwm/Basins"
@@ -127,6 +128,29 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             )
         )
 
+    @cli.command("import-basins-registry")
+    @click.option("--inventory", required=True, help="Path to Basins discovery inventory JSON.")
+    @click.option("--package-manifest", required=True, help="Path to Basins package manifest JSON.")
+    @click.option("--database-url", default=None, help="PostgreSQL/PostGIS URL. Defaults to DATABASE_URL.")
+    @click.option("--output", default=None, help="Optional path to write import report JSON.")
+    def import_basins_registry_command(
+        inventory: str,
+        package_manifest: str,
+        database_url: str | None,
+        output: str | None,
+    ) -> None:
+        try:
+            result = import_basins_registry(
+                inventory_path=inventory,
+                package_manifest_path=package_manifest,
+                database_url=database_url,
+                output_path=output,
+            )
+        except BasinsRegistryImportError as error:
+            click.echo(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), err=True)
+            raise SystemExit(1) from error
+        click.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -149,6 +173,11 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     migration_parser.add_argument("--basins-root", required=True)
     migration_parser.add_argument("--source-uri", default=DEFAULT_BASINS_MIGRATION_SOURCE_URI)
     migration_parser.add_argument("--output", required=True)
+    import_parser = subparsers.add_parser("import-basins-registry")
+    import_parser.add_argument("--inventory", required=True)
+    import_parser.add_argument("--package-manifest", required=True)
+    import_parser.add_argument("--database-url", default=None)
+    import_parser.add_argument("--output", default=None)
     args = parser.parse_args(argv)
 
     if args.command == "validate-package":
@@ -218,6 +247,19 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if args.command == "import-basins-registry":
+        try:
+            result = import_basins_registry(
+                inventory_path=args.inventory,
+                package_manifest_path=args.package_manifest,
+                database_url=args.database_url,
+                output_path=args.output,
+            )
+        except BasinsRegistryImportError as error:
+            print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2
