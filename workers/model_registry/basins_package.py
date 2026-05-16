@@ -26,6 +26,7 @@ BASINS_MIGRATION_REPORT_SCHEMA_VERSION = "basins.migration.v1"
 FORCING_SAMPLE_FILE_LIMIT = 5
 FORCING_SAMPLE_BYTE_LIMIT = 64 * 1024
 FORCING_SAMPLE_LINE_LIMIT = 1000
+_OS_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
 
 class BasinsPackageError(RuntimeError):
@@ -503,16 +504,17 @@ def _package_source_files(
     version: str,
     manifest_uri: str,
 ) -> list[SourceFile]:
+    expected_input_dir = _expected_input_dir(model, source_root, model_id=model_id, version=version)
     input_dir = _safe_source_dir(
         model.get("input_dir"),
         inventory_root,
         source_root,
         "input_dir",
+        expected_path=expected_input_dir,
         model_id=model_id,
         version=version,
         manifest_uri=manifest_uri,
     )
-    expected_input_dir = _expected_input_dir(model, source_root, model_id=model_id, version=version)
     _ensure_inventory_path_matches_expected(
         input_dir,
         expected_input_dir,
@@ -527,6 +529,7 @@ def _package_source_files(
             inventory_root,
             source_root,
             "gis_dir",
+            expected_path=expected_input_dir / "gis",
             model_id=model_id,
             version=version,
             manifest_uri=manifest_uri,
@@ -802,16 +805,17 @@ def _forcing_metadata(
             [],
         )
 
+    expected_forcing_dir = _expected_forcing_dir(model, source_root, model_id=model_id, version=version)
     forcing_dir = _safe_source_dir(
         forcing_dir_value,
         inventory_root,
         source_root,
         "forcing_dir",
+        expected_path=expected_forcing_dir,
         model_id=model_id,
         version=version,
         manifest_uri=manifest_uri,
     )
-    expected_forcing_dir = _expected_forcing_dir(model, source_root, model_id=model_id, version=version)
     _ensure_inventory_path_matches_expected(
         forcing_dir,
         expected_forcing_dir,
@@ -1246,6 +1250,18 @@ def _open_verified_source_file(
     _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
     resolved = _resolve_package_path(path, model_id=model_id, version=version)
     _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
+    if (
+        hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and _OS_OPEN_SUPPORTS_DIR_FD
+    ):
+        return _open_verified_source_file_at(
+            resolved,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
     try:
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
@@ -1276,6 +1292,149 @@ def _open_verified_source_file(
                 manifest_uri=manifest_uri,
             ) from error
         raise
+
+
+def _open_verified_source_file_at(
+    resolved: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> BinaryIO:
+    try:
+        relative_parts = resolved.relative_to(source_root).parts
+    except ValueError as error:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_PATH_UNSAFE",
+            "Basins package source path resolves outside the model source directory.",
+            model_id=model_id,
+            version=version,
+            path=str(resolved),
+            manifest_uri=manifest_uri,
+        ) from error
+    if not relative_parts:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_PATH_UNSAFE",
+            "Basins package source path is not a regular file.",
+            model_id=model_id,
+            version=version,
+            path=str(resolved),
+            manifest_uri=manifest_uri,
+        )
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+        file_flags |= os.O_CLOEXEC
+
+    open_dirs: list[int] = []
+    file_fd: int | None = None
+    try:
+        root_fd = os.open(source_root, directory_flags)
+        open_dirs.append(root_fd)
+        root_stat = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_PATH_UNSAFE",
+                "Basins package source root is not a directory.",
+                model_id=model_id,
+                version=version,
+                path=str(source_root),
+                manifest_uri=manifest_uri,
+            )
+
+        current_fd = root_fd
+        for component in relative_parts[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            open_dirs.append(next_fd)
+            next_stat = os.fstat(next_fd)
+            if not stat.S_ISDIR(next_stat.st_mode):
+                raise BasinsPackageError(
+                    "BASINS_PACKAGE_PATH_UNSAFE",
+                    "Basins package source ancestor is not a directory.",
+                    model_id=model_id,
+                    version=version,
+                    path=str(resolved),
+                    manifest_uri=manifest_uri,
+                )
+            current_fd = next_fd
+
+        file_fd = os.open(relative_parts[-1], file_flags, dir_fd=current_fd)
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            os.close(file_fd)
+            file_fd = None
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_PATH_UNSAFE",
+                "Basins package source path is not a regular file.",
+                model_id=model_id,
+                version=version,
+                path=str(resolved),
+                manifest_uri=manifest_uri,
+            )
+        _reject_source_symlink_path(
+            resolved,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+            error_path=resolved,
+        )
+        fresh_resolved = _resolve_package_path(resolved, model_id=model_id, version=version)
+        try:
+            fresh_resolved.relative_to(source_root)
+        except ValueError as error:
+            os.close(file_fd)
+            file_fd = None
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_PATH_UNSAFE",
+                "Basins package source path was replaced outside the model source directory.",
+                model_id=model_id,
+                version=version,
+                path=str(resolved),
+                manifest_uri=manifest_uri,
+            ) from error
+        fresh_stat = os.stat(fresh_resolved)
+        if (fresh_stat.st_dev, fresh_stat.st_ino) != (file_stat.st_dev, file_stat.st_ino):
+            os.close(file_fd)
+            file_fd = None
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_PATH_UNSAFE",
+                "Basins package source path was replaced during verified open.",
+                model_id=model_id,
+                version=version,
+                path=str(resolved),
+                manifest_uri=manifest_uri,
+            )
+        handle = os.fdopen(file_fd, "rb")
+        file_fd = None
+        return handle
+    except BasinsPackageError:
+        raise
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_PATH_UNSAFE",
+            "Basins package publication does not follow symlink or replaced source descendants.",
+            model_id=model_id,
+            version=version,
+            path=str(resolved),
+            manifest_uri=manifest_uri,
+        ) from error
+    finally:
+        if file_fd is not None:
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
+        for directory_fd in reversed(open_dirs):
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
 
 
 def _verify_object_bytes(
@@ -1324,6 +1483,7 @@ def _safe_source_dir(
     source_root: Path,
     field_name: str,
     *,
+    expected_path: Path,
     model_id: str | None = None,
     version: str | None = None,
     manifest_uri: str | None = None,
@@ -1337,6 +1497,17 @@ def _safe_source_dir(
             manifest_uri=manifest_uri,
         )
     path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = _source_dir_from_relative_inventory_value(
+            path,
+            inventory_root,
+            source_root,
+            expected_path,
+            field_name,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
     _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
     resolved = _resolve_package_path(path)
     _ensure_under_root(
@@ -1359,6 +1530,56 @@ def _safe_source_dir(
             manifest_uri=manifest_uri,
         )
     return resolved
+
+
+def _source_dir_from_relative_inventory_value(
+    path: Path,
+    inventory_root: Path,
+    source_root: Path,
+    expected_path: Path,
+    field_name: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Path:
+    normalized = Path(_normalize_relative_path(path.as_posix()))
+    if _relative_inventory_path_matches_expected(normalized, inventory_root, source_root, expected_path):
+        return expected_path
+    candidate = inventory_root / normalized
+    _ensure_under_root(
+        _resolve_package_path(candidate, model_id=model_id, version=version),
+        inventory_root,
+        error_code="BASINS_INVENTORY_PATH_MISMATCH",
+        message=f"Basins model {field_name} resolves outside the inventory root.",
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    return candidate
+
+
+def _relative_inventory_path_matches_expected(
+    relative_path: Path,
+    inventory_root: Path,
+    source_root: Path,
+    expected_path: Path,
+) -> bool:
+    relative_parts = relative_path.parts
+    expected_relative_paths: list[Path] = []
+    for base in (source_root, inventory_root):
+        try:
+            expected_relative_paths.append(expected_path.relative_to(base))
+        except ValueError:
+            continue
+
+    for expected_relative in expected_relative_paths:
+        expected_parts = expected_relative.parts
+        if relative_parts == expected_parts:
+            return True
+        if len(relative_parts) >= len(expected_parts) and relative_parts[-len(expected_parts) :] == expected_parts:
+            return True
+    return False
 
 
 def _safe_source_file(
@@ -1391,6 +1612,7 @@ def _reject_source_symlink_path(
     model_id: str | None = None,
     version: str | None = None,
     manifest_uri: str | None = None,
+    error_path: Path | None = None,
 ) -> None:
     current = path if path.is_absolute() else Path.cwd() / path
     parts: list[Path] = []
@@ -1415,7 +1637,7 @@ def _reject_source_symlink_path(
                 "Basins package publication does not follow symlink descendants.",
                 model_id=model_id,
                 version=version,
-                path=str(candidate),
+                path=str(error_path or candidate),
                 manifest_uri=manifest_uri,
             )
 

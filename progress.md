@@ -103,6 +103,7 @@
 - #135 Phase 6 follow-up 已补齐：`basins-migration-report` 默认 `source_uri=/volume/data/nwm/Basins` 并按文档命令返回 JSON 错误；`publish-basins` 先校验单段安全 `model_id/version`；canonical runtime 必需文件只接受 `input_dir` 直接子文件，GIS 仍固定为 `gis/<file>`；inventory 非 UTF-8 字节返回 `BASINS_INVENTORY_INVALID` JSON；`required_files` 中 canonical 以外的额外条目返回 `BASINS_REQUIRED_FILES_NON_CANONICAL` 且不写本地 manifest 或额外 package entry。
 - #135 Phase 6 round 7 已补齐：早期 stale required source 错误携带 `manifest_uri`；migration evidence stat/read 失败收敛为 `BASINS_MIGRATION_EVIDENCE_READ_FAILED` JSON；最终 package hash/copy 前会重新执行 symlink/containment 校验并用 no-follow 打开源文件，防止规划后替换为 symlink。
 - #135 Phase 6 round 8 已补齐：migration evidence size/hash 与 forcing CSV header/time 采样复用最终 no-follow 源文件读校验；遍历后替换为 symlink 会返回结构化 JSON，且不写 report 或本地 manifest。
+- #135 Phase 6 round 9 已补齐：相对 `input_dir/gis_dir/forcing_dir` 发布时按 inventory/source canonical 上下文解析，支持相对 Basins root inventory 跨 CWD 发布；最终源文件读取改为从 `source_root` 目录 fd 逐段 no-follow 打开并复核 inode，拒绝 runtime、forcing 与 migration evidence 祖先目录替换为 symlink。
 
 ## 已知技术风险 / 注意事项
 
