@@ -120,6 +120,7 @@
 - GIS 解析已严格限制 WGS84/EPSG:4326 或 CGCS2000/EPSG:4490 兼容 PRJ，保留 domain polygon interior rings；river downstream raw ID 会映射为导入后的 segment ID，`0/-1/空/自指` 下游标记写入 null 并保留原始值用于审计。
 - registry import 已加入 GIS feature/point 默认上限、SHUD evidence 流式计数、river segment `execute_values` bounded page size；集成测试补充 `PsycopgModelRegistryStore.list_river_segments` FeatureCollection 合同覆盖，真实 Basins smoke 也执行同查询。
 - #136 PR #142 follow-up 已补齐：registry import 拒绝 canonical `input/<alias>` 与 `gis` 目录级 symlink，SHUD evidence 加 byte/line 上限与 declared-count 早退，manifest source identity 改为必填精确匹配，既有 river segment 幂等改为字段 digest 冲突检测。
+- #136 PR #142 follow-up round 2 已补齐：registry import 使用 inventory 原始字节 SHA-256 对齐 publish-basins 的 `source_inventory_checksum`；PRJ/SHUD/checksum/GIS sidecar 读取改为 no-follow open + fstat/lstat 身份复核，pyshp 使用已安全打开的文件句柄。
 - 已新增 fast parser/CLI 测试和 opt-in PostgreSQL/PostGIS integration 测试；真实 Basins import smoke 仅在 `NHMS_RUN_REAL_BASINS_IMPORT=1`、integration DB 配置和 `data/Basins` 存在时运行。
 
 ## 已知技术风险 / 注意事项

@@ -70,7 +70,7 @@ def import_basins_registry(
     database_url: str | None = None,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    inventory = _read_json_object(
+    inventory, inventory_bytes = _read_json_document(
         inventory_path,
         error_code="BASINS_REGISTRY_INVENTORY_INVALID",
         not_found_code="BASINS_REGISTRY_INVENTORY_NOT_FOUND",
@@ -80,7 +80,7 @@ def import_basins_registry(
         error_code="BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
         not_found_code="BASINS_REGISTRY_PACKAGE_MANIFEST_NOT_FOUND",
     )
-    sources = _prepare_sources(inventory, manifest)
+    sources = _prepare_sources(inventory, manifest, inventory_raw_checksum=_sha256_bytes(inventory_bytes))
     resolved_database_url = database_url or os.getenv("DATABASE_URL", "").strip()
     if not resolved_database_url:
         raise BasinsRegistryImportError(
@@ -99,7 +99,7 @@ def prepare_basins_import_sources(
     inventory_path: str | Path,
     package_manifest_path: str | Path,
 ) -> ImportSources:
-    inventory = _read_json_object(
+    inventory, inventory_bytes = _read_json_document(
         inventory_path,
         error_code="BASINS_REGISTRY_INVENTORY_INVALID",
         not_found_code="BASINS_REGISTRY_INVENTORY_NOT_FOUND",
@@ -109,10 +109,15 @@ def prepare_basins_import_sources(
         error_code="BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
         not_found_code="BASINS_REGISTRY_PACKAGE_MANIFEST_NOT_FOUND",
     )
-    return _prepare_sources(inventory, manifest)
+    return _prepare_sources(inventory, manifest, inventory_raw_checksum=_sha256_bytes(inventory_bytes))
 
 
-def _prepare_sources(inventory: dict[str, Any], manifest: dict[str, Any]) -> ImportSources:
+def _prepare_sources(
+    inventory: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    inventory_raw_checksum: str | None = None,
+) -> ImportSources:
     model_id = _required_str(manifest, "model_id", "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID")
     model = _find_inventory_model(inventory, model_id)
     if manifest.get("schema_version") != "basins.package.v1":
@@ -144,7 +149,14 @@ def _prepare_sources(inventory: dict[str, Any], manifest: dict[str, Any]) -> Imp
     inventory_root = _inventory_root(inventory, model_id)
     source_root = _source_root(inventory_root, model, model_id)
     input_dir = _input_dir(inventory_root, source_root, model, model_id)
-    _validate_manifest_source_identity(inventory, manifest, model, source_root, model_id)
+    _validate_manifest_source_identity(
+        inventory,
+        manifest,
+        model,
+        source_root,
+        model_id,
+        inventory_raw_checksum=inventory_raw_checksum,
+    )
     _verify_model_id_matches_canonical_identity(model, model_id)
     required_files = model.get("required_files")
     if not isinstance(required_files, dict):
@@ -153,7 +165,6 @@ def _prepare_sources(inventory: dict[str, Any], manifest: dict[str, Any]) -> Imp
             "Basins inventory model record is missing required_files.",
             model_id=model_id,
         )
-    _validate_manifest_included_files(manifest, model, input_dir, model_id)
     try:
         geometry = parse_basins_geometry(
             model_id=model_id,
@@ -169,6 +180,7 @@ def _prepare_sources(inventory: dict[str, Any], manifest: dict[str, Any]) -> Imp
             path=error.path,
             details=error.details,
         ) from error
+    _validate_manifest_included_files(manifest, model, input_dir, model_id)
     return ImportSources(
         inventory=inventory,
         manifest=manifest,
@@ -727,6 +739,7 @@ def _validate_manifest_source_identity(
     model: dict[str, Any],
     source_root: Path,
     model_id: str,
+    inventory_raw_checksum: str | None,
 ) -> None:
     expected = {
         "basin_slug": model.get("basin_slug"),
@@ -752,15 +765,15 @@ def _validate_manifest_source_identity(
             model_id=model_id,
             details={"fields": sorted({*missing, *mismatches})},
         )
-    actual_inventory_checksums = {_sha256_json(inventory), _sha256_inventory_document(inventory)}
-    if source_inventory_checksum not in actual_inventory_checksums:
+    actual_inventory_checksum = inventory_raw_checksum or _sha256_json(inventory)
+    if source_inventory_checksum != actual_inventory_checksum:
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_SOURCE_MISMATCH",
             "Basins package manifest source inventory checksum does not match selected inventory.",
             model_id=model_id,
             details={
                 "fields": ["source_inventory_checksum"],
-                "expected": sorted(actual_inventory_checksums),
+                "expected": actual_inventory_checksum,
                 "actual": source_inventory_checksum,
             },
         )
@@ -887,15 +900,25 @@ def _sha256_json(payload: Any) -> str:
     ).hexdigest()
 
 
-def _sha256_inventory_document(payload: dict[str, Any]) -> str:
-    content = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    return hashlib.sha256(content).hexdigest()
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _read_json_object(path: str | Path, *, error_code: str, not_found_code: str) -> dict[str, Any]:
+    payload, _ = _read_json_document(path, error_code=error_code, not_found_code=not_found_code)
+    return payload
+
+
+def _read_json_document(
+    path: str | Path,
+    *,
+    error_code: str,
+    not_found_code: str,
+) -> tuple[dict[str, Any], bytes]:
     source = Path(path).expanduser()
     try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
+        content = source.read_bytes()
+        payload = json.loads(content.decode("utf-8"))
     except FileNotFoundError as error:
         raise BasinsRegistryImportError(
             not_found_code,
@@ -906,7 +929,7 @@ def _read_json_object(path: str | Path, *, error_code: str, not_found_code: str)
         raise BasinsRegistryImportError(error_code, f"JSON file is invalid: {source}", path=str(source)) from error
     if not isinstance(payload, dict):
         raise BasinsRegistryImportError(error_code, "JSON file must contain an object.", path=str(source))
-    return payload
+    return payload, content
 
 
 def _write_report(output_path: str | Path, report: dict[str, Any]) -> None:
