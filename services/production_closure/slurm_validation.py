@@ -7,7 +7,9 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+import uuid
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
@@ -24,6 +26,22 @@ SENSITIVE_URI_ASSIGNMENT_RE = re.compile(
     r"access[_-]?key|session[_-]?key|signature)[^/?&;\s=]*=[^/?&;\s]*",
     re.IGNORECASE,
 )
+TERMINAL_SLURM_STATES = {
+    "BOOT_FAIL",
+    "CANCELLED",
+    "COMPLETED",
+    "DEADLINE",
+    "FAILED",
+    "NODE_FAIL",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
+    "REVOKED",
+    "SPECIAL_EXIT",
+    "TIMEOUT",
+}
+CONTROLLED_FAILURE_STATES = TERMINAL_SLURM_STATES - {"COMPLETED"}
+DEFAULT_POLL_INTERVAL_SECONDS = 15.0
+DEFAULT_POLL_TIMEOUT_SECONDS = 900.0
 
 
 class ProductionValidationError(RuntimeError):
@@ -31,6 +49,100 @@ class ProductionValidationError(RuntimeError):
         super().__init__(message)
         self.error_code = error_code
         self.message = message
+
+
+@dataclass
+class EvidenceWriter:
+    evidence_root: Path
+    lane_dir: Path
+    force: bool = False
+    _created_paths: set[Path] = field(default_factory=set)
+
+    def prepare(self) -> None:
+        _refuse_symlink_components(self.evidence_root)
+        _refuse_symlink_components(self.lane_dir.parent)
+        if self.lane_dir.exists() or self.lane_dir.is_symlink():
+            _refuse_symlink_components(self.lane_dir)
+        resolved_lane = self.lane_dir.resolve()
+        try:
+            resolved_lane.relative_to(self.evidence_root)
+        except ValueError as error:
+            raise ProductionValidationError(
+                "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
+                "Evidence lane directory must stay under evidence root.",
+            ) from error
+        self.lane_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_json(self, path: Path, payload: Any) -> None:
+        self.write_text(
+            path,
+            json.dumps(redact_payload(payload), indent=2, sort_keys=True) + "\n",
+            already_redacted=True,
+        )
+
+    def write_runtime_manifest_json(self, path: Path, payload: Any) -> None:
+        self._write_bytes(
+            path,
+            (json.dumps(redact_payload(payload), indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            allow_outside_evidence=True,
+            file_label="Runtime manifest",
+            exists_error_code="PRODUCTION_SLURM_RUNTIME_MANIFEST_EXISTS",
+            write_error_code="PRODUCTION_SLURM_RUNTIME_MANIFEST_WRITE_FAILED",
+        )
+
+    def write_text(self, path: Path, value: str, *, already_redacted: bool = False) -> None:
+        content = value if already_redacted else redact_text(value)
+        self._write_bytes(path, content.encode("utf-8"))
+
+    def _write_bytes(
+        self,
+        path: Path,
+        content: bytes,
+        *,
+        allow_outside_evidence: bool = False,
+        file_label: str = "Evidence file",
+        exists_error_code: str = "PRODUCTION_SLURM_EVIDENCE_EXISTS",
+        write_error_code: str = "PRODUCTION_SLURM_EVIDENCE_WRITE_FAILED",
+    ) -> None:
+        safe_path = self._safe_file_path(path, allow_outside_evidence=allow_outside_evidence)
+        if safe_path.exists() and safe_path not in self._created_paths and not self.force:
+            raise ProductionValidationError(
+                exists_error_code,
+                f"{file_label} already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
+            )
+        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp_path.write_bytes(content)
+            os.replace(temp_path, safe_path)
+            self._created_paths.add(safe_path)
+        except OSError as error:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ProductionValidationError(
+                write_error_code,
+                f"Failed to write {file_label.lower()} {safe_path}: {error}",
+            ) from error
+
+    def _safe_file_path(self, path: Path, *, allow_outside_evidence: bool = False) -> Path:
+        if path.is_symlink():
+            raise ProductionValidationError(
+                "PRODUCTION_SLURM_EVIDENCE_SYMLINK",
+                f"Evidence file must not be a symlink: {path}",
+            )
+        _refuse_symlink_components(path.parent)
+        resolved_parent = path.parent.resolve()
+        if not allow_outside_evidence:
+            try:
+                resolved_parent.relative_to(self.evidence_root)
+            except ValueError as error:
+                raise ProductionValidationError(
+                    "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
+                    "Evidence file path must stay under evidence root.",
+                ) from error
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return resolved_parent / path.name
 
 
 @dataclass(frozen=True)
@@ -54,6 +166,9 @@ class ProductionSlurmConfig:
     max_concurrent: int
     submit: bool
     fake_slurm: bool
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
+    poll_timeout_seconds: float = DEFAULT_POLL_TIMEOUT_SECONDS
+    force: bool = False
 
     @property
     def lane_dir(self) -> Path:
@@ -67,11 +182,15 @@ class ProductionSlurmConfig:
         run_id: str | None,
         submit: bool,
         fake_slurm: bool,
+        poll_interval_seconds: float | None = None,
+        poll_timeout_seconds: float | None = None,
+        force: bool = False,
     ) -> ProductionSlurmConfig:
         resolved_run_id = _safe_run_id(run_id or datetime.now(UTC).strftime("m10-%Y%m%dT%H%M%SZ"))
         workspace_root = Path(os.getenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", "workspace")).expanduser()
+        resolved_evidence_root = _safe_resolved_evidence_root(evidence_root)
         return cls(
-            evidence_root=evidence_root.expanduser(),
+            evidence_root=resolved_evidence_root,
             run_id=resolved_run_id,
             cluster=os.getenv("NHMS_PRODUCTION_SLURM_CLUSTER", ""),
             account=os.getenv("NHMS_PRODUCTION_SLURM_ACCOUNT", ""),
@@ -90,33 +209,46 @@ class ProductionSlurmConfig:
             max_concurrent=int(os.getenv("NHMS_PRODUCTION_SLURM_MAX_CONCURRENT", "2")),
             submit=submit,
             fake_slurm=fake_slurm,
+            poll_interval_seconds=_non_negative_float_option(
+                poll_interval_seconds,
+                "NHMS_PRODUCTION_SLURM_POLL_INTERVAL_SECONDS",
+                DEFAULT_POLL_INTERVAL_SECONDS,
+            ),
+            poll_timeout_seconds=_non_negative_float_option(
+                poll_timeout_seconds,
+                "NHMS_PRODUCTION_SLURM_POLL_TIMEOUT_SECONDS",
+                DEFAULT_POLL_TIMEOUT_SECONDS,
+            ),
+            force=force,
         )
 
 
 def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
-    config.lane_dir.mkdir(parents=True, exist_ok=True)
+    config = replace(config, evidence_root=_safe_resolved_evidence_root(config.evidence_root))
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=config.force)
+    writer.prepare()
     preflight = _preflight_payload(config)
-    _write_json(config.lane_dir / "preflight.json", preflight)
+    writer.write_json(config.lane_dir / "preflight.json", preflight)
 
     blockers = _preflight_blockers(config)
-    manifest_index = _write_manifest_index(config)
-    rendered_script = _render_production_template(config, manifest_index)
-    _write_text(config.lane_dir / "rendered_run_shud_forecast_array.sbatch", rendered_script)
+    manifest_index = _write_manifest_index(config, writer)
+    rendered_script = _render_production_template(config, manifest_index, writer)
+    writer.write_text(config.lane_dir / "rendered_run_shud_forecast_array.sbatch", rendered_script)
 
     accounting = _fake_accounting(config) if config.fake_slurm else _real_accounting(config, blockers)
-    _write_json(config.lane_dir / "slurm_accounting.json", accounting)
+    writer.write_json(config.lane_dir / "slurm_accounting.json", accounting)
 
     partial_success = _partial_success_evidence(config, accounting)
-    _write_json(config.lane_dir / "array_partial_success.json", partial_success)
+    writer.write_json(config.lane_dir / "array_partial_success.json", partial_success)
 
     retry_cancel = _retry_cancel_evidence(partial_success)
-    _write_json(config.lane_dir / "retry_cancel.json", retry_cancel)
+    writer.write_json(config.lane_dir / "retry_cancel.json", retry_cancel)
 
     qc = _qc_blocking_evidence(config, partial_success)
-    _write_json(config.lane_dir / "qc_blocking.json", qc)
+    writer.write_json(config.lane_dir / "qc_blocking.json", qc)
 
     metadata = _environment_metadata(config)
-    _write_json(config.lane_dir / "environment.json", metadata)
+    writer.write_json(config.lane_dir / "environment.json", metadata)
 
     accounting_blockers = accounting.get("blockers") if isinstance(accounting.get("blockers"), list) else []
     all_blockers = [*blockers, *accounting_blockers]
@@ -143,7 +275,7 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
             "environment.json",
         ],
     }
-    _write_json(config.lane_dir / "summary.json", summary)
+    writer.write_json(config.lane_dir / "summary.json", summary)
     return summary
 
 
@@ -188,6 +320,48 @@ def _safe_run_id(run_id: str) -> str:
     )
 
 
+def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
+    root = evidence_root.expanduser()
+    if root.exists() or root.is_symlink():
+        _refuse_symlink_components(root)
+    parent = root.parent
+    if parent.exists() or parent.is_symlink():
+        _refuse_symlink_components(parent)
+    return root.resolve(strict=False)
+
+
+def _refuse_symlink_components(path: Path) -> None:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts:
+        if part == path.anchor or part == "":
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise ProductionValidationError(
+                "PRODUCTION_SLURM_EVIDENCE_SYMLINK",
+                f"Evidence path component must not be a symlink: {current}",
+            )
+
+
+def _non_negative_float_option(value: float | None, env_name: str, default: float) -> float:
+    raw_value = os.getenv(env_name) if value is None else value
+    if raw_value is None or raw_value == "":
+        return default
+    try:
+        resolved = float(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_POLL_OPTION_INVALID",
+            f"{env_name} must be a non-negative number.",
+        ) from error
+    if resolved < 0:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_POLL_OPTION_INVALID",
+            f"{env_name} must be a non-negative number.",
+        )
+    return resolved
+
+
 def _preflight_blockers(config: ProductionSlurmConfig) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
     required = {
@@ -206,7 +380,7 @@ def _preflight_blockers(config: ProductionSlurmConfig) -> list[dict[str, str]]:
     return blockers
 
 
-def _write_manifest_index(config: ProductionSlurmConfig) -> Path:
+def _write_manifest_index(config: ProductionSlurmConfig, writer: EvidenceWriter) -> Path:
     manifest_index = config.lane_dir / "manifest_index.json"
     tasks = [
         _task_manifest(config, task_id=0, run_id=f"{config.run_id}_success", model_id=config.model_id),
@@ -218,8 +392,8 @@ def _write_manifest_index(config: ProductionSlurmConfig) -> Path:
         ),
     ]
     for task in tasks:
-        _write_runtime_manifest(config, task)
-    _write_json(manifest_index, redact_payload(tasks))
+        _write_runtime_manifest(config, task, writer)
+    writer.write_json(manifest_index, redact_payload(tasks))
     return manifest_index
 
 
@@ -244,10 +418,9 @@ def _task_manifest(config: ProductionSlurmConfig, *, task_id: int, run_id: str, 
     }
 
 
-def _write_runtime_manifest(config: ProductionSlurmConfig, task: dict[str, Any]) -> Path:
+def _write_runtime_manifest(config: ProductionSlurmConfig, task: dict[str, Any], writer: EvidenceWriter) -> Path:
     run_id = str(task["run_id"])
     manifest_path = Path(str(task["manifest_path"]))
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     runtime_manifest = {
         "run_id": run_id,
         "run_type": "forecast",
@@ -292,7 +465,7 @@ def _write_runtime_manifest(config: ProductionSlurmConfig, task: dict[str, Any])
             "log_uri": task["log_uri"],
         },
     }
-    _write_json(manifest_path, runtime_manifest)
+    writer.write_runtime_manifest_json(manifest_path, runtime_manifest)
     return manifest_path
 
 
@@ -326,9 +499,10 @@ def _sanitized_object_store_prefix(prefix: str) -> str:
     return sanitized_path.strip("/")
 
 
-def _render_production_template(config: ProductionSlurmConfig, manifest_index: Path) -> str:
+def _render_production_template(config: ProductionSlurmConfig, manifest_index: Path, writer: EvidenceWriter) -> str:
     profile_path = config.lane_dir / "resource_profiles.yaml"
-    profile_path.write_text(
+    writer.write_text(
+        profile_path,
         "\n".join(
             [
                 "resource_profiles:",
@@ -345,7 +519,6 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
                 "",
             ]
         ),
-        encoding="utf-8",
     )
     gateway = RealSlurmGateway(
         SlurmGatewaySettings(
@@ -388,18 +561,10 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
     submit_command.append(str(script_path))
     submit = _run_command(submit_command)
     job_id = _parse_sbatch_parsable(submit["stdout"])
-    sacct = _run_command(
-        [
-            "sacct",
-            "-j",
-            job_id,
-            "--format=JobID,State,ExitCode,Elapsed,NodeList,Partition",
-            "-P",
-            "--noheader",
-        ]
-    )
-    records = parse_sacct_evidence(sacct["stdout"]) if sacct["returncode"] == 0 else []
-    task_blockers = _submitted_task_row_blockers(records, expected_task_ids={0, 1})
+    poll = _poll_sacct_for_expected_array(config, job_id, expected_task_ids={0, 1})
+    sacct = poll["last_sacct"]
+    records = poll["records"]
+    task_blockers = poll["blockers"]
     mode = "blocked" if task_blockers else "submitted"
     return {
         "mode": mode,
@@ -415,7 +580,67 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
         },
         "raw_sacct": sacct["stdout"],
         "sacct": sacct,
+        "poll": {
+            "attempts": poll["attempts"],
+            "elapsed_seconds": poll["elapsed_seconds"],
+            "interval_seconds": config.poll_interval_seconds,
+            "timeout_seconds": config.poll_timeout_seconds,
+        },
         "records": records,
+    }
+
+
+def _poll_sacct_for_expected_array(
+    config: ProductionSlurmConfig,
+    job_id: str,
+    *,
+    expected_task_ids: set[int],
+) -> dict[str, Any]:
+    command = [
+        "sacct",
+        "-j",
+        job_id,
+        "--format=JobID,State,ExitCode,Elapsed,NodeList,Partition",
+        "-P",
+        "--noheader",
+    ]
+    started = time.monotonic()
+    deadline = started + config.poll_timeout_seconds
+    attempts = 0
+    last_sacct: dict[str, Any] | None = None
+    last_records: list[dict[str, Any]] = []
+    last_blockers: list[dict[str, Any]] = []
+
+    while True:
+        attempts += 1
+        last_sacct = _run_command(command)
+        if last_sacct["returncode"] == 0:
+            last_records = parse_sacct_evidence(last_sacct["stdout"])
+            last_blockers = _submitted_task_outcome_blockers(last_records, expected_task_ids=expected_task_ids)
+            if not last_blockers:
+                break
+        else:
+            last_records = []
+            last_blockers = [
+                {
+                    "error_code": "SLURM_ARRAY_TASK_ACCOUNTING_UNAVAILABLE",
+                    "field": "sacct",
+                    "returncode": str(last_sacct["returncode"]),
+                }
+            ]
+
+        now = time.monotonic()
+        if now >= deadline:
+            last_blockers = _timeout_blockers(last_blockers)
+            break
+        time.sleep(min(config.poll_interval_seconds, max(0.0, deadline - now)))
+
+    return {
+        "attempts": attempts,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "last_sacct": last_sacct or _run_command(command),
+        "records": last_records,
+        "blockers": last_blockers,
     }
 
 
@@ -445,6 +670,7 @@ def parse_sacct_evidence(stdout: str) -> list[dict[str, Any]]:
         if len(fields) != 6:
             raise ProductionValidationError("SACCT_EVIDENCE_INVALID", "Expected 6 sacct fields.")
         job_id, state, exit_code, elapsed, node_list, partition = fields
+        normalized_state = _normalize_slurm_state(state)
         task_id = None
         if "_" in job_id and job_id.rsplit("_", 1)[1].isdigit():
             task_id = int(job_id.rsplit("_", 1)[1])
@@ -452,15 +678,110 @@ def parse_sacct_evidence(stdout: str) -> list[dict[str, Any]]:
             {
                 "job_id": job_id,
                 "task_id": task_id,
-                "state": state,
+                "state": normalized_state,
                 "exit_code": _parse_exit_code(exit_code),
                 "elapsed": elapsed,
                 "node_list": node_list,
                 "partition": partition,
-                "error_code": map_slurm_error_code(state) if state.upper() not in {"COMPLETED", "CANCELLED"} else None,
+                "error_code": (
+                    map_slurm_error_code(normalized_state)
+                    if normalized_state not in {"COMPLETED", "CANCELLED"}
+                    else None
+                ),
             }
         )
     return records
+
+
+def _submitted_task_outcome_blockers(
+    records: list[dict[str, Any]],
+    *,
+    expected_task_ids: set[int],
+) -> list[dict[str, Any]]:
+    task_records = {int(record["task_id"]): record for record in records if record.get("task_id") is not None}
+    observed = set(task_records)
+    missing = sorted(expected_task_ids - observed)
+    blockers: list[dict[str, Any]] = []
+    if missing:
+        blockers.append(
+            {
+                "error_code": "SLURM_ARRAY_TASK_ACCOUNTING_MISSING",
+                "field": "sacct",
+                "missing_task_ids": ",".join(str(task_id) for task_id in missing),
+            }
+        )
+
+    unfinished = sorted(
+        task_id
+        for task_id, record in task_records.items()
+        if task_id in expected_task_ids and str(record.get("state", "")) not in TERMINAL_SLURM_STATES
+    )
+    if unfinished:
+        blockers.append(
+            {
+                "error_code": "SLURM_ARRAY_TASK_ACCOUNTING_UNFINISHED",
+                "field": "sacct",
+                "unfinished_task_ids": ",".join(str(task_id) for task_id in unfinished),
+            }
+        )
+
+    task0 = task_records.get(0)
+    if (
+        task0
+        and task0.get("state") in TERMINAL_SLURM_STATES
+        and (task0.get("state") != "COMPLETED" or task0.get("exit_code") != 0)
+    ):
+        blockers.append(
+            {
+                "error_code": "SLURM_ARRAY_TASK_SUCCESS_CONTRACT_FAILED",
+                "field": "sacct",
+                "task_id": "0",
+                "state": str(task0.get("state", "")),
+                "exit_code": str(task0.get("exit_code")),
+            }
+        )
+
+    task1 = task_records.get(1)
+    if task1 and not _is_controlled_failure_outcome(task1):
+        blockers.append(
+            {
+                "error_code": "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MISSING",
+                "field": "sacct",
+                "task_id": "1",
+                "state": str(task1.get("state", "")),
+                "exit_code": str(task1.get("exit_code")),
+            }
+        )
+    return blockers
+
+
+def _timeout_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not blockers:
+        return [
+            {
+                "error_code": "SLURM_ARRAY_TASK_ACCOUNTING_TIMEOUT",
+                "field": "sacct",
+            }
+        ]
+    return [
+        {
+            **blocker,
+            "timeout": "true",
+        }
+        for blocker in blockers
+    ]
+
+
+def _normalize_slurm_state(state: str) -> str:
+    return state.strip().upper().split(maxsplit=1)[0]
+
+
+def _is_controlled_failure_outcome(record: dict[str, Any]) -> bool:
+    state = str(record.get("state", ""))
+    exit_code = record.get("exit_code")
+    if state in CONTROLLED_FAILURE_STATES:
+        return True
+    return state == "COMPLETED" and exit_code not in (0, None)
 
 
 def _submitted_task_row_blockers(
@@ -510,9 +831,11 @@ def _allowlisted_slurm_config(stdout: str) -> str:
 def _partial_success_evidence(config: ProductionSlurmConfig, accounting: dict[str, Any]) -> dict[str, Any]:
     records = accounting.get("records") if isinstance(accounting.get("records"), list) else []
     task_records = [record for record in records if record.get("task_id") is not None]
+    blockers = accounting.get("blockers") if isinstance(accounting.get("blockers"), list) else []
+    if accounting.get("mode") == "blocked" and _has_incomplete_accounting_blocker(blockers):
+        return _blocked_partial_success(config, blockers)
     if not task_records:
         if accounting.get("mode") == "blocked":
-            blockers = accounting.get("blockers") if isinstance(accounting.get("blockers"), list) else []
             return _blocked_partial_success(config, blockers)
         task_records = _planned_task_records()
     tasks = []
@@ -558,6 +881,16 @@ def _planned_task_records() -> list[dict[str, Any]]:
             "error_code": "SLURM_JOB_FAILED",
         },
     ]
+
+
+def _has_incomplete_accounting_blocker(blockers: list[dict[str, Any]]) -> bool:
+    incomplete_codes = {
+        "SLURM_ARRAY_TASK_ACCOUNTING_MISSING",
+        "SLURM_ARRAY_TASK_ACCOUNTING_UNFINISHED",
+        "SLURM_ARRAY_TASK_ACCOUNTING_TIMEOUT",
+        "SLURM_ARRAY_TASK_ACCOUNTING_UNAVAILABLE",
+    }
+    return any(blocker.get("error_code") in incomplete_codes for blocker in blockers)
 
 
 def _blocked_partial_success(config: ProductionSlurmConfig, blockers: list[dict[str, Any]]) -> dict[str, Any]:
@@ -704,16 +1037,6 @@ def _run_command(command: list[str]) -> dict[str, Any]:
     )
 
 
-def _write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(redact_payload(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _write_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(redact_text(value), encoding="utf-8")
-
-
 def _click_main(argv: Sequence[str] | None = None) -> int:
     import click
 
@@ -726,7 +1049,18 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--run-id")
     @click.option("--submit", is_flag=True, default=False)
     @click.option("--fake-slurm", is_flag=True, default=False)
-    def validate_slurm_command(evidence_root: Path, run_id: str | None, submit: bool, fake_slurm: bool) -> None:
+    @click.option("--poll-interval-seconds", type=float, default=None)
+    @click.option("--poll-timeout-seconds", type=float, default=None)
+    @click.option("--force", is_flag=True, default=False)
+    def validate_slurm_command(
+        evidence_root: Path,
+        run_id: str | None,
+        submit: bool,
+        fake_slurm: bool,
+        poll_interval_seconds: float | None,
+        poll_timeout_seconds: float | None,
+        force: bool,
+    ) -> None:
         try:
             summary = validate_slurm(
                 ProductionSlurmConfig.from_env(
@@ -734,6 +1068,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     run_id=run_id,
                     submit=submit,
                     fake_slurm=fake_slurm,
+                    poll_interval_seconds=poll_interval_seconds,
+                    poll_timeout_seconds=poll_timeout_seconds,
+                    force=force,
                 )
             )
             click.echo(json.dumps(summary, sort_keys=True))
@@ -756,6 +1093,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     validate_parser.add_argument("--run-id")
     validate_parser.add_argument("--submit", action="store_true")
     validate_parser.add_argument("--fake-slurm", action="store_true")
+    validate_parser.add_argument("--poll-interval-seconds", type=float, default=None)
+    validate_parser.add_argument("--poll-timeout-seconds", type=float, default=None)
+    validate_parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "validate-slurm":
@@ -768,6 +1108,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                             run_id=args.run_id,
                             submit=args.submit,
                             fake_slurm=args.fake_slurm,
+                            poll_interval_seconds=args.poll_interval_seconds,
+                            poll_timeout_seconds=args.poll_timeout_seconds,
+                            force=args.force,
                         )
                     ),
                     sort_keys=True,

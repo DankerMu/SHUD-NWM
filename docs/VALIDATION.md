@@ -135,7 +135,8 @@ uv run nhms-production validate-slurm \
   --fake-slurm
 ```
 
-Production preflight command:
+Production preflight command (does not submit work and is not #147 acceptance
+evidence):
 
 ```bash
 export NHMS_RUN_PRODUCTION_CLOSURE=1
@@ -153,6 +154,24 @@ uv run nhms-production validate-slurm \
   --evidence-root artifacts/production-closure \
   --run-id "$(date -u +m10-147-%Y%m%dT%H%M%SZ)"
 ```
+
+Production acceptance command:
+
+```bash
+uv run nhms-production validate-slurm \
+  --evidence-root artifacts/production-closure \
+  --run-id "$(date -u +m10-147-submit-%Y%m%dT%H%M%SZ)" \
+  --submit \
+  --poll-interval-seconds 15 \
+  --poll-timeout-seconds 900
+```
+
+Submitted acceptance evidence requires terminal Slurm accounting rows for array
+tasks `0` and `1`: task `0` must complete successfully, and task `1` must reach
+the expected controlled terminal failure/cancel outcome. Missing terminal task
+outcomes, shared stdout/stderr logs, or QC blocking evidence block #147
+acceptance. Use `--force` only for an intentional rerun of an existing `run_id`;
+the default protects audit evidence from accidental overwrite.
 
 If required preflight inputs or Slurm CLI tools are absent, the command writes a
 clear blocker bundle under `artifacts/production-closure/<run_id>/slurm/` and

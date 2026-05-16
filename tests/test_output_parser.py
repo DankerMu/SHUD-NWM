@@ -163,17 +163,50 @@ def test_reparse_upserts_existing_timeseries_rows(tmp_path: Path) -> None:
     assert repository.statuses == ["parsed", "parsed"]
 
 
+def test_s3_output_uri_must_match_configured_bucket_and_prefix(tmp_path: Path) -> None:
+    store, parser, repository = _build_parser(tmp_path, object_store_prefix="s3://nhms/prod")
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        "time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n".encode("utf-8"),
+    )
+    repository.context = HydroRunContext(
+        **{
+            **repository.context.__dict__,
+            "output_uri": "s3://nhms/prod/runs/run_001/output/",
+        }
+    )
+
+    result = parser.parse_run("run_001")
+
+    assert result.status == "parsed"
+    assert repository.statuses == ["parsed"]
+
+    for bad_uri in ("s3://other/prod/runs/run_001/output/", "s3://nhms/dev/runs/run_001/output/"):
+        repository.context = HydroRunContext(
+            **{
+                **repository.context.__dict__,
+                "output_uri": bad_uri,
+            }
+        )
+        repository.statuses.clear()
+        with pytest.raises(OutputParsingError) as exc_info:
+            parser.parse_run("run_001")
+        assert exc_info.value.error_code == "OUTPUT_URI_INVALID"
+        assert repository.statuses == ["failed"]
+
+
 def _build_parser(
     tmp_path: Path,
     *,
     max_flow_m3s: float = 100_000.0,
+    object_store_prefix: str = "s3://nhms",
     segments: tuple[RiverSegmentOrder, ...] = (
         RiverSegmentOrder("seg_a", "rivnet_v1", 1),
         RiverSegmentOrder("seg_b", "rivnet_v1", 2),
     ),
 ) -> tuple[LocalObjectStore, OutputParser, FakeOutputRepository]:
     object_root = tmp_path / "object-store"
-    store = LocalObjectStore(object_root, "s3://nhms")
+    store = LocalObjectStore(object_root, object_store_prefix)
     context = HydroRunContext(
         run_id="run_001",
         model_id="model_001",
@@ -183,13 +216,13 @@ def _build_parser(
         cycle_id="gfs_2026050100",
         cycle_time=_dt("2026-05-01T00:00:00Z"),
         start_time=_dt("2026-05-01T00:00:00Z"),
-        output_uri="s3://nhms/runs/run_001/output/",
+        output_uri=f"{object_store_prefix.rstrip('/')}/runs/run_001/output/",
     )
     repository = FakeOutputRepository(context=context, segments=segments)
     parser = OutputParser(
         config=OutputParserConfig(
             object_store_root=object_root,
-            object_store_prefix="s3://nhms",
+            object_store_prefix=object_store_prefix,
             max_flow_m3s=max_flow_m3s,
             batch_size=2,
         ),
