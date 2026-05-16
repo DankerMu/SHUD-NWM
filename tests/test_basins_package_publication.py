@@ -582,6 +582,71 @@ def test_publish_basins_rejects_partial_model_with_structured_error(
     assert "tailanhe" in error["path"]
 
 
+def test_publish_basins_rejects_invalid_utf8_inventory_with_structured_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path = tmp_path / "inventory.json"
+    inventory_path.write_bytes(b'{"models": [\xff]}\n')
+    output = tmp_path / "manifest.json"
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            "basins_basin_a_shud",
+            "--version",
+            "vbasins-invalid-utf8",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_INVENTORY_INVALID"
+    assert error["path"] == str(inventory_path)
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+
+
+def test_click_publish_basins_rejects_invalid_utf8_inventory_with_structured_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pytest.importorskip("click")
+    inventory_path = tmp_path / "inventory.json"
+    inventory_path.write_bytes(b'{"models": [\xff]}\n')
+    output = tmp_path / "manifest.json"
+
+    exit_code = _invoke_click(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            "basins_basin_a_shud",
+            "--version",
+            "vbasins-invalid-utf8",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_INVENTORY_INVALID"
+    assert error["path"] == str(inventory_path)
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+
+
 @pytest.mark.parametrize(
     ("field", "unsafe_value"),
     [
@@ -715,6 +780,51 @@ def test_publish_basins_rejects_nested_runtime_required_file_despite_valid_statu
     assert error["version"] == "vbasins-nested-runtime"
     assert "cfg_para" in error["message"]
     assert not (tmp_path / "manifest.json").exists()
+
+
+def test_publish_basins_rejects_extra_required_file_without_writing_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    extra_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "secret.txt"
+    extra_file.write_text("do not publish\n", encoding="utf-8")
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model["status"] = "valid"
+    model["default_publish_eligible"] = True
+    model["missing_required_files"] = []
+    model["required_files"]["cfg_para"].append("secret.txt")
+    write_inventory(inventory, inventory_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-extra-required",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_REQUIRED_FILES_NON_CANONICAL"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-extra-required"
+    assert "cfg_para:secret.txt" in error["message"]
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-extra-required" / "manifest.json").exists()
+    assert not (object_root / "models" / model_id / "vbasins-extra-required" / "package" / "secret.txt").exists()
 
 
 def test_publish_basins_reports_output_write_failure_as_json(

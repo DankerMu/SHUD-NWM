@@ -99,7 +99,7 @@
 - Basins package 对象写后校验已改为从对象路径分块读取计算 size/SHA，不再通过 `LocalObjectStore.checksum()` 整体读取对象；forcing 采样上限按已采样文件数计算，重复 header 不会扩大 time evidence 读取次数。
 - Basins package 发布新增 Phase 6 审查修复：发布前按 canonical SHUD/GIS 必需角色复核 `required_files`，拒绝篡改为 `valid` 的不完整 inventory；本地 `--output` manifest 仅在对象存储 manifest 写入并校验成功后落盘。
 - 已新增 `nhms-model basins-migration-report`：symlink Basins root 返回 `BASINS_MIGRATION_SYMLINK_TARGET`；真实 copied root 输出 file count、byte count、inventory checksum、source-to-target metadata、`production_ready=true`。
-- #135 Phase 6 follow-up 已补齐：`basins-migration-report` 默认 `source_uri=/volume/data/nwm/Basins` 并按文档命令返回 JSON 错误；`publish-basins` 先校验单段安全 `model_id/version`；canonical runtime 必需文件只接受 `input_dir` 直接子文件，GIS 仍固定为 `gis/<file>`。
+- #135 Phase 6 follow-up 已补齐：`basins-migration-report` 默认 `source_uri=/volume/data/nwm/Basins` 并按文档命令返回 JSON 错误；`publish-basins` 先校验单段安全 `model_id/version`；canonical runtime 必需文件只接受 `input_dir` 直接子文件，GIS 仍固定为 `gis/<file>`；inventory 非 UTF-8 字节返回 `BASINS_INVENTORY_INVALID` JSON；`required_files` 中 canonical 以外的额外条目返回 `BASINS_REQUIRED_FILES_NON_CANONICAL` 且不写本地 manifest 或额外 package entry。
 
 ## 已知技术风险 / 注意事项
 

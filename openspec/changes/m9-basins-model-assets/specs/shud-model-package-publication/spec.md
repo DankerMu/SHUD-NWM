@@ -42,6 +42,9 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 - **WHEN** a selected inventory model claims `status=valid` and `default_publish_eligible=true` but omits canonical required SHUD runtime or GIS sidecar roles from `required_files`
 - **THEN** package publication refuses the inventory with stable error code `BASINS_REQUIRED_FILES_MISSING`
 - **AND** it does not publish an immutable package or local manifest that omits required runtime/GIS assets
+- **WHEN** `required_files` contains extra non-canonical paths or roles after the canonical runtime/GIS files are present
+- **THEN** package publication refuses the inventory with stable error code `BASINS_REQUIRED_FILES_NON_CANONICAL`
+- **AND** it does not publish package entries or local manifests for the extra inventory-controlled paths
 
 #### Scenario: Package publication is idempotent
 
@@ -78,6 +81,7 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 - **THEN** stderr contains JSON with `error_code`, `message`, and relevant `model_id`, `version`, `path`, or `manifest_uri` fields
 - **AND** the command does not emit a success payload claiming `status=published`
 - **AND** requested local output JSON write failures SHALL use stable error code `BASINS_PACKAGE_OUTPUT_WRITE_FAILED`
+- **AND** malformed or non-UTF-8 inventory input SHALL use stable error code `BASINS_INVENTORY_INVALID` rather than an uncaught traceback
 
 ### Requirement: Historical forcing is represented without accidental bulk duplication
 

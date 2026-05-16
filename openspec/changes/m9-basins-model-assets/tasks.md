@@ -145,7 +145,7 @@ Fixture J - unreadable root or model directory:
 - [x] 2.5 Add explicit historical forcing copy option that writes forcing payloads to a separate object-store prefix and records URI/checksum evidence.
 - [x] 2.6 Make publication idempotent when source file checksums and target version are unchanged, and reject checksum changes for the same version unless an explicit new `--version` is used.
 - [x] 2.7 Implement `nhms-model basins-migration-report` so production evidence fails for symlink targets and passes for real copied directories with file count, byte count, and inventory checksum.
-- [x] 2.8 Harden package publication review findings: structured local output write failures, package checksum independent of raw inventory bytes, inventory-root path revalidation, local publish lock, object checksum verification from written bytes, bounded forcing sampling/streamed copy, and symlink-descendant rejection.
+- [x] 2.8 Harden package publication review findings: structured local output write failures, package checksum independent of raw inventory bytes, inventory-root path revalidation, local publish lock, object checksum verification from written bytes, bounded forcing sampling/streamed copy, symlink-descendant rejection, invalid UTF-8 inventory JSON errors, and non-canonical `required_files` rejection.
 
 ### #135 Package / Migration Fixture Matrix
 
@@ -201,6 +201,7 @@ Fixture P2 - structured failure payload:
 
 - Expected: all `publish-basins` and `basins-migration-report` command failures print JSON to stderr with at least `error_code`, `message`, and whichever of `model_id`, `version`, `path`, or `manifest_uri` is relevant. Commands must not claim `status=published` after a failure; checksum-conflict failures must preserve the previous manifest/package.
 - Output write failures use `BASINS_PACKAGE_OUTPUT_WRITE_FAILED` for package manifest output and `BASINS_MIGRATION_REPORT_WRITE_FAILED` for migration report output.
+- Invalid UTF-8 inventory bytes fail with `BASINS_INVENTORY_INVALID` JSON stderr and no traceback.
 
 Fixture P3 - inventory churn does not drive package conflicts:
 
@@ -236,6 +237,8 @@ Fixture P9 - tampered required-file inventory rejection:
 
 - Invocation: generate a valid inventory, then remove a canonical required runtime role or GIS sidecar role from the selected model `required_files` while leaving `status=valid` and `default_publish_eligible=true`.
 - Expected: non-zero exit with structured JSON `error_code=BASINS_REQUIRED_FILES_MISSING`; no local manifest output claims a successful package.
+- Invocation: keep canonical required files present but add a same-root extra such as `secret.txt` or `gis/fake.cfg.para` under a `required_files` role.
+- Expected: non-zero exit with structured JSON `error_code=BASINS_REQUIRED_FILES_NON_CANONICAL`; no local manifest or package entry is written for the extra path.
 
 Fixture P10 - local output waits for verified object manifest:
 

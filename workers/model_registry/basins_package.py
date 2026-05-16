@@ -335,7 +335,7 @@ def _read_inventory(path: str | Path) -> tuple[dict[str, Any], bytes]:
             f"Basins inventory cannot be read: {inventory_path}",
             path=str(inventory_path),
         ) from error
-    except json.JSONDecodeError as error:
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise BasinsPackageError(
             "BASINS_INVENTORY_INVALID",
             f"Basins inventory is not valid JSON: {inventory_path}",
@@ -484,31 +484,15 @@ def _package_source_files(
     required_files = model.get("required_files")
     if not isinstance(required_files, dict):
         raise BasinsPackageError("BASINS_INVENTORY_INVALID", "Basins model record is missing required_files.")
-    _validate_canonical_required_files(
+    files = _validated_canonical_required_source_files(
         required_files,
         input_dir,
         source_root,
+        object_store,
+        package_key,
         model_id=model_id,
         version=version,
     )
-
-    files: list[SourceFile] = []
-    for role, relative_names in required_files.items():
-        if not isinstance(relative_names, list):
-            continue
-        entry_role = "gis" if str(role).startswith("gis_") else "runtime_input"
-        for relative_name in relative_names:
-            relative_path = _normalize_relative_path(str(relative_name))
-            source_path = _safe_source_file(input_dir / relative_path, source_root)
-            files.append(
-                SourceFile(
-                    source_path=source_path,
-                    relative_path=relative_path,
-                    object_key=f"{package_key}/{relative_path}",
-                    object_uri=object_store.uri_for_key(f"{package_key}/{relative_path}"),
-                    role=entry_role,
-                )
-            )
 
     calib_path = source_root / "CALIB"
     _reject_source_symlink_path(calib_path, source_root)
@@ -529,15 +513,21 @@ def _package_source_files(
     return sorted(files, key=lambda item: (item.role, item.relative_path))
 
 
-def _validate_canonical_required_files(
+def _validated_canonical_required_source_files(
     required_files: dict[str, Any],
     input_dir: Path,
     source_root: Path,
+    object_store: LocalObjectStore,
+    package_key: str,
     *,
     model_id: str,
     version: str,
-) -> None:
+) -> list[SourceFile]:
     missing: list[str] = []
+    extras: list[str] = []
+    files: list[SourceFile] = []
+    canonical_roles = {role for role, _ in SHUD_REQUIRED_PATTERNS} | {role for role, _ in GIS_REQUIRED_FILES}
+
     for role, pattern in SHUD_REQUIRED_PATTERNS:
         relative_names = required_files.get(role)
         if not isinstance(relative_names, list) or not relative_names:
@@ -548,19 +538,45 @@ def _validate_canonical_required_files(
             relative_path = _normalize_relative_path(str(relative_name))
             if len(Path(relative_path).parts) == 1 and fnmatchcase(relative_path, pattern):
                 matching_paths.append(relative_path)
+            else:
+                extras.append(f"{role}:{relative_path}")
         if not matching_paths:
             missing.append(role)
             continue
         for relative_path in matching_paths:
-            _safe_source_file(input_dir / relative_path, source_root)
+            source_path = _safe_source_file(input_dir / relative_path, source_root)
+            files.append(
+                _source_file_for_package(
+                    source_path,
+                    relative_path,
+                    object_store,
+                    package_key,
+                    role="runtime_input",
+                )
+            )
 
     for role, file_name in GIS_REQUIRED_FILES:
         expected_path = _normalize_relative_path(f"gis/{file_name}")
         relative_names = required_files.get(role)
-        if not isinstance(relative_names, list) or expected_path not in [str(name) for name in relative_names]:
+        if not isinstance(relative_names, list) or not relative_names:
             missing.append(role)
             continue
-        _safe_source_file(input_dir / expected_path, source_root)
+        normalized_names = [_normalize_relative_path(str(name)) for name in relative_names]
+        extras.extend(f"{role}:{name}" for name in normalized_names if name != expected_path)
+        if expected_path not in normalized_names:
+            missing.append(role)
+            continue
+        source_path = _safe_source_file(input_dir / expected_path, source_root)
+        files.append(_source_file_for_package(source_path, expected_path, object_store, package_key, role="gis"))
+
+    for role, relative_names in required_files.items():
+        role_name = str(role)
+        if role_name in canonical_roles:
+            continue
+        if isinstance(relative_names, list):
+            extras.extend(f"{role_name}:{_normalize_relative_path(str(name))}" for name in relative_names)
+        else:
+            extras.append(f"{role_name}:<non-list>")
 
     if missing:
         roles = ", ".join(sorted(missing))
@@ -571,6 +587,34 @@ def _validate_canonical_required_files(
             version=version,
             path=str(input_dir),
         )
+    if extras:
+        entries = ", ".join(sorted(extras))
+        raise BasinsPackageError(
+            "BASINS_REQUIRED_FILES_NON_CANONICAL",
+            f"Basins inventory includes non-canonical required file entries: {entries}",
+            model_id=model_id or None,
+            version=version,
+            path=str(input_dir),
+        )
+    return files
+
+
+def _source_file_for_package(
+    source_path: Path,
+    relative_path: str,
+    object_store: LocalObjectStore,
+    package_key: str,
+    *,
+    role: str,
+) -> SourceFile:
+    object_key = f"{package_key}/{relative_path}"
+    return SourceFile(
+        source_path=source_path,
+        relative_path=relative_path,
+        object_key=object_key,
+        object_uri=object_store.uri_for_key(object_key),
+        role=role,
+    )
 
 
 def _forcing_metadata(
