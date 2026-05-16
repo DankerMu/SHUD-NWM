@@ -710,16 +710,31 @@ export interface components {
         };
         ModelInstance: {
             model_id: string;
+            model_name?: string | null;
+            basin_id?: string | null;
+            basin_name?: string | null;
             basin_version_id: string;
             river_network_version_id: string;
             mesh_version_id: string;
             calibration_version_id: string;
+            segment_count?: number | null;
+            mesh_uri?: string | null;
+            mesh_checksum?: string | null;
             shud_code_version: string;
             rshud_code_version?: string | null;
             autoshud_code_version?: string | null;
             active_flag: boolean;
             container_image?: string | null;
             model_package_uri: string;
+            package_checksum?: string | null;
+            manifest_uri?: string | null;
+            source_inventory_checksum?: string | null;
+            basin_slug?: string | null;
+            shud_input_name?: string | null;
+            source_path?: string | null;
+            resolved_source_path?: string | null;
+            source_uri?: string | null;
+            source_is_symlink?: boolean | null;
             resource_profile: {
                 [key: string]: unknown;
             };

@@ -343,6 +343,20 @@ def list_models(
         raise _handle_registry_error(error) from error
 
 
+@router.get("/models/{model_id}")
+def get_model(
+    request: Request,
+    model_id: str,
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(request, store.get_model(model_id))
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
 @router.post("/river-segment-crosswalks", status_code=status.HTTP_201_CREATED)
 def create_river_segment_crosswalks(
     payload: CrosswalkCreatePayload,

@@ -327,11 +327,11 @@ Fixture Z - gated real Basins import smoke:
 
 ## 4. Runtime, API, and Frontend Consumption
 
-- [ ] 4.1 Add a SHUD runtime staging smoke that uses a Basins-backed `model_package_uri` in dry-run or mock mode and verifies staged control/input files.
+- [x] 4.1 Add a SHUD runtime staging smoke that uses a Basins-backed `model_package_uri` in dry-run or mock mode and verifies staged control/input files.
 - [x] 4.2 Add API smoke tests showing imported Basins models appear in model listing/active discovery after explicit activation.
-- [ ] 4.3 Add river-segment API smoke showing imported Basins river features return paginated GeoJSON-compatible records for map rendering.
-- [ ] 4.4 Implement or update model asset detail API/OpenAPI contract so Basins-backed fields include basin/model names, segment count, mesh ID, calibration ID, package URI/checksum, active flag, and source lineage.
-- [ ] 4.5 Regenerate frontend API types and add frontend/store-level fixture coverage so the model asset management page can consume Basins-backed model metadata without placeholder-only data.
+- [x] 4.3 Add river-segment API smoke showing imported Basins river features return paginated GeoJSON-compatible records for map rendering.
+- [x] 4.4 Implement or update model asset detail API/OpenAPI contract so Basins-backed fields include basin/model names, segment count, mesh ID, calibration ID, package URI/checksum, active flag, and source lineage.
+- [x] 4.5 Regenerate frontend API types and add frontend/store-level fixture coverage so the model asset management page can consume Basins-backed model metadata without placeholder-only data.
 - [x] 4.6 Verify explicit activation through `PUT /api/v1/models/{model_id}/active`, including audit event or equivalent structured log plus API/DB proof.
 
 ### #137 Activation / Audit Fixture Matrix
@@ -363,6 +363,32 @@ Fixture AE - activation failure does not mutate registry:
 
 - Invocation: activate a missing model or a model whose references are invalid in a synthetic/fake store test.
 - Expected: API returns the existing safe error envelope; no active-state mutation and no audit row occur.
+
+### #138 Runtime / API Consumption Fixture Matrix
+
+Issue #138 owns tasks 4.1, 4.3, and 4.4. It must prove Basins-backed registry rows are consumable by runtime staging and API/map contracts without adding frontend UI routes.
+
+Fixture AF - Basins package stages through SHUDRuntime dry/mock path:
+
+- Setup: create a local object-store package at `models/<basins_model_id>/<version>/package/` using Basins-style file names such as `<alias>.sp.mesh`, `<alias>.cfg.para`, `<alias>.cfg.calib`, and required runtime side inputs; create a forcing artifact URI compatible with the current runtime staging contract.
+- Invocation: execute `SHUDRuntime` in dry/mock mode or call its staging path with a manifest whose `model.model_package_uri` points at that Basins package.
+- Expected: `runs/<run_id>/input/` contains staged Basins control/input files, generated cfg para keeps the Basins project name, and no live `shud_omp` solver or `/volume/data/nwm/Basins` dependency is required.
+
+Fixture AG - Basins model detail API exposes asset metadata:
+
+- Invocation: `GET /api/v1/models/{basins_model_id}` after seeding or importing a Basins-backed model row.
+- Expected: response uses the success envelope and includes `model_id`, basin/model names, `basin_id`, `basin_version_id`, `river_network_version_id`, `mesh_version_id`, `calibration_version_id`, segment count, mesh URI/checksum, `model_package_uri`, package checksum, active flag, and source lineage such as `manifest_uri`, `source_inventory_checksum`, `basin_slug`, and `shud_input_name`.
+- OpenAPI `ModelInstance` and generated frontend types must include any newly exposed stable fields; callers must not rely on local placeholder-only type patches.
+
+Fixture AH - Basins river segments are returned for map rendering:
+
+- Invocation: `GET /api/v1/basin-versions/{basin_version_id}/river-segments?river_network_version_id=<id>&limit=1&offset=0` for an imported/seeded Basins river network.
+- Expected: response is a paginated GeoJSON-compatible FeatureCollection with `total`, `feature_total`, `limit`, `offset`, feature geometry, `river_segment_id`, `basin_version_id`, `river_network_version_id`, and stable map properties.
+
+Fixture AI - model detail missing resource stays safe:
+
+- Invocation: `GET /api/v1/models/{missing_model_id}`.
+- Expected: API returns the existing safe `MODEL_REGISTRY_NOT_FOUND` envelope, without leaking database diagnostics.
 
 ## 5. Documentation and Validation
 

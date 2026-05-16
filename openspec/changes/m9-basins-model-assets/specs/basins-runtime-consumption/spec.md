@@ -32,6 +32,7 @@ The system SHALL provide enough Basins-backed metadata for the planned model ass
 
 - **WHEN** the frontend or API consumer requests model asset details for an imported Basins model
 - **THEN** available fields include basin/model names, segment count, mesh ID, calibration ID, package URI/checksum, active flag, and source path or source URI lineage
+- **AND** the model detail endpoint returns those fields through the shared API success envelope rather than requiring a frontend-local fixture patch
 
 #### Scenario: OpenAPI and generated frontend types include Basins asset fields
 

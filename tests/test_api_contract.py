@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -205,6 +206,12 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
     assert data["limit"] == 10
     assert data["offset"] == 0
     assert {item["model_id"] for item in data["items"]} == {"active_model", "inactive_model"}
+    inactive_item = next(item for item in data["items"] if item["model_id"] == "inactive_model")
+    assert inactive_item["resource_profile"]["manifest_uri"] == "s3://nhms/models/inactive_model/vbasins/manifest.json"
+    public_listing_profile_json = json.dumps(inactive_item["resource_profile"])
+    assert "token=secret" not in public_listing_profile_json
+    assert "user:pass@" not in public_listing_profile_json
+    assert "#frag" not in public_listing_profile_json
 
     spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
     list_models = spec["paths"]["/api/v1/models"]["get"]
@@ -218,6 +225,82 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
     assert limit_parameter["schema"]["maximum"] == 500
     response_schema = list_models["responses"]["200"]["content"]["application/json"]["schema"]
     assert response_schema["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/ModelInstancePage"
+
+
+def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
+    store = _ModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/models/inactive_model")
+            missing_response = client.get("/api/v1/models/missing_model")
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert response.status_code == 200
+    data = _assert_success_envelope(response.json())
+    assert {
+        "model_id": "inactive_model",
+        "model_name": "alias-a",
+        "basin_id": "basins_basin_a",
+        "basin_name": "Basin A",
+        "basin_version_id": "basin_v1",
+        "river_network_version_id": "network_v1",
+        "mesh_version_id": "mesh_v1",
+        "calibration_version_id": "calibration_v1",
+        "segment_count": 2,
+        "mesh_uri": "s3://nhms/models/inactive_model/vbasins/package/alias-a.sp.mesh",
+        "mesh_checksum": "mesh-sha-1",
+        "model_package_uri": "s3://nhms/models/inactive_model/package/",
+        "package_checksum": "package-sha-1",
+        "active_flag": False,
+        "manifest_uri": "s3://nhms/models/inactive_model/vbasins/manifest.json",
+        "source_inventory_checksum": "inventory-sha-1",
+        "basin_slug": "basin-a",
+        "shud_input_name": "alias-a",
+        "source_path": "/volume/data/nwm/Basins/basin-a",
+        "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
+        "source_uri": "s3://nhms/sources/basin-a",
+        "source_is_symlink": False,
+    }.items() <= data.items()
+    assert data["resource_profile"]["manifest_uri"] == "s3://nhms/models/inactive_model/vbasins/manifest.json"
+    assert data["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
+    assert data["resource_profile"]["lineage"]["source_uris"] == [
+        "s3://nhms/sources/nested",
+        "/volume/data/nwm/Basins/local-source",
+    ]
+    assert data["resource_profile"]["lineage"]["note"] == "s3 label only"
+    public_profile_json = json.dumps(data["resource_profile"])
+    assert "token=secret" not in public_profile_json
+    assert "user:pass@" not in public_profile_json
+    assert "#frag" not in public_profile_json
+
+    assert missing_response.status_code == 404
+    assert missing_response.json()["error"]["code"] == "MODEL_REGISTRY_NOT_FOUND"
+
+    spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
+    get_model = spec["paths"]["/api/v1/models/{model_id}"]["get"]
+    response_schema = get_model["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response_schema["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/ModelInstance"
+    model_properties = spec["components"]["schemas"]["ModelInstance"]["properties"]
+    for field in (
+        "model_name",
+        "basin_id",
+        "basin_name",
+        "segment_count",
+        "mesh_uri",
+        "mesh_checksum",
+        "package_checksum",
+        "manifest_uri",
+        "source_inventory_checksum",
+        "basin_slug",
+        "shud_input_name",
+        "source_path",
+        "resolved_source_path",
+        "source_uri",
+        "source_is_symlink",
+    ):
+        assert field in model_properties
 
 
 def test_forecast_series_contract_accepts_include_analysis_query() -> None:
@@ -342,6 +425,16 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
 
     assert "active?: \"true\" | \"false\" | \"all\";" in generated_types
     assert 'data: components["schemas"]["ModelInstancePage"];' in generated_types
+    assert 'data: components["schemas"]["ModelInstance"];' in generated_types
+    assert "model_name?: string | null;" in generated_types
+    assert "segment_count?: number | null;" in generated_types
+    assert "mesh_uri?: string | null;" in generated_types
+    assert "package_checksum?: string | null;" in generated_types
+    assert "source_inventory_checksum?: string | null;" in generated_types
+    assert "source_path?: string | null;" in generated_types
+    assert "resolved_source_path?: string | null;" in generated_types
+    assert "source_uri?: string | null;" in generated_types
+    assert "source_is_symlink?: boolean | null;" in generated_types
     assert "FloodFrequencyThresholds" in generated_types
     assert "Q2?: number | null;" in generated_types
     assert "Q20?: number | null;" in generated_types
@@ -520,26 +613,66 @@ class _ModelRegistryStore:
         self.models = [
             {
                 "model_id": "active_model",
+                "model_name": "active_model",
+                "basin_id": "basin",
+                "basin_name": "Basin",
                 "basin_version_id": "basin_v1",
                 "river_network_version_id": "network_v1",
                 "mesh_version_id": "mesh_v1",
                 "calibration_version_id": "calibration_v1",
                 "shud_code_version": "2.0",
+                "segment_count": 1,
+                "mesh_uri": "s3://nhms/models/active_model/package/active.sp.mesh",
+                "mesh_checksum": "mesh-sha-active",
                 "model_package_uri": "s3://nhms/models/active_model/package/",
+                "package_checksum": None,
+                "manifest_uri": None,
+                "source_inventory_checksum": None,
+                "basin_slug": None,
+                "shud_input_name": None,
+                "source_path": None,
+                "resolved_source_path": None,
+                "source_uri": None,
+                "source_is_symlink": None,
                 "active_flag": True,
                 "resource_profile": {},
                 "created_at": "2026-05-14T00:00:00Z",
             },
             {
                 "model_id": "inactive_model",
+                "model_name": "alias-a",
+                "basin_id": "basins_basin_a",
+                "basin_name": "Basin A",
                 "basin_version_id": "basin_v1",
                 "river_network_version_id": "network_v1",
                 "mesh_version_id": "mesh_v1",
                 "calibration_version_id": "calibration_v1",
                 "shud_code_version": "2.0",
+                "segment_count": 2,
+                "mesh_uri": "s3://nhms/models/inactive_model/vbasins/package/alias-a.sp.mesh",
+                "mesh_checksum": "mesh-sha-1",
                 "model_package_uri": "s3://nhms/models/inactive_model/package/",
+                "package_checksum": "package-sha-1",
+                "manifest_uri": "s3://nhms/models/inactive_model/vbasins/manifest.json",
+                "source_inventory_checksum": "inventory-sha-1",
+                "basin_slug": "basin-a",
+                "shud_input_name": "alias-a",
+                "source_path": "/volume/data/nwm/Basins/basin-a",
+                "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
+                "source_uri": "s3://nhms/sources/basin-a",
+                "source_is_symlink": False,
                 "active_flag": False,
-                "resource_profile": {},
+                "resource_profile": {
+                    "manifest_uri": "s3://nhms/models/inactive_model/vbasins/manifest.json",
+                    "source_uri": "s3://nhms/sources/basin-a",
+                    "lineage": {
+                        "source_uris": [
+                            "s3://nhms/sources/nested",
+                            "/volume/data/nwm/Basins/local-source",
+                        ],
+                        "note": "s3 label only",
+                    },
+                },
                 "created_at": "2026-05-14T00:00:00Z",
             },
         ]
@@ -572,6 +705,14 @@ class _ModelRegistryStore:
         if active is not None:
             items = [item for item in items if item["active_flag"] == active]
         return {"items": items[offset : offset + limit], "total": len(items), "limit": limit, "offset": offset}
+
+    def get_model(self, model_id: str) -> dict[str, Any]:
+        for item in self.models:
+            if item["model_id"] == model_id:
+                return dict(item)
+        from packages.common.model_registry import MissingResourceError
+
+        raise MissingResourceError(f"model_id not found: {model_id}")
 
 
 class _ForecastSeriesStore:

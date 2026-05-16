@@ -127,6 +127,10 @@
 - 已新增 fast parser/CLI 测试和 opt-in PostgreSQL/PostGIS integration 测试；真实 Basins import smoke 仅在 `NHMS_RUN_REAL_BASINS_IMPORT=1`、integration DB 配置和 `data/Basins` 存在时运行。
 - #137 已补齐 Basins-backed inactive model 显式激活证据：`PsycopgModelRegistryStore.set_model_active()` 成功变更会在同事务写入 `ops.audit_log`，记录 active 前后状态、model lineage 与 Basins package lineage；重复/缺失失败不写审计，API listing 覆盖 inactive/all/default active 发现路径。
 - #137 PR #143 review 修复已补齐：激活审计写入前清洗 `model_package_uri` 与 Basins lineage `manifest_uri`，移除 userinfo、query、fragment，仅保留稳定 scheme/host/path；fast/integration 测试覆盖敏感 URI 不落审计、重复/缺失不写审计，以及激活后 `active=false` 不再返回该 Basins 模型。
+- #138 已补齐 Basins runtime/API consumption：SHUDRuntime fast smoke 使用本地对象存储 Basins-style `model_package_uri` 直接验证 staging 与 `cfg.para` 生成，不依赖真实 solver 或 `/volume/data/nwm/Basins`；river-segment API smoke 覆盖 Basins paginated GeoJSON FeatureCollection；新增 `GET /api/v1/models/{model_id}` 实现，返回 success envelope 内的 basin/model 名称、basin/model/version IDs、segment count、mesh URI/checksum、package checksum、active flag 和 Basins lineage，缺失模型保持 `MODEL_REGISTRY_NOT_FOUND`。
+- #138 已同步 OpenAPI `ModelInstance` 和前端生成类型，移除 model detail deferred drift allowlist，并增加前端类型 fixture，资产管理页后续可消费真实 Basins-backed metadata 而不是本地 placeholder。
+- #138 PR #144 review 修复已补齐：模型公共投影对 `manifest_uri`、mesh/package URI、URI-valued source lineage 与 `resource_profile` 内嵌 URI 字符串递归执行稳定 URI 清洗，移除 userinfo/query/fragment；新增 nullable `source_path`、`resolved_source_path`、`source_uri`、`source_is_symlink` API/OpenAPI/前端类型契约，DB/internal row 保留原始 lineage。
+- #138 PR #144 follow-up 已补齐：公共模型响应与资产详情现在把 protocol-relative URI 引用也视为 URI-like，清洗 userinfo/query/fragment，同时保留普通 `/volume/...` 本地绝对路径。
 
 ## 已知技术风险 / 注意事项
 
