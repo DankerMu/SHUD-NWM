@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -39,9 +40,10 @@ TERMINAL_SLURM_STATES = {
     "SPECIAL_EXIT",
     "TIMEOUT",
 }
-CONTROLLED_FAILURE_STATES = TERMINAL_SLURM_STATES - {"COMPLETED"}
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 900.0
+MAX_POLL_INTERVAL_SECONDS = 300.0
+MAX_POLL_TIMEOUT_SECONDS = 86400.0
 
 
 class ProductionValidationError(RuntimeError):
@@ -213,11 +215,13 @@ class ProductionSlurmConfig:
                 poll_interval_seconds,
                 "NHMS_PRODUCTION_SLURM_POLL_INTERVAL_SECONDS",
                 DEFAULT_POLL_INTERVAL_SECONDS,
+                maximum=MAX_POLL_INTERVAL_SECONDS,
             ),
             poll_timeout_seconds=_non_negative_float_option(
                 poll_timeout_seconds,
                 "NHMS_PRODUCTION_SLURM_POLL_TIMEOUT_SECONDS",
                 DEFAULT_POLL_TIMEOUT_SECONDS,
+                maximum=MAX_POLL_TIMEOUT_SECONDS,
             ),
             force=force,
         )
@@ -241,7 +245,7 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
     partial_success = _partial_success_evidence(config, accounting)
     writer.write_json(config.lane_dir / "array_partial_success.json", partial_success)
 
-    retry_cancel = _retry_cancel_evidence(partial_success)
+    retry_cancel = _retry_cancel_evidence(config, partial_success, accounting)
     writer.write_json(config.lane_dir / "retry_cancel.json", retry_cancel)
 
     qc = _qc_blocking_evidence(config, partial_success)
@@ -273,6 +277,11 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
             "retry_cancel.json",
             "qc_blocking.json",
             "environment.json",
+        ],
+        "manifest_index_path": str(manifest_index),
+        "runtime_manifest_paths": [
+            task.get("manifest_path")
+            for task in _manifest_index_tasks(config)
         ],
     }
     writer.write_json(config.lane_dir / "summary.json", summary)
@@ -343,7 +352,7 @@ def _refuse_symlink_components(path: Path) -> None:
             )
 
 
-def _non_negative_float_option(value: float | None, env_name: str, default: float) -> float:
+def _non_negative_float_option(value: float | None, env_name: str, default: float, *, maximum: float) -> float:
     raw_value = os.getenv(env_name) if value is None else value
     if raw_value is None or raw_value == "":
         return default
@@ -354,10 +363,15 @@ def _non_negative_float_option(value: float | None, env_name: str, default: floa
             "PRODUCTION_SLURM_POLL_OPTION_INVALID",
             f"{env_name} must be a non-negative number.",
         ) from error
-    if resolved < 0:
+    if not math.isfinite(resolved) or resolved < 0:
         raise ProductionValidationError(
             "PRODUCTION_SLURM_POLL_OPTION_INVALID",
-            f"{env_name} must be a non-negative number.",
+            f"{env_name} must be a finite non-negative number.",
+        )
+    if resolved > maximum:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_POLL_OPTION_INVALID",
+            f"{env_name} must be less than or equal to {maximum:g}.",
         )
     return resolved
 
@@ -381,8 +395,20 @@ def _preflight_blockers(config: ProductionSlurmConfig) -> list[dict[str, str]]:
 
 
 def _write_manifest_index(config: ProductionSlurmConfig, writer: EvidenceWriter) -> Path:
-    manifest_index = config.lane_dir / "manifest_index.json"
-    tasks = [
+    manifest_index = _manifest_index_path(config)
+    tasks = _manifest_index_tasks(config)
+    for task in tasks:
+        _write_runtime_manifest(config, task, writer)
+    if _uses_shared_workspace_inputs(config):
+        writer.write_runtime_manifest_json(manifest_index, redact_payload(tasks))
+        writer.write_json(config.lane_dir / "manifest_index.json", redact_payload(tasks))
+    else:
+        writer.write_json(manifest_index, redact_payload(tasks))
+    return manifest_index
+
+
+def _manifest_index_tasks(config: ProductionSlurmConfig) -> list[dict[str, Any]]:
+    return [
         _task_manifest(config, task_id=0, run_id=f"{config.run_id}_success", model_id=config.model_id),
         _task_manifest(
             config,
@@ -391,13 +417,20 @@ def _write_manifest_index(config: ProductionSlurmConfig, writer: EvidenceWriter)
             model_id=f"{config.model_id}_fail",
         ),
     ]
-    for task in tasks:
-        _write_runtime_manifest(config, task, writer)
-    writer.write_json(manifest_index, redact_payload(tasks))
-    return manifest_index
+
+
+def _manifest_index_path(config: ProductionSlurmConfig) -> Path:
+    if _uses_shared_workspace_inputs(config):
+        return config.workspace_root / "runs" / config.run_id / "input" / "manifest_index.json"
+    return config.lane_dir / "manifest_index.json"
+
+
+def _uses_shared_workspace_inputs(config: ProductionSlurmConfig) -> bool:
+    return config.submit and not config.fake_slurm
 
 
 def _task_manifest(config: ProductionSlurmConfig, *, task_id: int, run_id: str, model_id: str) -> dict[str, Any]:
+    input_root = config.workspace_root if _uses_shared_workspace_inputs(config) else config.lane_dir
     output_uri = _object_uri(config, f"runs/{run_id}/output/")
     log_uri = _object_uri(config, f"runs/{run_id}/logs/")
     return {
@@ -409,7 +442,7 @@ def _task_manifest(config: ProductionSlurmConfig, *, task_id: int, run_id: str, 
         "source_id": "GFS",
         "cycle_time": "2026-05-16T00:00:00Z",
         "workspace_dir": str(config.workspace_root),
-        "manifest_path": str(config.workspace_root / "runs" / run_id / "input" / "manifest.json"),
+        "manifest_path": str(input_root / "runs" / run_id / "input" / "manifest.json"),
         "model_package_uri": config.model_package_uri,
         "forcing_uri": _object_uri(config, f"forcing/gfs/2026051600/basin_v1/{model_id}/"),
         "output_uri": output_uri,
@@ -560,6 +593,35 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
         submit_command.append(f"--account={config.account}")
     submit_command.append(str(script_path))
     submit = _run_command(submit_command)
+    if submit["returncode"] != 0:
+        return {
+            "mode": "blocked",
+            "job_id": None,
+            "array_spec": array_spec,
+            "blockers": [
+                {
+                    "error_code": "SBATCH_SUBMISSION_FAILED",
+                    "field": "sbatch",
+                    "returncode": str(submit["returncode"]),
+                }
+            ],
+            "commands": _inspection_commands(config),
+            "submit": submit,
+            "inspection": {
+                "sinfo": _run_command(["sinfo", "-o", "%P|%a|%l|%D|%t|%N"]),
+                "squeue": _run_command(["squeue", "-u", os.getenv("USER", ""), "-o", "%i|%P|%j|%u|%T|%M|%D|%R"]),
+                "scontrol": _slurm_config_inspection(),
+            },
+            "raw_sacct": "",
+            "sacct": None,
+            "poll": {
+                "attempts": 0,
+                "elapsed_seconds": 0.0,
+                "interval_seconds": config.poll_interval_seconds,
+                "timeout_seconds": config.poll_timeout_seconds,
+            },
+            "records": [],
+        }
     job_id = _parse_sbatch_parsable(submit["stdout"])
     poll = _poll_sacct_for_expected_array(config, job_id, expected_task_ids={0, 1})
     sacct = poll["last_sacct"]
@@ -779,9 +841,7 @@ def _normalize_slurm_state(state: str) -> str:
 def _is_controlled_failure_outcome(record: dict[str, Any]) -> bool:
     state = str(record.get("state", ""))
     exit_code = record.get("exit_code")
-    if state in CONTROLLED_FAILURE_STATES:
-        return True
-    return state == "COMPLETED" and exit_code not in (0, None)
+    return state == "FAILED" and exit_code not in (0, None)
 
 
 def _submitted_task_row_blockers(
@@ -832,6 +892,18 @@ def _partial_success_evidence(config: ProductionSlurmConfig, accounting: dict[st
     records = accounting.get("records") if isinstance(accounting.get("records"), list) else []
     task_records = [record for record in records if record.get("task_id") is not None]
     blockers = accounting.get("blockers") if isinstance(accounting.get("blockers"), list) else []
+    mode = str(accounting.get("mode", ""))
+    if mode == "not_submitted":
+        return _blocked_partial_success(
+            config,
+            [{"error_code": "PRODUCTION_SLURM_PREFLIGHT_ONLY", "field": "submit"}],
+            status="preflight_only",
+        )
+    if not task_records and mode != "fake":
+        return _blocked_partial_success(
+            config,
+            blockers or [{"error_code": "SLURM_ARRAY_TASK_ACCOUNTING_MISSING", "field": "sacct"}],
+        )
     if accounting.get("mode") == "blocked" and _has_incomplete_accounting_blocker(blockers):
         return _blocked_partial_success(config, blockers)
     if not task_records:
@@ -850,7 +922,14 @@ def _partial_success_evidence(config: ProductionSlurmConfig, accounting: dict[st
                 "publishable": succeeded,
                 "status": "succeeded" if succeeded else "blocked",
                 "error_code": None if succeeded else record.get("error_code") or "SLURM_JOB_FAILED",
-                "stderr_path": str(config.workspace_root / config.run_id / "logs" / f"9001_{task_id}.err"),
+                "stdout_path": _slurm_log_path(config, accounting, task_id, suffix="out")
+                if accounting.get("job_id")
+                else None,
+                "stderr_path": _slurm_log_path(config, accounting, task_id, suffix="err")
+                if accounting.get("job_id")
+                else None,
+                "log_verified": bool(mode == "fake"),
+                "log_status": "verified" if mode == "fake" else "unverified",
                 "retry_count": 0 if succeeded else 1,
                 "failure_stage": None if succeeded else "run_shud_forecast_array",
             }
@@ -893,12 +972,22 @@ def _has_incomplete_accounting_blocker(blockers: list[dict[str, Any]]) -> bool:
     return any(blocker.get("error_code") in incomplete_codes for blocker in blockers)
 
 
-def _blocked_partial_success(config: ProductionSlurmConfig, blockers: list[dict[str, Any]]) -> dict[str, Any]:
+def _slurm_log_path(config: ProductionSlurmConfig, accounting: dict[str, Any], task_id: int, *, suffix: str) -> str:
+    array_job_id = str(accounting.get("job_id") or "9001")
+    return str(config.workspace_root / config.run_id / "logs" / f"{array_job_id}_{task_id}.{suffix}")
+
+
+def _blocked_partial_success(
+    config: ProductionSlurmConfig,
+    blockers: list[dict[str, Any]],
+    *,
+    status: str = "blocked",
+) -> dict[str, Any]:
     error_code = str(blockers[0].get("error_code") if blockers else "SLURM_ARRAY_TASK_ACCOUNTING_MISSING")
     return {
         "schema": "nhms.production_closure.slurm.partial_success.v1",
         "array_job_id": None,
-        "status": "blocked",
+        "status": status,
         "error_code": error_code,
         "successful_outputs_remain_publishable": False,
         "failed_outputs_blocked": True,
@@ -908,9 +997,12 @@ def _blocked_partial_success(config: ProductionSlurmConfig, blockers: list[dict[
                 "job_id": None,
                 "run_id": f"{config.run_id}_{'success' if task_id == 0 else 'controlled_fail'}",
                 "publishable": False,
-                "status": "blocked",
+                "status": status,
                 "error_code": error_code,
+                "stdout_path": None,
                 "stderr_path": None,
+                "log_verified": False,
+                "log_status": "blocked",
                 "retry_count": 0,
                 "failure_stage": "run_shud_forecast_array",
             }
@@ -919,25 +1011,34 @@ def _blocked_partial_success(config: ProductionSlurmConfig, blockers: list[dict[
     }
 
 
-def _retry_cancel_evidence(partial_success: dict[str, Any]) -> dict[str, Any]:
+def _retry_cancel_evidence(
+    config: ProductionSlurmConfig,
+    partial_success: dict[str, Any],
+    accounting: dict[str, Any],
+) -> dict[str, Any]:
     failed = next((task for task in partial_success["tasks"] if not task["publishable"]), None)
     success = next((task for task in partial_success["tasks"] if task["publishable"]), None)
     error_code = failed.get("error_code") if failed else "SLURM_JOB_FAILED"
+    retry_count = failed.get("retry_count") if failed else 0
+    cancel_blocked = not config.fake_slurm
     return {
         "schema": "nhms.production_closure.slurm.retry_cancel.v1",
         "retry": {
+            "status": "not_executed" if cancel_blocked else "planned",
             "task_id": failed.get("task_id") if failed else None,
             "previous_error": error_code,
             "transient": is_transient_error(str(error_code)),
-            "retry_count": failed.get("retry_count") if failed else 0,
+            "retry_count": retry_count,
             "backoff_seconds": compute_backoff_seconds(0),
             "successful_task_unchanged": success.get("task_id") if success else None,
         },
         "cancel": {
-            "requested": True,
-            "state": "cancelled",
-            "job_id": "9002",
+            "requested": False if cancel_blocked else True,
+            "state": "not_executed" if cancel_blocked else "cancelled",
+            "job_id": None if cancel_blocked else "9002",
             "successful_outputs_mutated": False,
+            "error_code": "SLURM_RETRY_CANCEL_NOT_EXECUTED" if cancel_blocked else None,
+            "array_job_id": accounting.get("job_id"),
         },
     }
 
@@ -960,7 +1061,7 @@ def _qc_blocking_evidence(config: ProductionSlurmConfig, partial_success: dict[s
         "sibling_success": {
             "task_id": success.get("task_id") if success else 0,
             "run_id": success.get("run_id") if success else f"{config.run_id}_success",
-            "publishable": True,
+            "publishable": bool(success),
         },
     }
 
