@@ -957,6 +957,99 @@ def test_publish_basins_rejects_tampered_inventory_paths(
     assert error["path"] == str((outside_root / "basin-a").resolve())
 
 
+def test_publish_basins_rejects_same_root_tampered_input_dir_without_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    root = tmp_path / "basins"
+    alt_input_dir = _make_valid_model(root / "basin-a" / "alt", "alt-alias")
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model["status"] = "valid"
+    model["default_publish_eligible"] = True
+    model["missing_required_files"] = []
+    model["input_dir"] = str(alt_input_dir)
+    model["gis_dir"] = str(alt_input_dir / "gis")
+    model["required_files"] = _required_files_for_input_name("alt-alias")
+    write_inventory(inventory, inventory_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-same-root-input-tampered",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_INVENTORY_PATH_MISMATCH"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-same-root-input-tampered"
+    assert error["path"] == str(alt_input_dir.resolve())
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-same-root-input-tampered" / "manifest.json").exists()
+    assert not (object_root / "models" / model_id / "vbasins-same-root-input-tampered" / "package").exists()
+
+
+def test_publish_basins_rejects_same_root_tampered_forcing_dir_without_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path, forcing_count=1)
+    root = tmp_path / "basins"
+    alt_forcing_dir = root / "basin-a" / "alt-forcing"
+    alt_forcing_dir.mkdir()
+    (alt_forcing_dir / "X999999.csv").write_text("time,value\n2026-01-01,999\n", encoding="utf-8")
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model["forcing_dir"] = str(alt_forcing_dir)
+    model["forcing_csv_count"] = 1
+    write_inventory(inventory, inventory_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-same-root-forcing-tampered",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_INVENTORY_PATH_MISMATCH"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-same-root-forcing-tampered"
+    assert error["path"] == str(alt_forcing_dir.resolve())
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-same-root-forcing-tampered" / "manifest.json").exists()
+    assert not (object_root / "models" / model_id / "vbasins-same-root-forcing-tampered" / "package").exists()
+    assert not (object_root / "models" / model_id / "vbasins-same-root-forcing-tampered" / "forcing").exists()
+
+
 def test_publish_basins_rejects_unresolvable_symlink_descendant_as_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1432,6 +1525,29 @@ def _object_store_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     return object_root
+
+
+def _required_files_for_input_name(input_name: str) -> dict[str, list[str]]:
+    required = {
+        "cfg_para": [f"{input_name}.cfg.para"],
+        "cfg_ic": [f"{input_name}.cfg.ic"],
+        "cfg_calib": [f"{input_name}.cfg.calib"],
+        "sp_mesh": [f"{input_name}.sp.mesh"],
+        "sp_riv": [f"{input_name}.sp.riv"],
+        "sp_rivseg": [f"{input_name}.sp.rivseg"],
+        "sp_att": [f"{input_name}.sp.att"],
+        "para_soil": [f"{input_name}.para.soil"],
+        "para_geol": [f"{input_name}.para.geol"],
+        "para_lc": [f"{input_name}.para.lc"],
+        "tsd_forc": [f"{input_name}.tsd.forc"],
+        "tsd_lai": [f"{input_name}.tsd.lai"],
+        "tsd_mf": [f"{input_name}.tsd.mf"],
+        "tsd_rl": [f"{input_name}.tsd.rl"],
+    }
+    for layer in ("domain", "river", "seg"):
+        for suffix in ("shp", "shx", "dbf", "prj"):
+            required[f"gis_{layer}_{suffix}"] = [f"gis/{layer}.{suffix}"]
+    return required
 
 
 def _one_entry(manifest: dict[str, object], role: str) -> dict[str, object]:

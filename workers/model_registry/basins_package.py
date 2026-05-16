@@ -110,6 +110,8 @@ def publish_basins_package(
         object_store=store,
         forcing_key=forcing_key,
         copy_forcing=copy_forcing,
+        model_id=model_id,
+        version=version,
     )
     source_files = [*package_files, *(forcing_files if copy_forcing else [])]
     planned_included_files = sorted(
@@ -480,7 +482,39 @@ def _package_source_files(
     model_id: str,
     version: str,
 ) -> list[SourceFile]:
-    input_dir = _safe_source_dir(model.get("input_dir"), inventory_root, source_root, "input_dir")
+    input_dir = _safe_source_dir(
+        model.get("input_dir"),
+        inventory_root,
+        source_root,
+        "input_dir",
+        model_id=model_id,
+        version=version,
+    )
+    expected_input_dir = _expected_input_dir(model, source_root, model_id=model_id, version=version)
+    _ensure_inventory_path_matches_expected(
+        input_dir,
+        expected_input_dir,
+        "input_dir",
+        model_id=model_id,
+        version=version,
+    )
+    gis_dir_value = model.get("gis_dir")
+    if isinstance(gis_dir_value, str) and gis_dir_value:
+        gis_dir = _safe_source_dir(
+            gis_dir_value,
+            inventory_root,
+            source_root,
+            "gis_dir",
+            model_id=model_id,
+            version=version,
+        )
+        _ensure_inventory_path_matches_expected(
+            gis_dir,
+            expected_input_dir / "gis",
+            "gis_dir",
+            model_id=model_id,
+            version=version,
+        )
     required_files = model.get("required_files")
     if not isinstance(required_files, dict):
         raise BasinsPackageError("BASINS_INVENTORY_INVALID", "Basins model record is missing required_files.")
@@ -544,7 +578,7 @@ def _validated_canonical_required_source_files(
             missing.append(role)
             continue
         for relative_path in matching_paths:
-            source_path = _safe_source_file(input_dir / relative_path, source_root)
+            source_path = _safe_source_file(input_dir / relative_path, source_root, model_id=model_id, version=version)
             files.append(
                 _source_file_for_package(
                     source_path,
@@ -566,7 +600,7 @@ def _validated_canonical_required_source_files(
         if expected_path not in normalized_names:
             missing.append(role)
             continue
-        source_path = _safe_source_file(input_dir / expected_path, source_root)
+        source_path = _safe_source_file(input_dir / expected_path, source_root, model_id=model_id, version=version)
         files.append(_source_file_for_package(source_path, expected_path, object_store, package_key, role="gis"))
 
     for role, relative_names in required_files.items():
@@ -617,6 +651,80 @@ def _source_file_for_package(
     )
 
 
+def _expected_input_dir(
+    model: dict[str, Any],
+    source_root: Path,
+    *,
+    model_id: str,
+    version: str,
+) -> Path:
+    shud_input_name = model.get("shud_input_name")
+    if not isinstance(shud_input_name, str) or not shud_input_name:
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_INVALID",
+            "Basins model record is missing shud_input_name.",
+            model_id=model_id,
+            version=version,
+        )
+    try:
+        safe_name = _normalize_relative_path(shud_input_name)
+    except BasinsPackageError as error:
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_PATH_MISMATCH",
+            "Basins inventory shud_input_name is not a safe canonical input directory name.",
+            model_id=model_id,
+            version=version,
+            path=shud_input_name,
+        ) from error
+    if Path(safe_name).parts != (safe_name,):
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_PATH_MISMATCH",
+            "Basins inventory shud_input_name is not a single canonical input directory name.",
+            model_id=model_id,
+            version=version,
+            path=shud_input_name,
+        )
+    return _resolve_package_path(source_root / "input" / safe_name, model_id=model_id, version=version)
+
+
+def _expected_forcing_dir(
+    model: dict[str, Any],
+    source_root: Path,
+    *,
+    model_id: str,
+    version: str,
+) -> Path:
+    forcing_dir_original_name = model.get("forcing_dir_original_name")
+    if forcing_dir_original_name not in {"forcing", "focing"}:
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_PATH_MISMATCH",
+            "Basins inventory forcing_dir_original_name is not an accepted canonical forcing directory name.",
+            model_id=model_id,
+            version=version,
+            path=str(forcing_dir_original_name or ""),
+        )
+    return _resolve_package_path(source_root / forcing_dir_original_name, model_id=model_id, version=version)
+
+
+def _ensure_inventory_path_matches_expected(
+    actual: Path,
+    expected: Path,
+    field_name: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+) -> None:
+    resolved_expected = _resolve_package_path(expected, model_id=model_id, version=version)
+    if actual != resolved_expected:
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_PATH_MISMATCH",
+            f"Basins inventory {field_name} does not match the selected model's canonical source path.",
+            model_id=model_id,
+            version=version,
+            path=str(actual),
+        )
+
+
 def _forcing_metadata(
     *,
     model: dict[str, Any],
@@ -625,6 +733,8 @@ def _forcing_metadata(
     object_store: LocalObjectStore,
     forcing_key: str,
     copy_forcing: bool,
+    model_id: str,
+    version: str,
 ) -> tuple[dict[str, Any], list[SourceFile]]:
     forcing_dir_value = model.get("forcing_dir")
     if not isinstance(forcing_dir_value, str) or not forcing_dir_value:
@@ -641,7 +751,22 @@ def _forcing_metadata(
             [],
         )
 
-    forcing_dir = _safe_source_dir(forcing_dir_value, inventory_root, source_root, "forcing_dir")
+    forcing_dir = _safe_source_dir(
+        forcing_dir_value,
+        inventory_root,
+        source_root,
+        "forcing_dir",
+        model_id=model_id,
+        version=version,
+    )
+    expected_forcing_dir = _expected_forcing_dir(model, source_root, model_id=model_id, version=version)
+    _ensure_inventory_path_matches_expected(
+        forcing_dir,
+        expected_forcing_dir,
+        "forcing_dir",
+        model_id=model_id,
+        version=version,
+    )
     digest = hashlib.sha256()
     total_bytes = 0
     sample_headers: list[str] = []
@@ -979,9 +1104,22 @@ def _success_payload(status: str, manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _safe_source_dir(value: Any, inventory_root: Path, source_root: Path, field_name: str) -> Path:
+def _safe_source_dir(
+    value: Any,
+    inventory_root: Path,
+    source_root: Path,
+    field_name: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+) -> Path:
     if not isinstance(value, str) or not value:
-        raise BasinsPackageError("BASINS_INVENTORY_INVALID", f"Basins model record is missing {field_name}.")
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_INVALID",
+            f"Basins model record is missing {field_name}.",
+            model_id=model_id,
+            version=version,
+        )
     path = Path(value).expanduser()
     _reject_source_symlink_path(path, source_root)
     resolved = _resolve_package_path(path)
@@ -990,25 +1128,37 @@ def _safe_source_dir(value: Any, inventory_root: Path, source_root: Path, field_
         inventory_root,
         error_code="BASINS_INVENTORY_PATH_MISMATCH",
         message=f"Basins model {field_name} resolves outside the inventory root.",
+        model_id=model_id,
+        version=version,
     )
-    _ensure_under_source_root(resolved, source_root)
+    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version)
     if not resolved.is_dir():
         raise BasinsPackageError(
             "BASINS_SOURCE_NOT_FOUND",
             f"Basins source directory does not exist: {path}",
+            model_id=model_id,
+            version=version,
             path=str(path),
         )
     return resolved
 
 
-def _safe_source_file(path: Path, source_root: Path) -> Path:
+def _safe_source_file(
+    path: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+) -> Path:
     _reject_source_symlink_path(path, source_root)
     resolved = _resolve_package_path(path)
-    _ensure_under_source_root(resolved, source_root)
+    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version)
     if not resolved.is_file():
         raise BasinsPackageError(
             "BASINS_SOURCE_NOT_FOUND",
             f"Basins source file does not exist: {path}",
+            model_id=model_id,
+            version=version,
             path=str(path),
         )
     return resolved
@@ -1040,12 +1190,20 @@ def _reject_source_symlink_path(path: Path, source_root: Path) -> None:
             )
 
 
-def _ensure_under_source_root(path: Path, source_root: Path) -> None:
+def _ensure_under_source_root(
+    path: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+) -> None:
     _ensure_under_root(
         path,
         source_root,
         error_code="BASINS_PACKAGE_PATH_UNSAFE",
         message="Basins package source path resolves outside the model source directory.",
+        model_id=model_id,
+        version=version,
     )
 
 

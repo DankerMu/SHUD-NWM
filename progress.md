@@ -91,7 +91,7 @@
 - Basins 打包已兼容 `data/Basins` 为软链接根的 inventory：CALIB 文件用解析后的模型根计算相对路径，manifest/object store 仍保留 `CALIB/...` 路径，真实 opt-in smoke 已通过。
 - Basins package manifest 的 `included_files` 已补入 `role=manifest` 自条目；`package_checksum` 稳定覆盖源 package/forcing 证据，manifest 自条目单独记录 manifest 载荷校验和最终对象字节数，避免递归 checksum。
 - Basins package 的 `package_checksum` 已不再包含原始 inventory checksum；`source_inventory_checksum` 仅作为 manifest 证据保留，inventory 格式、无关字段或其它模型记录变更不会触发同版本冲突。
-- Basins package 发布会基于 inventory `resolved_root` 与 root-relative 字段复核 `resolved_source_path`、`input_dir`、`forcing_dir`，篡改绝对路径会返回 `BASINS_INVENTORY_PATH_MISMATCH` 或 `BASINS_PACKAGE_PATH_UNSAFE`。
+- Basins package 发布会基于 inventory `resolved_root`、root-relative 字段和模型身份复核 `resolved_source_path`、canonical `input/<shud_input_name>`、`gis/` 与 `forcing|focing`，绝对路径或同根路径篡改会返回 `BASINS_INVENTORY_PATH_MISMATCH` 或 `BASINS_PACKAGE_PATH_UNSAFE`。
 - Basins package 发布新增本地对象存储 `.publish.lock`、写入后对象 size/SHA 校验和流式文件复制；已有未变 manifest 可不加锁返回 `already_done`，并发锁冲突返回 `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`。
 - Basins package 与 migration 输出路径写入失败已收敛为 JSON 错误：`BASINS_PACKAGE_OUTPUT_WRITE_FAILED`、`BASINS_MIGRATION_REPORT_WRITE_FAILED`；不会在 CLI 暴露 traceback。
 - Basins forcing 处理已改为流式遍历和 copy，header/time evidence 只做有上限采样，manifest 记录 sample file/byte/line limits。
