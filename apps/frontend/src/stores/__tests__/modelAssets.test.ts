@@ -117,12 +117,21 @@ describe('useModelAssetsStore', () => {
       source_inventory_checksum: 'inventory-sha-1',
       basin_slug: 'basin-a',
       shud_input_name: 'alias-a',
+      source_path: null,
+      resolved_source_path: null,
+      source_uri: 's3://nhms/sources/basin-a',
       source_is_symlink: false,
     })
     expect(state.models[0].resource_profile).toMatchObject({
+      basin_slug: 'basin-a',
+      shud_input_name: 'alias-a',
       package_checksum: 'package-sha-1',
       source_inventory_checksum: 'inventory-sha-1',
       mesh: { checksum: 'mesh-sha-1' },
+      source_lineage: {
+        source_path: null,
+        source_uri: 's3://nhms/sources/basin-a',
+      },
     })
     expect(state.total).toBe(1)
     expect(state.loading).toBe(false)
@@ -161,20 +170,73 @@ describe('useModelAssetsStore', () => {
       mesh_checksum: 'mesh-sha-1',
       package_checksum: 'package-sha-1',
       manifest_uri: MANIFEST_URI,
-      source_path: '/volume/data/nwm/Basins/basin-a',
-      resolved_source_path: '/volume/data/nwm/Basins/basin-a',
+      source_path: null,
+      resolved_source_path: null,
       source_uri: 's3://nhms/sources/basin-a',
     })
     expect(selected?.resource_profile).toMatchObject({
       active_source: 'operator_activation',
       segment_count: 108,
       source_lineage: {
-        source_path: '/volume/data/nwm/Basins/basin-a',
+        source_path: null,
         source_uri: 's3://nhms/sources/basin-a',
       },
     })
     expect(useModelAssetsStore.getState().detailLoading).toBe(false)
     expect(useModelAssetsStore.getState().error).toBeNull()
+  })
+
+  it('preserves URI-like source paths while redacting local resolved paths', async () => {
+    const model = makeBasinsModel({
+      source_path: 's3://nhms/raw/basin-a',
+      resolved_source_path: 'https://assets.example.test/basin-a',
+      resource_profile: {
+        ...makeBasinsModel().resource_profile,
+        source_lineage: {
+          source_path: 's3://nhms/raw/basin-a',
+          resolved_source_path: '/volume/data/nwm/Basins/basin-a',
+          source_uri: 's3://nhms/sources/basin-a',
+        },
+      },
+    })
+    const page: ModelAssetPage = { items: [model], total: 1, limit: 50, offset: 0 }
+
+    vi.mocked(client.GET).mockResolvedValue(success(page) as never)
+
+    await useModelAssetsStore.getState().fetchModels()
+
+    expect(useModelAssetsStore.getState().models[0]).toMatchObject({
+      source_path: 's3://nhms/raw/basin-a',
+      resolved_source_path: 'https://assets.example.test/basin-a',
+    })
+    expect(useModelAssetsStore.getState().models[0].resource_profile).toMatchObject({
+      source_lineage: {
+        source_path: 's3://nhms/raw/basin-a',
+        resolved_source_path: null,
+        source_uri: 's3://nhms/sources/basin-a',
+      },
+    })
+  })
+
+  it('clears stale selected model when the next detail request fails', async () => {
+    const detail = makeBasinsModel()
+
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce(success(detail) as never)
+      .mockResolvedValueOnce(failure('model detail unavailable') as never)
+
+    await useModelAssetsStore.getState().fetchModelDetail(BASINS_MODEL_ID)
+    expect(useModelAssetsStore.getState().selectedModel?.model_id).toBe(BASINS_MODEL_ID)
+
+    await expect(useModelAssetsStore.getState().fetchModelDetail('missing-model')).rejects.toThrow(
+      'model detail unavailable',
+    )
+
+    expect(useModelAssetsStore.getState()).toMatchObject({
+      selectedModel: null,
+      detailLoading: false,
+      error: 'model detail unavailable',
+    })
   })
 
   it('keeps API errors in state for asset-management callers', async () => {

@@ -18,13 +18,16 @@ OBJECT_STORE_ROOT=/tmp/nhms-object-store OBJECT_STORE_PREFIX=s3://nhms \
 
 uv run nhms-model import-basins-registry \
   --inventory /tmp/basins-inventory.json \
-  --manifest /tmp/basins-package-manifest.json \
-  --model-id basins_qhh_shud
+  --package-manifest /tmp/basins-package-manifest.json \
+  --database-url postgresql://nhms:nhms_dev@localhost:5432/nhms_scratch \
+  --output /tmp/basins-registry-import-report.json
 
 uv run nhms-model basins-migration-report \
   --basins-root /volume/data/nwm/Basins \
   --output /tmp/basins-migration-report.json
 ```
+
+`import-basins-registry` mutates core registry tables. Do not run it against production unless it is an intentional migration with backup, approval, and an explicit production database URL.
 
 Production migration evidence must point at a copied Basins directory. A symlink-only `/volume/data/nwm/Basins` target is rejected because Linux production hosts must copy the actual data, not only migrate the development symlink.
 
@@ -138,3 +141,15 @@ corepack pnpm test:e2e
 ```bash
 openspec validate m9-basins-model-assets --strict --no-interactive
 ```
+
+## M9 Closeout Evidence
+
+Local #139 closeout verification on 2026-05-16:
+
+- `openspec validate m9-basins-model-assets --strict --no-interactive` -> `Change 'm9-basins-model-assets' is valid`.
+- `uv run ruff check .` -> `All checks passed!`.
+- `uv run pytest -q tests/test_basins_discovery.py tests/test_basins_package_publication.py tests/test_basins_registry_import.py tests/test_shud_runtime.py tests/test_model_registration.py tests/test_api_contract.py tests/test_openapi_drift.py` -> `173 passed, 8 skipped, 5 warnings`.
+- `NHMS_RUN_BASINS_SMOKE=1 uv run pytest -q tests/test_basins_discovery.py tests/test_basins_package_publication.py` -> `80 passed`.
+- `cd apps/frontend && corepack pnpm check:api-types` -> generated `/tmp/nhms-api-types.ts` matched `src/api/types.ts`.
+- `cd apps/frontend && corepack pnpm test -- src/api/__tests__/modelAssets.test.ts src/stores/__tests__/modelAssets.test.ts` -> `15 passed`, `53 passed`.
+- `cd apps/frontend && corepack pnpm build` -> Vite production build succeeded.

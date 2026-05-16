@@ -15,6 +15,8 @@ export interface ModelAssetListFilters {
   offset?: number
 }
 
+type JsonRecord = Record<string, unknown>
+
 interface ModelAssetsState {
   models: ModelAsset[]
   selectedModel: ModelAsset | null
@@ -55,6 +57,32 @@ async function getModelDetail(modelId: string) {
   return unwrapApiData<ModelAsset>(data, '模型资产详情加载失败')
 }
 
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isPublicUriLike(value: string) {
+  return /^(?!file:)[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('//')
+}
+
+function redactLocalSourcePaths(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactLocalSourcePaths)
+  if (!isJsonRecord(value)) return value
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => {
+      if ((key === 'source_path' || key === 'resolved_source_path') && typeof entry === 'string') {
+        return [key, isPublicUriLike(entry) ? entry : null]
+      }
+      return [key, redactLocalSourcePaths(entry)]
+    }),
+  )
+}
+
+function normalizeModelAsset(model: ModelAsset): ModelAsset {
+  return redactLocalSourcePaths(model) as ModelAsset
+}
+
 export const useModelAssetsStore = create<ModelAssetsState>((set) => ({
   models: [],
   selectedModel: null,
@@ -70,7 +98,7 @@ export const useModelAssetsStore = create<ModelAssetsState>((set) => ({
     try {
       const page = await getModelPage(filters)
       set({
-        models: page.items,
+        models: page.items.map(normalizeModelAsset),
         total: page.total,
         limit: page.limit,
         offset: page.offset,
@@ -84,14 +112,14 @@ export const useModelAssetsStore = create<ModelAssetsState>((set) => ({
     }
   },
   fetchModelDetail: async (modelId) => {
-    set({ detailLoading: true, error: null })
+    set({ selectedModel: null, detailLoading: true, error: null })
 
     try {
       const model = await getModelDetail(modelId)
-      set({ selectedModel: model, detailLoading: false, error: null })
+      set({ selectedModel: normalizeModelAsset(model), detailLoading: false, error: null })
     } catch (error) {
       const message = getApiErrorMessage(error, '模型资产详情加载失败')
-      set({ detailLoading: false, error: message })
+      set({ selectedModel: null, detailLoading: false, error: message })
       throw error
     }
   },
