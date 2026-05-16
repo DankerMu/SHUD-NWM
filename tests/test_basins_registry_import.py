@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pyproj import Transformer
 
 import workers.model_registry.basins_geometry as basins_geometry
 from packages.common.model_registry import PsycopgModelRegistryStore
@@ -33,7 +34,12 @@ def test_parser_reads_real_shapefiles_and_shud_evidence(tmp_path: Path) -> None:
 
     assert parsed.domain_wkt.startswith("MULTIPOLYGON")
     assert parsed.segment_count == 2
-    assert parsed.evidence_counts == {"sp_riv": 2, "sp_rivseg": 2}
+    assert parsed.evidence_counts == {
+        "river_count": 2,
+        "river_columns": 6,
+        "rivseg_segment_count": 2,
+        "rivseg_columns": 4,
+    }
     assert [segment.segment_order for segment in parsed.river_segments] == [1, 2]
     assert parsed.river_segments[0].downstream_segment_id == f"{model_id}_seg_2"
     assert parsed.river_segments[1].downstream_segment_id is None
@@ -543,6 +549,58 @@ def test_parser_rejects_projected_prj_with_epsg(tmp_path: Path) -> None:
     assert error.value.error_code == "BASINS_REGISTRY_GIS_CRS_UNSUPPORTED"
 
 
+def test_parser_reprojects_basins_albers_to_lon_lat(tmp_path: Path) -> None:
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
+    albers_prj = (
+        'PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",'
+        'SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],'
+        'AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],'
+        'UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],'
+        'PROJECTION["Albers_Conic_Equal_Area"],PARAMETER["latitude_of_center",0],'
+        'PARAMETER["longitude_of_center",102],PARAMETER["standard_parallel_1",34.35],'
+        'PARAMETER["standard_parallel_2",33.85],PARAMETER["false_easting",0],'
+        'PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],'
+        'AXIS["Easting",EAST],AXIS["Northing",NORTH]]\n'
+    )
+    transformer = Transformer.from_crs("EPSG:4490", albers_prj, always_xy=True)
+    _write_domain_shapefile(
+        input_dir / "gis" / "domain",
+        points=[transformer.transform(x, y) for x, y in [(100.0, 30.0), (101.0, 30.0), (101.0, 31.0), (100.0, 31.0)]],
+        prj_text=albers_prj,
+    )
+    _write_line_shapefile(
+        input_dir / "gis" / "river",
+        points=[
+            [transformer.transform(100.1, 30.1), transformer.transform(100.5, 30.4)],
+            [transformer.transform(100.5, 30.4), transformer.transform(100.8, 30.8)],
+        ],
+        prj_text=albers_prj,
+    )
+    _write_line_shapefile(
+        input_dir / "gis" / "seg",
+        points=[
+            [transformer.transform(100.1, 30.1), transformer.transform(100.5, 30.4)],
+            [transformer.transform(100.5, 30.4), transformer.transform(100.8, 30.8)],
+        ],
+        prj_text=albers_prj,
+    )
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+
+    parsed = parse_basins_geometry(
+        model_id=model_id,
+        input_dir=input_dir,
+        shud_input_name="alias-a",
+        required_files=model["required_files"],
+    )
+
+    assert "100.1" in parsed.river_segments[0].geom_wkt
+    assert "30.1" in parsed.river_segments[0].geom_wkt
+    assert "3600000" not in parsed.domain_wkt
+    assert parsed.river_segments[0].properties["source_crs_projected"] is True
+    assert parsed.river_segments[0].properties["source_projection_method"] == "albers equal area"
+
+
 def test_parser_preserves_domain_polygon_holes(tmp_path: Path) -> None:
     _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path, domain_with_hole=True)
     inventory = discover_basins_inventory(tmp_path / "basins")
@@ -582,7 +640,7 @@ def test_parser_enforces_shud_evidence_resource_limits(tmp_path: Path, monkeypat
     _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
     inventory = discover_basins_inventory(tmp_path / "basins")
     model = inventory["models"][0]
-    (input_dir / "alias-a.sp.riv").write_text("1 2\n3 4\n", encoding="utf-8")
+    (input_dir / "alias-a.sp.riv").write_text("# header\n1 2\n", encoding="utf-8")
     monkeypatch.setattr(basins_geometry, "MAX_BASINS_SHUD_EVIDENCE_LINES", 1)
 
     with pytest.raises(basins_geometry.BasinsGeometryError) as error:
@@ -614,7 +672,8 @@ def test_parser_stops_at_declared_shud_count_header(tmp_path: Path, monkeypatch:
     )
 
     assert parsed.segment_count == 2
-    assert parsed.evidence_counts == {"sp_riv": 2, "sp_rivseg": 2}
+    assert parsed.evidence_counts["river_count"] == 2
+    assert parsed.evidence_counts["rivseg_segment_count"] == 2
 
 
 def test_import_command_requires_database_but_consumes_manifests_first(
@@ -726,7 +785,23 @@ def test_import_command_reports_segment_count_mismatch_before_database(
     assert error["model_id"] == model_id
     assert error["gis_segment_count"] == 2
     assert error["evidence_count"] == 3
-    assert error["path"] == str(input_dir / "alias-a.sp.riv")
+    assert error["evidence"] == "rivseg_segment_count"
+    assert error["path"] == str(input_dir / "alias-a.sp.rivseg")
+
+
+def test_import_accepts_sp_riv_river_count_different_from_rivseg_segments(tmp_path: Path) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(
+        tmp_path,
+        sp_river_count=1,
+        sp_segment_count=2,
+    )
+
+    sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+
+    assert sources.ids["model_id"] == model_id
+    assert sources.geometry.segment_count == 2
+    assert sources.geometry.evidence_counts["river_count"] == 1
+    assert sources.geometry.evidence_counts["rivseg_segment_count"] == 2
 
 
 def test_click_path_exposes_import_basins_registry(
@@ -1033,9 +1108,52 @@ def test_real_basins_import_smoke_is_gated(
     assert segments["features"][0]["properties"]["basin_version_id"] == report["basin_version_id"]
 
 
+@pytest.mark.skipif(
+    os.getenv("NHMS_RUN_REAL_BASINS_IMPORT") != "1" or not Path("data/Basins").exists(),
+    reason="real Basins parser smoke is opt-in and requires data/Basins",
+)
+def test_real_basins_parser_smoke_reprojects_and_uses_rivseg_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = discover_basins_inventory(Path("data/Basins"))
+    valid = next(model for model in inventory["models"] if model["status"] == "valid")
+    inventory["models"] = [valid]
+    inventory["model_count"] = 1
+    inventory_path = tmp_path / "real-inventory.json"
+    write_inventory(inventory, inventory_path)
+    object_root = tmp_path / "object-store"
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    manifest_path = tmp_path / "real-manifest.json"
+    assert _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            valid["model_id"],
+            "--version",
+            "vbasins-real-parser-smoke",
+            "--output",
+            str(manifest_path),
+        ]
+    ) == 0
+
+    sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+
+    assert sources.geometry.segment_count == sources.geometry.evidence_counts["rivseg_segment_count"]
+    assert sources.geometry.evidence_counts["river_count"] != sources.geometry.evidence_counts["rivseg_segment_count"]
+    first_wkt = sources.geometry.river_segments[0].geom_wkt
+    first_numbers = [float(value) for value in first_wkt.removeprefix("LINESTRING(").split(",", 1)[0].split()]
+    assert -180 <= first_numbers[0] <= 180
+    assert -90 <= first_numbers[1] <= 90
+
+
 def _write_registry_fixture(
     tmp_path: Path,
     *,
+    sp_river_count: int | None = None,
     sp_segment_count: int = 2,
     domain_with_hole: bool = False,
 ) -> tuple[Path, Path, Path, Path, str]:
@@ -1043,6 +1161,7 @@ def _write_registry_fixture(
     input_dir = _make_valid_model(
         root / "basin-a",
         "alias-a",
+        sp_river_count=sp_river_count,
         sp_segment_count=sp_segment_count,
         domain_with_hole=domain_with_hole,
     )
@@ -1064,6 +1183,7 @@ def _make_valid_model(
     model_dir: Path,
     input_name: str,
     *,
+    sp_river_count: int | None = None,
     sp_segment_count: int,
     domain_with_hole: bool = False,
 ) -> Path:
@@ -1084,8 +1204,12 @@ def _make_valid_model(
         "tsd.rl",
     ):
         (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
-    (input_dir / f"{input_name}.sp.riv").write_text(f"{sp_segment_count}\n", encoding="utf-8")
-    (input_dir / f"{input_name}.sp.rivseg").write_text(f"{sp_segment_count}\n", encoding="utf-8")
+    river_count = sp_segment_count if sp_river_count is None else sp_river_count
+    (input_dir / f"{input_name}.sp.riv").write_text(f"{river_count} 6\n1 0 0 0.01 100 0\n", encoding="utf-8")
+    (input_dir / f"{input_name}.sp.rivseg").write_text(
+        f"{sp_segment_count} 4\n1 1 1 100\n",
+        encoding="utf-8",
+    )
     gis_dir = input_dir / "gis"
     gis_dir.mkdir()
     _write_domain_shapefile(gis_dir / "domain", with_hole=domain_with_hole)
@@ -1108,21 +1232,34 @@ def _replace_directory_with_symlink(path: Path, target: Path) -> None:
     path.symlink_to(target, target_is_directory=True)
 
 
-def _write_domain_shapefile(base: Path, *, with_hole: bool = False) -> None:
+def _write_domain_shapefile(
+    base: Path,
+    *,
+    with_hole: bool = False,
+    points: list[tuple[float, float]] | None = None,
+    prj_text: str | None = None,
+) -> None:
     import shapefile
 
     writer = shapefile.Writer(str(base), shapeType=shapefile.POLYGON)
     writer.field("ID", "N")
-    rings = [[[100.0, 30.0], [101.0, 30.0], [101.0, 31.0], [100.0, 31.0], [100.0, 30.0]]]
+    outer = points or [(100.0, 30.0), (101.0, 30.0), (101.0, 31.0), (100.0, 31.0)]
+    closed_outer = [list(point) for point in [*outer, outer[0]]]
+    rings = [closed_outer]
     if with_hole:
         rings.append([[100.2, 30.2], [100.2, 30.8], [100.8, 30.8], [100.8, 30.2], [100.2, 30.2]])
     writer.poly(rings)
     writer.record(1)
     writer.close()
-    _write_prj(base.with_suffix(".prj"))
+    _write_prj(base.with_suffix(".prj"), prj_text=prj_text)
 
 
-def _write_line_shapefile(base: Path) -> None:
+def _write_line_shapefile(
+    base: Path,
+    *,
+    points: list[list[tuple[float, float]]] | None = None,
+    prj_text: str | None = None,
+) -> None:
     import shapefile
 
     writer = shapefile.Writer(str(base), shapeType=shapefile.POLYLINE)
@@ -1130,19 +1267,23 @@ def _write_line_shapefile(base: Path) -> None:
     writer.field("ORDER", "N")
     writer.field("DOWN_ID", "N")
     writer.field("LENGTH_M", "F", decimal=3)
-    writer.line([[[100.1, 30.1], [100.5, 30.4]]])
+    lines = points or [[(100.1, 30.1), (100.5, 30.4)], [(100.5, 30.4), (100.8, 30.8)]]
+    writer.line([[list(point) for point in lines[0]]])
     writer.record(1, 1, 2, 50000.0)
-    writer.line([[[100.5, 30.4], [100.8, 30.8]]])
+    writer.line([[list(point) for point in lines[1]]])
     writer.record(2, 2, 0, 60000.0)
     writer.close()
-    _write_prj(base.with_suffix(".prj"))
+    _write_prj(base.with_suffix(".prj"), prj_text=prj_text)
 
 
-def _write_prj(path: Path) -> None:
+def _write_prj(path: Path, *, prj_text: str | None = None) -> None:
     path.write_text(
-        'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
-        'SPHEROID["WGS_1984",6378137,298.257223563]],'
-        'PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]]\n',
+        prj_text
+        or (
+            'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
+            'SPHEROID["WGS_1984",6378137,298.257223563]],'
+            'PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]]\n'
+        ),
         encoding="utf-8",
     )
 

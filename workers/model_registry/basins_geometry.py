@@ -87,7 +87,7 @@ class ParsedBasinsGeometry:
     river_network_checksum: str
     river_network_source_uri: str
     segment_count: int
-    evidence_counts: dict[str, int]
+    evidence_counts: dict[str, int | None]
 
 
 @dataclass(frozen=True)
@@ -95,6 +95,14 @@ class _LayerSnapshot:
     base: Path
     data: dict[str, bytes]
     digests: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _CoordinateTransform:
+    source_name: str
+    projection_method: str | None
+    transformer: Any | None
+    source_is_projected: bool
 
 
 @dataclass(frozen=True)
@@ -157,20 +165,24 @@ def parse_basins_geometry(
     domain_layer = _load_layer_snapshot(domain_base, input_root, expected_checksums, gis_budget)
     river_layer = _load_layer_snapshot(river_base, input_root, expected_checksums, gis_budget)
     seg_layer = _load_layer_snapshot(seg_base, input_root, expected_checksums, gis_budget)
-    _validate_prj(domain_layer)
-    _validate_prj(river_layer)
-    _validate_prj(seg_layer)
+    domain_transform = _coordinate_transform(domain_layer)
+    river_transform = _coordinate_transform(river_layer)
+    seg_transform = _coordinate_transform(seg_layer)
 
     sp_riv = _required_input_file(input_root, required_files, "sp_riv", shud_input_name)
     sp_rivseg = _required_input_file(input_root, required_files, "sp_rivseg", shud_input_name)
-    sp_riv_count, sp_riv_digest = _shud_segment_count(sp_riv, expected_checksums)
-    sp_rivseg_count, sp_rivseg_digest = _shud_segment_count(sp_rivseg, expected_checksums)
-    domain_wkt = _domain_multipolygon_wkt(domain_layer)
+    sp_riv_header, sp_riv_digest = _shud_count_header(sp_riv, expected_checksums)
+    sp_rivseg_header, sp_rivseg_digest = _shud_count_header(sp_rivseg, expected_checksums)
+    domain_wkt = _domain_multipolygon_wkt(domain_layer, domain_transform)
 
-    river_segments = _river_segments_from_layer(seg_layer, model_id=model_id)
+    river_segments = _river_segments_from_layer(seg_layer, model_id=model_id, coordinate_transform=seg_transform)
     selected_layer = seg_layer
     if not river_segments:
-        river_segments = _river_segments_from_layer(river_layer, model_id=model_id)
+        river_segments = _river_segments_from_layer(
+            river_layer,
+            model_id=model_id,
+            coordinate_transform=river_transform,
+        )
         selected_layer = river_layer
     if not river_segments:
         raise BasinsGeometryError(
@@ -180,22 +192,23 @@ def parse_basins_geometry(
         )
 
     evidence_counts = {
-        "sp_riv": sp_riv_count,
-        "sp_rivseg": sp_rivseg_count,
+        "river_count": sp_riv_header["count"],
+        "river_columns": sp_riv_header["columns"],
+        "rivseg_segment_count": sp_rivseg_header["count"],
+        "rivseg_columns": sp_rivseg_header["columns"],
     }
-    for evidence_name, evidence_count in evidence_counts.items():
-        if evidence_count != len(river_segments):
-            raise BasinsGeometryError(
-                "BASINS_REGISTRY_SEGMENT_COUNT_MISMATCH",
-                "Basins river segment count does not match SHUD evidence.",
-                path=str(sp_riv if evidence_name == "sp_riv" else sp_rivseg),
-                details={
-                    "model_id": model_id,
-                    "gis_segment_count": len(river_segments),
-                    "evidence_count": evidence_count,
-                    "evidence": evidence_name,
-                },
-            )
+    if sp_rivseg_header["count"] != len(river_segments):
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_SEGMENT_COUNT_MISMATCH",
+            "Basins GIS segment count does not match SHUD rivseg segment evidence.",
+            path=str(sp_rivseg),
+            details={
+                "model_id": model_id,
+                "gis_segment_count": len(river_segments),
+                "evidence_count": sp_rivseg_header["count"],
+                "evidence": "rivseg_segment_count",
+            },
+        )
 
     return ParsedBasinsGeometry(
         domain_wkt=domain_wkt,
@@ -336,28 +349,130 @@ def _load_layer_snapshot(
     return _LayerSnapshot(base=layer_base, data=data, digests=digests)
 
 
-def _validate_prj(layer: _LayerSnapshot) -> None:
+def _coordinate_transform(layer: _LayerSnapshot) -> _CoordinateTransform:
     prj_path = layer.base.with_suffix(".prj")
     text = layer.data["prj"].decode("utf-8", errors="ignore")
-    normalized = re.sub(r"[\s_]+", "", text.upper())
-    is_projected = "PROJCS[" in normalized or "PROJCRS[" in normalized or "PROJECTION[" in normalized
-    is_wgs84 = "GEOGCS[\"GCSWGS1984\"" in normalized or "DATUM[\"DWGS1984\"" in normalized
-    is_epsg4326 = "AUTHORITY[\"EPSG\",\"4326\"]" in normalized or "EPSG\",\"4326" in normalized
-    is_cgcs2000 = (
-        "CGCS2000" in normalized
-        or "CHINAGEODETICCOORDINATESYSTEM2000" in normalized
-        or "AUTHORITY[\"EPSG\",\"4490\"]" in normalized
-        or "EPSG\",\"4490" in normalized
-    )
-    if is_projected or not (is_wgs84 or is_epsg4326 or is_cgcs2000):
+    try:
+        from pyproj import CRS, Transformer
+    except ImportError as error:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_PROJ_DEPENDENCY_MISSING",
+            "pyproj is required for Basins CRS parsing and reprojection.",
+            path=str(prj_path),
+        ) from error
+    try:
+        crs = CRS.from_wkt(text)
+    except Exception as error:
         raise BasinsGeometryError(
             "BASINS_REGISTRY_GIS_CRS_UNSUPPORTED",
-            "Basins shapefile projection must be compatible with SRID 4490.",
+            "Basins shapefile projection could not be parsed.",
             path=str(prj_path),
+        ) from error
+
+    if crs.is_geographic and _is_wgs84_or_cgcs2000(crs):
+        return _CoordinateTransform(
+            source_name=str(crs.name or ""),
+            projection_method=None,
+            transformer=None,
+            source_is_projected=False,
         )
 
+    method = _projection_method_name(crs)
+    if crs.is_projected and _is_wgs84_or_cgcs2000(crs.geodetic_crs) and method in {
+        "albers equal area",
+        "transverse mercator",
+    }:
+        try:
+            transformer = Transformer.from_crs(crs, "EPSG:4490", always_xy=True)
+        except Exception as error:
+            raise BasinsGeometryError(
+                "BASINS_REGISTRY_GIS_CRS_UNSUPPORTED",
+                "Basins projected CRS could not be transformed to SRID 4490.",
+                path=str(prj_path),
+            ) from error
+        return _CoordinateTransform(
+            source_name=str(crs.name or ""),
+            projection_method=method,
+            transformer=transformer,
+            source_is_projected=True,
+        )
 
-def _domain_multipolygon_wkt(layer: _LayerSnapshot) -> str:
+    raise BasinsGeometryError(
+        "BASINS_REGISTRY_GIS_CRS_UNSUPPORTED",
+        "Basins shapefile projection must be WGS84/CGCS2000 geographic or supported Basins Albers/TM projected CRS.",
+        path=str(prj_path),
+    )
+
+
+def _is_wgs84_or_cgcs2000(crs: Any | None) -> bool:
+    if crs is None:
+        return False
+    authority = crs.to_authority()
+    if authority in {("EPSG", "4326"), ("EPSG", "4490")}:
+        return True
+    text = " ".join(
+        str(value or "")
+        for value in (
+            getattr(crs, "name", None),
+            getattr(getattr(crs, "datum", None), "name", None),
+            crs.to_wkt() if hasattr(crs, "to_wkt") else "",
+        )
+    ).upper()
+    return any(
+        marker in text
+        for marker in (
+            "WGS 84",
+            "WGS_1984",
+            "WORLD GEODETIC SYSTEM 1984",
+            "CGCS2000",
+            "CHINA GEODETIC COORDINATE SYSTEM 2000",
+        )
+    )
+
+
+def _projection_method_name(crs: Any) -> str | None:
+    operation = getattr(crs, "coordinate_operation", None)
+    method = getattr(operation, "method_name", None)
+    if method in (None, ""):
+        return None
+    normalized = re.sub(r"[_\s]+", " ", str(method).strip().lower())
+    aliases = {
+        "albers conic equal area": "albers equal area",
+        "albers equal area": "albers equal area",
+        "transverse mercator": "transverse mercator",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _transform_points(
+    points: list[tuple[float, float]],
+    coordinate_transform: _CoordinateTransform,
+    *,
+    path: Path,
+) -> list[tuple[float, float]]:
+    if coordinate_transform.transformer is None:
+        return points
+    try:
+        transformed = [coordinate_transform.transformer.transform(x, y) for x, y in points]
+    except Exception as error:
+        raise BasinsGeometryError(
+            "BASINS_REGISTRY_GIS_CRS_UNSUPPORTED",
+            "Basins projected coordinates could not be transformed to SRID 4490.",
+            path=str(path),
+        ) from error
+    result = [(float(x), float(y)) for x, y in transformed]
+    for x, y in result:
+        if not (math.isfinite(x) and math.isfinite(y) and -180.0 <= x <= 180.0 and -90.0 <= y <= 90.0):
+            raise BasinsGeometryError(
+                "BASINS_REGISTRY_GIS_CRS_UNSUPPORTED",
+                "Basins transformed coordinate is outside lon/lat bounds.",
+                path=str(path),
+                details={"x": x, "y": y},
+            )
+    return result
+
+
+def _domain_multipolygon_wkt(layer: _LayerSnapshot, coordinate_transform: _CoordinateTransform) -> str:
     reader = _shape_reader(layer)
     try:
         polygons: list[str] = []
@@ -375,7 +490,12 @@ def _domain_multipolygon_wkt(layer: _LayerSnapshot) -> str:
             for ring in _shape_parts(shape):
                 point_count += len(ring)
                 _check_resource_limit(point_count, MAX_BASINS_GIS_POINTS, "points", str(layer.base.with_suffix(".shp")))
-                closed = _closed_ring(ring)
+                transformed_ring = _transform_points(
+                    ring,
+                    coordinate_transform,
+                    path=layer.base.with_suffix(".shp"),
+                )
+                closed = _closed_ring(transformed_ring)
                 if len(closed) >= 4:
                     shape_rings.append(closed)
             polygons.extend(_polygon_wkts_from_rings(shape_rings))
@@ -390,7 +510,12 @@ def _domain_multipolygon_wkt(layer: _LayerSnapshot) -> str:
     return "MULTIPOLYGON(" + ", ".join(polygons) + ")"
 
 
-def _river_segments_from_layer(layer: _LayerSnapshot, *, model_id: str) -> list[RiverSegmentGeometry]:
+def _river_segments_from_layer(
+    layer: _LayerSnapshot,
+    *,
+    model_id: str,
+    coordinate_transform: _CoordinateTransform,
+) -> list[RiverSegmentGeometry]:
     reader = _shape_reader(layer)
     try:
         pending: list[dict[str, Any]] = []
@@ -405,52 +530,59 @@ def _river_segments_from_layer(layer: _LayerSnapshot, *, model_id: str) -> list[
                 str(layer.base.with_suffix(".shp")),
             )
             attrs = _record_dict(shape_record)
-            parts = _shape_parts(shape_record.shape)
-            for part_index, points in enumerate(parts, start=1):
-                point_count += len(points)
-                _check_resource_limit(point_count, MAX_BASINS_GIS_POINTS, "points", str(layer.base.with_suffix(".shp")))
-                if len(points) < 2:
-                    continue
-                order = _optional_int(_pick_attr(attrs, ("segment_order", "stream_order", "order", "ord", "seg_order")))
-                segment_order = order if order is not None else len(pending) + 1
-                raw_id = _pick_attr(
+            source_parts = [points for points in _shape_parts(shape_record.shape) if len(points) >= 2]
+            point_count += sum(len(points) for points in source_parts)
+            _check_resource_limit(point_count, MAX_BASINS_GIS_POINTS, "points", str(layer.base.with_suffix(".shp")))
+            merged_points = _merge_polyline_parts(source_parts)
+            if len(merged_points) < 2:
+                continue
+            transformed_points = _transform_points(
+                merged_points,
+                coordinate_transform,
+                path=layer.base.with_suffix(".shp"),
+            )
+            order = _optional_int(_pick_attr(attrs, ("segment_order", "stream_order", "order", "ord", "seg_order")))
+            segment_order = order if order is not None else len(pending) + 1
+            raw_id = _pick_attr(
+                attrs,
+                ("river_segment_id", "segment_id", "seg_id", "segid", "comid", "linkno", "id", "iriv", "iele"),
+            )
+            segment_id = _stable_segment_id(model_id, raw_id, segment_order)
+            downstream = _optional_text(
+                _pick_attr(
                     attrs,
-                    ("river_segment_id", "segment_id", "seg_id", "segid", "comid", "linkno", "id"),
+                    ("downstream_segment_id", "downstream", "down_id", "to_segment", "toid", "dslinkno"),
                 )
-                multi_part_index = part_index if len(parts) > 1 else None
-                segment_id = _stable_segment_id(model_id, raw_id, segment_order, multi_part_index)
-                downstream = _optional_text(
-                    _pick_attr(
-                        attrs,
-                        ("downstream_segment_id", "downstream", "down_id", "to_segment", "toid", "dslinkno"),
-                    )
-                )
-                length_m = _optional_float(
-                    _pick_attr(attrs, ("length_m", "length", "len_m", "shape_leng", "shapeleng"))
-                )
-                if length_m is None:
-                    length_m = _approximate_length_m(points)
-                properties = {str(key): _jsonable(value) for key, value in attrs.items()}
-                properties.update(
-                    {
-                        "source_layer": layer.base.name,
-                        "source_record_index": record_index,
-                        "source_part_index": part_index,
-                        "source_raw_segment_id": _jsonable(raw_id),
-                        "source_downstream_segment_id": _jsonable(downstream),
-                    }
-                )
-                pending.append(
-                    {
-                        "river_segment_id": segment_id,
-                        "segment_order": segment_order,
-                        "raw_id": raw_id,
-                        "raw_downstream": downstream,
-                        "length_m": length_m,
-                        "geom_wkt": "LINESTRING(" + ", ".join(_point_wkt(point) for point in points) + ")",
-                        "properties": properties,
-                    }
-                )
+            )
+            length_m = _optional_float(
+                _pick_attr(attrs, ("length_m", "length", "len_m", "shape_leng", "shapeleng"))
+            )
+            if length_m is None:
+                length_m = _approximate_length_m(transformed_points)
+            properties = {str(key): _jsonable(value) for key, value in attrs.items()}
+            properties.update(
+                {
+                    "source_layer": layer.base.name,
+                    "source_record_index": record_index,
+                    "source_part_count": len(source_parts),
+                    "source_raw_segment_id": _jsonable(raw_id),
+                    "source_downstream_segment_id": _jsonable(downstream),
+                    "source_crs": coordinate_transform.source_name,
+                    "source_crs_projected": coordinate_transform.source_is_projected,
+                    "source_projection_method": coordinate_transform.projection_method,
+                }
+            )
+            pending.append(
+                {
+                    "river_segment_id": segment_id,
+                    "segment_order": segment_order,
+                    "raw_id": raw_id,
+                    "raw_downstream": downstream,
+                    "length_m": length_m,
+                    "geom_wkt": "LINESTRING(" + ", ".join(_point_wkt(point) for point in transformed_points) + ")",
+                    "properties": properties,
+                }
+            )
     finally:
         reader.close()
     raw_to_segment_id = {
@@ -579,13 +711,24 @@ def _normalize_attr_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
 
 
-def _stable_segment_id(model_id: str, raw_id: Any, segment_order: int, part_index: int | None) -> str:
+def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[float, float]]:
+    merged: list[tuple[float, float]] = []
+    for points in parts:
+        if not merged:
+            merged.extend(points)
+        elif merged[-1] == points[0]:
+            merged.extend(points[1:])
+        else:
+            merged.extend(points)
+    return merged
+
+
+def _stable_segment_id(model_id: str, raw_id: Any, segment_order: int) -> str:
     if raw_id not in (None, ""):
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", str(raw_id).strip()).strip("_").lower()
         if slug:
             return f"{model_id}_seg_{slug}"
-    suffix = f"{segment_order:06d}" if part_index is None else f"{segment_order:06d}_p{part_index}"
-    return f"{model_id}_seg_{suffix}"
+    return f"{model_id}_seg_{segment_order:06d}"
 
 
 def _raw_segment_key(value: Any) -> str | None:
@@ -654,10 +797,8 @@ def _point_wkt(point: tuple[float, float]) -> str:
     return f"{point[0]:.12g} {point[1]:.12g}"
 
 
-def _shud_segment_count(path: Path, expected_checksums: dict[str, str] | None) -> tuple[int, str]:
+def _shud_count_header(path: Path, expected_checksums: dict[str, str] | None) -> tuple[dict[str, int | None], str]:
     input_root = path.parent
-    first: list[str] | None = None
-    row_count = 0
     byte_count = 0
     payload, digest = _read_verified_binary(
         path,
@@ -689,24 +830,28 @@ def _shud_segment_count(path: Path, expected_checksums: dict[str, str] | None) -
             continue
         if any(re.search(r"[A-Za-z]", token) for token in tokens):
             continue
-        if first is None:
-            first = tokens
-            if len(first) == 1:
-                declared = _optional_int(first[0])
-                if declared is not None and declared >= 0:
-                    return declared, digest
-        row_count += 1
-    if first is None:
+        declared = _optional_int(tokens[0])
+        columns = _optional_int(tokens[1]) if len(tokens) > 1 else None
+        if declared is not None and declared >= 0:
+            return {"count": declared, "columns": columns}, digest
+        break
+    raise BasinsGeometryError(
+        "BASINS_REGISTRY_SHUD_PARSE_FAILED",
+        "SHUD river evidence did not contain a valid numeric count header.",
+        path=str(path),
+    )
+
+
+def _shud_segment_count(path: Path, expected_checksums: dict[str, str] | None) -> tuple[int, str]:
+    header, digest = _shud_count_header(path, expected_checksums)
+    count = header["count"]
+    if count is None:
         raise BasinsGeometryError(
             "BASINS_REGISTRY_SHUD_PARSE_FAILED",
-            "SHUD river evidence did not contain any numeric rows.",
+            "SHUD river evidence did not contain a valid segment count.",
             path=str(path),
         )
-    if len(first) == 1:
-        declared = _optional_int(first[0])
-        if declared is not None and declared >= 0:
-            return declared, digest
-    return row_count, digest
+    return count, digest
 
 
 def _layer_checksum_from_snapshot(layer: _LayerSnapshot) -> str:
