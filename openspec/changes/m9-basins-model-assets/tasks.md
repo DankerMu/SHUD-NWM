@@ -263,13 +263,67 @@ Fixture R - production migration copied target:
 
 ## 3. Registry Import
 
-- [ ] 3.1 Add explicit `nhms-model import-basins-registry` command contract that consumes inventory/package manifests rather than crawling source directories ad hoc.
-- [ ] 3.2 Implement import from Basins inventory/package manifests into `core.basin` and `core.basin_version`, including domain geometry from `input_dir/gis/domain.shp` and sidecar validation.
-- [ ] 3.3 Implement river network parsing in a focused parser layer for `input_dir/gis/{river,seg}` and SHUD `.sp.riv`/`.sp.rivseg` evidence.
-- [ ] 3.4 Implement river network import into `core.river_network_version` and `core.river_segment`, reconciling segment counts and persisting topology metadata where available.
-- [ ] 3.5 Implement mesh/model import into `core.mesh_version` and `core.model_instance`, setting `model_package_uri`, checksum/source metadata, resource profile defaults, and inactive-by-default active flags.
-- [ ] 3.6 Ensure repeated imports are idempotent, reject checksum conflicts for unchanged version IDs, and do not alter existing active models unless an explicit activation path is used.
-- [ ] 3.7 Add real PostgreSQL/PostGIS integration coverage for one small Basins fixture or gated real Basins import path, including transaction rollback on geometry/count mismatch.
+- [x] 3.1 Add explicit `nhms-model import-basins-registry` command contract that consumes inventory/package manifests rather than crawling source directories ad hoc.
+- [x] 3.2 Implement import from Basins inventory/package manifests into `core.basin` and `core.basin_version`, including domain geometry from `input_dir/gis/domain.shp` and sidecar validation.
+- [x] 3.3 Implement river network parsing in a focused parser layer for `input_dir/gis/{river,seg}` and SHUD `.sp.riv`/`.sp.rivseg` evidence.
+- [x] 3.4 Implement river network import into `core.river_network_version` and `core.river_segment`, reconciling segment counts and persisting topology metadata where available.
+- [x] 3.5 Implement mesh/model import into `core.mesh_version` and `core.model_instance`, setting `model_package_uri`, checksum/source metadata, resource profile defaults, and inactive-by-default active flags.
+- [x] 3.6 Ensure repeated imports are idempotent, reject checksum conflicts for unchanged version IDs, and do not alter existing active models unless an explicit activation path is used.
+- [x] 3.7 Add real PostgreSQL/PostGIS integration coverage for one small Basins fixture or gated real Basins import path, including transaction rollback on geometry/count mismatch.
+
+#136 implementation note: fast tests generate real synthetic shapefiles and do not require `data/Basins` or `DATABASE_URL`; PostgreSQL/PostGIS import tests are marked `integration`, and Fixture Z remains additionally gated by `NHMS_RUN_REAL_BASINS_IMPORT=1`.
+
+### #136 Registry Import Fixture Matrix
+
+All #136 fast fixtures use synthetic Basins inventory and package manifest files plus a PostgreSQL/PostGIS test database when available. Tests that require real PostgreSQL/PostGIS must skip with an explicit reason when `DATABASE_URL` is absent; parser-only tests must remain fast and not require `/volume/data/nwm/Basins`.
+
+Fixture S - command contract consumes manifests:
+
+- Invocation: `nhms-model import-basins-registry --inventory <inventory.json> --package-manifest <manifest.json> --database-url <postgres-url> --output <import-report.json>`.
+- Expected: exit `0`; CLI stdout includes `status`, `model_id`, `basin_version_id`, `river_network_version_id`, `mesh_version_id`, `active=false`, and row counts. The implementation must not scan `data/Basins` or infer source files without the inventory/package manifest.
+
+Fixture T - complete geometry import:
+
+```text
+<root>/basin-a/input/alias-a/gis/domain.{shp,shx,dbf,prj}
+<root>/basin-a/input/alias-a/gis/river.{shp,shx,dbf,prj}
+<root>/basin-a/input/alias-a/gis/seg.{shp,shx,dbf,prj}
+<root>/basin-a/input/alias-a/alias-a.sp.riv
+<root>/basin-a/input/alias-a/alias-a.sp.rivseg
+<manifest.json>  # model_package_uri, manifest_uri, package_checksum, included_files
+```
+
+- Expected: creates or reuses `core.basin`, `core.basin_version`, `core.river_network_version`, `core.river_segment`, `core.mesh_version`, and `core.model_instance`; `basin_version.geom` is non-empty SRID 4490 geometry; river segment rows have non-empty LineString geometry where present; `model_instance.model_package_uri` and checksum/source metadata come from the package manifest.
+
+Fixture U - missing shapefile sidecar:
+
+- Invocation: same as Fixture T but remove `gis/domain.shx` or `gis/domain.prj` from the source tree and inventory `required_files`.
+- Expected: non-zero structured JSON stderr with `error_code=BASINS_REGISTRY_GIS_SIDECAR_MISSING`; no `core.basin`, `core.basin_version`, river, mesh, or model rows are left behind for that import.
+
+Fixture V - river segment count mismatch rollback:
+
+- Invocation: use GIS with 2 segment features but `.sp.riv` or `.sp.rivseg` evidence declaring 3 segments.
+- Expected: non-zero structured JSON stderr with `error_code=BASINS_REGISTRY_SEGMENT_COUNT_MISMATCH`; the transaction rolls back all rows created by this import.
+
+Fixture W - idempotent unchanged import:
+
+- Invocation: run Fixture T twice with unchanged inventory/package manifest.
+- Expected: second run exits `0` with `status=already_imported` or equivalent; row counts do not increase; existing active models remain unchanged.
+
+Fixture X - changed checksum conflict:
+
+- Invocation: import Fixture T, then rerun with the same `model_id`/version IDs and a different `package_checksum` or geometry/source checksum.
+- Expected: non-zero structured JSON stderr with `error_code=BASINS_REGISTRY_CHECKSUM_CONFLICT`; existing rows are not overwritten silently. Operators must publish/import a new version ID instead.
+
+Fixture Y - inactive default and resource profile:
+
+- Invocation: run Fixture T import without any activation flag, then query `core.model_instance` for the imported `model_id` and run the existing active-model discovery/listing path used by forecast staging.
+- Expected: imported `core.model_instance.active_flag=false`; any pre-existing active model remains active and unchanged; `resource_profile` contains deterministic defaults suitable for SHUD staging plus source lineage fields such as `basin_slug`, `shud_input_name`, `manifest_uri`, `package_checksum`, and `source_inventory_checksum`; active-model discovery does not select the imported model until the existing activation API is called.
+
+Fixture Z - gated real Basins import smoke:
+
+- Invocation: when `NHMS_RUN_REAL_BASINS_IMPORT=1`, `DATABASE_URL` is set, and `data/Basins` is available, discover and package one small valid Basins model, then run `import-basins-registry`.
+- Expected: import report records real source path, package URI/checksum, non-empty basin geometry, segment count, inactive model state, and a successful river segment list query. This fixture must be skipped by default in fast CI.
 
 ## 4. Runtime, API, and Frontend Consumption
 

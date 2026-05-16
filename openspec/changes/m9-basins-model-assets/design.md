@@ -179,3 +179,13 @@ Review focus:
 - Deterministic inventory/package contracts and checksum/idempotency behavior.
 - Geometry sidecar validation and no partial registry writes.
 - Existing model APIs and frontend consumers remain compatible.
+
+### #136 Registry Import Design Notes
+
+`nhms-model import-basins-registry` must treat the Basins discovery inventory and package manifest as its only source-of-truth inputs. It may open source files referenced by those manifests for geometry and SHUD evidence, but it must not rediscover arbitrary directories under `data/Basins`.
+
+The import should run as one database transaction per selected model so GIS sidecar failures, parser failures, checksum conflicts, and segment-count mismatches leave no partial `core.*` rows. Existing rows for the same deterministic IDs are reusable only when their checksum/source metadata still matches the incoming manifest and inventory; changed checksums require a new version ID.
+
+Geometry parsing should be isolated from database writes. The parser layer must validate required shapefile sidecars before reading `domain`, `river`, or `seg`, convert basin geometry to a non-empty MultiPolygon compatible with SRID 4490, convert river features to LineString geometry, and reconcile feature counts against `.sp.riv`/`.sp.rivseg` evidence before persistence.
+
+The model import must keep Basins models inactive by default. Source lineage belongs in existing checksum/source fields where available and in `resource_profile`/properties JSON for fields that lack dedicated columns, including `manifest_uri`, `package_checksum`, `source_inventory_checksum`, `basin_slug`, `shud_input_name`, and source path metadata.
