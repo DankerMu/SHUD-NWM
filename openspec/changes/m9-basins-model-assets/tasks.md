@@ -225,7 +225,12 @@ Fixture P6 - source/object write integrity:
 Fixture P7 - bounded forcing and symlink traversal:
 
 - Invocation: publish with many forcing CSV files and optional `--copy-forcing`; add a symlink descendant under calibration/forcing/source traversal.
-- Expected: forcing traversal/copy streams files without materializing all payload bytes; manifest records bounded sample limits; symlink descendants fail with `BASINS_PACKAGE_PATH_UNSAFE` and JSON stderr.
+- Expected: forcing traversal/copy streams files without materializing all payload bytes; manifest records bounded sample limits and sampled file count; symlink descendants and explicit required runtime/GIS/CALIB/forcing symlink paths fail with `BASINS_PACKAGE_PATH_UNSAFE` and JSON stderr.
+
+Fixture P8 - streaming object verification:
+
+- Invocation: publish Fixture K while spying on the local object store checksum helper or `Path.read_bytes`.
+- Expected: package object post-write verification computes size and SHA-256 by streaming from the resolved object path in chunks and does not call `LocalObjectStore.checksum()` for package verification.
 
 Fixture Q - production migration symlink rejection:
 

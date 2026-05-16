@@ -312,7 +312,47 @@ def test_publish_basins_forcing_metadata_is_bounded_and_copy_uses_iterator(
     assert manifest["forcing"]["csv_count"] == 7
     assert manifest["forcing"]["copied_file_count"] == 7
     assert manifest["forcing"]["sample_file_limit"] == 5
+    assert manifest["forcing"]["sampled_file_count"] == 5
     assert len(manifest["forcing"]["sample_headers"]) == 1
+
+
+def test_publish_basins_forcing_time_evidence_samples_file_limit_not_unique_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path, forcing_count=8)
+    _object_store_env(tmp_path, monkeypatch)
+    sampled_paths: list[Path] = []
+    original_csv_time_evidence = basins_package._csv_time_evidence
+
+    def counting_csv_time_evidence(path: Path) -> tuple[str | None, str | None, str | None, int]:
+        sampled_paths.append(path)
+        return original_csv_time_evidence(path)
+
+    monkeypatch.setattr(basins_package, "_csv_time_evidence", counting_csv_time_evidence)
+
+    assert (
+        _argparse_main(
+            [
+                "publish-basins",
+                "--inventory",
+                str(inventory_path),
+                "--model-id",
+                model_id,
+                "--version",
+                "vbasins-forcing-sample-limit",
+                "--output",
+                str(tmp_path / "manifest.json"),
+            ]
+        )
+        == 0
+    )
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+
+    assert len(sampled_paths) == basins_package.FORCING_SAMPLE_FILE_LIMIT
+    assert manifest["forcing"]["csv_count"] == 8
+    assert manifest["forcing"]["sampled_file_count"] == basins_package.FORCING_SAMPLE_FILE_LIMIT
+    assert manifest["forcing"]["sample_headers"] == ["time,value"]
 
 
 def test_publish_basins_accepts_symlink_root_with_calib_files(
@@ -357,6 +397,154 @@ def test_publish_basins_accepts_symlink_root_with_calib_files(
     assert manifest["resolved_source_path"] == str((real_root / "basin-a").resolve())
     assert (object_root / "models" / model_id / "vbasins-symlink" / "package" / "CALIB" / "top01.calib").is_file()
     assert (object_root / "models" / model_id / "vbasins-symlink" / "package" / "CALIB" / "top02.calib").is_file()
+
+
+def test_publish_basins_rejects_symlinked_required_runtime_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    runtime_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
+    real_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para.real"
+    runtime_file.rename(real_file)
+    try:
+        runtime_file.symlink_to(real_file)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+    _object_store_env(tmp_path, monkeypatch)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-runtime-symlink",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["path"] == str(runtime_file)
+
+
+def test_publish_basins_rejects_symlinked_required_gis_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    gis_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "gis" / "domain.shp"
+    real_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "gis" / "domain.real.shp"
+    gis_file.rename(real_file)
+    try:
+        gis_file.symlink_to(real_file)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+    _object_store_env(tmp_path, monkeypatch)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-gis-symlink",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["path"] == str(gis_file)
+
+
+def test_publish_basins_rejects_symlinked_forcing_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path, forcing_count=1)
+    forcing_dir = tmp_path / "basins" / "basin-a" / "forcing"
+    real_forcing_dir = tmp_path / "basins" / "basin-a" / "forcing-real"
+    forcing_dir.rename(real_forcing_dir)
+    try:
+        forcing_dir.symlink_to(real_forcing_dir, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+    _object_store_env(tmp_path, monkeypatch)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-forcing-dir-symlink",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["path"] == str(forcing_dir)
+
+
+def test_publish_basins_rejects_symlinked_calib_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path, calibration_count=1)
+    calib_dir = tmp_path / "basins" / "basin-a" / "CALIB"
+    real_calib_dir = tmp_path / "basins" / "basin-a" / "CALIB-real"
+    calib_dir.rename(real_calib_dir)
+    try:
+        calib_dir.symlink_to(real_calib_dir, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+    _object_store_env(tmp_path, monkeypatch)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-calib-dir-symlink",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNSAFE"
+    assert error["path"] == str(calib_dir)
 
 
 def test_publish_basins_rejects_partial_model_with_structured_error(
@@ -654,6 +842,40 @@ def test_publish_basins_manifest_checksums_match_mutated_bytes_written(
     assert object_bytes == b"mutated-before-write\n"
     assert entry["size_bytes"] == len(object_bytes)
     assert entry["sha256"] == hashlib.sha256(object_bytes).hexdigest()
+
+
+def test_publish_basins_object_verification_streams_without_store_checksum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    _object_store_env(tmp_path, monkeypatch)
+
+    def forbidden_checksum(self: object, key_or_uri: str) -> str:
+        raise AssertionError(f"LocalObjectStore.checksum must not be used for package verification: {key_or_uri}")
+
+    def forbidden_read_bytes(self: object, key_or_uri: str) -> bytes:
+        raise AssertionError(f"LocalObjectStore.read_bytes must not be used for package verification: {key_or_uri}")
+
+    monkeypatch.setattr(basins_package.LocalObjectStore, "checksum", forbidden_checksum)
+    monkeypatch.setattr(basins_package.LocalObjectStore, "read_bytes", forbidden_read_bytes)
+
+    assert (
+        _argparse_main(
+            [
+                "publish-basins",
+                "--inventory",
+                str(inventory_path),
+                "--model-id",
+                model_id,
+                "--version",
+                "vbasins-streaming-verify",
+                "--output",
+                str(tmp_path / "manifest.json"),
+            ]
+        )
+        == 0
+    )
 
 
 def test_basins_migration_report_rejects_symlink_target(

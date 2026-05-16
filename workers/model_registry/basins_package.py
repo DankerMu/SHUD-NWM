@@ -477,10 +477,12 @@ def _package_source_files(
                 )
             )
 
-    calib_dir = _resolve_package_path(source_root / "CALIB")
-    if calib_dir.is_dir():
+    calib_path = source_root / "CALIB"
+    _reject_source_symlink_path(calib_path, source_root)
+    if calib_path.is_dir():
+        calib_dir = _resolve_package_path(calib_path)
         _ensure_under_source_root(calib_dir, source_root)
-        for path in _walk_source_files(calib_dir, source_root):
+        for path in _walk_source_files(calib_path, source_root):
             relative_path = _normalize_relative_path(Path("CALIB", path.relative_to(calib_dir)).as_posix())
             files.append(
                 SourceFile(
@@ -526,6 +528,7 @@ def _forcing_metadata(
     time_end: str | None = None
     parsed_time_rows = 0
     csv_count = 0
+    sampled_file_count = 0
     source_files: list[SourceFile] = []
 
     for path in _walk_source_files(forcing_dir, source_root):
@@ -542,8 +545,9 @@ def _forcing_metadata(
         digest.update(sha256.encode("ascii"))
         digest.update(b"\0")
         total_bytes += size_bytes
-        if len(sample_headers) < FORCING_SAMPLE_FILE_LIMIT:
+        if sampled_file_count < FORCING_SAMPLE_FILE_LIMIT:
             header, first_time, last_time, row_count = _csv_time_evidence(path)
+            sampled_file_count += 1
             if header and header not in sample_headers:
                 sample_headers.append(header)
             if first_time is not None:
@@ -571,6 +575,7 @@ def _forcing_metadata(
         "byte_count": total_bytes,
         "aggregate_checksum": digest.hexdigest() if csv_count else None,
         "sample_headers": sample_headers,
+        "sampled_file_count": sampled_file_count,
         "time_coverage": (
             {"start": time_start, "end": time_end} if time_start is not None or time_end is not None else None
         ),
@@ -820,13 +825,26 @@ def _verify_object_bytes(
     expected_size: int,
     expected_sha256: str,
 ) -> None:
-    actual_size = store.size(key)
-    actual_sha256 = store.checksum(key)
+    actual_size, actual_sha256 = _object_size_and_checksum_streaming(store, key)
     if actual_size != expected_size or actual_sha256 != expected_sha256:
         raise ObjectStoreError(
             f"Object verification failed for {key}: expected {expected_size}/{expected_sha256}, "
             f"got {actual_size}/{actual_sha256}"
         )
+
+
+def _object_size_and_checksum_streaming(store: LocalObjectStore, key: str) -> tuple[int, str]:
+    path = store.resolve_path(key)
+    digest = hashlib.sha256()
+    size_bytes = 0
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size_bytes += len(chunk)
+    except OSError as error:
+        raise ObjectStoreError(f"Failed to verify object {key}: {error}") from error
+    return size_bytes, digest.hexdigest()
 
 
 def _success_payload(status: str, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -844,6 +862,7 @@ def _safe_source_dir(value: Any, inventory_root: Path, source_root: Path, field_
     if not isinstance(value, str) or not value:
         raise BasinsPackageError("BASINS_INVENTORY_INVALID", f"Basins model record is missing {field_name}.")
     path = Path(value).expanduser()
+    _reject_source_symlink_path(path, source_root)
     resolved = _resolve_package_path(path)
     _ensure_under_root(
         resolved,
@@ -862,6 +881,7 @@ def _safe_source_dir(value: Any, inventory_root: Path, source_root: Path, field_
 
 
 def _safe_source_file(path: Path, source_root: Path) -> Path:
+    _reject_source_symlink_path(path, source_root)
     resolved = _resolve_package_path(path)
     _ensure_under_source_root(resolved, source_root)
     if not resolved.is_file():
@@ -871,6 +891,32 @@ def _safe_source_file(path: Path, source_root: Path) -> Path:
             path=str(path),
         )
     return resolved
+
+
+def _reject_source_symlink_path(path: Path, source_root: Path) -> None:
+    current = path if path.is_absolute() else Path.cwd() / path
+    parts: list[Path] = []
+    while True:
+        parts.append(current)
+        if current == current.parent:
+            break
+        current = current.parent
+
+    for candidate in reversed(parts):
+        try:
+            resolved_parent = _resolve_package_path(candidate.parent)
+        except BasinsPackageError:
+            continue
+        try:
+            resolved_parent.relative_to(source_root)
+        except ValueError:
+            continue
+        if candidate.is_symlink():
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_PATH_UNSAFE",
+                "Basins package publication does not follow symlink descendants.",
+                path=str(candidate),
+            )
 
 
 def _ensure_under_source_root(path: Path, source_root: Path) -> None:

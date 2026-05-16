@@ -63,6 +63,7 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 - **AND** an existing lock SHALL fail deterministically with `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`
 - **AND** an existing unchanged manifest SHALL still return `already_done` without requiring the lock
 - **AND** package object entries SHALL record size and SHA-256 from the exact bytes written and verified in the object store before the final manifest is written
+- **AND** package object verification SHALL stream from the resolved object path in chunks instead of loading full object bytes into memory
 
 #### Scenario: Publication command failure payload
 
@@ -80,6 +81,7 @@ The system SHALL record historical forcing CSV metadata separately from the runt
 - **WHEN** a model has CMFD forcing CSV files under `forcing/` or `focing/`
 - **THEN** the package manifest records the forcing directory, CSV count, time coverage when parsable from file headers, and aggregate checksum metadata
 - **AND** header/time evidence sampling SHALL be bounded by recorded file/byte/line limits while aggregate count, bytes, and checksum are computed by streaming file metadata and hashes
+- **AND** the file sampling limit SHALL count sampled CSV files rather than unique headers, so duplicate headers cannot cause unbounded time-evidence reads
 
 #### Scenario: Runtime package excludes bulk forcing by default
 
@@ -98,6 +100,12 @@ The system SHALL record historical forcing CSV metadata separately from the runt
 - **WHEN** runtime, calibration, forcing, or migration evidence traversal encounters a symlink descendant below the selected source root
 - **THEN** the command refuses the traversal with stable error code `BASINS_PACKAGE_PATH_UNSAFE`
 - **AND** it emits structured JSON rather than an uncaught traceback
+
+#### Scenario: Explicit package source paths reject symlinks
+
+- **WHEN** `input_dir`, `forcing_dir`, `CALIB`, or required runtime/GIS files are symlinks below the selected model source root, even if they resolve inside the Basins source root
+- **THEN** package publication refuses the path with stable error code `BASINS_PACKAGE_PATH_UNSAFE`
+- **AND** a symlink Basins discovery root itself remains supported when the selected model source root resolves to real copied data
 
 ### Requirement: Production migration rejects symlink-only evidence
 

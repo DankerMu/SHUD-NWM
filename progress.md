@@ -95,7 +95,8 @@
 - Basins package 发布新增本地对象存储 `.publish.lock`、写入后对象 size/SHA 校验和流式文件复制；已有未变 manifest 可不加锁返回 `already_done`，并发锁冲突返回 `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`。
 - Basins package 与 migration 输出路径写入失败已收敛为 JSON 错误：`BASINS_PACKAGE_OUTPUT_WRITE_FAILED`、`BASINS_MIGRATION_REPORT_WRITE_FAILED`；不会在 CLI 暴露 traceback。
 - Basins forcing 处理已改为流式遍历和 copy，header/time evidence 只做有上限采样，manifest 记录 sample file/byte/line limits。
-- Basins package 与 migration 文件遍历已统一拒绝源树内 symlink 后代，返回 `BASINS_PACKAGE_PATH_UNSAFE`，避免软链文件相对路径异常和目录循环。
+- Basins package 与 migration 文件遍历已统一拒绝源树内 symlink 后代，显式 `input_dir`、`forcing_dir`、`CALIB` 和 required runtime/GIS symlink 也会返回 `BASINS_PACKAGE_PATH_UNSAFE`；Basins discovery root 自身为 symlink 仍兼容。
+- Basins package 对象写后校验已改为从对象路径分块读取计算 size/SHA，不再通过 `LocalObjectStore.checksum()` 整体读取对象；forcing 采样上限按已采样文件数计算，重复 header 不会扩大 time evidence 读取次数。
 - 已新增 `nhms-model basins-migration-report`：symlink Basins root 返回 `BASINS_MIGRATION_SYMLINK_TARGET`；真实 copied root 输出 file count、byte count、inventory checksum、source-to-target metadata、`production_ready=true`。
 
 ## 已知技术风险 / 注意事项
