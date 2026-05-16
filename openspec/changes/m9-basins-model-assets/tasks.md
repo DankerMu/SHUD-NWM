@@ -232,6 +232,16 @@ Fixture P8 - streaming object verification:
 - Invocation: publish Fixture K while spying on the local object store checksum helper or `Path.read_bytes`.
 - Expected: package object post-write verification computes size and SHA-256 by streaming from the resolved object path in chunks and does not call `LocalObjectStore.checksum()` for package verification.
 
+Fixture P9 - tampered required-file inventory rejection:
+
+- Invocation: generate a valid inventory, then remove a canonical required runtime role or GIS sidecar role from the selected model `required_files` while leaving `status=valid` and `default_publish_eligible=true`.
+- Expected: non-zero exit with structured JSON `error_code=BASINS_REQUIRED_FILES_MISSING`; no local manifest output claims a successful package.
+
+Fixture P10 - local output waits for verified object manifest:
+
+- Invocation: publish Fixture K with a writable `--output` path while object-store manifest write or verification fails.
+- Expected: non-zero exit with structured JSON failure; the requested local output file is not written with a manifest that claims publication.
+
 Fixture Q - production migration symlink rejection:
 
 ```text

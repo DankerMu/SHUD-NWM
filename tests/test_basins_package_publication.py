@@ -582,6 +582,48 @@ def test_publish_basins_rejects_partial_model_with_structured_error(
     assert "tailanhe" in error["path"]
 
 
+def test_publish_basins_rejects_tampered_required_files_despite_valid_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model["status"] = "valid"
+    model["default_publish_eligible"] = True
+    model["missing_required_files"] = []
+    model["required_files"].pop("tsd_rl")
+    model["required_files"]["gis_domain_shp"] = []
+    write_inventory(inventory, inventory_path)
+    _object_store_env(tmp_path, monkeypatch)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-tampered-required",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_REQUIRED_FILES_MISSING"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-tampered-required"
+    assert "tsd_rl" in error["message"]
+    assert "gis_domain_shp" in error["message"]
+    assert not (tmp_path / "manifest.json").exists()
+
+
 def test_publish_basins_reports_output_write_failure_as_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -617,6 +659,59 @@ def test_publish_basins_reports_output_write_failure_as_json(
     assert error["path"] == str(output_parent / "manifest.json")
     assert "Traceback" not in captured.err
     assert not (object_root / "models" / model_id / "vbasins-output-fail" / "manifest.json").exists()
+
+
+def test_publish_basins_does_not_write_local_output_when_manifest_verify_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    original_verify = basins_package._verify_object_bytes
+
+    def failing_manifest_verify(
+        store: object,
+        key: str,
+        *,
+        expected_size: int,
+        expected_sha256: str,
+    ) -> None:
+        if key.endswith("/manifest.json"):
+            raise basins_package.ObjectStoreError("synthetic manifest verification failure")
+        original_verify(  # type: ignore[arg-type]
+            store,
+            key,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+        )
+
+    monkeypatch.setattr(basins_package, "_verify_object_bytes", failing_manifest_verify)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-manifest-verify-fail",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_WRITE_FAILED"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-manifest-verify-fail"
+    assert not output.exists()
+    assert (object_root / "models" / model_id / "vbasins-manifest-verify-fail" / "manifest.json").is_file()
 
 
 def test_publish_basins_rejects_tampered_inventory_paths(

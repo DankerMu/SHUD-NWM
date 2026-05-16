@@ -37,6 +37,12 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 - **WHEN** a Basins inventory model has `status=partial` or `default_publish_eligible=false`
 - **THEN** package publication refuses the model with stable error code `BASINS_MODEL_NOT_PUBLISHABLE` unless a later explicit partial-acceptance option is defined
 
+#### Scenario: Required runtime and GIS roles are revalidated before publication
+
+- **WHEN** a selected inventory model claims `status=valid` and `default_publish_eligible=true` but omits canonical required SHUD runtime or GIS sidecar roles from `required_files`
+- **THEN** package publication refuses the inventory with stable error code `BASINS_REQUIRED_FILES_MISSING`
+- **AND** it does not publish an immutable package or local manifest that omits required runtime/GIS assets
+
 #### Scenario: Package publication is idempotent
 
 - **WHEN** publication is run again for unchanged source files and the same target version
@@ -63,6 +69,7 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 - **AND** an existing lock SHALL fail deterministically with `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`
 - **AND** an existing unchanged manifest SHALL still return `already_done` without requiring the lock
 - **AND** package object entries SHALL record size and SHA-256 from the exact bytes written and verified in the object store before the final manifest is written
+- **AND** requested local `--output` manifest JSON SHALL only be written after the object-store manifest has been written and verified
 - **AND** package object verification SHALL stream from the resolved object path in chunks instead of loading full object bytes into memory
 
 #### Scenario: Publication command failure payload

@@ -12,7 +12,12 @@ from typing import Any
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 
-from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory
+from .basins_discovery import (
+    GIS_REQUIRED_FILES,
+    SHUD_REQUIRED_PATTERNS,
+    BasinsDiscoveryError,
+    discover_basins_inventory,
+)
 
 BASINS_PACKAGE_SCHEMA_VERSION = "basins.package.v1"
 BASINS_MIGRATION_REPORT_SCHEMA_VERSION = "basins.migration.v1"
@@ -86,7 +91,15 @@ def publish_basins_package(
     inventory_root = _resolved_inventory_root(inventory, model_id, version)
     source_root = _resolved_source_root(model, inventory_root, model_id, version)
 
-    package_files = _package_source_files(model, inventory_root, source_root, store, package_key)
+    package_files = _package_source_files(
+        model,
+        inventory_root,
+        source_root,
+        store,
+        package_key,
+        model_id=model_id,
+        version=version,
+    )
     forcing, forcing_files = _forcing_metadata(
         model=model,
         inventory_root=inventory_root,
@@ -161,6 +174,13 @@ def publish_basins_package(
             )
             return _success_payload("already_done", existing_manifest)
 
+        _preflight_json_output_path(
+            output_path,
+            error_code="BASINS_PACKAGE_OUTPUT_WRITE_FAILED",
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
         included_files = []
         for source_file in source_files:
             included_files.append(_write_source_file_to_store(source_file, store))
@@ -211,6 +231,13 @@ def publish_basins_package(
             manifest_key=manifest_key,
         )
         local_output_manifest = manifest
+        store.write_bytes_atomic(manifest_key, manifest_bytes)
+        _verify_object_bytes(
+            store,
+            manifest_key,
+            expected_size=len(manifest_bytes),
+            expected_sha256=_sha256_bytes(manifest_bytes),
+        )
         _write_json_file(
             output_path,
             manifest,
@@ -218,13 +245,6 @@ def publish_basins_package(
             model_id=model_id,
             version=version,
             manifest_uri=manifest_uri,
-        )
-        store.write_bytes_atomic(manifest_key, manifest_bytes)
-        _verify_object_bytes(
-            store,
-            manifest_key,
-            expected_size=len(manifest_bytes),
-            expected_sha256=_sha256_bytes(manifest_bytes),
         )
     except (OSError, ObjectStoreError, ValueError) as error:
         raise BasinsPackageError(
@@ -453,11 +473,21 @@ def _package_source_files(
     source_root: Path,
     object_store: LocalObjectStore,
     package_key: str,
+    *,
+    model_id: str,
+    version: str,
 ) -> list[SourceFile]:
     input_dir = _safe_source_dir(model.get("input_dir"), inventory_root, source_root, "input_dir")
     required_files = model.get("required_files")
     if not isinstance(required_files, dict):
         raise BasinsPackageError("BASINS_INVENTORY_INVALID", "Basins model record is missing required_files.")
+    _validate_canonical_required_files(
+        required_files,
+        input_dir,
+        source_root,
+        model_id=model_id,
+        version=version,
+    )
 
     files: list[SourceFile] = []
     for role, relative_names in required_files.items():
@@ -494,6 +524,50 @@ def _package_source_files(
                 )
             )
     return sorted(files, key=lambda item: (item.role, item.relative_path))
+
+
+def _validate_canonical_required_files(
+    required_files: dict[str, Any],
+    input_dir: Path,
+    source_root: Path,
+    *,
+    model_id: str,
+    version: str,
+) -> None:
+    missing: list[str] = []
+    for role, pattern in SHUD_REQUIRED_PATTERNS:
+        relative_names = required_files.get(role)
+        if not isinstance(relative_names, list) or not relative_names:
+            missing.append(role)
+            continue
+        matching_paths = []
+        for relative_name in relative_names:
+            relative_path = _normalize_relative_path(str(relative_name))
+            if Path(relative_path).match(pattern):
+                matching_paths.append(relative_path)
+        if not matching_paths:
+            missing.append(role)
+            continue
+        for relative_path in matching_paths:
+            _safe_source_file(input_dir / relative_path, source_root)
+
+    for role, file_name in GIS_REQUIRED_FILES:
+        expected_path = _normalize_relative_path(f"gis/{file_name}")
+        relative_names = required_files.get(role)
+        if not isinstance(relative_names, list) or expected_path not in [str(name) for name in relative_names]:
+            missing.append(role)
+            continue
+        _safe_source_file(input_dir / expected_path, source_root)
+
+    if missing:
+        roles = ", ".join(sorted(missing))
+        raise BasinsPackageError(
+            "BASINS_REQUIRED_FILES_MISSING",
+            f"Basins inventory is missing canonical required file roles or paths: {roles}",
+            model_id=model_id or None,
+            version=version,
+            path=str(input_dir),
+        )
 
 
 def _forcing_metadata(
@@ -1078,6 +1152,28 @@ def _write_json_file(
         raise BasinsPackageError(
             error_code,
             f"Failed to write Basins output JSON: {output}: {error}",
+            model_id=model_id,
+            version=version,
+            path=str(output),
+            manifest_uri=manifest_uri,
+        ) from error
+
+
+def _preflight_json_output_path(
+    path: str | Path,
+    *,
+    error_code: str,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> None:
+    output = Path(path).expanduser()
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise BasinsPackageError(
+            error_code,
+            f"Failed to prepare Basins output JSON path: {output}: {error}",
             model_id=model_id,
             version=version,
             path=str(output),
