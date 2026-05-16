@@ -106,6 +106,7 @@
 - #135 Phase 6 round 9 已补齐：相对 `input_dir/gis_dir/forcing_dir` 发布时按 inventory/source canonical 上下文解析，支持相对 Basins root inventory 跨 CWD 发布；最终源文件读取改为从 `source_root` 目录 fd 逐段 no-follow 打开并复核 inode，拒绝 runtime、forcing 与 migration evidence 祖先目录替换为 symlink。
 - #135 Phase 6 round 10 已补齐：runtime required_files 只接受 `<shud_input_name>.<suffix>` canonical 文件名，拒绝同模式额外直系文件；相对 `input_dir/gis_dir/forcing_dir` 只接受 canonical 相对形式，拒绝任意前缀篡改。
 - #135 Phase 6 round 11 已补齐：Basins package 发布对本地对象存储 package、manifest、lock key 执行 root 下逐组件 symlink 拒绝，避免 stale object-store symlink 被写入或校验跟随。
+- #135 Phase 6 round 12 已补齐：本地对象存储 package、manifest、lock 写入/读取/校验改为 anchored no-follow 父目录 fd 流程，拒绝 final write/replace 前对象存储祖先被替换为 symlink；publish 入口按 canonical `basin_slug` 复算 deterministic `model_id`，拒绝重标记与重复 ID inventory。
 
 ## 已知技术风险 / 注意事项
 

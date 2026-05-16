@@ -202,6 +202,84 @@ def test_publish_basins_checksum_ignores_benign_inventory_churn(
     assert second_manifest["package_checksum"] == first_payload["package_checksum"]
 
 
+def test_publish_basins_rejects_relabelled_inventory_model_id_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    requested_model_id = "basins_relabelled_shud"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    model = inventory["models"][0]
+    model["model_id"] = requested_model_id
+    model["suggested_ids"]["model_id"] = requested_model_id
+    inventory_path.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            requested_model_id,
+            "--version",
+            "vbasins-relabelled",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_MODEL_ID_MISMATCH"
+    assert error["model_id"] == requested_model_id
+    assert error["version"] == "vbasins-relabelled"
+    assert "manifest_uri" not in error
+    assert not (object_root / "models" / requested_model_id / "vbasins-relabelled").exists()
+
+
+def test_publish_basins_rejects_duplicate_inventory_model_id_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    duplicate = dict(inventory["models"][0])
+    duplicate["basin_slug"] = "other-basin"
+    duplicate["source_path"] = str(tmp_path / "basins" / "other-basin")
+    inventory["models"].append(duplicate)
+    inventory_path.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-duplicate-id",
+            "--output",
+            str(tmp_path / "manifest.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_MODEL_ID_DUPLICATE"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-duplicate-id"
+    assert "manifest_uri" not in error
+    assert not (object_root / "models" / model_id / "vbasins-duplicate-id").exists()
+
+
 def test_publish_basins_excludes_forcing_payloads_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1491,6 +1569,73 @@ def test_publish_basins_rejects_existing_object_store_package_symlink_without_mo
     assert "Traceback" not in captured.err
     assert package_object.is_symlink()
     assert target_object.read_text(encoding="utf-8") == "do not modify\n"
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / version / "manifest.json").exists()
+
+
+def test_publish_basins_rejects_object_store_ancestor_replaced_with_symlink_before_final_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    version = "vbasins-object-ancestor-race"
+    escaped_dir = tmp_path / "escaped-object-target"
+    escaped_dir.mkdir()
+    escaped_target = escaped_dir / "alias-a.cfg.para"
+    escaped_target.write_text("do not modify\n", encoding="utf-8")
+    package_dir = object_root / "models" / model_id / version / "package"
+    original_replace = basins_package.os.rename
+    mutated = False
+
+    def swapping_rename(
+        src: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        dst: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal mutated
+        if not mutated and os.fspath(dst) == "alias-a.cfg.para" and src_dir_fd is not None and dst_dir_fd is not None:
+            mutated = True
+            moved_package_dir = package_dir.with_name("package.original")
+            package_dir.rename(moved_package_dir)
+            try:
+                package_dir.symlink_to(escaped_dir, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                pytest.skip(f"symlink support unavailable: {error}")
+        return original_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(basins_package.os, "rename", swapping_rename)
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            version,
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert mutated is True
+    assert error["error_code"] == "BASINS_PACKAGE_OBJECT_PATH_UNSAFE"
+    assert error["model_id"] == model_id
+    assert error["version"] == version
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/{version}/manifest.json"
+    assert "Traceback" not in captured.err
+    assert package_dir.is_symlink()
+    assert escaped_target.read_text(encoding="utf-8") == "do not modify\n"
     assert not output.exists()
     assert not (object_root / "models" / model_id / version / "manifest.json").exists()
 

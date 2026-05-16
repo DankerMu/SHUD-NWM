@@ -6,6 +6,7 @@ import os
 import stat
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
@@ -21,6 +22,9 @@ from .basins_discovery import (
     BasinsDiscoveryError,
     discover_basins_inventory,
 )
+from .basins_discovery import (
+    _slug_id as _basins_slug_id,
+)
 
 BASINS_PACKAGE_SCHEMA_VERSION = "basins.package.v1"
 BASINS_MIGRATION_REPORT_SCHEMA_VERSION = "basins.migration.v1"
@@ -28,6 +32,20 @@ FORCING_SAMPLE_FILE_LIMIT = 5
 FORCING_SAMPLE_BYTE_LIMIT = 64 * 1024
 FORCING_SAMPLE_LINE_LIMIT = 1000
 _OS_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+_OS_MKDIR_SUPPORTS_DIR_FD = os.mkdir in os.supports_dir_fd
+_OS_RENAME_SUPPORTS_DIR_FD = os.rename in os.supports_dir_fd
+_OS_UNLINK_SUPPORTS_DIR_FD = os.unlink in os.supports_dir_fd
+_OS_STAT_SUPPORTS_DIR_FD = os.stat in os.supports_dir_fd
+_OS_STAT_SUPPORTS_FOLLOW_SYMLINKS = os.stat in os.supports_follow_symlinks
+_OS_OPENAT_OBJECT_STORE_AVAILABLE = (
+    hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_DIRECTORY")
+    and _OS_OPEN_SUPPORTS_DIR_FD
+    and _OS_MKDIR_SUPPORTS_DIR_FD
+    and _OS_RENAME_SUPPORTS_DIR_FD
+    and _OS_UNLINK_SUPPORTS_DIR_FD
+    and _OS_STAT_SUPPORTS_DIR_FD
+)
 
 
 class BasinsPackageError(RuntimeError):
@@ -71,6 +89,13 @@ class SourceFile:
     object_key: str
     object_uri: str
     role: str
+
+
+@dataclass(frozen=True)
+class ObjectStoreParent:
+    path: Path
+    name: str
+    parent_fd: int | None = None
 
 
 def publish_basins_package(
@@ -409,23 +434,60 @@ def _find_publishable_model(inventory: dict[str, Any], model_id: str, version: s
             model_id=model_id,
             version=version,
         )
-    for model in models:
-        if isinstance(model, dict) and model.get("model_id") == model_id:
-            if model.get("status") != "valid" or model.get("default_publish_eligible") is not True:
-                raise BasinsPackageError(
-                    "BASINS_MODEL_NOT_PUBLISHABLE",
-                    "Basins model is not publishable from this inventory.",
-                    model_id=model_id,
-                    version=version,
-                    path=str(model.get("source_path") or ""),
-                )
-            return model
+    matches = [model for model in models if isinstance(model, dict) and model.get("model_id") == model_id]
+    if len(matches) > 1:
+        raise BasinsPackageError(
+            "BASINS_MODEL_ID_DUPLICATE",
+            "Basins inventory contains duplicate records for the requested model_id.",
+            model_id=model_id,
+            version=version,
+        )
+    if matches:
+        model = matches[0]
+        _verify_model_id_matches_canonical_identity(model, model_id, version)
+        if model.get("status") != "valid" or model.get("default_publish_eligible") is not True:
+            raise BasinsPackageError(
+                "BASINS_MODEL_NOT_PUBLISHABLE",
+                "Basins model is not publishable from this inventory.",
+                model_id=model_id,
+                version=version,
+                path=str(model.get("source_path") or ""),
+            )
+        return model
     raise BasinsPackageError(
         "BASINS_MODEL_NOT_FOUND",
         "Basins model_id was not found in inventory.",
         model_id=model_id,
         version=version,
     )
+
+
+def _verify_model_id_matches_canonical_identity(model: dict[str, Any], model_id: str, version: str) -> None:
+    basin_slug = model.get("basin_slug")
+    suggested_ids = model.get("suggested_ids")
+    suggested_model_id = suggested_ids.get("model_id") if isinstance(suggested_ids, dict) else None
+    if not isinstance(basin_slug, str) or not basin_slug:
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_INVALID",
+            "Basins model record is missing basin_slug.",
+            model_id=model_id,
+            version=version,
+            path=str(model.get("source_path") or ""),
+        )
+
+    expected_model_id = f"basins_{_basins_slug_id(basin_slug)}_shud"
+    if (
+        model.get("model_id") != expected_model_id
+        or model_id != expected_model_id
+        or suggested_model_id != expected_model_id
+    ):
+        raise BasinsPackageError(
+            "BASINS_MODEL_ID_MISMATCH",
+            "Basins inventory model_id does not match the selected model's canonical source identity.",
+            model_id=model_id,
+            version=version,
+            path=str(model.get("source_path") or ""),
+        )
 
 
 def _object_store_from_env(*, model_id: str, version: str) -> LocalObjectStore:
@@ -1215,16 +1277,21 @@ def _acquire_publish_lock(
     version: str,
     manifest_uri: str,
 ) -> None:
-    lock_path = _object_path_rejecting_symlinks(
-        store,
-        lock_key,
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
+    lock_path = _object_path_for_key(store, lock_key)
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        with _object_parent_for_write(
+            store,
+            lock_key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as target:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            fd = _object_os_open(target.name, flags, 0o666, target)
     except FileExistsError as error:
         raise BasinsPackageError(
             "BASINS_PACKAGE_PUBLISH_IN_PROGRESS",
@@ -1258,7 +1325,11 @@ def _acquire_publish_lock(
 
 def _release_publish_lock(store: LocalObjectStore, lock_key: str) -> None:
     try:
-        _object_path_rejecting_symlinks(store, lock_key).unlink(missing_ok=True)
+        with _object_parent_for_write(store, lock_key) as target:
+            try:
+                _object_os_unlink(target.name, target)
+            except FileNotFoundError:
+                pass
     except (BasinsPackageError, OSError, ValueError):
         pass
 
@@ -1302,18 +1373,25 @@ def _write_file_to_store_streaming(
     version: str | None = None,
     manifest_uri: str | None = None,
 ) -> tuple[int, str]:
-    target_path = _object_path_rejecting_symlinks(
-        store,
-        key,
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
+    target_path = _object_path_for_key(store, key)
     temp_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.part")
     digest = hashlib.sha256()
     size_bytes = 0
     try:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with _object_parent_for_write(
+            store,
+            key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as target:
+            temp_name = temp_path.name
+            temp_fd = _object_os_open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _object_no_follow_flag() | _object_cloexec_flag(),
+                0o666,
+                target,
+            )
         with (
             _open_verified_source_file(
                 source_path,
@@ -1322,16 +1400,25 @@ def _write_file_to_store_streaming(
                 version=version,
                 manifest_uri=manifest_uri,
             ) as source,
-            temp_path.open("wb") as target,
+            os.fdopen(temp_fd, "wb") as target_handle,
         ):
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                target.write(chunk)
+                target_handle.write(chunk)
                 digest.update(chunk)
                 size_bytes += len(chunk)
-        os.replace(temp_path, target_path)
+            target_handle.flush()
+            os.fsync(target_handle.fileno())
+        with _object_parent_for_existing_write(
+            store,
+            key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as target:
+            _object_os_replace(temp_path.name, target.name, target)
     except OSError as error:
         try:
-            temp_path.unlink(missing_ok=True)
+            _remove_object_temp_path(store, key, temp_path.name)
         except OSError as cleanup_error:
             raise ObjectStoreError(
                 f"Failed to write object {key}: {error}; cleanup also failed: {cleanup_error}"
@@ -1349,21 +1436,37 @@ def _write_bytes_to_store_atomic(
     version: str | None = None,
     manifest_uri: str | None = None,
 ) -> str:
-    target_path = _object_path_rejecting_symlinks(
-        store,
-        key,
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
+    target_path = _object_path_for_key(store, key)
     temp_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.part")
     try:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path.write_bytes(content)
-        os.replace(temp_path, target_path)
+        with _object_parent_for_write(
+            store,
+            key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as target:
+            temp_fd = _object_os_open(
+                temp_path.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _object_no_follow_flag() | _object_cloexec_flag(),
+                0o666,
+                target,
+            )
+        with os.fdopen(temp_fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with _object_parent_for_existing_write(
+            store,
+            key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as target:
+            _object_os_replace(temp_path.name, target.name, target)
     except OSError as error:
         try:
-            temp_path.unlink(missing_ok=True)
+            _remove_object_temp_path(store, key, temp_path.name)
         except OSError as cleanup_error:
             raise ObjectStoreError(
                 f"Failed to write object {key}: {error}; cleanup also failed: {cleanup_error}"
@@ -1398,17 +1501,26 @@ def _object_exists_no_symlinks(
     version: str,
     manifest_uri: str,
 ) -> bool:
-    path = _object_path_rejecting_symlinks(
-        store,
-        key,
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
     try:
-        path.lstat()
+        with _object_parent_for_existing_read(
+            store,
+            key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as target:
+            stat_result = _object_os_stat(target.name, target)
+            if stat.S_ISLNK(stat_result.st_mode):
+                raise _object_path_unsafe_error(
+                    target.path,
+                    model_id=model_id,
+                    version=version,
+                    manifest_uri=manifest_uri,
+                )
     except FileNotFoundError:
         return False
+    except BasinsPackageError:
+        raise
     except OSError as error:
         raise ObjectStoreError(f"Failed to check object existence for {key}: {error}") from error
     return True
@@ -1422,15 +1534,15 @@ def _read_object_bytes_no_symlinks(
     version: str,
     manifest_uri: str,
 ) -> bytes:
-    path = _object_path_rejecting_symlinks(
-        store,
-        key,
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
     try:
-        return path.read_bytes()
+        with _open_object_file_no_symlinks(
+            store,
+            key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as handle:
+            return handle.read()
     except OSError as error:
         raise ObjectStoreError(f"Failed to read object {key}: {error}") from error
 
@@ -1443,15 +1555,8 @@ def _object_path_rejecting_symlinks(
     version: str | None = None,
     manifest_uri: str | None = None,
 ) -> Path:
-    key = store.normalize_key(key_or_uri)
-    validation = validate_object_path(key)
-    if not validation.valid:
-        raise ValueError(validation.error)
-    if ".." in Path(key).parts:
-        raise ValueError(f"Object key must not contain '..': {key_or_uri}")
-
+    key, parts = _object_key_parts(store, key_or_uri)
     root = Path(store.root)
-    parts = Path(key).parts
     candidate = root
     for part in parts:
         candidate = candidate / part
@@ -1471,6 +1576,308 @@ def _object_path_rejecting_symlinks(
                 manifest_uri=manifest_uri,
             )
     return root.joinpath(*parts)
+
+
+def _object_key_parts(store: LocalObjectStore, key_or_uri: str) -> tuple[str, tuple[str, ...]]:
+    key = store.normalize_key(key_or_uri)
+    validation = validate_object_path(key)
+    if not validation.valid:
+        raise ValueError(validation.error)
+    parts = Path(key).parts
+    if not parts or ".." in parts:
+        raise ValueError(f"Object key must not contain '..': {key_or_uri}")
+    return key, parts
+
+
+def _object_path_for_key(store: LocalObjectStore, key_or_uri: str) -> Path:
+    _, parts = _object_key_parts(store, key_or_uri)
+    return Path(store.root).joinpath(*parts)
+
+
+@contextmanager
+def _object_parent_for_write(
+    store: LocalObjectStore,
+    key_or_uri: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Iterator[ObjectStoreParent]:
+    if _OS_OPENAT_OBJECT_STORE_AVAILABLE:
+        target = _open_object_parent_at(
+            store,
+            key_or_uri,
+            create=True,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        try:
+            yield target
+        finally:
+            if target.parent_fd is not None:
+                os.close(target.parent_fd)
+        return
+
+    path = _object_path_rejecting_symlinks(
+        store,
+        key_or_uri,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path = _object_path_rejecting_symlinks(
+        store,
+        key_or_uri,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    yield ObjectStoreParent(path=path, name=path.name)
+
+
+@contextmanager
+def _object_parent_for_existing_write(
+    store: LocalObjectStore,
+    key_or_uri: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Iterator[ObjectStoreParent]:
+    if _OS_OPENAT_OBJECT_STORE_AVAILABLE:
+        target = _open_object_parent_at(
+            store,
+            key_or_uri,
+            create=False,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        try:
+            yield target
+        finally:
+            if target.parent_fd is not None:
+                os.close(target.parent_fd)
+        return
+
+    path = _object_path_rejecting_symlinks(
+        store,
+        key_or_uri,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    yield ObjectStoreParent(path=path, name=path.name)
+
+
+@contextmanager
+def _object_parent_for_existing_read(
+    store: LocalObjectStore,
+    key_or_uri: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Iterator[ObjectStoreParent]:
+    with _object_parent_for_existing_write(
+        store,
+        key_or_uri,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    ) as target:
+        yield target
+
+
+def _open_object_parent_at(
+    store: LocalObjectStore,
+    key_or_uri: str,
+    *,
+    create: bool,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> ObjectStoreParent:
+    _, parts = _object_key_parts(store, key_or_uri)
+    root = Path(store.root)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _object_cloexec_flag()
+    current_fd: int | None = None
+    try:
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
+        current_fd = os.open(root, directory_flags)
+        root_stat = os.fstat(current_fd)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_OBJECT_PATH_UNSAFE",
+                "Basins package object-store root is not a directory.",
+                model_id=model_id,
+                version=version,
+                path=str(root),
+                manifest_uri=manifest_uri,
+            )
+
+        parent_path = root
+        for component in parts[:-1]:
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o777, dir_fd=current_fd)
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            except OSError as error:
+                if _object_path_component_is_symlink(parent_path / component):
+                    raise _object_path_unsafe_error(
+                        parent_path / component,
+                        model_id=model_id,
+                        version=version,
+                        manifest_uri=manifest_uri,
+                    ) from error
+                raise
+
+            try:
+                next_stat = os.fstat(next_fd)
+                if not stat.S_ISDIR(next_stat.st_mode):
+                    raise _object_path_unsafe_error(
+                        parent_path / component,
+                        model_id=model_id,
+                        version=version,
+                        manifest_uri=manifest_uri,
+                    )
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(current_fd)
+            current_fd = next_fd
+            parent_path = parent_path / component
+
+        target = ObjectStoreParent(path=root.joinpath(*parts), name=parts[-1], parent_fd=current_fd)
+        current_fd = None
+        return target
+    except (BasinsPackageError, FileNotFoundError):
+        raise
+    except OSError as error:
+        raise ObjectStoreError(f"Failed to inspect object-store path {key_or_uri}: {error}") from error
+    finally:
+        if current_fd is not None:
+            try:
+                os.close(current_fd)
+            except OSError:
+                pass
+
+
+def _object_os_open(name: str, flags: int, mode: int, target: ObjectStoreParent) -> int:
+    if target.parent_fd is not None:
+        return os.open(name, flags, mode, dir_fd=target.parent_fd)
+    return os.open(target.path.with_name(name), flags, mode)
+
+
+def _object_os_replace(source_name: str, target_name: str, target: ObjectStoreParent) -> None:
+    if target.parent_fd is not None:
+        os.rename(source_name, target_name, src_dir_fd=target.parent_fd, dst_dir_fd=target.parent_fd)
+        return
+    os.replace(target.path.with_name(source_name), target.path.with_name(target_name))
+
+
+def _object_os_unlink(name: str, target: ObjectStoreParent) -> None:
+    if target.parent_fd is not None:
+        os.unlink(name, dir_fd=target.parent_fd)
+        return
+    target.path.with_name(name).unlink()
+
+
+def _object_os_stat(name: str, target: ObjectStoreParent) -> os.stat_result:
+    if target.parent_fd is not None and _OS_STAT_SUPPORTS_FOLLOW_SYMLINKS:
+        return os.stat(name, dir_fd=target.parent_fd, follow_symlinks=False)
+    return target.path.with_name(name).lstat()
+
+
+def _remove_object_temp_path(store: LocalObjectStore, key_or_uri: str, temp_name: str) -> None:
+    with _object_parent_for_existing_write(store, key_or_uri) as target:
+        try:
+            _object_os_unlink(temp_name, target)
+        except FileNotFoundError:
+            pass
+
+
+@contextmanager
+def _open_object_file_no_symlinks(
+    store: LocalObjectStore,
+    key_or_uri: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Iterator[BinaryIO]:
+    with _object_parent_for_existing_read(
+        store,
+        key_or_uri,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    ) as target:
+        flags = os.O_RDONLY | _object_no_follow_flag() | _object_cloexec_flag()
+        try:
+            fd = _object_os_open(target.name, flags, 0o666, target)
+        except OSError as error:
+            if _object_path_component_is_symlink(target.path):
+                raise _object_path_unsafe_error(
+                    target.path,
+                    model_id=model_id,
+                    version=version,
+                    manifest_uri=manifest_uri,
+                ) from error
+            raise
+        try:
+            stat_result = os.fstat(fd)
+            if not stat.S_ISREG(stat_result.st_mode):
+                raise _object_path_unsafe_error(
+                    target.path,
+                    model_id=model_id,
+                    version=version,
+                    manifest_uri=manifest_uri,
+                )
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                yield handle
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+
+def _object_path_component_is_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _object_path_unsafe_error(
+    path: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> BasinsPackageError:
+    return BasinsPackageError(
+        "BASINS_PACKAGE_OBJECT_PATH_UNSAFE",
+        "Basins package publication does not follow object-store symlink components.",
+        model_id=model_id,
+        version=version,
+        path=str(path),
+        manifest_uri=manifest_uri,
+    )
+
+
+def _object_no_follow_flag() -> int:
+    return os.O_NOFOLLOW if hasattr(os, "O_NOFOLLOW") else 0
+
+
+def _object_cloexec_flag() -> int:
+    return os.O_CLOEXEC if hasattr(os, "O_CLOEXEC") else 0
 
 
 def _open_verified_source_file(
