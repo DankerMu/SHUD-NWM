@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -142,7 +143,7 @@ def _prepare_sources(inventory: dict[str, Any], manifest: dict[str, Any]) -> Imp
 
     inventory_root = _inventory_root(inventory, model_id)
     source_root = _source_root(inventory_root, model, model_id)
-    input_dir = _input_dir(source_root, model, model_id)
+    input_dir = _input_dir(inventory_root, source_root, model, model_id)
     _validate_manifest_source_identity(inventory, manifest, model, source_root, model_id)
     _verify_model_id_matches_canonical_identity(model, model_id)
     required_files = model.get("required_files")
@@ -331,6 +332,12 @@ def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
     existing_count = int(existing["count"]) if existing is not None else 0
     if existing_count:
         _require_existing(existing_count == sources.geometry.segment_count, "river_segment", ids["model_id"])
+        _require_existing(
+            _existing_river_segment_digest(cursor, ids["river_network_version_id"])
+            == _incoming_river_segment_digest(sources),
+            "river_segment",
+            ids["model_id"],
+        )
         return 0
     try:
         from psycopg2.extras import Json, execute_values
@@ -515,6 +522,84 @@ def _require_existing(condition: bool, resource: str, model_id: str) -> None:
         )
 
 
+def _existing_river_segment_digest(cursor: Any, river_network_version_id: str) -> str:
+    cursor.execute(
+        """
+        SELECT river_segment_id,
+               segment_order,
+               downstream_segment_id,
+               length_m,
+               ST_AsText(geom) AS geom_wkt,
+               properties_json
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+        ORDER BY COALESCE(segment_order, 2147483647), river_segment_id
+        """,
+        (river_network_version_id,),
+    )
+    rows = [
+        _river_segment_digest_row(
+            river_segment_id=row["river_segment_id"],
+            segment_order=row["segment_order"],
+            downstream_segment_id=row["downstream_segment_id"],
+            length_m=row["length_m"],
+            geom_wkt=row["geom_wkt"],
+            properties=_json_dict(row["properties_json"]),
+        )
+        for row in cursor.fetchall()
+    ]
+    return _sha256_json(rows)
+
+
+def _incoming_river_segment_digest(sources: ImportSources) -> str:
+    rows = [
+        _river_segment_digest_row(
+            river_segment_id=segment.river_segment_id,
+            segment_order=segment.segment_order,
+            downstream_segment_id=segment.downstream_segment_id,
+            length_m=segment.length_m,
+            geom_wkt=segment.geom_wkt,
+            properties={
+                **segment.properties,
+                "basin_slug": sources.model.get("basin_slug"),
+                "shud_input_name": sources.model.get("shud_input_name"),
+            },
+        )
+        for segment in sorted(
+            sources.geometry.river_segments,
+            key=lambda item: (
+                item.segment_order if item.segment_order is not None else 2147483647,
+                item.river_segment_id,
+            ),
+        )
+    ]
+    return _sha256_json(rows)
+
+
+def _river_segment_digest_row(
+    *,
+    river_segment_id: Any,
+    segment_order: Any,
+    downstream_segment_id: Any,
+    length_m: Any,
+    geom_wkt: Any,
+    properties: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "river_segment_id": str(river_segment_id),
+        "segment_order": None if segment_order is None else int(segment_order),
+        "downstream_segment_id": None if downstream_segment_id is None else str(downstream_segment_id),
+        "length_m": None if length_m is None else float(length_m),
+        "geom_wkt": _normalize_wkt(str(geom_wkt or "")),
+        "properties": properties,
+    }
+
+
+def _normalize_wkt(value: str) -> str:
+    compact_commas = re.sub(r"\s*,\s*", ",", value.strip())
+    return re.sub(r"\s+", " ", compact_commas)
+
+
 def _find_inventory_model(inventory: dict[str, Any], model_id: str) -> dict[str, Any]:
     models = inventory.get("models")
     if not isinstance(models, list):
@@ -580,11 +665,22 @@ def _source_root(inventory_root: Path, model: dict[str, Any], model_id: str) -> 
     return source_root
 
 
-def _input_dir(source_root: Path, model: dict[str, Any], model_id: str) -> Path:
+def _input_dir(inventory_root: Path, source_root: Path, model: dict[str, Any], model_id: str) -> Path:
     shud_input_name = _required_model_str(model, "shud_input_name", model_id)
-    expected = (source_root / "input" / shud_input_name).resolve()
-    recorded = Path(_required_model_str(model, "input_dir", model_id)).expanduser().resolve()
-    if recorded != expected:
+    expected = source_root / "input" / shud_input_name
+    for role, path in (
+        ("input", source_root / "input"),
+        ("shud_input_name", expected),
+    ):
+        _reject_directory_symlink(path, role, model_id)
+    gis_dir = expected / "gis"
+    if gis_dir.exists() or gis_dir.is_symlink():
+        _reject_directory_symlink(gis_dir, "gis", model_id)
+    final_resolved = expected.resolve()
+    _ensure_under_root(final_resolved, inventory_root, model_id)
+    _ensure_under_root(final_resolved, source_root, model_id)
+    recorded = Path(_required_model_str(model, "input_dir", model_id)).expanduser()
+    if recorded.resolve() != final_resolved:
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_SOURCE_MISMATCH",
             "Basins inventory input_dir does not match canonical source root and shud_input_name.",
@@ -640,32 +736,34 @@ def _validate_manifest_source_identity(
         "source_is_symlink": bool(model.get("source_is_symlink", False)),
         "source_inventory_schema_version": inventory.get("schema_version"),
     }
+    missing = [key for key in expected if key not in manifest or manifest.get(key) in (None, "")]
     mismatches = [
         key
         for key, expected_value in expected.items()
-        if key in manifest and manifest.get(key) != expected_value
+        if key not in missing and manifest.get(key) != expected_value
     ]
-    if mismatches:
+    source_inventory_checksum = manifest.get("source_inventory_checksum")
+    if not isinstance(source_inventory_checksum, str) or not source_inventory_checksum:
+        missing.append("source_inventory_checksum")
+    if missing or mismatches:
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_SOURCE_MISMATCH",
             "Basins package manifest source identity does not match selected inventory model.",
             model_id=model_id,
-            details={"fields": sorted(mismatches)},
+            details={"fields": sorted({*missing, *mismatches})},
         )
-    source_inventory_checksum = manifest.get("source_inventory_checksum")
-    if isinstance(source_inventory_checksum, str) and source_inventory_checksum:
-        actual_inventory_checksums = {_sha256_json(inventory), _sha256_inventory_document(inventory)}
-        if source_inventory_checksum not in actual_inventory_checksums:
-            raise BasinsRegistryImportError(
-                "BASINS_REGISTRY_SOURCE_MISMATCH",
-                "Basins package manifest source inventory checksum does not match selected inventory.",
-                model_id=model_id,
-                details={
-                    "field": "source_inventory_checksum",
-                    "expected": sorted(actual_inventory_checksums),
-                    "actual": source_inventory_checksum,
-                },
-            )
+    actual_inventory_checksums = {_sha256_json(inventory), _sha256_inventory_document(inventory)}
+    if source_inventory_checksum not in actual_inventory_checksums:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_SOURCE_MISMATCH",
+            "Basins package manifest source inventory checksum does not match selected inventory.",
+            model_id=model_id,
+            details={
+                "fields": ["source_inventory_checksum"],
+                "expected": sorted(actual_inventory_checksums),
+                "actual": source_inventory_checksum,
+            },
+        )
 
 
 def _validate_manifest_included_files(
@@ -875,6 +973,29 @@ def _ensure_under_root(path: Path, root: Path, model_id: str) -> None:
             model_id=model_id,
             path=str(path),
         ) from error
+
+
+def _reject_directory_symlink(path: Path, role: str, model_id: str) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins source directory cannot be safely inspected.",
+            model_id=model_id,
+            path=str(path),
+            details={"role": role},
+        ) from error
+    if stat.S_ISLNK(mode):
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_PATH_UNSAFE",
+            "Basins source directory component is a symlink.",
+            model_id=model_id,
+            path=str(path),
+            details={"role": role},
+        )
 
 
 def _basin_name(model: dict[str, Any]) -> str:

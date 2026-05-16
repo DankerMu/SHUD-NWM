@@ -28,6 +28,11 @@ SHUD_CANONICAL_SUFFIXES = {
 }
 MAX_BASINS_GIS_FEATURES = 250_000
 MAX_BASINS_GIS_POINTS = 5_000_000
+# SHUD segment evidence files should be tiny count/header or row-count inputs.
+# These guards keep stale or hostile local files from turning import into an
+# unbounded scan before registry writes begin.
+MAX_BASINS_SHUD_EVIDENCE_BYTES = 16 * 1024 * 1024
+MAX_BASINS_SHUD_EVIDENCE_LINES = 250_000
 
 
 class BasinsGeometryError(RuntimeError):
@@ -86,7 +91,7 @@ def parse_basins_geometry(
     """Parse domain and river geometry from inventory-referenced Basins files."""
 
     _validate_required_files_canonical(required_files, shud_input_name, input_dir)
-    input_root = input_dir.resolve()
+    input_root = input_dir
     domain_base = _validated_layer_base(input_root, "domain", required_files)
     river_base = _validated_layer_base(input_root, "river", required_files)
     seg_base = _validated_layer_base(input_root, "seg", required_files)
@@ -502,8 +507,22 @@ def _shud_segment_count(path: Path) -> int:
     _validate_safe_file(path, input_root, role="shud_evidence", error_code="BASINS_REGISTRY_SOURCE_MISSING")
     first: list[str] | None = None
     row_count = 0
+    byte_count = 0
     with path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
+        for line_count, line in enumerate(handle, start=1):
+            _check_resource_limit(
+                line_count,
+                MAX_BASINS_SHUD_EVIDENCE_LINES,
+                "shud_evidence_lines",
+                str(path),
+            )
+            byte_count += len(line.encode("utf-8"))
+            _check_resource_limit(
+                byte_count,
+                MAX_BASINS_SHUD_EVIDENCE_BYTES,
+                "shud_evidence_bytes",
+                str(path),
+            )
             stripped = line.strip()
             if not stripped or stripped.startswith(("#", "//", "%")):
                 continue
@@ -514,6 +533,10 @@ def _shud_segment_count(path: Path) -> int:
                 continue
             if first is None:
                 first = tokens
+                if len(first) == 1:
+                    declared = _optional_int(first[0])
+                    if declared is not None and declared >= 0:
+                        return declared
             row_count += 1
     if first is None:
         raise BasinsGeometryError(

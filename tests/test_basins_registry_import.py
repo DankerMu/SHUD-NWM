@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,34 @@ def test_manifest_must_match_selected_inventory_source_before_database(
     assert error["error_code"] == "BASINS_REGISTRY_SOURCE_MISMATCH"
     assert error["model_id"] == model_id
     assert "shud_input_name" in error["fields"]
+
+
+def test_manifest_source_identity_fields_are_required_before_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["source_inventory_checksum"]
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_REGISTRY_SOURCE_MISMATCH"
+    assert error["model_id"] == model_id
+    assert error["fields"] == ["source_inventory_checksum"]
 
 
 def test_manifest_checksum_conflict_fails_before_database(
@@ -152,6 +181,36 @@ def test_import_rejects_mutated_source_symlink_before_database(
     assert error["model_id"] == model_id
 
 
+def test_import_rejects_input_alias_directory_symlink_before_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    external_model_dir = tmp_path / "external" / "basin-a"
+    external_input_dir = _make_valid_model(external_model_dir, "alias-a", sp_segment_count=2)
+    _copy_matching_fixture_payload(input_dir, external_input_dir)
+    _replace_directory_with_symlink(input_dir, external_input_dir)
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_REGISTRY_PATH_UNSAFE"
+    assert error["model_id"] == model_id
+    assert error["path"] == str(root / "basin-a" / "input" / "alias-a")
+    assert error["role"] == "shud_input_name"
+
+
 def test_parser_rejects_projected_prj_with_epsg(tmp_path: Path) -> None:
     _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
     projected = (
@@ -209,6 +268,45 @@ def test_parser_enforces_resource_limits(tmp_path: Path, monkeypatch: pytest.Mon
 
     assert error.value.error_code == "BASINS_REGISTRY_RESOURCE_LIMIT_EXCEEDED"
     assert error.value.details["resource"] == "features"
+
+
+def test_parser_enforces_shud_evidence_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+    (input_dir / "alias-a.sp.riv").write_text("1 2\n3 4\n", encoding="utf-8")
+    monkeypatch.setattr(basins_geometry, "MAX_BASINS_SHUD_EVIDENCE_LINES", 1)
+
+    with pytest.raises(basins_geometry.BasinsGeometryError) as error:
+        parse_basins_geometry(
+            model_id=model_id,
+            input_dir=input_dir,
+            shud_input_name="alias-a",
+            required_files=model["required_files"],
+        )
+
+    assert error.value.error_code == "BASINS_REGISTRY_RESOURCE_LIMIT_EXCEEDED"
+    assert error.value.details == {"resource": "shud_evidence_lines", "count": 2, "limit": 1}
+
+
+def test_parser_stops_at_declared_shud_count_header(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+    trailing_payload = "\n".join("1 2 3" for _ in range(20))
+    (input_dir / "alias-a.sp.riv").write_text(f"2\n{trailing_payload}\n", encoding="utf-8")
+    (input_dir / "alias-a.sp.rivseg").write_text(f"2\n{trailing_payload}\n", encoding="utf-8")
+    monkeypatch.setattr(basins_geometry, "MAX_BASINS_SHUD_EVIDENCE_LINES", 1)
+
+    parsed = parse_basins_geometry(
+        model_id=model_id,
+        input_dir=input_dir,
+        shud_input_name="alias-a",
+        required_files=model["required_files"],
+    )
+
+    assert parsed.segment_count == 2
+    assert parsed.evidence_counts == {"sp_riv": 2, "sp_rivseg": 2}
 
 
 def test_import_command_requires_database_but_consumes_manifests_first(
@@ -462,6 +560,45 @@ def test_registry_import_checksum_conflict_rolls_back(
 
 
 @pytest.mark.integration
+def test_registry_import_conflicts_on_existing_river_segment_drift(
+    tmp_path: Path,
+    integration_database_url: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    args = [
+        "import-basins-registry",
+        "--inventory",
+        str(inventory_path),
+        "--package-manifest",
+        str(manifest_path),
+        "--database-url",
+        integration_database_url,
+    ]
+    assert _argparse_main(args) == 0
+    capsys.readouterr()
+
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE core.river_segment
+                SET length_m = length_m + 1
+                WHERE river_network_version_id = %s
+                  AND river_segment_id = %s
+                """,
+                ("basins_basin_a_rivnet_vbasins", f"{model_id}_seg_1"),
+            )
+
+    assert _argparse_main(args) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["error_code"] == "BASINS_REGISTRY_CHECKSUM_CONFLICT"
+    assert error["model_id"] == model_id
+    assert error["resource"] == "river_segment"
+
+
+@pytest.mark.integration
 def test_registry_import_mismatch_rolls_back_all_rows(
     tmp_path: Path,
     integration_database_url: str,
@@ -621,6 +758,17 @@ def _make_valid_model(
     forcing.mkdir()
     (forcing / "X000001.csv").write_text("time,value\n2026-01-01,1\n", encoding="utf-8")
     return input_dir
+
+
+def _copy_matching_fixture_payload(source: Path, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+
+
+def _replace_directory_with_symlink(path: Path, target: Path) -> None:
+    shutil.rmtree(path)
+    path.symlink_to(target, target_is_directory=True)
 
 
 def _write_domain_shapefile(base: Path, *, with_hole: bool = False) -> None:
