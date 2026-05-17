@@ -367,3 +367,73 @@ Issue #149 non-goals / deferred:
 - Full staging source-to-frontend chain is handled by #150.
 - National-scale MVT/query/frontend performance is handled by #151.
 - Full production auth/RBAC/alert readiness is handled by #152; #149 still must avoid source credential leakage.
+
+## Issue #150 Fixture Overlay: Staging End-to-End Forecast/Analysis Closure
+
+Fixture level: expanded
+
+Why expanded:
+
+- Connects the already-landed production closure lanes for Slurm (#147), object storage (#148), and meteorology/QC (#149) into one source-to-frontend staging evidence bundle.
+- Touches the opt-in production validation CLI, pipeline orchestration, SHUD output parsing/QC, flood frequency, tile publication, API contract checks, frontend smoke, durable evidence indexing, and redacted config capture.
+
+Change surface:
+
+- `services/production_closure/*` staging E2E validation lane, shared evidence helpers, and CLI dispatch.
+- Existing Slurm/object-store/met production closure evidence readers and contracts from #147-#149.
+- `workers/output_parser/*`, `workers/flood_frequency/*`, `services/tile_publisher/*`, API contract checks, and frontend smoke/playwright helpers where needed.
+- Targeted production E2E/QC/API/frontend tests, `docs/VALIDATION.md`, and `progress.md`.
+
+Must preserve:
+
+- Fast tests and default CI do not require real external networks, production credentials, real object storage, copied `/volume` data, PostGIS integration DB, real Slurm, live SHUD solver, or a running frontend server.
+- Existing #147/#148/#149 validation lanes and their evidence schemas remain compatible.
+- API checks use existing identifier contracts derived from the evidence bundle; no new run_id-specific API filters are introduced unless this issue explicitly implements and documents that contract.
+- Frontend smoke must not rely on mock API routes or local-only placeholder data when claiming staging-published data readiness.
+- Bad SHUD output must fail before flood frequency, tile, API, or frontend publication evidence claims success.
+- Secrets and signed URLs never appear in logs, evidence bundles, API/frontend payloads, docs, PR comments, or smoke screenshots.
+
+Must add/change for #150:
+
+- A documented opt-in `validate-e2e` lane or equivalent command that records source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, selected dependency evidence roots, and evidence root under `artifacts/production-closure/<run_id>/e2e/`.
+- A staging E2E runbook that explicitly selects source cycle, model set, object prefix, Slurm partition/account, DB target, API base, and frontend smoke mode.
+- A deterministic fast path that consumes or synthesizes bounded #147/#148/#149-style evidence without requiring real services, while never claiming live DB/API/Slurm/frontend success unless those checks actually ran.
+- Stage evidence for `download -> canonical -> forcing -> Slurm SHUD -> parse -> flood frequency -> tile publish -> API/frontend`, including status, blockers, input/output URIs, DB IDs, Slurm jobs/logs, QC results, tile artifacts, frontend smoke result, and redacted config.
+- SHUD output QC evidence for malformed `.rivqdown`, NaN/Inf, missing required outputs, count mismatches, and time-axis mismatches, with stable error codes and downstream publication blockers.
+- API evidence that starts from the closure evidence root and queries existing contracts using derived `model_id`, `basin_version_id`, `segment_id`, `source/cycle_time`, `job_id`, and `layer_id`.
+- Frontend smoke evidence that records whether it used a real staging API, a deterministic local API fixture derived from the E2E evidence bundle, or a skipped/not_executed blocker; it must not claim staging frontend readiness from mock-only data.
+- Run-scoped, idempotent evidence/object behavior with explicit same-run `--force` semantics and no cross-run overwrite.
+
+Issue #150 risk packs:
+
+- Public API / CLI / script entry: selected - opt-in `validate-e2e` command, API contract checks, and frontend smoke entrypoints need stable JSON/error behavior.
+- Config / project setup: selected - source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, dependency evidence roots, and evidence root are preflight inputs.
+- File IO / path safety / overwrite: selected - durable evidence bundles, inherited object URIs, tile artifacts, SHUD logs, screenshots/results, and rerun behavior must stay run-scoped and contained.
+- Schema / columns / units / field names: selected - stage manifest, derived identifiers, QC records, flood frequency outputs, tile metadata, API evidence, and frontend lineage fields must stay stable.
+- Geospatial / CRS / shapefile sidecars: selected - tile publication and API/frontend map checks consume model/river/layer identifiers and must not corrupt existing geometry contracts.
+- Time series / forcing / temporal boundaries: selected - source cycle, forcing valid times, SHUD output time axis, forecast series, frequency windows, and frontend timeline evidence are core acceptance.
+- Numerical stability / conservation / NaN: selected - malformed/NaN/Inf/count/time mismatch SHUD outputs must block downstream publication.
+- Solver runtime / performance / threading: selected - consumes Slurm SHUD job evidence and must preserve job/log/QC/runtime linkage from #147.
+- Resource limits / large input / discovery: selected - bounded model set, artifact enumeration, API checks, tile output, frontend smoke, and evidence payloads need deterministic limits.
+- Legacy compatibility / examples: selected - existing fast lanes, M9 Basins contracts, API identifiers, frontend tests, and demo fixtures must continue to pass.
+- Error handling / rollback / partial outputs: selected - failed stage must stop dependent publication while preserving previous/sibling evidence and actionable blockers.
+- Release / packaging / dependency compatibility: selected - Linux/HPC optional services and frontend toolchain availability must be handled by opt-in gates.
+- Documentation / migration notes: selected - staging runbook, validation command, evidence file list, source-to-frontend lineage, and progress/validation docs must be updated.
+
+Issue #150 required evidence:
+
+- Preflight artifact: source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, dependency evidence roots, and evidence root -> redacted JSON with stable missing-input errors and no secret-shaped values.
+- Dependency evidence test: accepted #147/#148/#149 evidence inputs or deterministic equivalents -> validation records each dependency as consumed, skipped, or not_executed without fabricating live success.
+- Stage manifest test: bounded chain input -> stage evidence lists `download`, `canonical`, `forcing`, `slurm`, `parse`, `frequency`, `tile`, `api`, and `frontend` statuses plus blockers and artifact URIs.
+- API contract test: derived identifiers from the evidence bundle -> API evidence queries existing model/detail/forecast/alert/job/log/tile metadata contracts or records `not_executed` with a stable reason; it must not invent run_id-only filters.
+- Frontend smoke test: staging API or deterministic evidence-backed API fixture -> smoke evidence records source/model/run lineage and rejects mock-only placeholder success.
+- SHUD output QC blocker test: malformed `.rivqdown`, NaN/Inf, missing output, count mismatch, or time-axis mismatch -> downstream frequency/tile/API/frontend publication is blocked for that run with stable error metadata and retained raw/log paths.
+- Idempotency/path/redaction test: reruns, unsafe run IDs, credential-shaped API/object/slurm/frontend values, and existing evidence bundles -> no cross-run overwrite, explicit same-run force behavior, path containment, and redacted evidence/stdout/docs.
+- Local verification commands: OpenSpec strict validation, `uv run ruff check .`, targeted production E2E/QC/API/frontend tests, frontend `corepack pnpm test && corepack pnpm build` when UI/generated types change, and documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-e2e --evidence-root ...`.
+
+Issue #150 non-goals / deferred:
+
+- National-scale MVT/query/frontend performance thresholds are handled by #151; #150 only proves bounded staging closure.
+- Production auth/RBAC/alert/rollback readiness is handled by #152; #150 still must avoid secret leakage and record redacted config.
+- New live source credential acquisition is out of scope; #150 consumes #149 evidence or deterministic production-like source evidence.
+- New permanent production deployment is out of scope; #150 emits staging/production-like validation evidence only.
