@@ -336,7 +336,8 @@ The bundle is written under
   `implicit_model_activation=false`.
 - `environment.json` and `summary.json`: redacted command/environment metadata
   and evidence file index. Summary markers include `execution_mode`,
-  `deterministic_fixture`, `live_met_executed`, `live_source_count`, and
+  `deterministic_fixture`, `live_registry_import`, `live_api`,
+  `live_api_status`, `api_contract_source`, and
   `final_production_readiness_claimed=false` for ops dependency closure.
 
 Secret-shaped userinfo, query strings, fragments, and sensitive assignment
