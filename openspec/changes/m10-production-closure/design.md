@@ -295,3 +295,75 @@ Issue #148 non-goals / deferred:
 - Full staging source-to-frontend chain is handled by #150.
 - National-scale MVT/query/frontend performance is handled by #151.
 - Full production auth/RBAC/alert readiness is handled by #152; #148 only proves no implicit activation and safe rollback evidence.
+
+## Issue #149 Fixture Overlay: Live Meteorology Ingestion + QC Closure
+
+Fixture level: expanded
+
+Why expanded:
+
+- Touches opt-in production validation CLI, live/public source config, credential redaction, raw object downloads, canonical conversion, forcing production, QC evidence, best-available lineage, and source availability/error semantics.
+
+Change surface:
+
+- `services/production_closure/*` production met validation lane and docs.
+- `workers/data_adapters/{gfs_adapter.py,ifs_adapter.py,era5_adapter.py,cli.py}` source discovery/download reuse points.
+- `workers/canonical_converter/*`, `workers/forcing_producer/*`, and `packages/common/met_store.py` lineage/QC reuse points.
+- `packages/common/object_store.py`, `packages/common/redaction.py`, and source identity helpers.
+- Targeted adapter/canonical/forcing/production-closure tests, `docs/VALIDATION.md`, and `progress.md`.
+
+Must preserve:
+
+- Fast tests and default CI do not require external network, real GFS/IFS/ERA5/CLDAS credentials, real object storage, copied `/volume` data, PostGIS integration DB, real API, Slurm, or a live SHUD solver.
+- Existing GFS, ERA5, and IFS adapter mock/fixture tests remain compatible.
+- Existing canonical conversion, forcing production, best-available, API contracts, demo seed, and M9 Basins model contracts remain compatible.
+- CLDAS remains restricted/skipped unless explicit credentials and implementation are present; evidence must not fabricate CLDAS success.
+- Source credentials, signed URLs, userinfo, tokens, passwords, and credential-shaped query/path values never appear in stdout, logs, manifests, audit/evidence files, docs, or PR comments.
+
+Must add/change for #149:
+
+- A documented opt-in `validate-met` lane or equivalent command that records enabled source subset, credential/public-path mode, cached fallback policy, cycle window, object prefix, selected Basins model, CLDAS restricted reason, and evidence root under `artifacts/production-closure/<run_id>/met/`.
+- Redacted source configuration templates for GFS, IFS, ERA5, and CLDAS with explicit `enabled`, `disabled`, or `restricted` status and stable blocker codes for missing inputs.
+- Deterministic production-like cycle discovery/download evidence for available GFS/IFS/ERA5 sources, with optional live execution only when source-specific network/credential gates are explicitly enabled; evidence must include file count, byte count, checksum, retry count, source identity, cycle time, raw object URI, unavailable/incomplete source status, and per-source execution mode from `deterministic_fixture|live_executed|skipped|restricted|not_executed`.
+- Bounded source behavior: manifest enumeration, per-file read/download size, retry/backoff, network timeout, source count, forecast-hour count, and evidence payload size must have deterministic limits for fast validation and recorded limits for live validation.
+- Run-scoped object/evidence behavior: raw/canonical/forcing validation scratch objects and evidence bundles must stay under the current `run_id`, refuse cross-run overwrite, validate path containment, and require explicit force/cleanup behavior before replacing an existing same-run bundle.
+- Canonical product evidence from the downloaded raw manifest, including variables, units, time axis, source cycle, object URI, checksum, and malformed/missing raw failure metadata.
+- Forcing production and QC evidence for at least one Basins-backed model, including forcing URI/manifest, source lineage, required variable coverage, continuity, unit, missing-value, and range checks.
+- Best-available lineage evidence that records selected source per valid time or explicit skipped/restricted reason without claiming live success for non-executed sources.
+
+Issue #149 risk packs:
+
+- Public API / CLI / script entry: selected - opt-in `validate-met` production closure command and existing source worker CLIs need stable JSON/error behavior.
+- Config / project setup: selected - enabled source subset, credential/public path, cached fallback, cycle window, object prefix, selected model, and CLDAS restricted reason are preflight inputs.
+- File IO / path safety / overwrite: selected - raw/canonical/forcing object writes, manifests, evidence bundles, cache fallback, and cleanup/idempotency must stay contained and avoid unintentional overwrite.
+- Schema / columns / units / field names: selected - source config, raw manifest, canonical product metadata, forcing manifest, QC records, and best-available lineage fields must stay stable.
+- Geospatial / CRS / shapefile sidecars: not selected - #149 uses an existing Basins-backed model and does not alter river geometry or CRS sidecars.
+- Time series / forcing / temporal boundaries: selected - cycle windows, forecast hours, valid times, time-axis continuity, best-available selection, and forcing coverage are core acceptance.
+- Numerical stability / conservation / NaN: selected - forcing QC must reject missing/non-finite/out-of-range variables and malformed source/canonical values; hydrologic skill certification remains non-goal.
+- Solver runtime / performance / threading: not selected - #149 stops at forcing/QC readiness and does not run live SHUD solver workloads.
+- Resource limits / large input / discovery: selected - live discovery/download, raw/canonical file sizes, retry loops, and manifest enumeration must be bounded for fast lanes.
+- Legacy compatibility / examples: selected - existing mock adapters, demo GFS/IFS/ERA5 data, source-id normalization, and Basins fixture assumptions must continue to pass.
+- Error handling / rollback / partial outputs: selected - unavailable source cycles, restricted CLDAS, partial downloads, failed canonical conversion, and failed forcing QC need stable evidence without corrupting successful sibling evidence.
+- Release / packaging / dependency compatibility: selected - Linux/HPC environments may lack optional live-source dependencies or credentials; default validation must remain deterministic.
+- Documentation / migration notes: selected - runbook, validation command, evidence file list, source credential policy, CLDAS restricted policy, and progress/validation docs must be updated.
+
+Issue #149 required evidence:
+
+- Preflight artifact: enabled sources, credential/public-path mode, cached fallback policy, cycle window, object prefix, selected model/version, CLDAS restricted reason, and evidence root -> redacted JSON with no secret-shaped values.
+- Source config template test: GFS/IFS/ERA5/CLDAS config with credential-shaped values -> evidence reports enabled/disabled/restricted status and redacts secret values.
+- Cycle discovery/download test: deterministic production-like cycle for at least one GFS/IFS/ERA5 source -> raw manifest with file count, byte count, checksum, retry count, source identity, cycle time, raw object URI, per-source execution mode, and stable unavailable/incomplete status for skipped sources.
+- Bounds test: oversized source manifests/files/retry plans/evidence payloads -> stable blocker evidence before unbounded enumeration, reads, retries, or writes.
+- Idempotency/path test: existing same-run and different-run raw/canonical/forcing/evidence objects -> no cross-run overwrite, explicit same-run force/cleanup behavior, and path containment enforcement.
+- Canonical conversion test: raw manifest -> canonical product metadata with variable/unit/time-axis/source-cycle/object-URI/checksum evidence, and stable failure for malformed or missing raw inputs.
+- Forcing/QC test: canonical products plus Basins-backed model -> forcing manifest/package URI and QC result for continuity, units, missing values, variable ranges, and pass/fail status.
+- Best-available lineage test: executed and skipped/restricted source set -> selected source or explicit reason per valid time without fabricated CLDAS/live-source success.
+- Redaction test: source endpoints, object prefixes, manifests, stdout, docs, and PR evidence containing token/password/signed-URL-shaped values -> emitted evidence replaces sensitive values with redaction markers.
+- Local verification commands: OpenSpec strict validation, `uv run ruff check .`, targeted data adapter/canonical/forcing/QC/production-closure tests, and documented opt-in validation command when `NHMS_RUN_PRODUCTION_CLOSURE=1`.
+
+Issue #149 non-goals / deferred:
+
+- Real Slurm workload and SHUD accounting evidence are handled by #147 and #150.
+- Production object-store copied-root migration is handled by #148; #149 consumes object prefix contracts only.
+- Full staging source-to-frontend chain is handled by #150.
+- National-scale MVT/query/frontend performance is handled by #151.
+- Full production auth/RBAC/alert readiness is handled by #152; #149 still must avoid source credential leakage.
