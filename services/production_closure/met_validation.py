@@ -980,12 +980,24 @@ def _summary(
     canonical_evidence: Mapping[str, Any],
     forcing_manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
+    source_modes = [
+        str(source.get("execution_mode"))
+        for source in raw_evidence.get("sources", [])
+        if isinstance(source, Mapping)
+    ]
+    live_source_count = sum(1 for mode in source_modes if mode == "live_executed")
+    deterministic_fixture = live_source_count == 0
     return {
         "schema": "nhms.production_closure.met.v1",
         "issue": 149,
         "run_id": config.run_id,
         "status": status,
         "evidence_dir": str(config.lane_dir),
+        "execution_mode": "live_source_ingest" if live_source_count else "deterministic_fixture",
+        "deterministic_fixture": deterministic_fixture,
+        "live_met_executed": live_source_count > 0,
+        "live_source_count": live_source_count,
+        "final_production_readiness_claimed": False,
         "object_prefix": config.object_prefix,
         "enabled_sources": list(config.enabled_sources),
         "cycle_time": _format_time(config.cycle_start),

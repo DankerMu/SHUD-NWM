@@ -821,12 +821,19 @@ def _summary(
     tile_evidence: Mapping[str, Any],
     frontend_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
+    live_db_executed = query_evidence["live_db_executed"]
+    live_api_executed = query_evidence["live_api_executed"]
+    live_frontend_executed = frontend_evidence["live_frontend_executed"]
+    deterministic_fixture = not (live_db_executed and live_api_executed and live_frontend_executed)
     return {
         "schema": "nhms.production_closure.scale.v1",
         "issue": 151,
         "run_id": config.run_id,
         "status": status,
         "evidence_dir": str(config.lane_dir),
+        "execution_mode": "live_scale_validation" if not deterministic_fixture else "deterministic_fixture",
+        "deterministic_fixture": deterministic_fixture,
+        "final_production_readiness_claimed": False,
         "dataset_source": config.dataset_source,
         "segment_count": dataset_manifest["segment_count"],
         "model_count": dataset_manifest["model_count"],
@@ -836,9 +843,9 @@ def _summary(
         "production_mvt_readiness_claimed": tile_evidence["production_mvt_readiness_claimed"],
         "query_status": query_evidence["status"],
         "frontend_status": frontend_evidence["status"],
-        "live_db_executed": query_evidence["live_db_executed"],
-        "live_api_executed": query_evidence["live_api_executed"],
-        "live_frontend_executed": frontend_evidence["live_frontend_executed"],
+        "live_db_executed": live_db_executed,
+        "live_api_executed": live_api_executed,
+        "live_frontend_executed": live_frontend_executed,
         "blockers": blockers,
         "ready_semantics": (
             "ready means deterministic thresholds pass and tile expectation is satisfied; GeoJSON compatibility "

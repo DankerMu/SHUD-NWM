@@ -877,12 +877,27 @@ def _summary(
     api_evidence: Mapping[str, Any],
     frontend_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
+    live_stage_fields = {
+        "live_db_executed": False,
+        "live_api_executed": api_evidence.get("live_api_executed") is True,
+        "live_slurm_executed": False,
+        "live_frontend_executed": frontend_evidence.get("live_frontend_executed") is True,
+    }
+    for stage in stage_manifest.get("stages", []):
+        if isinstance(stage, Mapping) and stage.get("stage") == "slurm":
+            live_stage_fields["live_slurm_executed"] = stage.get("live_success_claimed") is True
+            break
+    deterministic_fixture = not all(live_stage_fields.values())
     return {
         "schema": "nhms.production_closure.e2e.v1",
         "issue": 150,
         "run_id": config.run_id,
         "status": status,
         "evidence_dir": str(config.lane_dir),
+        "execution_mode": "live_e2e_executed" if not deterministic_fixture else "deterministic_fixture",
+        "deterministic_fixture": deterministic_fixture,
+        **live_stage_fields,
+        "final_production_readiness_claimed": False,
         "source_cycle": _format_time(config.source_cycle),
         "model_set": list(config.model_set),
         "db_target": config.db_target,

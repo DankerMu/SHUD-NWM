@@ -34,6 +34,8 @@ DEFAULT_OBJECT_STORE_TARGET = "local-production-like"
 DEFAULT_CLEANUP_POLICY = "quarantine"
 FORBIDDEN_RUNTIME_SOURCE_FRAGMENTS = ("data/Basins", "/volume/")
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+MAX_PERCENT_DECODE_ROUNDS = 4
+ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 MAX_STORED_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
 SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
     r"(?:^|[;?#&])[^=/?#;&]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|"
@@ -1161,14 +1163,69 @@ def _validate_object_store_prefix_safe(prefix: str) -> None:
             "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
             "Object-store prefix must not contain fragments.",
         )
-    for raw_segment in parsed.path.split("/"):
-        segment = unquote(raw_segment)
-        decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(segment)
+    for decoded in _canonical_decode_steps(prefix):
+        if ENCODED_SEPARATOR_RE.search(decoded):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                "Object-store prefix path must not contain encoded separators.",
+            )
+        if SENSITIVE_PREFIX_ASSIGNMENT_RE.search(decoded):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                "Object-store prefix must not contain credential assignments.",
+            )
+        decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(decoded)
         if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in decoded_parts):
             raise ProductionObjectStoreValidationError(
                 "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
-                "Object-store prefix path segments must not contain credential assignments.",
+                "Object-store prefix must not contain credential assignments.",
             )
+        decoded_parsed = urlsplit(decoded)
+        if decoded_parsed.username or decoded_parsed.password:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                "Object-store prefix must not contain userinfo credentials.",
+            )
+        _guard_url_authority(decoded_parsed.netloc)
+        for segment in decoded_parsed.path.split("/"):
+            if segment in {".", ".."} or "\\" in segment:
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                    "Object-store prefix path must not contain traversal.",
+                )
+
+
+def _guard_url_authority(netloc: str) -> None:
+    if not netloc:
+        return
+    if "/" in netloc or "\\" in netloc:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix URL authority must not contain separators.",
+        )
+    host = netloc.rsplit("@", maxsplit=1)[-1].split(":", maxsplit=1)[0]
+    if host in {".", ".."} or any(segment in {"", ".", ".."} for segment in host.split(".")):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix URL authority must not contain traversal.",
+        )
+
+
+def _canonical_decode_steps(value: str) -> tuple[str, ...]:
+    steps = [value]
+    current = value
+    for _ in range(MAX_PERCENT_DECODE_ROUNDS):
+        decoded = unquote(current)
+        if decoded == current:
+            break
+        steps.append(decoded)
+        current = decoded
+    if unquote(current) != current:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix contains over-encoded percent escapes.",
+        )
+    return tuple(steps)
 
 
 def _operational_prefix(value: str) -> str:

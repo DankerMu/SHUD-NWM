@@ -33,6 +33,11 @@ def test_validate_slurm_fake_lane_writes_required_evidence_and_redacts(monkeypat
     lane_dir = evidence_root / "m10_147" / "slurm"
     assert summary["status"] == "ready"
     assert summary["evidence_dir"] == str(lane_dir)
+    assert summary["execution_mode"] == "deterministic_fixture"
+    assert summary["deterministic_fixture"] is True
+    assert summary["live_slurm_executed"] is False
+    assert summary["live_slurm_status"] == "not_executed"
+    assert summary["final_production_readiness_claimed"] is False
     for name in summary["files"]:
         assert (lane_dir / name).exists()
 

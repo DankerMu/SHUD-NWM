@@ -37,6 +37,11 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert exit_code == 0
     assert summary["status"] == "ready"
     assert summary["evidence_dir"] == str(lane_dir)
+    assert summary["execution_mode"] == "deterministic_fixture"
+    assert summary["deterministic_fixture"] is True
+    assert summary["live_met_executed"] is False
+    assert summary["live_source_count"] == 0
+    assert summary["final_production_readiness_claimed"] is False
     assert summary["object_prefix"] == "s3://nhms-prod/met/runs/m10_149/met"
     assert "raw_cycle_manifest.json" in summary["files"]
     assert sorted(summary["files"]) == sorted(path.name for path in lane_dir.glob("*.json") if path.is_file())

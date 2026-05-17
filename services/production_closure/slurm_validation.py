@@ -342,12 +342,19 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         status = "blocked"
     elif config.submit:
         status = "submitted"
+    live_slurm_executed = accounting.get("mode") == "submitted" and not blockers and not accounting_blockers
+    deterministic_fixture = not live_slurm_executed
     summary = {
         "schema": "nhms.production_closure.slurm.v1",
         "issue": 147,
         "run_id": config.run_id,
         "status": status,
         "evidence_dir": str(config.lane_dir),
+        "execution_mode": "live_slurm_submitted" if live_slurm_executed else "deterministic_fixture",
+        "deterministic_fixture": deterministic_fixture,
+        "live_slurm_executed": live_slurm_executed,
+        "live_slurm_status": "executed" if live_slurm_executed else "not_executed",
+        "final_production_readiness_claimed": False,
         "blockers": all_blockers,
         "files": [
             "preflight.json",

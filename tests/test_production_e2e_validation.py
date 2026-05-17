@@ -19,6 +19,13 @@ def test_validate_e2e_default_lane_writes_required_ready_evidence(tmp_path: Path
 
     lane_dir = tmp_path / "artifacts" / "m10_150" / "e2e"
     assert summary["status"] == "ready"
+    assert summary["execution_mode"] == "deterministic_fixture"
+    assert summary["deterministic_fixture"] is True
+    assert summary["live_db_executed"] is False
+    assert summary["live_api_executed"] is False
+    assert summary["live_slurm_executed"] is False
+    assert summary["live_frontend_executed"] is False
+    assert summary["final_production_readiness_claimed"] is False
     assert summary["stage_statuses"] == {
         "download": "ready",
         "canonical": "ready",

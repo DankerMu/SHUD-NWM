@@ -250,6 +250,7 @@ def test_validate_ops_dependency_closure_requires_external_acceptance_receipt_fo
             "deterministic_fixture": False,
             "final_production_readiness_claimed": False,
             "live_slurm_executed": True,
+            "live_slurm_status": "executed",
         },
     )
 
@@ -367,6 +368,41 @@ def test_validate_ops_accepts_object_store_only_with_summary_live_proof_and_rece
     ).hexdigest()
 
 
+def test_validate_ops_rejects_spoofed_live_field_even_with_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        extra={
+            "execution_mode": "accepted_live_evidence",
+            "deterministic_fixture": False,
+            "final_production_readiness_claimed": False,
+            "live_spoof": True,
+        },
+    )
+    _write_dependency_acceptance_receipt(summary_path, "slurm", 147, "nhms.production_closure.slurm.v1")
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="spoofed_live_field",
+            slurm_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "spoofed_live_field" / "ops" / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert slurm["status"] == "blocked"
+    assert slurm["deterministic_fixture"] is False
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING"
+    assert "producer-level non-deterministic/live execution proof" in slurm["reason"]
+
+
 def test_validate_ops_dependency_receipt_uses_bounded_summary_digest_without_second_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -385,6 +421,7 @@ def test_validate_ops_dependency_receipt_uses_bounded_summary_digest_without_sec
             "deterministic_fixture": False,
             "final_production_readiness_claimed": False,
             "live_slurm_executed": True,
+            "live_slurm_status": "executed",
         },
     )
     summary_bytes = summary_path.read_bytes()
@@ -1000,22 +1037,34 @@ def _write_dependency_summary(
         "evidence_dir": str(path.parent),
     }
     if accepted:
+        live_fields_by_dependency = {
+            "slurm": {"live_slurm_executed": True, "live_slurm_status": "executed"},
+            "object_store": {
+                "live_registry_import": True,
+                "live_api": True,
+                "live_api_status": "executed",
+            },
+            "met": {"live_met_executed": True, "live_source_count": 1},
+            "e2e": {
+                "live_db_executed": True,
+                "live_api_executed": True,
+                "live_slurm_executed": True,
+                "live_frontend_executed": True,
+            },
+            "scale": {
+                "live_db_executed": True,
+                "live_api_executed": True,
+                "live_frontend_executed": True,
+            },
+        }
         payload.update(
             {
                 "execution_mode": "accepted_live_evidence",
                 "deterministic_fixture": False,
                 "final_production_readiness_claimed": False,
-                f"live_{name}_executed": True,
+                **live_fields_by_dependency[name],
             }
         )
-        if name == "object_store":
-            payload.update(
-                {
-                    "live_registry_import": True,
-                    "live_api": True,
-                    "live_api_status": "executed",
-                }
-            )
     if extra:
         payload.update(extra)
     path.write_text(

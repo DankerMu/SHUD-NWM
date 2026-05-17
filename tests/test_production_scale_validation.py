@@ -26,6 +26,9 @@ def test_validate_scale_default_lane_writes_required_ready_evidence(tmp_path: Pa
 
     lane_dir = tmp_path / "artifacts" / "m10_151" / "scale"
     assert summary["status"] == "ready"
+    assert summary["execution_mode"] == "deterministic_fixture"
+    assert summary["deterministic_fixture"] is True
+    assert summary["final_production_readiness_claimed"] is False
     assert summary["dataset_source"] == "deterministic_large_fixture"
     assert summary["production_mvt_readiness_claimed"] is False
     assert summary["live_db_executed"] is False

@@ -155,6 +155,51 @@ ACCEPTED_DEPENDENCY_RECEIPT_KEY = "accepted_dependency_evidence"
 ACCEPTED_DEPENDENCY_RECEIPT_SCHEMA = "nhms.production_closure.ops.accepted_dependency_evidence.v1"
 ACCEPTED_DEPENDENCY_EXECUTION_MODES = {"accepted_live_evidence", "live_executed", "consumed_live_evidence"}
 LIVE_READY_DEPENDENCIES = frozenset(DEPENDENCY_CONTRACTS)
+PRODUCER_LIVE_PROOF_CONTRACTS = {
+    "slurm": {
+        "execution_modes": {
+            "accepted_live_evidence",
+            "live_executed",
+            "consumed_live_evidence",
+            "live_slurm_submitted",
+        },
+        "required_true": ("live_slurm_executed",),
+        "required_values": {"live_slurm_status": "executed"},
+    },
+    "object_store": {
+        "execution_modes": {
+            "accepted_live_evidence",
+            "live_executed",
+            "consumed_live_evidence",
+            "live_registry_import_and_live_api",
+        },
+        "required_true": ("live_registry_import", "live_api"),
+        "required_values": {"live_api_status": "executed"},
+    },
+    "met": {
+        "execution_modes": {"accepted_live_evidence", "live_executed", "consumed_live_evidence", "live_source_ingest"},
+        "required_true": ("live_met_executed",),
+        "minimum_counts": {"live_source_count": 1},
+    },
+    "e2e": {
+        "execution_modes": {"accepted_live_evidence", "live_executed", "consumed_live_evidence", "live_e2e_executed"},
+        "required_true": (
+            "live_db_executed",
+            "live_api_executed",
+            "live_slurm_executed",
+            "live_frontend_executed",
+        ),
+    },
+    "scale": {
+        "execution_modes": {
+            "accepted_live_evidence",
+            "live_executed",
+            "consumed_live_evidence",
+            "live_scale_validation",
+        },
+        "required_true": ("live_db_executed", "live_api_executed", "live_frontend_executed"),
+    },
+}
 ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 
 
@@ -1111,7 +1156,7 @@ def _has_accepted_dependency_evidence(
         return False, "Dependency summary is deterministic/non-live evidence and cannot be accepted by ops closure."
     if summary.get("final_production_readiness_claimed") is True:
         return False, "Dependency summary must not claim final production readiness."
-    if name in LIVE_READY_DEPENDENCIES and not _summary_has_accepted_live_proof(summary):
+    if name in LIVE_READY_DEPENDENCIES and not _summary_has_accepted_live_proof(name, summary):
         return (
             False,
             "Dependency summary is missing producer-level non-deterministic/live execution proof; "
@@ -1190,21 +1235,30 @@ def _summary_has_deterministic_evidence(summary: Mapping[str, Any]) -> bool:
     return False
 
 
-def _summary_has_accepted_live_proof(summary: Mapping[str, Any]) -> bool:
+def _summary_has_accepted_live_proof(name: str, summary: Mapping[str, Any]) -> bool:
     if summary.get("deterministic_fixture") is not False:
         return False
+    if summary.get("final_production_readiness_claimed") is not False:
+        return False
+    contract = PRODUCER_LIVE_PROOF_CONTRACTS.get(name)
+    if contract is None:
+        return False
     execution_mode = str(summary.get("execution_mode", ""))
-    if execution_mode not in ACCEPTED_DEPENDENCY_EXECUTION_MODES and _is_deterministic_execution_mode(execution_mode):
+    if execution_mode not in contract["execution_modes"]:
         return False
-    live_fields = [(key, value) for key, value in _walk_summary_fields(summary) if key.startswith("live_")]
-    if not live_fields:
+    if _is_deterministic_execution_mode(execution_mode):
         return False
-    for key, value in live_fields:
-        if value is False:
+    for required_field in contract.get("required_true", ()):
+        if summary.get(required_field) is not True:
             return False
-        if key.endswith("_status") and str(value) != "executed":
+    for required_field, expected in contract.get("required_values", {}).items():
+        if summary.get(required_field) != expected:
             return False
-    return any(value is True for _key, value in live_fields)
+    for required_field, minimum in contract.get("minimum_counts", {}).items():
+        value = summary.get(required_field)
+        if not isinstance(value, int) or value < minimum:
+            return False
+    return True
 
 
 def _walk_summary_fields(value: Any) -> tuple[tuple[str, Any], ...]:

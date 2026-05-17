@@ -228,7 +228,9 @@ contains:
   this evidence verified only when the controlled-failure marker is present in
   task `1` shared logs.
 - `environment.json` and `summary.json`: redacted command/environment metadata
-  and evidence file index.
+  and evidence file index. Summary markers include `execution_mode`,
+  `deterministic_fixture`, `live_slurm_executed`, `live_slurm_status`, and
+  `final_production_readiness_claimed=false` for ops dependency closure.
 
 Secrets and signed URL-shaped values are redacted from the rendered script and
 all JSON evidence touched by this lane.
@@ -333,7 +335,9 @@ The bundle is written under
   written keys/rows, cleanup or quarantine status, and
   `implicit_model_activation=false`.
 - `environment.json` and `summary.json`: redacted command/environment metadata
-  and evidence file index.
+  and evidence file index. Summary markers include `execution_mode`,
+  `deterministic_fixture`, `live_met_executed`, `live_source_count`, and
+  `final_production_readiness_claimed=false` for ops dependency closure.
 
 Secret-shaped userinfo, query strings, fragments, and sensitive assignment
 values are redacted from evidence.
@@ -514,7 +518,9 @@ The bundle is written under
   claim staging frontend readiness from mock-only data.
 - `environment.json` and `summary.json`: redacted command/environment metadata,
   stage statuses, blockers, object URIs, logs, QC result, tile artifacts, and
-  evidence file index.
+  evidence file index. Summary markers include `execution_mode`,
+  `deterministic_fixture`, DB/API/Slurm/frontend live execution booleans, and
+  `final_production_readiness_claimed=false` for ops dependency closure.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs are rejected before writes. Secret-shaped object/API,
@@ -602,7 +608,10 @@ Evidence is written under
   `live_frontend_executed=false`.
 - `resource_bounds_evidence.json`, `environment.json`, and `summary.json`:
   bounded oversized bbox, long time range, object-listing behavior, redacted
-  environment, final readiness, and file index.
+  environment, final readiness, and file index. Summary markers include
+  `execution_mode`, `deterministic_fixture`, DB/API/frontend live execution
+  booleans, and `final_production_readiness_claimed=false` for ops dependency
+  closure.
 
 MVT blocker semantics are explicit. In the default GeoJSON compatibility mode
 the lane may be `ready`, but `production_mvt_readiness_claimed=false`. If
@@ -716,7 +725,13 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   `deterministic_fixture=false`, `final_production_readiness_claimed=false`,
   and a non-deterministic `execution_mode` such as
   `accepted_live_evidence`. The producer summary itself must also expose
-  non-deterministic/live proof; a sidecar receipt alone is not enough.
+  recognized lane-specific non-deterministic/live proof; a sidecar receipt
+  alone is not enough. The recognized summary contracts are
+  `live_slurm_executed=true` plus `live_slurm_status=executed` for #147,
+  `live_registry_import=true`, `live_api=true`, and
+  `live_api_status=executed` for #148, `live_met_executed=true` with
+  `live_source_count>=1` for #149, and all documented live execution booleans
+  true for #150/#151. Arbitrary `live_*` fields are ignored.
   Deterministic or non-live summaries, summaries that claim final production
   readiness, or summaries with missing/mismatched receipt fields are recorded as
   skipped or blocked, not accepted.

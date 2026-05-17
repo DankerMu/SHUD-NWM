@@ -174,6 +174,17 @@ def test_validate_object_store_rejects_unsafe_prefix_before_writing_evidence(
         "s3://nhms-prod/path%23x-amz-signature=abc/m10",
         "s3://nhms-prod/path%252Ftoken=secret/m10",
         "s3://nhms-prod/path%252Fx-amz-signature=abc/m10",
+        "s3://bucket/%2E%2E/prod",
+        "s3://bucket/prod%2Fsecret",
+        "s3://bucket/prod%5Csecret",
+        "s3://bucket/prod\\secret",
+        "s3://bucket/%252Ftoken=secret/prod",
+        "s3://%2E%2E/prod",
+        "s3://bucket.%2E/prod",
+        "s3://bucket/path%3Fcredential=abc",
+        "s3://bucket/path%23credential=abc",
+        "s3://bucket/path%3Bcredential=abc",
+        "s3://bucket/path%26credential=abc",
     ],
 )
 def test_validate_object_store_rejects_sensitive_prefix_shapes_without_lane_evidence(
