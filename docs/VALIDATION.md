@@ -474,16 +474,20 @@ The bundle is written under
   self-contained execution policy.
 - `dependency_status.json`: supplied #147/#148/#149 summaries are consumed only
   when they use the expected production-closure schema/issue and an allowed
-  success status such as `ready`. Missing, malformed, failed, blocked,
-  `not_executed`, unknown, or wrong-lane summaries block the chain. Omitted
-  roots are recorded as skipped deterministic equivalents without fabricating
-  live Slurm/object-store/met success.
+  success status such as `ready`; #147 Slurm submit evidence also accepts
+  `submitted`. Missing, malformed, failed, blocked, `not_executed`, unknown, or
+  wrong-lane summaries block the chain. Omitted roots are recorded as skipped
+  deterministic equivalents without fabricating live Slurm/object-store/met
+  success.
 - `stage_manifest.json`: statuses, blockers, inputs, outputs, object URIs, DB
   IDs, Slurm job ID, and derived `model_id`, `basin_version_id`, `segment_id`,
   `source/cycle_time`, `job_id`, and `layer_id` for download, canonical,
   forcing, slurm, parse, frequency, tile, API, and frontend stages. Fast mode
   outputs point at concrete local artifact manifests under
-  `stage_artifacts/` instead of claiming live DB/object/tile publication.
+  `stage_artifacts/` instead of claiming live DB/object/tile publication. If a
+  supplied dependency evidence root blocks the chain, stage manifest outputs are
+  empty and any durable `stage_artifacts/**/*.json` payloads are explicit
+  `blocked`/`not_executed` records, not ready artifacts.
 - `shud_output_qc.json`: deterministic SHUD `.rivqdown` QC with stable blockers
   for missing `.rivqdown`, malformed columns, NaN/Inf, missing required output,
   count mismatch, and time-axis mismatch. Failed QC blocks parse, frequency,

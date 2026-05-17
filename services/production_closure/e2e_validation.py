@@ -49,7 +49,7 @@ DEPENDENCY_SUMMARY_CONTRACTS = {
     "slurm": {
         "issue": 147,
         "schema": "nhms.production_closure.slurm.v1",
-        "allowed_statuses": {"ready"},
+        "allowed_statuses": {"ready", "submitted"},
     },
     "object_store": {
         "issue": 148,
@@ -255,7 +255,7 @@ def validate_e2e(config: ProductionE2EConfig) -> dict[str, Any]:
     qc = _write_shud_output_qc(config, writer, derived_ids)
     writer.write_json(config.lane_dir / "shud_output_qc.json", qc)
 
-    stage_artifacts = _write_stage_artifacts(config, writer, derived_ids, qc)
+    stage_artifacts = _write_stage_artifacts(config, writer, derived_ids, dependency_status, qc)
     stage_manifest = _stage_manifest(config, derived_ids, dependency_status, qc, stage_artifacts)
     writer.write_json(config.lane_dir / "stage_manifest.json", stage_manifest)
 
@@ -500,18 +500,48 @@ def _write_shud_output_qc(
     writer: EvidenceWriter,
     derived_ids: Mapping[str, Any],
 ) -> dict[str, Any]:
-    raw_dir = config.lane_dir / "raw" / "shud"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = _safe_raw_shud_dir(config)
     rivqdown_path = raw_dir / f"{config.run_id}.rivqdown"
     log_path = raw_dir / "shud.log"
     if config.force:
-        _remove_current_qc_outputs(rivqdown_path, log_path)
+        _remove_current_qc_outputs(config, rivqdown_path, log_path)
     _write_qc_fixture(config, writer, rivqdown_path, log_path)
     return _qc_result(config, rivqdown_path, log_path, derived_ids)
 
 
-def _remove_current_qc_outputs(*paths: Path) -> None:
+def _safe_raw_shud_dir(config: ProductionE2EConfig) -> Path:
+    raw_dir = config.lane_dir / "raw" / "shud"
+    _validate_evidence_path_contained(config, raw_dir, path_kind="SHUD raw output directory")
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    _validate_evidence_path_contained(config, raw_dir, path_kind="SHUD raw output directory")
+    return raw_dir
+
+
+def _validate_evidence_path_contained(config: ProductionE2EConfig, path: Path, *, path_kind: str) -> None:
+    _refuse_symlink_components(path)
+    resolved_path = path.resolve(strict=False)
+    resolved_lane = config.lane_dir.resolve(strict=False)
+    for root, message in (
+        (config.evidence_root, "Evidence path must stay under evidence root."),
+        (resolved_lane, "Evidence path must stay under evidence lane."),
+    ):
+        try:
+            resolved_path.relative_to(root)
+        except ValueError as error:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+                message,
+            ) from error
+    if path.is_symlink():
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_SYMLINK",
+            f"{path_kind} must not be a symlink: {path}",
+        )
+
+
+def _remove_current_qc_outputs(config: ProductionE2EConfig, *paths: Path) -> None:
     for path in paths:
+        _validate_evidence_path_contained(config, path, path_kind="SHUD raw output")
         if path.exists() or path.is_symlink():
             if path.is_symlink():
                 raise ProductionE2EValidationError(
@@ -557,6 +587,8 @@ def _qc_result(
     log_path: Path,
     derived_ids: Mapping[str, Any],
 ) -> dict[str, Any]:
+    _validate_evidence_path_contained(config, rivqdown_path, path_kind="SHUD raw output")
+    _validate_evidence_path_contained(config, log_path, path_kind="SHUD raw output")
     retained_paths = {
         "raw_output_dir": str(rivqdown_path.parent),
         "rivqdown": str(rivqdown_path) if rivqdown_path.exists() else None,
@@ -940,6 +972,7 @@ def _write_stage_artifacts(
     config: ProductionE2EConfig,
     writer: EvidenceWriter,
     derived_ids: Mapping[str, Any],
+    dependency_status: Mapping[str, Any],
     qc: Mapping[str, Any],
 ) -> dict[str, list[str]]:
     artifacts_dir = config.lane_dir / "stage_artifacts"
@@ -969,6 +1002,16 @@ def _write_stage_artifacts(
         "live_slurm_executed": False,
         "live_frontend_executed": False,
     }
+    dependency_blocker = _dependency_stage_blocker(dependency_status)
+    if dependency_blocker:
+        for stage_name, stage_outputs in outputs.items():
+            for output in stage_outputs:
+                if output.endswith(".json"):
+                    writer.write_json(
+                        Path(output),
+                        _blocked_stage_artifact_payload(config, stage_name, derived_ids, dependency_blocker),
+                    )
+        return outputs
     writer.write_json(
         Path(outputs["download"][0]),
         {
@@ -1083,6 +1126,32 @@ def _write_stage_artifacts(
             },
         )
     return outputs
+
+
+def _blocked_stage_artifact_payload(
+    config: ProductionE2EConfig,
+    stage_name: str,
+    derived_ids: Mapping[str, Any],
+    dependency_blocker: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": f"nhms.production_closure.e2e.stage.{stage_name}.v1",
+        "run_id": config.run_id,
+        "source_cycle": _format_time(config.source_cycle),
+        "model_id": derived_ids["model_id"],
+        "source": derived_ids["source"],
+        "cycle_time": derived_ids["cycle_time"],
+        "status": "blocked",
+        "execution_mode": "not_executed",
+        "live_db_executed": False,
+        "live_api_executed": False,
+        "live_slurm_executed": False,
+        "live_frontend_executed": False,
+        "blockers": [dict(dependency_blocker)],
+        "reason": (
+            "Stage artifact was not executed because dependency evidence is missing, blocked, invalid, or not ready."
+        ),
+    }
 
 
 def _api_contract_queries(derived_ids: Mapping[str, Any]) -> list[dict[str, Any]]:

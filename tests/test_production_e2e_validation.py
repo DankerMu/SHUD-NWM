@@ -143,6 +143,39 @@ def test_validate_e2e_consumes_dependency_summaries_without_claiming_live_succes
     assert {item["summary_status"] for item in dependencies} == {"ready"}
 
 
+def test_validate_e2e_consumes_submitted_slurm_dependency_summary(tmp_path: Path) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    (root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.slurm.v1",
+                "issue": 147,
+                "run_id": "slurm-submit-run",
+                "status": "submitted",
+                "evidence_dir": str(root),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="submitted-slurm",
+            slurm_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "submitted-slurm" / "e2e"
+    dependencies = _read_json(lane_dir / "dependency_status.json")["dependencies"]
+    slurm_dependency = next(item for item in dependencies if item["dependency"] == "slurm")
+    assert summary["status"] == "ready"
+    assert slurm_dependency["status"] == "consumed"
+    assert slurm_dependency["summary_status"] == "submitted"
+    assert slurm_dependency["live_success_claimed"] is False
+
+
 def test_validate_e2e_blocks_on_blocked_dependency_summary(tmp_path: Path) -> None:
     root = tmp_path / "met"
     root.mkdir()
@@ -171,6 +204,9 @@ def test_validate_e2e_blocks_on_blocked_dependency_summary(tmp_path: Path) -> No
     assert summary["blockers"][0]["error_code"] == "PRODUCTION_E2E_DEPENDENCY_BLOCKED"
     assert set(stage_manifest["stage_statuses"].values()) == {"blocked"}
     assert all(not stage["outputs"] for stage in stage_manifest["stages"])
+    for payload in _stage_artifact_json_payloads(lane_dir):
+        assert payload.get("status") != "ready"
+        assert payload.get("metadata", {}).get("status") != "ready"
     assert api["status"] == "blocked"
     assert api["execution_mode"] == "not_executed"
     assert frontend["status"] == "blocked"
@@ -357,6 +393,23 @@ def test_validate_e2e_force_does_not_reuse_stale_shud_raw_outputs(
     assert qc["retained_paths"][missing_name] is None
 
 
+def test_validate_e2e_force_refuses_symlinked_raw_parent_without_unlinking_external_file(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / "rawlink" / "e2e"
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / "rawlink.rivqdown"
+    external_file.write_text("external evidence must remain\n", encoding="utf-8")
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "raw").symlink_to(external_dir, target_is_directory=True)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(ProductionE2EConfig.from_env(evidence_root=evidence_root, run_id="rawlink", force=True))
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_SYMLINK"
+    assert external_file.read_text(encoding="utf-8") == "external evidence must remain\n"
+
+
 def test_validate_e2e_rejects_multi_model_set_before_writes(tmp_path: Path) -> None:
     config = ProductionE2EConfig.from_env(
         evidence_root=tmp_path / "artifacts",
@@ -453,6 +506,10 @@ def test_validate_e2e_click_and_argparse_dispatch(tmp_path: Path, capsys: pytest
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _stage_artifact_json_payloads(lane_dir: Path) -> list[dict]:
+    return [_read_json(path) for path in sorted((lane_dir / "stage_artifacts").rglob("*.json"))]
 
 
 def _dependency_schema(dependency: str) -> str:
