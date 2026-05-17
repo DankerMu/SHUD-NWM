@@ -7,7 +7,10 @@ import pytest
 
 from services.production_closure import slurm_validation
 from services.production_closure.scale_validation import (
+    DEFAULT_MIN_MODEL_COUNT,
+    DEFAULT_MIN_SEGMENT_COUNT,
     MAX_EVIDENCE_PAYLOAD_BYTES,
+    MAX_OBJECT_LISTING_COUNT,
     EvidenceWriter,
     ProductionScaleConfig,
     ProductionScaleValidationError,
@@ -86,6 +89,14 @@ def test_validate_scale_mvt_expectation_creates_explicit_release_blocker(tmp_pat
     assert blocker["expected_content_type"] == "application/x-protobuf"
     assert "production MVT readiness is not achieved" in blocker["message"]
     assert "/api/v1/tiles/flood-return-period" in blocker["affected_endpoints"]
+    assert blocker["missing_implementation_work"] == [
+        "PostGIS tile clipping and vector-tile encoding for national-scale river and flood-return-period layers",
+        "application/x-protobuf content-type and response contract for .pbf tile endpoints",
+        "layer metadata validation for vector-tile layer IDs, fields, CRS, and extent assumptions",
+        "tile byte-bound enforcement for encoded protobuf responses",
+        "API, OpenAPI, and frontend contract updates where protobuf delivery changes clients",
+        "regression tests and validation documentation for production MVT delivery",
+    ]
 
 
 def test_validate_scale_threshold_and_count_failures_block_readiness(tmp_path: Path) -> None:
@@ -119,6 +130,76 @@ def test_validate_scale_threshold_and_count_failures_block_readiness(tmp_path: P
     assert "PRODUCTION_SCALE_SEGMENT_COUNT_BELOW_THRESHOLD" in error_codes
     assert "PRODUCTION_SCALE_MODEL_COUNT_BELOW_THRESHOLD" in error_codes
     assert "PRODUCTION_SCALE_QUERY_P95_THRESHOLD_EXCEEDED" in error_codes
+
+
+def test_validate_scale_lower_minima_do_not_bypass_production_floors(tmp_path: Path) -> None:
+    threshold_path = tmp_path / "tiny-thresholds.json"
+    threshold_path.write_text(
+        json.dumps({"minimum_counts": {"segment_count": 1, "model_count": 1}}),
+        encoding="utf-8",
+    )
+
+    summary = validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="tiny_floor",
+            thresholds_file=threshold_path,
+            segment_count=1,
+            model_count=1,
+        )
+    )
+
+    dataset = _read_json(tmp_path / "artifacts" / "tiny_floor" / "scale" / "dataset_manifest.json")
+    error_codes = {blocker["error_code"] for blocker in summary["blockers"]}
+    assert summary["status"] == "blocked"
+    assert dataset["status"] == "blocked"
+    assert dataset["minimum_counts"] == {"segment_count": 1, "model_count": 1}
+    assert "PRODUCTION_SCALE_MIN_SEGMENT_COUNT_BELOW_PRODUCTION_FLOOR" in error_codes
+    assert "PRODUCTION_SCALE_MIN_MODEL_COUNT_BELOW_PRODUCTION_FLOOR" in error_codes
+    assert "PRODUCTION_SCALE_SEGMENT_COUNT_BELOW_PRODUCTION_FLOOR" in error_codes
+    assert "PRODUCTION_SCALE_MODEL_COUNT_BELOW_PRODUCTION_FLOOR" in error_codes
+    assert any(
+        blocker.get("production_floor") == DEFAULT_MIN_SEGMENT_COUNT for blocker in summary["blockers"]
+    )
+    assert any(blocker.get("production_floor") == DEFAULT_MIN_MODEL_COUNT for blocker in summary["blockers"])
+
+
+def test_validate_scale_non_default_counts_and_source_propagate_to_evidence(tmp_path: Path) -> None:
+    summary = validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="imported_counts",
+            dataset_source="basins_registry_import",
+            segment_count=150000,
+            model_count=44,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "imported_counts" / "scale"
+    dataset = _read_json(lane_dir / "dataset_manifest.json")
+    query = _read_json(lane_dir / "query_latency_evidence.json")
+    frontend = _read_json(lane_dir / "frontend_large_layer_evidence.json")
+    tile = _read_json(lane_dir / "tile_evidence.json")
+    model_listing = next(item for item in query["queries"] if item["query"] == "model_listing")
+
+    assert summary["status"] == "ready"
+    assert summary["dataset_source"] == "basins_registry_import"
+    assert summary["segment_count"] == 150000
+    assert summary["model_count"] == 44
+    assert dataset["dataset_source"] == "basins_registry_import"
+    assert dataset["generation_mode"] == "consumed_imported_dataset_metadata"
+    assert dataset["segment_count"] == 150000
+    assert dataset["model_count"] == 44
+    assert query["dataset_checksum"] == dataset["checksum"]
+    assert model_listing["row_count"] == 44
+    assert "rows=44" in model_listing["plan_text"]
+    assert frontend["lineage"]["dataset_source"] == "basins_registry_import"
+    assert frontend["lineage"]["segment_count"] == 150000
+    assert frontend["lineage"]["model_count"] == 44
+    assert frontend["lineage"]["dataset_checksum"] == dataset["checksum"]
+    assert {item["large_layer_render"]["segment_count"] for item in frontend["breakpoints"]} == {150000}
+    assert tile["layer_metadata"]["source"] == "basins_registry_import"
+    assert tile["layer_metadata"]["segment_count"] == 150000
 
 
 def test_validate_scale_query_latency_records_p95_and_blocks_malformed_samples(tmp_path: Path) -> None:
@@ -201,6 +282,27 @@ def test_validate_scale_threshold_integer_fields_raise_stable_errors(tmp_path: P
         )
 
     assert exc_info.value.error_code == "PRODUCTION_SCALE_THRESHOLDS_INVALID"
+
+
+def test_validate_scale_object_listing_limit_above_max_blocks_readiness(tmp_path: Path) -> None:
+    threshold_path = tmp_path / "thresholds.json"
+    threshold_path.write_text(json.dumps({"object_listing_limit": MAX_OBJECT_LISTING_COUNT + 1}), encoding="utf-8")
+
+    summary = validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="object_limit",
+            thresholds_file=threshold_path,
+        )
+    )
+
+    resource = _read_json(tmp_path / "artifacts" / "object_limit" / "scale" / "resource_bounds_evidence.json")
+    blocker = resource["blockers"][0]
+    assert summary["status"] == "blocked"
+    assert resource["status"] == "blocked"
+    assert blocker["error_code"] == "PRODUCTION_SCALE_OBJECT_LISTING_LIMIT_EXCEEDED"
+    assert blocker["observed"] == MAX_OBJECT_LISTING_COUNT + 1
+    assert blocker["maximum"] == MAX_OBJECT_LISTING_COUNT
 
 
 @pytest.mark.parametrize(
@@ -311,6 +413,10 @@ def test_validate_scale_run_id_idempotency_force_path_safety_and_redaction(
         ProductionScaleConfig.from_env(evidence_root=symlink_root, run_id="safe")
     assert symlink_exc.value.error_code == "PRODUCTION_SCALE_EVIDENCE_SYMLINK"
 
+    with pytest.raises(ProductionScaleValidationError) as nested_symlink_exc:
+        ProductionScaleConfig.from_env(evidence_root=symlink_root / "new-root", run_id="safe")
+    assert nested_symlink_exc.value.error_code == "PRODUCTION_SCALE_EVIDENCE_SYMLINK"
+
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "supersecret")
     exit_code = slurm_validation._argparse_main(
         [
@@ -347,6 +453,41 @@ def test_validate_scale_run_id_idempotency_force_path_safety_and_redaction(
     )
     assert "supersecret" not in evidence_text
     assert "[redacted]" in evidence_text
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "error_code"),
+    [
+        ("api_base_url", "https://api.example/path%2Ftoken=secret", "PRODUCTION_SCALE_API_BASE_URL_UNSAFE"),
+        ("api_base_url", "https://api.example/path%252Fpassword=secret", "PRODUCTION_SCALE_API_BASE_URL_UNSAFE"),
+        ("api_base_url", "https://api.example/path%2Fsignature=secret", "PRODUCTION_SCALE_API_BASE_URL_UNSAFE"),
+        ("api_base_url", "https://api.example/path%252Fx-amz-signature=secret", "PRODUCTION_SCALE_API_BASE_URL_UNSAFE"),
+        ("api_base_url", "https://api.example/path%2F..", "PRODUCTION_SCALE_API_BASE_URL_UNSAFE"),
+        ("api_base_url", "https://api.example/path%252Fchild", "PRODUCTION_SCALE_API_BASE_URL_UNSAFE"),
+        ("api_base_url", "https://api.example/path%3Ftoken=secret", "PRODUCTION_SCALE_API_BASE_URL_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%2Ftoken=secret", "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%252Fpassword=secret", "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%2Fsignature=secret", "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%252Fx-amz-signature=secret", "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%2F..", "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%252Fchild", "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%3Ftoken=secret", "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE"),
+    ],
+)
+def test_validate_scale_rejects_encoded_api_and_object_path_secrets(
+    tmp_path: Path,
+    field_name: str,
+    value: str,
+    error_code: str,
+) -> None:
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="encoded_secret",
+            **{field_name: value},
+        )
+
+    assert exc_info.value.error_code == error_code
 
 
 def test_validate_scale_click_and_argparse_dispatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

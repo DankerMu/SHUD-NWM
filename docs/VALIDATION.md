@@ -615,9 +615,10 @@ Local #151 verification uses these fast regression commands:
 
 ```bash
 openspec validate m10-production-closure --strict --no-interactive
-.venv/bin/ruff check services/production_closure tests/test_production_scale_validation.py docs/VALIDATION.md progress.md
-.venv/bin/pytest -q tests/test_production_scale_validation.py
-.venv/bin/pytest -q tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_flood_alerts_api.py tests/test_openapi_drift.py
+uv run ruff check .
+uv run ruff check services/production_closure tests/test_production_scale_validation.py docs/VALIDATION.md progress.md
+uv run pytest -q tests/test_production_scale_validation.py
+uv run pytest -q tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_flood_alerts_api.py tests/test_openapi_drift.py
 ```
 
 ## Opt-In Real Basins Smoke

@@ -40,6 +40,15 @@ DEFAULT_THRESHOLDS_VERSION = "m10-scale-thresholds-v1"
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
 MAX_SAMPLE_COUNT = 128
 MAX_OBJECT_LISTING_COUNT = 10_000
+MAX_PERCENT_DECODE_ROUNDS = 4
+MVT_MISSING_IMPLEMENTATION_WORK = [
+    "PostGIS tile clipping and vector-tile encoding for national-scale river and flood-return-period layers",
+    "application/x-protobuf content-type and response contract for .pbf tile endpoints",
+    "layer metadata validation for vector-tile layer IDs, fields, CRS, and extent assumptions",
+    "tile byte-bound enforcement for encoded protobuf responses",
+    "API, OpenAPI, and frontend contract updates where protobuf delivery changes clients",
+    "regression tests and validation documentation for production MVT delivery",
+]
 
 QUERY_TARGETS = {
     "model_listing": {
@@ -378,7 +387,7 @@ def validate_scale(config: ProductionScaleConfig) -> dict[str, Any]:
     tile_evidence = _tile_evidence(config, dataset_manifest)
     writer.write_json(config.lane_dir / "tile_evidence.json", tile_evidence)
 
-    frontend_evidence = _frontend_large_layer_evidence(config)
+    frontend_evidence = _frontend_large_layer_evidence(config, dataset_manifest)
     writer.write_json(config.lane_dir / "frontend_large_layer_evidence.json", frontend_evidence)
 
     resource_evidence = _resource_bounds_evidence(config)
@@ -469,6 +478,38 @@ def _dataset_manifest(config: ProductionScaleConfig) -> dict[str, Any]:
                 "threshold": config.min_model_count,
             }
         )
+    if config.min_segment_count < DEFAULT_MIN_SEGMENT_COUNT:
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_SCALE_MIN_SEGMENT_COUNT_BELOW_PRODUCTION_FLOOR",
+                "configured_minimum": config.min_segment_count,
+                "production_floor": DEFAULT_MIN_SEGMENT_COUNT,
+            }
+        )
+    if config.min_model_count < DEFAULT_MIN_MODEL_COUNT:
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_SCALE_MIN_MODEL_COUNT_BELOW_PRODUCTION_FLOOR",
+                "configured_minimum": config.min_model_count,
+                "production_floor": DEFAULT_MIN_MODEL_COUNT,
+            }
+        )
+    if config.segment_count < DEFAULT_MIN_SEGMENT_COUNT:
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_SCALE_SEGMENT_COUNT_BELOW_PRODUCTION_FLOOR",
+                "observed": config.segment_count,
+                "production_floor": DEFAULT_MIN_SEGMENT_COUNT,
+            }
+        )
+    if config.model_count < DEFAULT_MIN_MODEL_COUNT:
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_SCALE_MODEL_COUNT_BELOW_PRODUCTION_FLOOR",
+                "observed": config.model_count,
+                "production_floor": DEFAULT_MIN_MODEL_COUNT,
+            }
+        )
     return {
         "schema": "nhms.production_closure.scale.dataset_manifest.v1",
         "run_id": config.run_id,
@@ -555,12 +596,14 @@ def _query_latency_evidence(
                     "threshold_ms": threshold_ms,
                 }
             )
-        plan_text = "\n".join(fixture["plan_lines"])
+        row_count = _query_row_count(query_name, fixture, dataset_manifest)
+        plan_lines = _query_plan_lines(query_name, fixture, row_count)
+        plan_text = "\n".join(plan_lines)
         queries.append(
             {
                 "query": query_name,
                 "endpoint": fixture["endpoint"],
-                "row_count": fixture["row_count"],
+                "row_count": row_count,
                 "bounded_payload": True,
                 "plan_text": plan_text,
                 "plan_hash": hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
@@ -606,6 +649,7 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
                 "expected_content_type": "application/x-protobuf",
                 "observed_content_type": current_content_type,
                 "affected_endpoints": endpoints,
+                "missing_implementation_work": MVT_MISSING_IMPLEMENTATION_WORK,
                 "message": (
                     "Current flood tile delivery is GeoJSON compatibility; production MVT readiness is not achieved."
                 ),
@@ -644,7 +688,7 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
         "endpoint_references": endpoints,
         "layer_metadata": {
             "layer_id": "flood-return-period",
-            "source": "deterministic_large_fixture",
+            "source": config.dataset_source,
             "segment_count": dataset_manifest["segment_count"],
             "fields": ["segment_id", "value", "unit", "quality_flag", "return_period", "warning_level"],
             "legacy_pbf_route_behavior": "307 redirect to GeoJSON endpoint",
@@ -654,7 +698,10 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
     }
 
 
-def _frontend_large_layer_evidence(config: ProductionScaleConfig) -> dict[str, Any]:
+def _frontend_large_layer_evidence(
+    config: ProductionScaleConfig,
+    dataset_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
     blockers = []
     breakpoints = []
     for breakpoint in config.frontend_breakpoints:
@@ -694,7 +741,7 @@ def _frontend_large_layer_evidence(config: ProductionScaleConfig) -> dict[str, A
                 "timings_ms": timings,
                 "memory_mb": memory_mb,
                 "threshold_comparison": comparisons,
-                "large_layer_render": {"segment_count": DEFAULT_SEGMENT_COUNT, "status": "within_budget"},
+                "large_layer_render": {"segment_count": dataset_manifest["segment_count"], "status": "within_budget"},
                 "segment_selection": {"timing_ms": 48.0 if not is_mobile else 61.0, "status": "ready"},
                 "timeline_movement": {"timing_ms": timings["timeline_ms"], "status": "ready"},
                 "chart_render": {"timing_ms": timings["chart_ms"], "status": "ready"},
@@ -710,6 +757,9 @@ def _frontend_large_layer_evidence(config: ProductionScaleConfig) -> dict[str, A
         "frontend_api_base": config.api_base_url,
         "lineage": {
             "dataset_source": config.dataset_source,
+            "segment_count": dataset_manifest["segment_count"],
+            "model_count": dataset_manifest["model_count"],
+            "dataset_checksum": dataset_manifest["checksum"],
             "run_id": config.run_id,
             "thresholds_version": config.thresholds.version,
             "tile_expectation": config.tile_content_type_expectation,
@@ -725,10 +775,19 @@ def _frontend_large_layer_evidence(config: ProductionScaleConfig) -> dict[str, A
 
 
 def _resource_bounds_evidence(config: ProductionScaleConfig) -> dict[str, Any]:
+    blockers = []
+    if config.thresholds.object_listing_limit > MAX_OBJECT_LISTING_COUNT:
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_SCALE_OBJECT_LISTING_LIMIT_EXCEEDED",
+                "observed": config.thresholds.object_listing_limit,
+                "maximum": MAX_OBJECT_LISTING_COUNT,
+            }
+        )
     return {
         "schema": "nhms.production_closure.scale.resource_bounds.v1",
         "run_id": config.run_id,
-        "status": "ready",
+        "status": "blocked" if blockers else "ready",
         "oversized_bbox": {
             "input": [-180.0, -90.0, 180.0, 90.0],
             "behavior": config.thresholds.oversized_bbox_behavior,
@@ -748,6 +807,7 @@ def _resource_bounds_evidence(config: ProductionScaleConfig) -> dict[str, Any]:
             "unbounded_payloads_rejected": True,
         },
         "evidence_payload_limit_bytes": MAX_EVIDENCE_PAYLOAD_BYTES,
+        "blockers": blockers,
     }
 
 
@@ -1011,7 +1071,12 @@ def _validate_api_base_url(value: str) -> None:
             "PRODUCTION_SCALE_API_BASE_URL_UNSAFE",
             "Scale API base URL must not contain userinfo credentials, query parameters, or fragments.",
         )
-    if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in SENSITIVE_PREFIX_SEPARATOR_RE.split(value)):
+    _guard_canonical_path_segments(
+        parsed.path,
+        error_code="PRODUCTION_SCALE_API_BASE_URL_UNSAFE",
+        message="Scale API base URL path must not contain credential assignments, traversal, or encoded separators.",
+    )
+    if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in _canonical_decode_steps(value)):
         raise ProductionScaleValidationError(
             "PRODUCTION_SCALE_API_BASE_URL_UNSAFE",
             "Scale API base URL must not contain credential assignments.",
@@ -1041,18 +1106,44 @@ def _validate_object_prefix_safe(prefix: str) -> None:
             "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE",
             "Scale object prefix must not contain userinfo credentials, query parameters, or fragments.",
         )
-    for raw_segment in parsed.path.split("/"):
-        segment = unquote(raw_segment)
-        if "/" in segment or "\\" in segment or segment in {".", ".."}:
-            raise ProductionScaleValidationError(
-                "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE",
-                "Scale object prefix path segments must not contain '.', '..', or decoded path separators.",
-            )
-        if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in SENSITIVE_PREFIX_SEPARATOR_RE.split(segment)):
-            raise ProductionScaleValidationError(
-                "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE",
-                "Scale object prefix path segments must not contain credential assignments.",
-            )
+    _guard_canonical_path_segments(
+        parsed.path,
+        error_code="PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE",
+        message=(
+            "Scale object prefix path segments must not contain credential assignments, traversal, "
+            "or encoded separators."
+        ),
+    )
+
+
+def _canonical_decode_steps(value: str) -> tuple[str, ...]:
+    steps = [value]
+    current = value
+    for _ in range(MAX_PERCENT_DECODE_ROUNDS):
+        decoded = unquote(current)
+        if decoded == current:
+            break
+        steps.append(decoded)
+        current = decoded
+    return tuple(steps)
+
+
+def _guard_canonical_path_segments(path: str, *, error_code: str, message: str) -> None:
+    for raw_segment in path.split("/"):
+        if raw_segment == "":
+            continue
+        for segment in _canonical_decode_steps(raw_segment):
+            if (
+                "/" in segment
+                or "\\" in segment
+                or "?" in segment
+                or "#" in segment
+                or ";" in segment
+                or "&" in segment
+                or segment in {".", ".."}
+                or SENSITIVE_PREFIX_ASSIGNMENT_RE.search(segment)
+            ):
+                raise ProductionScaleValidationError(error_code, message)
 
 
 def _safe_run_id(run_id: str) -> str:
@@ -1066,11 +1157,7 @@ def _safe_run_id(run_id: str) -> str:
 
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
     root = evidence_root.expanduser()
-    if root.exists() or root.is_symlink():
-        _refuse_symlink_components(root)
-    parent = root.parent
-    if parent.exists() or parent.is_symlink():
-        _refuse_symlink_components(parent)
+    _refuse_symlink_components_to_deepest_existing(root)
     return root.resolve(strict=False)
 
 
@@ -1085,6 +1172,21 @@ def _refuse_symlink_components(path: Path) -> None:
                 "PRODUCTION_SCALE_EVIDENCE_SYMLINK",
                 f"Evidence path component must not be a symlink: {current}",
             )
+
+
+def _refuse_symlink_components_to_deepest_existing(path: Path) -> None:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts:
+        if part == path.anchor or part == "":
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise ProductionScaleValidationError(
+                "PRODUCTION_SCALE_EVIDENCE_SYMLINK",
+                f"Evidence path component must not be a symlink: {current}",
+            )
+        if not current.exists():
+            break
 
 
 def _bbox_sizes(names: Sequence[str]) -> dict[str, Any]:
@@ -1120,6 +1222,27 @@ def _latency_samples(config: ProductionScaleConfig, query_name: str, defaults: S
                 f"{env_key} contains a non-numeric latency sample.",
             ) from error
     return tuple(samples)
+
+
+def _query_row_count(
+    query_name: str,
+    fixture: Mapping[str, Any],
+    dataset_manifest: Mapping[str, Any],
+) -> int:
+    if query_name == "model_listing":
+        return int(dataset_manifest["model_count"])
+    if query_name in {"river_bbox", "flood_alert_map"}:
+        return min(int(fixture["row_count"]), int(dataset_manifest["segment_count"]))
+    return int(fixture["row_count"])
+
+
+def _query_plan_lines(query_name: str, fixture: Mapping[str, Any], row_count: int) -> tuple[str, ...]:
+    if query_name == "model_listing":
+        return (
+            f"Limit  (cost=0.42..18.00 rows={row_count} width=96)",
+            "  -> Index Scan using model_instance_pkey on core.model_instance",
+        )
+    return tuple(str(line) for line in fixture["plan_lines"])
 
 
 def _validate_samples(query_name: str, samples: Sequence[float]) -> dict[str, Any] | None:
