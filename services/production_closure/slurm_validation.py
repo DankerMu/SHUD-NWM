@@ -18,6 +18,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
 from services.orchestrator.retry import compute_backoff_seconds, is_transient_error
+from services.production_closure.object_store_validation import (
+    ProductionObjectStoreConfig,
+    ProductionObjectStoreValidationError,
+    validate_object_store,
+)
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.real_backend import RealSlurmGateway, map_slurm_error_code
 
@@ -216,8 +221,16 @@ class ProductionSlurmConfig:
             account=os.getenv("NHMS_PRODUCTION_SLURM_ACCOUNT", ""),
             partition=os.getenv("NHMS_PRODUCTION_SLURM_PARTITION", ""),
             workspace_root=workspace_root,
-            object_store_root=os.getenv("OBJECT_STORE_ROOT", str(workspace_root)),
-            object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
+            object_store_root=_object_store_env_value(
+                "NHMS_PRODUCTION_OBJECT_STORE_ROOT",
+                "OBJECT_STORE_ROOT",
+                str(workspace_root),
+            ),
+            object_store_prefix=_object_store_env_value(
+                "NHMS_PRODUCTION_OBJECT_STORE_PREFIX",
+                "OBJECT_STORE_PREFIX",
+                "",
+            ),
             model_id=os.getenv("NHMS_PRODUCTION_SLURM_MODEL_ID", "basins_qhh_shud"),
             model_package_uri=os.getenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", ""),
             solver_binary=os.getenv("SHUD_EXECUTABLE", os.getenv("NHMS_PRODUCTION_SLURM_SOLVER_BINARY", "shud_omp")),
@@ -424,6 +437,13 @@ def _validate_walltime(value: str) -> None:
             "PRODUCTION_SLURM_RESOURCE_INVALID",
             "NHMS_PRODUCTION_SLURM_WALLTIME hours must be bounded.",
         )
+
+
+def _object_store_env_value(production_name: str, generic_name: str, default: str) -> str:
+    production_value = os.getenv(production_name)
+    if production_value is not None:
+        return production_value
+    return os.getenv(generic_name, default)
 
 
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
@@ -1534,7 +1554,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     force=force,
                 )
             )
-            click.echo(json.dumps(summary, sort_keys=True))
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
         except (ProductionValidationError, OSError, subprocess.SubprocessError) as error:
             if isinstance(error, ProductionValidationError):
                 click.echo(f"{error.error_code}: {error.message}", err=True)
@@ -1542,7 +1562,49 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 click.echo(f"PRODUCTION_SLURM_VALIDATION_FAILED: {error}", err=True)
             raise SystemExit(1) from error
 
-    cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
+    @cli.command("validate-object-store")
+    @click.option("--evidence-root", type=click.Path(path_type=Path), required=True)
+    @click.option("--run-id")
+    @click.option("--basins-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--model-id", default=None)
+    @click.option("--version", default=None)
+    @click.option("--force", is_flag=True, default=False)
+    def validate_object_store_command(
+        evidence_root: Path,
+        run_id: str | None,
+        basins_root: Path | None,
+        model_id: str | None,
+        version: str | None,
+        force: bool,
+    ) -> None:
+        try:
+            summary = validate_object_store(
+                ProductionObjectStoreConfig.from_env(
+                    evidence_root=evidence_root,
+                    run_id=run_id,
+                    basins_root=basins_root,
+                    model_id=model_id,
+                    version=version,
+                    force=force,
+                )
+            )
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
+        except ProductionObjectStoreValidationError as error:
+            click.echo(f"{error.error_code}: {error.message}", err=True)
+            raise SystemExit(1) from error
+        except Exception as error:
+            to_payload = getattr(error, "to_payload", None)
+            if callable(to_payload):
+                click.echo(json.dumps(to_payload(), ensure_ascii=False, sort_keys=True), err=True)
+            else:
+                click.echo(f"PRODUCTION_OBJECT_STORE_VALIDATION_FAILED: {error}", err=True)
+            raise SystemExit(1) from error
+
+    try:
+        cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
+    except click.ClickException as error:
+        error.show()
+        raise SystemExit(error.exit_code) from error
     return 0
 
 
@@ -1557,21 +1619,30 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     validate_parser.add_argument("--poll-interval-seconds", type=float, default=None)
     validate_parser.add_argument("--poll-timeout-seconds", type=float, default=None)
     validate_parser.add_argument("--force", action="store_true")
+    object_parser = subparsers.add_parser("validate-object-store")
+    object_parser.add_argument("--evidence-root", type=Path, required=True)
+    object_parser.add_argument("--run-id")
+    object_parser.add_argument("--basins-root", type=Path, default=None)
+    object_parser.add_argument("--model-id", default=None)
+    object_parser.add_argument("--version", default=None)
+    object_parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "validate-slurm":
         try:
             print(
                 json.dumps(
-                    validate_slurm(
-                        ProductionSlurmConfig.from_env(
-                            evidence_root=args.evidence_root,
-                            run_id=args.run_id,
-                            submit=args.submit,
-                            fake_slurm=args.fake_slurm,
-                            poll_interval_seconds=args.poll_interval_seconds,
-                            poll_timeout_seconds=args.poll_timeout_seconds,
-                            force=args.force,
+                    redact_payload(
+                        validate_slurm(
+                            ProductionSlurmConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                submit=args.submit,
+                                fake_slurm=args.fake_slurm,
+                                poll_interval_seconds=args.poll_interval_seconds,
+                                poll_timeout_seconds=args.poll_timeout_seconds,
+                                force=args.force,
+                            )
                         )
                     ),
                     sort_keys=True,
@@ -1582,6 +1653,36 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 print(f"{error.error_code}: {error.message}", file=sys.stderr)
             else:
                 print(f"PRODUCTION_SLURM_VALIDATION_FAILED: {error}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "validate-object-store":
+        try:
+            print(
+                json.dumps(
+                    redact_payload(
+                        validate_object_store(
+                            ProductionObjectStoreConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                basins_root=args.basins_root,
+                                model_id=args.model_id,
+                                version=args.version,
+                                force=args.force,
+                            )
+                        )
+                    ),
+                    sort_keys=True,
+                )
+            )
+        except ProductionObjectStoreValidationError as error:
+            print(f"{error.error_code}: {error.message}", file=sys.stderr)
+            return 1
+        except Exception as error:
+            to_payload = getattr(error, "to_payload", None)
+            if callable(to_payload):
+                print(json.dumps(to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+            else:
+                print(f"PRODUCTION_OBJECT_STORE_VALIDATION_FAILED: {error}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")

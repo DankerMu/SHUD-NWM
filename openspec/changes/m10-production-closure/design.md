@@ -230,3 +230,68 @@ Issue #147 non-goals / deferred:
 - Full staging E2E source-to-frontend closure is handled by #150.
 - National-scale MVT/query/frontend performance is handled by #151.
 - Full production auth/RBAC/alert/rollback readiness is handled by #152, while #147 still must avoid secret leakage.
+
+## Issue #148 Fixture Overlay: Production Object Store + Basins Copied-Data Migration
+
+Fixture level: expanded
+
+Why expanded:
+
+- Touches CLI validation lane, object-store publish/overwrite paths, copied Basins migration evidence, package manifests, registry import, cleanup/rollback, and symlink/path safety.
+
+Change surface:
+
+- `services/production_closure/*` production object-store validation lane and docs.
+- `workers/model_registry/basins_discovery.py`, `basins_package.py`, `basins_registry_import.py`, and `cli.py` reuse points.
+- `packages/common/object_store.py`, `packages/common/redaction.py`, and model registry API/runtime consumption evidence.
+- `tests/test_basins_package_publication.py`, `tests/test_basins_registry_import.py`, targeted production-closure object-store tests, `docs/VALIDATION.md`, and `progress.md`.
+
+Must preserve:
+
+- Fast tests and default CI do not require real S3/MinIO, production credentials, copied `/volume` data, PostGIS integration DB, or real SHUD solver.
+- Existing M9 discovery, publish, migration-report, registry import, activation, runtime/API/frontend Basins contracts remain compatible.
+- `data/Basins` symlink remains acceptable for development discovery/package smoke, but cannot be accepted as production copied-root evidence.
+- Object manifests, audit/API evidence, logs, and PR comments must not expose credentials, userinfo, tokens, signed query strings, or development-only source paths as runtime package sources.
+
+Must add/change for #148:
+
+- A documented opt-in `validate-object-store` lane or equivalent command that records object-store target/root/prefix, credential source, cleanup policy, copied Basins root, selected model/version, and evidence root under `artifacts/production-closure/<run_id>/object-store/`.
+- Reuse M9 `basins-migration-report` to accept copied roots and reject symlink-only roots with stable error evidence before package/import work.
+- Reuse Basins package publication against production-like object storage and verify manifest/object bytes/checksums from the stored objects.
+- Reuse registry import-source preparation plus deterministic API-contract/runtime evidence to prove model package consumption uses object URI prefix, not `data/Basins` or `/volume/...` source paths. Fast evidence prepares local import sources and marks live DB import/API execution as `not_executed`; when live registry inputs are explicitly enabled, validation must run the registry DB import and block on missing or failed import evidence instead of claiming local-only success.
+- Add cleanup/rollback evidence for failed publish/import attempts and prove no model becomes active implicitly.
+
+Issue #148 risk packs:
+
+- Public API / CLI / script entry: selected - opt-in production closure command and reused `nhms-model` commands need stable JSON/error behavior.
+- Config / project setup: selected - object-store target/root/prefix, credential source, cleanup policy, copied root, selected model/version, and evidence root are preflight inputs.
+- File IO / path safety / overwrite: selected - copied root, object writes, manifest output, cleanup/quarantine, symlink rejection, and overwrite/idempotency are core acceptance.
+- Schema / columns / units / field names: selected - migration report, package manifest, registry import report, API/runtime evidence fields, checksums, and URI lineage must stay stable.
+- Geospatial / CRS / shapefile sidecars: selected - registry import consumes Basins GIS sidecars and must preserve M9 geometry/CRS safety.
+- Time series / forcing / temporal boundaries: selected - package manifests include forcing metadata/time coverage; #148 does not produce live forcing.
+- Numerical stability / conservation / NaN: not selected - no solver/output numerical behavior changes; #147/#150 cover malformed output/QC.
+- Solver runtime / performance / threading: selected - runtime smoke must prove object URI package staging without requiring real solver execution.
+- Resource limits / large input / discovery: selected - copied Basins tree traversal, object manifest size, forcing samples, and GIS/SHUD evidence bounds must remain bounded.
+- Legacy compatibility / examples: selected - `tailanhe/focing`, `input/<alias>`, zhaochen nested models, development symlink discovery, and M9 test fixtures must continue to work.
+- Error handling / rollback / partial outputs: selected - failed publish/import cleanup evidence and no implicit activation are core acceptance.
+- Release / packaging / dependency compatibility: selected - Linux/object-store path behavior and optional PostGIS integration availability must remain compatible.
+- Documentation / migration notes: selected - runbook, validation command, evidence file list, and copied-not-symlink production requirement must be updated.
+
+Issue #148 required evidence:
+
+- Preflight artifact: object-store target/root/prefix, credential source, cleanup policy, copied Basins root, model/version, and evidence root -> redacted JSON with no secret-shaped values.
+- Copied-root migration test: copied synthetic Basins root -> migration report with file count, byte count, inventory checksum, source/target metadata, and `production_ready=true`.
+- Symlink-root rejection test: symlink Basins root -> stable blocker/error evidence and no production-ready bundle or package/import writes.
+- Stored-object verification test: publish package to production-like local object store -> manifest URI/package URI/per-file checksums/package checksum verified by rereading object bytes.
+- Registry/API/runtime consumption test: default fast evidence prepares registry import sources and API/runtime contract smoke, while opt-in live registry evidence imports to the configured DB when enabled -> object URI prefix is used and development source paths are not runtime package sources; evidence must not claim live DB/API success unless that integration actually ran.
+- Cleanup/rollback test: simulated publish/import failure after partial work -> evidence lists written keys/rows, cleanup/quarantine result, and active model state remains unchanged.
+- Redaction test: endpoint/root/prefix/manifest/API evidence containing credential-shaped URI values -> emitted evidence removes userinfo/query/fragment/secrets.
+- Local verification commands: OpenSpec strict validation, `uv run ruff check .`, targeted Basins package/registry/runtime/API tests, and documented opt-in validation command when `NHMS_RUN_PRODUCTION_CLOSURE=1`.
+
+Issue #148 non-goals / deferred:
+
+- Real Slurm workload and SHUD accounting evidence are handled by #147.
+- Live meteorology source discovery/download/QC is handled by #149.
+- Full staging source-to-frontend chain is handled by #150.
+- National-scale MVT/query/frontend performance is handled by #151.
+- Full production auth/RBAC/alert readiness is handled by #152; #148 only proves no implicit activation and safe rollback evidence.

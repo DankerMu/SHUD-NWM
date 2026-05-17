@@ -12,6 +12,8 @@ from services.production_closure import slurm_validation
 def test_validate_slurm_fake_lane_writes_required_evidence_and_redacts(monkeypatch, tmp_path: Path, capsys) -> None:
     evidence_root = tmp_path / "artifacts"
     secret_uri = "s3://user:pass@example.invalid/models/qhh/package?X-Amz-Signature=abc&token=secret"
+    monkeypatch.delenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", raising=False)
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
@@ -99,6 +101,37 @@ def test_validate_slurm_fake_lane_writes_required_evidence_and_redacts(monkeypat
     assert qc["malformed_task"]["error_code"] == "NON_FINITE_FLOW"
     assert qc["malformed_task"]["publication_blocked"] is True
     assert qc["sibling_success"]["publishable"] is True
+
+
+def test_validate_slurm_uses_documented_production_object_store_env_names(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/prod/models/qhh/package/")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "generic-object-store"))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://generic/prefix")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "production-object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://production/prefix")
+
+    exit_code = slurm_validation.main(
+        ["validate-slurm", "--evidence-root", str(evidence_root), "--run-id", "m10_148", "--fake-slurm"]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    lane_dir = evidence_root / "m10_148" / "slurm"
+    preflight = json.loads((lane_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight["object_store"]["root"] == str(tmp_path / "production-object-store")
+    assert preflight["object_store"]["prefix"] == "s3://production/prefix"
+
+    manifest_index = json.loads((lane_dir / "manifest_index.json").read_text(encoding="utf-8"))
+    assert manifest_index[0]["output_uri"] == "s3://production/prefix/runs/m10_148_success/output/"
 
 
 def test_validate_slurm_missing_preflight_writes_blocker_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -246,6 +279,122 @@ def test_validate_slurm_rejects_invalid_poll_env_without_evidence(
     assert exit_code == 1
     assert "PRODUCTION_SLURM_POLL_OPTION_INVALID" in capsys.readouterr().err
     assert not (tmp_path / "artifacts" / "badpollenv" / "slurm").exists()
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_error"),
+    [
+        (["validate-slurm", "--run-id", "missingroot"], "Missing option '--evidence-root'"),
+        (["validate-slurm", "--evidence-root", "artifacts", "--bad-option"], "No such option: --bad-option"),
+    ],
+)
+def test_click_usage_errors_exit_without_traceback(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    argv: list[str],
+    expected_error: str,
+) -> None:
+    pytest.importorskip("click")
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        exit_code = slurm_validation.main(argv)
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "Usage:" in captured.err
+    if expected_error.startswith("No such option"):
+        assert "No such option" in captured.err
+        assert "--bad-option" in captured.err
+    else:
+        assert expected_error in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_validate_slurm_stdout_redacts_summary_like_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    secret_package_uri = "s3://user:pass@bucket/path?token=secret&X-Amz-Signature=abc"
+
+    def fake_validate(config: slurm_validation.ProductionSlurmConfig) -> dict[str, object]:
+        return {
+            "schema": "nhms.production_closure.slurm.v1",
+            "run_id": config.run_id,
+            "status": "ready",
+            "evidence_dir": str(config.lane_dir),
+            "model_package_uri": secret_package_uri,
+            "notes": "path token=secret x-amz-signature=abc credential=hidden",
+        }
+
+    monkeypatch.setattr(slurm_validation, "validate_slurm", fake_validate)
+
+    exit_code = slurm_validation.main(
+        ["validate-slurm", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "stdoutredact"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "user:pass@" not in captured.out
+    assert "?token=secret" not in captured.out
+    assert "token=secret" not in captured.out
+    assert "x-amz-signature=abc" not in captured.out
+    assert "credential=hidden" not in captured.out
+    assert json.loads(captured.out)["model_package_uri"] == "s3://bucket/path"
+
+
+def test_packaged_validate_object_store_stdout_redacts_summary_like_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    secret_package_uri = "s3://user:pass@bucket/path?token=secret&X-Amz-Signature=abc"
+
+    def fake_validate(config: slurm_validation.ProductionObjectStoreConfig) -> dict[str, object]:
+        return {
+            "schema": "nhms.production_closure.object_store.v1",
+            "run_id": config.run_id,
+            "status": "ready",
+            "evidence_dir": str(config.lane_dir),
+            "model_package_uri": secret_package_uri,
+            "notes": "path token=secret x-amz-signature=abc credential=hidden",
+        }
+
+    monkeypatch.setattr(slurm_validation, "validate_object_store", fake_validate)
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "stdoutobj"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "user:pass@" not in captured.out
+    assert "?token=secret" not in captured.out
+    assert "token=secret" not in captured.out
+    assert "x-amz-signature=abc" not in captured.out
+    assert "credential=hidden" not in captured.out
+    assert json.loads(captured.out)["model_package_uri"] == "s3://bucket/path"
+
+    exit_code = slurm_validation._argparse_main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts-argparse"), "--run-id", "argparseobj"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "user:pass@" not in captured.out
+    assert "?token=secret" not in captured.out
+    assert "token=secret" not in captured.out
+    assert "x-amz-signature=abc" not in captured.out
+    assert "credential=hidden" not in captured.out
+    assert json.loads(captured.out)["model_package_uri"] == "s3://bucket/path"
 
 
 def test_validate_slurm_submit_fake_conflict_fails_without_evidence(

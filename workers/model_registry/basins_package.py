@@ -13,7 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from packages.common.object_store import MAX_OBJECT_MANIFEST_BYTES, LocalObjectStore, ObjectStoreError
 from packages.common.storage import validate_object_path
 
 from .basins_discovery import (
@@ -31,6 +31,7 @@ BASINS_MIGRATION_REPORT_SCHEMA_VERSION = "basins.migration.v1"
 FORCING_SAMPLE_FILE_LIMIT = 5
 FORCING_SAMPLE_BYTE_LIMIT = 64 * 1024
 FORCING_SAMPLE_LINE_LIMIT = 1000
+MAX_EXISTING_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
 _OS_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _OS_MKDIR_SUPPORTS_DIR_FD = os.mkdir in os.supports_dir_fd
 _OS_RENAME_SUPPORTS_DIR_FD = os.rename in os.supports_dir_fd
@@ -192,6 +193,14 @@ def publish_basins_package(
                 version=version,
                 manifest_uri=manifest_uri,
             )
+        _verify_existing_manifest_consistency(
+            store,
+            existing_manifest,
+            checksum_material=checksum_material,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
         _write_json_file(
             output_path,
             existing_manifest,
@@ -224,6 +233,14 @@ def publish_basins_package(
                     version=version,
                     manifest_uri=manifest_uri,
                 )
+            _verify_existing_manifest_consistency(
+                store,
+                existing_manifest,
+                checksum_material=checksum_material,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
             _write_json_file(
                 output_path,
                 existing_manifest,
@@ -1282,6 +1299,7 @@ def _read_existing_manifest(
                 model_id=model_id,
                 version=version,
                 manifest_uri=manifest_uri,
+                max_bytes=MAX_EXISTING_MANIFEST_BYTES,
             ).decode("utf-8")
         )
     except (ObjectStoreError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
@@ -1301,6 +1319,132 @@ def _read_existing_manifest(
             manifest_uri=manifest_uri,
         )
     return manifest
+
+
+def _verify_existing_manifest_consistency(
+    store: LocalObjectStore,
+    manifest: dict[str, Any],
+    *,
+    checksum_material: dict[str, Any],
+    model_id: str,
+    version: str,
+    manifest_uri: str,
+) -> None:
+    manifest_entries = [
+        entry
+        for entry in manifest.get("included_files", [])
+        if isinstance(entry, dict) and entry.get("role") == "manifest"
+    ]
+    if len(manifest_entries) != 1:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_MANIFEST_INVALID",
+            "Existing Basins package manifest must include exactly one manifest self-entry.",
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+
+    for entry in manifest.get("included_files", []):
+        if not isinstance(entry, dict):
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_MANIFEST_INVALID",
+                "Existing Basins package manifest included_files entries must be objects.",
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
+        try:
+            object_uri = str(entry["object_uri"])
+            expected_size = int(entry["size_bytes"])
+            expected_sha256 = str(entry["sha256"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_MANIFEST_INVALID",
+                "Existing Basins package manifest has an invalid included_files entry.",
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            ) from error
+
+        if entry.get("role") == "manifest":
+            if object_uri != manifest_uri:
+                raise BasinsPackageError(
+                    "BASINS_PACKAGE_MANIFEST_INVALID",
+                    "Existing Basins package manifest self-entry URI must match the manifest URI.",
+                    model_id=model_id,
+                    version=version,
+                    manifest_uri=manifest_uri,
+                )
+            payload_sha256 = _sha256_bytes(_json_bytes(_manifest_payload_without_self_entry(manifest)))
+            if expected_sha256 != payload_sha256:
+                raise BasinsPackageError(
+                    "BASINS_PACKAGE_MANIFEST_INVALID",
+                    "Existing Basins package manifest self-entry checksum does not match stored manifest bytes.",
+                    model_id=model_id,
+                    version=version,
+                    manifest_uri=manifest_uri,
+                )
+        object_expected_sha256 = expected_sha256
+        if entry.get("role") == "manifest":
+            object_expected_sha256 = _sha256_bytes(_json_bytes(manifest))
+        try:
+            _verify_object_bytes(
+                store,
+                object_uri,
+                expected_size=expected_size,
+                expected_sha256=object_expected_sha256,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
+        except (ObjectStoreError, ValueError) as error:
+            raise BasinsPackageError(
+                "BASINS_PACKAGE_MANIFEST_INVALID",
+                f"Existing Basins package object does not match manifest entry: {object_uri}",
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            ) from error
+
+    non_manifest_entries = [
+        {
+            "relative_path": entry["relative_path"],
+            "role": entry["role"],
+            "size_bytes": entry["size_bytes"],
+            "sha256": entry["sha256"],
+        }
+        for entry in manifest.get("included_files", [])
+        if isinstance(entry, dict) and entry.get("role") != "manifest"
+    ]
+    reconstructed_checksum_material = {
+        "schema_version": manifest.get("schema_version"),
+        "model_id": manifest.get("model_id"),
+        "version": manifest.get("version"),
+        "included_files": sorted(non_manifest_entries, key=lambda item: (item["role"], item["relative_path"])),
+        "forcing": _forcing_checksum_material(manifest.get("forcing", {})),
+        "copy_forcing": bool(manifest.get("forcing", {}).get("payload_copied", False))
+        if isinstance(manifest.get("forcing"), dict)
+        else False,
+        "source_model_identity": checksum_material["source_model_identity"],
+    }
+    if _sha256_json(reconstructed_checksum_material) != manifest.get("package_checksum"):
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_MANIFEST_INVALID",
+            "Existing Basins package manifest package checksum does not match recorded entries.",
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+
+
+def _manifest_payload_without_self_entry(manifest: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(manifest)
+    payload["included_files"] = [
+        entry
+        for entry in manifest.get("included_files", [])
+        if isinstance(entry, dict) and entry.get("role") != "manifest"
+    ]
+    return payload
 
 
 def _acquire_publish_lock(
@@ -1566,6 +1710,7 @@ def _read_object_bytes_no_symlinks(
     model_id: str,
     version: str,
     manifest_uri: str,
+    max_bytes: int | None = None,
 ) -> bytes:
     try:
         with _open_object_file_no_symlinks(
@@ -1575,7 +1720,24 @@ def _read_object_bytes_no_symlinks(
             version=version,
             manifest_uri=manifest_uri,
         ) as handle:
-            return handle.read()
+            if max_bytes is None:
+                return handle.read()
+            if max_bytes < 0:
+                raise ValueError("max_bytes must be non-negative.")
+            chunks = []
+            remaining = max_bytes + 1
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+            if len(content) > max_bytes:
+                raise ObjectStoreError(
+                    f"Object {key} exceeds read limit: {len(content)} bytes > {max_bytes} bytes"
+                )
+            return content
     except OSError as error:
         raise ObjectStoreError(f"Failed to read object {key}: {error}") from error
 

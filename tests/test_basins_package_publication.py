@@ -121,6 +121,85 @@ def test_publish_basins_is_idempotent_for_unchanged_source(
     assert second_manifest == first_manifest
 
 
+def test_publish_basins_rejects_tampered_existing_manifest_before_local_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    first_output = tmp_path / "first_manifest.json"
+    second_output = tmp_path / "second_manifest.json"
+    args = [
+        "publish-basins",
+        "--inventory",
+        str(inventory_path),
+        "--model-id",
+        model_id,
+        "--version",
+        "vbasins-test",
+        "--output",
+    ]
+    assert _argparse_main([*args, str(first_output)]) == 0
+    capsys.readouterr()
+
+    object_manifest = object_root / "models" / model_id / "vbasins-test" / "manifest.json"
+    manifest = json.loads(object_manifest.read_text(encoding="utf-8"))
+    manifest_entry = _one_entry(manifest, "manifest")
+    manifest_entry["sha256"] = "0" * 64
+    object_manifest.write_bytes(basins_package._json_bytes(manifest))
+
+    exit_code = _argparse_main([*args, str(second_output)])
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_MANIFEST_INVALID"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-test"
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-test/manifest.json"
+    assert not second_output.exists()
+
+
+def test_publish_basins_rejects_tampered_existing_package_object_before_local_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    first_output = tmp_path / "first_manifest.json"
+    second_output = tmp_path / "second_manifest.json"
+    args = [
+        "publish-basins",
+        "--inventory",
+        str(inventory_path),
+        "--model-id",
+        model_id,
+        "--version",
+        "vbasins-test",
+        "--output",
+    ]
+    assert _argparse_main([*args, str(first_output)]) == 0
+    capsys.readouterr()
+
+    package_object = object_root / "models" / model_id / "vbasins-test" / "package" / "alias-a.cfg.para"
+    package_object.write_text("tampered\n", encoding="utf-8")
+
+    exit_code = _argparse_main([*args, str(second_output)])
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_MANIFEST_INVALID"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-test"
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-test/manifest.json"
+    assert not second_output.exists()
+
+
 def test_publish_basins_rejects_checksum_conflict_for_same_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -159,6 +238,47 @@ def test_publish_basins_rejects_checksum_conflict_for_same_version(
     assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-test/manifest.json"
     object_manifest = object_root / "models" / model_id / "vbasins-test" / "manifest.json"
     assert json.loads(object_manifest.read_text()) == previous_manifest
+
+
+def test_publish_basins_rejects_oversized_existing_manifest_before_conflict_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "manifest.json"
+    args = [
+        "publish-basins",
+        "--inventory",
+        str(inventory_path),
+        "--model-id",
+        model_id,
+        "--version",
+        "vbasins-test",
+        "--output",
+        str(manifest_path),
+    ]
+    assert _argparse_main(args) == 0
+    capsys.readouterr()
+
+    object_manifest = object_root / "models" / model_id / "vbasins-test" / "manifest.json"
+    object_manifest.write_bytes(b"{" + (b'"padding":' + b'"x"' * basins_package.MAX_EXISTING_MANIFEST_BYTES))
+    source_file = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "alias-a.cfg.para"
+    source_file.write_text("mutated\n", encoding="utf-8")
+    write_inventory(discover_basins_inventory(tmp_path / "basins"), inventory_path)
+
+    exit_code = _argparse_main(args)
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_MANIFEST_INVALID"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-test"
+    assert error["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-test/manifest.json"
+    assert manifest_path.exists()
 
 
 def test_publish_basins_checksum_ignores_benign_inventory_churn(
