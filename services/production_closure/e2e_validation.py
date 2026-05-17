@@ -976,6 +976,8 @@ def _write_stage_artifacts(
     qc: Mapping[str, Any],
 ) -> dict[str, list[str]]:
     artifacts_dir = config.lane_dir / "stage_artifacts"
+    if config.force:
+        _remove_current_stage_artifacts(config, artifacts_dir)
     outputs: dict[str, list[str]] = {
         "download": [str(artifacts_dir / "download" / "raw_cycle_manifest.json")],
         "canonical": [str(artifacts_dir / "canonical" / "canonical_manifest.json")],
@@ -1012,6 +1014,7 @@ def _write_stage_artifacts(
                         _blocked_stage_artifact_payload(config, stage_name, derived_ids, dependency_blocker),
                     )
         return outputs
+    qc_blocker = _qc_stage_blocker(qc)
     writer.write_json(
         Path(outputs["download"][0]),
         {
@@ -1057,6 +1060,15 @@ def _write_stage_artifacts(
             "qc_status": qc.get("status"),
         },
     )
+    if qc.get("status") != "pass":
+        for stage_name in sorted(DOWNSTREAM_STAGE_NAMES):
+            for output in outputs[stage_name]:
+                if output.endswith(".json"):
+                    writer.write_json(
+                        Path(output),
+                        _blocked_stage_artifact_payload(config, stage_name, derived_ids, qc_blocker),
+                    )
+        return outputs
     if qc.get("status") == "pass":
         writer.write_json(
             Path(outputs["parse"][0]),
@@ -1128,11 +1140,34 @@ def _write_stage_artifacts(
     return outputs
 
 
+def _remove_current_stage_artifacts(config: ProductionE2EConfig, artifacts_dir: Path) -> None:
+    _validate_evidence_path_contained(config, artifacts_dir, path_kind="stage_artifacts directory")
+    if not artifacts_dir.exists() and not artifacts_dir.is_symlink():
+        return
+    if artifacts_dir.is_symlink():
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_SYMLINK",
+            f"stage_artifacts directory must not be a symlink: {artifacts_dir}",
+        )
+    for path in sorted(artifacts_dir.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        _validate_evidence_path_contained(config, path, path_kind="stage artifact")
+        if path.is_symlink():
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_EVIDENCE_SYMLINK",
+                f"stage artifact must not be a symlink: {path}",
+            )
+        if path.is_dir():
+            path.rmdir()
+        else:
+            path.unlink()
+    artifacts_dir.rmdir()
+
+
 def _blocked_stage_artifact_payload(
     config: ProductionE2EConfig,
     stage_name: str,
     derived_ids: Mapping[str, Any],
-    dependency_blocker: Mapping[str, Any],
+    blocker: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "schema": f"nhms.production_closure.e2e.stage.{stage_name}.v1",
@@ -1147,11 +1182,15 @@ def _blocked_stage_artifact_payload(
         "live_api_executed": False,
         "live_slurm_executed": False,
         "live_frontend_executed": False,
-        "blockers": [dict(dependency_blocker)],
-        "reason": (
-            "Stage artifact was not executed because dependency evidence is missing, blocked, invalid, or not ready."
-        ),
+        "blockers": [dict(blocker)] if blocker else [],
+        "reason": _blocked_stage_artifact_reason(blocker),
     }
+
+
+def _blocked_stage_artifact_reason(blocker: Mapping[str, Any] | None) -> str:
+    if blocker and blocker.get("stage") == "shud_output_qc":
+        return "Stage artifact was not executed because SHUD output QC blocked downstream publication."
+    return "Stage artifact was not executed because dependency evidence is missing, blocked, invalid, or not ready."
 
 
 def _api_contract_queries(derived_ids: Mapping[str, Any]) -> list[dict[str, Any]]:

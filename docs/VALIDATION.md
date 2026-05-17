@@ -485,9 +485,13 @@ The bundle is written under
   forcing, slurm, parse, frequency, tile, API, and frontend stages. Fast mode
   outputs point at concrete local artifact manifests under
   `stage_artifacts/` instead of claiming live DB/object/tile publication. If a
-  supplied dependency evidence root blocks the chain, stage manifest outputs are
-  empty and any durable `stage_artifacts/**/*.json` payloads are explicit
-  `blocked`/`not_executed` records, not ready artifacts.
+  supplied dependency evidence root or SHUD QC blocks the chain, stage manifest
+  outputs are empty and any durable `stage_artifacts/**/*.json` payloads are
+  explicit `blocked`/`not_executed` records, not ready artifacts. Forced reruns
+  remove the current run's existing `stage_artifacts/` tree with symlink/path
+  containment checks before writing fresh artifacts, so stale non-JSON outputs
+  such as tile `.pbf` fixtures cannot remain as ready evidence after a blocked
+  rerun.
 - `shud_output_qc.json`: deterministic SHUD `.rivqdown` QC with stable blockers
   for missing `.rivqdown`, malformed columns, NaN/Inf, missing required output,
   count mismatch, and time-axis mismatch. Failed QC blocks parse, frequency,

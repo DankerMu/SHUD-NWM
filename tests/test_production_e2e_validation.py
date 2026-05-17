@@ -393,6 +393,48 @@ def test_validate_e2e_force_does_not_reuse_stale_shud_raw_outputs(
     assert qc["retained_paths"][missing_name] is None
 
 
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "missing_rivqdown",
+        "malformed_columns",
+        "non_finite",
+        "missing_required_output",
+        "count_mismatch",
+        "time_axis_mismatch",
+    ],
+)
+def test_validate_e2e_force_qc_blocker_removes_stale_downstream_stage_artifacts(
+    tmp_path: Path,
+    fixture: str,
+) -> None:
+    run_id = f"force-downstream-{fixture}"
+    validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id))
+
+    lane_dir = tmp_path / "artifacts" / run_id / "e2e"
+    assert _read_json(lane_dir / "stage_artifacts" / "parse" / "parsed_timeseries_manifest.json")["status"] == "ready"
+    assert (lane_dir / "stage_artifacts" / "tile" / "0" / "0" / "0.pbf").is_file()
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id=run_id,
+            shud_qc_fixture=fixture,
+            force=True,
+        )
+    )
+
+    stage_manifest = _read_json(lane_dir / "stage_manifest.json")
+    assert summary["status"] == "blocked"
+    for stage in ("parse", "frequency", "tile", "api", "frontend"):
+        assert stage_manifest["stage_statuses"][stage] == "blocked"
+    for payload in _downstream_stage_artifact_json_payloads(lane_dir):
+        assert payload.get("status") != "ready"
+        assert payload.get("metadata", {}).get("status") != "ready"
+        assert payload.get("execution_mode") == "not_executed"
+    assert not (lane_dir / "stage_artifacts" / "tile" / "0" / "0" / "0.pbf").exists()
+
+
 def test_validate_e2e_force_refuses_symlinked_raw_parent_without_unlinking_external_file(tmp_path: Path) -> None:
     evidence_root = tmp_path / "artifacts"
     lane_dir = evidence_root / "rawlink" / "e2e"
@@ -408,6 +450,25 @@ def test_validate_e2e_force_refuses_symlinked_raw_parent_without_unlinking_exter
 
     assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_SYMLINK"
     assert external_file.read_text(encoding="utf-8") == "external evidence must remain\n"
+
+
+def test_validate_e2e_force_refuses_symlinked_stage_artifacts_without_unlinking_external_file(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / "stagelink" / "e2e"
+    external_dir = tmp_path / "external-stage"
+    external_dir.mkdir()
+    external_file = external_dir / "0.pbf"
+    external_file.write_text("external stage artifact must remain\n", encoding="utf-8")
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "stage_artifacts").symlink_to(external_dir, target_is_directory=True)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(ProductionE2EConfig.from_env(evidence_root=evidence_root, run_id="stagelink", force=True))
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_SYMLINK"
+    assert external_file.read_text(encoding="utf-8") == "external stage artifact must remain\n"
 
 
 def test_validate_e2e_rejects_multi_model_set_before_writes(tmp_path: Path) -> None:
@@ -510,6 +571,15 @@ def _read_json(path: Path) -> dict:
 
 def _stage_artifact_json_payloads(lane_dir: Path) -> list[dict]:
     return [_read_json(path) for path in sorted((lane_dir / "stage_artifacts").rglob("*.json"))]
+
+
+def _downstream_stage_artifact_json_payloads(lane_dir: Path) -> list[dict]:
+    downstream_dirs = ("parse", "frequency", "tile", "api", "frontend")
+    return [
+        _read_json(path)
+        for stage_name in downstream_dirs
+        for path in sorted((lane_dir / "stage_artifacts" / stage_name).rglob("*.json"))
+    ]
 
 
 def _dependency_schema(dependency: str) -> str:
