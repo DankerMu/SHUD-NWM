@@ -20,6 +20,7 @@ from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
     rmtree_no_follow,
     unlink_no_follow,
 )
@@ -122,7 +123,19 @@ class EvidenceWriter:
                 "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
                 "Evidence lane directory must stay under evidence root.",
             ) from error
-        self.lane_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(self.evidence_root)
+            ensure_directory_no_follow(self.lane_dir, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionE2EValidationError(
+                error_code,
+                f"Failed to prepare evidence lane {self.lane_dir}: {error}",
+            ) from error
 
     def write_json(self, path: Path, payload: Any) -> None:
         content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
@@ -178,7 +191,18 @@ class EvidenceWriter:
                 "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
                 "Evidence file path must stay under evidence root.",
             ) from error
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(path.parent, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionE2EValidationError(
+                error_code,
+                f"Failed to prepare evidence file parent {path.parent}: {error}",
+            ) from error
         return resolved_parent / path.name
 
 

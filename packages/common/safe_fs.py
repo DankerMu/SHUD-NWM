@@ -17,6 +17,7 @@ class SafeFilesystemError(RuntimeError):
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
 def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> Path:
@@ -100,6 +101,89 @@ def atomic_write_bytes_no_follow(
     finally:
         os.close(parent_fd)
     return target
+
+
+def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> int:
+    """Open a file for reading without following symlinked parents or target."""
+
+    target = _expand_path(path)
+    parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=False)
+    try:
+        _verify_fd_matches_path(parent_fd, parent_path)
+        try:
+            expected = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise SafeFilesystemError(f"Failed to stat {target}: {error}", kind="io") from error
+        if stat.S_ISLNK(expected.st_mode):
+            raise SafeFilesystemError(f"Target file must not be a symlink: {target}")
+        try:
+            file_fd = os.open(target.name, _READ_FLAGS, dir_fd=parent_fd)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise SafeFilesystemError(f"Target file must not be a symlink: {target}") from error
+            raise
+        try:
+            opened = os.fstat(file_fd)
+            if expected.st_dev != opened.st_dev or expected.st_ino != opened.st_ino:
+                raise SafeFilesystemError(f"Target file changed while being opened: {target}")
+            _verify_fd_matches_path(parent_fd, parent_path)
+            return file_fd
+        except Exception:
+            os.close(file_fd)
+            raise
+    finally:
+        os.close(parent_fd)
+
+
+def stat_no_follow(path: Path, *, containment_root: Path | None = None) -> os.stat_result:
+    """Stat a filesystem entry without following symlinked parents or target."""
+
+    target = _expand_path(path)
+    parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=False)
+    try:
+        _verify_fd_matches_path(parent_fd, parent_path)
+        result = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(result.st_mode):
+            raise SafeFilesystemError(f"Target file must not be a symlink: {target}")
+        _verify_fd_matches_path(parent_fd, parent_path)
+        return result
+    except FileNotFoundError:
+        raise
+    except SafeFilesystemError:
+        raise
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to stat {target}: {error}", kind="io") from error
+    finally:
+        os.close(parent_fd)
+
+
+def read_bytes_no_follow(path: Path, *, containment_root: Path | None = None) -> bytes:
+    """Read a file through a no-follow descriptor-bound open."""
+
+    file_fd = open_file_no_follow(path, containment_root=containment_root)
+    try:
+        chunks: list[bytes] = []
+        while chunk := os.read(file_fd, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to read {path}: {error}", kind="io") from error
+    finally:
+        os.close(file_fd)
+
+
+def read_bytes_limited_no_follow(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+    """Read at most max_bytes plus one sentinel byte through a no-follow open."""
+
+    file_fd = open_file_no_follow(path, containment_root=containment_root)
+    try:
+        return os.read(file_fd, max_bytes + 1)
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to read {path}: {error}", kind="io") from error
+    finally:
+        os.close(file_fd)
 
 
 def unlink_no_follow(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False) -> None:
@@ -194,6 +278,8 @@ def _open_parent_dir(
     containment_root: Path | None,
     create: bool,
 ) -> tuple[int, Path]:
+    if containment_root is not None:
+        _relative_parts_under_root(path, containment_root)
     parent = path.parent
     if create:
         ensure_directory_no_follow(parent, containment_root=containment_root)
@@ -282,11 +368,7 @@ def _anchor_for(path: Path, *, containment_root: Path | None) -> tuple[Path, tup
     target = _expand_path(path)
     if containment_root is not None:
         root = _expand_path(containment_root)
-        try:
-            relative = target.relative_to(root)
-        except ValueError as error:
-            raise SafeFilesystemError(f"Path must stay under containment root: {target}") from error
-        return root, tuple(relative.parts)
+        return root, _relative_parts_under_root(target, root)
     if not target.is_absolute():
         target = target.resolve(strict=False)
     anchor = target
@@ -302,6 +384,20 @@ def _anchor_for(path: Path, *, containment_root: Path | None) -> tuple[Path, tup
 def _expand_path(path: Path) -> Path:
     expanded = Path(path).expanduser()
     return expanded if expanded.is_absolute() else expanded.resolve(strict=False)
+
+
+def _relative_parts_under_root(path: Path, root: Path) -> tuple[str, ...]:
+    target = _expand_path(path)
+    containment_root = _expand_path(root)
+    try:
+        relative = target.relative_to(containment_root)
+    except ValueError as error:
+        raise SafeFilesystemError(f"Path must stay under containment root: {target}") from error
+    parts = tuple(relative.parts)
+    for part in parts:
+        if part in {"", ".", ".."}:
+            raise SafeFilesystemError(f"Unsafe path component under containment root: {part!r}")
+    return parts
 
 
 def _close_file_fd(file_fd: int | None) -> None:

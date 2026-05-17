@@ -11,7 +11,14 @@ import pytest
 
 from packages.common import safe_fs
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
-from services.production_closure import object_store_validation, slurm_validation
+from services.production_closure import (
+    e2e_validation,
+    met_validation,
+    object_store_validation,
+    ops_validation,
+    scale_validation,
+    slurm_validation,
+)
 from services.production_closure.object_store_validation import (
     EvidenceWriter,
     ProductionObjectStoreConfig,
@@ -830,27 +837,11 @@ def test_local_object_store_read_bytes_limited_uses_bounded_read(
     store.write_bytes_atomic(key, b"abcdef")
     path = store.resolve_path(key)
     read_sizes: list[int] = []
+    original_os_read = safe_fs.os.read
 
-    class RecordingHandle:
-        def __enter__(self) -> RecordingHandle:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self, size: int = -1) -> bytes:
-            read_sizes.append(size)
-            return b"abcdef"[:size]
-
-    original_open = type(path).open
-
-    def fake_open(self: Path, mode: str = "r", *args: object, **kwargs: object) -> RecordingHandle:
-        if self != path:
-            return original_open(self, mode, *args, **kwargs)
-        assert mode == "rb"
-        assert not args
-        assert not kwargs
-        return RecordingHandle()
+    def fake_os_read(fd: int, size: int) -> bytes:
+        read_sizes.append(size)
+        return original_os_read(fd, size)
 
     original_read_bytes = type(path).read_bytes
 
@@ -859,13 +850,66 @@ def test_local_object_store_read_bytes_limited_uses_bounded_read(
             return original_read_bytes(self)
         raise AssertionError("read_bytes() must not be used for limited reads")
 
-    monkeypatch.setattr(type(path), "open", fake_open)
+    monkeypatch.setattr(safe_fs.os, "read", fake_os_read)
     monkeypatch.setattr(type(path), "read_bytes", forbidden_read_bytes)
 
     with pytest.raises(object_store_validation.ObjectStoreError):
         store.read_bytes_limited(key, max_bytes=5)
 
     assert read_sizes == [6]
+
+
+@pytest.mark.parametrize("helper_name", ["unlink_no_follow", "rmtree_no_follow"])
+def test_safe_fs_rejects_parent_traversal_under_containment_root(
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    victim = outside / "victim.txt"
+    victim.write_text("external must remain\n", encoding="utf-8")
+
+    if helper_name == "unlink_no_follow":
+        with pytest.raises(safe_fs.SafeFilesystemError):
+            safe_fs.unlink_no_follow(root / ".." / "outside" / "victim.txt", containment_root=root)
+        assert victim.read_text(encoding="utf-8") == "external must remain\n"
+    else:
+        with pytest.raises(safe_fs.SafeFilesystemError):
+            safe_fs.rmtree_no_follow(root / ".." / "outside", containment_root=root)
+        assert victim.read_text(encoding="utf-8") == "external must remain\n"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["read_bytes_limited", "size_and_checksum", "write_bytes_atomic", "delete"],
+)
+def test_local_object_store_rejects_symlinked_object_key_parent_identity(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms-prod/m10")
+    stale_dir = tmp_path / "object-store" / "runs" / "stale" / "input"
+    stale_dir.mkdir(parents=True)
+    stale_file = stale_dir / "manifest.json"
+    stale_file.write_bytes(b"stale sibling content\n")
+    current_parent = tmp_path / "object-store" / "runs" / "current"
+    current_parent.parent.mkdir(parents=True, exist_ok=True)
+    current_parent.symlink_to(tmp_path / "object-store" / "runs" / "stale", target_is_directory=True)
+    key = "runs/current/input/manifest.json"
+
+    with pytest.raises(ObjectStoreError):
+        if operation == "read_bytes_limited":
+            store.read_bytes_limited(key, max_bytes=1024)
+        elif operation == "size_and_checksum":
+            store.size_and_checksum(key)
+        elif operation == "write_bytes_atomic":
+            store.write_bytes_atomic(key, b"new content\n")
+        else:
+            store.delete(key)
+
+    assert stale_file.read_bytes() == b"stale sibling content\n"
 
 
 def test_local_object_store_rejects_parent_symlink_swap_before_write_or_delete(
@@ -918,6 +962,80 @@ def test_local_object_store_rejects_parent_symlink_swap_before_write_or_delete(
     with pytest.raises(ObjectStoreError):
         store.delete("runs/run_001/input/manifest.json")
     assert external_target.read_text(encoding="utf-8") == "external must remain\n"
+
+
+@pytest.mark.parametrize(
+    ("lane_name", "module", "error_type", "error_code"),
+    [
+        (
+            "e2e",
+            e2e_validation,
+            e2e_validation.ProductionE2EValidationError,
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+        ),
+        (
+            "met",
+            met_validation,
+            met_validation.ProductionMetValidationError,
+            "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE",
+        ),
+        (
+            "object-store",
+            object_store_validation,
+            ProductionObjectStoreValidationError,
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+        ),
+        (
+            "ops",
+            ops_validation,
+            ops_validation.ProductionOpsValidationError,
+            "PRODUCTION_OPS_EVIDENCE_PATH_UNSAFE",
+        ),
+        (
+            "scale",
+            scale_validation,
+            scale_validation.ProductionScaleValidationError,
+            "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE",
+        ),
+        (
+            "slurm",
+            slurm_validation,
+            slurm_validation.ProductionValidationError,
+            "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
+        ),
+    ],
+)
+def test_production_evidence_writers_prepare_reject_lane_parent_symlink_swap_without_external_mkdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lane_name: str,
+    module: object,
+    error_type: type[Exception],
+    error_code: str,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / f"prepare-swap-{lane_name}" / lane_name
+    external = tmp_path / f"external-{lane_name}"
+    external.mkdir()
+    writer = module.EvidenceWriter(evidence_root, lane_dir, force=True)
+    original_ensure = module.ensure_directory_no_follow
+    swapped = False
+
+    def swap_lane_parent(path: Path, *, containment_root: Path | None = None) -> Path:
+        nonlocal swapped
+        if Path(path) == lane_dir and not swapped:
+            swapped = True
+            lane_dir.parent.symlink_to(external, target_is_directory=True)
+        return original_ensure(path, containment_root=containment_root)
+
+    monkeypatch.setattr(module, "ensure_directory_no_follow", swap_lane_parent)
+
+    with pytest.raises(error_type) as exc_info:
+        writer.prepare()
+
+    assert swapped is True
+    assert exc_info.value.error_code == error_code
+    assert sorted(path.name for path in external.iterdir()) == []
 
 
 @pytest.mark.parametrize(

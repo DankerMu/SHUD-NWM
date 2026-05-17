@@ -18,7 +18,12 @@ from typing import Any, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
-from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, unlink_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    unlink_no_follow,
+)
 from services.orchestrator.retry import compute_backoff_seconds, is_transient_error
 from services.production_closure.e2e_validation import (
     ProductionE2EConfig,
@@ -111,7 +116,7 @@ class EvidenceWriter:
                     "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
                     f"Evidence lane path must be a directory: {self.lane_dir}.",
                 )
-        resolved_lane = self.lane_dir.resolve()
+        resolved_lane = self.lane_dir.resolve(strict=False)
         try:
             resolved_lane.relative_to(self.evidence_root)
         except ValueError as error:
@@ -119,7 +124,19 @@ class EvidenceWriter:
                 "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
                 "Evidence lane directory must stay under evidence root.",
             ) from error
-        self.lane_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(self.evidence_root)
+            ensure_directory_no_follow(self.lane_dir, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_SLURM_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionValidationError(
+                error_code,
+                f"Failed to prepare evidence lane {self.lane_dir}: {error}",
+            ) from error
 
     def write_json(self, path: Path, payload: Any) -> None:
         self.write_text(
@@ -152,7 +169,12 @@ class EvidenceWriter:
         exists_error_code: str = "PRODUCTION_SLURM_EVIDENCE_EXISTS",
         write_error_code: str = "PRODUCTION_SLURM_EVIDENCE_WRITE_FAILED",
     ) -> None:
-        safe_path = self._safe_file_path(path, allow_outside_evidence=allow_outside_evidence)
+        safe_path = self._safe_file_path(
+            path,
+            allow_outside_evidence=allow_outside_evidence,
+            file_label=file_label,
+            write_error_code=write_error_code,
+        )
         if safe_path.exists() and safe_path not in self._created_paths and not self.force:
             raise ProductionValidationError(
                 exists_error_code,
@@ -174,14 +196,21 @@ class EvidenceWriter:
                 f"Failed to write {file_label.lower()} {safe_path}: {error}",
             ) from error
 
-    def _safe_file_path(self, path: Path, *, allow_outside_evidence: bool = False) -> Path:
+    def _safe_file_path(
+        self,
+        path: Path,
+        *,
+        allow_outside_evidence: bool = False,
+        file_label: str = "Evidence file",
+        write_error_code: str = "PRODUCTION_SLURM_EVIDENCE_WRITE_FAILED",
+    ) -> Path:
         if path.is_symlink():
             raise ProductionValidationError(
                 "PRODUCTION_SLURM_EVIDENCE_SYMLINK",
                 f"Evidence file must not be a symlink: {path}",
             )
         _refuse_symlink_components(path.parent)
-        resolved_parent = path.parent.resolve()
+        resolved_parent = path.parent.resolve(strict=False)
         if not allow_outside_evidence:
             try:
                 resolved_parent.relative_to(self.evidence_root)
@@ -190,7 +219,15 @@ class EvidenceWriter:
                     "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
                     "Evidence file path must stay under evidence root.",
                 ) from error
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            containment_root = None if allow_outside_evidence else self.evidence_root
+            ensure_directory_no_follow(path.parent, containment_root=containment_root)
+        except SafeFilesystemError as error:
+            error_code = write_error_code if error.kind == "io" else "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+            raise ProductionValidationError(
+                error_code,
+                f"Failed to prepare {file_label.lower()} parent {path.parent}: {error}",
+            ) from error
         return resolved_parent / path.name
 
 
