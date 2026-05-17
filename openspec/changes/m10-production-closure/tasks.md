@@ -114,33 +114,33 @@
 
 ## 5. National-Scale MVT / Performance Closure
 
-- [ ] 5.0 Record preflight: real imported dataset or deterministic fixture source, minimum segment/model counts, bbox sizes, thresholds file, and tile content-type expectation.
-- [ ] 5.1 Build or select a national-scale river network fixture from imported Basins/registry data and document segment counts and geometry bounds.
-- [ ] 5.2 Implement or validate true MVT publication when `application/x-protobuf` production delivery is required; otherwise close only with an explicit release-blocking report that lists affected endpoints, missing implementation work, and states production tile readiness is not achieved.
-- [ ] 5.3 Capture PostGIS query plans and p95 latency for model listing, river segments bbox, flood alerts, forecast series, pipeline jobs, and tile metadata.
-- [ ] 5.4 Capture frontend load/render evidence for large river layers and timeline/chart interactions at desktop and mobile breakpoints.
-- [ ] 5.5 Define capacity thresholds and failure behavior for oversized tiles, bbox queries, long time ranges, and object-store artifact listings.
-- [ ] 5.6 Document validation command and evidence files under `artifacts/production-closure/<run_id>/scale/`, including dataset manifest, threshold file, query plans, latency report, tile report, frontend screenshots/results, and fast-regression commands.
+- [x] 5.0 Record preflight: real imported dataset or deterministic fixture source, minimum segment/model counts, bbox sizes, thresholds file, and tile content-type expectation.
+- [x] 5.1 Build or select a national-scale river network fixture from imported Basins/registry data and document segment counts and geometry bounds.
+- [x] 5.2 Implement or validate true MVT publication when `application/x-protobuf` production delivery is required; otherwise close only with an explicit release-blocking report that lists affected endpoints, missing implementation work, and states production tile readiness is not achieved.
+- [x] 5.3 Capture PostGIS query plans and p95 latency for model listing, river segments bbox, flood alerts, forecast series, pipeline jobs, and tile metadata.
+- [x] 5.4 Capture frontend load/render evidence for large river layers and timeline/chart interactions at desktop and mobile breakpoints.
+- [x] 5.5 Define capacity thresholds and failure behavior for oversized tiles, bbox queries, long time ranges, and object-store artifact listings.
+- [x] 5.6 Document validation command and evidence files under `artifacts/production-closure/<run_id>/scale/`, including dataset manifest, threshold file, query plans, latency report, tile report, frontend screenshots/results, and fast-regression commands.
 
 ### Issue #151 Evidence Map
 
-- [ ] 5.E1 Preflight artifact: input fixture sets dataset source, minimum segment/model counts, bbox set, thresholds file/version, tile content-type expectation, frontend breakpoints, and evidence root; expected output is redacted JSON under `artifacts/production-closure/<run_id>/scale/` with stable missing/unsafe input errors.
-- [ ] 5.E2 Dataset/fixture manifest: input deterministic large fixture or consumed real imported dataset; expected output records segment/model counts, geometry bounds, bbox sizes, fixture checksum, CRS/geometry assumptions, and generation/consumption mode without requiring real national data in fast checks.
-- [ ] 5.E3 Threshold artifact: input versioned thresholds; expected output records p95 API/query targets, max tile bytes, frontend load/render/memory budgets, oversized bbox behavior, long time-range behavior, object-list limits, and pass/fail semantics.
-- [ ] 5.E4 Query/latency evidence: input bounded query samples; expected output records model listing, river bbox, flood alert summary/ranking/timeline/map, forecast series, jobs/logs, and tile metadata row counts, plan text/hash, latency samples, p95, threshold comparison, and live DB/API execution flags.
-- [ ] 5.E5 MVT/readiness blocker: input tile content expectation `application/x-protobuf` with current GeoJSON compatibility delivery; expected output creates an explicit release blocker identifying affected endpoints and states production tile readiness is not achieved. If true MVT is implemented, expected output validates content type, tile byte bound, and layer metadata.
-- [ ] 5.E6 Frontend large-layer evidence: input desktop/mobile breakpoint set and deterministic or real frontend smoke mode; expected output records map load, large-layer render, segment selection, timeline movement, chart render, memory budget status, execution mode, and no mock-only live-readiness claim.
-- [ ] 5.E7 Resource/path/redaction: input oversized bbox, long time range, huge object listing, unsafe run IDs, symlinked evidence paths, credential-shaped API/object URLs, and reruns; expected output uses stable blockers, bounded payloads, no cross-run overwrite, and redacted evidence/stdout/docs.
-- [ ] 5.E8 Fast-regression commands: expected passing commands include `openspec validate m10-production-closure --strict --no-interactive`, `uv run ruff check .`, targeted scale/API/tile/frontend-evidence tests, frontend tests/build when UI/generated types change, and documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-scale --evidence-root ...`.
+- [x] 5.E1 Preflight artifact: input fixture sets dataset source, minimum segment/model counts, bbox set, thresholds file/version, tile content-type expectation, frontend breakpoints, and evidence root; expected output is redacted JSON under `artifacts/production-closure/<run_id>/scale/` with stable missing/unsafe input errors.
+- [x] 5.E2 Dataset/fixture manifest: input deterministic large fixture or consumed real imported dataset; expected output records segment/model counts, geometry bounds, bbox sizes, fixture checksum, CRS/geometry assumptions, and generation/consumption mode without requiring real national data in fast checks.
+- [x] 5.E3 Threshold artifact: input versioned thresholds; expected output records p95 API/query targets, max tile bytes, frontend load/render/memory budgets, oversized bbox behavior, long time-range behavior, object-list limits, and pass/fail semantics.
+- [x] 5.E4 Query/latency evidence: input bounded query samples; expected output records model listing, river bbox, flood alert summary/ranking/timeline/map, forecast series, jobs/logs, and tile metadata row counts, plan text/hash, latency samples, p95, threshold comparison, and live DB/API execution flags.
+- [x] 5.E5 MVT/readiness blocker: input tile content expectation `application/x-protobuf` with current GeoJSON compatibility delivery; expected output creates an explicit release blocker identifying affected endpoints and states production tile readiness is not achieved. If true MVT is implemented, expected output validates content type, tile byte bound, and layer metadata.
+- [x] 5.E6 Frontend large-layer evidence: input desktop/mobile breakpoint set and deterministic or real frontend smoke mode; expected output records map load, large-layer render, segment selection, timeline movement, chart render, memory budget status, execution mode, and no mock-only live-readiness claim.
+- [x] 5.E7 Resource/path/redaction: input oversized bbox, long time range, huge object listing, unsafe run IDs, symlinked evidence paths, credential-shaped API/object URLs, and reruns; expected output uses stable blockers, bounded payloads, no cross-run overwrite, and redacted evidence/stdout/docs.
+- [x] 5.E8 Fast-regression commands: expected passing commands include `openspec validate m10-production-closure --strict --no-interactive`, `uv run ruff check .`, targeted scale/API/tile/frontend-evidence tests, frontend tests/build when UI/generated types change, and documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-scale --evidence-root ...`.
 
 ### Issue #151 Selected Risk Packs
 
-- [ ] 5.R1 Public API / CLI / script entry: selected - `validate-scale`, API/tile evidence queries, and frontend smoke/load entrypoints need stable JSON/error behavior.
-- [ ] 5.R2 Config / project setup: selected - dataset source, thresholds file, bbox set, tile content-type expectation, frontend breakpoints, and evidence root are preflight inputs.
-- [ ] 5.R3 File IO / path safety / overwrite: selected - large fixture manifests, thresholds, query plans, latency reports, tile reports, frontend results, and reruns must stay run-scoped and bounded.
-- [ ] 5.R4 Schema / geospatial / time-series contracts: selected - threshold schema, query evidence schema, CRS/bbox assumptions, tile metadata, content types, latency units, valid times, and frontend timing/memory fields must remain stable.
-- [ ] 5.R5 Numerical/performance/resource bounds: selected - latency percentiles, counts, byte sizes, timing samples, bbox enumeration, object listings, and evidence payloads must reject malformed/non-finite or oversized data.
-- [ ] 5.R6 Legacy compatibility, error handling, release compatibility, and docs: selected - existing GeoJSON tile compatibility, `.pbf` redirect, API/frontend tests, explicit MVT release blocker, optional browser/PostGIS gates, and validation docs must remain compatible.
+- [x] 5.R1 Public API / CLI / script entry: selected - `validate-scale`, API/tile evidence queries, and frontend smoke/load entrypoints need stable JSON/error behavior.
+- [x] 5.R2 Config / project setup: selected - dataset source, thresholds file, bbox set, tile content-type expectation, frontend breakpoints, and evidence root are preflight inputs.
+- [x] 5.R3 File IO / path safety / overwrite: selected - large fixture manifests, thresholds, query plans, latency reports, tile reports, frontend results, and reruns must stay run-scoped and bounded.
+- [x] 5.R4 Schema / geospatial / time-series contracts: selected - threshold schema, query evidence schema, CRS/bbox assumptions, tile metadata, content types, latency units, valid times, and frontend timing/memory fields must remain stable.
+- [x] 5.R5 Numerical/performance/resource bounds: selected - latency percentiles, counts, byte sizes, timing samples, bbox enumeration, object listings, and evidence payloads must reject malformed/non-finite or oversized data.
+- [x] 5.R6 Legacy compatibility, error handling, release compatibility, and docs: selected - existing GeoJSON tile compatibility, `.pbf` redirect, API/frontend tests, explicit MVT release blocker, optional browser/PostGIS gates, and validation docs must remain compatible.
 
 ### Issue #151 Deferred Risk Packs
 
