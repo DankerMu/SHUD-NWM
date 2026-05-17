@@ -331,6 +331,100 @@ The bundle is written under
 Secret-shaped userinfo, query strings, fragments, and sensitive assignment
 values are redacted from evidence.
 
+## M10 Live Meteorology Ingestion + QC Closure
+
+Issue #149 adds an opt-in production closure lane for live meteorology source
+configuration, deterministic production-like cycle ingestion, canonical product
+lineage, forcing generation, and forcing QC. The default command is
+self-contained: it does not require external network access, live source
+credentials, real S3/MinIO, copied `/volume` data, PostGIS, a live API, Slurm,
+or a SHUD solver.
+
+Fast deterministic evidence command:
+
+```bash
+uv run nhms-production validate-met \
+  --evidence-root artifacts/production-closure \
+  --run-id local-149
+```
+
+Production-like preflight can explicitly select the source subset, cycle window,
+object prefix, model fixture, and CLDAS restricted reason:
+
+```bash
+export NHMS_RUN_PRODUCTION_CLOSURE=1
+export NHMS_PRODUCTION_MET_SOURCES=GFS,IFS,ERA5
+export NHMS_PRODUCTION_MET_ACCESS_MODE=public-or-deterministic-fixture
+export NHMS_PRODUCTION_MET_CACHED_FALLBACK_POLICY=deterministic_fixture
+export NHMS_PRODUCTION_MET_CYCLE_START=2026-05-07T00:00:00Z
+export NHMS_PRODUCTION_MET_CYCLE_END=2026-05-07T06:00:00Z
+export NHMS_PRODUCTION_MET_FORECAST_HOURS=0,3
+export NHMS_PRODUCTION_MET_OBJECT_PREFIX=s3://nhms-prod/met
+export NHMS_PRODUCTION_MET_MODEL_ID=basins_qhh_shud_fixture
+export NHMS_PRODUCTION_MET_MODEL_VERSION=vproduction-met-local
+export NHMS_PRODUCTION_MET_CLDAS_RESTRICTED_REASON="CLDAS credentials/licensing not available"
+uv run nhms-production validate-met \
+  --evidence-root artifacts/production-closure \
+  --run-id "$(date -u +m10-149-%Y%m%dT%H%M%SZ)"
+```
+
+The lane records GFS, IFS, ERA5, and CLDAS source states. Fast mode uses
+`deterministic_fixture` for enabled GFS/IFS/ERA5 sources and `restricted` for
+CLDAS. If source-specific live gates such as
+`NHMS_PRODUCTION_MET_ALLOW_LIVE_NETWORK=1` and
+`NHMS_PRODUCTION_MET_LIVE_GFS=1` are set, the current #149 lane records
+`not_executed` rather than claiming live success; live network execution is left
+to a later production executor.
+
+### Fast Regression Commands
+
+Local #149 verification uses these fast regression commands:
+
+```bash
+openspec validate m10-production-closure --strict --no-interactive
+.venv/bin/ruff check services/production_closure tests/test_production_met_validation.py docs/VALIDATION.md progress.md
+.venv/bin/pytest -q tests/test_production_met_validation.py tests/test_production_slurm_validation.py tests/test_canonical_converter.py tests/test_forcing_producer.py tests/test_source_identity.py
+```
+
+The opt-in deterministic production-closure smoke is:
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 .venv/bin/nhms-production validate-met \
+  --evidence-root artifacts/production-closure \
+  --run-id local-149-production-met
+```
+
+With synthetic local inputs it should report `status=ready`. Validation-created
+raw/canonical/forcing scratch objects are written under
+`artifacts/production-closure/<run_id>/met/local-object-store/` and use object
+URIs scoped to `<object-prefix>/runs/<run_id>/met/...`. Reusing a run ID refuses
+to overwrite the existing bundle unless `--force` is supplied.
+
+The bundle is written under
+`artifacts/production-closure/<run_id>/met/` and contains:
+
+- `preflight.json`: redacted enabled source subset, access mode, cached fallback
+  policy, cycle window, object prefix, selected deterministic Basins-backed
+  model/version, CLDAS restricted reason, evidence root, and bounded resource
+  limits.
+- `source_config.json`: GFS, IFS, ERA5, and CLDAS source status plus execution
+  mode from `deterministic_fixture`, `live_executed`, `skipped`, `restricted`,
+  or `not_executed`; credentials are represented by source names only.
+- `raw_cycle_manifest.json`: bounded deterministic source cycle evidence with
+  source ID, cycle time, forecast hours, file counts, byte counts, checksums,
+  retry counts, raw/object URIs, and skipped/restricted source evidence.
+- `canonical_products.json`: canonical GFS product metadata with source cycle,
+  variables, units, time axis, object URI, checksum, lineage, and explicit
+  malformed/missing raw failure metadata.
+- `forcing_manifest.json` and `forcing_qc.json`: forcing package URI, manifest,
+  checksum, continuity check, required variables, units, missing-value check,
+  range checks, and pass/fail status.
+- `best_available_lineage.json`: selected source per valid time plus explicit
+  skipped/restricted reasons; it does not fabricate success for non-executed
+  GFS, IFS, ERA5, or CLDAS sources.
+- `environment.json` and `summary.json`: redacted command/environment metadata
+  and evidence file index.
+
 ## Opt-In Real Basins Smoke
 
 Run only when `data/Basins` exists and points at an accessible Basins tree.
