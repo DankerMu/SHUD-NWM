@@ -615,6 +615,187 @@ def test_runtime_forcing_prefix_rejects_zero_byte_or_empty_tree(
     assert list(input_dir.rglob("*")) == []
 
 
+def test_runtime_forcing_prefix_rejects_fifo_child_without_blocking(
+    tmp_path: Path,
+) -> None:
+    config = ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m10_148_fifo_force")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms-prod/runtime-prefix")
+    prefix = Path(store.root) / "runs" / config.run_id / "input" / "scratch" / "runtime-staging" / "forcing"
+    prefix.mkdir(parents=True)
+    os.mkfifo(prefix / "forcing.tsd.forc")
+    input_dir = config.lane_dir / "runtime-workspace" / "runs" / f"{config.run_id}_runtime_staging" / "input"
+    input_dir.mkdir(parents=True)
+    staging_budget = object_store_validation.RuntimeStagingBudget(
+        max_file_count=4,
+        max_node_count=4,
+        max_directory_depth=8,
+        max_total_bytes=1024,
+        max_object_bytes=object_store_validation.MAX_RUNTIME_STAGING_OBJECT_BYTES,
+    )
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        object_store_validation._collect_runtime_object_or_prefix(
+            config,
+            store,
+            f"runs/{config.run_id}/input/scratch/runtime-staging/forcing/",
+            input_dir,
+            staging_budget,
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert "regular files or directories" in exc_info.value.message
+    assert list(input_dir.rglob("*")) == []
+
+
+def test_runtime_forcing_prefix_rejects_extra_non_validation_child_before_staging(
+    tmp_path: Path,
+) -> None:
+    config = ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m10_148_extra_force")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms-prod/runtime-prefix")
+    current_key = (
+        f"runs/{config.run_id}/input/scratch/runtime-staging/forcing/gfs/2026051600/basin_v1/model/"
+        "forcing.tsd.forc"
+    )
+    stale_key = f"runs/{config.run_id}/input/scratch/runtime-staging/forcing/stale/forcing.tsd.forc"
+    store.write_bytes_atomic(current_key, b"current\n")
+    store.write_bytes_atomic(stale_key, b"stale\n")
+    input_dir = config.lane_dir / "runtime-workspace" / "runs" / f"{config.run_id}_runtime_staging" / "input"
+    input_dir.mkdir(parents=True)
+    staging_budget = object_store_validation.RuntimeStagingBudget(
+        max_file_count=4,
+        max_node_count=8,
+        max_directory_depth=8,
+        max_total_bytes=1024,
+        max_object_bytes=object_store_validation.MAX_RUNTIME_STAGING_OBJECT_BYTES,
+    )
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        object_store_validation._collect_runtime_object_or_prefix(
+            config,
+            store,
+            f"runs/{config.run_id}/input/scratch/runtime-staging/forcing/",
+            input_dir,
+            staging_budget,
+            allowed_keys={current_key},
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert "non-validation object" in exc_info.value.message
+    assert stale_key.rsplit("/", maxsplit=1)[0] in exc_info.value.message
+    assert list(input_dir.rglob("*")) == []
+
+
+def test_validate_object_store_blocks_preexisting_extra_runtime_forcing_prefix_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "m10_148_extra_prefix"
+    object_root = tmp_path / "object-store"
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/runtime-prefix")
+    stale_file = (
+        object_root
+        / "runs"
+        / run_id
+        / "input"
+        / "scratch"
+        / "runtime-staging"
+        / "forcing"
+        / "gfs"
+        / "2026051600"
+        / "basin_v1"
+        / "basins_basin_a_shud"
+        / "stale"
+        / "forcing.tsd.forc"
+    )
+    stale_file.parent.mkdir(parents=True)
+    stale_file.write_text("stale forcing must not be staged\n", encoding="utf-8")
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id))
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert "non-validation object" in exc_info.value.message
+    lane_dir = tmp_path / "artifacts" / run_id / "object-store"
+    input_dir = lane_dir / "runtime-workspace" / "runs" / f"{run_id}_runtime_staging" / "input"
+    assert list(input_dir.rglob("*")) == []
+
+
+def test_runtime_staging_rejects_package_forcing_target_collision_before_writes(
+    tmp_path: Path,
+) -> None:
+    config = ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m10_148_collision")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms-prod/runtime-prefix")
+    package_key = "models/collision/alias-a.cfg.para"
+    forcing_key = f"runs/{config.run_id}/input/scratch/runtime-staging/forcing/alias-a.cfg.para"
+    package_content = b"package cfg\n"
+    forcing_content = b"forcing cfg\n"
+    package_uri = store.write_bytes_atomic(package_key, package_content)
+    store.write_bytes_atomic(forcing_key, forcing_content)
+    package_sha = hashlib.sha256(package_content).hexdigest()
+    input_dir = config.lane_dir / "runtime-workspace" / "runs" / f"{config.run_id}_runtime_staging" / "input"
+    output_dir = config.lane_dir / "runtime-workspace" / "runs" / f"{config.run_id}_runtime_staging" / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    package_manifest = {
+        "included_files": [
+            {
+                "role": "cfg",
+                "relative_path": "alias-a.cfg.para",
+                "object_uri": package_uri,
+                "size_bytes": len(package_content),
+                "sha256": package_sha,
+            }
+        ]
+    }
+    stored_verification = {
+        "entries": [
+            {
+                "role": "cfg",
+                "relative_path": "alias-a.cfg.para",
+                "object_uri": package_uri,
+                "expected_size_bytes": len(package_content),
+                "expected_sha256": package_sha,
+                "verified": True,
+            }
+        ]
+    }
+    runtime_manifest = {
+        "run_id": f"{config.run_id}_runtime_staging",
+        "start_time": "2026-05-16T00:00:00Z",
+        "end_time": "2026-05-17T00:00:00Z",
+        "model": {"model_id": "model", "project_name": "alias-a", "segment_count": 2},
+        "forcing": {
+            "forcing_uri": store.uri_for_key(
+                f"runs/{config.run_id}/input/scratch/runtime-staging/forcing/"
+            )
+        },
+        "runtime": {"output_interval_minutes": 1440},
+    }
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        object_store_validation._prepare_runtime_staging_workspace(
+            config,
+            store,
+            runtime_manifest,
+            package_manifest,
+            stored_verification,
+            input_dir,
+            output_dir,
+            allowed_forcing_keys={forcing_key},
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert "target path collision before write" in exc_info.value.message
+    assert list(input_dir.rglob("*")) == []
+
+
 def test_validate_object_store_blocks_package_object_changed_between_verification_and_runtime_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1090,6 +1271,26 @@ def test_local_object_store_read_bytes_limited_uses_bounded_read(
         store.read_bytes_limited(key, max_bytes=5)
 
     assert read_sizes == [6]
+
+
+@pytest.mark.parametrize("operation", ["read_bytes_limited", "iter_bytes", "size_and_checksum"])
+def test_local_object_store_rejects_fifo_entry_without_blocking(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms-prod/m10")
+    key = "runs/m10_148_fifo/input/manifest.json"
+    fifo_path = store.resolve_path(key)
+    fifo_path.parent.mkdir(parents=True)
+    os.mkfifo(fifo_path)
+
+    with pytest.raises(ObjectStoreError):
+        if operation == "read_bytes_limited":
+            store.read_bytes_limited(key, max_bytes=1024)
+        elif operation == "iter_bytes":
+            next(store.iter_bytes(key))
+        else:
+            store.size_and_checksum(key)
 
 
 @pytest.mark.parametrize("helper_name", ["unlink_no_follow", "rmtree_no_follow"])

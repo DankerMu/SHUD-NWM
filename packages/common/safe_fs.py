@@ -17,7 +17,12 @@ class SafeFilesystemError(RuntimeError):
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
 
 
 def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> Path:
@@ -118,6 +123,8 @@ def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> 
             raise SafeFilesystemError(f"Failed to stat {target}: {error}", kind="io") from error
         if stat.S_ISLNK(expected.st_mode):
             raise SafeFilesystemError(f"Target file must not be a symlink: {target}")
+        if not stat.S_ISREG(expected.st_mode):
+            raise SafeFilesystemError(f"Target file must be a regular file: {target}")
         try:
             file_fd = os.open(target.name, _READ_FLAGS, dir_fd=parent_fd)
         except OSError as error:
@@ -126,6 +133,8 @@ def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> 
             raise
         try:
             opened = os.fstat(file_fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise SafeFilesystemError(f"Target file must be a regular file: {target}")
             if expected.st_dev != opened.st_dev or expected.st_ino != opened.st_ino:
                 raise SafeFilesystemError(f"Target file changed while being opened: {target}")
             _verify_fd_matches_path(parent_fd, parent_path)
