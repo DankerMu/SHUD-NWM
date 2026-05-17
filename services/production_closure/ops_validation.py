@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -151,7 +152,9 @@ DEPENDENCY_CONTRACTS = {
 }
 EXPLICIT_BLOCKED_DEPENDENCY_STATUSES = {"blocked", "failed", "failure", "error", "not_executed", "missing", "unknown"}
 ACCEPTED_DEPENDENCY_RECEIPT_KEY = "accepted_dependency_evidence"
+ACCEPTED_DEPENDENCY_RECEIPT_SCHEMA = "nhms.production_closure.ops.accepted_dependency_evidence.v1"
 ACCEPTED_DEPENDENCY_EXECUTION_MODES = {"accepted_live_evidence", "live_executed", "consumed_live_evidence"}
+ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 
 
 class ProductionOpsValidationError(RuntimeError):
@@ -174,6 +177,11 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
+            if not self.lane_dir.is_dir():
+                raise ProductionOpsValidationError(
+                    "PRODUCTION_OPS_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
             if any(self.lane_dir.iterdir()) and not self.force:
                 raise ProductionOpsValidationError(
                     "PRODUCTION_OPS_EVIDENCE_EXISTS",
@@ -360,7 +368,7 @@ def _preflight_payload(config: ProductionOpsConfig) -> dict[str, Any]:
         "run_id": config.run_id,
         "auth_mode": config.auth_mode,
         "required_roles": list(config.required_roles),
-        "alert_target": config.alert_target,
+        "alert_target": _evidence_alert_target(config.alert_target),
         "deployment_config_source": config.deployment_config_source,
         "rollback_drill_scope": config.rollback_scope,
         "dependency_evidence": {
@@ -631,7 +639,10 @@ def _audit_redaction_evidence(config: ProductionOpsConfig, auth_rbac: Mapping[st
                 "lineage": {
                     **decision["lineage"],
                     "api_payload": "password=deterministic-secret-for-redaction-test",
-                    "alert_payload": f"{config.alert_target}/token=deterministic-secret-for-redaction-test",
+                    "alert_payload": (
+                        f"{_evidence_alert_target(config.alert_target)}/"
+                        "token=deterministic-secret-for-redaction-test"
+                    ),
                     "frontend_output": "session_key=deterministic-secret-for-redaction-test",
                     "pr_evidence": "signed_url=https://example.test/object?X-Amz-Signature=deterministic-secret",
                 },
@@ -658,6 +669,7 @@ def _audit_redaction_evidence(config: ProductionOpsConfig, auth_rbac: Mapping[st
 
 def _monitoring_alert_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     execution_mode = "dry_run_sink" if config.alert_target.startswith("dry-run://") else "not_executed"
+    evidence_target = _evidence_alert_target(config.alert_target)
     alerts = []
     blockers = []
     for alert_name, fixture in MONITORING_ALERTS.items():
@@ -673,8 +685,8 @@ def _monitoring_alert_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 "threshold_breached": fixture["observed"] > fixture["threshold"],
                 "execution_mode": execution_mode,
                 "live_alert_sink_delivered": False,
-                "sink": config.alert_target,
-                "dry_run_target": config.alert_target if execution_mode == "dry_run_sink" else None,
+                "sink": evidence_target,
+                "dry_run_target": evidence_target if execution_mode == "dry_run_sink" else None,
                 "runbook_link": fixture["runbook"],
                 "recommended_operator_action": fixture["action"],
             }
@@ -851,7 +863,11 @@ def _environment_payload(config: ProductionOpsConfig) -> dict[str, Any]:
         "python_version": sys.version.split()[0],
         "platform": platform.platform(),
         "cwd": str(Path.cwd()),
-        "env": {key: os.getenv(key, "") for key in env_keys if key in os.environ},
+        "env": {
+            key: _environment_value_for_evidence(key, os.getenv(key, ""))
+            for key in env_keys
+            if key in os.environ
+        },
         "redaction": {
             "secret_shaped_values_redacted": True,
             "stdout_redacted": True,
@@ -962,7 +978,47 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             error_code="PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
             reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
         )
-    accepted, reason = _has_accepted_dependency_evidence(summary)
+    try:
+        receipt_path = _dependency_acceptance_receipt_path(root, name, summary_path)
+    except ProductionOpsValidationError as error:
+        return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code)
+    if receipt_path is None:
+        accepted = False
+        reason = (
+            "Dependency summary is missing external accepted_dependency_evidence.json receipt under the "
+            "dependency evidence root."
+        )
+        receipt = None
+    else:
+        try:
+            receipt = _read_dependency_receipt_json(receipt_path)
+        except ProductionOpsValidationError as error:
+            return _invalid_dependency(name, receipt_path, "blocked", error.message, error_code=error.error_code)
+        except (OSError, json.JSONDecodeError) as error:
+            return _invalid_dependency(
+                name,
+                receipt_path,
+                "blocked",
+                f"Dependency acceptance receipt could not be read: {error}",
+                error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID",
+            )
+        if not isinstance(receipt, Mapping):
+            return _invalid_dependency(
+                name,
+                receipt_path,
+                "blocked",
+                "Dependency acceptance receipt JSON must be an object.",
+                error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID",
+            )
+        accepted, reason = _has_accepted_dependency_evidence(
+            name,
+            contract,
+            summary,
+            receipt,
+            summary_path=summary_path,
+            receipt_path=receipt_path,
+        )
+        receipt = {**receipt, "receipt_path": str(receipt_path)}
     if not accepted:
         deterministic_fixture = _summary_has_deterministic_evidence(summary)
         return _dependency_from_summary(
@@ -977,7 +1033,6 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING",
             reason=reason,
         )
-    receipt = summary[ACCEPTED_DEPENDENCY_RECEIPT_KEY]
     return _dependency_from_summary(
         name,
         contract,
@@ -987,7 +1042,10 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
         execution_mode=str(receipt["execution_mode"]),
         deterministic_fixture=False,
         final_production_readiness_claimed=False,
-        reason="Accepted production closure dependency summary consumed with explicit non-deterministic receipt.",
+        reason=(
+            "Accepted production closure dependency summary consumed with external non-deterministic "
+            "ops acceptance receipt."
+        ),
         receipt=receipt,
     )
 
@@ -1025,29 +1083,65 @@ def _dependency_from_summary(
         payload["error_code"] = error_code
     if receipt is not None:
         payload["accepted_dependency_evidence"] = {
+            "schema": receipt["schema"],
             "receipt_id": receipt["receipt_id"],
             "accepted_at": receipt["accepted_at"],
             "execution_mode": receipt["execution_mode"],
             "deterministic_fixture": receipt["deterministic_fixture"],
             "final_production_readiness_claimed": receipt["final_production_readiness_claimed"],
+            "receipt_path": receipt["receipt_path"],
+            "summary_sha256": receipt["summary_sha256"],
         }
     return payload
 
 
-def _has_accepted_dependency_evidence(summary: Mapping[str, Any]) -> tuple[bool, str]:
+def _has_accepted_dependency_evidence(
+    name: str,
+    contract: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    summary_path: Path,
+    receipt_path: Path,
+) -> tuple[bool, str]:
     if _summary_has_deterministic_evidence(summary):
         return False, "Dependency summary is deterministic/non-live evidence and cannot be accepted by ops closure."
-    if summary.get("final_production_readiness_claimed") is not False:
-        return False, "Dependency summary must explicitly set final_production_readiness_claimed=false."
-    receipt = summary.get(ACCEPTED_DEPENDENCY_RECEIPT_KEY)
-    if not isinstance(receipt, Mapping):
-        return False, f"Dependency summary is missing {ACCEPTED_DEPENDENCY_RECEIPT_KEY} receipt fields."
-    required = ("accepted", "receipt_id", "accepted_at", "execution_mode", "deterministic_fixture")
+    if summary.get("final_production_readiness_claimed") is True:
+        return False, "Dependency summary must not claim final production readiness."
+    required = (
+        "schema",
+        "accepted",
+        "dependency",
+        "issue",
+        "summary_schema",
+        "summary_run_id",
+        "summary_path",
+        "summary_sha256",
+        "receipt_id",
+        "accepted_at",
+        "execution_mode",
+        "deterministic_fixture",
+        "final_production_readiness_claimed",
+    )
     missing = [field for field in required if field not in receipt]
     if missing:
         return False, f"Dependency accepted-evidence receipt is missing fields: {', '.join(missing)}."
+    if receipt.get("schema") != ACCEPTED_DEPENDENCY_RECEIPT_SCHEMA:
+        return False, "Dependency accepted-evidence receipt schema is not supported."
     if receipt.get("accepted") is not True:
         return False, "Dependency accepted-evidence receipt must set accepted=true."
+    if receipt.get("dependency") != name:
+        return False, "Dependency accepted-evidence receipt dependency binding does not match."
+    if receipt.get("issue") != contract["issue"]:
+        return False, "Dependency accepted-evidence receipt issue binding does not match."
+    if receipt.get("summary_schema") != contract["schema"]:
+        return False, "Dependency accepted-evidence receipt schema binding does not match."
+    if receipt.get("summary_run_id") != summary.get("run_id"):
+        return False, "Dependency accepted-evidence receipt run_id binding does not match."
+    if receipt.get("summary_path") != str(summary_path):
+        return False, "Dependency accepted-evidence receipt summary_path binding does not match."
+    if receipt.get("summary_sha256") != _sha256_file(summary_path):
+        return False, "Dependency accepted-evidence receipt checksum binding does not match."
     if receipt.get("final_production_readiness_claimed") is not False:
         return False, "Dependency accepted-evidence receipt must set final_production_readiness_claimed=false."
     if receipt.get("deterministic_fixture") is not False:
@@ -1057,6 +1151,8 @@ def _has_accepted_dependency_evidence(summary: Mapping[str, Any]) -> tuple[bool,
         return False, "Dependency accepted-evidence receipt must use a non-deterministic accepted execution mode."
     if _is_deterministic_execution_mode(execution_mode):
         return False, "Dependency accepted-evidence receipt execution mode must not be deterministic."
+    if _is_deterministic_execution_mode(str(receipt.get("receipt_id", ""))):
+        return False, "Dependency accepted-evidence receipt_id must not be deterministic fixture material."
     for receipt_field in ("receipt_id", "accepted_at"):
         if not str(receipt.get(receipt_field, "")).strip():
             return False, f"Dependency accepted-evidence receipt field {receipt_field} must be non-empty."
@@ -1157,6 +1253,45 @@ def _dependency_summary_path(root: Path, name: str) -> Path | None:
     return None
 
 
+def _dependency_acceptance_receipt_path(root: Path, name: str, summary_path: Path) -> Path | None:
+    resolved_root = _safe_dependency_root(root)
+    candidates = [
+        summary_path.parent / "accepted_dependency_evidence.json",
+        resolved_root / "accepted_dependency_evidence.json",
+        resolved_root / name / "accepted_dependency_evidence.json",
+    ]
+    if name == "object_store":
+        candidates.append(resolved_root / "object-store" / "accepted_dependency_evidence.json")
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_symlink():
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK",
+                f"Dependency acceptance receipt must not be a symlink: {candidate}",
+            )
+        _refuse_dependency_symlink_components(candidate.parent)
+        if not candidate.exists():
+            continue
+        if not candidate.is_file():
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID",
+                f"Dependency acceptance receipt must be a file: {candidate}",
+            )
+        resolved_candidate = candidate.resolve(strict=True)
+        try:
+            resolved_candidate.relative_to(resolved_root)
+        except ValueError as error:
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                "Dependency acceptance receipt must stay under its supplied dependency root.",
+            ) from error
+        return resolved_candidate
+    return None
+
+
 def _dependency_status_from_explicit(value: str) -> str:
     normalized = value.strip().lower()
     allowed = {"skipped", "blocked", "not_executed"}
@@ -1223,14 +1358,34 @@ def _refuse_dependency_symlink_components(path: Path) -> None:
 
 
 def _read_dependency_summary_json(summary_path: Path) -> Any:
-    with summary_path.open("rb") as handle:
+    return _read_bounded_json(
+        summary_path,
+        too_large_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_TOO_LARGE",
+        too_large_message="Dependency summary exceeds configured limit of {limit} bytes.",
+    )
+
+
+def _read_dependency_receipt_json(receipt_path: Path) -> Any:
+    return _read_bounded_json(
+        receipt_path,
+        too_large_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_TOO_LARGE",
+        too_large_message="Dependency acceptance receipt exceeds configured limit of {limit} bytes.",
+    )
+
+
+def _read_bounded_json(path: Path, *, too_large_code: str, too_large_message: str) -> Any:
+    with path.open("rb") as handle:
         content = handle.read(MAX_EVIDENCE_PAYLOAD_BYTES + 1)
     if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
         raise ProductionOpsValidationError(
-            "PRODUCTION_OPS_DEPENDENCY_SUMMARY_TOO_LARGE",
-            f"Dependency summary exceeds configured limit of {MAX_EVIDENCE_PAYLOAD_BYTES} bytes.",
+            too_large_code,
+            too_large_message.format(limit=MAX_EVIDENCE_PAYLOAD_BYTES),
         )
     return json.loads(content.decode("utf-8"))
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _default_setting_value(config: ProductionOpsConfig, service: str, setting: str) -> str:
@@ -1287,6 +1442,20 @@ def _validate_config(config: ProductionOpsConfig) -> None:
         )
 
 
+def _evidence_alert_target(value: str) -> str:
+    if value.startswith("dry-run://"):
+        return value
+    parsed = urlsplit(value)
+    identity = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "redacted-alert-target"
+    return f"{identity}/[redacted-alert-path]"
+
+
+def _environment_value_for_evidence(key: str, value: str) -> str:
+    if key == "NHMS_PRODUCTION_OPS_ALERT_TARGET":
+        return _evidence_alert_target(value)
+    return value
+
+
 def _validate_identifier(value: str, field_name: str) -> None:
     if not SAFE_IDENTIFIER_RE.fullmatch(value):
         raise ProductionOpsValidationError(
@@ -1323,7 +1492,7 @@ def _validate_config_value_safe(value: str, service: str, setting: str) -> None:
 
 
 def _is_path_or_root_setting(setting: str) -> bool:
-    return setting.endswith("ROOT") or "PATH" in setting
+    return setting.endswith("ROOT") or setting.endswith("PREFIX") or "PATH" in setting
 
 
 def _validate_target_safe(value: str, field_name: str, error_code: str) -> None:
@@ -1343,12 +1512,29 @@ def _validate_target_safe(value: str, field_name: str, error_code: str) -> None:
 
 def _guard_canonical_path_segments(value: str, *, error_code: str, field_name: str) -> None:
     for decoded in _canonical_decode_steps(value, error_code):
+        if ENCODED_SEPARATOR_RE.search(decoded):
+            raise ProductionOpsValidationError(error_code, f"{field_name} path must not contain encoded separators.")
         if SENSITIVE_PREFIX_ASSIGNMENT_RE.search(decoded):
             raise ProductionOpsValidationError(error_code, f"{field_name} must not contain credential assignments.")
         parsed = urlsplit(decoded)
+        if parsed.username or parsed.password:
+            raise ProductionOpsValidationError(error_code, f"{field_name} must not contain userinfo credentials.")
+        _guard_url_authority(parsed.netloc, error_code=error_code, field_name=field_name)
         for segment in parsed.path.split("/"):
             if segment in {".", ".."} or "\\" in segment:
                 raise ProductionOpsValidationError(error_code, f"{field_name} path must not contain traversal.")
+
+
+def _guard_url_authority(netloc: str, *, error_code: str, field_name: str) -> None:
+    if not netloc:
+        return
+    if "/" in netloc or "\\" in netloc:
+        raise ProductionOpsValidationError(error_code, f"{field_name} URL authority must not contain separators.")
+    host = netloc.rsplit("@", maxsplit=1)[-1].split(":", maxsplit=1)[0]
+    if host in {".", ".."}:
+        raise ProductionOpsValidationError(error_code, f"{field_name} URL authority must not contain traversal.")
+    if any(segment in {".", ".."} for segment in host.split(".")):
+        raise ProductionOpsValidationError(error_code, f"{field_name} URL authority must not contain dot segments.")
 
 
 def _canonical_decode_steps(value: str, error_code: str) -> tuple[str, ...]:

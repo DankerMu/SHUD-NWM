@@ -14,7 +14,7 @@ uv run pytest -q tests/test_api_contract.py tests/test_production_scale_validati
 
 ## Expected Evidence
 
-- `scale/latency_report.json` records p95 samples, thresholds, and query plan hashes.
+- `scale/query_latency_evidence.json` records p95 samples, thresholds, and query plan hashes.
 - `ops/monitoring_alerts.json` records the breached API p95 threshold.
 
 ## Recovery Steps

@@ -653,7 +653,10 @@ Useful knobs:
   simulated and `release_blocked` unless validated live receipts are consumed.
 - `--slurm-evidence-root`, `--object-store-evidence-root`,
   `--met-evidence-root`, `--e2e-evidence-root`, and `--scale-evidence-root`:
-  optional accepted dependency summaries for #147-#151.
+  optional dependency evidence roots for #147-#151. The original producer
+  `summary.json` files are consumed unchanged; accepted ops closure additionally
+  requires an external `accepted_dependency_evidence.json` receipt under the
+  same dependency evidence root.
 - `--dependency-statuses`: optional comma-separated statuses such as
   `slurm=skipped,object_store=skipped,met=blocked,e2e=not_executed,scale=blocked`
   for fixture validation. Explicit `accepted` is rejected with
@@ -662,7 +665,7 @@ Useful knobs:
 
 Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
 
-- `preflight.json`: auth mode, roles, alert target, deployment config source,
+- `preflight.json`: auth mode, roles, alert target identity, deployment config source,
   rollback scope, dependency evidence roots/statuses, evidence root, and
   self-contained execution policy.
 - `config_validation.json`: API, orchestrator, Slurm gateway, tile publisher,
@@ -671,8 +674,9 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   blockers. `setting_source_metadata` records whether each
   required setting came from the environment or from a generated default; every
   generated default remains release-blocking until explicitly supplied.
-  Root/path settings reject dot segments, traversal, and backslash separators.
-  The checked-in service config template is
+  Root/path/prefix settings reject unsafe URL authorities, dot segments,
+  traversal, backslash separators, encoded separators, and credential
+  assignments. The checked-in service config template is
   `docs/runbooks/production-service-config.md`.
 - `auth_rbac.json` and `auth_release_blockers.json`: model activation, rerun,
   cancel, QC override, source config change, and tile republish decisions for
@@ -685,8 +689,10 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
 - `monitoring_alerts.json`: source latency, Slurm backlog, failed basin retries,
   object-store failure, stale analysis state, tile error, and API p95 alert
   evidence with metric, severity, observed value, threshold, dry-run or
-  not-executed mode, runbook link, and operator action. Non-dry-run alert
-  targets do not imply live sink delivery without delivery receipts.
+  not-executed mode, runbook link, and operator action. Dry-run targets are
+  recorded as configured; non-dry-run alert targets are recorded only as a
+  sanitized scheme/host identity with the path redacted and do not imply live
+  sink delivery without delivery receipts.
 - `rollback_drills.json`: bad model activation, failed publish/import, failed
   source cycle, failed Slurm array, and bad tile release drills with command,
   precondition, expected evidence, recovery, residual risk, dependency
@@ -694,13 +700,17 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
 - `dependency_closure.json`, `environment.json`, and `summary.json`: #147-#151
   accepted/skipped/blocked/not-executed dependency closure, redacted
   environment, final release blockers, live flags, and evidence file index.
-  Accepted dependency closure requires a matching issue/schema/status plus an
-  `accepted_dependency_evidence` receipt with `accepted=true`, non-empty
-  `receipt_id` and `accepted_at`, `deterministic_fixture=false`,
-  `final_production_readiness_claimed=false`, and a non-deterministic
-  `execution_mode` such as `accepted_live_evidence`. Deterministic summaries or
-  summaries with missing live/accepted receipt fields are recorded as skipped or
-  blocked, not accepted.
+  Accepted dependency closure requires a matching unchanged producer
+  `summary.json` issue/schema/status plus a sidecar
+  `accepted_dependency_evidence.json` receipt with schema
+  `nhms.production_closure.ops.accepted_dependency_evidence.v1`,
+  `accepted=true`, dependency/issue/schema/run ID/summary path/summary checksum
+  bindings, non-empty non-deterministic `receipt_id`, non-empty `accepted_at`,
+  `deterministic_fixture=false`, `final_production_readiness_claimed=false`,
+  and a non-deterministic `execution_mode` such as
+  `accepted_live_evidence`. Deterministic or non-live summaries, summaries that
+  claim final production readiness, or summaries with missing/mismatched receipt
+  fields are recorded as skipped or blocked, not accepted.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs, symlinked evidence roots, oversized payloads,
@@ -716,7 +726,7 @@ Local #152 verification uses these fast regression commands:
 
 ```bash
 openspec validate m10-production-closure --strict --no-interactive
-uv run ruff check services/production_closure tests/test_production_ops_validation.py docs/VALIDATION.md progress.md
+uv run ruff check services/production_closure tests/test_production_ops_validation.py docs/VALIDATION.md docs/runbooks/api-latency.md docs/runbooks/tile-publish-error.md progress.md
 uv run pytest -q tests/test_production_ops_validation.py
 uv run pytest -q tests/test_production_ops_validation.py tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_production_slurm_validation.py
 ```

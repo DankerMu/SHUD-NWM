@@ -14,7 +14,7 @@ uv run pytest -q tests/test_production_scale_validation.py
 
 ## Expected Evidence
 
-- `scale/tile_report.json` records content type, byte limits, and blocker status.
+- `scale/tile_evidence.json` records content type, byte limits, and blocker status.
 - `e2e/stage_manifest.json` links tile publication to upstream QC.
 - `ops/monitoring_alerts.json` records this critical alert.
 

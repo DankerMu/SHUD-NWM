@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from urllib.parse import quote
@@ -230,6 +231,54 @@ def test_validate_ops_dependency_closure_accepts_real_summaries_but_keeps_live_c
     assert summary["status"] == "release_blocked"
     assert summary["dependency_status"] == "accepted"
     assert summary["final_production_readiness_claimed"] is False
+
+
+def test_validate_ops_dependency_closure_requires_external_acceptance_receipt_for_producer_summary(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+    )
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="producer_without_receipt",
+            slurm_evidence_root=root,
+        )
+    )
+    dependency = _read_json(tmp_path / "artifacts" / "producer_without_receipt" / "ops" / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING"
+    assert "accepted_dependency_evidence.json" in slurm["reason"]
+
+    _write_dependency_acceptance_receipt(summary_path, "slurm", 147, "nhms.production_closure.slurm.v1")
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="producer_with_receipt",
+            slurm_evidence_root=root,
+        )
+    )
+    accepted_dependency = _read_json(
+        tmp_path / "artifacts" / "producer_with_receipt" / "ops" / "dependency_closure.json"
+    )
+    accepted_slurm = next(item for item in accepted_dependency["dependencies"] if item["dependency"] == "slurm")
+    assert accepted_slurm["status"] == "accepted"
+    assert accepted_slurm["accepted_dependency_evidence"]["summary_sha256"] == hashlib.sha256(
+        summary_path.read_bytes()
+    ).hexdigest()
+    assert accepted_slurm["accepted_dependency_evidence"]["receipt_path"] == str(
+        root / "accepted_dependency_evidence.json"
+    )
 
 
 @pytest.mark.parametrize(
@@ -510,6 +559,7 @@ def test_validate_ops_live_ready_config_knobs_do_not_claim_live_execution(tmp_pa
     assert auth["model_activation_boundary"]["requested_auth_mode"] == "backend_route_executed"
     assert alerts["status"] == "release_blocked"
     assert {alert["execution_mode"] for alert in alerts["alerts"]} == {"not_executed"}
+    assert {alert["sink"] for alert in alerts["alerts"]} == {"https://alerts.example/[redacted-alert-path]"}
 
 
 def test_validate_ops_env_supplied_config_values_are_not_marked_missing(
@@ -562,6 +612,38 @@ def test_validate_ops_rejects_unsafe_config_root_values(
 
     with pytest.raises(ProductionOpsValidationError) as exc_info:
         validate_ops(ProductionOpsConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="bad_config_root"))
+
+    assert exc_info.value.error_code == "PRODUCTION_OPS_CONFIG_VALUE_UNSAFE"
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value"),
+    [
+        ("NHMS_PRODUCTION_OPS_OBJECT_STORE_OBJECT_STORE_ROOT", "s3://../prod"),
+        ("NHMS_PRODUCTION_OPS_OBJECT_STORE_OBJECT_STORE_ROOT", "file://../workspace"),
+        ("NHMS_PRODUCTION_OPS_OBJECT_STORE_OBJECT_STORE_ROOT", "s3://%2E%2E/prod"),
+        ("NHMS_PRODUCTION_OPS_OBJECT_STORE_OBJECT_STORE_ROOT", "s3://bucket%2Fprod/root"),
+        ("NHMS_PRODUCTION_OPS_OBJECT_STORE_OBJECT_STORE_PREFIX", "s3://bucket/%2E%2E/root"),
+        ("NHMS_PRODUCTION_OPS_OBJECT_STORE_OBJECT_STORE_PREFIX", "s3://bucket/path%2Ftoken"),
+        ("NHMS_PRODUCTION_OPS_OBJECT_STORE_OBJECT_STORE_PREFIX", "s3://bucket/path/access_key=secret"),
+        ("NHMS_PRODUCTION_OPS_TILE_PUBLISHER_TILE_OBJECT_PREFIX", "s3://bucket/%2E%2E/tiles"),
+        ("NHMS_PRODUCTION_OPS_TILE_PUBLISHER_TILE_OBJECT_PREFIX", "s3://bucket/tiles%5Cprod"),
+        ("NHMS_PRODUCTION_OPS_TILE_PUBLISHER_TILE_OBJECT_PREFIX", "s3://bucket/tiles/token=secret"),
+        ("NHMS_PRODUCTION_OPS_ORCHESTRATOR_OBJECT_STORE_PREFIX", "s3://bucket/%2E%2E/orchestrator"),
+        ("NHMS_PRODUCTION_OPS_ORCHESTRATOR_OBJECT_STORE_PREFIX", "s3://bucket/orchestrator%2Fprod"),
+        ("NHMS_PRODUCTION_OPS_ORCHESTRATOR_OBJECT_STORE_PREFIX", "s3://bucket/orchestrator/api_key=secret"),
+    ],
+)
+def test_validate_ops_rejects_unsafe_config_url_authorities_and_prefixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(env_name, value)
+
+    with pytest.raises(ProductionOpsValidationError) as exc_info:
+        validate_ops(ProductionOpsConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="bad_config_prefix"))
 
     assert exc_info.value.error_code == "PRODUCTION_OPS_CONFIG_VALUE_UNSAFE"
 
@@ -633,6 +715,39 @@ def test_validate_ops_run_id_idempotency_path_safety_payload_limit_and_secret_re
     assert "supersecret" not in evidence_text
     assert "deterministic-secret-for-redaction-test" not in evidence_text
     assert "[redacted]" in evidence_text
+
+
+def test_validate_ops_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:
+    lane_path = tmp_path / "artifacts" / "file_lane" / "ops"
+    lane_path.parent.mkdir(parents=True)
+    lane_path.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ProductionOpsValidationError) as exc_info:
+        validate_ops(ProductionOpsConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="file_lane"))
+
+    assert exc_info.value.error_code == "PRODUCTION_OPS_EVIDENCE_PATH_UNSAFE"
+
+
+def test_validate_ops_sanitizes_path_embedded_alert_target_tokens(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_target = "https://hooks.example/services/T00000000/B00000000/raw-path-webhook-token"
+    monkeypatch.setenv("NHMS_PRODUCTION_OPS_ALERT_TARGET", raw_target)
+
+    assert _argparse_main(["--evidence-root", str(tmp_path / "artifacts"), "--run-id", "alert_path_token"]) == 0
+    captured = capsys.readouterr()
+    assert "T00000000" not in captured.out
+    assert "B00000000" not in captured.out
+    assert "raw-path-webhook-token" not in captured.out
+
+    lane_dir = tmp_path / "artifacts" / "alert_path_token" / "ops"
+    evidence_text = "\n".join(path.read_text(encoding="utf-8") for path in lane_dir.glob("*.json"))
+    assert "T00000000" not in evidence_text
+    assert "B00000000" not in evidence_text
+    assert "raw-path-webhook-token" not in evidence_text
+    assert "https://hooks.example/[redacted-alert-path]" in evidence_text
 
 
 @pytest.mark.parametrize(
@@ -729,23 +844,35 @@ def _write_dependency_summary(
         "run_id": f"{name}-run",
         "status": status,
         "evidence_dir": str(path.parent),
-        "final_production_readiness_claimed": False,
     }
-    if accepted:
-        payload["accepted_dependency_evidence"] = {
-            "accepted": True,
-            "receipt_id": f"{name}-accepted-receipt",
-            "accepted_at": "2026-05-17T00:00:00Z",
-            "execution_mode": "accepted_live_evidence",
-            "deterministic_fixture": False,
-            "final_production_readiness_claimed": False,
-        }
     if extra:
         payload.update(extra)
     path.write_text(
         json.dumps(payload),
         encoding="utf-8",
     )
+    if accepted:
+        _write_dependency_acceptance_receipt(path, name, issue, schema)
+
+
+def _write_dependency_acceptance_receipt(path: Path, name: str, issue: int, schema: str) -> None:
+    summary = _read_json(path)
+    receipt = {
+        "schema": "nhms.production_closure.ops.accepted_dependency_evidence.v1",
+        "accepted": True,
+        "dependency": name,
+        "issue": issue,
+        "summary_schema": schema,
+        "summary_run_id": summary["run_id"],
+        "summary_path": str(path.resolve()),
+        "summary_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "receipt_id": f"ops-acceptance-{name}-7f43c0e2b47041f0a6d3107b0f76c234",
+        "accepted_at": "2026-05-17T00:00:00Z",
+        "execution_mode": "accepted_live_evidence",
+        "deterministic_fixture": False,
+        "final_production_readiness_claimed": False,
+    }
+    (path.parent / "accepted_dependency_evidence.json").write_text(json.dumps(receipt), encoding="utf-8")
 
 
 def _safe_config_value(setting: str) -> str:
