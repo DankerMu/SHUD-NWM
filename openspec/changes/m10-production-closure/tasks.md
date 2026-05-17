@@ -46,6 +46,35 @@
 - [ ] 3.5 Record best-available lineage and skipped/restricted source reasons without fabricating CLDAS success.
 - [ ] 3.6 Document validation command and evidence files under `artifacts/production-closure/<run_id>/met/`, including redacted source config, raw/canonical manifests, forcing manifest, QC result, best-available lineage, and fast-regression commands.
 
+### Issue #149 Evidence Map
+
+- [ ] 3.E1 Preflight artifact: input fixture sets enabled source subset, credential/public-path mode, cached fallback policy, cycle window, object prefix, selected Basins model, and CLDAS restricted reason; expected output is redacted JSON under `artifacts/production-closure/<run_id>/met/` with stable missing-input errors and no secret-shaped values.
+- [ ] 3.E2 Source config template evidence: input config covers GFS, IFS, ERA5, and CLDAS; expected output records each source as `enabled`, `disabled`, or `restricted`, includes public endpoint identity or credential source name only, and redacts tokens, passwords, signed URLs, and userinfo from stdout/evidence/docs.
+- [ ] 3.E3 Cycle discovery/download evidence: input live or deterministic production-like GFS/IFS/ERA5 cycle window; expected output records source ID, cycle time, selected forecast hours, file count, byte count, checksum(s), retry count, object/raw URI, unavailable/incomplete cycles with stable source-status evidence instead of silent success, and per-source execution mode from `deterministic_fixture|live_executed|skipped|restricted|not_executed`.
+- [ ] 3.E4 Canonical conversion evidence: input downloaded raw manifest; expected output writes canonical product metadata with source cycle, variables, units, time axis, object URI, per-product checksum, and failure metadata for missing or malformed raw inputs.
+- [ ] 3.E5 Forcing production/QC evidence: input canonical products and one Basins-backed model; expected output writes forcing manifest/package URI plus QC for continuity, required variables, units, missing values, range checks, and pass/fail status without requiring a live SHUD solver.
+- [ ] 3.E6 Best-available lineage evidence: input enabled and skipped/restricted sources; expected output records selected source per valid time or explicit skipped/restricted reasons, and never fabricates CLDAS, ERA5, IFS, or GFS success when the source did not execute.
+- [ ] 3.E7 Bounded live-source behavior: input fixture includes large/unavailable source shapes; expected output enforces manifest-entry count limits, per-file read/download byte limits, retry/backoff/timeout limits, evidence payload size limits, and deterministic fast-lane discovery/download bounds.
+- [ ] 3.E8 Run-scoped object/evidence idempotency: input reruns the same and different `run_id`; expected output writes raw/canonical/forcing scratch evidence under `runs/<run_id>/...` or `artifacts/production-closure/<run_id>/met/`, refuses overwrite of other run bundles, checks path containment, and requires explicit force/cleanup behavior for replacing the same run bundle.
+- [ ] 3.E9 Fast-regression commands: expected passing commands include `openspec validate m10-production-closure --strict --no-interactive`, `uv run ruff check .`, targeted adapter/canonical/forcing/QC tests, and a documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-met --evidence-root ...` command that uses deterministic fixtures unless source-specific live network/credential flags are explicitly enabled.
+
+### Issue #149 Selected Risk Packs
+
+- [ ] 3.R1 Public API / CLI / script entry: selected - `validate-met` and existing source worker CLIs must have stable JSON/error behavior.
+- [ ] 3.R2 Config / project setup: selected - source subset, credential/public path, cached fallback, cycle window, object prefix, selected model, and CLDAS restricted reason are preflight inputs.
+- [ ] 3.R3 File IO / path safety / overwrite: selected - raw/canonical/forcing objects and evidence must be run-scoped, contained, idempotent, and redacted.
+- [ ] 3.R4 Schema / units / field names and time-series boundaries: selected - source config, raw/canonical/forcing/QC/best-available fields, units, cycle windows, forecast hours, valid times, and continuity must remain stable.
+- [ ] 3.R5 Numerical/QC and resource limits: selected - malformed/non-finite/out-of-range source data must fail with bounded discovery, reads, retries, and payloads.
+- [ ] 3.R6 Legacy compatibility, error handling, release/dependency compatibility, and docs: selected - existing adapters/fixtures continue to pass, skipped/restricted sources are explicit, optional live dependencies are not required for fast checks, and validation docs/progress are updated.
+
+### Issue #149 Deferred Risk Packs
+
+- [ ] 3.D1 Defer real Slurm SHUD execution and accounting to #147/#150; #149 only proves forcing/QC readiness for a Basins-backed model.
+- [ ] 3.D2 Defer production object-store copied-root migration to #148; #149 consumes object prefix contracts but does not redefine model package migration.
+- [ ] 3.D3 Defer full staging source-to-frontend workflow to #150; #149 emits source/canonical/forcing evidence consumed by staging E2E.
+- [ ] 3.D4 Defer national-scale query/tile/frontend performance to #151; #149 validates a bounded source cycle and model.
+- [ ] 3.D5 Defer full production auth/RBAC/alert readiness to #152; #149 still covers source credential redaction and source failure evidence.
+
 ## 4. Staging End-to-End Closure
 
 - [ ] 4.0 Record preflight: source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, and evidence root.

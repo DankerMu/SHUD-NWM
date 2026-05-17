@@ -18,6 +18,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
 from services.orchestrator.retry import compute_backoff_seconds, is_transient_error
+from services.production_closure.met_validation import (
+    ProductionMetConfig,
+    ProductionMetValidationError,
+    validate_met,
+)
 from services.production_closure.object_store_validation import (
     ProductionObjectStoreConfig,
     ProductionObjectStoreValidationError,
@@ -1600,6 +1605,49 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 click.echo(f"PRODUCTION_OBJECT_STORE_VALIDATION_FAILED: {error}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("validate-met")
+    @click.option("--evidence-root", type=click.Path(path_type=Path), required=True)
+    @click.option("--run-id")
+    @click.option("--sources", default=None)
+    @click.option("--cycle-start", default=None)
+    @click.option("--cycle-end", default=None)
+    @click.option("--forecast-hours", default=None)
+    @click.option("--model-id", default=None)
+    @click.option("--model-version", default=None)
+    @click.option("--force", is_flag=True, default=False)
+    def validate_met_command(
+        evidence_root: Path,
+        run_id: str | None,
+        sources: str | None,
+        cycle_start: str | None,
+        cycle_end: str | None,
+        forecast_hours: str | None,
+        model_id: str | None,
+        model_version: str | None,
+        force: bool,
+    ) -> None:
+        try:
+            summary = validate_met(
+                ProductionMetConfig.from_env(
+                    evidence_root=evidence_root,
+                    run_id=run_id,
+                    sources=sources,
+                    cycle_start=cycle_start,
+                    cycle_end=cycle_end,
+                    forecast_hours=forecast_hours,
+                    model_id=model_id,
+                    model_version=model_version,
+                    force=force,
+                )
+            )
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
+        except ProductionMetValidationError as error:
+            click.echo(f"{error.error_code}: {error.message}", err=True)
+            raise SystemExit(1) from error
+        except Exception as error:
+            click.echo(f"PRODUCTION_MET_VALIDATION_FAILED: {error}", err=True)
+            raise SystemExit(1) from error
+
     try:
         cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
     except click.ClickException as error:
@@ -1626,6 +1674,16 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     object_parser.add_argument("--model-id", default=None)
     object_parser.add_argument("--version", default=None)
     object_parser.add_argument("--force", action="store_true")
+    met_parser = subparsers.add_parser("validate-met")
+    met_parser.add_argument("--evidence-root", type=Path, required=True)
+    met_parser.add_argument("--run-id")
+    met_parser.add_argument("--sources", default=None)
+    met_parser.add_argument("--cycle-start", default=None)
+    met_parser.add_argument("--cycle-end", default=None)
+    met_parser.add_argument("--forecast-hours", default=None)
+    met_parser.add_argument("--model-id", default=None)
+    met_parser.add_argument("--model-version", default=None)
+    met_parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "validate-slurm":
@@ -1683,6 +1741,35 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
             else:
                 print(f"PRODUCTION_OBJECT_STORE_VALIDATION_FAILED: {error}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "validate-met":
+        try:
+            print(
+                json.dumps(
+                    redact_payload(
+                        validate_met(
+                            ProductionMetConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                sources=args.sources,
+                                cycle_start=args.cycle_start,
+                                cycle_end=args.cycle_end,
+                                forecast_hours=args.forecast_hours,
+                                model_id=args.model_id,
+                                model_version=args.model_version,
+                                force=args.force,
+                            )
+                        )
+                    ),
+                    sort_keys=True,
+                )
+            )
+        except ProductionMetValidationError as error:
+            print(f"{error.error_code}: {error.message}", file=sys.stderr)
+            return 1
+        except Exception as error:
+            print(f"PRODUCTION_MET_VALIDATION_FAILED: {error}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")
