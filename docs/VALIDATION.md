@@ -180,8 +180,11 @@ shared stdout/stderr logs, or QC blocking evidence block #147 acceptance. The
 task `1` shared stdout/stderr evidence must include the
 `NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED` marker emitted by the
 rendered sbatch script and the `NON_FINITE_FLOW` worker/QC error signature from
-the intended malformed-output path. Use `--force` only for an intentional rerun
-of an existing `run_id`; the default protects audit evidence from accidental
+the intended malformed-output path. The rendered script emits this validation
+failure only when the selected task manifest declares
+`expected_outcome=controlled_failure`; ordinary task `1` workloads do not get
+the validation marker. Use `--force` only for an intentional rerun of an
+existing `run_id`; the default protects audit evidence from accidental
 overwrite.
 
 In submit mode, the manifest index rendered into `NHMS_MANIFEST_INDEX` is copied

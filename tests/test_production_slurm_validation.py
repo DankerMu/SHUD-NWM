@@ -51,6 +51,10 @@ def test_validate_slurm_fake_lane_writes_required_evidence_and_redacts(monkeypat
     assert "#SBATCH --time=00:30:00" in rendered
     assert "export SHUD_THREADS=2" in rendered
     assert "export OMP_NUM_THREADS=2" in rendered
+    assert 'VALIDATION_EXPECTED_OUTCOME="$(python - <<' in rendered
+    assert 'if [[ "$VALIDATION_EXPECTED_OUTCOME" == "controlled_failure" ]]; then' in rendered
+    assert slurm_validation.CONTROLLED_FAILURE_LOG_MARKER in rendered
+    assert "NON_FINITE_FLOW" in rendered
     assert (
         'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" '
         '--task-id "${SLURM_ARRAY_TASK_ID:-0}"'
