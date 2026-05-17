@@ -1025,6 +1025,109 @@ def test_validate_slurm_submit_blocks_log_swapped_to_symlink_after_path_check(
     assert task1["error_code"] == "SLURM_ARRAY_TASK_LOG_UNSAFE"
 
 
+def test_validate_slurm_submit_blocks_log_parent_swapped_to_symlink_after_path_check(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+    outside = tmp_path / "external-logs"
+    outside.mkdir()
+    outside_marker = outside / "7815_1.out"
+    external_sentinel = "EXTERNAL_PARENT_SWAP_MARKER_DO_NOT_READ"
+    outside_marker.write_text(
+        f"{slurm_validation.CONTROLLED_FAILURE_LOG_MARKER}\nNON_FINITE_FLOW\n{external_sentinel}\n",
+        encoding="utf-8",
+    )
+    swapped = False
+    original_validate_path = slurm_validation._validate_slurm_log_path
+    original_open = slurm_validation.os.open
+
+    def swap_parent_after_path_check(config, path, *, field, task_id):
+        nonlocal swapped
+        blocker = original_validate_path(config, path, field=field, task_id=task_id)
+        if blocker is None and not swapped and task_id == 1 and field == "task_1_out":
+            log_dir = workspace_root / "parentracedlog" / "logs"
+            for child in log_dir.iterdir():
+                child.unlink()
+            log_dir.rmdir()
+            log_dir.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return blocker
+
+    def guarded_open(path, flags, mode=0o777, *, dir_fd=None):
+        if Path(path) == outside or Path(path) == outside_marker:
+            raise AssertionError("external Slurm log path must not be opened")
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(slurm_validation, "_validate_slurm_log_path", swap_parent_after_path_check)
+    monkeypatch.setattr(slurm_validation.os, "open", guarded_open)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            log_dir = workspace_root / "parentracedlog" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "7815_0.out").write_text("task 0 stdout\n", encoding="utf-8")
+            (log_dir / "7815_0.err").write_text("task 0 stderr\n", encoding="utf-8")
+            (log_dir / "7815_1.out").write_text("initial benign stdout\n", encoding="utf-8")
+            (log_dir / "7815_1.err").write_text("task 1 stderr\n", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="7815\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "7815|COMPLETED|0:0|00:00:11|cn04|CPU\n"
+                    "7815_0|COMPLETED|0:0|00:00:10|cn04|CPU\n"
+                    "7815_1|FAILED|2:0|00:00:05|cn04|CPU\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "parentracedlog",
+            "--submit",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    assert swapped is True
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    blocker_codes = [blocker["error_code"] for blocker in summary["blockers"]]
+    assert "SLURM_ARRAY_TASK_LOG_UNSAFE" in blocker_codes
+    assert "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING" in blocker_codes
+    lane_dir = tmp_path / "artifacts" / "parentracedlog" / "slurm"
+    evidence_text = "\n".join(path.read_text(encoding="utf-8") for path in lane_dir.iterdir() if path.is_file())
+    assert external_sentinel not in evidence_text
+    partial = json.loads((lane_dir / "array_partial_success.json").read_text())
+    task1 = next(task for task in partial["tasks"] if task["task_id"] == 1)
+    assert task1["log_status"] == "blocked"
+    assert task1["error_code"] == "SLURM_ARRAY_TASK_LOG_UNSAFE"
+
+
 def test_validate_slurm_submit_blocks_oversized_log(
     tmp_path: Path,
     monkeypatch,

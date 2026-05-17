@@ -1052,7 +1052,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
         )
     try:
-        receipt_evidence = _dependency_acceptance_receipt_path(root, name, summary_path)
+        receipt_evidence = _dependency_acceptance_receipt_path(summary_evidence, name)
     except ProductionOpsValidationError as error:
         return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code)
     if receipt_evidence is None:
@@ -1445,11 +1445,17 @@ def _dependency_summary_path(root: Path, name: str) -> _BoundDependencyEvidenceP
 
 
 def _dependency_acceptance_receipt_path(
-    root: Path,
+    summary_evidence: _BoundDependencyEvidencePath,
     name: str,
-    summary_path: Path,
 ) -> _BoundDependencyEvidencePath | None:
-    root_path, root_stat = _safe_dependency_root(root)
+    _verify_bound_directory_identity(
+        summary_evidence.root,
+        summary_evidence.root_stat,
+        "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+    )
+    root_path = summary_evidence.root
+    root_stat = summary_evidence.root_stat
+    summary_path = summary_evidence.path
     candidates = [
         summary_path.parent / "accepted_dependency_evidence.json",
         root_path / "accepted_dependency_evidence.json",

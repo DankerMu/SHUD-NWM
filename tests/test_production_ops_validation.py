@@ -1040,6 +1040,66 @@ def test_validate_ops_blocks_dependency_root_swap_to_symlink_before_receipt_open
     assert "accepted_dependency_evidence" not in slurm
 
 
+def test_validate_ops_blocks_dependency_root_swap_to_symlink_after_summary_read_before_receipt_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=False,
+    )
+    outside = tmp_path / "outside-slurm"
+    outside.mkdir()
+    outside_summary_path = outside / "summary.json"
+    _write_dependency_summary(
+        outside_summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+    marker_receipt_digest = hashlib.sha256((outside / "accepted_dependency_evidence.json").read_bytes()).hexdigest()
+    swapped = False
+    original_read_summary = ops_validation_module._read_dependency_summary_json
+
+    def swap_root_after_summary_read(summary_evidence):
+        nonlocal swapped
+        summary, digest = original_read_summary(summary_evidence)
+        if not swapped:
+            swapped = True
+            summary_path.unlink()
+            root.rmdir()
+            root.symlink_to(outside, target_is_directory=True)
+        return summary, digest
+
+    monkeypatch.setattr(ops_validation_module, "_read_dependency_summary_json", swap_root_after_summary_read)
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="root_swap_after_summary",
+            slurm_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "root_swap_after_summary" / "ops" / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert swapped is True
+    assert summary["status"] == "release_blocked"
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE"
+    assert "accepted_dependency_evidence" not in slurm
+    assert marker_receipt_digest not in json.dumps(slurm)
+
+
 def test_validate_ops_blocks_invalid_utf8_dependency_summary_and_writes_lane(tmp_path: Path) -> None:
     invalid_root = tmp_path / "invalid-summary"
     invalid_root.mkdir()

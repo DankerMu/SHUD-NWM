@@ -189,6 +189,14 @@ class EvidenceWriter:
 
 
 @dataclass(frozen=True)
+class _BoundSlurmLogPath:
+    path: Path
+    log_dir: Path
+    log_dir_stat: os.stat_result
+    basename: str
+
+
+@dataclass(frozen=True)
 class ProductionSlurmConfig:
     evidence_root: Path
     run_id: str
@@ -1170,40 +1178,18 @@ def _validated_slurm_log_content(
     read_content: bool = True,
 ) -> tuple[dict[str, str] | None, str | None]:
     field = f"task_{task_id}_{suffix}"
+    bound_log, blocker = _bind_slurm_log_path(config, path, field=field, task_id=task_id)
+    if blocker:
+        return blocker, None
     blocker = _validate_slurm_log_path(config, path, field=field, task_id=task_id)
     if blocker:
         return blocker, None
-
-    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
-    flags = os.O_RDONLY | nofollow_flag
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NONBLOCK"):
-        flags |= os.O_NONBLOCK
-
-    pre_open_lstat: os.stat_result | None = None
-    try:
-        pre_open_lstat = path.lstat()
-    except FileNotFoundError:
+    if bound_log is None:
         return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None
-    except OSError:
-        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
-    if stat.S_ISLNK(pre_open_lstat.st_mode):
-        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None
-    if not stat.S_ISREG(pre_open_lstat.st_mode):
-        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
 
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None
-    except OSError as error:
-        error_code = (
-            "SLURM_ARRAY_TASK_LOG_UNSAFE"
-            if nofollow_flag and error.errno == errno.ELOOP
-            else "SLURM_ARRAY_TASK_LOG_UNREADABLE"
-        )
-        return _slurm_log_blocker(error_code, field, task_id, path), None
+    blocker, fd, pre_open_lstat = _open_bound_slurm_log_file(bound_log, field=field, task_id=task_id)
+    if blocker or fd is None or pre_open_lstat is None:
+        return blocker, None
 
     try:
         fd_stat = os.fstat(fd)
@@ -1223,6 +1209,115 @@ def _validated_slurm_log_content(
         return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
     finally:
         os.close(fd)
+
+
+def _bind_slurm_log_path(
+    config: ProductionSlurmConfig,
+    path: Path,
+    *,
+    field: str,
+    task_id: int,
+) -> tuple[_BoundSlurmLogPath | None, dict[str, str] | None]:
+    log_dir = _slurm_log_dir(config)
+    try:
+        _refuse_symlink_components(log_dir)
+        resolved_log_dir = log_dir.resolve(strict=True)
+        resolved_parent = path.parent.resolve(strict=False)
+        resolved_path = path.resolve(strict=False)
+        resolved_path.relative_to(resolved_log_dir)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ProductionValidationError, ValueError):
+        return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    if resolved_parent != resolved_log_dir:
+        return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    try:
+        log_dir_stat = resolved_log_dir.lstat()
+    except OSError:
+        return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    if stat.S_ISLNK(log_dir_stat.st_mode) or not stat.S_ISDIR(log_dir_stat.st_mode):
+        return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    return _BoundSlurmLogPath(
+        path=path,
+        log_dir=resolved_log_dir,
+        log_dir_stat=log_dir_stat,
+        basename=path.name,
+    ), None
+
+
+def _open_bound_slurm_log_file(
+    bound_log: _BoundSlurmLogPath,
+    *,
+    field: str,
+    task_id: int,
+) -> tuple[dict[str, str] | None, int | None, os.stat_result | None]:
+    path = bound_log.path
+    if not _slurm_log_dir_identity_matches(bound_log):
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None, None
+
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    dir_flags = os.O_RDONLY | nofollow_flag
+    if hasattr(os, "O_CLOEXEC"):
+        dir_flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    try:
+        dir_fd = os.open(bound_log.log_dir, dir_flags)
+    except OSError:
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None, None
+
+    try:
+        opened_dir_stat = os.fstat(dir_fd)
+        if (
+            not stat.S_ISDIR(opened_dir_stat.st_mode)
+            or opened_dir_stat.st_dev != bound_log.log_dir_stat.st_dev
+            or opened_dir_stat.st_ino != bound_log.log_dir_stat.st_ino
+        ):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None, None
+
+        try:
+            pre_open_lstat = os.stat(bound_log.basename, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None, None
+        except OSError:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None, None
+        if stat.S_ISLNK(pre_open_lstat.st_mode):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None, None
+        if not stat.S_ISREG(pre_open_lstat.st_mode):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None, None
+
+        file_flags = os.O_RDONLY | nofollow_flag
+        if hasattr(os, "O_CLOEXEC"):
+            file_flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NONBLOCK"):
+            file_flags |= os.O_NONBLOCK
+        try:
+            fd = os.open(bound_log.basename, file_flags, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None, None
+        except OSError as error:
+            error_code = (
+                "SLURM_ARRAY_TASK_LOG_UNSAFE"
+                if nofollow_flag and error.errno == errno.ELOOP
+                else "SLURM_ARRAY_TASK_LOG_UNREADABLE"
+            )
+            return _slurm_log_blocker(error_code, field, task_id, path), None, None
+        return None, fd, pre_open_lstat
+    finally:
+        os.close(dir_fd)
+
+
+def _slurm_log_dir_identity_matches(bound_log: _BoundSlurmLogPath) -> bool:
+    try:
+        current = bound_log.log_dir.lstat()
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(current.st_mode)
+        and stat.S_ISDIR(current.st_mode)
+        and current.st_dev == bound_log.log_dir_stat.st_dev
+        and current.st_ino == bound_log.log_dir_stat.st_ino
+    )
 
 
 def _validate_slurm_log_path(
