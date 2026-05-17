@@ -1076,7 +1076,14 @@ def _validate_api_base_url(value: str) -> None:
         error_code="PRODUCTION_SCALE_API_BASE_URL_UNSAFE",
         message="Scale API base URL path must not contain credential assignments, traversal, or encoded separators.",
     )
-    if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in _canonical_decode_steps(value)):
+    if any(
+        SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part)
+        for part in _canonical_decode_steps(
+            value,
+            error_code="PRODUCTION_SCALE_API_BASE_URL_UNSAFE",
+            message="Scale API base URL must not contain credential assignments or over-encoded percent escapes.",
+        )
+    ):
         raise ProductionScaleValidationError(
             "PRODUCTION_SCALE_API_BASE_URL_UNSAFE",
             "Scale API base URL must not contain credential assignments.",
@@ -1116,7 +1123,7 @@ def _validate_object_prefix_safe(prefix: str) -> None:
     )
 
 
-def _canonical_decode_steps(value: str) -> tuple[str, ...]:
+def _canonical_decode_steps(value: str, *, error_code: str, message: str) -> tuple[str, ...]:
     steps = [value]
     current = value
     for _ in range(MAX_PERCENT_DECODE_ROUNDS):
@@ -1125,6 +1132,8 @@ def _canonical_decode_steps(value: str) -> tuple[str, ...]:
             break
         steps.append(decoded)
         current = decoded
+    if unquote(current) != current:
+        raise ProductionScaleValidationError(error_code, message)
     return tuple(steps)
 
 
@@ -1132,7 +1141,7 @@ def _guard_canonical_path_segments(path: str, *, error_code: str, message: str) 
     for raw_segment in path.split("/"):
         if raw_segment == "":
             continue
-        for segment in _canonical_decode_steps(raw_segment):
+        for segment in _canonical_decode_steps(raw_segment, error_code=error_code, message=message):
             if (
                 "/" in segment
                 or "\\" in segment

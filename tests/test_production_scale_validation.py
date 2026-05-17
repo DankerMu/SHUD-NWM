@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -11,6 +12,7 @@ from services.production_closure.scale_validation import (
     DEFAULT_MIN_SEGMENT_COUNT,
     MAX_EVIDENCE_PAYLOAD_BYTES,
     MAX_OBJECT_LISTING_COUNT,
+    MAX_PERCENT_DECODE_ROUNDS,
     EvidenceWriter,
     ProductionScaleConfig,
     ProductionScaleValidationError,
@@ -490,6 +492,31 @@ def test_validate_scale_rejects_encoded_api_and_object_path_secrets(
     assert exc_info.value.error_code == error_code
 
 
+@pytest.mark.parametrize(
+    ("field_name", "prefix", "error_code"),
+    [
+        ("api_base_url", "https://api.example/path", "PRODUCTION_SCALE_API_BASE_URL_UNSAFE"),
+        ("object_prefix", "s3://bucket/path", "PRODUCTION_SCALE_OBJECT_PREFIX_UNSAFE"),
+    ],
+)
+def test_validate_scale_rejects_over_encoded_api_and_object_path_secrets(
+    tmp_path: Path,
+    field_name: str,
+    prefix: str,
+    error_code: str,
+) -> None:
+    encoded_secret_segment = _percent_encode_rounds("/token=secret", MAX_PERCENT_DECODE_ROUNDS + 1)
+
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="over_encoded_secret",
+            **{field_name: f"{prefix}{encoded_secret_segment}"},
+        )
+
+    assert exc_info.value.error_code == error_code
+
+
 def test_validate_scale_click_and_argparse_dispatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     click_exit = slurm_validation._click_main(
         [
@@ -532,3 +559,10 @@ def test_validate_scale_click_and_argparse_dispatch(tmp_path: Path, capsys: pyte
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _percent_encode_rounds(value: str, rounds: int) -> str:
+    encoded = value
+    for _ in range(rounds):
+        encoded = quote(encoded, safe="")
+    return encoded
