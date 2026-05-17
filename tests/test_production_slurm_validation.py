@@ -335,7 +335,7 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
             (log_dir / "7777_0.out").write_text("task 0 stdout\n", encoding="utf-8")
             (log_dir / "7777_0.err").write_text("task 0 stderr\n", encoding="utf-8")
             (log_dir / "7777_1.out").write_text(
-                f"{slurm_validation.CONTROLLED_FAILURE_LOG_MARKER}\n",
+                f"{slurm_validation.CONTROLLED_FAILURE_LOG_MARKER}\nNON_FINITE_FLOW\n",
                 encoding="utf-8",
             )
             (log_dir / "7777_1.err").write_text("task 1 stderr\n", encoding="utf-8")
@@ -559,6 +559,75 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_marker_missing(
     assert qc["malformed_task"]["publication_blocked"] is False
 
 
+def test_validate_slurm_submit_blocks_when_controlled_failure_signature_missing(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            log_dir = workspace_root / "missingsignature" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            for task_id in (0, 1):
+                (log_dir / f"7799_{task_id}.out").write_text(f"task {task_id} stdout\n", encoding="utf-8")
+                (log_dir / f"7799_{task_id}.err").write_text(f"task {task_id} stderr\n", encoding="utf-8")
+            (log_dir / "7799_1.out").write_text(
+                f"{slurm_validation.CONTROLLED_FAILURE_LOG_MARKER}\nsetup failed\n",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="7799\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "7799|COMPLETED|0:0|00:00:11|cn04|CPU\n"
+                    "7799_0|COMPLETED|0:0|00:00:10|cn04|CPU\n"
+                    "7799_1|FAILED|2:0|00:00:05|cn04|CPU\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "missingsignature",
+            "--submit",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    assert [blocker["error_code"] for blocker in summary["blockers"]] == [
+        "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING"
+    ]
+    lane_dir = tmp_path / "artifacts" / "missingsignature" / "slurm"
+    qc = json.loads((lane_dir / "qc_blocking.json").read_text())
+    assert qc["malformed_task"]["status"] == "not_verified"
+    assert qc["malformed_task"]["publication_blocked"] is False
+
+
 def test_validate_slurm_submit_blocks_when_task_accounting_rows_never_finish(
     tmp_path: Path,
     monkeypatch,
@@ -620,6 +689,10 @@ def test_validate_slurm_submit_blocks_when_task_accounting_rows_never_finish(
     partial = json.loads((lane_dir / "array_partial_success.json").read_text())
     assert partial["status"] == "blocked"
     assert partial["successful_outputs_remain_publishable"] is False
+    workspace_root = tmp_path / "shared-workspace"
+    assert not (workspace_root / "runs" / "sbatchfailed" / "input" / "manifest_index.json").exists()
+    assert not (workspace_root / "runs" / "sbatchfailed_success" / "input" / "manifest.json").exists()
+    assert not (workspace_root / "runs" / "sbatchfailed_controlled_fail" / "input" / "manifest.json").exists()
     assert all(task["publishable"] is False for task in partial["tasks"])
 
 
@@ -797,9 +870,16 @@ def test_validate_slurm_submit_sbatch_failure_writes_blocked_bundle(
     assert accounting["submit"]["returncode"] == 1
     assert accounting["submit"]["stderr"] == "invalid account"
     assert accounting["poll"]["attempts"] == 0
+    assert accounting["shared_runtime_inputs_cleaned"] is True
     partial = json.loads((lane_dir / "array_partial_success.json").read_text())
     assert partial["status"] == "blocked"
     assert partial["successful_outputs_remain_publishable"] is False
+    workspace_root = tmp_path / "shared-workspace"
+    assert summary["manifest_index_path"] == str(lane_dir / "manifest_index.json")
+    assert all(str(lane_dir) in path for path in summary["runtime_manifest_paths"])
+    assert not (workspace_root / "runs" / "sbatchfailed" / "input" / "manifest_index.json").exists()
+    assert not (workspace_root / "runs" / "sbatchfailed_success" / "input" / "manifest.json").exists()
+    assert not (workspace_root / "runs" / "sbatchfailed_controlled_fail" / "input" / "manifest.json").exists()
 
 
 def test_validate_slurm_rejects_unsafe_run_id(tmp_path: Path) -> None:
@@ -939,7 +1019,7 @@ def test_validate_slurm_refuses_existing_runtime_manifest_unless_force(monkeypat
         )
         == 0
     )
-    assert json.loads(manifest_path.read_text(encoding="utf-8"))["run_id"] == "existingmanifest_success"
+    assert not manifest_path.exists()
 
 
 def test_validate_slurm_rejects_symlinked_lane_and_evidence_file(monkeypatch, tmp_path: Path) -> None:

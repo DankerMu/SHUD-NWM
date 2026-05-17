@@ -48,6 +48,7 @@ MAX_POLL_INTERVAL_SECONDS = 300.0
 MAX_POLL_TIMEOUT_SECONDS = 86400.0
 MIN_POLL_INTERVAL_SECONDS = 1.0
 CONTROLLED_FAILURE_LOG_MARKER = "NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED"
+CONTROLLED_FAILURE_LOG_SIGNATURES = ("NON_FINITE_FLOW",)
 RESOURCE_LIMITS = {
     "nodes": 128,
     "ntasks": 4096,
@@ -281,6 +282,12 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
     writer.write_text(config.lane_dir / "rendered_run_shud_forecast_array.sbatch", rendered_script)
 
     accounting = _fake_accounting(config) if config.fake_slurm else _real_accounting(config, blockers)
+    if accounting.get("shared_runtime_inputs_cleaned") is True:
+        manifest_index, manifest_tasks = _write_manifest_index(
+            config,
+            writer,
+            use_shared_workspace_inputs=False,
+        )
     writer.write_json(config.lane_dir / "slurm_accounting.json", accounting)
 
     partial_success = _partial_success_evidence(config, accounting)
@@ -735,6 +742,7 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
     submit_command.append(str(script_path))
     submit = _run_command(submit_command)
     if submit["returncode"] != 0:
+        _cleanup_shared_runtime_inputs(config)
         return {
             "mode": "blocked",
             "job_id": None,
@@ -761,6 +769,7 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
                 "interval_seconds": config.poll_interval_seconds,
                 "timeout_seconds": config.poll_timeout_seconds,
             },
+            "shared_runtime_inputs_cleaned": True,
             "records": [],
         }
     job_id = _parse_sbatch_parsable(submit["stdout"])
@@ -830,6 +839,26 @@ def _safe_workspace_path(workspace_root: Path, path: Path) -> Path:
             "Shared Slurm workspace path must stay under workspace root.",
         ) from error
     return resolved_path
+
+
+def _cleanup_shared_runtime_inputs(config: ProductionSlurmConfig) -> None:
+    for path in _shared_runtime_input_paths(config):
+        try:
+            safe_path = _safe_workspace_path(config.workspace_root, path)
+        except ProductionValidationError:
+            continue
+        try:
+            safe_path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _shared_runtime_input_paths(config: ProductionSlurmConfig) -> list[Path]:
+    return [
+        config.workspace_root / "runs" / config.run_id / "input" / "manifest_index.json",
+        config.workspace_root / "runs" / f"{config.run_id}_success" / "input" / "manifest.json",
+        config.workspace_root / "runs" / f"{config.run_id}_controlled_fail" / "input" / "manifest.json",
+    ]
 
 
 def _poll_sacct_for_expected_array(
@@ -1033,7 +1062,7 @@ def _submitted_log_blockers(
                     }
                 )
     task1 = task_records.get(1)
-    if task1 and _is_controlled_failure_outcome(task1) and not _controlled_failure_marker_present(config, job_id):
+    if task1 and _is_controlled_failure_outcome(task1) and not _controlled_failure_log_evidence_present(config, job_id):
         blockers.append(
             {
                 "error_code": "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING",
@@ -1045,17 +1074,31 @@ def _submitted_log_blockers(
     return blockers
 
 
+def _controlled_failure_log_evidence_present(config: ProductionSlurmConfig, job_id: str) -> bool:
+    task1_logs = _read_task_logs(config, job_id, task_id=1)
+    if not task1_logs:
+        return False
+    joined_logs = "\n".join(task1_logs)
+    return CONTROLLED_FAILURE_LOG_MARKER in joined_logs and any(
+        signature in joined_logs for signature in CONTROLLED_FAILURE_LOG_SIGNATURES
+    )
+
+
 def _controlled_failure_marker_present(config: ProductionSlurmConfig, job_id: str) -> bool:
+    return any(CONTROLLED_FAILURE_LOG_MARKER in content for content in _read_task_logs(config, job_id, task_id=1))
+
+
+def _read_task_logs(config: ProductionSlurmConfig, job_id: str, *, task_id: int) -> list[str]:
+    contents: list[str] = []
     for suffix in ("out", "err"):
-        path = _slurm_log_file(config, job_id, 1, suffix=suffix)
+        path = _slurm_log_file(config, job_id, task_id, suffix=suffix)
         if not path.is_file():
             continue
         try:
-            if CONTROLLED_FAILURE_LOG_MARKER in path.read_text(encoding="utf-8", errors="replace"):
-                return True
+            contents.append(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
-    return False
+    return contents
 
 
 def _timeout_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:

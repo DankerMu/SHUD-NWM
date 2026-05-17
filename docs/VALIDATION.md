@@ -179,9 +179,10 @@ not satisfy the controlled-failure contract. Missing terminal task outcomes,
 shared stdout/stderr logs, or QC blocking evidence block #147 acceptance. The
 task `1` shared stdout/stderr evidence must include the
 `NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED` marker emitted by the
-rendered sbatch script before the expected worker failure. Use `--force` only
-for an intentional rerun of an existing `run_id`; the default protects audit
-evidence from accidental overwrite.
+rendered sbatch script and the `NON_FINITE_FLOW` worker/QC error signature from
+the intended malformed-output path. Use `--force` only for an intentional rerun
+of an existing `run_id`; the default protects audit evidence from accidental
+overwrite.
 
 In submit mode, the manifest index rendered into `NHMS_MANIFEST_INDEX` is copied
 under the configured shared workspace at
@@ -190,7 +191,9 @@ read it. Fake and no-submit preflight runs keep generated manifest inputs inside
 the evidence lane and are planned/preflight-only, not publishable acceptance
 evidence. If submit preflight is blocked, runtime manifests and the manifest
 index also stay inside the evidence lane and are not written to the shared
-workspace.
+workspace. If `sbatch` rejects the submission, the validator removes the shared
+runtime manifests/index written for that attempted submission before writing the
+blocked evidence bundle.
 
 If required preflight inputs or Slurm CLI tools are absent, the command writes a
 clear blocker bundle under `artifacts/production-closure/<run_id>/slurm/` and
