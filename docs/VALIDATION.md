@@ -432,13 +432,13 @@ The bundle is written under
 
 ## M10 #150 Staging End-to-End Forecast/Analysis Closure
 
-Issue #150 adds an opt-in staging E2E closure lane that records the bounded
-source -> canonical -> forcing -> Slurm SHUD -> parse -> flood frequency -> tile
-publish -> API/frontend chain under one evidence bundle. The default command is
-self-contained and deterministic: it does not require external network, real
-object storage, copied `/volume` data, PostGIS, real Slurm, a live SHUD solver,
-or a running frontend server. It also does not claim live DB/API/Slurm/frontend
-success unless those checks are represented by supplied evidence.
+Issue #150 adds an opt-in staging E2E closure lane that records deterministic,
+evidence-backed closure for the bounded source -> canonical -> forcing -> Slurm
+SHUD -> parse -> flood frequency -> tile publish -> API/frontend chain under
+one evidence bundle. The default command is self-contained and deterministic:
+it does not require external network, real object storage, copied `/volume`
+data, PostGIS, real Slurm, a live SHUD solver, or a running frontend server. It
+also does not claim live DB/API/Slurm/frontend success unless real checks run.
 
 Fast deterministic evidence command:
 
@@ -472,20 +472,27 @@ The bundle is written under
 - `preflight.json`: redacted source cycle, model set, DB target, object prefix,
   Slurm partition/account, frontend API base, dependency evidence roots, and
   self-contained execution policy.
-- `dependency_status.json`: supplied or deterministic-equivalent #147/#148/#149
-  evidence status as `consumed`, `skipped`, `missing`, or `blocked`; it never
-  fabricates live Slurm/object-store/met success.
+- `dependency_status.json`: supplied #147/#148/#149 summaries are consumed only
+  when they use the expected production-closure schema/issue and an allowed
+  success status such as `ready`. Missing, malformed, failed, blocked,
+  `not_executed`, unknown, or wrong-lane summaries block the chain. Omitted
+  roots are recorded as skipped deterministic equivalents without fabricating
+  live Slurm/object-store/met success.
 - `stage_manifest.json`: statuses, blockers, inputs, outputs, object URIs, DB
   IDs, Slurm job ID, and derived `model_id`, `basin_version_id`, `segment_id`,
   `source/cycle_time`, `job_id`, and `layer_id` for download, canonical,
-  forcing, slurm, parse, frequency, tile, API, and frontend stages.
+  forcing, slurm, parse, frequency, tile, API, and frontend stages. Fast mode
+  outputs point at concrete local artifact manifests under
+  `stage_artifacts/` instead of claiming live DB/object/tile publication.
 - `shud_output_qc.json`: deterministic SHUD `.rivqdown` QC with stable blockers
   for missing `.rivqdown`, malformed columns, NaN/Inf, missing required output,
   count mismatch, and time-axis mismatch. Failed QC blocks parse, frequency,
   tile, API, and frontend publication for that run while retaining raw/log paths.
 - `api_contract_evidence.json`: existing-contract API evidence derived from the
   bundle identifiers. Fast mode records deterministic contract evidence and
-  `live_api_executed=false`; it does not add run_id-specific API filters.
+  `live_api_executed=false`; it uses the existing model detail, forecast
+  series, flood alert summary/ranking/timeline, jobs/logs, and flood return
+  period tile contracts without contacting a live API.
 - `frontend_smoke_evidence.json`: deterministic evidence-backed smoke lineage
   for map, forecast, monitoring, and alerts. Fast mode records
   `live_frontend_executed=false`, `mock_api_routes_used=false`, and does not

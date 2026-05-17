@@ -58,11 +58,48 @@ def test_validate_e2e_default_lane_writes_required_ready_evidence(tmp_path: Path
     assert {query["contract"] for query in api["contract_queries"]} == {
         "model_detail",
         "forecast_series",
-        "flood_alerts",
-        "pipeline_job",
-        "pipeline_logs",
+        "flood_alerts_summary",
+        "flood_alerts_ranking",
+        "flood_alerts_timeline",
+        "jobs",
+        "job_logs",
         "tile_metadata",
     }
+    paths = {query["contract"]: query["path"] for query in api["contract_queries"]}
+    assert paths["model_detail"] == "/api/v1/models/basins_qhh_shud_fixture"
+    assert (
+        paths["forecast_series"]
+        == "/api/v1/basin-versions/basins_qhh_shud_fixture_basin_v1/river-segments/seg_a/forecast-series"
+    )
+    assert paths["flood_alerts_summary"] == "/api/v1/flood-alerts/summary"
+    assert paths["flood_alerts_ranking"] == "/api/v1/flood-alerts/ranking"
+    assert paths["flood_alerts_timeline"] == "/api/v1/flood-alerts/timeline"
+    assert paths["jobs"] == "/api/v1/jobs"
+    assert paths["job_logs"] == "/api/v1/jobs/m10_150-array-0/logs"
+    assert paths["tile_metadata"] == "/api/v1/tiles/flood-return-period"
+    queries = {query["contract"]: query.get("query", {}) for query in api["contract_queries"]}
+    assert queries["forecast_series"] == {
+        "issue_time": "2026-05-07T00:00:00Z",
+        "variables": "q_down",
+        "scenarios": "GFS",
+        "include_analysis": "false",
+    }
+    assert "source" not in queries["forecast_series"]
+    assert "cycle_time" not in queries["forecast_series"]
+    assert queries["flood_alerts_ranking"] == {
+        "run_id": "m10_150",
+        "limit": 10,
+        "offset": 0,
+        "valid_time": "2026-05-07T03:00:00Z",
+    }
+    assert "segment_id" not in queries["flood_alerts_ranking"]
+
+    stage_manifest = _read_json(lane_dir / "stage_manifest.json")
+    for stage in stage_manifest["stages"]:
+        assert stage["outputs"], stage["stage"]
+        for output in stage["outputs"]:
+            if output.startswith(str(lane_dir)):
+                assert Path(output).exists(), output
 
     frontend = _read_json(lane_dir / "frontend_smoke_evidence.json")
     assert frontend["status"] == "ready"
@@ -76,7 +113,15 @@ def test_validate_e2e_consumes_dependency_summaries_without_claiming_live_succes
         root = tmp_path / dependency
         root.mkdir()
         (root / "summary.json").write_text(
-            json.dumps({"run_id": f"{dependency}-run", "status": "ready", "evidence_dir": str(root)}),
+            json.dumps(
+                {
+                    "schema": _dependency_schema(dependency),
+                    "issue": _dependency_issue(dependency),
+                    "run_id": f"{dependency}-run",
+                    "status": "ready",
+                    "evidence_dir": str(root),
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -101,14 +146,118 @@ def test_validate_e2e_consumes_dependency_summaries_without_claiming_live_succes
 def test_validate_e2e_blocks_on_blocked_dependency_summary(tmp_path: Path) -> None:
     root = tmp_path / "met"
     root.mkdir()
-    (root / "summary.json").write_text(json.dumps({"run_id": "met-run", "status": "blocked"}), encoding="utf-8")
+    (root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "blocked",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     summary = validate_e2e(
         ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="blockeddep", met_evidence_root=root)
     )
 
+    lane_dir = tmp_path / "artifacts" / "blockeddep" / "e2e"
+    stage_manifest = _read_json(lane_dir / "stage_manifest.json")
+    api = _read_json(lane_dir / "api_contract_evidence.json")
+    frontend = _read_json(lane_dir / "frontend_smoke_evidence.json")
+
     assert summary["status"] == "blocked"
     assert summary["blockers"][0]["error_code"] == "PRODUCTION_E2E_DEPENDENCY_BLOCKED"
+    assert set(stage_manifest["stage_statuses"].values()) == {"blocked"}
+    assert all(not stage["outputs"] for stage in stage_manifest["stages"])
+    assert api["status"] == "blocked"
+    assert api["execution_mode"] == "not_executed"
+    assert frontend["status"] == "blocked"
+    assert frontend["execution_mode"] == "not_executed"
+
+
+@pytest.mark.parametrize("bad_status", ["failed", "error", "not_executed", "unknown"])
+def test_validate_e2e_rejects_non_ready_dependency_statuses(tmp_path: Path, bad_status: str) -> None:
+    root = tmp_path / "object-store"
+    root.mkdir()
+    (root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.object_store.v1",
+                "issue": 148,
+                "run_id": "object-run",
+                "status": bad_status,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id=f"baddep-{bad_status}",
+            object_store_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / f"baddep-{bad_status}" / "e2e"
+    dependency = _read_json(lane_dir / "dependency_status.json")["dependencies"][1]
+    assert summary["status"] == "blocked"
+    assert dependency["dependency"] == "object_store"
+    assert dependency["status"] == "blocked"
+    assert dependency["summary_status"] == bad_status
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema": "nhms.production_closure.object_store.v1", "issue": 148},
+        {"schema": "nhms.production_closure.met.v1", "issue": 149, "status": "ready"},
+    ],
+)
+def test_validate_e2e_rejects_missing_status_or_wrong_dependency_schema(
+    tmp_path: Path,
+    payload: dict,
+) -> None:
+    root = tmp_path / "object-store"
+    root.mkdir()
+    (root / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id=f"invaliddep-{len(payload)}",
+            object_store_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / f"invaliddep-{len(payload)}" / "e2e"
+    dependency = _read_json(lane_dir / "dependency_status.json")["dependencies"][1]
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["status"] != "consumed"
+
+
+def test_validate_e2e_rejects_malformed_dependency_json(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    (root / "summary.json").write_text("{not json", encoding="utf-8")
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="malformeddep",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "malformeddep" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["execution_mode"] == "not_executed"
 
 
 @pytest.mark.parametrize(
@@ -175,6 +324,51 @@ def test_validate_e2e_same_run_requires_force(tmp_path: Path) -> None:
         ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="same", force=True)
     )
     assert forced_summary["status"] == "ready"
+
+
+@pytest.mark.parametrize(
+    ("fixture", "error_code", "missing_name"),
+    [
+        ("missing_rivqdown", "SHUD_RIVQDOWN_MISSING", "rivqdown"),
+        ("missing_required_output", "SHUD_REQUIRED_OUTPUT_MISSING", "log"),
+    ],
+)
+def test_validate_e2e_force_does_not_reuse_stale_shud_raw_outputs(
+    tmp_path: Path,
+    fixture: str,
+    error_code: str,
+    missing_name: str,
+) -> None:
+    validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=f"force-{fixture}"))
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id=f"force-{fixture}",
+            shud_qc_fixture=fixture,
+            force=True,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / f"force-{fixture}" / "e2e"
+    qc = _read_json(lane_dir / "shud_output_qc.json")
+    assert summary["status"] == "blocked"
+    assert qc["error_code"] == error_code
+    assert qc["retained_paths"][missing_name] is None
+
+
+def test_validate_e2e_rejects_multi_model_set_before_writes(tmp_path: Path) -> None:
+    config = ProductionE2EConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="multi",
+        model_set="model_a,model_b",
+    )
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_MODEL_SET_UNSUPPORTED"
+    assert not (tmp_path / "artifacts" / "multi").exists()
 
 
 def test_validate_e2e_redacts_secret_shaped_values_from_evidence_and_stdout(
@@ -259,3 +453,15 @@ def test_validate_e2e_click_and_argparse_dispatch(tmp_path: Path, capsys: pytest
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _dependency_schema(dependency: str) -> str:
+    return {
+        "met": "nhms.production_closure.met.v1",
+        "slurm": "nhms.production_closure.slurm.v1",
+        "object-store": "nhms.production_closure.object_store.v1",
+    }[dependency]
+
+
+def _dependency_issue(dependency: str) -> int:
+    return {"met": 149, "slurm": 147, "object-store": 148}[dependency]

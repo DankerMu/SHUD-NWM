@@ -45,6 +45,32 @@ DOWNSTREAM_STAGE_NAMES = {"parse", "frequency", "tile", "api", "frontend"}
 DERIVED_SEGMENT_IDS = ("seg_a", "seg_b")
 EXPECTED_TIMESTEP_HOURS = (0, 3)
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
+DEPENDENCY_SUMMARY_CONTRACTS = {
+    "slurm": {
+        "issue": 147,
+        "schema": "nhms.production_closure.slurm.v1",
+        "allowed_statuses": {"ready"},
+    },
+    "object_store": {
+        "issue": 148,
+        "schema": "nhms.production_closure.object_store.v1",
+        "allowed_statuses": {"ready"},
+    },
+    "met": {
+        "issue": 149,
+        "schema": "nhms.production_closure.met.v1",
+        "allowed_statuses": {"ready"},
+    },
+}
+EXPLICIT_BLOCKED_DEPENDENCY_STATUSES = {
+    "blocked",
+    "failed",
+    "failure",
+    "error",
+    "not_executed",
+    "missing",
+    "unknown",
+}
 
 
 class ProductionE2EValidationError(RuntimeError):
@@ -229,13 +255,14 @@ def validate_e2e(config: ProductionE2EConfig) -> dict[str, Any]:
     qc = _write_shud_output_qc(config, writer, derived_ids)
     writer.write_json(config.lane_dir / "shud_output_qc.json", qc)
 
-    stage_manifest = _stage_manifest(config, derived_ids, dependency_status, qc)
+    stage_artifacts = _write_stage_artifacts(config, writer, derived_ids, qc)
+    stage_manifest = _stage_manifest(config, derived_ids, dependency_status, qc, stage_artifacts)
     writer.write_json(config.lane_dir / "stage_manifest.json", stage_manifest)
 
-    api_evidence = _api_contract_evidence(config, derived_ids, stage_manifest, qc)
+    api_evidence = _api_contract_evidence(config, derived_ids, dependency_status, stage_manifest, qc)
     writer.write_json(config.lane_dir / "api_contract_evidence.json", api_evidence)
 
-    frontend_evidence = _frontend_smoke_evidence(config, derived_ids, stage_manifest, qc)
+    frontend_evidence = _frontend_smoke_evidence(config, derived_ids, dependency_status, stage_manifest, qc)
     writer.write_json(config.lane_dir / "frontend_smoke_evidence.json", frontend_evidence)
 
     environment = _environment_payload(config)
@@ -303,7 +330,7 @@ def _dependency_status_payload(config: ProductionE2EConfig) -> dict[str, Any]:
                 {
                     "error_code": "PRODUCTION_E2E_DEPENDENCY_BLOCKED",
                     "dependency": name,
-                    "message": f"{name} dependency evidence is blocked.",
+                    "message": dependency.get("reason", f"{name} dependency evidence is blocked."),
                 }
             )
         elif dependency["status"] == "missing":
@@ -311,7 +338,10 @@ def _dependency_status_payload(config: ProductionE2EConfig) -> dict[str, Any]:
                 {
                     "error_code": "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_MISSING",
                     "dependency": name,
-                    "message": f"{name} dependency evidence root does not contain summary.json.",
+                    "message": dependency.get(
+                        "reason",
+                        f"{name} dependency evidence root does not contain a valid summary.json.",
+                    ),
                 }
             )
     return {
@@ -324,6 +354,7 @@ def _dependency_status_payload(config: ProductionE2EConfig) -> dict[str, Any]:
 
 
 def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
+    contract = DEPENDENCY_SUMMARY_CONTRACTS[name]
     if root is None:
         return {
             "dependency": name,
@@ -331,6 +362,8 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "execution_mode": "deterministic_equivalent",
             "live_success_claimed": False,
             "summary_path": None,
+            "expected_issue": contract["issue"],
+            "expected_schema": contract["schema"],
             "reason": "No accepted dependency evidence root was supplied; using bounded deterministic equivalent.",
         }
     summary_path = _dependency_summary_path(root, name)
@@ -341,6 +374,8 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "execution_mode": "not_executed",
             "live_success_claimed": False,
             "summary_path": str(root),
+            "expected_issue": contract["issue"],
+            "expected_schema": contract["schema"],
             "reason": "Dependency evidence root was supplied but no summary.json was found.",
         }
     try:
@@ -348,24 +383,85 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as error:
         return {
             "dependency": name,
-            "status": "missing",
+            "status": "blocked",
             "execution_mode": "not_executed",
             "live_success_claimed": False,
             "summary_path": str(summary_path),
+            "expected_issue": contract["issue"],
+            "expected_schema": contract["schema"],
             "reason": f"Dependency summary could not be read: {error}",
         }
+    if not isinstance(summary, Mapping):
+        return _invalid_dependency_summary(name, summary_path, "Dependency summary JSON must be an object.")
+
     summary_status = str(summary.get("status", "unknown"))
-    dependency_status = "blocked" if summary_status == "blocked" else "consumed"
+    summary_schema = summary.get("schema")
+    summary_issue = summary.get("issue")
+    schema_matches = summary_schema == contract["schema"]
+    issue_matches = summary_issue == contract["issue"]
+    if not schema_matches or not issue_matches:
+        return _invalid_dependency_summary(
+            name,
+            summary_path,
+            (
+                f"Dependency summary must be issue #{contract['issue']} with schema {contract['schema']}; "
+                f"got issue={summary_issue!r}, schema={summary_schema!r}."
+            ),
+            summary=summary,
+        )
+    if summary_status in contract["allowed_statuses"]:
+        return {
+            "dependency": name,
+            "status": "consumed",
+            "execution_mode": "consumed_evidence",
+            "live_success_claimed": False,
+            "summary_path": str(summary_path),
+            "summary_status": summary_status,
+            "schema": summary_schema,
+            "issue": summary_issue,
+            "run_id": summary.get("run_id"),
+            "evidence_dir": summary.get("evidence_dir"),
+            "reason": "Accepted production closure dependency summary consumed.",
+        }
+    dependency_status = "blocked" if summary_status in EXPLICIT_BLOCKED_DEPENDENCY_STATUSES else "blocked"
     return {
         "dependency": name,
         "status": dependency_status,
-        "execution_mode": "consumed_evidence",
+        "execution_mode": "not_executed",
         "live_success_claimed": False,
         "summary_path": str(summary_path),
         "summary_status": summary_status,
+        "schema": summary_schema,
+        "issue": summary_issue,
         "run_id": summary.get("run_id"),
         "evidence_dir": summary.get("evidence_dir"),
-        "reason": "Accepted dependency evidence summary consumed.",
+        "reason": (
+            f"Dependency summary status {summary_status!r} is not an allowed success status "
+            f"for #{contract['issue']} {name} evidence."
+        ),
+    }
+
+
+def _invalid_dependency_summary(
+    name: str,
+    summary_path: Path,
+    reason: str,
+    *,
+    summary: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    contract = DEPENDENCY_SUMMARY_CONTRACTS[name]
+    return {
+        "dependency": name,
+        "status": "blocked",
+        "execution_mode": "not_executed",
+        "live_success_claimed": False,
+        "summary_path": str(summary_path),
+        "summary_status": summary.get("status", "unknown") if summary is not None else "unknown",
+        "schema": summary.get("schema") if summary is not None else None,
+        "issue": summary.get("issue") if summary is not None else None,
+        "expected_schema": contract["schema"],
+        "expected_issue": contract["issue"],
+        "reason": reason,
     }
 
 
@@ -408,8 +504,21 @@ def _write_shud_output_qc(
     raw_dir.mkdir(parents=True, exist_ok=True)
     rivqdown_path = raw_dir / f"{config.run_id}.rivqdown"
     log_path = raw_dir / "shud.log"
+    if config.force:
+        _remove_current_qc_outputs(rivqdown_path, log_path)
     _write_qc_fixture(config, writer, rivqdown_path, log_path)
     return _qc_result(config, rivqdown_path, log_path, derived_ids)
+
+
+def _remove_current_qc_outputs(*paths: Path) -> None:
+    for path in paths:
+        if path.exists() or path.is_symlink():
+            if path.is_symlink():
+                raise ProductionE2EValidationError(
+                    "PRODUCTION_E2E_EVIDENCE_SYMLINK",
+                    f"SHUD raw output must not be a symlink: {path}",
+                )
+            path.unlink()
 
 
 def _write_qc_fixture(
@@ -585,12 +694,20 @@ def _stage_manifest(
     derived_ids: Mapping[str, Any],
     dependency_status: Mapping[str, Any],
     qc: Mapping[str, Any],
+    stage_artifacts: Mapping[str, list[str]],
 ) -> dict[str, Any]:
     qc_blocker = _qc_stage_blocker(qc)
+    dependency_blocker = _dependency_stage_blocker(dependency_status)
     stages = []
     for stage_name in STAGE_NAMES:
         blocked_by_qc = stage_name in DOWNSTREAM_STAGE_NAMES and qc.get("status") != "pass"
-        stage_status = "blocked" if blocked_by_qc else "ready"
+        blocked_by_dependency = dependency_blocker is not None
+        stage_blockers = []
+        if blocked_by_dependency:
+            stage_blockers.append(dependency_blocker)
+        if blocked_by_qc and qc_blocker:
+            stage_blockers.append(qc_blocker)
+        stage_status = "blocked" if blocked_by_qc or blocked_by_dependency else "ready"
         stages.append(
             {
                 "stage": stage_name,
@@ -598,8 +715,8 @@ def _stage_manifest(
                 "execution_mode": _stage_execution_mode(stage_name),
                 "live_success_claimed": False,
                 "inputs": _stage_inputs(config, stage_name, derived_ids),
-                "outputs": [] if blocked_by_qc else _stage_outputs(config, stage_name, derived_ids),
-                "blockers": [qc_blocker] if blocked_by_qc and qc_blocker else [],
+                "outputs": [] if stage_status == "blocked" else stage_artifacts[stage_name],
+                "blockers": stage_blockers,
             }
         )
     return {
@@ -610,16 +727,29 @@ def _stage_manifest(
         "dependency_status": dependency_status["dependencies"],
         "stages": stages,
         "stage_statuses": {stage["stage"]: stage["status"] for stage in stages},
-        "blockers": [qc_blocker] if qc_blocker else [],
+        "blockers": [blocker for blocker in (dependency_blocker, qc_blocker) if blocker],
     }
 
 
 def _api_contract_evidence(
     config: ProductionE2EConfig,
     derived_ids: Mapping[str, Any],
+    dependency_status: Mapping[str, Any],
     stage_manifest: Mapping[str, Any],
     qc: Mapping[str, Any],
 ) -> dict[str, Any]:
+    dependency_blocker = _dependency_stage_blocker(dependency_status)
+    if dependency_blocker:
+        return {
+            "schema": "nhms.production_closure.e2e.api_contract.v1",
+            "run_id": config.run_id,
+            "status": "blocked",
+            "execution_mode": "not_executed",
+            "live_api_executed": False,
+            "blockers": [dependency_blocker],
+            "reason": "API publication checks are blocked by missing or invalid dependency evidence.",
+            "contract_queries": [],
+        }
     if qc.get("status") != "pass":
         return {
             "schema": "nhms.production_closure.e2e.api_contract.v1",
@@ -641,47 +771,7 @@ def _api_contract_evidence(
         "db_target": config.db_target,
         "derived_identifiers": dict(derived_ids),
         "stage_statuses": stage_manifest["stage_statuses"],
-        "contract_queries": [
-            {
-                "contract": "model_detail",
-                "method": "GET",
-                "path": f"/api/v1/models/{derived_ids['model_id']}",
-                "status": "deterministic_evidence",
-            },
-            {
-                "contract": "forecast_series",
-                "method": "GET",
-                "path": (
-                    f"/api/v1/basin-versions/{derived_ids['basin_version_id']}/river-segments/"
-                    f"{derived_ids['segment_id']}/forecast-series"
-                ),
-                "status": "deterministic_evidence",
-            },
-            {
-                "contract": "flood_alerts",
-                "method": "GET",
-                "path": f"/api/v1/flood-alerts/segments/{derived_ids['segment_id']}",
-                "status": "deterministic_evidence",
-            },
-            {
-                "contract": "pipeline_job",
-                "method": "GET",
-                "path": f"/api/v1/pipeline/jobs/{derived_ids['job_id']}",
-                "status": "deterministic_evidence",
-            },
-            {
-                "contract": "pipeline_logs",
-                "method": "GET",
-                "path": f"/api/v1/jobs/{derived_ids['job_id']}/logs",
-                "status": "deterministic_evidence",
-            },
-            {
-                "contract": "tile_metadata",
-                "method": "GET",
-                "path": f"/api/v1/tiles/{derived_ids['layer_id']}/metadata",
-                "status": "deterministic_evidence",
-            },
-        ],
+        "contract_queries": _api_contract_queries(derived_ids),
         "run_id_specific_api_filters_added": False,
         "notes": "Fast path records existing-contract queries from derived IDs without contacting a live API.",
     }
@@ -690,9 +780,21 @@ def _api_contract_evidence(
 def _frontend_smoke_evidence(
     config: ProductionE2EConfig,
     derived_ids: Mapping[str, Any],
+    dependency_status: Mapping[str, Any],
     stage_manifest: Mapping[str, Any],
     qc: Mapping[str, Any],
 ) -> dict[str, Any]:
+    dependency_blocker = _dependency_stage_blocker(dependency_status)
+    if dependency_blocker:
+        return {
+            "schema": "nhms.production_closure.e2e.frontend_smoke.v1",
+            "run_id": config.run_id,
+            "status": "blocked",
+            "execution_mode": "not_executed",
+            "live_frontend_executed": False,
+            "blockers": [dependency_blocker],
+            "reason": "Frontend smoke is blocked by missing or invalid dependency evidence.",
+        }
     if qc.get("status") != "pass":
         return {
             "schema": "nhms.production_closure.e2e.frontend_smoke.v1",
@@ -766,7 +868,7 @@ def _summary(
             "error_code": qc.get("error_code"),
             "downstream_publication_blocked": qc.get("downstream_publication_blocked"),
         },
-        "tile_artifacts": [] if qc.get("status") != "pass" else _stage_outputs(config, "tile", derived_ids),
+        "tile_artifacts": _ready_stage_outputs(stage_manifest, "tile"),
         "api_status": api_evidence.get("status"),
         "frontend_status": frontend_evidence.get("status"),
         "files": [
@@ -790,6 +892,30 @@ def _summary_blockers(dependency_status: Mapping[str, Any], qc: Mapping[str, Any
     return blockers
 
 
+def _dependency_stage_blocker(dependency_status: Mapping[str, Any]) -> dict[str, Any] | None:
+    blockers = list(dependency_status.get("blockers", []))
+    if not blockers:
+        return None
+    dependencies = [
+        {
+            "dependency": item.get("dependency"),
+            "status": item.get("status"),
+            "summary_status": item.get("summary_status"),
+            "summary_path": item.get("summary_path"),
+            "reason": item.get("reason"),
+        }
+        for item in dependency_status.get("dependencies", [])
+        if item.get("status") in {"blocked", "missing"}
+    ]
+    return {
+        "error_code": "PRODUCTION_E2E_DEPENDENCY_CHAIN_BLOCKED",
+        "stage": "dependency_evidence",
+        "message": "Supplied #147/#148/#149 dependency evidence is missing, blocked, invalid, or not ready.",
+        "blocks": list(STAGE_NAMES),
+        "dependencies": dependencies,
+    }
+
+
 def _qc_stage_blocker(qc: Mapping[str, Any]) -> dict[str, Any] | None:
     error_code = qc.get("error_code")
     if not error_code:
@@ -810,6 +936,232 @@ def _stage_execution_mode(stage_name: str) -> str:
     return "deterministic_fixture"
 
 
+def _write_stage_artifacts(
+    config: ProductionE2EConfig,
+    writer: EvidenceWriter,
+    derived_ids: Mapping[str, Any],
+    qc: Mapping[str, Any],
+) -> dict[str, list[str]]:
+    artifacts_dir = config.lane_dir / "stage_artifacts"
+    outputs: dict[str, list[str]] = {
+        "download": [str(artifacts_dir / "download" / "raw_cycle_manifest.json")],
+        "canonical": [str(artifacts_dir / "canonical" / "canonical_manifest.json")],
+        "forcing": [str(artifacts_dir / "forcing" / "forcing_manifest.json")],
+        "slurm": [str(artifacts_dir / "slurm" / "slurm_manifest.json"), str(config.lane_dir / "raw" / "shud")],
+        "parse": [str(artifacts_dir / "parse" / "parsed_timeseries_manifest.json")],
+        "frequency": [str(artifacts_dir / "frequency" / "return_period_manifest.json")],
+        "tile": [
+            str(artifacts_dir / "tile" / "tilejson.json"),
+            str(artifacts_dir / "tile" / "0" / "0" / "0.pbf"),
+        ],
+        "api": [str(artifacts_dir / "api" / "api_contract_queries.json")],
+        "frontend": [str(artifacts_dir / "frontend" / "frontend_lineage.json")],
+    }
+    base_payload = {
+        "run_id": config.run_id,
+        "source_cycle": _format_time(config.source_cycle),
+        "model_id": derived_ids["model_id"],
+        "source": derived_ids["source"],
+        "cycle_time": derived_ids["cycle_time"],
+        "execution_mode": "deterministic_fixture",
+        "live_db_executed": False,
+        "live_api_executed": False,
+        "live_slurm_executed": False,
+        "live_frontend_executed": False,
+    }
+    writer.write_json(
+        Path(outputs["download"][0]),
+        {
+            **base_payload,
+            "schema": "nhms.production_closure.e2e.stage.download.v1",
+            "status": "ready",
+            "raw_cycle_uri": f"{config.object_prefix}/raw/{derived_ids['source']}/{derived_ids['cycle_time']}/",
+            "files": [{"name": "gfs_surface.grib2", "bytes": 128, "sha256": "deterministic-download-fixture"}],
+        },
+    )
+    writer.write_json(
+        Path(outputs["canonical"][0]),
+        {
+            **base_payload,
+            "schema": "nhms.production_closure.e2e.stage.canonical.v1",
+            "status": "ready",
+            "input_manifest": outputs["download"][0],
+            "canonical_uri": f"{config.object_prefix}/canonical/{derived_ids['source']}/{derived_ids['cycle_time']}/",
+            "products": [{"variable": "precipitation_rate", "unit": "mm/h"}],
+        },
+    )
+    writer.write_json(
+        Path(outputs["forcing"][0]),
+        {
+            **base_payload,
+            "schema": "nhms.production_closure.e2e.stage.forcing.v1",
+            "status": "ready",
+            "input_manifest": outputs["canonical"][0],
+            "forcing_uri": f"{config.object_prefix}/forcing/{config.run_id}/forcing.json",
+            "segment_ids": list(derived_ids["segment_ids"]),
+        },
+    )
+    writer.write_json(
+        Path(outputs["slurm"][0]),
+        {
+            **base_payload,
+            "schema": "nhms.production_closure.e2e.stage.slurm.v1",
+            "status": "ready",
+            "execution_mode": "deterministic_slurm_evidence",
+            "live_slurm_executed": False,
+            "job_id": derived_ids["job_id"],
+            "raw_output_dir": str(config.lane_dir / "raw" / "shud"),
+            "qc_status": qc.get("status"),
+        },
+    )
+    if qc.get("status") == "pass":
+        writer.write_json(
+            Path(outputs["parse"][0]),
+            {
+                **base_payload,
+                "schema": "nhms.production_closure.e2e.stage.parse.v1",
+                "status": "ready",
+                "input_rivqdown": qc.get("retained_paths", {}).get("rivqdown"),
+                "records": len(DERIVED_SEGMENT_IDS) * len(EXPECTED_TIMESTEP_HOURS),
+                "segment_ids": list(derived_ids["segment_ids"]),
+            },
+        )
+        writer.write_json(
+            Path(outputs["frequency"][0]),
+            {
+                **base_payload,
+                "schema": "nhms.production_closure.e2e.stage.frequency.v1",
+                "status": "ready",
+                "input_manifest": outputs["parse"][0],
+                "return_periods": [2, 5, 10],
+                "segment_id": derived_ids["segment_id"],
+            },
+        )
+        writer.write_json(
+            Path(outputs["tile"][0]),
+            {
+                "tilejson": "3.0.0",
+                "name": f"{config.run_id}-flood-return-period",
+                "tiles": [f"{config.object_prefix}/tiles/{config.run_id}/{{z}}/{{x}}/{{y}}.pbf"],
+                "metadata": {
+                    **base_payload,
+                    "schema": "nhms.production_closure.e2e.stage.tile.v1",
+                    "status": "ready",
+                    "layer_id": derived_ids["layer_id"],
+                    "run_id": config.run_id,
+                    "duration": "PT3H",
+                    "valid_time": derived_ids["publication_time"],
+                },
+            },
+        )
+        writer.write_text(Path(outputs["tile"][1]), "deterministic mvt fixture\n")
+        writer.write_json(
+            Path(outputs["api"][0]),
+            {
+                **base_payload,
+                "schema": "nhms.production_closure.e2e.stage.api.v1",
+                "status": "ready",
+                "execution_mode": "deterministic_contract_evidence",
+                "contract_queries": _api_contract_queries(derived_ids),
+            },
+        )
+        writer.write_json(
+            Path(outputs["frontend"][0]),
+            {
+                **base_payload,
+                "schema": "nhms.production_closure.e2e.stage.frontend.v1",
+                "status": "ready",
+                "execution_mode": "deterministic_evidence_backed_fixture",
+                "staging_frontend_readiness_claimed": False,
+                "lineage": {
+                    "source": derived_ids["source"],
+                    "cycle_time": derived_ids["cycle_time"],
+                    "model_id": derived_ids["model_id"],
+                    "run_id": config.run_id,
+                    "publication_time": derived_ids["publication_time"],
+                },
+            },
+        )
+    return outputs
+
+
+def _api_contract_queries(derived_ids: Mapping[str, Any]) -> list[dict[str, Any]]:
+    run_id = derived_ids["run_id"]
+    segment_id = derived_ids["segment_id"]
+    return [
+        {
+            "contract": "model_detail",
+            "method": "GET",
+            "path": f"/api/v1/models/{derived_ids['model_id']}",
+            "status": "deterministic_evidence",
+        },
+        {
+            "contract": "forecast_series",
+            "method": "GET",
+            "path": (
+                f"/api/v1/basin-versions/{derived_ids['basin_version_id']}/river-segments/"
+                f"{segment_id}/forecast-series"
+            ),
+            "query": {
+                "issue_time": derived_ids["cycle_time"],
+                "variables": "q_down",
+                "scenarios": derived_ids["source"],
+                "include_analysis": "false",
+            },
+            "status": "deterministic_evidence",
+        },
+        {
+            "contract": "flood_alerts_summary",
+            "method": "GET",
+            "path": "/api/v1/flood-alerts/summary",
+            "query": {"run_id": run_id},
+            "status": "deterministic_evidence",
+        },
+        {
+            "contract": "flood_alerts_ranking",
+            "method": "GET",
+            "path": "/api/v1/flood-alerts/ranking",
+            "query": {"run_id": run_id, "limit": 10, "offset": 0, "valid_time": derived_ids["publication_time"]},
+            "status": "deterministic_evidence",
+        },
+        {
+            "contract": "flood_alerts_timeline",
+            "method": "GET",
+            "path": "/api/v1/flood-alerts/timeline",
+            "query": {"run_id": run_id, "segment_id": segment_id},
+            "status": "deterministic_evidence",
+        },
+        {
+            "contract": "jobs",
+            "method": "GET",
+            "path": "/api/v1/jobs",
+            "query": {
+                "model_id": derived_ids["model_id"],
+                "source": derived_ids["source"],
+                "cycle_time": derived_ids["cycle_time"],
+            },
+            "status": "deterministic_evidence",
+        },
+        {
+            "contract": "job_logs",
+            "method": "GET",
+            "path": f"/api/v1/jobs/{derived_ids['job_id']}/logs",
+            "status": "deterministic_evidence",
+        },
+        {
+            "contract": "tile_metadata",
+            "method": "GET",
+            "path": "/api/v1/tiles/flood-return-period",
+            "query": {
+                "run_id": run_id,
+                "duration": "PT3H",
+                "valid_time": derived_ids["publication_time"],
+            },
+            "status": "deterministic_evidence",
+        },
+    ]
+
+
 def _stage_inputs(config: ProductionE2EConfig, stage_name: str, derived_ids: Mapping[str, Any]) -> list[str]:
     inputs = {
         "download": [f"source:{derived_ids['source']} cycle:{derived_ids['cycle_time']}"],
@@ -825,21 +1177,12 @@ def _stage_inputs(config: ProductionE2EConfig, stage_name: str, derived_ids: Map
     return inputs[stage_name]
 
 
-def _stage_outputs(config: ProductionE2EConfig, stage_name: str, derived_ids: Mapping[str, Any]) -> list[str]:
-    outputs = {
-        "download": [f"{config.object_prefix}/raw/{derived_ids['source']}/{derived_ids['cycle_time']}/manifest.json"],
-        "canonical": [
-            f"{config.object_prefix}/canonical/{derived_ids['source']}/{derived_ids['cycle_time']}/manifest.json"
-        ],
-        "forcing": [f"{config.object_prefix}/forcing/{config.run_id}/forcing.json"],
-        "slurm": [str(config.lane_dir / "raw" / "shud"), f"job:{derived_ids['job_id']}"],
-        "parse": [f"db:{config.db_target}:river_timeseries:{config.run_id}"],
-        "frequency": [f"db:{config.db_target}:return_period:{derived_ids['segment_id']}"],
-        "tile": _object_uris(config, derived_ids)["tile_artifacts"],
-        "api": [f"contract:{derived_ids['model_id']}:{derived_ids['segment_id']}:{derived_ids['job_id']}"],
-        "frontend": [f"lineage:{config.run_id}:{derived_ids['model_id']}:{derived_ids['cycle_time']}"],
-    }
-    return outputs[stage_name]
+def _ready_stage_outputs(stage_manifest: Mapping[str, Any], stage_name: str) -> list[str]:
+    for stage in stage_manifest.get("stages", []):
+        if stage.get("stage") == stage_name and stage.get("status") == "ready":
+            outputs = stage.get("outputs", [])
+            return list(outputs) if isinstance(outputs, list) else []
+    return []
 
 
 def _object_uris(config: ProductionE2EConfig, derived_ids: Mapping[str, Any]) -> dict[str, Any]:
@@ -898,6 +1241,11 @@ def _validate_config(config: ProductionE2EConfig) -> None:
         )
     if not config.model_set:
         raise ProductionE2EValidationError("PRODUCTION_E2E_MODEL_SET_INVALID", "At least one model must be selected.")
+    if len(config.model_set) > 1:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_MODEL_SET_UNSUPPORTED",
+            "Staging E2E closure currently supports one selected model until per-model evidence is implemented.",
+        )
     for model_id in config.model_set:
         _validate_identifier(model_id, "model_id")
     for value, field_name in (
