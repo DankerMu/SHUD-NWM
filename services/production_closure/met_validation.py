@@ -6,9 +6,7 @@ import math
 import os
 import platform
 import re
-import shutil
 import sys
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +15,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, rmtree_no_follow
 from packages.common.test_netcdf4 import encode_test_netcdf4
 from workers.canonical_converter.converter import (
     CanonicalConversionError,
@@ -139,13 +138,20 @@ class EvidenceWriter:
                 "PRODUCTION_MET_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to replace an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.evidence_root)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_MET_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionMetValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionMetValidationError(
                 "PRODUCTION_MET_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",
@@ -1151,7 +1157,13 @@ def _prepare_object_bundle(config: ProductionMetConfig) -> None:
         )
     if object_root.exists() and config.force:
         _refuse_symlink_components(object_root)
-        shutil.rmtree(object_root)
+        try:
+            rmtree_no_follow(object_root, containment_root=config.lane_dir)
+        except SafeFilesystemError as error:
+            raise ProductionMetValidationError(
+                "PRODUCTION_MET_OBJECT_PATH_UNSAFE",
+                f"Failed to safely remove met validation object bundle {object_root}: {error}",
+            ) from error
 
 
 def _write_grid_definition(store: LocalObjectStore, config: ProductionMetConfig) -> str:

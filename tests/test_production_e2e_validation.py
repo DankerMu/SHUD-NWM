@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import safe_fs
 from services.production_closure import e2e_validation as e2e_validation_module
 from services.production_closure import slurm_validation
 from services.production_closure.e2e_validation import (
     MAX_DEPENDENCY_SUMMARY_DEPTH,
     MAX_DEPENDENCY_SUMMARY_NODES,
     MAX_EVIDENCE_PAYLOAD_BYTES,
+    EvidenceWriter,
     ProductionE2EConfig,
     ProductionE2EValidationError,
     _argparse_main,
@@ -908,6 +910,106 @@ def test_validate_e2e_force_refuses_symlinked_stage_artifacts_without_unlinking_
 
     assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_SYMLINK"
     assert external_file.read_text(encoding="utf-8") == "external stage artifact must remain\n"
+
+
+def test_e2e_evidence_writer_rejects_lane_parent_symlink_swap_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="swap")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_lane_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == config.lane_dir and not swapped:
+            swapped = True
+            config.lane_dir.rmdir()
+            config.lane_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_lane_parent)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        writer.write_json(config.lane_dir / "summary.json", {"status": "ready"})
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "summary.json").exists()
+
+
+def test_validate_e2e_force_refuses_raw_parent_symlink_swap_without_external_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "rawswap"
+    validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id))
+    lane_dir = tmp_path / "artifacts" / run_id / "e2e"
+    raw_dir = lane_dir / "raw" / "shud"
+    external = tmp_path / "external-raw"
+    external.mkdir()
+    external_file = external / f"{run_id}.rivqdown"
+    external_file.write_text("external evidence must remain\n", encoding="utf-8")
+    original_open_parent = safe_fs._open_parent_dir
+    swapped = False
+
+    def swap_raw_parent(path: Path, *, containment_root: Path | None, create: bool):
+        nonlocal swapped
+        if path.parent == raw_dir and path.name == f"{run_id}.rivqdown" and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(raw_dir, containment_root=lane_dir)
+            raw_dir.symlink_to(external, target_is_directory=True)
+        return original_open_parent(path, containment_root=containment_root, create=create)
+
+    monkeypatch.setattr(safe_fs, "_open_parent_dir", swap_raw_parent)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id, force=True))
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert external_file.read_text(encoding="utf-8") == "external evidence must remain\n"
+
+
+def test_validate_e2e_force_refuses_stage_artifacts_parent_symlink_swap_without_external_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "stageswap"
+    validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id))
+    lane_dir = tmp_path / "artifacts" / run_id / "e2e"
+    artifacts_dir = lane_dir / "stage_artifacts"
+    external = tmp_path / "external-stage"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("external stage artifact must remain\n", encoding="utf-8")
+    original_open_child = safe_fs._open_child_dir
+    swapped = False
+
+    def swap_stage_root(parent_fd: int, name: str, path_label: Path) -> int:
+        nonlocal swapped
+        if path_label == artifacts_dir and name == artifacts_dir.name and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(artifacts_dir, containment_root=lane_dir)
+            artifacts_dir.symlink_to(external, target_is_directory=True)
+        return original_open_child(parent_fd, name, path_label)
+
+    monkeypatch.setattr(safe_fs, "_open_child_dir", swap_stage_root)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(
+            ProductionE2EConfig.from_env(
+                evidence_root=tmp_path / "artifacts",
+                run_id=run_id,
+                shud_qc_fixture="missing_rivqdown",
+                force=True,
+            )
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert sentinel.read_text(encoding="utf-8") == "external stage artifact must remain\n"
 
 
 def test_validate_e2e_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:

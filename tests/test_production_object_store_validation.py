@@ -9,9 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from packages.common.object_store import LocalObjectStore
+from packages.common import safe_fs
+from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from services.production_closure import object_store_validation, slurm_validation
 from services.production_closure.object_store_validation import (
+    EvidenceWriter,
     ProductionObjectStoreConfig,
     ProductionObjectStoreValidationError,
     _argparse_main,
@@ -866,6 +868,58 @@ def test_local_object_store_read_bytes_limited_uses_bounded_read(
     assert read_sizes == [6]
 
 
+def test_local_object_store_rejects_parent_symlink_swap_before_write_or_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms-prod/m10")
+    external = tmp_path / "external-store"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_run_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path.name == "input" and path.parent.name == "run_001" and not swapped:
+            swapped = True
+            run_dir = path.parent
+            run_dir.rmdir()
+            run_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_run_parent)
+    with pytest.raises(ObjectStoreError):
+        store.write_bytes_atomic("runs/run_001/input/manifest.json", b"manifest\n")
+    assert not (external / "input" / "manifest.json").exists()
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", original_verify)
+    run_dir = tmp_path / "object-store" / "runs" / "run_001"
+    if run_dir.is_symlink():
+        run_dir.unlink()
+    safe_fs.rmtree_no_follow(run_dir, containment_root=tmp_path / "object-store", missing_ok=True)
+    (run_dir / "input").mkdir(parents=True)
+    target = run_dir / "input" / "manifest.json"
+    target.write_text("internal\n", encoding="utf-8")
+    external_target = external / "input" / "manifest.json"
+    external_target.parent.mkdir(parents=True)
+    external_target.write_text("external must remain\n", encoding="utf-8")
+    original_open_parent = safe_fs._open_parent_dir
+    swapped_for_delete = False
+
+    def swap_delete_parent(path: Path, *, containment_root: Path | None, create: bool):
+        nonlocal swapped_for_delete
+        if path == target and not swapped_for_delete:
+            swapped_for_delete = True
+            safe_fs.rmtree_no_follow(run_dir, containment_root=tmp_path / "object-store")
+            run_dir.symlink_to(external, target_is_directory=True)
+        return original_open_parent(path, containment_root=containment_root, create=create)
+
+    monkeypatch.setattr(safe_fs, "_open_parent_dir", swap_delete_parent)
+    with pytest.raises(ObjectStoreError):
+        store.delete("runs/run_001/input/manifest.json")
+    assert external_target.read_text(encoding="utf-8") == "external must remain\n"
+
+
 @pytest.mark.parametrize(
     "child_name",
     [
@@ -902,6 +956,131 @@ def test_validate_object_store_refuses_same_run_lane_child_symlink_without_exter
     assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK"
     assert external_file.read_text(encoding="utf-8") == "external must remain\n"
     assert sorted(path.name for path in external_dir.iterdir()) == ["sentinel.txt"]
+
+
+def test_object_store_evidence_writer_rejects_lane_parent_symlink_swap_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="swap")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_lane_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == config.lane_dir and not swapped:
+            swapped = True
+            config.lane_dir.rmdir()
+            config.lane_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_lane_parent)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        writer.write_json(config.lane_dir / "summary.json", {"status": "ready"})
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "summary.json").exists()
+
+
+def test_validate_object_store_refuses_raw_cleanup_parent_symlink_swap_without_external_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    config = ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id="rawswap", force=True)
+    lane_dir = config.lane_dir
+    lane_dir.mkdir(parents=True)
+    external = tmp_path / "external-raw"
+    external.mkdir()
+    external_file = external / ".inventory.raw.json"
+    external_file.write_text("external must remain\n", encoding="utf-8")
+    original_open_parent = safe_fs._open_parent_dir
+    swapped = False
+
+    def swap_raw_parent(path: Path, *, containment_root: Path | None, create: bool):
+        nonlocal swapped
+        if path == lane_dir / ".inventory.raw.json" and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(lane_dir, containment_root=evidence_root)
+            lane_dir.symlink_to(external, target_is_directory=True)
+        return original_open_parent(path, containment_root=containment_root, create=create)
+
+    monkeypatch.setattr(safe_fs, "_open_parent_dir", swap_raw_parent)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(config)
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert external_file.read_text(encoding="utf-8") == "external must remain\n"
+
+
+@pytest.mark.parametrize(
+    ("raw_name", "helper_name"),
+    [
+        (".inventory.raw.json", "write_inventory"),
+        (".migration_report.raw.json", "write_basins_migration_report"),
+        (".package_manifest.raw.json", "publish_basins_package"),
+    ],
+)
+def test_validate_object_store_raw_lane_write_rejects_symlink_swap_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_name: str,
+    helper_name: str,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    config = ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id=f"rawswap-{helper_name}")
+    lane_dir = config.lane_dir
+    external = tmp_path / f"external-{helper_name}"
+    external.mkdir()
+    external_raw = external / raw_name
+    external_raw.write_text("external must remain\n", encoding="utf-8")
+    original_helper = getattr(object_store_validation, helper_name)
+    original_atomic_write = safe_fs.atomic_write_bytes_no_follow
+    swapped = False
+    helper_called = False
+
+    def wrapped_helper(*args: object, **kwargs: object) -> object:
+        nonlocal helper_called
+        output_path = Path(kwargs.get("output_path") or (args[1] if helper_name == "write_inventory" else ""))
+        if output_path.name == raw_name:
+            helper_called = True
+        return original_helper(*args, **kwargs)
+
+    def swap_lane_before_raw_write(
+        path: Path,
+        content: bytes,
+        *,
+        containment_root: Path | None = None,
+        temp_suffix: str = "tmp",
+    ) -> Path:
+        nonlocal swapped
+        if path == lane_dir / raw_name and containment_root == lane_dir and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(lane_dir, containment_root=evidence_root)
+            lane_dir.symlink_to(external, target_is_directory=True)
+        return original_atomic_write(path, content, containment_root=containment_root, temp_suffix=temp_suffix)
+
+    monkeypatch.setattr(object_store_validation, helper_name, wrapped_helper)
+    monkeypatch.setattr(safe_fs, "atomic_write_bytes_no_follow", swap_lane_before_raw_write)
+    monkeypatch.setattr(object_store_validation, "atomic_write_bytes_no_follow", swap_lane_before_raw_write)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(config)
+
+    assert helper_called is True
+    assert swapped is True
+    assert exc_info.value.error_code in {
+        "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+        "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+    }
+    assert external_raw.read_text(encoding="utf-8") == "external must remain\n"
+    assert sorted(path.name for path in external.iterdir()) == [raw_name]
 
 
 def test_validate_object_store_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:

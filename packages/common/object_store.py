@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-import os
-import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    unlink_no_follow,
+)
 from packages.common.storage import validate_object_path
 
 MAX_OBJECT_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -70,26 +74,20 @@ class LocalObjectStore:
 
     def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
         path = self.resolve_path(key_or_uri)
-        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_bytes(content)
-            os.replace(temp_path, path)
-        except OSError as error:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                raise ObjectStoreError(
-                    f"Failed to write object {key_or_uri}: {error}; cleanup also failed: {cleanup_error}"
-                ) from cleanup_error
+            ensure_directory_no_follow(self.root)
+            atomic_write_bytes_no_follow(path, content, containment_root=self.root, temp_suffix="part")
+        except (OSError, SafeFilesystemError) as error:
             raise ObjectStoreError(f"Failed to write object {key_or_uri}: {error}") from error
         return self.uri_for_key(self.normalize_key(key_or_uri))
 
     def delete(self, key_or_uri: str) -> None:
         path = self.resolve_path(key_or_uri)
+        if not self.root.exists():
+            return
         try:
-            path.unlink(missing_ok=True)
-        except OSError as error:
+            unlink_no_follow(path, containment_root=self.root, missing_ok=True)
+        except (OSError, SafeFilesystemError) as error:
             raise ObjectStoreError(f"Failed to delete object {key_or_uri}: {error}") from error
 
     def iter_bytes(self, key_or_uri: str, *, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:

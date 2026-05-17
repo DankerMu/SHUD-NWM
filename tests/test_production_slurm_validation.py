@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import safe_fs
 from services.production_closure import slurm_validation
 
 
@@ -1639,6 +1640,135 @@ def test_validate_slurm_refuses_existing_runtime_manifest_unless_force(monkeypat
     assert not manifest_path.exists()
 
 
+def test_slurm_evidence_writer_rejects_lane_parent_symlink_swap_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = slurm_validation.EvidenceWriter(
+        tmp_path / "artifacts",
+        tmp_path / "artifacts" / "swap" / "slurm",
+        force=True,
+    )
+    writer.prepare()
+    external = tmp_path / "external"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_lane_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == writer.lane_dir and not swapped:
+            swapped = True
+            writer.lane_dir.rmdir()
+            writer.lane_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_lane_parent)
+
+    with pytest.raises(slurm_validation.ProductionValidationError) as exc_info:
+        writer.write_json(writer.lane_dir / "summary.json", {"status": "ready"})
+
+    assert exc_info.value.error_code == "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "summary.json").exists()
+
+
+def test_slurm_runtime_manifest_rejects_parent_symlink_swap_even_outside_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = slurm_validation.EvidenceWriter(
+        tmp_path / "artifacts",
+        tmp_path / "artifacts" / "swap" / "slurm",
+        force=True,
+    )
+    writer.prepare()
+    workspace = tmp_path / "workspace"
+    manifest_parent = workspace / "runs" / "swap_success" / "input"
+    manifest_parent.mkdir(parents=True)
+    external = tmp_path / "external-runtime"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_manifest_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == manifest_parent and not swapped:
+            swapped = True
+            manifest_parent.rmdir()
+            manifest_parent.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_manifest_parent)
+
+    with pytest.raises(slurm_validation.ProductionValidationError) as exc_info:
+        writer.write_runtime_manifest_json(manifest_parent / "manifest.json", {"status": "ready"})
+
+    assert exc_info.value.error_code == "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "manifest.json").exists()
+
+
+def test_validate_slurm_shared_runtime_cleanup_refuses_parent_symlink_swap_without_external_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+    external = tmp_path / "external-cleanup"
+    external_input = external / "input"
+    external_input.mkdir(parents=True)
+    external_manifest = external_input / "manifest_index.json"
+    external_manifest.write_text("external must remain\n", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="blocked after manifest write")
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    original_unlink_no_follow = safe_fs.unlink_no_follow
+    swapped = False
+
+    def swap_cleanup_parent(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False):
+        nonlocal swapped
+        if path.name == "manifest_index.json" and path.parent.name == "input" and not swapped:
+            swapped = True
+            run_dir = path.parent.parent
+            safe_fs.rmtree_no_follow(run_dir, containment_root=workspace_root)
+            run_dir.symlink_to(external, target_is_directory=True)
+        return original_unlink_no_follow(path, containment_root=containment_root, missing_ok=missing_ok)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(slurm_validation, "unlink_no_follow", swap_cleanup_parent)
+
+    try:
+        exit_code = slurm_validation.main(
+            [
+                "validate-slurm",
+                "--evidence-root",
+                str(tmp_path / "artifacts"),
+                "--run-id",
+                "cleanupswap",
+                "--submit",
+            ]
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    assert external_manifest.read_text(encoding="utf-8") == "external must remain\n"
+    cleanup = json.loads((tmp_path / "artifacts" / "cleanupswap" / "slurm" / "slurm_accounting.json").read_text())
+    assert any(item["status"] == "failed" for item in cleanup["shared_runtime_input_cleanup"])
+
+
 def test_validate_slurm_submit_reports_shared_input_cleanup_failure(
     monkeypatch,
     tmp_path: Path,
@@ -1651,18 +1781,18 @@ def test_validate_slurm_submit_reports_shared_input_cleanup_failure(
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
     monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
 
-    original_unlink = Path.unlink
+    original_unlink_no_follow = slurm_validation.unlink_no_follow
 
-    def fake_unlink(path: Path, *args, **kwargs):
+    def fake_unlink(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False):
         if path.name == "manifest_index.json":
             raise OSError("nfs busy")
-        return original_unlink(path, *args, **kwargs)
+        return original_unlink_no_follow(path, containment_root=containment_root, missing_ok=missing_ok)
 
     def fake_run(command, **kwargs):
         del kwargs
         program = Path(command[0]).name
         if program == "sbatch":
-            monkeypatch.setattr(Path, "unlink", fake_unlink)
+            monkeypatch.setattr(slurm_validation, "unlink_no_follow", fake_unlink)
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="invalid account")
         return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
 

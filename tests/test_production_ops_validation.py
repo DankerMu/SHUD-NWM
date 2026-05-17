@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 import pytest
 
+from packages.common import safe_fs
 from services.production_closure import ops_validation as ops_validation_module
 from services.production_closure import slurm_validation
 from services.production_closure.ops_validation import (
@@ -141,11 +142,41 @@ def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path
 
     assert audit["status"] == "ready"
     assert len(audit["audit_rows"]) == len(auth["action_decisions"])
+    assert set(audit["redaction_scope"]) == {
+        "config",
+        "logs",
+        "manifests",
+        "audit_rows",
+        "api_payloads",
+        "alert_payloads",
+        "pr_evidence",
+        "frontend_output",
+    }
     first_row = audit["audit_rows"][0]
     assert {"actor", "role", "target", "previous_state", "new_state", "decision", "reason", "lineage"} <= set(
         first_row
     )
     assert {row["decision"] for row in audit["audit_rows"]} == {"allowed", "denied", "release_blocked"}
+    represented_surfaces = {
+        "config": "config",
+        "logs": "log_output",
+        "manifests": "manifest_payload",
+        "audit_rows": "audit_correlation_id",
+        "api_payloads": "api_payload",
+        "alert_payloads": "alert_payload",
+        "pr_evidence": "pr_evidence",
+        "frontend_output": "frontend_output",
+    }
+    first_lineage = first_row["lineage"]
+    for field in represented_surfaces.values():
+        assert field in first_lineage
+    audit_text = json.dumps(audit)
+    for surface, field in represented_surfaces.items():
+        assert surface in audit["redaction_scope"]
+        if surface != "audit_rows":
+            assert "[redacted]" in json.dumps(first_lineage[field])
+    assert "deterministic-secret-for-redaction-test" not in audit_text
+    assert "deterministic-secret" not in audit_text
 
 
 def test_validate_ops_monitoring_alerts_and_rollback_drills_cover_required_surfaces(tmp_path: Path) -> None:
@@ -1590,6 +1621,28 @@ def test_validate_ops_run_id_idempotency_path_safety_payload_limit_and_secret_re
     with pytest.raises(ProductionOpsValidationError) as payload_exc:
         writer.write_json(config.lane_dir / "too_large.json", {"payload": "x" * 256})
     assert payload_exc.value.error_code == "PRODUCTION_OPS_EVIDENCE_PAYLOAD_TOO_LARGE"
+
+    swap_config = ProductionOpsConfig.from_env(evidence_root=tmp_path / "swap", run_id="swap")
+    swap_writer = EvidenceWriter(swap_config.evidence_root, swap_config.lane_dir, force=True)
+    swap_writer.prepare()
+    external = tmp_path / "external-swap"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_lane_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == swap_config.lane_dir and not swapped:
+            swapped = True
+            swap_config.lane_dir.rmdir()
+            swap_config.lane_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_lane_parent)
+    with pytest.raises(ProductionOpsValidationError) as swap_exc:
+        swap_writer.write_json(swap_config.lane_dir / "summary.json", {"status": "ready"})
+    assert swap_exc.value.error_code == "PRODUCTION_OPS_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "summary.json").exists()
 
     monkeypatch.setenv("AUTH_TOKEN", "supersecret")
     exit_code = slurm_validation._argparse_main(

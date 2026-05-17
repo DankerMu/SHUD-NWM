@@ -11,7 +11,6 @@ import stat
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +18,7 @@ from typing import Any, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, unlink_no_follow
 from services.orchestrator.retry import compute_backoff_seconds, is_transient_error
 from services.production_closure.e2e_validation import (
     ProductionE2EConfig,
@@ -158,16 +158,17 @@ class EvidenceWriter:
                 exists_error_code,
                 f"{file_label} already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            containment_root = None if allow_outside_evidence else self.evidence_root
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=containment_root)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = write_error_code if error.kind == "io" else "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+            raise ProductionValidationError(
+                error_code,
+                f"Failed to write {file_label.lower()} {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             raise ProductionValidationError(
                 write_error_code,
                 f"Failed to write {file_label.lower()} {safe_path}: {error}",
@@ -927,8 +928,8 @@ def _cleanup_shared_runtime_inputs(config: ProductionSlurmConfig) -> list[dict[s
             results.append({"path": str(path), "status": "unsafe", "error_code": error.error_code})
             continue
         try:
-            safe_path.unlink(missing_ok=True)
-        except OSError as error:
+            unlink_no_follow(safe_path, containment_root=config.workspace_root, missing_ok=True)
+        except (OSError, SafeFilesystemError) as error:
             results.append({"path": str(safe_path), "status": "failed", "error": str(error)})
             continue
         results.append({"path": str(safe_path), "status": "absent" if not safe_path.exists() else "failed"})

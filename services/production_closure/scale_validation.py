@@ -8,7 +8,6 @@ import os
 import platform
 import re
 import sys
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:_-]{0,127}$")
@@ -249,13 +249,20 @@ class EvidenceWriter:
                 "PRODUCTION_SCALE_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.lane_dir)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_SCALE_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionScaleValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionScaleValidationError(
                 "PRODUCTION_SCALE_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",

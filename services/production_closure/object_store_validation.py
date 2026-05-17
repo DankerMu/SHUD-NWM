@@ -7,15 +7,16 @@ import os
 import platform
 import re
 import sys
-import uuid
+import tempfile
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packages.common.object_store import MAX_OBJECT_MANIFEST_BYTES, LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, unlink_no_follow
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.basins_package import (
     BasinsPackageError,
@@ -37,6 +38,7 @@ SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 MAX_PERCENT_DECODE_ROUNDS = 4
 ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 MAX_STORED_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
+MAX_RAW_INTERMEDIATE_BYTES = 64 * 1024 * 1024
 SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
     r"(?:^|[;?#&])[^=/?#;&]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|"
     r"session[_-]?key|signature|x-amz-signature)[^=/?#;&]*=",
@@ -89,13 +91,20 @@ class EvidenceWriter:
                 "PRODUCTION_OBJECT_STORE_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.evidence_root)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionObjectStoreValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionObjectStoreValidationError(
                 "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",
@@ -232,21 +241,29 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
     cleanup_raw_files = [inventory_path, package_manifest_raw_path]
     try:
         inventory = discover_basins_inventory(basins_root)
-        _validate_lane_path_contained(config, inventory_path, path_kind="raw inventory file")
-        write_inventory(inventory, inventory_path)
+        _write_raw_worker_output(
+            config,
+            inventory_path,
+            path_kind="raw inventory file",
+            producer=lambda output_path: write_inventory(inventory, output_path),
+        )
         selected_model_id = config.model_id or _default_model_id(inventory)
         _validate_local_object_store_root(config)
         store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
-        _validate_lane_path_contained(config, package_manifest_raw_path, path_kind="raw package manifest file")
-        publish_result = publish_basins_package(
-            inventory_path=inventory_path,
-            model_id=selected_model_id,
-            version=config.version,
-            output_path=package_manifest_raw_path,
-            copy_forcing=False,
-            object_store=store,
+        publish_result, package_manifest_bytes = _write_raw_worker_output(
+            config,
+            package_manifest_raw_path,
+            path_kind="raw package manifest file",
+            producer=lambda output_path: publish_basins_package(
+                inventory_path=inventory_path,
+                model_id=selected_model_id,
+                version=config.version,
+                output_path=output_path,
+                copy_forcing=False,
+                object_store=store,
+            ),
         )
-        manifest = json.loads(package_manifest_raw_path.read_text(encoding="utf-8"))
+        manifest = json.loads(package_manifest_bytes.decode("utf-8"))
         writer.write_json(config.lane_dir / "package_manifest.json", manifest)
         package_evidence = _package_manifest_evidence(publish_result, manifest)
         writer.write_json(config.lane_dir / "package_manifest_evidence.json", package_evidence)
@@ -290,8 +307,7 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
         return summary
     finally:
         for path in cleanup_raw_files:
-            _validate_lane_path_contained(config, path, path_kind="raw cleanup file")
-            path.unlink(missing_ok=True)
+            _cleanup_raw_lane_file(config, path, path_kind="raw cleanup file")
 
 
 def write_synthetic_basins_fixture(root: Path) -> dict[str, Any]:
@@ -371,11 +387,15 @@ def _write_migration_evidence(
 ) -> dict[str, Any] | None:
     raw_path = config.lane_dir / ".migration_report.raw.json"
     try:
-        _validate_lane_path_contained(config, raw_path, path_kind="raw migration report file")
-        report = write_basins_migration_report(
-            basins_root=basins_root,
-            source_uri=config.source_uri,
-            output_path=raw_path,
+        report, _report_bytes = _write_raw_worker_output(
+            config,
+            raw_path,
+            path_kind="raw migration report file",
+            producer=lambda output_path: write_basins_migration_report(
+                basins_root=basins_root,
+                source_uri=config.source_uri,
+                output_path=output_path,
+            ),
         )
     except BasinsPackageError as error:
         blocker = error.to_payload()
@@ -384,10 +404,102 @@ def _write_migration_evidence(
         writer.write_json(config.lane_dir / "migration_blocker.json", blocker)
         return None
     finally:
-        _validate_lane_path_contained(config, raw_path, path_kind="raw migration report file")
-        raw_path.unlink(missing_ok=True)
+        _cleanup_raw_lane_file(config, raw_path, path_kind="raw migration report file")
     writer.write_json(config.lane_dir / "migration_report.json", report)
     return report
+
+
+def _write_raw_worker_output(
+    config: ProductionObjectStoreConfig,
+    raw_path: Path,
+    *,
+    path_kind: str,
+    producer: Callable[[Path], Any],
+) -> tuple[Any, bytes]:
+    _validate_lane_path_contained(config, raw_path, path_kind=path_kind)
+    with tempfile.TemporaryDirectory(prefix="nhms-object-store-validation-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        temp_path = temp_dir / raw_path.name
+        producer_succeeded = False
+        try:
+            result = producer(temp_path)
+            content = _read_raw_worker_output(temp_path, path_kind=path_kind)
+            producer_succeeded = True
+        finally:
+            try:
+                unlink_no_follow(temp_path, containment_root=temp_dir, missing_ok=True)
+            except (OSError, SafeFilesystemError) as error:
+                if producer_succeeded:
+                    raise ProductionObjectStoreValidationError(
+                        "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+                        f"Failed to safely remove temporary {path_kind} {temp_path}: {error}",
+                    ) from error
+    _write_raw_lane_bytes(config, raw_path, content, path_kind=path_kind)
+    return result, content
+
+
+def _read_raw_worker_output(path: Path, *, path_kind: str) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            content = handle.read(MAX_RAW_INTERMEDIATE_BYTES + 1)
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+            f"Failed to read temporary {path_kind} {path}: {error}",
+        ) from error
+    if len(content) > MAX_RAW_INTERMEDIATE_BYTES:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+            f"Temporary {path_kind} exceeds {MAX_RAW_INTERMEDIATE_BYTES} bytes: {path}",
+        )
+    return content
+
+
+def _write_raw_lane_bytes(
+    config: ProductionObjectStoreConfig,
+    raw_path: Path,
+    content: bytes,
+    *,
+    path_kind: str,
+) -> None:
+    _validate_lane_path_contained(config, raw_path, path_kind=path_kind)
+    try:
+        atomic_write_bytes_no_follow(raw_path, content, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to safely write {path_kind} {raw_path}: {error}",
+        ) from error
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+            f"Failed to safely write {path_kind} {raw_path}: {error}",
+        ) from error
+
+
+def _cleanup_raw_lane_file(config: ProductionObjectStoreConfig, raw_path: Path, *, path_kind: str) -> None:
+    try:
+        unlink_no_follow(raw_path, containment_root=config.lane_dir, missing_ok=True)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to safely remove {path_kind} {raw_path}: {error}",
+        ) from error
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+            f"Failed to safely remove {path_kind} {raw_path}: {error}",
+        ) from error
 
 
 def _package_manifest_evidence(publish_result: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:

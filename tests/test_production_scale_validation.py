@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import pytest
 
+from packages.common import safe_fs
 from services.production_closure import slurm_validation
 from services.production_closure.scale_validation import (
     DEFAULT_MIN_MODEL_COUNT,
@@ -376,6 +377,35 @@ def test_scale_evidence_writer_rejects_files_outside_current_lane(tmp_path: Path
         writer.write_json(config.evidence_root / config.run_id / "outside_scale.json", {"status": "unsafe"})
 
     assert exc_info.value.error_code == "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
+
+
+def test_scale_evidence_writer_rejects_lane_parent_symlink_swap_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionScaleConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="swap")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_lane_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == config.lane_dir and not swapped:
+            swapped = True
+            config.lane_dir.rmdir()
+            config.lane_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_lane_parent)
+
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        writer.write_json(config.lane_dir / "summary.json", {"status": "ready"})
+
+    assert exc_info.value.error_code == "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "summary.json").exists()
 
 
 def test_validate_scale_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:

@@ -10,7 +10,6 @@ import platform
 import re
 import stat
 import sys
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +17,12 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    rmtree_no_follow,
+    unlink_no_follow,
+)
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:_-]{0,127}$")
@@ -139,13 +144,20 @@ class EvidenceWriter:
                 "PRODUCTION_E2E_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.evidence_root)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionE2EValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionE2EValidationError(
                 "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",
@@ -843,7 +855,13 @@ def _remove_current_qc_outputs(config: ProductionE2EConfig, *paths: Path) -> Non
                     "PRODUCTION_E2E_EVIDENCE_SYMLINK",
                     f"SHUD raw output must not be a symlink: {path}",
                 )
-            path.unlink()
+            try:
+                unlink_no_follow(path, containment_root=config.lane_dir)
+            except SafeFilesystemError as error:
+                raise ProductionE2EValidationError(
+                    "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+                    f"Failed to safely remove SHUD raw output {path}: {error}",
+                ) from error
 
 
 def _write_qc_fixture(
@@ -1459,18 +1477,13 @@ def _remove_current_stage_artifacts(config: ProductionE2EConfig, artifacts_dir: 
             "PRODUCTION_E2E_EVIDENCE_SYMLINK",
             f"stage_artifacts directory must not be a symlink: {artifacts_dir}",
         )
-    for path in sorted(artifacts_dir.rglob("*"), key=lambda item: len(item.parts), reverse=True):
-        _validate_evidence_path_contained(config, path, path_kind="stage artifact")
-        if path.is_symlink():
-            raise ProductionE2EValidationError(
-                "PRODUCTION_E2E_EVIDENCE_SYMLINK",
-                f"stage artifact must not be a symlink: {path}",
-            )
-        if path.is_dir():
-            path.rmdir()
-        else:
-            path.unlink()
-    artifacts_dir.rmdir()
+    try:
+        rmtree_no_follow(artifacts_dir, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"Failed to safely remove stage_artifacts directory {artifacts_dir}: {error}",
+        ) from error
 
 
 def _blocked_stage_artifact_payload(

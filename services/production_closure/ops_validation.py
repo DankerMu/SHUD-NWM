@@ -10,7 +10,6 @@ import platform
 import re
 import stat
 import sys
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +17,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:_-]{0,127}$")
@@ -263,13 +263,20 @@ class EvidenceWriter:
                 "PRODUCTION_OPS_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.lane_dir)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_OPS_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_OPS_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionOpsValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionOpsValidationError(
                 "PRODUCTION_OPS_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",
@@ -697,13 +704,19 @@ def _audit_redaction_evidence(config: ProductionOpsConfig, auth_rbac: Mapping[st
                 "reason": decision["reason"],
                 "lineage": {
                     **decision["lineage"],
+                    "config": "api_key=deterministic-secret-for-redaction-test",
+                    "log_output": "worker log password=deterministic-secret-for-redaction-test",
+                    "manifest_payload": {
+                        "object_store_uri": "s3://bucket/path?token=deterministic-secret-for-redaction-test",
+                        "manifest_token": "deterministic-secret-for-redaction-test",
+                    },
                     "api_payload": "password=deterministic-secret-for-redaction-test",
                     "alert_payload": (
                         f"{_evidence_alert_target(config.alert_target)}/"
                         "token=deterministic-secret-for-redaction-test"
                     ),
                     "frontend_output": "session_key=deterministic-secret-for-redaction-test",
-                    "pr_evidence": "signed_url=https://example.test/object?X-Amz-Signature=deterministic-secret",
+                    "pr_evidence": "signature=deterministic-secret-for-redaction-test",
                 },
             }
         )
