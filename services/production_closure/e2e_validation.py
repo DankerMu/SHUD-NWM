@@ -99,6 +99,11 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
+            if not self.lane_dir.is_dir():
+                raise ProductionE2EValidationError(
+                    "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
             if any(self.lane_dir.iterdir()) and not self.force:
                 raise ProductionE2EValidationError(
                     "PRODUCTION_E2E_EVIDENCE_EXISTS",

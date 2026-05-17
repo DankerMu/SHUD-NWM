@@ -106,6 +106,11 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
+            if not self.lane_dir.is_dir():
+                raise ProductionValidationError(
+                    "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
         resolved_lane = self.lane_dir.resolve()
         try:
             resolved_lane.relative_to(self.evidence_root)

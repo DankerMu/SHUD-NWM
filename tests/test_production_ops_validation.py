@@ -1239,6 +1239,153 @@ def test_validate_ops_blocks_invalid_utf8_dependency_receipt_and_writes_lane(tmp
     assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID"
 
 
+def test_validate_ops_blocks_malformed_dependency_receipt_and_writes_lane(tmp_path: Path) -> None:
+    invalid_root = tmp_path / "malformed-receipt"
+    invalid_root.mkdir()
+    summary_path = invalid_root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+    (invalid_root / "accepted_dependency_evidence.json").write_text('{"schema": ', encoding="utf-8")
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="malformed_receipt",
+            slurm_evidence_root=invalid_root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "malformed_receipt" / "ops"
+    dependency = _read_json(lane_dir / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert summary["status"] == "release_blocked"
+    assert summary["dependency_status"] == "release_blocked"
+    assert (lane_dir / "summary.json").is_file()
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID"
+
+
+def test_validate_ops_blocks_too_deep_dependency_receipt_and_writes_lane(tmp_path: Path) -> None:
+    root = tmp_path / "deep-receipt"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+    receipt_path = root / "accepted_dependency_evidence.json"
+    receipt = _read_json(receipt_path)
+    nested: object = "leaf"
+    for _ in range(150):
+        nested = [nested]
+    receipt["bounded_nested_payload"] = nested
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="too_deep_receipt",
+            slurm_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "too_deep_receipt" / "ops"
+    dependency = _read_json(lane_dir / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert summary["status"] == "release_blocked"
+    assert summary["dependency_status"] == "release_blocked"
+    assert (lane_dir / "summary.json").is_file()
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID"
+    assert "nesting limit" in slurm["reason"]
+
+
+def test_validate_ops_blocks_too_wide_dependency_receipt_and_writes_lane(tmp_path: Path) -> None:
+    root = tmp_path / "wide-receipt"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+    receipt_path = root / "accepted_dependency_evidence.json"
+    receipt = _read_json(receipt_path)
+    receipt["wide_nodes"] = [0] * 10_050
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="too_wide_receipt",
+            slurm_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "too_wide_receipt" / "ops"
+    dependency = _read_json(lane_dir / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert summary["status"] == "release_blocked"
+    assert summary["dependency_status"] == "release_blocked"
+    assert (lane_dir / "summary.json").is_file()
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID"
+    assert "complexity limit" in slurm["reason"]
+
+
+def test_validate_ops_blocks_dependency_receipt_recursion_error_and_writes_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "recursive-receipt"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+
+    def raise_recursion_error(receipt_path: object) -> object:
+        del receipt_path
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(ops_validation_module, "_read_dependency_receipt_json", raise_recursion_error)
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="recursive_receipt",
+            slurm_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "recursive_receipt" / "ops"
+    dependency = _read_json(lane_dir / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert summary["status"] == "release_blocked"
+    assert summary["dependency_status"] == "release_blocked"
+    assert (lane_dir / "summary.json").is_file()
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID"
+
+
 def test_validate_ops_resolves_dependency_summary_shapes_in_rollback_references(tmp_path: Path) -> None:
     run_root = tmp_path / "dependencies"
     slurm_root = run_root / "slurm"

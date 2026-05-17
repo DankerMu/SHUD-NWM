@@ -1501,6 +1501,31 @@ def test_validate_slurm_refuses_existing_evidence_file_unless_force(monkeypatch,
     )
 
 
+def test_validate_slurm_existing_lane_regular_file_reports_stable_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    evidence_root = tmp_path / "artifacts"
+    lane_path = evidence_root / "file_lane" / "slurm"
+    lane_path.parent.mkdir(parents=True)
+    lane_path.write_text("not a directory", encoding="utf-8")
+
+    try:
+        exit_code = slurm_validation.main(
+            ["validate-slurm", "--evidence-root", str(evidence_root), "--run-id", "file_lane", "--fake-slurm"]
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    assert exit_code == 1
+    assert "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE" in capsys.readouterr().err
+
+
 def test_validate_slurm_refuses_symlinked_runtime_manifest(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")

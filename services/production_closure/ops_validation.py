@@ -1068,7 +1068,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             receipt = _read_dependency_receipt_json(receipt_evidence)
         except ProductionOpsValidationError as error:
             return _invalid_dependency(name, receipt_path, "blocked", error.message, error_code=error.error_code)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             return _invalid_dependency(
                 name,
                 receipt_path,
@@ -1084,6 +1084,10 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
                 "Dependency acceptance receipt JSON must be an object.",
                 error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID",
             )
+        try:
+            _validate_dependency_receipt_complexity(receipt)
+        except ProductionOpsValidationError as error:
+            return _invalid_dependency(name, receipt_path, "blocked", error.message, error_code=error.error_code)
         accepted, reason = _has_accepted_dependency_evidence(
             name,
             contract,
@@ -1283,7 +1287,11 @@ def _summary_has_deterministic_evidence(summary: Mapping[str, Any], *, dependenc
         return True
     if summary.get("final_production_readiness_claimed") is False and summary.get("deterministic_fixture") is not False:
         return True
-    for key, value in _walk_summary_fields(summary):
+    for key, value in _walk_json_fields(
+        summary,
+        error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+        subject="Dependency summary",
+    ):
         if key in {"execution_mode", "configured_execution_mode", "cached_fallback_policy", "dataset_source"}:
             if _is_deterministic_execution_mode(str(value)):
                 return True
@@ -1345,10 +1353,26 @@ def _summary_has_accepted_live_proof(name: str, summary: Mapping[str, Any]) -> b
 
 
 def _validate_dependency_summary_complexity(summary: Mapping[str, Any]) -> None:
-    tuple(_walk_summary_fields(summary))
+    _validate_dependency_json_complexity(
+        summary,
+        error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+        subject="Dependency summary",
+    )
 
 
-def _walk_summary_fields(value: Any) -> tuple[tuple[str, Any], ...]:
+def _validate_dependency_receipt_complexity(receipt: Mapping[str, Any]) -> None:
+    _validate_dependency_json_complexity(
+        receipt,
+        error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID",
+        subject="Dependency acceptance receipt",
+    )
+
+
+def _validate_dependency_json_complexity(value: Any, *, error_code: str, subject: str) -> None:
+    tuple(_walk_json_fields(value, error_code=error_code, subject=subject))
+
+
+def _walk_json_fields(value: Any, *, error_code: str, subject: str) -> tuple[tuple[str, Any], ...]:
     fields: list[tuple[str, Any]] = []
     stack: list[tuple[Any, int]] = [(value, 0)]
     visited_nodes = 0
@@ -1357,16 +1381,16 @@ def _walk_summary_fields(value: Any) -> tuple[tuple[str, Any], ...]:
         visited_nodes += 1
         if visited_nodes > MAX_DEPENDENCY_SUMMARY_NODES:
             raise ProductionOpsValidationError(
-                "PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+                error_code,
                 (
-                    "Dependency summary exceeds configured complexity limit of "
+                    f"{subject} exceeds configured complexity limit of "
                     f"{MAX_DEPENDENCY_SUMMARY_NODES} visited JSON nodes."
                 ),
             )
         if depth > MAX_DEPENDENCY_SUMMARY_DEPTH:
             raise ProductionOpsValidationError(
-                "PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
-                f"Dependency summary exceeds configured nesting limit of {MAX_DEPENDENCY_SUMMARY_DEPTH} levels.",
+                error_code,
+                f"{subject} exceeds configured nesting limit of {MAX_DEPENDENCY_SUMMARY_DEPTH} levels.",
             )
         if isinstance(current, Mapping):
             for key, nested in reversed(tuple(current.items())):

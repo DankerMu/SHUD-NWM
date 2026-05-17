@@ -135,6 +135,17 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert "https://example.invalid/gfs" in evidence_text
 
 
+def test_validate_met_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:
+    lane_path = tmp_path / "artifacts" / "file_lane" / "met"
+    lane_path.parent.mkdir(parents=True)
+    lane_path.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        validate_met(ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="file_lane"))
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
+
+
 @pytest.mark.parametrize(
     "prefix",
     [
