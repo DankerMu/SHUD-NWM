@@ -536,6 +536,91 @@ After using the smoke run locally, remove
 `artifacts/production-closure/local-150-production-e2e/` so generated evidence
 does not remain in the worktree.
 
+## M10 National Scale / MVT Performance Closure
+
+Issue #151 adds an opt-in `nhms-production validate-scale` lane. The default
+fast path uses a deterministic large fixture and does not require real national
+data, PostGIS, a live API, a browser, object storage, or an MVT encoder.
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-scale \
+  --evidence-root artifacts/production-closure \
+  --run-id local-151-production-scale
+```
+
+Useful knobs:
+
+- `NHMS_PRODUCTION_SCALE_DATASET_SOURCE`: defaults to
+  `deterministic_large_fixture`; use a safe identifier for consumed imported
+  dataset metadata.
+- `NHMS_PRODUCTION_SCALE_SEGMENT_COUNT` / `NHMS_PRODUCTION_SCALE_MODEL_COUNT`:
+  deterministic or consumed counts checked against threshold minimums.
+- `NHMS_PRODUCTION_SCALE_MIN_SEGMENT_COUNT` /
+  `NHMS_PRODUCTION_SCALE_MIN_MODEL_COUNT`: override default minimums.
+- `NHMS_PRODUCTION_SCALE_BBOX_SET`: comma-separated bbox names, default
+  `national,yangtze,urban`.
+- `NHMS_PRODUCTION_SCALE_THRESHOLDS_FILE`: optional versioned JSON threshold
+  artifact. Without it, the lane writes generated defaults.
+- `NHMS_PRODUCTION_SCALE_TILE_CONTENT_TYPE_EXPECTATION`: defaults to
+  `application/geo+json`. Set `application/x-protobuf` only when validating
+  production MVT readiness.
+- `NHMS_PRODUCTION_SCALE_FRONTEND_BREAKPOINTS`: comma-separated values such as
+  `desktop:1440x900,mobile:390x844`.
+- `NHMS_PRODUCTION_SCALE_API_BASE_URL` and
+  `NHMS_PRODUCTION_SCALE_OBJECT_PREFIX`: recorded after safety checks and
+  redaction; userinfo, query strings, fragments, path traversal, and
+  secret-shaped assignments are rejected.
+- `NHMS_PRODUCTION_SCALE_LATENCY_FIXTURE=non_finite`: negative-test mode that
+  records a stable blocker for malformed/non-finite timing samples.
+
+Evidence is written under
+`artifacts/production-closure/<run_id>/scale/`:
+
+- `preflight.json`: dataset source, count thresholds, bbox set, thresholds
+  source/version, tile content-type expectation, frontend breakpoints, API/object
+  targets, evidence root, and fast-path execution policy.
+- `dataset_manifest.json`: segment/model counts, national geometry bounds, bbox
+  sizes, checksum, CRS and geometry assumptions, and count blockers.
+- `thresholds.json`: p95 query/API targets, max tile bytes, frontend
+  load/render/timeline/chart/memory budgets, oversized bbox behavior, long
+  time-range behavior, object-listing bounds, and pass/fail semantics.
+- `query_latency_evidence.json`: deterministic model listing, river bbox, flood
+  alert summary/ranking/timeline/map, forecast series, jobs/logs, and tile
+  metadata row counts, plan text/hash, finite latency samples, p95, threshold
+  comparison, `live_db_executed=false`, and `live_api_executed=false`.
+- `tile_evidence.json`: observed GeoJSON compatibility content type, max-byte
+  comparison, endpoint references, layer metadata, and blocker status.
+- `frontend_large_layer_evidence.json`: desktop/mobile load, render, timeline,
+  chart, memory, lineage, recoverable oversized/unavailable behavior, and
+  `live_frontend_executed=false`.
+- `resource_bounds_evidence.json`, `environment.json`, and `summary.json`:
+  bounded oversized bbox, long time range, object-listing behavior, redacted
+  environment, final readiness, and file index.
+
+MVT blocker semantics are explicit. In the default GeoJSON compatibility mode
+the lane may be `ready`, but `production_mvt_readiness_claimed=false`. If
+`application/x-protobuf` is expected while the current GeoJSON delivery remains
+in place, the lane writes `PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED`, lists the
+affected tile endpoints, and the summary is `blocked`.
+
+Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
+supplied. Unsafe run IDs, symlinked evidence paths, unsafe object/API values,
+malformed/non-finite timing samples, unbounded payloads, count failures, and
+threshold failures block readiness. After a local smoke, remove
+`artifacts/production-closure/local-151-production-scale/`.
+
+### Fast Regression Commands
+
+Local #151 verification uses these fast regression commands:
+
+```bash
+openspec validate m10-production-closure --strict --no-interactive
+uv run ruff check .
+uv run ruff check services/production_closure tests/test_production_scale_validation.py docs/VALIDATION.md progress.md
+uv run pytest -q tests/test_production_scale_validation.py
+uv run pytest -q tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_flood_alerts_api.py tests/test_openapi_drift.py
+```
+
 ## Opt-In Real Basins Smoke
 
 Run only when `data/Basins` exists and points at an accessible Basins tree.

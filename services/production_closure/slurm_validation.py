@@ -33,6 +33,11 @@ from services.production_closure.object_store_validation import (
     ProductionObjectStoreValidationError,
     validate_object_store,
 )
+from services.production_closure.scale_validation import (
+    ProductionScaleConfig,
+    ProductionScaleValidationError,
+    validate_scale,
+)
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.real_backend import RealSlurmGateway, map_slurm_error_code
 
@@ -1711,6 +1716,67 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"PRODUCTION_E2E_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("validate-scale")
+    @click.option("--evidence-root", type=click.Path(path_type=Path), required=True)
+    @click.option("--run-id")
+    @click.option("--dataset-source", default=None)
+    @click.option("--segment-count", type=int, default=None)
+    @click.option("--model-count", type=int, default=None)
+    @click.option("--min-segment-count", type=int, default=None)
+    @click.option("--min-model-count", type=int, default=None)
+    @click.option("--bbox-set", default=None)
+    @click.option("--thresholds-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--tile-content-type-expectation", default=None)
+    @click.option("--frontend-breakpoints", default=None)
+    @click.option("--api-base-url", default=None)
+    @click.option("--object-prefix", default=None)
+    @click.option("--latency-fixture", default=None)
+    @click.option("--force", is_flag=True, default=False)
+    def validate_scale_command(
+        evidence_root: Path,
+        run_id: str | None,
+        dataset_source: str | None,
+        segment_count: int | None,
+        model_count: int | None,
+        min_segment_count: int | None,
+        min_model_count: int | None,
+        bbox_set: str | None,
+        thresholds_file: Path | None,
+        tile_content_type_expectation: str | None,
+        frontend_breakpoints: str | None,
+        api_base_url: str | None,
+        object_prefix: str | None,
+        latency_fixture: str | None,
+        force: bool,
+    ) -> None:
+        try:
+            summary = validate_scale(
+                ProductionScaleConfig.from_env(
+                    evidence_root=evidence_root,
+                    run_id=run_id,
+                    dataset_source=dataset_source,
+                    segment_count=segment_count,
+                    model_count=model_count,
+                    min_segment_count=min_segment_count,
+                    min_model_count=min_model_count,
+                    bbox_set=bbox_set,
+                    thresholds_file=thresholds_file,
+                    tile_content_type_expectation=tile_content_type_expectation,
+                    frontend_breakpoints=frontend_breakpoints,
+                    api_base_url=api_base_url,
+                    object_prefix=object_prefix,
+                    latency_fixture=latency_fixture,
+                    force=force,
+                )
+            )
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
+        except ProductionScaleValidationError as error:
+            click.echo(f"{error.error_code}: {redact_text(error.message)}", err=True)
+            raise SystemExit(1) from error
+        except Exception as error:
+            click.echo(f"PRODUCTION_SCALE_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
+            raise SystemExit(1) from error
+
     try:
         cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
     except click.ClickException as error:
@@ -1762,6 +1828,22 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     e2e_parser.add_argument("--met-evidence-root", type=Path, default=None)
     e2e_parser.add_argument("--shud-qc-fixture", default=None)
     e2e_parser.add_argument("--force", action="store_true")
+    scale_parser = subparsers.add_parser("validate-scale")
+    scale_parser.add_argument("--evidence-root", type=Path, required=True)
+    scale_parser.add_argument("--run-id")
+    scale_parser.add_argument("--dataset-source", default=None)
+    scale_parser.add_argument("--segment-count", type=int, default=None)
+    scale_parser.add_argument("--model-count", type=int, default=None)
+    scale_parser.add_argument("--min-segment-count", type=int, default=None)
+    scale_parser.add_argument("--min-model-count", type=int, default=None)
+    scale_parser.add_argument("--bbox-set", default=None)
+    scale_parser.add_argument("--thresholds-file", type=Path, default=None)
+    scale_parser.add_argument("--tile-content-type-expectation", default=None)
+    scale_parser.add_argument("--frontend-breakpoints", default=None)
+    scale_parser.add_argument("--api-base-url", default=None)
+    scale_parser.add_argument("--object-prefix", default=None)
+    scale_parser.add_argument("--latency-fixture", default=None)
+    scale_parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "validate-slurm":
@@ -1882,6 +1964,41 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             return 1
         except Exception as error:
             print(f"PRODUCTION_E2E_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "validate-scale":
+        try:
+            print(
+                json.dumps(
+                    redact_payload(
+                        validate_scale(
+                            ProductionScaleConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                dataset_source=args.dataset_source,
+                                segment_count=args.segment_count,
+                                model_count=args.model_count,
+                                min_segment_count=args.min_segment_count,
+                                min_model_count=args.min_model_count,
+                                bbox_set=args.bbox_set,
+                                thresholds_file=args.thresholds_file,
+                                tile_content_type_expectation=args.tile_content_type_expectation,
+                                frontend_breakpoints=args.frontend_breakpoints,
+                                api_base_url=args.api_base_url,
+                                object_prefix=args.object_prefix,
+                                latency_fixture=args.latency_fixture,
+                                force=args.force,
+                            )
+                        )
+                    ),
+                    sort_keys=True,
+                )
+            )
+        except ProductionScaleValidationError as error:
+            print(f"{error.error_code}: {redact_text(error.message)}", file=sys.stderr)
+            return 1
+        except Exception as error:
+            print(f"PRODUCTION_SCALE_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")

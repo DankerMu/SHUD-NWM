@@ -437,3 +437,70 @@ Issue #150 non-goals / deferred:
 - Production auth/RBAC/alert/rollback readiness is handled by #152; #150 still must avoid secret leakage and record redacted config.
 - New live source credential acquisition is out of scope; #150 consumes #149 evidence or deterministic production-like source evidence.
 - New permanent production deployment is out of scope; #150 emits staging/production-like validation evidence only.
+
+## Issue #151 Fixture Overlay: National-Scale MVT and Performance Closure
+
+Fixture level: expanded
+
+Why expanded:
+
+- Touches capacity/performance evidence, large geospatial fixtures, API query contracts, tile delivery semantics, frontend smoke/load evidence, and release-blocker reporting for production MVT readiness.
+
+Change surface:
+
+- A new opt-in `validate-scale` production closure lane under `services/production_closure/*` and the production closure CLI dispatch.
+- API/tile/query evidence helpers for model listing, river bbox, flood alert map, forecast series, pipeline jobs/logs, and flood return-period tile metadata.
+- Frontend smoke evidence that may be deterministic when frontend code is unchanged, but must record desktop/mobile breakpoints, load/render thresholds, and mock/live execution flags.
+- `tests/test_production_scale_validation.py`, `docs/VALIDATION.md`, `progress.md`, and national-scale OpenSpec tasks/spec updates.
+
+Must preserve:
+
+- Fast tests and default CI do not require a real national dataset, PostGIS, MVT encoder, object storage, production credentials, live API, frontend preview server, or browser.
+- Existing GeoJSON flood return-period endpoint and legacy `.pbf` redirect behavior remain truthful; the lane must not claim production MVT readiness when delivery is GeoJSON compatibility.
+- Existing frontend flood-alert/map tests and generated API types remain compatible unless frontend code changes.
+- Existing #147/#148/#149/#150 closure lanes and M9 Basins registry/object URI contracts remain valid.
+- Secret values and signed URLs never appear in performance reports, thresholds, query evidence, frontend evidence, docs, or PR comments.
+
+Must add/change for #151:
+
+- A documented opt-in `validate-scale` lane or equivalent command that records dataset source, segment/model counts, bbox set, thresholds file/version, tile content-type expectation, frontend breakpoint set, and evidence root under `artifacts/production-closure/<run_id>/scale/`.
+- A deterministic large fixture or consumed real imported dataset manifest with segment/model counts, geometry bounds, bbox sizes, and fixture generation mode; if counts fall below thresholds, readiness is blocked with stable metadata.
+- A versioned thresholds artifact defining minimum segment/model counts, p95 API/query targets, max tile bytes, frontend load/render budgets, memory bounds, oversized bbox behavior, long time-range behavior, and object-listing bounds.
+- Query/latency evidence for model listing, river segments bbox, flood alert summary/ranking/timeline/map, forecast series, pipeline jobs/logs, and tile metadata. Fast mode may use deterministic timing samples and query-plan fixtures, but must mark live DB/API execution false unless real checks ran.
+- Tile delivery evidence that either validates `application/x-protobuf` MVT with bounded bytes/layer metadata, or emits an explicit release blocker that current GeoJSON compatibility delivery is not production MVT. A blocked MVT path must not claim production tile readiness.
+- Frontend large-layer evidence for desktop and mobile breakpoints that records load/render/timeline/chart budgets, execution mode, lineage, and recoverable oversized/unavailable-layer behavior. Mock-only data must not be reported as live frontend readiness.
+- Run-scoped idempotent evidence behavior, path containment, payload-size/resource bounds, and secret redaction for thresholds, query evidence, tile reports, screenshots/results, and environment metadata.
+
+Issue #151 risk packs:
+
+- Public API / CLI / script entry: selected - `validate-scale`, API/tile evidence queries, and frontend smoke/load entrypoints need stable JSON/error behavior.
+- Config / project setup: selected - dataset source, thresholds file, bbox set, tile content-type expectation, frontend breakpoints, and evidence root are preflight inputs.
+- File IO / path safety / overwrite: selected - large fixture manifests, thresholds, query plans, latency reports, tile reports, frontend results, and reruns must stay run-scoped and bounded.
+- Schema / columns / units / field names: selected - threshold schema, query evidence schema, latency units, tile metadata, content types, and frontend timing/memory fields must remain stable.
+- Geospatial / CRS / shapefile sidecars: selected - national river network bounds, bbox filtering, tile geometry metadata, and CRS assumptions are core #151 acceptance.
+- Time series / forcing / temporal boundaries: selected - forecast series, flood alert valid times, long time ranges, and frontend timeline interactions must be bounded.
+- Numerical stability / conservation / NaN: selected - latency percentile calculation, counts, byte sizes, and timing samples must reject malformed/non-finite values.
+- Solver runtime / performance / threading: not selected - #151 consumes published/queryable outputs and does not run SHUD solvers.
+- Resource limits / large input / discovery: selected - national-scale fixture size, bbox enumeration, object listings, tile byte bounds, API samples, frontend loads, and evidence payloads must be bounded.
+- Legacy compatibility / examples: selected - existing GeoJSON tile compatibility, `.pbf` redirect, model registry, API contracts, and frontend tests must continue to pass.
+- Error handling / rollback / partial outputs: selected - failed thresholds, oversized requests, missing MVT, or frontend load failures must produce stable blockers without claiming readiness.
+- Release / packaging / dependency compatibility: selected - Linux/headless/browser optional tooling, PostGIS optionality, and frontend build dependencies must be explicitly gated.
+- Documentation / migration notes: selected - validation command, MVT blocker/readiness semantics, thresholds, and progress/validation docs must be updated.
+
+Issue #151 required evidence:
+
+- Preflight artifact: dataset source (`real_imported|deterministic_large_fixture`), minimum segment/model counts, bbox set, thresholds file/version, tile content-type expectation, frontend breakpoints, and evidence root -> redacted JSON with stable missing/unsafe input errors.
+- Dataset/fixture manifest: deterministic or consumed data source -> segment/model counts, geometry bounds, bbox sizes, fixture checksum, CRS/geometry assumptions, and generation/consumption mode.
+- Threshold artifact test: input thresholds -> versioned JSON with p95 targets, max tile bytes, frontend load/render/memory budgets, oversized bbox behavior, long time-range behavior, object-list limits, and pass/fail semantics.
+- Query/latency evidence test: bounded query samples -> model listing, river bbox, flood alert summary/ranking/timeline/map, forecast series, jobs/logs, and tile metadata evidence with row counts, plan text/hash, latency samples, p95, threshold comparison, and live execution flags.
+- MVT/readiness blocker test: tile content expectation `application/x-protobuf` with current GeoJSON delivery -> release blocker artifact that identifies affected endpoints and states production tile readiness is not achieved; GeoJSON compatibility path remains truthful.
+- Frontend large-layer evidence test: deterministic or real frontend smoke -> desktop/mobile breakpoint records, load/render/timeline/chart timing, memory budget status or not_executed/blocker, and no mock-only live-readiness claim.
+- Resource/path/redaction test: oversized bbox, long time range, huge object listing, unsafe run IDs, symlinked evidence paths, credential-shaped API/object URLs, and reruns -> stable blockers, bounded payloads, no cross-run overwrite, and redacted evidence/stdout/docs.
+- Local verification commands: OpenSpec strict validation, `uv run ruff check .`, targeted scale/API/tile/frontend-evidence tests, frontend `corepack pnpm test && corepack pnpm build` when UI/generated types change, and documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-scale --evidence-root ...`.
+
+Issue #151 non-goals / deferred:
+
+- Production auth/RBAC/alert/rollback readiness is handled by #152.
+- Real MVT implementation may be deferred only with an explicit release blocker; #151 must not silently pass production tile readiness on GeoJSON compatibility delivery.
+- Full hydrologic skill validation and model calibration quality remain out of scope.
+- Permanent production deployment and continuous load testing infrastructure are out of scope; #151 emits bounded validation evidence and blockers.
