@@ -281,6 +281,36 @@ def test_validate_slurm_rejects_invalid_poll_env_without_evidence(
     assert not (tmp_path / "artifacts" / "badpollenv" / "slurm").exists()
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected_error"),
+    [
+        (["validate-slurm", "--run-id", "missingroot"], "Missing option '--evidence-root'"),
+        (["validate-slurm", "--evidence-root", "artifacts", "--bad-option"], "No such option: --bad-option"),
+    ],
+)
+def test_click_usage_errors_exit_without_traceback(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    argv: list[str],
+    expected_error: str,
+) -> None:
+    pytest.importorskip("click")
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        exit_code = slurm_validation.main(argv)
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "Usage:" in captured.err
+    assert expected_error in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_validate_slurm_submit_fake_conflict_fails_without_evidence(
     tmp_path: Path,
     capsys,

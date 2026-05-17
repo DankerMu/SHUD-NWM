@@ -1600,7 +1600,11 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 click.echo(f"PRODUCTION_OBJECT_STORE_VALIDATION_FAILED: {error}", err=True)
             raise SystemExit(1) from error
 
-    cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
+    try:
+        cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
+    except click.ClickException as error:
+        error.show()
+        raise SystemExit(error.exit_code) from error
     return 0
 
 

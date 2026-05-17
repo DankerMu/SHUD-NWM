@@ -174,7 +174,7 @@ def test_verify_stored_objects_blocks_tampered_manifest_self_entry_checksum(
     assert blocked_entry["actual_sha256"] != blocked_entry["manifest_recorded_sha256"]
 
 
-def test_verify_stored_objects_reports_limited_package_checksum_when_identity_not_provable(
+def test_verify_stored_objects_blocks_limited_package_checksum_when_identity_not_provable(
     tmp_path: Path,
 ) -> None:
     summary = validate_object_store(
@@ -205,7 +205,7 @@ def test_verify_stored_objects_reports_limited_package_checksum_when_identity_no
     verification = _verify_stored_objects(store, manifest)
 
     manifest_verification = next(entry for entry in verification["entries"] if entry["role"] == "manifest")
-    assert verification["status"] == "verified"
+    assert verification["status"] == "blocked"
     assert verification["package_checksum_matches_manifest"] is True
     assert verification["package_checksum_confirmed_from_stored_manifest"] is False
     assert verification["package_checksum_reconstruction_status"] == "limited"
@@ -216,6 +216,13 @@ def test_verify_stored_objects_reports_limited_package_checksum_when_identity_no
     )
     assert verification["recomputed_package_checksum"] is None
     assert manifest_verification["verified"] is True
+    assert object_store_validation._result_blockers(verification) == [
+        {
+            "error_code": "PRODUCTION_OBJECT_STORE_VALIDATION_BLOCKED",
+            "schema": "nhms.production_closure.object_store.stored_object_verification.v1",
+            "status": "blocked",
+        }
+    ]
 
 
 def test_validate_object_store_uses_documented_env_names_without_generic_fallback(

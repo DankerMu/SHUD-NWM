@@ -388,7 +388,7 @@ def _verify_stored_objects(store: LocalObjectStore, manifest: dict[str, Any]) ->
     )
     package_checksum_matches_manifest = stored_manifest.get("package_checksum") == manifest.get("package_checksum")
     entries = []
-    all_verified = package_checksum_matches_manifest
+    all_verified = package_checksum_verified
     for entry in stored_manifest.get("included_files", []):
         if not isinstance(entry, dict):
             continue
