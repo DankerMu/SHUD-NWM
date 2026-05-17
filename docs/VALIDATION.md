@@ -233,6 +233,73 @@ contains:
 Secrets and signed URL-shaped values are redacted from the rendered script and
 all JSON evidence touched by this lane.
 
+## M10 #148 Production Object Store Closure
+
+Issue #148 adds an opt-in production closure lane for Basins copied-data and
+production-like object-store evidence. The default command uses a synthetic
+copied Basins root and a filesystem-backed local object store; it does not
+require real S3/MinIO, PostGIS, a live API, production credentials, or a SHUD
+solver.
+
+Fast deterministic evidence command:
+
+```bash
+uv run nhms-production validate-object-store \
+  --evidence-root artifacts/production-closure \
+  --run-id local-148
+```
+
+Production-like preflight can point at a copied Basins root and an object URI
+prefix:
+
+```bash
+export NHMS_RUN_PRODUCTION_CLOSURE=1
+export NHMS_PRODUCTION_OBJECT_STORE_TARGET=local-production-like
+export NHMS_PRODUCTION_OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-object-store
+export NHMS_PRODUCTION_OBJECT_STORE_PREFIX=s3://nhms-prod/basins-migration
+export NHMS_PRODUCTION_OBJECT_STORE_CREDENTIAL_SOURCE=env-or-workload-identity
+export NHMS_PRODUCTION_OBJECT_STORE_CLEANUP_POLICY=quarantine
+export NHMS_PRODUCTION_BASINS_ROOT=/scratch/frd_muziyao/copied-Basins
+export NHMS_PRODUCTION_BASINS_MODEL_ID=basins_qhh_shud
+export NHMS_PRODUCTION_BASINS_VERSION=v$(date -u +%Y%m%dT%H%M%SZ)
+uv run nhms-production validate-object-store \
+  --evidence-root artifacts/production-closure \
+  --run-id "$(date -u +m10-148-%Y%m%dT%H%M%SZ)"
+```
+
+The Basins root must be copied data. A symlink-only root is blocked with
+`BASINS_MIGRATION_SYMLINK_TARGET` before package/import writes occur.
+
+The bundle is written under
+`artifacts/production-closure/<run_id>/object-store/` and contains:
+
+- `preflight.json`: redacted object-store target/root/prefix, endpoint,
+  credential source, cleanup policy, copied Basins root, selected model/version,
+  source URI, and evidence root.
+- `migration_report.json` or `migration_blocker.json`: reused M9 migration
+  evidence for copied roots, including file/byte counts and checksums, or a
+  stable blocker for symlink roots.
+- `package_manifest.json` and `package_manifest_evidence.json`: redacted Basins
+  package manifest evidence published to the production-like object URI prefix.
+- `stored_object_verification.json`: rereads the stored manifest/package objects
+  and verifies sizes and SHA-256 checksums from stored bytes.
+- `registry_api_runtime_consumption.json`: local registry source preparation,
+  API-response fixture, and runtime staging/cfg-generation evidence. Fast mode
+  records DB/API as `not_executed` instead of fabricating live success, and
+  verifies runtime package sources use the configured object URI prefix rather
+  than `data/Basins` or `/volume/...`.
+- `runtime_staging_manifest.json`: full runtime manifest written during local
+  staging, including object URI inputs/outputs used by the generated SHUD
+  runtime configuration.
+- `cleanup_rollback.json`: simulated failure after partial object write with
+  written keys/rows, cleanup or quarantine status, and
+  `implicit_model_activation=false`.
+- `environment.json` and `summary.json`: redacted command/environment metadata
+  and evidence file index.
+
+Secret-shaped userinfo, query strings, fragments, and sensitive assignment
+values are redacted from evidence.
+
 ## Opt-In Real Basins Smoke
 
 Run only when `data/Basins` exists and points at an accessible Basins tree.

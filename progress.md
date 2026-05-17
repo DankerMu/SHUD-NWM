@@ -11,6 +11,7 @@
 - M9 Basins 已完成并关闭：GitHub Epic #133，子 issue #134-#139 全部关闭；PR #144、#145 已合并。
 - M10 生产环境闭环已完成 OpenSpec 设计和 issue 拆分：`openspec/changes/m10-production-closure/`，GitHub Epic #146，子 issue #147-#152 覆盖真实 Slurm+SHUD workload、生产对象存储/Basins copied-data、真实气象源+QC、staging E2E、全国规模/MVT 性能、生产运维安全 runbook。
 - M10 #147 Real Slurm + SHUD workload closure 已新增 opt-in `nhms-production validate-slurm` 证据 lane：默认 fake/deterministic，不依赖真实 Slurm/SHUD/生产密钥；生产 preflight 缺失时写 blocker artifact 到 `artifacts/production-closure/<run_id>/slurm/`。
+- M10 #148 Production object store + Basins copied-data closure 已新增 opt-in `nhms-production validate-object-store` 证据 lane：默认 synthetic copied Basins + local production-like object store，不依赖真实 S3/MinIO/PostGIS/API/SHUD；symlink-only Basins root 会在 package/import 前以稳定 blocker 退出。
 - CI 覆盖 markdown lint、OpenAPI lint、JSON Schema 校验、真实 PostgreSQL/PostGIS/Timescale 集成、后端测试、前端 build/test、bundle size。
 - #126 后本地基线：`uv run pytest -q` -> `586 passed, 3 skipped`；真实 DB integration 为显式 opt-in，GitHub CI 已跑通。
 - 当前有效代码入口：`apps/api`、`apps/frontend`、`services/orchestrator`、`services/slurm_gateway`、`services/tile_publisher`、`workers/*` 下划线包、`infra/sbatch`。
@@ -27,6 +28,7 @@
 - Orchestrator 支持 forecast/analysis/hindcast 链路、Slurm job array、retry/cancel 一致性、partial success、publish stage、pipeline persistence。
 - Real Slurm gateway 已实现 `sbatch`、`sacct`、`scancel`、`sinfo`、array job、日志读取、模板白名单，并有 fake-binary smoke。
 - #147 Slurm closure lane 已覆盖 redacted preflight、canonical `infra/sbatch` SHUD array rendering、fake/real `sacct` evidence schema、array partial success、retry/cancel evidence、malformed SHUD output/QC blocking evidence和 redacted environment metadata。
+- #148 object-store closure lane 已覆盖 redacted preflight、M9 copied-root migration report、package publish manifest evidence、stored-object checksum reread verification、local registry/API/runtime consumption evidence、failure cleanup/quarantine evidence和 no implicit activation。
 - 测试环境真实 Slurm 基础 smoke 已通过：集群 `shudhpc`，默认 account `friends`，`CPU`/`GPU` 分区可见；`CPU` 分区 job `5684` 在 `cn04` 完成，`COMPLETED` / `0:0`。后续可复用命令见 `docs/VALIDATION.md`。
 - 真实 DB 集成测试已覆盖从零迁移、幂等迁移、确定性 seed、API/空间查询、worker chain、fake real-Slurm 边界。
 
