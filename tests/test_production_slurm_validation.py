@@ -307,8 +307,94 @@ def test_click_usage_errors_exit_without_traceback(
     assert exit_code == 2
     assert captured.out == ""
     assert "Usage:" in captured.err
-    assert expected_error in captured.err
+    if expected_error.startswith("No such option"):
+        assert "No such option" in captured.err
+        assert "--bad-option" in captured.err
+    else:
+        assert expected_error in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_validate_slurm_stdout_redacts_summary_like_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    secret_package_uri = "s3://user:pass@bucket/path?token=secret&X-Amz-Signature=abc"
+
+    def fake_validate(config: slurm_validation.ProductionSlurmConfig) -> dict[str, object]:
+        return {
+            "schema": "nhms.production_closure.slurm.v1",
+            "run_id": config.run_id,
+            "status": "ready",
+            "evidence_dir": str(config.lane_dir),
+            "model_package_uri": secret_package_uri,
+            "notes": "path token=secret x-amz-signature=abc credential=hidden",
+        }
+
+    monkeypatch.setattr(slurm_validation, "validate_slurm", fake_validate)
+
+    exit_code = slurm_validation.main(
+        ["validate-slurm", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "stdoutredact"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "user:pass@" not in captured.out
+    assert "?token=secret" not in captured.out
+    assert "token=secret" not in captured.out
+    assert "x-amz-signature=abc" not in captured.out
+    assert "credential=hidden" not in captured.out
+    assert json.loads(captured.out)["model_package_uri"] == "s3://bucket/path"
+
+
+def test_packaged_validate_object_store_stdout_redacts_summary_like_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    secret_package_uri = "s3://user:pass@bucket/path?token=secret&X-Amz-Signature=abc"
+
+    def fake_validate(config: slurm_validation.ProductionObjectStoreConfig) -> dict[str, object]:
+        return {
+            "schema": "nhms.production_closure.object_store.v1",
+            "run_id": config.run_id,
+            "status": "ready",
+            "evidence_dir": str(config.lane_dir),
+            "model_package_uri": secret_package_uri,
+            "notes": "path token=secret x-amz-signature=abc credential=hidden",
+        }
+
+    monkeypatch.setattr(slurm_validation, "validate_object_store", fake_validate)
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "stdoutobj"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "user:pass@" not in captured.out
+    assert "?token=secret" not in captured.out
+    assert "token=secret" not in captured.out
+    assert "x-amz-signature=abc" not in captured.out
+    assert "credential=hidden" not in captured.out
+    assert json.loads(captured.out)["model_package_uri"] == "s3://bucket/path"
+
+    exit_code = slurm_validation._argparse_main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts-argparse"), "--run-id", "argparseobj"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "user:pass@" not in captured.out
+    assert "?token=secret" not in captured.out
+    assert "token=secret" not in captured.out
+    assert "x-amz-signature=abc" not in captured.out
+    assert "credential=hidden" not in captured.out
+    assert json.loads(captured.out)["model_package_uri"] == "s3://bucket/path"
 
 
 def test_validate_slurm_submit_fake_conflict_fails_without_evidence(

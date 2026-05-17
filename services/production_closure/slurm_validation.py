@@ -1554,7 +1554,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     force=force,
                 )
             )
-            click.echo(json.dumps(summary, sort_keys=True))
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
         except (ProductionValidationError, OSError, subprocess.SubprocessError) as error:
             if isinstance(error, ProductionValidationError):
                 click.echo(f"{error.error_code}: {error.message}", err=True)
@@ -1588,7 +1588,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     force=force,
                 )
             )
-            click.echo(json.dumps(summary, sort_keys=True))
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
         except ProductionObjectStoreValidationError as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
@@ -1632,15 +1632,17 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         try:
             print(
                 json.dumps(
-                    validate_slurm(
-                        ProductionSlurmConfig.from_env(
-                            evidence_root=args.evidence_root,
-                            run_id=args.run_id,
-                            submit=args.submit,
-                            fake_slurm=args.fake_slurm,
-                            poll_interval_seconds=args.poll_interval_seconds,
-                            poll_timeout_seconds=args.poll_timeout_seconds,
-                            force=args.force,
+                    redact_payload(
+                        validate_slurm(
+                            ProductionSlurmConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                submit=args.submit,
+                                fake_slurm=args.fake_slurm,
+                                poll_interval_seconds=args.poll_interval_seconds,
+                                poll_timeout_seconds=args.poll_timeout_seconds,
+                                force=args.force,
+                            )
                         )
                     ),
                     sort_keys=True,
@@ -1657,14 +1659,16 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         try:
             print(
                 json.dumps(
-                    validate_object_store(
-                        ProductionObjectStoreConfig.from_env(
-                            evidence_root=args.evidence_root,
-                            run_id=args.run_id,
-                            basins_root=args.basins_root,
-                            model_id=args.model_id,
-                            version=args.version,
-                            force=args.force,
+                    redact_payload(
+                        validate_object_store(
+                            ProductionObjectStoreConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                basins_root=args.basins_root,
+                                model_id=args.model_id,
+                                version=args.version,
+                                force=args.force,
+                            )
                         )
                     ),
                     sort_keys=True,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -48,6 +49,22 @@ class LocalObjectStore:
         except OSError as error:
             raise ObjectStoreError(f"Failed to read object {key_or_uri}: {error}") from error
 
+    def read_bytes_limited(self, key_or_uri: str, *, max_bytes: int) -> bytes:
+        if max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative.")
+        path = self.resolve_path(key_or_uri)
+        try:
+            size_bytes = path.stat().st_size
+            if size_bytes > max_bytes:
+                raise ObjectStoreError(
+                    f"Object {key_or_uri} exceeds read limit: {size_bytes} bytes > {max_bytes} bytes"
+                )
+            return path.read_bytes()
+        except ObjectStoreError:
+            raise
+        except OSError as error:
+            raise ObjectStoreError(f"Failed to read object {key_or_uri}: {error}") from error
+
     def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
         path = self.resolve_path(key_or_uri)
         temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
@@ -72,8 +89,27 @@ class LocalObjectStore:
         except OSError as error:
             raise ObjectStoreError(f"Failed to delete object {key_or_uri}: {error}") from error
 
+    def iter_bytes(self, key_or_uri: str, *, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive.")
+        path = self.resolve_path(key_or_uri)
+        try:
+            with path.open("rb") as handle:
+                while chunk := handle.read(chunk_size):
+                    yield chunk
+        except OSError as error:
+            raise ObjectStoreError(f"Failed to stream object {key_or_uri}: {error}") from error
+
     def checksum(self, key_or_uri: str) -> str:
-        return sha256_bytes(self.read_bytes(key_or_uri))
+        return self.size_and_checksum(key_or_uri)[1]
+
+    def size_and_checksum(self, key_or_uri: str, *, chunk_size: int = 1024 * 1024) -> tuple[int, str]:
+        digest = hashlib.sha256()
+        size_bytes = 0
+        for chunk in self.iter_bytes(key_or_uri, chunk_size=chunk_size):
+            digest.update(chunk)
+            size_bytes += len(chunk)
+        return size_bytes, digest.hexdigest()
 
     def size(self, key_or_uri: str) -> int:
         path = self.resolve_path(key_or_uri)

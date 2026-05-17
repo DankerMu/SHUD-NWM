@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from packages.common.object_store import LocalObjectStore
 from services.production_closure import object_store_validation, slurm_validation
 from services.production_closure.object_store_validation import (
     ProductionObjectStoreConfig,
+    _argparse_main,
     _verify_stored_objects,
     validate_object_store,
     write_synthetic_basins_fixture,
@@ -28,7 +31,7 @@ def test_validate_object_store_synthetic_copied_root_success(
 ) -> None:
     object_root = tmp_path / "object-store"
     monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(object_root))
-    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://user:pass@nhms-prod/m10?token=secret")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/m10")
     monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ENDPOINT", "https://user:pass@example.invalid:9000/path?token=secret")
     monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_CREDENTIAL_SOURCE", "env:AWS_SECRET_ACCESS_KEY")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "super-secret")
@@ -102,49 +105,77 @@ def test_validate_object_store_synthetic_copied_root_success(
     assert "s3://nhms-prod/m10" in evidence_text
 
 
-def test_validate_object_store_registry_uses_raw_manifest_when_evidence_redacts_prefix(
+def test_validate_object_store_rejects_unsafe_prefix_before_writing_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    original_prepare = object_store_validation.prepare_basins_import_sources
-    observed_manifest_paths: list[Path] = []
-    observed_raw_prefixes: list[str] = []
-
-    def recording_prepare(*, inventory_path: Path, package_manifest_path: Path) -> object:
-        observed_manifest_paths.append(package_manifest_path)
-        raw_manifest = json.loads(package_manifest_path.read_text(encoding="utf-8"))
-        observed_raw_prefixes.append(str(raw_manifest["model_package_uri"]))
-        return original_prepare(inventory_path=inventory_path, package_manifest_path=package_manifest_path)
-
-    monkeypatch.setattr(object_store_validation, "prepare_basins_import_sources", recording_prepare)
     monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
     monkeypatch.setenv(
         "NHMS_PRODUCTION_OBJECT_STORE_PREFIX",
         "s3://AWS_SECRET_ACCESS_KEY:super-secret@nhms-prod/token=secret/m10?X-Amz-Signature=secret",
     )
 
-    exit_code = slurm_validation.main(
-        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_raw_manifest"]
-    )
+    try:
+        exit_code = slurm_validation.main(
+            [
+                "validate-object-store",
+                "--evidence-root",
+                str(tmp_path / "artifacts"),
+                "--run-id",
+                "m10_148_raw_manifest",
+            ]
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
 
-    summary = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
     lane_dir = tmp_path / "artifacts" / "m10_148_raw_manifest" / "object-store"
-    manifest_evidence = json.loads((lane_dir / "package_manifest.json").read_text(encoding="utf-8"))
-    consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
-    assert exit_code == 0
-    assert summary["status"] == "ready"
-    assert consumption["registry"]["status"] == "local_sources_prepared"
-    assert consumption["status"] == "ready"
-    assert observed_manifest_paths == [lane_dir / ".package_manifest.raw.json"]
-    assert observed_raw_prefixes[0].startswith("s3://nhms-prod/token=secret/m10/models/")
-    assert manifest_evidence["model_package_uri"] == "s3://nhms-prod/token=[redacted]"
-    assert manifest_evidence["manifest_uri"] == "s3://nhms-prod/token=[redacted]"
-    evidence_text = "\n".join(path.read_text(encoding="utf-8") for path in lane_dir.glob("*.json"))
-    assert "AWS_SECRET_ACCESS_KEY" not in evidence_text
-    assert "super-secret" not in evidence_text
-    assert "X-Amz-Signature" not in evidence_text
-    assert "token=secret" not in evidence_text
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE" in captured.err
+    assert "Traceback" not in captured.err
+    assert not lane_dir.exists()
+    assert not (tmp_path / "object-store").exists()
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "s3://user:pass@nhms-prod/m10",
+        "s3://nhms-prod/m10?token=secret",
+        "s3://nhms-prod/m10#credential=secret",
+        "s3://nhms-prod/token=secret/m10",
+        "s3://nhms-prod/signature=abc/m10",
+        "s3://nhms-prod/access_key=abc/m10",
+        "s3://nhms-prod/secret=abc/m10",
+        "s3://nhms-prod/password=abc/m10",
+        "s3://nhms-prod/credential=abc/m10",
+        "s3://nhms-prod/x-amz-signature=abc/m10",
+    ],
+)
+def test_validate_object_store_rejects_sensitive_prefix_shapes_without_lane_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    prefix: str,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", prefix)
+
+    try:
+        exit_code = slurm_validation.main(
+            ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_badprefix"]
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE" in captured.err
+    assert not (tmp_path / "artifacts" / "m10_148_badprefix").exists()
+    assert not (tmp_path / "object-store").exists()
 
 
 def test_verify_stored_objects_blocks_tampered_manifest_self_entry_checksum(
@@ -371,3 +402,111 @@ def test_validate_object_store_invalid_target_fails_without_evidence(
     assert exit_code == 1
     assert "PRODUCTION_OBJECT_STORE_TARGET_INVALID" in capsys.readouterr().err
     assert not (tmp_path / "artifacts" / "badtarget").exists()
+
+
+def test_validate_object_store_stdout_redacts_summary_like_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_package_uri = "s3://user:pass@bucket/path?token=secret&X-Amz-Signature=abc"
+
+    def fake_validate(config: ProductionObjectStoreConfig) -> dict[str, object]:
+        return {
+            "schema": "nhms.production_closure.object_store.v1",
+            "run_id": config.run_id,
+            "status": "ready",
+            "evidence_dir": str(config.lane_dir),
+            "model_package_uri": secret_package_uri,
+            "notes": "path token=secret x-amz-signature=abc credential=hidden",
+        }
+
+    monkeypatch.setattr(object_store_validation, "validate_object_store", fake_validate)
+
+    exit_code = object_store_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "stdout_redact"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "user:pass@" not in captured.out
+    assert "?token=secret" not in captured.out
+    assert "token=secret" not in captured.out
+    assert "x-amz-signature=abc" not in captured.out
+    assert "credential=hidden" not in captured.out
+    assert json.loads(captured.out)["model_package_uri"] == "s3://bucket/path"
+
+    exit_code = _argparse_main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts-argparse"), "--run-id", "argparse"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "user:pass@" not in captured.out
+    assert "?token=secret" not in captured.out
+    assert "token=secret" not in captured.out
+    assert "x-amz-signature=abc" not in captured.out
+    assert "credential=hidden" not in captured.out
+    assert json.loads(captured.out)["model_package_uri"] == "s3://bucket/path"
+
+
+def test_validate_object_store_standalone_click_usage_errors_exit_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "services.production_closure.object_store_validation",
+            "validate-object-store",
+            "--bad-option",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "Usage:" in result.stderr
+    assert "No such option" in result.stderr
+    assert "--bad-option" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_verify_stored_objects_streams_package_entries_without_full_reads(
+    tmp_path: Path,
+) -> None:
+    summary = validate_object_store(
+        ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m10_148_streaming")
+    )
+    manifest_path = tmp_path / "artifacts" / "m10_148_streaming" / "object-store" / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stream_calls: list[str] = []
+
+    class RecordingStore(LocalObjectStore):
+        def read_bytes(self, key_or_uri: str) -> bytes:
+            raise AssertionError(f"full read must not be used during stored object verification: {key_or_uri}")
+
+        def read_bytes_limited(self, key_or_uri: str, *, max_bytes: int) -> bytes:
+            assert key_or_uri == summary["manifest_uri"]
+            return super().read_bytes_limited(key_or_uri, max_bytes=max_bytes)
+
+        def size_and_checksum(self, key_or_uri: str, *, chunk_size: int = 1024 * 1024) -> tuple[int, str]:
+            stream_calls.append(key_or_uri)
+            return super().size_and_checksum(key_or_uri, chunk_size=chunk_size)
+
+    store = RecordingStore(
+        tmp_path / "artifacts" / "m10_148_streaming" / "object-store" / "local-object-store",
+        "s3://nhms-production-like/m10_148_streaming",
+    )
+
+    verification = _verify_stored_objects(store, manifest)
+
+    assert verification["status"] == "verified"
+    assert stream_calls
+    assert any(call != summary["manifest_uri"] for call in stream_calls)

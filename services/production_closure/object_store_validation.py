@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
@@ -33,6 +33,12 @@ DEFAULT_OBJECT_STORE_TARGET = "local-production-like"
 DEFAULT_CLEANUP_POLICY = "quarantine"
 FORBIDDEN_RUNTIME_SOURCE_FRAGMENTS = ("data/Basins", "/volume/")
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+MAX_STORED_MANIFEST_BYTES = 16 * 1024 * 1024
+SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
+    r"(?:^|[;&])[^=/?#;&]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|"
+    r"session[_-]?key|signature|x-amz-signature)[^=/?#;&]*=",
+    re.IGNORECASE,
+)
 
 
 class ProductionObjectStoreValidationError(RuntimeError):
@@ -377,7 +383,7 @@ def _package_manifest_evidence(publish_result: dict[str, Any], manifest: dict[st
 
 
 def _verify_stored_objects(store: LocalObjectStore, manifest: dict[str, Any]) -> dict[str, Any]:
-    stored_manifest_bytes = store.read_bytes(str(manifest["manifest_uri"]))
+    stored_manifest_bytes = store.read_bytes_limited(str(manifest["manifest_uri"]), max_bytes=MAX_STORED_MANIFEST_BYTES)
     stored_manifest = json.loads(stored_manifest_bytes.decode("utf-8"))
     stored_manifest_sha256 = hashlib.sha256(stored_manifest_bytes).hexdigest()
     package_checksum_reconstruction = _package_checksum_from_stored_manifest(stored_manifest)
@@ -393,9 +399,7 @@ def _verify_stored_objects(store: LocalObjectStore, manifest: dict[str, Any]) ->
         if not isinstance(entry, dict):
             continue
         object_uri = str(entry["object_uri"])
-        content = store.read_bytes(object_uri)
-        actual_sha256 = hashlib.sha256(content).hexdigest()
-        actual_size = len(content)
+        actual_size, actual_sha256 = store.size_and_checksum(object_uri)
         expected_sha256 = entry["sha256"]
         manifest_payload_sha256 = None
         final_manifest_sha256 = None
@@ -909,6 +913,43 @@ def _validate_config(config: ProductionObjectStoreConfig) -> None:
             "PRODUCTION_OBJECT_STORE_PREFIX_INVALID",
             "Object-store prefix must be an object URI prefix such as s3://bucket/prefix.",
         )
+    _validate_object_store_prefix_safe(config.configured_object_store_prefix)
+    if config.object_store_prefix != config.configured_object_store_prefix:
+        _validate_object_store_prefix_safe(config.object_store_prefix)
+
+
+def _validate_object_store_prefix_safe(prefix: str) -> None:
+    if not prefix:
+        return
+    try:
+        parsed = urlsplit(prefix)
+    except ValueError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix must not contain credential material.",
+        ) from error
+    if parsed.username or parsed.password:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix must not contain userinfo credentials.",
+        )
+    if parsed.query:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix must not contain query parameters.",
+        )
+    if parsed.fragment:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix must not contain fragments.",
+        )
+    for raw_segment in parsed.path.split("/"):
+        segment = unquote(raw_segment)
+        if SENSITIVE_PREFIX_ASSIGNMENT_RE.search(segment):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                "Object-store prefix path segments must not contain credential assignments.",
+            )
 
 
 def _operational_prefix(value: str) -> str:
@@ -990,7 +1031,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     force=force,
                 )
             )
-            click.echo(json.dumps(summary, sort_keys=True))
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
         except (
             ProductionObjectStoreValidationError,
             BasinsPackageError,
@@ -1007,7 +1048,11 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 click.echo(f"PRODUCTION_OBJECT_STORE_VALIDATION_FAILED: {error}", err=True)
             raise SystemExit(1) from error
 
-    cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
+    try:
+        cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
+    except click.ClickException as error:
+        error.show()
+        raise SystemExit(error.exit_code) from error
     return 0
 
 
@@ -1026,14 +1071,16 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         try:
             print(
                 json.dumps(
-                    validate_object_store(
-                        ProductionObjectStoreConfig.from_env(
-                            evidence_root=args.evidence_root,
-                            run_id=args.run_id,
-                            basins_root=args.basins_root,
-                            model_id=args.model_id,
-                            version=args.version,
-                            force=args.force,
+                    redact_payload(
+                        validate_object_store(
+                            ProductionObjectStoreConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                basins_root=args.basins_root,
+                                model_id=args.model_id,
+                                version=args.version,
+                                force=args.force,
+                            )
                         )
                     ),
                     sort_keys=True,
