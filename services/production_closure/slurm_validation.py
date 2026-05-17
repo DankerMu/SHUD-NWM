@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -1141,12 +1143,10 @@ def _read_task_logs(config: ProductionSlurmConfig, job_id: str, *, task_id: int)
     contents: list[str] = []
     for suffix in ("out", "err"):
         path = _slurm_log_file(config, job_id, task_id, suffix=suffix)
-        if _slurm_log_file_blocker(config, path, task_id=task_id, suffix=suffix):
+        blocker, content = _validated_slurm_log_content(config, path, task_id=task_id, suffix=suffix)
+        if blocker or content is None:
             continue
-        try:
-            contents.append(_read_bounded_slurm_log(path))
-        except OSError:
-            continue
+        contents.append(content)
     return contents
 
 
@@ -1157,60 +1157,110 @@ def _slurm_log_file_blocker(
     task_id: int,
     suffix: str,
 ) -> dict[str, str] | None:
+    blocker, _content = _validated_slurm_log_content(config, path, task_id=task_id, suffix=suffix, read_content=False)
+    return blocker
+
+
+def _validated_slurm_log_content(
+    config: ProductionSlurmConfig,
+    path: Path,
+    *,
+    task_id: int,
+    suffix: str,
+    read_content: bool = True,
+) -> tuple[dict[str, str] | None, str | None]:
     field = f"task_{task_id}_{suffix}"
+    blocker = _validate_slurm_log_path(config, path, field=field, task_id=task_id)
+    if blocker:
+        return blocker, None
+
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | nofollow_flag
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+
+    pre_open_lstat: os.stat_result | None = None
+    if nofollow_flag == 0:
+        try:
+            pre_open_lstat = path.lstat()
+        except FileNotFoundError:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None
+        except OSError:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
+        if stat.S_ISLNK(pre_open_lstat.st_mode):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None
+
     try:
-        _refuse_symlink_components(path)
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None
+    except OSError as error:
+        error_code = (
+            "SLURM_ARRAY_TASK_LOG_UNSAFE"
+            if nofollow_flag and error.errno == errno.ELOOP
+            else "SLURM_ARRAY_TASK_LOG_UNREADABLE"
+        )
+        return _slurm_log_blocker(error_code, field, task_id, path), None
+
+    try:
+        fd_stat = os.fstat(fd)
+        if pre_open_lstat and (fd_stat.st_dev != pre_open_lstat.st_dev or fd_stat.st_ino != pre_open_lstat.st_ino):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None
+        if not stat.S_ISREG(fd_stat.st_mode):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
+        if fd_stat.st_size > MAX_SLURM_LOG_BYTES:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_TOO_LARGE", field, task_id, path), None
+        if not read_content:
+            return None, None
+        content = _read_bounded_slurm_log_fd(fd)
+        if len(content) > MAX_SLURM_LOG_BYTES:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_TOO_LARGE", field, task_id, path), None
+        return None, content.decode("utf-8", errors="replace")
+    except OSError:
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
+    finally:
+        os.close(fd)
+
+
+def _validate_slurm_log_path(
+    config: ProductionSlurmConfig,
+    path: Path,
+    *,
+    field: str,
+    task_id: int,
+) -> dict[str, str] | None:
+    try:
+        _refuse_symlink_components(path.parent)
         resolved_path = path.resolve(strict=False)
         resolved_log_dir = _slurm_log_dir(config).resolve(strict=False)
         resolved_path.relative_to(resolved_log_dir)
     except (OSError, ProductionValidationError, ValueError):
-        return {
-            "error_code": "SLURM_ARRAY_TASK_LOG_UNSAFE",
-            "field": field,
-            "task_id": str(task_id),
-            "path": str(path),
-        }
-    if not path.exists():
-        return {
-            "error_code": "SLURM_ARRAY_TASK_LOG_MISSING",
-            "field": field,
-            "task_id": str(task_id),
-            "path": str(path),
-        }
-    if not path.is_file():
-        return {
-            "error_code": "SLURM_ARRAY_TASK_LOG_UNREADABLE",
-            "field": field,
-            "task_id": str(task_id),
-            "path": str(path),
-        }
-    try:
-        if path.stat().st_size > MAX_SLURM_LOG_BYTES:
-            return {
-                "error_code": "SLURM_ARRAY_TASK_LOG_TOO_LARGE",
-                "field": field,
-                "task_id": str(task_id),
-                "path": str(path),
-                "max_bytes": str(MAX_SLURM_LOG_BYTES),
-            }
-        with path.open("rb") as handle:
-            handle.read(1)
-    except OSError:
-        return {
-            "error_code": "SLURM_ARRAY_TASK_LOG_UNREADABLE",
-            "field": field,
-            "task_id": str(task_id),
-            "path": str(path),
-        }
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
     return None
 
 
-def _read_bounded_slurm_log(path: Path) -> str:
-    with path.open("rb") as handle:
-        content = handle.read(MAX_SLURM_LOG_BYTES + 1)
-    if len(content) > MAX_SLURM_LOG_BYTES:
-        raise OSError(f"Slurm log exceeds configured limit of {MAX_SLURM_LOG_BYTES} bytes.")
-    return content.decode("utf-8", errors="replace")
+def _slurm_log_blocker(error_code: str, field: str, task_id: int, path: Path) -> dict[str, str]:
+    blocker = {
+        "error_code": error_code,
+        "field": field,
+        "task_id": str(task_id),
+        "path": str(path),
+    }
+    if error_code == "SLURM_ARRAY_TASK_LOG_TOO_LARGE":
+        blocker["max_bytes"] = str(MAX_SLURM_LOG_BYTES)
+    return blocker
+
+
+def _read_bounded_slurm_log_fd(fd: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_SLURM_LOG_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def _timeout_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
