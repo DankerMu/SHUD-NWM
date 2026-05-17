@@ -975,7 +975,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
         summary, summary_sha256 = _read_dependency_summary_json(summary_path)
     except ProductionOpsValidationError as error:
         return _invalid_dependency(name, summary_path, "blocked", error.message, error_code=error.error_code)
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return _invalid_dependency(
             name,
             summary_path,
@@ -1049,7 +1049,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             receipt = _read_dependency_receipt_json(receipt_path)
         except ProductionOpsValidationError as error:
             return _invalid_dependency(name, receipt_path, "blocked", error.message, error_code=error.error_code)
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             return _invalid_dependency(
                 name,
                 receipt_path,

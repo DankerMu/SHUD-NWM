@@ -788,6 +788,148 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_signature_missing(
     assert qc["malformed_task"]["publication_blocked"] is False
 
 
+def test_validate_slurm_submit_blocks_symlinked_log_without_touching_target(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+    outside = tmp_path / "outside-sentinel.log"
+    sentinel = b"external sentinel\n" + (b"x" * (slurm_validation.MAX_SLURM_LOG_BYTES + 1))
+    outside.write_bytes(sentinel)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            log_dir = workspace_root / "symlinklog" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "7811_0.out").write_text("task 0 stdout\n", encoding="utf-8")
+            (log_dir / "7811_0.err").write_text("task 0 stderr\n", encoding="utf-8")
+            (log_dir / "7811_1.out").symlink_to(outside)
+            (log_dir / "7811_1.err").write_text(
+                f"{slurm_validation.CONTROLLED_FAILURE_LOG_MARKER}\nNON_FINITE_FLOW\n",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="7811\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "7811|COMPLETED|0:0|00:00:11|cn04|CPU\n"
+                    "7811_0|COMPLETED|0:0|00:00:10|cn04|CPU\n"
+                    "7811_1|FAILED|2:0|00:00:05|cn04|CPU\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "symlinklog",
+            "--submit",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    assert outside.read_bytes() == sentinel
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    blocker_codes = [blocker["error_code"] for blocker in summary["blockers"]]
+    assert "SLURM_ARRAY_TASK_LOG_UNSAFE" in blocker_codes
+    lane_dir = tmp_path / "artifacts" / "symlinklog" / "slurm"
+    partial = json.loads((lane_dir / "array_partial_success.json").read_text())
+    task1 = next(task for task in partial["tasks"] if task["task_id"] == 1)
+    assert task1["log_status"] == "blocked"
+    assert task1["error_code"] == "SLURM_ARRAY_TASK_LOG_UNSAFE"
+
+
+def test_validate_slurm_submit_blocks_oversized_log(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            log_dir = workspace_root / "oversizedlog" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "7812_0.out").write_text("task 0 stdout\n", encoding="utf-8")
+            (log_dir / "7812_0.err").write_text("task 0 stderr\n", encoding="utf-8")
+            (log_dir / "7812_1.out").write_bytes(b"x" * (slurm_validation.MAX_SLURM_LOG_BYTES + 1))
+            (log_dir / "7812_1.err").write_text(
+                f"{slurm_validation.CONTROLLED_FAILURE_LOG_MARKER}\nNON_FINITE_FLOW\n",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="7812\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "7812|COMPLETED|0:0|00:00:11|cn04|CPU\n"
+                    "7812_0|COMPLETED|0:0|00:00:10|cn04|CPU\n"
+                    "7812_1|FAILED|2:0|00:00:05|cn04|CPU\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "oversizedlog",
+            "--submit",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    blocker_codes = [blocker["error_code"] for blocker in summary["blockers"]]
+    assert "SLURM_ARRAY_TASK_LOG_TOO_LARGE" in blocker_codes
+    lane_dir = tmp_path / "artifacts" / "oversizedlog" / "slurm"
+    partial = json.loads((lane_dir / "array_partial_success.json").read_text())
+    task1 = next(task for task in partial["tasks"] if task["task_id"] == 1)
+    assert task1["log_status"] == "blocked"
+    assert task1["error_code"] == "SLURM_ARRAY_TASK_LOG_TOO_LARGE"
+
+
 def test_validate_slurm_submit_blocks_when_task_accounting_rows_never_finish(
     tmp_path: Path,
     monkeypatch,
