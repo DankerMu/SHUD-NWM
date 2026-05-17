@@ -56,12 +56,13 @@ class LocalObjectStore:
             raise ValueError("max_bytes must be non-negative.")
         path = self.resolve_path(key_or_uri)
         try:
-            size_bytes = path.stat().st_size
-            if size_bytes > max_bytes:
+            with path.open("rb") as handle:
+                content = handle.read(max_bytes + 1)
+            if len(content) > max_bytes:
                 raise ObjectStoreError(
-                    f"Object {key_or_uri} exceeds read limit: {size_bytes} bytes > {max_bytes} bytes"
+                    f"Object {key_or_uri} exceeds read limit: observed more than {max_bytes} bytes"
                 )
-            return path.read_bytes()
+            return content
         except ObjectStoreError:
             raise
         except OSError as error:

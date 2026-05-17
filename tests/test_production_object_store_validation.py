@@ -161,8 +161,12 @@ def test_validate_object_store_rejects_unsafe_prefix_before_writing_evidence(
         "s3://nhms-prod/password=abc/m10",
         "s3://nhms-prod/credential=abc/m10",
         "s3://nhms-prod/x-amz-signature=abc/m10",
+        "s3://nhms-prod/path%2Ftoken=secret/m10",
+        "s3://nhms-prod/path%2Fx-amz-signature=abc/m10",
         "s3://nhms-prod/path%3Ftoken=secret/m10",
         "s3://nhms-prod/path%23x-amz-signature=abc/m10",
+        "s3://nhms-prod/path%252Ftoken=secret/m10",
+        "s3://nhms-prod/path%252Fx-amz-signature=abc/m10",
     ],
 )
 def test_validate_object_store_rejects_sensitive_prefix_shapes_without_lane_evidence(
@@ -368,6 +372,81 @@ def test_validate_object_store_delete_cleanup_policy_removes_partial_objects(
     assert cleanup["partial_objects_remaining"] == []
     assert cleanup["implicit_model_activation"] is False
     assert not any(object_root.glob("models/*/vproduction-object-store-local-failed-import/partial-package.bin"))
+
+
+def test_validate_object_store_cleanup_does_not_touch_existing_model_scoped_failed_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_root = tmp_path / "object-store"
+    basins_root = tmp_path / "copied-basins"
+    inventory = write_synthetic_basins_fixture(basins_root)
+    model_id = next(model["model_id"] for model in inventory["models"] if model["status"] == "valid")
+    version = "vexisting-failed-import"
+    existing_key = f"models/{model_id}/{version}-failed-import/partial-package.bin"
+    existing_content = b"pre-existing model-scoped failed import\n"
+    store = LocalObjectStore(object_root, "s3://nhms-prod/m10")
+    store.write_bytes_atomic(existing_key, existing_content)
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/m10")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_CLEANUP_POLICY", "delete")
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_ROOT", str(basins_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_MODEL_ID", model_id)
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_VERSION", version)
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_existing"]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    lane_dir = tmp_path / "artifacts" / "m10_148_existing" / "object-store"
+    cleanup = json.loads((lane_dir / "cleanup_rollback.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert summary["status"] == "ready"
+    assert store.read_bytes(existing_key) == existing_content
+    assert cleanup["cleanup_status"] == "deleted"
+    assert cleanup["written_object_keys"] == [
+        f"runs/m10_148_existing/input/scratch/cleanup-rollback/{model_id}/{version}-failed-import/partial-package.bin"
+    ]
+    assert cleanup["partial_objects_remaining"] == []
+
+
+def test_validate_object_store_refuses_existing_cleanup_scratch_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_root = tmp_path / "object-store"
+    basins_root = tmp_path / "copied-basins"
+    inventory = write_synthetic_basins_fixture(basins_root)
+    model_id = next(model["model_id"] for model in inventory["models"] if model["status"] == "valid")
+    version = "vexisting-scratch"
+    run_id = "m10_148_scratch_exists"
+    existing_key = (
+        f"runs/{run_id}/input/scratch/cleanup-rollback/"
+        f"{model_id}/{version}-failed-import/partial-package.bin"
+    )
+    store = LocalObjectStore(object_root, "s3://nhms-prod/m10")
+    store.write_bytes_atomic(existing_key, b"existing scratch content\n")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/m10")
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_ROOT", str(basins_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_MODEL_ID", model_id)
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_VERSION", version)
+
+    try:
+        exit_code = slurm_validation.main(
+            ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", run_id]
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "PRODUCTION_OBJECT_STORE_VALIDATION_OBJECT_EXISTS" in captured.err
+    assert store.read_bytes(existing_key) == b"existing scratch content\n"
 
 
 def test_validate_object_store_runtime_evidence_has_no_development_source_leak(
@@ -712,3 +791,50 @@ def test_verify_stored_objects_streams_package_entries_without_full_reads(
     assert verification["status"] == "verified"
     assert stream_calls
     assert any(call != summary["manifest_uri"] for call in stream_calls)
+
+
+def test_local_object_store_read_bytes_limited_uses_bounded_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path)
+    key = "runs/m10_148_bounded/input/manifest.json"
+    store.write_bytes_atomic(key, b"abcdef")
+    path = store.resolve_path(key)
+    read_sizes: list[int] = []
+
+    class RecordingHandle:
+        def __enter__(self) -> RecordingHandle:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return b"abcdef"[:size]
+
+    original_open = type(path).open
+
+    def fake_open(self: Path, mode: str = "r", *args: object, **kwargs: object) -> RecordingHandle:
+        if self != path:
+            return original_open(self, mode, *args, **kwargs)
+        assert mode == "rb"
+        assert not args
+        assert not kwargs
+        return RecordingHandle()
+
+    original_read_bytes = type(path).read_bytes
+
+    def forbidden_read_bytes(self: Path) -> bytes:
+        if self != path:
+            return original_read_bytes(self)
+        raise AssertionError("read_bytes() must not be used for limited reads")
+
+    monkeypatch.setattr(type(path), "open", fake_open)
+    monkeypatch.setattr(type(path), "read_bytes", forbidden_read_bytes)
+
+    with pytest.raises(object_store_validation.ObjectStoreError):
+        store.read_bytes_limited(key, max_bytes=5)
+
+    assert read_sizes == [6]

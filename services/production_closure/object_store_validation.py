@@ -40,6 +40,7 @@ SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
     r"session[_-]?key|signature|x-amz-signature)[^=/?#;&]*=",
     re.IGNORECASE,
 )
+SENSITIVE_PREFIX_SEPARATOR_RE = re.compile(r"[/;?#&]")
 
 
 class ProductionObjectStoreValidationError(RuntimeError):
@@ -887,8 +888,16 @@ def _cleanup_rollback_evidence(
     store: LocalObjectStore,
     model_id: str,
 ) -> dict[str, Any]:
-    partial_key = f"models/{model_id}/{config.version}-failed-import/partial-package.bin"
-    store.write_bytes_atomic(partial_key, b"partial object written before simulated import failure\n")
+    scratch_prefix = f"runs/{config.run_id}/input/scratch/cleanup-rollback/{model_id}/{config.version}-failed-import"
+    partial_key = f"{scratch_prefix}/partial-package.bin"
+    created_keys: set[str] = set()
+    _write_validation_run_scratch_object(
+        config,
+        store,
+        partial_key,
+        b"partial object written before simulated import failure\n",
+    )
+    created_keys.add(store.normalize_key(partial_key))
     written_keys = [partial_key]
     rows = [
         {
@@ -900,13 +909,14 @@ def _cleanup_rollback_evidence(
     cleanup_status = "retained"
     quarantine_key = None
     if config.cleanup_policy == "delete":
-        store.delete(partial_key)
+        _delete_validation_run_object(config, store, partial_key, created_keys)
         cleanup_status = "deleted"
     elif config.cleanup_policy == "quarantine":
         quarantine_key = f"runs/{config.run_id}/logs/quarantine/{partial_key}"
         content = store.read_bytes(partial_key)
-        store.write_bytes_atomic(quarantine_key, content)
-        store.delete(partial_key)
+        _write_validation_run_scratch_object(config, store, quarantine_key, content)
+        created_keys.add(store.normalize_key(quarantine_key))
+        _delete_validation_run_object(config, store, partial_key, created_keys)
         cleanup_status = "quarantined"
     partial_exists_after = store.exists(partial_key)
     return {
@@ -929,6 +939,45 @@ def _cleanup_rollback_evidence(
         "implicit_model_activation": False,
         "active_model_state": "unchanged",
     }
+
+
+def _write_validation_run_scratch_object(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    key: str,
+    content: bytes,
+) -> str:
+    normalized_key = store.normalize_key(key)
+    if not _is_validation_run_object(config, normalized_key):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_VALIDATION_KEY_UNSAFE",
+            f"Validation-created cleanup objects must stay under runs/{config.run_id}/.",
+        )
+    return _write_validation_scratch_object(store, normalized_key, content)
+
+
+def _delete_validation_run_object(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    key: str,
+    created_keys: set[str],
+) -> None:
+    normalized_key = store.normalize_key(key)
+    if not _is_validation_run_object(config, normalized_key):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_VALIDATION_KEY_UNSAFE",
+            f"Validation cleanup may only delete objects under runs/{config.run_id}/.",
+        )
+    if normalized_key not in created_keys:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_VALIDATION_KEY_UNSAFE",
+            "Validation cleanup may only delete objects created by the current validation run.",
+        )
+    store.delete(normalized_key)
+
+
+def _is_validation_run_object(config: ProductionObjectStoreConfig, key: str) -> bool:
+    return key == f"runs/{config.run_id}" or key.startswith(f"runs/{config.run_id}/")
 
 
 def _preflight_payload(config: ProductionObjectStoreConfig) -> dict[str, Any]:
@@ -1092,7 +1141,8 @@ def _validate_object_store_prefix_safe(prefix: str) -> None:
         )
     for raw_segment in parsed.path.split("/"):
         segment = unquote(raw_segment)
-        if SENSITIVE_PREFIX_ASSIGNMENT_RE.search(segment):
+        decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(segment)
+        if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in decoded_parts):
             raise ProductionObjectStoreValidationError(
                 "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
                 "Object-store prefix path segments must not contain credential assignments.",
