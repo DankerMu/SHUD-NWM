@@ -18,6 +18,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
 from services.orchestrator.retry import compute_backoff_seconds, is_transient_error
+from services.production_closure.e2e_validation import (
+    ProductionE2EConfig,
+    ProductionE2EValidationError,
+    validate_e2e,
+)
 from services.production_closure.met_validation import (
     ProductionMetConfig,
     ProductionMetValidationError,
@@ -1648,6 +1653,64 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"PRODUCTION_MET_VALIDATION_FAILED: {error}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("validate-e2e")
+    @click.option("--evidence-root", type=click.Path(path_type=Path), required=True)
+    @click.option("--run-id")
+    @click.option("--source-cycle", default=None)
+    @click.option("--model-set", default=None)
+    @click.option("--db-target", default=None)
+    @click.option("--object-prefix", default=None)
+    @click.option("--slurm-partition", default=None)
+    @click.option("--slurm-account", default=None)
+    @click.option("--frontend-api-base", default=None)
+    @click.option("--slurm-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--object-store-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--met-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--shud-qc-fixture", default=None)
+    @click.option("--force", is_flag=True, default=False)
+    def validate_e2e_command(
+        evidence_root: Path,
+        run_id: str | None,
+        source_cycle: str | None,
+        model_set: str | None,
+        db_target: str | None,
+        object_prefix: str | None,
+        slurm_partition: str | None,
+        slurm_account: str | None,
+        frontend_api_base: str | None,
+        slurm_evidence_root: Path | None,
+        object_store_evidence_root: Path | None,
+        met_evidence_root: Path | None,
+        shud_qc_fixture: str | None,
+        force: bool,
+    ) -> None:
+        try:
+            summary = validate_e2e(
+                ProductionE2EConfig.from_env(
+                    evidence_root=evidence_root,
+                    run_id=run_id,
+                    source_cycle=source_cycle,
+                    model_set=model_set,
+                    db_target=db_target,
+                    object_prefix=object_prefix,
+                    slurm_partition=slurm_partition,
+                    slurm_account=slurm_account,
+                    frontend_api_base=frontend_api_base,
+                    slurm_evidence_root=slurm_evidence_root,
+                    object_store_evidence_root=object_store_evidence_root,
+                    met_evidence_root=met_evidence_root,
+                    shud_qc_fixture=shud_qc_fixture,
+                    force=force,
+                )
+            )
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
+        except ProductionE2EValidationError as error:
+            click.echo(f"{error.error_code}: {redact_text(error.message)}", err=True)
+            raise SystemExit(1) from error
+        except Exception as error:
+            click.echo(f"PRODUCTION_E2E_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
+            raise SystemExit(1) from error
+
     try:
         cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
     except click.ClickException as error:
@@ -1684,6 +1747,21 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     met_parser.add_argument("--model-id", default=None)
     met_parser.add_argument("--model-version", default=None)
     met_parser.add_argument("--force", action="store_true")
+    e2e_parser = subparsers.add_parser("validate-e2e")
+    e2e_parser.add_argument("--evidence-root", type=Path, required=True)
+    e2e_parser.add_argument("--run-id")
+    e2e_parser.add_argument("--source-cycle", default=None)
+    e2e_parser.add_argument("--model-set", default=None)
+    e2e_parser.add_argument("--db-target", default=None)
+    e2e_parser.add_argument("--object-prefix", default=None)
+    e2e_parser.add_argument("--slurm-partition", default=None)
+    e2e_parser.add_argument("--slurm-account", default=None)
+    e2e_parser.add_argument("--frontend-api-base", default=None)
+    e2e_parser.add_argument("--slurm-evidence-root", type=Path, default=None)
+    e2e_parser.add_argument("--object-store-evidence-root", type=Path, default=None)
+    e2e_parser.add_argument("--met-evidence-root", type=Path, default=None)
+    e2e_parser.add_argument("--shud-qc-fixture", default=None)
+    e2e_parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "validate-slurm":
@@ -1770,6 +1848,40 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             return 1
         except Exception as error:
             print(f"PRODUCTION_MET_VALIDATION_FAILED: {error}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "validate-e2e":
+        try:
+            print(
+                json.dumps(
+                    redact_payload(
+                        validate_e2e(
+                            ProductionE2EConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                source_cycle=args.source_cycle,
+                                model_set=args.model_set,
+                                db_target=args.db_target,
+                                object_prefix=args.object_prefix,
+                                slurm_partition=args.slurm_partition,
+                                slurm_account=args.slurm_account,
+                                frontend_api_base=args.frontend_api_base,
+                                slurm_evidence_root=args.slurm_evidence_root,
+                                object_store_evidence_root=args.object_store_evidence_root,
+                                met_evidence_root=args.met_evidence_root,
+                                shud_qc_fixture=args.shud_qc_fixture,
+                                force=args.force,
+                            )
+                        )
+                    ),
+                    sort_keys=True,
+                )
+            )
+        except ProductionE2EValidationError as error:
+            print(f"{error.error_code}: {redact_text(error.message)}", file=sys.stderr)
+            return 1
+        except Exception as error:
+            print(f"PRODUCTION_E2E_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")

@@ -430,6 +430,97 @@ The bundle is written under
 - `environment.json` and `summary.json`: redacted command/environment metadata
   and evidence file index.
 
+## M10 #150 Staging End-to-End Forecast/Analysis Closure
+
+Issue #150 adds an opt-in staging E2E closure lane that records the bounded
+source -> canonical -> forcing -> Slurm SHUD -> parse -> flood frequency -> tile
+publish -> API/frontend chain under one evidence bundle. The default command is
+self-contained and deterministic: it does not require external network, real
+object storage, copied `/volume` data, PostGIS, real Slurm, a live SHUD solver,
+or a running frontend server. It also does not claim live DB/API/Slurm/frontend
+success unless those checks are represented by supplied evidence.
+
+Fast deterministic evidence command:
+
+```bash
+uv run nhms-production validate-e2e \
+  --evidence-root artifacts/production-closure \
+  --run-id local-150
+```
+
+Production-like preflight can explicitly select source cycle, model set, DB
+target, object prefix, Slurm partition/account, frontend API base, and optional
+accepted #147/#148/#149 evidence roots:
+
+```bash
+export NHMS_RUN_PRODUCTION_CLOSURE=1
+export NHMS_PRODUCTION_E2E_SOURCE_CYCLE=2026-05-07T00:00:00Z
+export NHMS_PRODUCTION_E2E_MODEL_SET=basins_qhh_shud_fixture
+export NHMS_PRODUCTION_E2E_DB_TARGET=staging
+export NHMS_PRODUCTION_E2E_OBJECT_PREFIX=s3://nhms-prod/staging-e2e
+export NHMS_PRODUCTION_E2E_SLURM_PARTITION=CPU
+export NHMS_PRODUCTION_E2E_SLURM_ACCOUNT=friends
+export NHMS_PRODUCTION_E2E_FRONTEND_API_BASE=https://staging-api.example/api/v1
+uv run nhms-production validate-e2e \
+  --evidence-root artifacts/production-closure \
+  --run-id "$(date -u +m10-150-%Y%m%dT%H%M%SZ)"
+```
+
+The bundle is written under
+`artifacts/production-closure/<run_id>/e2e/` and contains:
+
+- `preflight.json`: redacted source cycle, model set, DB target, object prefix,
+  Slurm partition/account, frontend API base, dependency evidence roots, and
+  self-contained execution policy.
+- `dependency_status.json`: supplied or deterministic-equivalent #147/#148/#149
+  evidence status as `consumed`, `skipped`, `missing`, or `blocked`; it never
+  fabricates live Slurm/object-store/met success.
+- `stage_manifest.json`: statuses, blockers, inputs, outputs, object URIs, DB
+  IDs, Slurm job ID, and derived `model_id`, `basin_version_id`, `segment_id`,
+  `source/cycle_time`, `job_id`, and `layer_id` for download, canonical,
+  forcing, slurm, parse, frequency, tile, API, and frontend stages.
+- `shud_output_qc.json`: deterministic SHUD `.rivqdown` QC with stable blockers
+  for missing `.rivqdown`, malformed columns, NaN/Inf, missing required output,
+  count mismatch, and time-axis mismatch. Failed QC blocks parse, frequency,
+  tile, API, and frontend publication for that run while retaining raw/log paths.
+- `api_contract_evidence.json`: existing-contract API evidence derived from the
+  bundle identifiers. Fast mode records deterministic contract evidence and
+  `live_api_executed=false`; it does not add run_id-specific API filters.
+- `frontend_smoke_evidence.json`: deterministic evidence-backed smoke lineage
+  for map, forecast, monitoring, and alerts. Fast mode records
+  `live_frontend_executed=false`, `mock_api_routes_used=false`, and does not
+  claim staging frontend readiness from mock-only data.
+- `environment.json` and `summary.json`: redacted command/environment metadata,
+  stage statuses, blockers, object URIs, logs, QC result, tile artifacts, and
+  evidence file index.
+
+Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
+supplied. Unsafe run IDs are rejected before writes. Secret-shaped object/API,
+Slurm, frontend, DB, and environment values are redacted from stdout and
+evidence.
+
+### Fast Regression Commands
+
+Local #150 verification uses these fast regression commands:
+
+```bash
+openspec validate m10-production-closure --strict --no-interactive
+.venv/bin/ruff check services/production_closure tests/test_production_e2e_validation.py docs/VALIDATION.md progress.md
+.venv/bin/pytest -q tests/test_production_e2e_validation.py tests/test_production_slurm_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_output_parser.py tests/test_flood_frequency.py tests/test_api_contract.py
+```
+
+The opt-in deterministic production-closure smoke is:
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 .venv/bin/nhms-production validate-e2e \
+  --evidence-root artifacts/production-closure \
+  --run-id local-150-production-e2e
+```
+
+After using the smoke run locally, remove
+`artifacts/production-closure/local-150-production-e2e/` so generated evidence
+does not remain in the worktree.
+
 ## Opt-In Real Basins Smoke
 
 Run only when `data/Basins` exists and points at an accessible Basins tree.

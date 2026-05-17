@@ -77,33 +77,33 @@
 
 ## 4. Staging End-to-End Closure
 
-- [ ] 4.0 Record preflight: source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, and evidence root.
-- [ ] 4.1 Create a staging E2E runbook and command that selects source cycle, model set, object prefix, Slurm partition, and DB target explicitly.
-- [ ] 4.2 Run `download -> canonical -> forcing -> Slurm SHUD -> parse -> flood frequency -> tile publish` for a bounded model set.
-- [ ] 4.3 Verify API surfaces by starting from the closure evidence root, then querying existing contracts with derived `model_id`, `basin_version_id`, `segment_id`, `source/cycle_time`, `job_id`, and `layer_id`; only add run_id-specific API filters if the issue explicitly implements that contract.
-- [ ] 4.4 Verify frontend smoke or Playwright flow loads the published run with no mock data and shows source/model/run lineage.
-- [ ] 4.5 Enforce SHUD output QC before downstream publication: malformed `.rivqdown`, NaN/Inf, missing required outputs, or count/time mismatches must fail with stable error codes and block frequency/tile/API publication for that run.
-- [ ] 4.6 Emit a closure evidence bundle mapping every artifact to run_id, source cycle, model/version, Slurm job, QC result, and object URI.
+- [x] 4.0 Record preflight: source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, and evidence root.
+- [x] 4.1 Create a staging E2E runbook and command that selects source cycle, model set, object prefix, Slurm partition, and DB target explicitly.
+- [x] 4.2 Run `download -> canonical -> forcing -> Slurm SHUD -> parse -> flood frequency -> tile publish` for a bounded model set.
+- [x] 4.3 Verify API surfaces by starting from the closure evidence root, then querying existing contracts with derived `model_id`, `basin_version_id`, `segment_id`, `source/cycle_time`, `job_id`, and `layer_id`; only add run_id-specific API filters if the issue explicitly implements that contract.
+- [x] 4.4 Verify frontend smoke or Playwright flow loads the published run with no mock data and shows source/model/run lineage.
+- [x] 4.5 Enforce SHUD output QC before downstream publication: malformed `.rivqdown`, NaN/Inf, missing required outputs, or count/time mismatches must fail with stable error codes and block frequency/tile/API publication for that run.
+- [x] 4.6 Emit a closure evidence bundle mapping every artifact to run_id, source cycle, model/version, Slurm job, QC result, and object URI.
 
 ### Issue #150 Evidence Map
 
-- [ ] 4.E1 Preflight artifact: input fixture sets source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, dependency evidence roots, and evidence root; expected output is redacted JSON under `artifacts/production-closure/<run_id>/e2e/` with stable missing-input errors and no secret values.
-- [ ] 4.E2 Dependency evidence ingestion: input accepted #147/#148/#149 evidence bundles or deterministic equivalents; expected output records each dependency as consumed, skipped, blocked, or not_executed without fabricating live Slurm/object-store/met success.
-- [ ] 4.E3 Stage manifest: input bounded source/model set; expected output records `download`, `canonical`, `forcing`, `slurm`, `parse`, `frequency`, `tile`, `api`, and `frontend` stage statuses, blockers, input/output URIs, derived IDs, and redacted config.
-- [ ] 4.E4 API contract evidence: input derived `model_id`, `basin_version_id`, `segment_id`, `source/cycle_time`, `job_id`, and `layer_id` from the evidence bundle; expected output queries existing API contracts or records a stable not_executed/blocker reason, and does not require new run_id-specific API filters unless implemented by this issue.
-- [ ] 4.E5 Frontend smoke evidence: input staging API base or deterministic evidence-backed API fixture; expected output records map/forecast/monitoring/alert lineage for source, cycle, model, run_id, QC status, and publication time, and rejects mock-only placeholder success.
-- [ ] 4.E6 SHUD output QC blocker: input missing `.rivqdown`, malformed columns, NaN/Inf, missing required output, count mismatch, or time-axis mismatch; expected output blocks frequency, tile, API, and frontend publication for that run with stable error metadata while retaining raw output/log paths.
-- [ ] 4.E7 Run-scoped idempotency/path/redaction: input reruns, unsafe run IDs, existing evidence bundles, and credential-shaped object/API/slurm/frontend values; expected output refuses unsafe or cross-run writes, requires explicit same-run force/cleanup behavior, and redacts secrets from stdout, evidence, docs, and screenshots/results.
-- [ ] 4.E8 Fast-regression commands: expected passing commands include `openspec validate m10-production-closure --strict --no-interactive`, `uv run ruff check .`, targeted production E2E/QC/API/frontend tests, frontend tests/build when relevant, and documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-e2e --evidence-root ...` command.
+- [x] 4.E1 Preflight artifact: input fixture sets source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, dependency evidence roots, and evidence root; expected output is redacted JSON under `artifacts/production-closure/<run_id>/e2e/` with stable missing-input errors and no secret values.
+- [x] 4.E2 Dependency evidence ingestion: input accepted #147/#148/#149 evidence bundles or deterministic equivalents; expected output records each dependency as consumed, skipped, blocked, or not_executed without fabricating live Slurm/object-store/met success.
+- [x] 4.E3 Stage manifest: input bounded source/model set; expected output records `download`, `canonical`, `forcing`, `slurm`, `parse`, `frequency`, `tile`, `api`, and `frontend` stage statuses, blockers, input/output URIs, derived IDs, and redacted config.
+- [x] 4.E4 API contract evidence: input derived `model_id`, `basin_version_id`, `segment_id`, `source/cycle_time`, `job_id`, and `layer_id` from the evidence bundle; expected output queries existing API contracts or records a stable not_executed/blocker reason, and does not require new run_id-specific API filters unless implemented by this issue.
+- [x] 4.E5 Frontend smoke evidence: input staging API base or deterministic evidence-backed API fixture; expected output records map/forecast/monitoring/alert lineage for source, cycle, model, run_id, QC status, and publication time, and rejects mock-only placeholder success.
+- [x] 4.E6 SHUD output QC blocker: input missing `.rivqdown`, malformed columns, NaN/Inf, missing required output, count mismatch, or time-axis mismatch; expected output blocks frequency, tile, API, and frontend publication for that run with stable error metadata while retaining raw output/log paths.
+- [x] 4.E7 Run-scoped idempotency/path/redaction: input reruns, unsafe run IDs, existing evidence bundles, and credential-shaped object/API/slurm/frontend values; expected output refuses unsafe or cross-run writes, requires explicit same-run force/cleanup behavior, and redacts secrets from stdout, evidence, docs, and screenshots/results.
+- [x] 4.E8 Fast-regression commands: expected passing commands include `openspec validate m10-production-closure --strict --no-interactive`, `uv run ruff check .`, targeted production E2E/QC/API/frontend tests, frontend tests/build when relevant, and documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-e2e --evidence-root ...` command.
 
 ### Issue #150 Selected Risk Packs
 
-- [ ] 4.R1 Public API / CLI / script entry: selected - `validate-e2e`, API contract checks, and frontend smoke entrypoints need stable JSON/error behavior.
-- [ ] 4.R2 Config / project setup: selected - source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, dependency evidence roots, and evidence root are preflight inputs.
-- [ ] 4.R3 File IO / path safety / overwrite: selected - evidence bundles, inherited object URIs, SHUD logs, tile artifacts, screenshots/results, and reruns must stay run-scoped and contained.
-- [ ] 4.R4 Schema / geospatial / time-series contracts: selected - derived identifiers, stage manifests, QC records, flood frequency outputs, tile metadata, API evidence, frontend lineage, geometry/layer IDs, valid times, and timelines must remain stable.
-- [ ] 4.R5 Numerical/QC, solver runtime, and resource bounds: selected - malformed SHUD outputs must block downstream publication, Slurm job evidence must stay linked, and bounded model/artifact/API/frontend enumeration must be enforced.
-- [ ] 4.R6 Legacy compatibility, error handling, release compatibility, and docs: selected - #147/#148/#149 lanes, M9 Basins contracts, existing API/frontend tests, optional service gates, rollback/blocker evidence, and validation docs must remain compatible.
+- [x] 4.R1 Public API / CLI / script entry: selected - `validate-e2e`, API contract checks, and frontend smoke entrypoints need stable JSON/error behavior.
+- [x] 4.R2 Config / project setup: selected - source cycle, model set, DB target, object prefix, Slurm partition/account, frontend API base, dependency evidence roots, and evidence root are preflight inputs.
+- [x] 4.R3 File IO / path safety / overwrite: selected - evidence bundles, inherited object URIs, SHUD logs, tile artifacts, screenshots/results, and reruns must stay run-scoped and contained.
+- [x] 4.R4 Schema / geospatial / time-series contracts: selected - derived identifiers, stage manifests, QC records, flood frequency outputs, tile metadata, API evidence, frontend lineage, geometry/layer IDs, valid times, and timelines must remain stable.
+- [x] 4.R5 Numerical/QC, solver runtime, and resource bounds: selected - malformed SHUD outputs must block downstream publication, Slurm job evidence must stay linked, and bounded model/artifact/API/frontend enumeration must be enforced.
+- [x] 4.R6 Legacy compatibility, error handling, release compatibility, and docs: selected - #147/#148/#149 lanes, M9 Basins contracts, existing API/frontend tests, optional service gates, rollback/blocker evidence, and validation docs must remain compatible.
 
 ### Issue #150 Deferred Risk Packs
 
