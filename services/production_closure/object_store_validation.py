@@ -1176,8 +1176,6 @@ def _validate_local_object_store_root(config: ProductionObjectStoreConfig) -> No
             f"local object store root must not be a symlink: {config.object_store_root}",
         )
     _refuse_symlink_components(config.object_store_root)
-    if config.target == "local-production-like":
-        _refuse_existing_descendant_symlinks(config.object_store_root, path_kind="local object store root")
     resolved_lane = config.lane_dir.resolve(strict=False)
     try:
         config.object_store_root.expanduser().resolve(strict=False).relative_to(resolved_lane)
@@ -1192,6 +1190,7 @@ def _validate_local_object_store_root(config: ProductionObjectStoreConfig) -> No
         default_root = (config.lane_dir / "local-object-store").resolve(strict=False)
         configured_root.relative_to(default_root)
     except ValueError:
+        _refuse_run_scoped_local_object_store_symlinks(config)
         return
     _validate_lane_path_contained(config, config.object_store_root, path_kind="local object store root")
     _refuse_existing_descendant_symlinks(config.object_store_root, path_kind="local object store root")
@@ -1221,8 +1220,29 @@ def _validate_lane_path_contained(
         ) from error
 
 
+def _refuse_run_scoped_local_object_store_symlinks(config: ProductionObjectStoreConfig) -> None:
+    root = config.object_store_root.expanduser()
+    for prefix in _run_scoped_local_object_store_prefixes(config):
+        _refuse_existing_descendant_symlinks(root / prefix, path_kind="local object store run prefix")
+
+
+def _run_scoped_local_object_store_prefixes(config: ProductionObjectStoreConfig) -> tuple[Path, ...]:
+    prefix_path = PurePosixPath(unquote(urlsplit(config.object_store_prefix).path).strip("/"))
+    prefixes = {
+        Path("runs") / config.run_id,
+        Path(*prefix_path.parts) if prefix_path.parts else Path(),
+        Path(config.version).parent,
+    }
+    return tuple(sorted((prefix for prefix in prefixes if str(prefix) != "."), key=str))
+
+
 def _refuse_existing_descendant_symlinks(root: Path, *, path_kind: str) -> None:
-    if not root.exists() or root.is_symlink():
+    if root.is_symlink():
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+            f"{path_kind} must not contain symlinks: {root}",
+        )
+    if not root.exists():
         return
     for path in root.rglob("*"):
         if path.is_symlink():

@@ -1178,17 +1178,20 @@ def _validated_slurm_log_content(
     flags = os.O_RDONLY | nofollow_flag
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
 
     pre_open_lstat: os.stat_result | None = None
-    if nofollow_flag == 0:
-        try:
-            pre_open_lstat = path.lstat()
-        except FileNotFoundError:
-            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None
-        except OSError:
-            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
-        if stat.S_ISLNK(pre_open_lstat.st_mode):
-            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None
+    try:
+        pre_open_lstat = path.lstat()
+    except FileNotFoundError:
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None
+    except OSError:
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
+    if stat.S_ISLNK(pre_open_lstat.st_mode):
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None
+    if not stat.S_ISREG(pre_open_lstat.st_mode):
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
 
     try:
         fd = os.open(path, flags)

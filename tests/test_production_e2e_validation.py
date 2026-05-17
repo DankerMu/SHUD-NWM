@@ -458,6 +458,70 @@ def test_validate_e2e_blocks_dependency_summary_swap_to_symlink_before_fd_open(
     assert target_payload not in json.dumps(dependency)
 
 
+def test_validate_e2e_blocks_dependency_parent_swap_to_symlink_before_summary_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "deps"
+    summary_parent = root / "met"
+    summary_parent.mkdir(parents=True)
+    summary_path = summary_parent / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-met"
+    outside.mkdir()
+    (outside / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "outside-met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    swapped = False
+    original_verify = e2e_validation_module._verify_bound_directory_identity
+
+    def swap_parent_before_verify(path, expected, path_unsafe_code):
+        nonlocal swapped
+        if path == summary_parent.resolve() and not swapped:
+            swapped = True
+            summary_path.unlink()
+            summary_parent.rmdir()
+            summary_parent.symlink_to(outside, target_is_directory=True)
+        return original_verify(path, expected, path_unsafe_code)
+
+    monkeypatch.setattr(e2e_validation_module, "_verify_bound_directory_identity", swap_parent_before_verify)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="parent-swap",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "parent-swap" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert swapped is True
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE"
+    assert "outside-met-run" not in json.dumps(dependency)
+
+
 @pytest.mark.parametrize(
     ("fixture", "error_code"),
     [

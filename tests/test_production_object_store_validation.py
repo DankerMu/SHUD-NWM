@@ -975,6 +975,27 @@ def test_validate_object_store_refuses_external_local_store_descendant_symlink_w
     assert sorted(path.name for path in target_prefix.iterdir()) == ["sentinel.txt"]
 
 
+def test_validate_object_store_does_not_recursively_scan_unrelated_external_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    run_id = "broad-external-root"
+    object_root = tmp_path / "external-object-store"
+    unrelated_target = tmp_path / "unrelated-target"
+    unrelated_target.mkdir()
+    (object_root / "unrelated" / "deep").mkdir(parents=True)
+    (object_root / "unrelated" / "deep" / "link").symlink_to(unrelated_target, target_is_directory=True)
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", f"s3://nhms-prod/runs/{run_id}")
+
+    config = ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id=run_id, force=True)
+    object_store_validation._validate_internal_lane_paths(config)
+
+    assert (object_root / "unrelated" / "deep" / "link").is_symlink()
+    assert not (object_root / "runs").exists()
+
+
 def test_validate_object_store_refuses_nested_local_store_symlink_without_external_write(
     tmp_path: Path,
 ) -> None:

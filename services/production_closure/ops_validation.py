@@ -296,6 +296,15 @@ class EvidenceWriter:
 
 
 @dataclass(frozen=True)
+class _BoundDependencyEvidencePath:
+    path: Path
+    root: Path
+    root_stat: os.stat_result
+    parent: Path
+    parent_stat: os.stat_result
+
+
+@dataclass(frozen=True)
 class ProductionOpsConfig:
     evidence_root: Path
     run_id: str
@@ -964,10 +973,10 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             "reason": "No accepted dependency evidence root was supplied; deterministic fast-path summary used.",
         }
     try:
-        summary_path = _dependency_summary_path(root, name)
+        summary_evidence = _dependency_summary_path(root, name)
     except ProductionOpsValidationError as error:
         return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code)
-    if summary_path is None:
+    if summary_evidence is None:
         return _invalid_dependency(
             name,
             root,
@@ -975,8 +984,9 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             "Dependency evidence root has no summary.json.",
             error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_MISSING",
         )
+    summary_path = summary_evidence.path
     try:
-        summary, summary_sha256 = _read_dependency_summary_json(summary_path)
+        summary, summary_sha256 = _read_dependency_summary_json(summary_evidence)
     except ProductionOpsValidationError as error:
         return _invalid_dependency(name, summary_path, "blocked", error.message, error_code=error.error_code)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
@@ -1042,10 +1052,10 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
         )
     try:
-        receipt_path = _dependency_acceptance_receipt_path(root, name, summary_path)
+        receipt_evidence = _dependency_acceptance_receipt_path(root, name, summary_path)
     except ProductionOpsValidationError as error:
         return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code)
-    if receipt_path is None:
+    if receipt_evidence is None:
         accepted = False
         reason = (
             "Dependency summary is missing external accepted_dependency_evidence.json receipt under the "
@@ -1053,8 +1063,9 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
         )
         receipt = None
     else:
+        receipt_path = receipt_evidence.path
         try:
-            receipt = _read_dependency_receipt_json(receipt_path)
+            receipt = _read_dependency_receipt_json(receipt_evidence)
         except ProductionOpsValidationError as error:
             return _invalid_dependency(name, receipt_path, "blocked", error.message, error_code=error.error_code)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -1406,11 +1417,11 @@ def _invalid_dependency(
     }
 
 
-def _dependency_summary_path(root: Path, name: str) -> Path | None:
-    resolved_root = _safe_dependency_root(root)
-    candidates = [resolved_root / "summary.json", resolved_root / name / "summary.json"]
+def _dependency_summary_path(root: Path, name: str) -> _BoundDependencyEvidencePath | None:
+    root_path, root_stat = _safe_dependency_root(root)
+    candidates = [root_path / "summary.json", root_path / name / "summary.json"]
     if name == "object_store":
-        candidates.append(resolved_root / "object-store" / "summary.json")
+        candidates.append(root_path / "object-store" / "summary.json")
     for candidate in candidates:
         if candidate.is_symlink():
             raise ProductionOpsValidationError(
@@ -1423,25 +1434,29 @@ def _dependency_summary_path(root: Path, name: str) -> Path | None:
                 continue
             resolved_candidate = candidate.resolve(strict=True)
             try:
-                resolved_candidate.relative_to(resolved_root)
+                resolved_candidate.relative_to(root_path)
             except ValueError as error:
                 raise ProductionOpsValidationError(
                     "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
                     "Dependency summary file must stay under its supplied dependency root.",
                 ) from error
-            return resolved_candidate
+            return _bind_dependency_evidence_path(resolved_candidate, root_path=root_path, root_stat=root_stat)
     return None
 
 
-def _dependency_acceptance_receipt_path(root: Path, name: str, summary_path: Path) -> Path | None:
-    resolved_root = _safe_dependency_root(root)
+def _dependency_acceptance_receipt_path(
+    root: Path,
+    name: str,
+    summary_path: Path,
+) -> _BoundDependencyEvidencePath | None:
+    root_path, root_stat = _safe_dependency_root(root)
     candidates = [
         summary_path.parent / "accepted_dependency_evidence.json",
-        resolved_root / "accepted_dependency_evidence.json",
-        resolved_root / name / "accepted_dependency_evidence.json",
+        root_path / "accepted_dependency_evidence.json",
+        root_path / name / "accepted_dependency_evidence.json",
     ]
     if name == "object_store":
-        candidates.append(resolved_root / "object-store" / "accepted_dependency_evidence.json")
+        candidates.append(root_path / "object-store" / "accepted_dependency_evidence.json")
     seen: set[Path] = set()
     for candidate in candidates:
         if candidate in seen:
@@ -1462,13 +1477,13 @@ def _dependency_acceptance_receipt_path(root: Path, name: str, summary_path: Pat
             )
         resolved_candidate = candidate.resolve(strict=True)
         try:
-            resolved_candidate.relative_to(resolved_root)
+            resolved_candidate.relative_to(root_path)
         except ValueError as error:
             raise ProductionOpsValidationError(
                 "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
                 "Dependency acceptance receipt must stay under its supplied dependency root.",
             ) from error
-        return resolved_candidate
+        return _bind_dependency_evidence_path(resolved_candidate, root_path=root_path, root_stat=root_stat)
     return None
 
 
@@ -1504,7 +1519,7 @@ def _dependency_artifact_references(config: ProductionOpsConfig, drill: str) -> 
                     {
                         "dependency": name,
                         "drill": drill,
-                        "summary": str(summary if summary is not None else root / "summary.json"),
+                        "summary": str(summary.path if summary is not None else root / "summary.json"),
                     }
                 )
     if not references:
@@ -1518,7 +1533,7 @@ def _dependency_artifact_references(config: ProductionOpsConfig, drill: str) -> 
     return references
 
 
-def _safe_dependency_root(root: Path) -> Path:
+def _safe_dependency_root(root: Path) -> tuple[Path, os.stat_result]:
     expanded = root.expanduser()
     _refuse_dependency_symlink_components(expanded)
     resolved_root = expanded.resolve(strict=False)
@@ -1527,7 +1542,53 @@ def _safe_dependency_root(root: Path) -> Path:
             "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
             f"Dependency evidence root must be a directory: {expanded}",
         )
-    return resolved_root
+    root_stat = _lstat_dependency_directory(
+        resolved_root,
+        symlink_code="PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK",
+        path_unsafe_code="PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+        message=f"Dependency evidence root must be a directory: {expanded}",
+    )
+    return resolved_root, root_stat
+
+
+def _bind_dependency_evidence_path(
+    path: Path,
+    *,
+    root_path: Path,
+    root_stat: os.stat_result,
+) -> _BoundDependencyEvidencePath:
+    parent = path.parent
+    parent_stat = _lstat_dependency_directory(
+        parent,
+        symlink_code="PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK",
+        path_unsafe_code="PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+        message=f"Dependency evidence parent must be a directory: {parent}",
+    )
+    return _BoundDependencyEvidencePath(
+        path=path,
+        root=root_path,
+        root_stat=root_stat,
+        parent=parent,
+        parent_stat=parent_stat,
+    )
+
+
+def _lstat_dependency_directory(
+    path: Path,
+    *,
+    symlink_code: str,
+    path_unsafe_code: str,
+    message: str,
+) -> os.stat_result:
+    try:
+        path_stat = path.lstat()
+    except OSError as error:
+        raise ProductionOpsValidationError(path_unsafe_code, message) from error
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise ProductionOpsValidationError(symlink_code, f"Dependency evidence path must not be a symlink: {path}")
+    if not stat.S_ISDIR(path_stat.st_mode):
+        raise ProductionOpsValidationError(path_unsafe_code, message)
+    return path_stat
 
 
 def _refuse_dependency_symlink_components(path: Path) -> None:
@@ -1537,7 +1598,7 @@ def _refuse_dependency_symlink_components(path: Path) -> None:
         raise ProductionOpsValidationError("PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK", error.message) from error
 
 
-def _read_dependency_summary_json(summary_path: Path) -> tuple[Any, str]:
+def _read_dependency_summary_json(summary_path: _BoundDependencyEvidencePath) -> tuple[Any, str]:
     return _read_bounded_json_with_digest(
         summary_path,
         too_large_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_TOO_LARGE",
@@ -1545,7 +1606,7 @@ def _read_dependency_summary_json(summary_path: Path) -> tuple[Any, str]:
     )
 
 
-def _read_dependency_receipt_json(receipt_path: Path) -> Any:
+def _read_dependency_receipt_json(receipt_path: _BoundDependencyEvidencePath) -> Any:
     return _read_bounded_json(
         receipt_path,
         too_large_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_TOO_LARGE",
@@ -1553,7 +1614,12 @@ def _read_dependency_receipt_json(receipt_path: Path) -> Any:
     )
 
 
-def _read_bounded_json(path: Path, *, too_large_code: str, too_large_message: str) -> Any:
+def _read_bounded_json(
+    path: _BoundDependencyEvidencePath,
+    *,
+    too_large_code: str,
+    too_large_message: str,
+) -> Any:
     parsed, _digest = _read_bounded_json_with_digest(
         path,
         too_large_code=too_large_code,
@@ -1562,7 +1628,12 @@ def _read_bounded_json(path: Path, *, too_large_code: str, too_large_message: st
     return parsed
 
 
-def _read_bounded_json_with_digest(path: Path, *, too_large_code: str, too_large_message: str) -> tuple[Any, str]:
+def _read_bounded_json_with_digest(
+    path: _BoundDependencyEvidencePath,
+    *,
+    too_large_code: str,
+    too_large_message: str,
+) -> tuple[Any, str]:
     content = _read_descriptor_bound_payload(
         path,
         too_large_code=too_large_code,
@@ -1579,7 +1650,7 @@ def _read_bounded_json_with_digest(path: Path, *, too_large_code: str, too_large
 
 
 def _read_descriptor_bound_payload(
-    path: Path,
+    evidence_path: _BoundDependencyEvidencePath,
     *,
     too_large_code: str,
     too_large_message: str,
@@ -1587,6 +1658,9 @@ def _read_descriptor_bound_payload(
     path_unsafe_code: str,
     invalid_code: str,
 ) -> bytes:
+    path = evidence_path.path
+    _verify_bound_directory_identity(evidence_path.root, evidence_path.root_stat, path_unsafe_code)
+    _verify_bound_directory_identity(evidence_path.parent, evidence_path.parent_stat, path_unsafe_code)
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -1644,6 +1718,26 @@ def _read_descriptor_bound_payload(
         return b"".join(chunks)
     finally:
         os.close(fd)
+
+
+def _verify_bound_directory_identity(path: Path, expected: os.stat_result, path_unsafe_code: str) -> None:
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise ProductionOpsValidationError(
+            path_unsafe_code,
+            f"Dependency evidence directory changed while opening evidence: {path}",
+        ) from error
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or current.st_dev != expected.st_dev
+        or current.st_ino != expected.st_ino
+    ):
+        raise ProductionOpsValidationError(
+            path_unsafe_code,
+            f"Dependency evidence directory changed while opening evidence: {path}",
+        )
 
 
 def _default_setting_value(config: ProductionOpsConfig, service: str, setting: str) -> str:
