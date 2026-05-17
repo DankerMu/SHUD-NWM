@@ -34,6 +34,8 @@ SERVICE_CONFIG_TEMPLATE = "docs/runbooks/production-service-config.md"
 ROLLBACK_RUNBOOK = "docs/runbooks/rollback-drills.md"
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
 MAX_PERCENT_DECODE_ROUNDS = 4
+MAX_DEPENDENCY_SUMMARY_DEPTH = 128
+MAX_DEPENDENCY_SUMMARY_NODES = 10_000
 
 SERVICE_CONFIGS = {
     "api": ("DATABASE_URL", "AUTH_BACKEND", "AUDIT_LOG_DESTINATION", "CORS_ALLOWED_ORIGINS"),
@@ -975,7 +977,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
         summary, summary_sha256 = _read_dependency_summary_json(summary_path)
     except ProductionOpsValidationError as error:
         return _invalid_dependency(name, summary_path, "blocked", error.message, error_code=error.error_code)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         return _invalid_dependency(
             name,
             summary_path,
@@ -991,6 +993,10 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             "Dependency summary JSON must be an object.",
             error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
         )
+    try:
+        _validate_dependency_summary_complexity(summary)
+    except ProductionOpsValidationError as error:
+        return _invalid_dependency(name, summary_path, "blocked", error.message, error_code=error.error_code)
     schema_matches = summary.get("schema") == contract["schema"]
     issue_matches = summary.get("issue") == contract["issue"]
     summary_status = str(summary.get("status", "unknown"))
@@ -1325,15 +1331,37 @@ def _summary_has_accepted_live_proof(name: str, summary: Mapping[str, Any]) -> b
     return True
 
 
+def _validate_dependency_summary_complexity(summary: Mapping[str, Any]) -> None:
+    tuple(_walk_summary_fields(summary))
+
+
 def _walk_summary_fields(value: Any) -> tuple[tuple[str, Any], ...]:
     fields: list[tuple[str, Any]] = []
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            fields.append((str(key), nested))
-            fields.extend(_walk_summary_fields(nested))
-    elif isinstance(value, list):
-        for nested in value:
-            fields.extend(_walk_summary_fields(nested))
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    visited_nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        visited_nodes += 1
+        if visited_nodes > MAX_DEPENDENCY_SUMMARY_NODES:
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+                (
+                    "Dependency summary exceeds configured complexity limit of "
+                    f"{MAX_DEPENDENCY_SUMMARY_NODES} visited JSON nodes."
+                ),
+            )
+        if depth > MAX_DEPENDENCY_SUMMARY_DEPTH:
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+                f"Dependency summary exceeds configured nesting limit of {MAX_DEPENDENCY_SUMMARY_DEPTH} levels.",
+            )
+        if isinstance(current, Mapping):
+            for key, nested in reversed(tuple(current.items())):
+                fields.append((str(key), nested))
+                stack.append((nested, depth + 1))
+        elif isinstance(current, list):
+            for nested in reversed(current):
+                stack.append((nested, depth + 1))
     return tuple(fields)
 
 
