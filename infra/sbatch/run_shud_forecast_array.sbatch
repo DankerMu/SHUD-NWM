@@ -41,7 +41,40 @@ PY
 )"
 if [[ "$VALIDATION_EXPECTED_OUTCOME" == "controlled_failure" ]]; then
   echo "{{controlled_failure_log_marker | default('NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED')}}"
-  echo "NON_FINITE_FLOW"
-  exit 2
+  python - <<'PY'
+from datetime import UTC, datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from workers.output_parser.parser import (
+    HydroRunContext,
+    OutputParsingError,
+    RiverSegmentOrder,
+    parse_rivqdown_file,
+)
+
+with TemporaryDirectory() as tmpdir:
+    malformed = Path(tmpdir) / "controlled_failure.rivqdown"
+    malformed.write_text("time,seg_a\n2026-05-16T00:00:00Z,NaN\n", encoding="utf-8")
+    try:
+        parse_rivqdown_file(
+            malformed,
+            HydroRunContext(
+                run_id="production_closure_controlled_failure",
+                model_id="validation",
+                basin_version_id="basin_v1",
+                river_network_version_id="rnv_v1",
+                source_id="GFS",
+                cycle_id="production_closure_validation",
+                cycle_time=datetime(2026, 5, 16, tzinfo=UTC),
+                start_time=datetime(2026, 5, 16, tzinfo=UTC),
+            ),
+            (RiverSegmentOrder("seg_a", "rnv_v1", 0),),
+        )
+    except OutputParsingError as error:
+        print(f"{error.error_code}: {error.message}")
+        raise SystemExit(2 if error.error_code == "NON_FINITE_FLOW" else 1) from error
+raise SystemExit(1)
+PY
 fi
 nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"

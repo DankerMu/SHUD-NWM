@@ -182,10 +182,12 @@ task `1` shared stdout/stderr evidence must include the
 rendered sbatch script and the `NON_FINITE_FLOW` worker/QC error signature from
 the intended malformed-output path. The rendered script emits this validation
 failure only when the selected task manifest declares
-`expected_outcome=controlled_failure`; ordinary task `1` workloads do not get
-the validation marker. Use `--force` only for an intentional rerun of an
-existing `run_id`; the default protects audit evidence from accidental
-overwrite.
+`expected_outcome=controlled_failure`; that branch invokes the repository
+output-parser `.rivqdown` parser on a minimal NaN fixture so the signature comes
+from the QC/parser path rather than a bare shell shortcut. Ordinary task `1`
+workloads do not get the validation marker. Use `--force` only for an
+intentional rerun of an existing `run_id`; the default protects audit evidence
+from accidental overwrite.
 
 In submit mode, the manifest index rendered into `NHMS_MANIFEST_INDEX` is copied
 under the configured shared workspace at
