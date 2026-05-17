@@ -917,6 +917,23 @@ def test_validate_object_store_existing_lane_regular_file_raises_stable_error(tm
     assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
 
 
+@pytest.mark.parametrize("suffix", ["new-root", "missing/deep"])
+def test_validate_object_store_rejects_primary_evidence_root_under_existing_symlink(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    target_root = tmp_path / "target-root"
+    target_root.mkdir()
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        ProductionObjectStoreConfig.from_env(evidence_root=symlink_root / suffix, run_id="safe")
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK"
+    assert not (target_root / suffix).exists()
+
+
 def test_validate_object_store_refuses_nested_synthetic_basins_symlink_without_external_write(
     tmp_path: Path,
 ) -> None:

@@ -254,6 +254,23 @@ def test_validate_met_rejects_path_escape_before_writing(tmp_path: Path, capsys:
     assert not (tmp_path / "artifacts").exists()
 
 
+@pytest.mark.parametrize("suffix", ["new-root", "missing/deep"])
+def test_validate_met_rejects_primary_evidence_root_under_existing_symlink(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    target_root = tmp_path / "target-root"
+    target_root.mkdir()
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        ProductionMetConfig.from_env(evidence_root=symlink_root / suffix, run_id="safe")
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_EVIDENCE_SYMLINK"
+    assert not (target_root / suffix).exists()
+
+
 def test_validate_met_same_run_requires_force_and_force_replaces_bundle(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

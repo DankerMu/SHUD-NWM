@@ -1578,6 +1578,12 @@ def test_validate_ops_run_id_idempotency_path_safety_payload_limit_and_secret_re
         ProductionOpsConfig.from_env(evidence_root=symlink_root, run_id="safe")
     assert symlink_exc.value.error_code == "PRODUCTION_OPS_EVIDENCE_SYMLINK"
 
+    for suffix in ("new-root", "missing/deep"):
+        with pytest.raises(ProductionOpsValidationError) as nested_symlink_exc:
+            ProductionOpsConfig.from_env(evidence_root=symlink_root / suffix, run_id="safe")
+        assert nested_symlink_exc.value.error_code == "PRODUCTION_OPS_EVIDENCE_SYMLINK"
+        assert not (target_root / suffix).exists()
+
     config = ProductionOpsConfig.from_env(evidence_root=tmp_path / "payload", run_id="payload")
     writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True, max_payload_bytes=64)
     writer.prepare()

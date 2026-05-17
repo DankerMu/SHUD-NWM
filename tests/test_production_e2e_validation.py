@@ -696,6 +696,23 @@ def test_validate_e2e_rejects_unsafe_run_id_before_writes(tmp_path: Path) -> Non
     assert not (tmp_path / "artifacts").exists()
 
 
+@pytest.mark.parametrize("suffix", ["new-root", "missing/deep"])
+def test_validate_e2e_rejects_primary_evidence_root_under_existing_symlink(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    target_root = tmp_path / "target-root"
+    target_root.mkdir()
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        ProductionE2EConfig.from_env(evidence_root=symlink_root / suffix, run_id="safe")
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_SYMLINK"
+    assert not (target_root / suffix).exists()
+
+
 @pytest.mark.parametrize(
     ("field_name", "value", "error_code"),
     [

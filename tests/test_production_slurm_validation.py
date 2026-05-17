@@ -1464,6 +1464,28 @@ def test_validate_slurm_rejects_unsafe_run_id(tmp_path: Path) -> None:
     assert not (tmp_path / "escape").exists()
 
 
+@pytest.mark.parametrize("suffix", ["new-root", "missing/deep"])
+def test_validate_slurm_rejects_primary_evidence_root_under_existing_symlink(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    target_root = tmp_path / "target-root"
+    target_root.mkdir()
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(slurm_validation.ProductionValidationError) as exc_info:
+        slurm_validation.ProductionSlurmConfig.from_env(
+            evidence_root=symlink_root / suffix,
+            run_id="safe",
+            submit=False,
+            fake_slurm=True,
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_SLURM_EVIDENCE_SYMLINK"
+    assert not (target_root / suffix).exists()
+
+
 def test_validate_slurm_refuses_existing_evidence_file_unless_force(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")

@@ -429,9 +429,11 @@ def test_validate_scale_run_id_idempotency_force_path_safety_and_redaction(
         ProductionScaleConfig.from_env(evidence_root=symlink_root, run_id="safe")
     assert symlink_exc.value.error_code == "PRODUCTION_SCALE_EVIDENCE_SYMLINK"
 
-    with pytest.raises(ProductionScaleValidationError) as nested_symlink_exc:
-        ProductionScaleConfig.from_env(evidence_root=symlink_root / "new-root", run_id="safe")
-    assert nested_symlink_exc.value.error_code == "PRODUCTION_SCALE_EVIDENCE_SYMLINK"
+    for suffix in ("new-root", "missing/deep"):
+        with pytest.raises(ProductionScaleValidationError) as nested_symlink_exc:
+            ProductionScaleConfig.from_env(evidence_root=symlink_root / suffix, run_id="safe")
+        assert nested_symlink_exc.value.error_code == "PRODUCTION_SCALE_EVIDENCE_SYMLINK"
+        assert not (target_root / suffix).exists()
 
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "supersecret")
     exit_code = slurm_validation._argparse_main(
