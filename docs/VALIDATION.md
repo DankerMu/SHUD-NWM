@@ -621,6 +621,84 @@ uv run pytest -q tests/test_production_scale_validation.py
 uv run pytest -q tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_flood_alerts_api.py tests/test_openapi_drift.py
 ```
 
+## M10 Production Ops / Security / Runbook Closure
+
+Issue #152 adds an opt-in `nhms-production validate-ops` lane. The default
+fast path is deterministic and self-contained: it does not require a real
+identity provider, credentials, alert sink, object store, Slurm, PostGIS/API,
+frontend server, or scheduler. It writes evidence, but the default summary is
+`release_blocked` with `final_production_readiness_claimed=false`.
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-ops \
+  --evidence-root artifacts/production-closure \
+  --run-id local-152-production-ops
+```
+
+Useful knobs:
+
+- `--auth-mode` / `NHMS_PRODUCTION_OPS_AUTH_MODE`: defaults to
+  `fallback_release_gated`; live backend auth must be supplied before final
+  readiness can be claimed.
+- `--required-roles` / `NHMS_PRODUCTION_OPS_REQUIRED_ROLES`: comma-separated
+  role list. It must include the action roles for model activation, rerun,
+  cancel, QC override, source config change, and tile republish.
+- `--alert-target` / `NHMS_PRODUCTION_OPS_ALERT_TARGET`: defaults to
+  `dry-run://ops-validation`. Userinfo, query strings, fragments, traversal,
+  and secret-shaped assignments are rejected.
+- `--deployment-config-source` and `--rollback-scope`: recorded in preflight
+  and evidence. The default rollback scope is simulated drills.
+- `--slurm-evidence-root`, `--object-store-evidence-root`,
+  `--met-evidence-root`, `--e2e-evidence-root`, and `--scale-evidence-root`:
+  optional accepted dependency summaries for #147-#151.
+- `--dependency-statuses`: optional comma-separated statuses such as
+  `slurm=accepted,object_store=skipped,met=blocked,e2e=not_executed,scale=accepted`
+  for fixture validation.
+
+Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
+
+- `preflight.json`: auth mode, roles, alert target, deployment config source,
+  rollback scope, dependency evidence roots/statuses, evidence root, and
+  self-contained execution policy.
+- `config_validation.json`: API, orchestrator, Slurm gateway, tile publisher,
+  frontend, database, object store, source adapter, and workspace root required
+  settings, redacted values, and stable unsafe-setting blockers.
+- `auth_rbac.json` and `auth_release_blockers.json`: model activation, rerun,
+  cancel, QC override, source config change, and tile republish decisions for
+  allowed, denied, and release-blocked cases, with required roles, stable error
+  codes, execution modes, live-auth flags, no denied/release-blocked mutation,
+  residual risk, and removal criteria.
+- `audit_redaction.json`: allowed/denied/release-blocked audit rows with actor,
+  role, target, previous/new state, decision, reason, lineage, and redacted
+  secret-shaped fields across config/log/manifest/API/alert/PR/frontend shapes.
+- `monitoring_alerts.json`: source latency, Slurm backlog, failed basin retries,
+  object-store failure, stale analysis state, tile error, and API p95 alert
+  evidence with metric, severity, observed value, threshold, dry-run/live mode,
+  runbook link, and operator action.
+- `rollback_drills.json`: bad model activation, failed publish/import, failed
+  source cycle, failed Slurm array, and bad tile release drills with command,
+  precondition, expected evidence, recovery, residual risk, dependency
+  references, and simulated/live execution flags.
+- `dependency_closure.json`, `environment.json`, and `summary.json`: #147-#151
+  accepted/skipped/blocked/not-executed dependency closure, redacted
+  environment, final release blockers, live flags, and evidence file index.
+
+Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
+supplied. Unsafe run IDs, symlinked evidence roots, oversized payloads,
+credential-shaped config/auth/alert values, and unsafe dependency status inputs
+fail with stable errors and no secret leakage.
+
+### Fast Regression Commands
+
+Local #152 verification uses these fast regression commands:
+
+```bash
+openspec validate m10-production-closure --strict --no-interactive
+uv run ruff check services/production_closure tests/test_production_ops_validation.py docs/VALIDATION.md progress.md
+uv run pytest -q tests/test_production_ops_validation.py
+uv run pytest -q tests/test_production_ops_validation.py tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_production_slurm_validation.py
+```
+
 ## Opt-In Real Basins Smoke
 
 Run only when `data/Basins` exists and points at an accessible Basins tree.

@@ -33,6 +33,11 @@ from services.production_closure.object_store_validation import (
     ProductionObjectStoreValidationError,
     validate_object_store,
 )
+from services.production_closure.ops_validation import (
+    ProductionOpsConfig,
+    ProductionOpsValidationError,
+    validate_ops,
+)
 from services.production_closure.scale_validation import (
     ProductionScaleConfig,
     ProductionScaleValidationError,
@@ -1777,6 +1782,64 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"PRODUCTION_SCALE_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("validate-ops")
+    @click.option("--evidence-root", type=click.Path(path_type=Path), required=True)
+    @click.option("--run-id")
+    @click.option("--auth-mode", default=None)
+    @click.option("--required-roles", default=None)
+    @click.option("--alert-target", default=None)
+    @click.option("--deployment-config-source", default=None)
+    @click.option("--rollback-scope", default=None)
+    @click.option("--slurm-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--object-store-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--met-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--e2e-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--scale-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--dependency-statuses", default=None)
+    @click.option("--force", is_flag=True, default=False)
+    def validate_ops_command(
+        evidence_root: Path,
+        run_id: str | None,
+        auth_mode: str | None,
+        required_roles: str | None,
+        alert_target: str | None,
+        deployment_config_source: str | None,
+        rollback_scope: str | None,
+        slurm_evidence_root: Path | None,
+        object_store_evidence_root: Path | None,
+        met_evidence_root: Path | None,
+        e2e_evidence_root: Path | None,
+        scale_evidence_root: Path | None,
+        dependency_statuses: str | None,
+        force: bool,
+    ) -> None:
+        try:
+            summary = validate_ops(
+                ProductionOpsConfig.from_env(
+                    evidence_root=evidence_root,
+                    run_id=run_id,
+                    auth_mode=auth_mode,
+                    required_roles=required_roles,
+                    alert_target=alert_target,
+                    deployment_config_source=deployment_config_source,
+                    rollback_scope=rollback_scope,
+                    slurm_evidence_root=slurm_evidence_root,
+                    object_store_evidence_root=object_store_evidence_root,
+                    met_evidence_root=met_evidence_root,
+                    e2e_evidence_root=e2e_evidence_root,
+                    scale_evidence_root=scale_evidence_root,
+                    dependency_statuses=dependency_statuses,
+                    force=force,
+                )
+            )
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
+        except ProductionOpsValidationError as error:
+            click.echo(f"{error.error_code}: {redact_text(error.message)}", err=True)
+            raise SystemExit(1) from error
+        except Exception as error:
+            click.echo(f"PRODUCTION_OPS_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
+            raise SystemExit(1) from error
+
     try:
         cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
     except click.ClickException as error:
@@ -1844,6 +1907,21 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     scale_parser.add_argument("--object-prefix", default=None)
     scale_parser.add_argument("--latency-fixture", default=None)
     scale_parser.add_argument("--force", action="store_true")
+    ops_parser = subparsers.add_parser("validate-ops")
+    ops_parser.add_argument("--evidence-root", type=Path, required=True)
+    ops_parser.add_argument("--run-id")
+    ops_parser.add_argument("--auth-mode", default=None)
+    ops_parser.add_argument("--required-roles", default=None)
+    ops_parser.add_argument("--alert-target", default=None)
+    ops_parser.add_argument("--deployment-config-source", default=None)
+    ops_parser.add_argument("--rollback-scope", default=None)
+    ops_parser.add_argument("--slurm-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--object-store-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--met-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--e2e-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--scale-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--dependency-statuses", default=None)
+    ops_parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "validate-slurm":
@@ -1999,6 +2077,40 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             return 1
         except Exception as error:
             print(f"PRODUCTION_SCALE_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "validate-ops":
+        try:
+            print(
+                json.dumps(
+                    redact_payload(
+                        validate_ops(
+                            ProductionOpsConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                auth_mode=args.auth_mode,
+                                required_roles=args.required_roles,
+                                alert_target=args.alert_target,
+                                deployment_config_source=args.deployment_config_source,
+                                rollback_scope=args.rollback_scope,
+                                slurm_evidence_root=args.slurm_evidence_root,
+                                object_store_evidence_root=args.object_store_evidence_root,
+                                met_evidence_root=args.met_evidence_root,
+                                e2e_evidence_root=args.e2e_evidence_root,
+                                scale_evidence_root=args.scale_evidence_root,
+                                dependency_statuses=args.dependency_statuses,
+                                force=args.force,
+                            )
+                        )
+                    ),
+                    sort_keys=True,
+                )
+            )
+        except ProductionOpsValidationError as error:
+            print(f"{error.error_code}: {redact_text(error.message)}", file=sys.stderr)
+            return 1
+        except Exception as error:
+            print(f"PRODUCTION_OPS_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")
