@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from services.production_closure import slurm_validation
-from services.production_closure.met_validation import ProductionMetConfig, validate_met
+from services.production_closure.met_validation import (
+    ProductionMetConfig,
+    ProductionMetValidationError,
+    _forcing_qc_payload,
+    validate_met,
+)
+from workers.forcing_producer.producer import ForcingTimeseriesRow
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -55,7 +61,7 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
 
     raw = _read_json(lane_dir / "raw_cycle_manifest.json")
     assert raw["status"] == "ready"
-    assert raw["total_file_count"] == 49
+    assert raw["total_file_count"] == 15
     gfs = next(source for source in raw["sources"] if source["source"] == "GFS")
     assert gfs["status"] == "available"
     assert gfs["file_count"] == 15
@@ -63,14 +69,30 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert gfs["retry_count"] == 0
     assert gfs["object_uri"].startswith("s3://nhms-prod/met/runs/m10_149/met/raw/gfs/")
     assert len(gfs["checksums"]) > 1
+    ifs = next(source for source in raw["sources"] if source["source"] == "IFS")
+    era5 = next(source for source in raw["sources"] if source["source"] == "ERA5")
+    assert ifs["status"] == "skipped"
+    assert era5["status"] == "skipped"
+    assert ifs["canonical_lineage_required"] is False
 
     canonical = _read_json(lane_dir / "canonical_products.json")
     assert canonical["status"] == "ready"
     assert canonical["product_count"] == 14
+    assert {
+        source["source"]: source["conversion_status"] for source in canonical["source_statuses"]
+    } == {
+        "GFS": "canonical_ready",
+        "IFS": "skipped",
+        "ERA5": "skipped",
+        "CLDAS": "skipped",
+    }
     product = canonical["products"][0]
     assert set(product) >= {"source_cycle", "variable", "unit", "time_axis", "object_uri", "checksum", "lineage"}
-    assert canonical["failure_checks"][0]["status"] == "blocked"
-    assert canonical["failure_checks"][0]["downstream_forcing_ready"] is False
+    failure_checks = {check["failure_type"]: check for check in canonical["failure_checks"] if "failure_type" in check}
+    assert failure_checks["malformed_raw"]["status"] == "blocked"
+    assert failure_checks["nonfinite"]["status"] == "blocked"
+    assert failure_checks["out_of_range"]["status"] == "blocked"
+    assert all(check["downstream_forcing_ready"] is False for check in failure_checks.values())
 
     forcing = _read_json(lane_dir / "forcing_manifest.json")
     assert forcing["status"] == "forcing_ready"
@@ -79,6 +101,9 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert qc["status"] == "pass"
     assert qc["required_variables"]["missing"] == []
     assert qc["continuity"]["status"] == "pass"
+    assert qc["continuity"]["expected_valid_times"] == ["2026-05-07T00:00:00Z", "2026-05-07T03:00:00Z"]
+    assert qc["package_uri"].startswith("s3://nhms-prod/met/runs/m10_149/met/forcing/gfs/")
+    assert qc["package_manifest_uri"].endswith("/forcing_package.json")
     assert all(check["status"] == "pass" for check in qc["range_checks"])
 
     lineage = _read_json(lane_dir / "best_available_lineage.json")
@@ -96,12 +121,22 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert "https://example.invalid/gfs" in evidence_text
 
 
-def test_validate_met_rejects_sensitive_object_prefix_without_evidence(
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "s3://nhms-prod/met?token=secret",
+        "s3://nhms-prod/met/../other",
+        "s3://nhms-prod/met/%2e%2e/other",
+        "s3://nhms-prod/met/./other",
+    ],
+)
+def test_validate_met_rejects_unsafe_object_prefix_without_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    prefix: str,
 ) -> None:
-    monkeypatch.setenv("NHMS_PRODUCTION_MET_OBJECT_PREFIX", "s3://nhms-prod/met?token=secret")
+    monkeypatch.setenv("NHMS_PRODUCTION_MET_OBJECT_PREFIX", prefix)
 
     try:
         exit_code = slurm_validation.main(
@@ -132,8 +167,9 @@ def test_validate_met_live_gate_does_not_claim_success_without_executor(
     gfs = next(source for source in source_config["sources"] if source["source"] == "GFS")
     assert gfs["execution_mode"] == "not_executed"
     raw = _read_json(lane_dir / "raw_cycle_manifest.json")
+    assert raw["status"] == "blocked"
     raw_gfs = next(source for source in raw["sources"] if source["source"] == "GFS")
-    assert raw_gfs["status"] == "unavailable"
+    assert raw_gfs["status"] == "not_executed"
     assert raw_gfs["file_count"] == 0
 
 
@@ -209,6 +245,125 @@ def test_validate_met_disabled_sources_record_skipped_without_success(tmp_path: 
     assert modes["ERA5"] == "skipped"
     assert modes["CLDAS"] == "restricted"
     assert next(source for source in raw["sources"] if source["source"] == "IFS")["file_count"] == 0
+
+
+def test_validate_met_rejects_cycle_window_missing_endpoint(tmp_path: Path) -> None:
+    config = ProductionMetConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="missingendpoint",
+        cycle_end="2026-05-07T06:00:00Z",
+        forecast_hours="0,3",
+    )
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        validate_met(config)
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_FORECAST_HOURS_CYCLE_WINDOW_INCOMPLETE"
+    assert not (tmp_path / "artifacts" / "missingendpoint" / "met").exists()
+
+
+def test_validate_met_rejects_cycle_window_missing_intermediate(tmp_path: Path) -> None:
+    config = ProductionMetConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="missingmiddle",
+        cycle_end="2026-05-07T06:00:00Z",
+        forecast_hours="0,6",
+    )
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        validate_met(config)
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_FORECAST_HOURS_CYCLE_WINDOW_INCOMPLETE"
+
+
+def test_validate_met_qc_fails_missing_expected_endpoint_and_intermediate(tmp_path: Path) -> None:
+    config = ProductionMetConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="qcmissingtimes",
+        cycle_end="2026-05-07T06:00:00Z",
+        forecast_hours="0,3,6",
+    )
+    rows = [
+        ForcingTimeseriesRow(
+            forcing_version_id="qc_fixture",
+            basin_version_id="basin_v1",
+            station_id="station_1",
+            valid_time=config.cycle_start,
+            source_id="gfs",
+            variable=variable,
+            value=1.0 if variable != "Press" else 101325.0,
+            unit="fixture",
+            native_resolution="3h",
+        )
+        for variable in ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
+    ]
+
+    qc = _forcing_qc_payload(
+        rows,
+        {"lineage": {}},
+        expected_valid_times=(config.cycle_start, config.cycle_start.replace(hour=3), config.cycle_end),
+        package_uri="fixture://package",
+        package_manifest_uri="fixture://package/forcing_package.json",
+    )
+
+    assert qc["status"] == "fail"
+    assert qc["continuity"]["status"] == "fail"
+    assert qc["continuity"]["missing_valid_times"] == ["2026-05-07T03:00:00Z", "2026-05-07T06:00:00Z"]
+
+
+def test_validate_met_disabled_fallback_policy_blocks_without_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_MET_CACHED_FALLBACK_POLICY", "disabled")
+
+    summary = validate_met(
+        ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="fallbackdisabled", sources="GFS")
+    )
+
+    lane_dir = tmp_path / "artifacts" / "fallbackdisabled" / "met"
+    assert summary["status"] == "blocked"
+    raw = _read_json(lane_dir / "raw_cycle_manifest.json")
+    assert raw["status"] == "blocked"
+    gfs = next(source for source in raw["sources"] if source["source"] == "GFS")
+    assert gfs["status"] == "not_executed"
+    assert gfs["execution_mode"] == "not_executed"
+    assert gfs["file_count"] == 0
+
+
+def test_validate_met_cached_only_policy_uses_cached_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_MET_CACHED_FALLBACK_POLICY", "cached_only")
+
+    summary = validate_met(
+        ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="cachedonly", sources="GFS")
+    )
+
+    lane_dir = tmp_path / "artifacts" / "cachedonly" / "met"
+    assert summary["status"] == "ready"
+    source_config = _read_json(lane_dir / "source_config.json")
+    gfs_config = next(source for source in source_config["sources"] if source["source"] == "GFS")
+    assert gfs_config["execution_mode"] == "deterministic_fixture"
+    assert "cached" in gfs_config["reason"]
+
+
+def test_validate_met_raw_manifest_uses_redacted_configured_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_MET_GFS_ENDPOINT", "https://user:pass@mirror.example.invalid/gfs?token=secret")
+
+    validate_met(
+        ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="endpointlineage", sources="GFS")
+    )
+
+    lane_dir = tmp_path / "artifacts" / "endpointlineage" / "met"
+    raw = _read_json(lane_dir / "raw_cycle_manifest.json")
+    gfs = next(source for source in raw["sources"] if source["source"] == "GFS")
+    assert gfs["manifest_entries"][0]["endpoint_identity"] == "https://mirror.example.invalid/gfs"
+    assert gfs["manifest_entries"][0]["remote_url"].startswith("https://mirror.example.invalid/gfs/")
+    evidence_text = "\n".join(path.read_text(encoding="utf-8") for path in lane_dir.glob("*.json"))
+    assert "user:pass@" not in evidence_text
+    assert "token=secret" not in evidence_text
 
 
 def test_argparse_validate_met_fallback(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

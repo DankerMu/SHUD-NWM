@@ -16,12 +16,16 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packages.common.object_store import LocalObjectStore
-from packages.common.redaction import redact_payload
+from packages.common.redaction import redact_payload, redact_text
 from packages.common.test_netcdf4 import encode_test_netcdf4
 from workers.canonical_converter.converter import (
     CanonicalConversionError,
     CanonicalConverter,
     CanonicalConverterConfig,
+    ERA5CanonicalConverter,
+    ERA5CanonicalConverterConfig,
+    IFSCanonicalConverter,
+    IFSCanonicalConverterConfig,
     format_cycle_time,
     parse_cycle_time,
 )
@@ -47,7 +51,7 @@ SOURCE_ORDER = ("GFS", "IFS", "ERA5", "CLDAS")
 DETERMINISTIC_SOURCES = ("GFS", "IFS", "ERA5")
 SOURCE_STORAGE_ID = {"GFS": "gfs", "IFS": "IFS", "ERA5": "ERA5", "CLDAS": "CLDAS"}
 DEFAULT_CYCLE_START = "2026-05-07T00:00:00Z"
-DEFAULT_CYCLE_END = "2026-05-07T06:00:00Z"
+DEFAULT_CYCLE_END = "2026-05-07T03:00:00Z"
 DEFAULT_FORECAST_HOURS = (0, 3)
 DEFAULT_SOURCE_SUBSET = ("GFS", "IFS", "ERA5")
 GFS_VARIABLES = ("tmp2m", "apcp", "rh2m", "u10m", "v10m", "pressfc", "dswrf")
@@ -63,6 +67,7 @@ ERA5_VARIABLES = (
     "surface_net_thermal_radiation",
 )
 REQUIRED_FORCING_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
+NEGATIVE_FIXTURE_ENV = "NHMS_PRODUCTION_MET_NEGATIVE_FIXTURE"
 FORCING_RANGES = {
     "PRCP": (0.0, 500.0),
     "TEMP": (-80.0, 60.0),
@@ -506,7 +511,7 @@ def _source_config_payload(config: ProductionMetConfig) -> dict[str, Any]:
     for source in SOURCE_ORDER:
         status = _source_status(config, source)
         execution_mode = _source_execution_mode(config, source, status)
-        endpoint = os.getenv(f"NHMS_PRODUCTION_MET_{source}_ENDPOINT", _default_endpoint(source))
+        endpoint = _configured_endpoint(source)
         sources.append(
             {
                 "source": source,
@@ -544,7 +549,7 @@ def _write_raw_source_evidence(config: ProductionMetConfig, store: LocalObjectSt
                 {
                     "source": source,
                     "source_id": SOURCE_STORAGE_ID[source],
-                    "status": "restricted" if status == "restricted" else "unavailable",
+                    "status": _raw_unavailable_status(status, execution_mode),
                     "execution_mode": execution_mode,
                     "reason": _source_reason(config, source, status, execution_mode),
                     "cycle_time": None,
@@ -559,23 +564,83 @@ def _write_raw_source_evidence(config: ProductionMetConfig, store: LocalObjectSt
             )
             continue
 
+        if source != "GFS":
+            source_entries.append(_skipped_noncanonical_source(config, source, execution_mode))
+            continue
+
         manifest = _write_deterministic_source_manifest(config, store, source)
         total_files += manifest["file_count"]
         total_bytes += manifest["byte_count"]
         source_entries.append(manifest)
 
+    raw_status, blockers = _raw_aggregate_status(source_entries)
     payload = {
         "schema": "nhms.production_closure.met.raw_cycle_manifest.v1",
-        "status": "ready",
+        "status": raw_status,
         "run_id": config.run_id,
         "cycle_time": _format_time(config.cycle_start),
         "sources": source_entries,
         "total_file_count": total_files,
         "total_byte_count": total_bytes,
+        "blockers": blockers,
         "bounds": _bounds_payload(config.bounds),
     }
     _enforce_manifest_bound(config, total_files)
     return payload
+
+
+def _raw_unavailable_status(status: str, execution_mode: str) -> str:
+    if status == "restricted":
+        return "restricted"
+    if execution_mode == "skipped":
+        return "skipped"
+    if execution_mode == "not_executed":
+        return "not_executed"
+    return "unavailable"
+
+
+def _skipped_noncanonical_source(config: ProductionMetConfig, source: str, execution_mode: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "source_id": SOURCE_STORAGE_ID[source],
+        "status": "skipped",
+        "execution_mode": "skipped",
+        "reason": (
+            f"{source} deterministic fixture is available but skipped in this closure lane because "
+            "raw-to-canonical and forcing lineage is selected for GFS only"
+        ),
+        "configured_execution_mode": execution_mode,
+        "cycle_time": None,
+        "selected_forecast_hours": [],
+        "file_count": 0,
+        "byte_count": 0,
+        "checksums": [],
+        "retry_count": 0,
+        "raw_uri": None,
+        "object_uri": None,
+        "canonical_lineage_required": False,
+    }
+
+
+def _raw_aggregate_status(source_entries: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    blockers = []
+    for entry in source_entries:
+        if entry.get("source") == "CLDAS" and entry.get("status") == "restricted":
+            continue
+        if entry.get("execution_mode") == "skipped":
+            continue
+        if entry.get("status") != "available":
+            blockers.append(
+                {
+                    "error_code": "PRODUCTION_MET_RAW_SOURCE_NOT_AVAILABLE",
+                    "source": entry.get("source"),
+                    "source_id": entry.get("source_id"),
+                    "status": entry.get("status"),
+                    "execution_mode": entry.get("execution_mode"),
+                    "reason": entry.get("reason"),
+                }
+            )
+    return ("ready" if not blockers else "blocked", blockers)
 
 
 def _write_deterministic_source_manifest(
@@ -585,6 +650,7 @@ def _write_deterministic_source_manifest(
 ) -> dict[str, Any]:
     source_id = SOURCE_STORAGE_ID[source]
     compact_cycle = format_cycle_time(config.cycle_start)
+    endpoint_identity = _configured_endpoint(source).rstrip("/")
     entries = []
     for forecast_hour in config.forecast_hours:
         for variable in _source_variables(source):
@@ -599,10 +665,8 @@ def _write_deterministic_source_manifest(
                     "cycle_time": _format_time(config.cycle_start),
                     "forecast_hour": forecast_hour,
                     "variable": variable,
-                    "remote_url": (
-                        f"{_default_endpoint(source).rstrip('/')}/{compact_cycle}/"
-                        f"f{forecast_hour:03d}/{variable}"
-                    ),
+                    "remote_url": f"{endpoint_identity}/{compact_cycle}/f{forecast_hour:03d}/{variable}",
+                    "endpoint_identity": endpoint_identity,
                     "local_key": key,
                     "object_uri": object_uri,
                     "size_bytes": len(content),
@@ -620,6 +684,7 @@ def _write_deterministic_source_manifest(
             "forecast_hours": list(config.forecast_hours),
             "execution_mode": "deterministic_fixture",
             "production_like": True,
+            "endpoint_identity": endpoint_identity,
         },
         "entries": [
             {
@@ -671,16 +736,7 @@ def _write_canonical_evidence(
             "failure_checks": [],
         }
 
-    converter = CanonicalConverter(
-        config=CanonicalConverterConfig(
-            source_id="gfs",
-            object_store_root=config.object_store_root,
-            object_store_prefix=config.object_prefix,
-            grid_definition_uri=f"models/{config.model_id}/grids/gfs_0p25.json",
-        ),
-        repository=repository,
-        object_store=store,
-    )
+    converter = _canonical_converter(config, store, repository, "GFS")
     manifest = _raw_manifest_for_converter(gfs_source)
     try:
         result = converter.convert_manifest(manifest)
@@ -694,33 +750,23 @@ def _write_canonical_evidence(
             "failure_checks": [],
         }
 
-    products = []
-    for product in sorted(result.products, key=lambda item: (item.valid_time, item.variable)):
-        record = repository.products[product.canonical_product_id]
-        products.append(
-            {
-                "canonical_product_id": product.canonical_product_id,
-                "source_id": record["source_id"],
-                "source_cycle": f"{record['source_id']}_{format_cycle_time(record['cycle_time'])}",
-                "cycle_time": _format_time(record["cycle_time"]),
-                "valid_time": _format_time(product.valid_time),
-                "lead_time_hours": product.lead_time_hours,
-                "variable": product.variable,
-                "unit": record["unit"],
-                "time_axis": {
-                    "cycle_time": _format_time(record["cycle_time"]),
-                    "valid_time": _format_time(product.valid_time),
-                    "lead_time_hours": product.lead_time_hours,
-                },
-                "object_uri": product.object_uri,
-                "checksum": product.checksum,
-                "quality_flag": product.quality_flag,
-                "status": product.status,
-                "lineage": record["lineage_json"],
-            }
-        )
+    products = _canonical_product_payloads(repository, result)
 
-    missing_check = _missing_raw_failure_check(config, manifest)
+    failure_checks = _stable_negative_failure_checks(config, store, repository, manifest)
+    source_statuses = [
+        {
+            "source": source["source"],
+            "source_id": source["source_id"],
+            "raw_status": source["status"],
+            "raw_execution_mode": source["execution_mode"],
+            "conversion_status": "canonical_ready"
+            if source["source"] == "GFS" and source["status"] == "available"
+            else "skipped",
+            "reason": source.get("reason"),
+        }
+        for source in raw_evidence.get("sources", [])
+        if isinstance(source, Mapping)
+    ]
     return {
         "schema": "nhms.production_closure.met.canonical.v1",
         "status": "ready",
@@ -728,8 +774,9 @@ def _write_canonical_evidence(
         "source_id": "gfs",
         "cycle_time": _format_time(config.cycle_start),
         "product_count": len(products),
+        "source_statuses": source_statuses,
         "products": products,
-        "failure_checks": [missing_check],
+        "failure_checks": failure_checks,
     }
 
 
@@ -771,8 +818,15 @@ def _write_forcing_evidence(
             },
         }
 
-    package_manifest = json.loads(store.read_bytes(str(result.file_uris["package_manifest"])).decode("utf-8"))
-    qc = _forcing_qc_payload(repository.timeseries, package_manifest)
+    package_manifest_uri = str(result.file_uris["package_manifest"])
+    package_manifest = json.loads(store.read_bytes(package_manifest_uri).decode("utf-8"))
+    qc = _forcing_qc_payload(
+        repository.timeseries,
+        package_manifest,
+        expected_valid_times=_expected_valid_times(config),
+        package_uri=result.forcing_package_uri,
+        package_manifest_uri=package_manifest_uri,
+    )
     manifest = {
         "schema": "nhms.production_closure.met.forcing_manifest.v1",
         "status": result.status,
@@ -782,7 +836,7 @@ def _write_forcing_evidence(
         "source_id": "gfs",
         "cycle_time": _format_time(config.cycle_start),
         "forcing_package_uri": result.forcing_package_uri,
-        "forcing_package_manifest_uri": result.file_uris["package_manifest"],
+        "forcing_package_manifest_uri": package_manifest_uri,
         "checksum": result.checksum,
         "station_count": result.station_count,
         "timestep_count": result.timestep_count,
@@ -792,11 +846,18 @@ def _write_forcing_evidence(
     return {"manifest": manifest, "qc": qc}
 
 
-def _forcing_qc_payload(rows: Sequence[ForcingTimeseriesRow], package_manifest: Mapping[str, Any]) -> dict[str, Any]:
+def _forcing_qc_payload(
+    rows: Sequence[ForcingTimeseriesRow],
+    package_manifest: Mapping[str, Any],
+    *,
+    expected_valid_times: Sequence[datetime],
+    package_uri: str | None = None,
+    package_manifest_uri: str | None = None,
+) -> dict[str, Any]:
     variables = sorted({row.variable for row in rows})
     valid_times = sorted({row.valid_time for row in rows})
     missing_required = sorted(set(REQUIRED_FORCING_VARIABLES) - set(variables))
-    continuity = _continuity_check(valid_times)
+    continuity = _continuity_check(valid_times, expected_valid_times=expected_valid_times)
     missing_values = [
         {
             "station_id": row.station_id,
@@ -845,7 +906,9 @@ def _forcing_qc_payload(rows: Sequence[ForcingTimeseriesRow], package_manifest: 
             "status": "pass" if not missing_values else "fail",
         },
         "range_checks": range_checks,
-        "package_uri": package_manifest.get("lineage", {}).get("forcing_package_manifest_uri"),
+        "package_uri": package_uri or package_manifest.get("lineage", {}).get("forcing_package_uri"),
+        "package_manifest_uri": package_manifest_uri
+        or package_manifest.get("lineage", {}).get("forcing_package_manifest_uri"),
     }
 
 
@@ -877,6 +940,11 @@ def _best_available_lineage(
         for source in raw_evidence.get("sources", [])
         if isinstance(source, Mapping)
     }
+    source_statuses = {
+        str(source["source"]): str(source["status"])
+        for source in raw_evidence.get("sources", [])
+        if isinstance(source, Mapping)
+    }
     per_valid_time = []
     for forecast_hour in config.forecast_hours:
         valid_time = config.cycle_start + timedelta(hours=forecast_hour)
@@ -890,6 +958,8 @@ def _best_available_lineage(
                 candidates.append({"source": source, "status": "available_not_selected", "execution_mode": mode})
             elif mode == "restricted":
                 candidates.append({"source": source, "status": "restricted", "execution_mode": mode})
+            elif mode == "not_executed" or source_statuses.get(source) in {"unavailable", "not_executed"}:
+                candidates.append({"source": source, "status": "not_executed", "execution_mode": mode})
             else:
                 candidates.append({"source": source, "status": "skipped", "execution_mode": mode})
         per_valid_time.append(
@@ -905,7 +975,9 @@ def _best_available_lineage(
         )
     return {
         "schema": "nhms.production_closure.met.best_available_lineage.v1",
-        "status": "ready" if forcing_qc.get("status") == "pass" else "blocked",
+        "status": "ready"
+        if raw_evidence.get("status") == "ready" and forcing_qc.get("status") == "pass"
+        else "blocked",
         "run_id": config.run_id,
         "per_valid_time": per_valid_time,
         "skipped_or_restricted_sources": [
@@ -980,6 +1052,9 @@ def _environment_payload(config: ProductionMetConfig) -> dict[str, Any]:
 def _result_blockers(*payloads: Mapping[str, Any]) -> list[dict[str, Any]]:
     blockers = []
     for payload in payloads:
+        for blocker in payload.get("blockers", []):
+            if isinstance(blocker, Mapping):
+                blockers.append(dict(blocker))
         status = payload.get("status")
         if status not in {"ready", "pass", "canonical_ready", "forcing_ready"}:
             blockers.append(
@@ -1012,6 +1087,21 @@ def _validate_config(config: ProductionMetConfig) -> None:
         raise ProductionMetValidationError(
             "PRODUCTION_MET_FORECAST_HOURS_INVALID",
             "Forecast hours must be between 0 and 240.",
+        )
+    if int((config.cycle_end - config.cycle_start).total_seconds()) % (3 * 3600) != 0:
+        raise ProductionMetValidationError(
+            "PRODUCTION_MET_CYCLE_WINDOW_INVALID",
+            "Cycle window must align to the 3-hour meteorological forcing step.",
+        )
+    expected_forecast_hours = _expected_forecast_hours(config)
+    missing_hours = sorted(set(expected_forecast_hours) - set(config.forecast_hours))
+    if missing_hours:
+        raise ProductionMetValidationError(
+            "PRODUCTION_MET_FORECAST_HOURS_CYCLE_WINDOW_INCOMPLETE",
+            (
+                "Forecast hours must cover the configured cycle window at 3-hour intervals; "
+                f"missing forecast hours: {missing_hours}."
+            ),
         )
     if config.cached_fallback_policy not in {"deterministic_fixture", "disabled", "cached_only"}:
         raise ProductionMetValidationError(
@@ -1122,7 +1212,7 @@ def _deterministic_values(source: str, variable: str, forecast_hour: int) -> lis
 
 def _raw_manifest_for_converter(source_manifest: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "source_id": "gfs",
+        "source_id": source_manifest["source_id"],
         "cycle_time": source_manifest["cycle_time"],
         "metadata": {
             "forecast_hours": list(source_manifest["selected_forecast_hours"]),
@@ -1138,6 +1228,98 @@ def _raw_manifest_for_converter(source_manifest: Mapping[str, Any]) -> dict[str,
             for entry in source_manifest.get("manifest_entries", [])
         ],
     }
+
+
+def _canonical_converter(
+    config: ProductionMetConfig,
+    store: LocalObjectStore,
+    repository: _MetClosureRepository,
+    source: str,
+) -> CanonicalConverter:
+    if source == "ERA5":
+        return ERA5CanonicalConverter(
+            config=ERA5CanonicalConverterConfig(
+                object_store_root=config.object_store_root,
+                object_store_prefix=config.object_prefix,
+                grid_definition_uri=f"models/{config.model_id}/grids/era5_0p25.json",
+            ),
+            repository=repository,
+            object_store=store,
+        )
+    if source == "IFS":
+        return IFSCanonicalConverter(
+            config=IFSCanonicalConverterConfig(
+                object_store_root=config.object_store_root,
+                object_store_prefix=config.object_prefix,
+                grid_definition_uri=f"models/{config.model_id}/grids/ifs_0p25.json",
+            ),
+            repository=repository,
+            object_store=store,
+        )
+    return CanonicalConverter(
+        config=CanonicalConverterConfig(
+            source_id="gfs",
+            object_store_root=config.object_store_root,
+            object_store_prefix=config.object_prefix,
+            grid_definition_uri=f"models/{config.model_id}/grids/gfs_0p25.json",
+        ),
+        repository=repository,
+        object_store=store,
+    )
+
+
+def _canonical_product_payloads(
+    repository: _MetClosureRepository,
+    result: Any,
+) -> list[dict[str, Any]]:
+    products = []
+    for product in sorted(result.products, key=lambda item: (item.valid_time, item.variable)):
+        record = repository.products[product.canonical_product_id]
+        products.append(
+            {
+                "canonical_product_id": product.canonical_product_id,
+                "source_id": record["source_id"],
+                "source_cycle": f"{record['source_id']}_{format_cycle_time(record['cycle_time'])}",
+                "cycle_time": _format_time(record["cycle_time"]),
+                "valid_time": _format_time(product.valid_time),
+                "lead_time_hours": product.lead_time_hours,
+                "variable": product.variable,
+                "unit": record["unit"],
+                "time_axis": {
+                    "cycle_time": _format_time(record["cycle_time"]),
+                    "valid_time": _format_time(product.valid_time),
+                    "lead_time_hours": product.lead_time_hours,
+                },
+                "object_uri": product.object_uri,
+                "checksum": product.checksum,
+                "quality_flag": product.quality_flag,
+                "status": product.status,
+                "lineage": record["lineage_json"],
+            }
+        )
+    return products
+
+
+def _stable_negative_failure_checks(
+    config: ProductionMetConfig,
+    store: LocalObjectStore,
+    repository: _MetClosureRepository,
+    manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    del store, repository
+    negative_store = LocalObjectStore(
+        config.object_store_root / "negative-fixtures",
+        f"{config.object_prefix.rstrip('/')}/negative-fixtures",
+    )
+    negative_repository = _MetClosureRepository(model_id=config.model_id)
+    checks = [_missing_raw_failure_check(config, manifest)]
+    checks.append(_malformed_raw_failure_check(config, negative_store, negative_repository, manifest))
+    checks.append(_nonfinite_forcing_failure_check(config, negative_store, negative_repository, manifest))
+    checks.append(_out_of_range_forcing_failure_check(config, negative_store, negative_repository, manifest))
+    requested = os.getenv(NEGATIVE_FIXTURE_ENV, "").strip().lower()
+    if requested:
+        checks.append(_requested_negative_fixture_check(config, requested, checks))
+    return checks
 
 
 def _missing_raw_failure_check(config: ProductionMetConfig, manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -1161,6 +1343,263 @@ def _missing_raw_failure_check(config: ProductionMetConfig, manifest: Mapping[st
     }
 
 
+def _malformed_raw_failure_check(
+    config: ProductionMetConfig,
+    store: LocalObjectStore,
+    repository: _MetClosureRepository,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    check_manifest = _copy_manifest_for_negative_check(manifest, "malformed_raw")
+    target = check_manifest["entries"][0]
+    bad_key = str(target["local_key"])
+    _write_object_guarded(store, bad_key, b"not-a-netcdf", force=True)
+    converter = _canonical_converter(config, store, repository, "GFS")
+    return _conversion_failure_payload(
+        config,
+        check_manifest,
+        converter,
+        error_code="PRODUCTION_MET_RAW_MALFORMED",
+        failure_type="malformed_raw",
+    )
+
+
+def _nonfinite_forcing_failure_check(
+    config: ProductionMetConfig,
+    store: LocalObjectStore,
+    repository: _MetClosureRepository,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    check_manifest = _copy_manifest_for_negative_check(manifest, "nonfinite")
+    _replace_gfs_fixture_value(config, store, check_manifest, variable="tmp2m", forecast_hour=0, value=float("nan"))
+    converter = _canonical_converter(config, store, repository, "GFS")
+    try:
+        result = converter.convert_manifest(check_manifest)
+        rows = _forcing_rows_for_products(repository, result, store)
+        qc = _forcing_qc_payload(
+            rows,
+            {"lineage": {}},
+            expected_valid_times=_expected_valid_times(config),
+            package_uri="negative-fixture://nonfinite",
+            package_manifest_uri="negative-fixture://nonfinite/forcing_package.json",
+        )
+    except CanonicalConversionError as error:
+        return _negative_blocked_payload(
+            config,
+            "PRODUCTION_MET_RAW_NONFINITE",
+            "nonfinite",
+            str(error),
+            source_id="gfs",
+        )
+    return _qc_failure_payload(config, "PRODUCTION_MET_QC_NONFINITE", "nonfinite", qc)
+
+
+def _out_of_range_forcing_failure_check(
+    config: ProductionMetConfig,
+    store: LocalObjectStore,
+    repository: _MetClosureRepository,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    check_manifest = _copy_manifest_for_negative_check(manifest, "out_of_range")
+    _replace_gfs_fixture_value(config, store, check_manifest, variable="pressfc", forecast_hour=0, value=200000.0)
+    converter = _canonical_converter(config, store, repository, "GFS")
+    try:
+        result = converter.convert_manifest(check_manifest)
+        rows = _forcing_rows_for_products(repository, result, store)
+        qc = _forcing_qc_payload(
+            rows,
+            {"lineage": {}},
+            expected_valid_times=_expected_valid_times(config),
+            package_uri="negative-fixture://out-of-range",
+            package_manifest_uri="negative-fixture://out-of-range/forcing_package.json",
+        )
+    except CanonicalConversionError as error:
+        return _negative_blocked_payload(
+            config,
+            "PRODUCTION_MET_RAW_OUT_OF_RANGE",
+            "out_of_range",
+            str(error),
+            source_id="gfs",
+        )
+    return _qc_failure_payload(config, "PRODUCTION_MET_QC_OUT_OF_RANGE", "out_of_range", qc)
+
+
+def _copy_manifest_for_negative_check(manifest: Mapping[str, Any], suffix: str) -> dict[str, Any]:
+    copied = json.loads(json.dumps(manifest))
+    for entry in copied["entries"]:
+        local_key = str(entry["local_key"])
+        if "/raw/gfs/" in f"/{local_key}":
+            entry["local_key"] = local_key.replace("/raw/gfs/", f"/raw_negative/{suffix}/gfs/")
+        elif local_key.startswith("raw/gfs/"):
+            entry["local_key"] = local_key.replace("raw/gfs/", f"raw_negative/{suffix}/gfs/", 1)
+    return copied
+
+
+def _replace_gfs_fixture_value(
+    config: ProductionMetConfig,
+    store: LocalObjectStore,
+    manifest: Mapping[str, Any],
+    *,
+    variable: str,
+    forecast_hour: int,
+    value: float,
+) -> None:
+    for entry in manifest["entries"]:
+        if entry["variable"] == variable and int(entry["forecast_hour"]) == forecast_hour:
+            content = encode_test_netcdf4(variable, forecast_hour, values=[value], cycle_time=config.cycle_start)
+            _write_object_guarded(store, str(entry["local_key"]), content, force=True)
+        else:
+            content = _deterministic_raw_content(
+                "GFS",
+                str(entry["variable"]),
+                int(entry["forecast_hour"]),
+                config.cycle_start,
+            )
+            _write_object_guarded(store, str(entry["local_key"]), content, force=True)
+
+
+def _conversion_failure_payload(
+    config: ProductionMetConfig,
+    manifest: Mapping[str, Any],
+    converter: CanonicalConverter,
+    *,
+    error_code: str,
+    failure_type: str,
+) -> dict[str, Any]:
+    try:
+        converter.convert_manifest(manifest)
+    except CanonicalConversionError as error:
+        return _negative_blocked_payload(config, error_code, failure_type, str(error), source_id="gfs")
+    return {
+        "status": "unexpected_pass",
+        "error_code": error_code,
+        "failure_type": failure_type,
+        "downstream_forcing_ready": True,
+        "source_id": "gfs",
+        "cycle_time": _format_time(config.cycle_start),
+    }
+
+
+def _forcing_rows_for_products(
+    repository: _MetClosureRepository,
+    result: Any,
+    store: LocalObjectStore,
+) -> list[ForcingTimeseriesRow]:
+    forcing_version_id = "negative_fixture_forcing"
+    canonical_to_forcing = {
+        "prcp_rate_or_amount": "PRCP",
+        "air_temperature_2m": "TEMP",
+        "relative_humidity_2m": "RH",
+        "wind_u_10m": "wind",
+        "wind_speed": "wind",
+        "shortwave_down": "Rn",
+        "net_radiation": "Rn",
+        "pressure_surface": "Press",
+        "surface_pressure": "Press",
+    }
+    selected_by_time_variable: dict[tuple[datetime, str], ForcingTimeseriesRow] = {}
+    for product in result.products:
+        forcing_variable = canonical_to_forcing.get(product.variable)
+        if forcing_variable is None:
+            continue
+        record = repository.products[product.canonical_product_id]
+        values = _canonical_product_values(repository, product.canonical_product_id, store)
+        selected_by_time_variable[(product.valid_time, forcing_variable)] = ForcingTimeseriesRow(
+            forcing_version_id=forcing_version_id,
+            basin_version_id="basin_v1",
+            station_id="station_1",
+            valid_time=product.valid_time,
+            source_id=str(record["source_id"]),
+            variable=forcing_variable,
+            value=float(values[0]) if values else float("nan"),
+            unit=package_manifest_unit(forcing_variable),
+            native_resolution=str(record.get("native_time_resolution") or "3h"),
+            quality_flag=str(record.get("quality_flag", "ok")),
+        )
+    return list(selected_by_time_variable.values())
+
+
+def _canonical_product_values(
+    repository: _MetClosureRepository,
+    product_id: str,
+    store: LocalObjectStore,
+) -> list[float]:
+    import xarray as xr
+
+    record = repository.products[product_id]
+    object_uri = str(record["object_uri"])
+    file_path = store.resolve_path(object_uri)
+    dataset = xr.open_dataset(file_path, engine="netcdf4")
+    try:
+        variable = str(record["variable"])
+        return [float(value) for value in dataset[variable].values.ravel().tolist()]
+    finally:
+        dataset.close()
+
+
+def _qc_failure_payload(
+    config: ProductionMetConfig,
+    error_code: str,
+    failure_type: str,
+    qc: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": "blocked" if qc.get("status") == "fail" else "unexpected_pass",
+        "error_code": error_code,
+        "failure_type": failure_type,
+        "downstream_forcing_ready": False if qc.get("status") == "fail" else True,
+        "source_id": "gfs",
+        "cycle_time": _format_time(config.cycle_start),
+        "qc_status": qc.get("status"),
+        "missing_values": qc.get("missing_values"),
+        "range_checks": qc.get("range_checks"),
+    }
+
+
+def _negative_blocked_payload(
+    config: ProductionMetConfig,
+    error_code: str,
+    failure_type: str,
+    error_message: str,
+    *,
+    source_id: str,
+) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "error_code": error_code,
+        "failure_type": failure_type,
+        "downstream_forcing_ready": False,
+        "source_id": source_id,
+        "cycle_time": _format_time(config.cycle_start),
+        "error_message": error_message,
+    }
+
+
+def _requested_negative_fixture_check(
+    config: ProductionMetConfig,
+    requested: str,
+    checks: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    for check in checks:
+        if check.get("failure_type") == requested:
+            return {
+                "status": "blocked",
+                "error_code": "PRODUCTION_MET_NEGATIVE_FIXTURE_REQUESTED",
+                "failure_type": requested,
+                "downstream_forcing_ready": False,
+                "source_id": "gfs",
+                "cycle_time": _format_time(config.cycle_start),
+                "affected_source_blocked": check.get("status") == "blocked",
+            }
+    return {
+        "status": "blocked",
+        "error_code": "PRODUCTION_MET_NEGATIVE_FIXTURE_UNKNOWN",
+        "failure_type": requested,
+        "downstream_forcing_ready": False,
+        "source_id": "gfs",
+        "cycle_time": _format_time(config.cycle_start),
+    }
+
+
 def _forcing_qc_rows_by_variable(rows: Sequence[ForcingTimeseriesRow]) -> dict[str, list[ForcingTimeseriesRow]]:
     grouped: dict[str, list[ForcingTimeseriesRow]] = {}
     for row in rows:
@@ -1168,18 +1607,37 @@ def _forcing_qc_rows_by_variable(rows: Sequence[ForcingTimeseriesRow]) -> dict[s
     return grouped
 
 
-def _continuity_check(valid_times: Sequence[datetime]) -> dict[str, Any]:
+def _continuity_check(
+    valid_times: Sequence[datetime],
+    *,
+    expected_valid_times: Sequence[datetime] | None = None,
+) -> dict[str, Any]:
+    expected = tuple(expected_valid_times or ())
     if not valid_times:
-        return {"status": "fail", "reason": "no_valid_times", "expected_step_hours": 3}
+        return {
+            "status": "fail",
+            "reason": "no_valid_times",
+            "expected_step_hours": 3,
+            "expected_valid_times": [_format_time(value) for value in expected],
+            "missing_valid_times": [_format_time(value) for value in expected],
+        }
     deltas = [
         (later - earlier).total_seconds() / 3600.0
         for earlier, later in zip(valid_times, valid_times[1:], strict=False)
     ]
+    observed = set(valid_times)
+    missing = [value for value in expected if value not in observed]
+    unexpected = [value for value in valid_times if expected and value not in expected]
+    deltas_pass = all(delta == 3.0 for delta in deltas)
+    expected_pass = not missing and not unexpected
     return {
-        "status": "pass" if all(delta == 3.0 for delta in deltas) else "fail",
+        "status": "pass" if deltas_pass and expected_pass else "fail",
         "expected_step_hours": 3,
+        "expected_valid_times": [_format_time(value) for value in expected],
         "observed_valid_times": [_format_time(value) for value in valid_times],
         "observed_deltas_hours": deltas,
+        "missing_valid_times": [_format_time(value) for value in missing],
+        "unexpected_valid_times": [_format_time(value) for value in unexpected],
     }
 
 
@@ -1215,6 +1673,8 @@ def _source_execution_mode(config: ProductionMetConfig, source: str, status: str
     live_allowed = _truthy_env(os.getenv("NHMS_PRODUCTION_MET_ALLOW_LIVE_NETWORK"))
     if live_requested and live_allowed:
         return "not_executed"
+    if config.cached_fallback_policy == "disabled":
+        return "not_executed"
     return "deterministic_fixture"
 
 
@@ -1224,7 +1684,11 @@ def _source_reason(config: ProductionMetConfig, source: str, status: str, execut
     if status == "disabled":
         return "source not included in enabled source subset"
     if execution_mode == "not_executed":
+        if config.cached_fallback_policy == "disabled":
+            return "cached/deterministic fallback policy is disabled and no live executor is available"
         return "live source gate was enabled, but this closure lane has no network executor; no live success is claimed"
+    if config.cached_fallback_policy == "cached_only":
+        return "cached deterministic production-like fixture used by cached-only validation"
     return "deterministic production-like fixture used by fast validation"
 
 
@@ -1434,12 +1898,30 @@ def _validate_object_prefix_safe(prefix: str) -> None:
         )
     for raw_segment in parsed.path.split("/"):
         segment = unquote(raw_segment)
+        if segment in {".", ".."}:
+            raise ProductionMetValidationError(
+                "PRODUCTION_MET_OBJECT_PREFIX_UNSAFE",
+                "Met object prefix path segments must not contain '.' or '..'.",
+            )
         decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(segment)
         if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in decoded_parts):
             raise ProductionMetValidationError(
                 "PRODUCTION_MET_OBJECT_PREFIX_UNSAFE",
                 "Met object prefix path segments must not contain credential assignments.",
             )
+
+
+def _configured_endpoint(source: str) -> str:
+    return redact_text(os.getenv(f"NHMS_PRODUCTION_MET_{source}_ENDPOINT", _default_endpoint(source)))
+
+
+def _expected_forecast_hours(config: ProductionMetConfig) -> tuple[int, ...]:
+    window_hours = int((config.cycle_end - config.cycle_start).total_seconds() // 3600)
+    return tuple(range(0, window_hours + 1, 3))
+
+
+def _expected_valid_times(config: ProductionMetConfig) -> tuple[datetime, ...]:
+    return tuple(config.cycle_start + timedelta(hours=hour) for hour in _expected_forecast_hours(config))
 
 
 def _run_scoped_prefix(prefix: str, run_id: str) -> str:

@@ -357,7 +357,7 @@ export NHMS_PRODUCTION_MET_SOURCES=GFS,IFS,ERA5
 export NHMS_PRODUCTION_MET_ACCESS_MODE=public-or-deterministic-fixture
 export NHMS_PRODUCTION_MET_CACHED_FALLBACK_POLICY=deterministic_fixture
 export NHMS_PRODUCTION_MET_CYCLE_START=2026-05-07T00:00:00Z
-export NHMS_PRODUCTION_MET_CYCLE_END=2026-05-07T06:00:00Z
+export NHMS_PRODUCTION_MET_CYCLE_END=2026-05-07T03:00:00Z
 export NHMS_PRODUCTION_MET_FORECAST_HOURS=0,3
 export NHMS_PRODUCTION_MET_OBJECT_PREFIX=s3://nhms-prod/met
 export NHMS_PRODUCTION_MET_MODEL_ID=basins_qhh_shud_fixture
@@ -382,8 +382,9 @@ Local #149 verification uses these fast regression commands:
 
 ```bash
 openspec validate m10-production-closure --strict --no-interactive
+uv run ruff check .
 .venv/bin/ruff check services/production_closure tests/test_production_met_validation.py docs/VALIDATION.md progress.md
-.venv/bin/pytest -q tests/test_production_met_validation.py tests/test_production_slurm_validation.py tests/test_canonical_converter.py tests/test_forcing_producer.py tests/test_source_identity.py
+.venv/bin/pytest -q tests/test_production_met_validation.py tests/test_production_slurm_validation.py tests/test_canonical_converter.py tests/test_forcing_producer.py tests/test_source_identity.py tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_era5_adapter.py
 ```
 
 The opt-in deterministic production-closure smoke is:

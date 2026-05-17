@@ -30,7 +30,7 @@
 - Real Slurm gateway 已实现 `sbatch`、`sacct`、`scancel`、`sinfo`、array job、日志读取、模板白名单，并有 fake-binary smoke。
 - #147 Slurm closure lane 已覆盖 redacted preflight、canonical `infra/sbatch` SHUD array rendering、fake/real `sacct` evidence schema、array partial success、retry/cancel evidence、malformed SHUD output/QC blocking evidence和 redacted environment metadata。
 - #148 object-store closure lane 已覆盖 redacted preflight、M9 copied-root migration report、package publish manifest evidence、stored-object checksum reread verification、local registry/API/runtime consumption evidence、failure cleanup/quarantine evidence和 no implicit activation。
-- #149 met closure lane 已覆盖 redacted source preflight/source_config、bounded deterministic GFS/IFS/ERA5 cycle manifest、CLDAS restricted evidence、GFS canonical product lineage、deterministic Basins-backed forcing package、forcing continuity/required-variable/unit/missing/range QC、best-available lineage、secret redaction、run-scoped idempotency/path safety。
+- #149 met closure lane 已覆盖 redacted source preflight/source_config、bounded deterministic GFS raw cycle manifest、IFS/ERA5 非转换源 skipped 证据、CLDAS restricted evidence、GFS canonical product lineage、deterministic Basins-backed forcing package、forcing continuity/required-variable/unit/missing/range QC、malformed/non-finite/out-of-range negative QC blocker evidence、best-available lineage、secret redaction、run-scoped idempotency/path safety。
 - 测试环境真实 Slurm 基础 smoke 已通过：集群 `shudhpc`，默认 account `friends`，`CPU`/`GPU` 分区可见；`CPU` 分区 job `5684` 在 `cn04` 完成，`COMPLETED` / `0:0`。后续可复用命令见 `docs/VALIDATION.md`。
 - 真实 DB 集成测试已覆盖从零迁移、幂等迁移、确定性 seed、API/空间查询、worker chain、fake real-Slurm 边界。
 
