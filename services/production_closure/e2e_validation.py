@@ -23,7 +23,7 @@ SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
     r"session[_-]?key|signature|x-amz-signature)[^=/?#;&]*=",
     re.IGNORECASE,
 )
-SENSITIVE_PREFIX_SEPARATOR_RE = re.compile(r"[/;?#&]")
+ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 DEFAULT_SOURCE_CYCLE = "2026-05-07T00:00:00Z"
 DEFAULT_MODEL_SET = ("basins_qhh_shud_fixture",)
 DEFAULT_OBJECT_PREFIX = "s3://nhms-production-like/e2e"
@@ -45,6 +45,7 @@ DOWNSTREAM_STAGE_NAMES = {"parse", "frequency", "tile", "api", "frontend"}
 DERIVED_SEGMENT_IDS = ("seg_a", "seg_b")
 EXPECTED_TIMESTEP_HOURS = (0, 3)
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
+MAX_PERCENT_DECODE_ROUNDS = 4
 DEPENDENCY_SUMMARY_CONTRACTS = {
     "slurm": {
         "issue": 147,
@@ -1405,6 +1406,26 @@ def _validate_frontend_api_base(value: str) -> None:
             "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
             "Frontend API base must not contain userinfo credentials, query parameters, or fragments.",
         )
+    _guard_canonical_path_segments(
+        parsed.path,
+        error_code="PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+        message=(
+            "Frontend API base path must not contain credential assignments, traversal, "
+            "backslashes, query or fragment separators, or encoded separators."
+        ),
+    )
+    if any(
+        SENSITIVE_PREFIX_ASSIGNMENT_RE.search(decoded)
+        for decoded in _canonical_decode_steps(
+            value,
+            error_code="PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+            message="Frontend API base must not contain credential assignments or over-encoded percent escapes.",
+        )
+    ):
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+            "Frontend API base must not contain credential assignments.",
+        )
 
 
 def _validate_object_prefix_safe(prefix: str) -> None:
@@ -1430,19 +1451,48 @@ def _validate_object_prefix_safe(prefix: str) -> None:
             "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE",
             "E2E object prefix must not contain userinfo credentials, query parameters, or fragments.",
         )
-    for raw_segment in parsed.path.split("/"):
-        segment = unquote(raw_segment)
-        if "/" in segment or "\\" in segment or segment in {".", ".."}:
-            raise ProductionE2EValidationError(
-                "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE",
-                "E2E object prefix path segments must not contain '.', '..', or decoded path separators.",
-            )
-        decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(segment)
-        if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in decoded_parts):
-            raise ProductionE2EValidationError(
-                "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE",
-                "E2E object prefix path segments must not contain credential assignments.",
-            )
+    _guard_canonical_path_segments(
+        parsed.path,
+        error_code="PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE",
+        message=(
+            "E2E object prefix path segments must not contain credential assignments, traversal, "
+            "backslashes, query or fragment separators, or encoded separators."
+        ),
+    )
+
+
+def _canonical_decode_steps(value: str, *, error_code: str, message: str) -> tuple[str, ...]:
+    steps = [value]
+    current = value
+    for _ in range(MAX_PERCENT_DECODE_ROUNDS):
+        decoded = unquote(current)
+        if decoded == current:
+            break
+        steps.append(decoded)
+        current = decoded
+    if unquote(current) != current:
+        raise ProductionE2EValidationError(error_code, message)
+    return tuple(steps)
+
+
+def _guard_canonical_path_segments(path: str, *, error_code: str, message: str) -> None:
+    for raw_segment in path.split("/"):
+        if raw_segment == "":
+            continue
+        if ENCODED_SEPARATOR_RE.search(raw_segment):
+            raise ProductionE2EValidationError(error_code, message)
+        for segment in _canonical_decode_steps(raw_segment, error_code=error_code, message=message):
+            if (
+                "/" in segment
+                or "\\" in segment
+                or "?" in segment
+                or "#" in segment
+                or ";" in segment
+                or "&" in segment
+                or segment in {".", ".."}
+                or SENSITIVE_PREFIX_ASSIGNMENT_RE.search(segment)
+            ):
+                raise ProductionE2EValidationError(error_code, message)
 
 
 def _parse_model_set(value: str | None) -> tuple[str, ...]:

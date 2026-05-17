@@ -355,6 +355,80 @@ def test_validate_e2e_rejects_unsafe_run_id_before_writes(tmp_path: Path) -> Non
     assert not (tmp_path / "artifacts").exists()
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value", "error_code"),
+    [
+        ("object_prefix", "s3://bucket/path%252Fchild", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%252F..", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%252Ftoken=secret", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%3Ftoken=secret", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%23token=secret", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path\\child", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%5Cchild", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("frontend_api_base", "https://frontend.example/api%252Fv1", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+        ("frontend_api_base", "https://frontend.example/api%252F..", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+        (
+            "frontend_api_base",
+            "https://frontend.example/api%252Ftoken=secret",
+            "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+        ),
+        (
+            "frontend_api_base",
+            "https://frontend.example/api%3Ftoken=secret",
+            "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+        ),
+        (
+            "frontend_api_base",
+            "https://frontend.example/api%23token=secret",
+            "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+        ),
+        ("frontend_api_base", "https://frontend.example/api\\v1", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+        ("frontend_api_base", "https://frontend.example/api%5Cv1", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+    ],
+)
+def test_validate_e2e_rejects_encoded_api_and_object_path_material_before_writes(
+    tmp_path: Path,
+    field_name: str,
+    value: str,
+    error_code: str,
+) -> None:
+    kwargs = {field_name: value}
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="encoded_path", **kwargs)
+        validate_e2e(config)
+
+    assert exc_info.value.error_code == error_code
+    assert not (tmp_path / "artifacts" / "encoded_path").exists()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "prefix", "error_code"),
+    [
+        ("object_prefix", "s3://bucket/path", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("frontend_api_base", "https://frontend.example/api", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+    ],
+)
+def test_validate_e2e_rejects_over_encoded_api_and_object_path_material_before_writes(
+    tmp_path: Path,
+    field_name: str,
+    prefix: str,
+    error_code: str,
+) -> None:
+    encoded_secret_segment = _percent_encode_rounds("/token=secret", 5)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        config = ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="over_encoded_path",
+            **{field_name: f"{prefix}{encoded_secret_segment}"},
+        )
+        validate_e2e(config)
+
+    assert exc_info.value.error_code == error_code
+    assert not (tmp_path / "artifacts" / "over_encoded_path").exists()
+
+
 def test_validate_e2e_same_run_requires_force(tmp_path: Path) -> None:
     config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="same")
     validate_e2e(config)
@@ -599,3 +673,10 @@ def _dependency_schema(dependency: str) -> str:
 
 def _dependency_issue(dependency: str) -> int:
     return {"met": 149, "slurm": 147, "object-store": 148}[dependency]
+
+
+def _percent_encode_rounds(value: str, rounds: int) -> str:
+    encoded = value
+    for _ in range(rounds):
+        encoded = "".join(f"%{byte:02X}" for byte in encoded.encode("utf-8"))
+    return encoded
