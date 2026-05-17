@@ -742,7 +742,8 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
     submit_command.append(str(script_path))
     submit = _run_command(submit_command)
     if submit["returncode"] != 0:
-        _cleanup_shared_runtime_inputs(config)
+        cleanup = _cleanup_shared_runtime_inputs(config)
+        cleanup_blockers = _shared_runtime_cleanup_blockers(cleanup)
         return {
             "mode": "blocked",
             "job_id": None,
@@ -752,7 +753,8 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
                     "error_code": "SBATCH_SUBMISSION_FAILED",
                     "field": "sbatch",
                     "returncode": str(submit["returncode"]),
-                }
+                },
+                *cleanup_blockers,
             ],
             "commands": _inspection_commands(config),
             "submit": submit,
@@ -769,7 +771,8 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
                 "interval_seconds": config.poll_interval_seconds,
                 "timeout_seconds": config.poll_timeout_seconds,
             },
-            "shared_runtime_inputs_cleaned": True,
+            "shared_runtime_inputs_cleaned": not cleanup_blockers,
+            "shared_runtime_input_cleanup": cleanup,
             "records": [],
         }
     job_id = _parse_sbatch_parsable(submit["stdout"])
@@ -841,16 +844,33 @@ def _safe_workspace_path(workspace_root: Path, path: Path) -> Path:
     return resolved_path
 
 
-def _cleanup_shared_runtime_inputs(config: ProductionSlurmConfig) -> None:
+def _cleanup_shared_runtime_inputs(config: ProductionSlurmConfig) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
     for path in _shared_runtime_input_paths(config):
         try:
             safe_path = _safe_workspace_path(config.workspace_root, path)
-        except ProductionValidationError:
+        except ProductionValidationError as error:
+            results.append({"path": str(path), "status": "unsafe", "error_code": error.error_code})
             continue
         try:
             safe_path.unlink(missing_ok=True)
-        except OSError:
+        except OSError as error:
+            results.append({"path": str(safe_path), "status": "failed", "error": str(error)})
             continue
+        results.append({"path": str(safe_path), "status": "absent" if not safe_path.exists() else "failed"})
+    return results
+
+
+def _shared_runtime_cleanup_blockers(cleanup: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            "error_code": "PRODUCTION_SLURM_SHARED_INPUT_CLEANUP_FAILED",
+            "field": "workspace",
+            "path": item["path"],
+        }
+        for item in cleanup
+        if item.get("status") != "absent"
+    ]
 
 
 def _shared_runtime_input_paths(config: ProductionSlurmConfig) -> list[Path]:

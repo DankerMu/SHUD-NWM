@@ -871,6 +871,7 @@ def test_validate_slurm_submit_sbatch_failure_writes_blocked_bundle(
     assert accounting["submit"]["stderr"] == "invalid account"
     assert accounting["poll"]["attempts"] == 0
     assert accounting["shared_runtime_inputs_cleaned"] is True
+    assert {item["status"] for item in accounting["shared_runtime_input_cleanup"]} == {"absent"}
     partial = json.loads((lane_dir / "array_partial_success.json").read_text())
     assert partial["status"] == "blocked"
     assert partial["successful_outputs_remain_publishable"] is False
@@ -1020,6 +1021,64 @@ def test_validate_slurm_refuses_existing_runtime_manifest_unless_force(monkeypat
         == 0
     )
     assert not manifest_path.exists()
+
+
+def test_validate_slurm_submit_reports_shared_input_cleanup_failure(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+
+    original_unlink = Path.unlink
+
+    def fake_unlink(path: Path, *args, **kwargs):
+        if path.name == "manifest_index.json":
+            raise OSError("nfs busy")
+        return original_unlink(path, *args, **kwargs)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            monkeypatch.setattr(Path, "unlink", fake_unlink)
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="invalid account")
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "cleanupfailed",
+            "--submit",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    assert {blocker["error_code"] for blocker in summary["blockers"]} == {
+        "SBATCH_SUBMISSION_FAILED",
+        "PRODUCTION_SLURM_SHARED_INPUT_CLEANUP_FAILED",
+    }
+    lane_dir = tmp_path / "artifacts" / "cleanupfailed" / "slurm"
+    accounting = json.loads((lane_dir / "slurm_accounting.json").read_text())
+    assert accounting["shared_runtime_inputs_cleaned"] is False
+    assert any(item["status"] == "failed" for item in accounting["shared_runtime_input_cleanup"])
+    assert (tmp_path / "shared-workspace" / "runs" / "cleanupfailed" / "input" / "manifest_index.json").exists()
 
 
 def test_validate_slurm_rejects_symlinked_lane_and_evidence_file(monkeypatch, tmp_path: Path) -> None:
