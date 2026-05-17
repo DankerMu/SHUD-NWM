@@ -21,7 +21,7 @@ _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXE
 
 
 def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> Path:
-    """Create a directory via no-follow directory descriptors and return its resolved path."""
+    """Create a directory via no-follow directory descriptors and return its configured path."""
 
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=containment_root)
@@ -57,7 +57,7 @@ def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = No
             os.close(fd)
     finally:
         os.close(root_fd)
-    return target.resolve(strict=False)
+    return target
 
 
 def atomic_write_bytes_no_follow(
@@ -369,21 +369,23 @@ def _anchor_for(path: Path, *, containment_root: Path | None) -> tuple[Path, tup
     if containment_root is not None:
         root = _expand_path(containment_root)
         return root, _relative_parts_under_root(target, root)
-    if not target.is_absolute():
-        target = target.resolve(strict=False)
-    anchor = target
-    missing_parts: list[str] = []
-    while not anchor.exists():
-        missing_parts.append(anchor.name)
-        if anchor.parent == anchor:
-            raise SafeFilesystemError(f"No existing anchor directory for path: {target}")
-        anchor = anchor.parent
-    return anchor, tuple(reversed(missing_parts))
+    root = Path(target.anchor)
+    if not root.anchor:
+        raise SafeFilesystemError(f"No filesystem anchor for path: {target}")
+    return root, _absolute_parts(target)
 
 
 def _expand_path(path: Path) -> Path:
     expanded = Path(path).expanduser()
-    return expanded if expanded.is_absolute() else expanded.resolve(strict=False)
+    return expanded if expanded.is_absolute() else Path.cwd() / expanded
+
+
+def _absolute_parts(path: Path) -> tuple[str, ...]:
+    parts = tuple(part for part in path.parts if part not in {path.anchor, ""})
+    for part in parts:
+        if part in {".", ".."}:
+            raise SafeFilesystemError(f"Unsafe path component: {part!r}")
+    return parts
 
 
 def _relative_parts_under_root(path: Path, root: Path) -> tuple[str, ...]:

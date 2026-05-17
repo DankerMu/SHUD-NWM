@@ -13,6 +13,7 @@ from services.production_closure.e2e_validation import (
     MAX_DEPENDENCY_SUMMARY_DEPTH,
     MAX_DEPENDENCY_SUMMARY_NODES,
     MAX_EVIDENCE_PAYLOAD_BYTES,
+    MAX_RAW_SHUD_QC_BYTES,
     EvidenceWriter,
     ProductionE2EConfig,
     ProductionE2EValidationError,
@@ -893,6 +894,132 @@ def test_validate_e2e_force_does_not_reuse_stale_shud_raw_outputs(
     assert summary["status"] == "blocked"
     assert qc["error_code"] == error_code
     assert qc["retained_paths"][missing_name] is None
+
+
+def test_validate_e2e_qc_refuses_swapped_rivqdown_symlink_without_reading_external_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "qc-rivqdown-swap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    raw_dir = config.lane_dir / "raw" / "shud"
+    external = tmp_path / "external-qc"
+    external.mkdir()
+    external_target = external / f"{run_id}.rivqdown"
+    external_target.write_text(
+        "time,seg_a,seg_b\n2026-05-07T00:00:00Z,86400,172800\n2026-05-07T03:00:00Z,129600,216000\n",
+        encoding="utf-8",
+    )
+    original_read = e2e_validation_module.read_bytes_limited_no_follow
+    swapped = False
+
+    def swap_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == raw_dir / f"{run_id}.rivqdown" and not swapped:
+            swapped = True
+            path.unlink()
+            path.symlink_to(external_target)
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(e2e_validation_module, "read_bytes_limited_no_follow", swap_before_read)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert external_target.read_text(encoding="utf-8").startswith("time,seg_a,seg_b")
+
+
+def test_validate_e2e_qc_refuses_swapped_log_symlink_before_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "qc-log-swap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    raw_dir = config.lane_dir / "raw" / "shud"
+    external = tmp_path / "external-log"
+    external.mkdir()
+    external_log = external / "shud.log"
+    external_log.write_text("external log must remain\n", encoding="utf-8")
+    original_stat = e2e_validation_module.stat_no_follow
+    swapped = False
+
+    def swap_log_before_stat(path: Path, *, containment_root: Path | None = None):
+        nonlocal swapped
+        if path == raw_dir / "shud.log" and not swapped:
+            swapped = True
+            path.unlink()
+            path.symlink_to(external_log)
+        return original_stat(path, containment_root=containment_root)
+
+    monkeypatch.setattr(e2e_validation_module, "stat_no_follow", swap_log_before_stat)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert external_log.read_text(encoding="utf-8") == "external log must remain\n"
+
+
+def test_validate_e2e_qc_refuses_parent_symlink_swap_before_read_without_external_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "qc-parent-swap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    raw_dir = config.lane_dir / "raw" / "shud"
+    external = tmp_path / "external-parent-qc"
+    external.mkdir()
+    external_target = external / f"{run_id}.rivqdown"
+    external_target.write_text("external must remain\n", encoding="utf-8")
+    original_read = e2e_validation_module.read_bytes_limited_no_follow
+    swapped = False
+
+    def swap_parent_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == raw_dir / f"{run_id}.rivqdown" and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(raw_dir, containment_root=config.lane_dir)
+            raw_dir.symlink_to(external, target_is_directory=True)
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(e2e_validation_module, "read_bytes_limited_no_follow", swap_parent_before_read)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert external_target.read_text(encoding="utf-8") == "external must remain\n"
+
+
+def test_validate_e2e_qc_refuses_oversized_swapped_rivqdown_before_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "qc-oversized-swap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    raw_dir = config.lane_dir / "raw" / "shud"
+    original_read = e2e_validation_module.read_bytes_limited_no_follow
+    swapped = False
+
+    def enlarge_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == raw_dir / f"{run_id}.rivqdown" and not swapped:
+            swapped = True
+            path.write_bytes(b"x" * (MAX_RAW_SHUD_QC_BYTES + 1))
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(e2e_validation_module, "read_bytes_limited_no_follow", enlarge_before_read)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert "exceeds configured limit" in exc_info.value.message
 
 
 @pytest.mark.parametrize(

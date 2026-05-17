@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -20,6 +21,8 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
+    stat_no_follow,
     unlink_no_follow,
 )
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
@@ -33,17 +36,19 @@ from workers.model_registry.basins_registry_import import (
     import_basins_registry,
     prepare_basins_import_sources,
 )
-from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, SHUDRuntimeError
+from workers.shud_runtime.runtime import SHUDRuntimeError
 
 DEFAULT_BASINS_MIGRATION_SOURCE_URI = "/volume/data/nwm/Basins"
 DEFAULT_OBJECT_STORE_TARGET = "local-production-like"
 DEFAULT_CLEANUP_POLICY = "quarantine"
 FORBIDDEN_RUNTIME_SOURCE_FRAGMENTS = ("data/Basins", "/volume/")
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:_-]{0,127}$")
 MAX_PERCENT_DECODE_ROUNDS = 4
 ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 MAX_STORED_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
 MAX_RAW_INTERMEDIATE_BYTES = 64 * 1024 * 1024
+MAX_RUNTIME_STAGING_OBJECT_BYTES = 8 * 1024 * 1024
 SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
     r"(?:^|[;?#&])[^=/?#;&]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|"
     r"session[_-]?key|signature|x-amz-signature)[^=/?#;&]*=",
@@ -1054,19 +1059,6 @@ def _runtime_staging_evidence(
             "log_uri": store.uri_for_key(f"runs/{config.run_id}/logs/runtime-staging/"),
         },
     }
-    runtime_config = SHUDRuntimeConfig(
-        workspace_root=config.lane_dir / "runtime-workspace",
-        object_store_root=config.object_store_root,
-        object_store_prefix=config.object_store_prefix,
-        shud_executable="/bin/false",
-        output_interval_minutes=1440,
-        dry_run=True,
-    )
-    _validate_lane_path_contained(config, runtime_config.workspace_root, path_kind="runtime workspace")
-    runtime = SHUDRuntime(
-        config=runtime_config,
-        object_store=store,
-    )
     input_dir = config.lane_dir / "runtime-workspace" / "runs" / runtime_manifest["run_id"] / "input"
     output_dir = config.lane_dir / "runtime-workspace" / "runs" / runtime_manifest["run_id"] / "output"
     _validate_lane_path_contained(config, input_dir, path_kind="runtime input directory")
@@ -1087,8 +1079,7 @@ def _runtime_staging_evidence(
     _validate_lane_path_contained(config, input_dir, path_kind="runtime input directory")
     _validate_lane_path_contained(config, output_dir, path_kind="runtime output directory")
     try:
-        runtime.prepare_workspace(runtime_manifest, input_dir)
-        cfg_path = runtime.generate_cfg_para(runtime_manifest, input_dir, output_dir)
+        cfg_path = _prepare_runtime_staging_workspace(config, store, runtime_manifest, manifest, input_dir, output_dir)
     except SHUDRuntimeError as error:
         return {
             "status": "blocked",
@@ -1101,6 +1092,8 @@ def _runtime_staging_evidence(
             },
             "validation_object_keys": [forcing_key],
         }
+    except ProductionObjectStoreValidationError:
+        raise
     staged_files = sorted(path.relative_to(input_dir).as_posix() for path in input_dir.rglob("*") if path.is_file())
     evidence = {
         "status": "prepared",
@@ -1137,6 +1130,201 @@ def _write_validation_scratch_object(store: LocalObjectStore, key: str, content:
             f"Validation scratch object already exists and will not be overwritten: {normalized_key}",
         )
     return store.write_bytes_atomic(normalized_key, content)
+
+
+def _prepare_runtime_staging_workspace(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    runtime_manifest: dict[str, Any],
+    package_manifest: dict[str, Any],
+    input_dir: Path,
+    output_dir: Path,
+) -> Path:
+    _refuse_existing_descendant_symlinks(input_dir, path_kind="runtime input directory")
+    _refuse_existing_descendant_symlinks(output_dir, path_kind="runtime output directory")
+    _stage_runtime_package_objects(config, store, package_manifest, input_dir)
+    _stage_runtime_object_or_prefix(config, store, runtime_manifest["forcing"]["forcing_uri"], input_dir)
+    for suffix in (".mesh", ".para", ".calib", ".tsd.forc"):
+        if _first_staged_file(input_dir, suffix) is None:
+            raise SHUDRuntimeError("WORKSPACE_INCOMPLETE", f"Missing required staged file: *{suffix}")
+    template_path = _first_staged_file(input_dir, ".cfg.para") or _first_staged_file(input_dir, ".para")
+    if template_path is None:
+        raise SHUDRuntimeError("CFG_TEMPLATE_MISSING", "No .para template found in staged model package.")
+    template_content = _read_runtime_staging_text(config, template_path)
+    cfg_path = input_dir / f"{_safe_runtime_project_name(runtime_manifest)}.cfg.para"
+    content = "\n".join(line for line in template_content.splitlines() if ".cfg.ic" not in line)
+    replacements = {
+        "START_TIME": str(runtime_manifest["start_time"]),
+        "END_TIME": str(runtime_manifest["end_time"]),
+        "OUTPUT_DIR": str(output_dir),
+        "MODEL_OUTPUT_INTERVAL": str(runtime_manifest.get("runtime", {}).get("output_interval_minutes", 1440)),
+        "INIT_MODE": "1",
+        "SEGMENT_COUNT": str(runtime_manifest["model"]["segment_count"]),
+    }
+    for key, value in replacements.items():
+        content = _replace_or_append_runtime_cfg(content, key, value)
+    _write_runtime_staging_bytes(config, cfg_path, content.rstrip().encode("utf-8") + b"\n")
+    _refuse_existing_descendant_symlinks(input_dir, path_kind="runtime input directory")
+    _refuse_existing_descendant_symlinks(output_dir, path_kind="runtime output directory")
+    return cfg_path
+
+
+def _stage_runtime_package_objects(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    package_manifest: dict[str, Any],
+    input_dir: Path,
+) -> list[Path]:
+    staged: list[Path] = []
+    for entry in package_manifest.get("included_files", []):
+        if not isinstance(entry, dict) or entry.get("role") == "manifest":
+            continue
+        relative_path = _safe_runtime_relative_path(str(entry.get("relative_path", "")))
+        target = input_dir / relative_path
+        _stage_runtime_object(config, store, str(entry["object_uri"]), target)
+        staged.append(target)
+    return staged
+
+
+def _stage_runtime_object(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    uri_or_key: str,
+    target: Path,
+) -> None:
+    _validate_lane_path_contained(config, target.parent, path_kind="runtime staging directory")
+    content = store.read_bytes_limited(uri_or_key, max_bytes=MAX_RUNTIME_STAGING_OBJECT_BYTES)
+    _write_runtime_staging_bytes(config, target, content)
+
+
+def _stage_runtime_object_or_prefix(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    uri_or_key: str,
+    input_dir: Path,
+) -> list[Path]:
+    normalized_key = store.normalize_key(uri_or_key)
+    source_path = store.resolve_path(normalized_key)
+    try:
+        source_stat = stat_no_follow(source_path, containment_root=store.root)
+    except FileNotFoundError as error:
+        raise SHUDRuntimeError("ARTIFACT_NOT_FOUND", f"Object storage artifact not found: {uri_or_key}") from error
+    except SafeFilesystemError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging source path is unsafe: {source_path}: {error}",
+        ) from error
+    if stat.S_ISREG(source_stat.st_mode):
+        target = input_dir / source_path.name
+        _stage_runtime_object(config, store, normalized_key, target)
+        return [target]
+    if stat.S_ISDIR(source_stat.st_mode):
+        staged: list[Path] = []
+        for path in sorted(source_path.rglob("*")):
+            if not _is_store_regular_file(path, store.root):
+                continue
+            relative_path = path.relative_to(source_path)
+            relative_key = PurePosixPath(normalized_key, relative_path.as_posix()).as_posix()
+            target = input_dir / _safe_runtime_relative_path(relative_path.as_posix())
+            _stage_runtime_object(config, store, relative_key, target)
+            staged.append(target)
+        return staged
+    raise SHUDRuntimeError(
+        "ARTIFACT_NOT_FOUND",
+        f"Object storage artifact is not a regular file or directory: {uri_or_key}",
+    )
+
+
+def _write_runtime_staging_bytes(config: ProductionObjectStoreConfig, target: Path, content: bytes) -> None:
+    _validate_lane_path_contained(config, target.parent, path_kind="runtime staging directory")
+    try:
+        atomic_write_bytes_no_follow(target, content, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to write runtime staging file {target}: {error}",
+        ) from error
+
+
+def _read_runtime_staging_text(config: ProductionObjectStoreConfig, path: Path) -> str:
+    try:
+        content = read_bytes_limited_no_follow(
+            path,
+            max_bytes=MAX_RUNTIME_STAGING_OBJECT_BYTES,
+            containment_root=config.lane_dir,
+        )
+    except (OSError, SafeFilesystemError) as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Failed to read runtime staging file {path}: {error}",
+        ) from error
+    if len(content) > MAX_RUNTIME_STAGING_OBJECT_BYTES:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging file exceeds configured limit of {MAX_RUNTIME_STAGING_OBJECT_BYTES} bytes: {path}",
+        )
+    return content.decode("utf-8")
+
+
+def _first_staged_file(input_dir: Path, suffix: str) -> Path | None:
+    matches = sorted(path for path in input_dir.rglob(f"*{suffix}") if _is_regular_staged_file(path))
+    return matches[0] if matches else None
+
+
+def _is_regular_staged_file(path: Path) -> bool:
+    try:
+        path_stat = stat_no_follow(path)
+    except (OSError, SafeFilesystemError):
+        return False
+    return stat.S_ISREG(path_stat.st_mode) and path_stat.st_size > 0
+
+
+def _is_store_regular_file(path: Path, root: Path) -> bool:
+    try:
+        path_stat = stat_no_follow(path, containment_root=root)
+    except (OSError, SafeFilesystemError):
+        return False
+    return stat.S_ISREG(path_stat.st_mode) and path_stat.st_size > 0
+
+
+def _safe_runtime_relative_path(value: str) -> Path:
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging object path is unsafe: {value}",
+        )
+    return Path(*relative.parts)
+
+
+def _safe_runtime_project_name(runtime_manifest: dict[str, Any]) -> str:
+    name = str(runtime_manifest.get("model", {}).get("project_name") or runtime_manifest["model"]["model_id"])
+    if SAFE_IDENTIFIER_RE.fullmatch(name):
+        return name
+    raise ProductionObjectStoreValidationError(
+        "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+        f"Runtime staging project name is unsafe: {name}",
+    )
+
+
+def _replace_or_append_runtime_cfg(content: str, key: str, value: str) -> str:
+    lines = []
+    replaced = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{key} ") or stripped.startswith(f"{key}="):
+            lines.append(f"{key} = {value}")
+            replaced = True
+        else:
+            lines.append(line)
+    if not replaced:
+        lines.append(f"{key} = {value}")
+    return "\n".join(lines)
 
 
 def _cleanup_rollback_evidence(

@@ -21,7 +21,9 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
     rmtree_no_follow,
+    stat_no_follow,
     unlink_no_follow,
 )
 
@@ -54,6 +56,7 @@ DOWNSTREAM_STAGE_NAMES = {"parse", "frequency", "tile", "api", "frontend"}
 DERIVED_SEGMENT_IDS = ("seg_a", "seg_b")
 EXPECTED_TIMESTEP_HOURS = (0, 3)
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
+MAX_RAW_SHUD_QC_BYTES = 256 * 1024
 MAX_PERCENT_DECODE_ROUNDS = 4
 MAX_DEPENDENCY_SUMMARY_DEPTH = 128
 MAX_DEPENDENCY_SUMMARY_NODES = 10_000
@@ -946,17 +949,17 @@ def _qc_result(
     _validate_evidence_path_contained(config, log_path, path_kind="SHUD raw output")
     retained_paths = {
         "raw_output_dir": str(rivqdown_path.parent),
-        "rivqdown": str(rivqdown_path) if rivqdown_path.exists() else None,
-        "log": str(log_path) if log_path.exists() else None,
+        "rivqdown": str(rivqdown_path) if _qc_exists(config, rivqdown_path) else None,
+        "log": str(log_path) if _qc_exists(config, log_path) else None,
     }
-    if not rivqdown_path.is_file():
+    if not _qc_regular_file(config, rivqdown_path):
         return _qc_blocked(
             config,
             "SHUD_RIVQDOWN_MISSING",
             "Required .rivqdown output is missing.",
             retained_paths,
         )
-    if not log_path.is_file():
+    if not _qc_regular_file(config, log_path):
         return _qc_blocked(
             config,
             "SHUD_REQUIRED_OUTPUT_MISSING",
@@ -964,9 +967,10 @@ def _qc_result(
             retained_paths,
         )
 
+    rivqdown_content = _read_raw_shud_qc_text(config, rivqdown_path)
     lines = [
         line.strip()
-        for line in rivqdown_path.read_text(encoding="utf-8").splitlines()
+        for line in rivqdown_content.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
     if len(lines) < 2:
@@ -1074,6 +1078,48 @@ def _qc_blocked(
         },
         "next_step": "Inspect retained SHUD raw output and logs, regenerate valid .rivqdown, then rerun with --force.",
     }
+
+
+def _qc_exists(config: ProductionE2EConfig, path: Path) -> bool:
+    try:
+        stat_no_follow(path, containment_root=config.lane_dir)
+        return True
+    except FileNotFoundError:
+        return False
+    except SafeFilesystemError as error:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"Failed to bind SHUD raw output path {path}: {error}",
+        ) from error
+
+
+def _qc_regular_file(config: ProductionE2EConfig, path: Path) -> bool:
+    try:
+        path_stat = stat_no_follow(path, containment_root=config.lane_dir)
+    except FileNotFoundError:
+        return False
+    except SafeFilesystemError as error:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"Failed to bind SHUD raw output path {path}: {error}",
+        ) from error
+    return stat.S_ISREG(path_stat.st_mode)
+
+
+def _read_raw_shud_qc_text(config: ProductionE2EConfig, path: Path) -> str:
+    try:
+        content = read_bytes_limited_no_follow(path, max_bytes=MAX_RAW_SHUD_QC_BYTES, containment_root=config.lane_dir)
+    except (OSError, SafeFilesystemError) as error:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"Failed to read SHUD raw output {path}: {error}",
+        ) from error
+    if len(content) > MAX_RAW_SHUD_QC_BYTES:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"SHUD raw output exceeds configured limit of {MAX_RAW_SHUD_QC_BYTES} bytes: {path}",
+        )
+    return content.decode("utf-8")
 
 
 def _stage_manifest(

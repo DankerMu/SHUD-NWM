@@ -881,6 +881,40 @@ def test_safe_fs_rejects_parent_traversal_under_containment_root(
         assert victim.read_text(encoding="utf-8") == "external must remain\n"
 
 
+@pytest.mark.parametrize("case", ["parent", "root"])
+def test_safe_fs_ensure_directory_no_follow_rejects_uncontained_symlink_components(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    symlink = tmp_path / "link"
+    symlink.symlink_to(external, target_is_directory=True)
+    target = symlink / "child" if case == "parent" else symlink
+
+    with pytest.raises(safe_fs.SafeFilesystemError):
+        safe_fs.ensure_directory_no_follow(target)
+
+    assert sorted(path.name for path in external.iterdir()) == []
+
+
+@pytest.mark.parametrize("case", ["parent", "root"])
+def test_local_object_store_rejects_symlinked_root_identity(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    external = tmp_path / "external-store"
+    external.mkdir()
+    symlink = tmp_path / "store-link"
+    symlink.symlink_to(external, target_is_directory=True)
+    root = symlink / "child" if case == "parent" else symlink
+
+    with pytest.raises(ObjectStoreError):
+        LocalObjectStore(root, "s3://nhms-prod/m10")
+
+    assert sorted(path.name for path in external.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     "operation",
     ["read_bytes_limited", "size_and_checksum", "write_bytes_atomic", "delete"],
@@ -1357,6 +1391,99 @@ def test_validate_object_store_runtime_staging_refuses_symlink_swap_before_works
 
     monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", swap_runtime_run_before_dir_create)
     monkeypatch.setattr(object_store_validation, "ensure_directory_no_follow", swap_runtime_run_before_dir_create)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id=run_id))
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert sorted(path.name for path in external.iterdir()) == []
+
+
+def test_validate_object_store_runtime_staging_refuses_descendant_symlink_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "runtime-child-symlink"
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / run_id / "object-store"
+    external = tmp_path / "external-runtime-child"
+    external.mkdir()
+    external_cfg = external / "alias-a.cfg.para"
+    external_cfg.write_text("external must remain\n", encoding="utf-8")
+    original_write = object_store_validation.atomic_write_bytes_no_follow
+    swapped = False
+
+    def swap_cfg_before_write(
+        path: Path,
+        content: bytes,
+        *,
+        containment_root: Path | None = None,
+        temp_suffix: str = "tmp",
+    ) -> Path:
+        nonlocal swapped
+        if (
+            path
+            == lane_dir
+            / "runtime-workspace"
+            / "runs"
+            / f"{run_id}_runtime_staging"
+            / "input"
+            / "alias-a.cfg.para"
+            and not swapped
+        ):
+            swapped = True
+            if path.exists():
+                path.unlink()
+            path.symlink_to(external_cfg)
+        return original_write(path, content, containment_root=containment_root, temp_suffix=temp_suffix)
+
+    monkeypatch.setattr(object_store_validation, "atomic_write_bytes_no_follow", swap_cfg_before_write)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id=run_id))
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert external_cfg.read_text(encoding="utf-8") == "external must remain\n"
+
+
+def test_validate_object_store_runtime_staging_refuses_package_subdir_symlink_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "runtime-subdir-symlink"
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / run_id / "object-store"
+    external = tmp_path / "external-runtime-subdir"
+    external.mkdir()
+    original_write = object_store_validation.atomic_write_bytes_no_follow
+    swapped = False
+
+    def swap_gis_before_write(
+        path: Path,
+        content: bytes,
+        *,
+        containment_root: Path | None = None,
+        temp_suffix: str = "tmp",
+    ) -> Path:
+        nonlocal swapped
+        gis_dir = (
+            lane_dir
+            / "runtime-workspace"
+            / "runs"
+            / f"{run_id}_runtime_staging"
+            / "input"
+            / "gis"
+        )
+        if path.parent == gis_dir and not swapped:
+            swapped = True
+            if gis_dir.exists():
+                safe_fs.rmtree_no_follow(gis_dir, containment_root=lane_dir)
+            gis_dir.symlink_to(external, target_is_directory=True)
+        return original_write(path, content, containment_root=containment_root, temp_suffix=temp_suffix)
+
+    monkeypatch.setattr(object_store_validation, "atomic_write_bytes_no_follow", swap_gis_before_write)
 
     with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
         validate_object_store(ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id=run_id))

@@ -45,7 +45,13 @@ class LocalObjectStore:
     object_store_prefix: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "root", Path(self.root).expanduser().resolve())
+        root = Path(self.root).expanduser()
+        root = root if root.is_absolute() else Path.cwd() / root
+        try:
+            ensure_directory_no_follow(root)
+        except SafeFilesystemError as error:
+            raise ObjectStoreError(f"Local object store root is unsafe: {error}") from error
+        object.__setattr__(self, "root", root)
 
     def exists(self, key_or_uri: str) -> bool:
         path = self.resolve_path(key_or_uri)

@@ -16,7 +16,12 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 from packages.common.redaction import redact_payload, redact_text
-from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
+)
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:_-]{0,127}$")
@@ -967,16 +972,24 @@ def _load_thresholds(
     if thresholds_file is not None:
         _refuse_symlink_components(thresholds_file)
         try:
-            if thresholds_file.stat().st_size > MAX_EVIDENCE_PAYLOAD_BYTES:
+            content = read_bytes_limited_no_follow(thresholds_file, max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES)
+            if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
                 raise ProductionScaleValidationError(
                     "PRODUCTION_SCALE_THRESHOLDS_INVALID",
                     f"Thresholds file exceeds configured limit of {MAX_EVIDENCE_PAYLOAD_BYTES} bytes.",
                 )
-            raw = json.loads(thresholds_file.read_text(encoding="utf-8"))
+            raw = json.loads(content.decode("utf-8"))
+        except ProductionScaleValidationError:
+            raise
         except (OSError, json.JSONDecodeError) as error:
             raise ProductionScaleValidationError(
                 "PRODUCTION_SCALE_THRESHOLDS_INVALID",
                 f"Thresholds file could not be read as JSON: {error}",
+            ) from error
+        except SafeFilesystemError as error:
+            raise ProductionScaleValidationError(
+                "PRODUCTION_SCALE_THRESHOLDS_INVALID",
+                f"Thresholds file could not be read safely: {error}",
             ) from error
         if not isinstance(raw, Mapping):
             raise ProductionScaleValidationError(

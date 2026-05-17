@@ -7,7 +7,7 @@ from urllib.parse import quote
 import pytest
 
 from packages.common import safe_fs
-from services.production_closure import slurm_validation
+from services.production_closure import scale_validation, slurm_validation
 from services.production_closure.scale_validation import (
     DEFAULT_MIN_MODEL_COUNT,
     DEFAULT_MIN_SEGMENT_COUNT,
@@ -258,6 +258,72 @@ def test_validate_scale_rejects_oversized_thresholds_file_before_json_parse(tmp_
             thresholds_file=threshold_path,
         )
 
+    assert exc_info.value.error_code == "PRODUCTION_SCALE_THRESHOLDS_INVALID"
+    assert "exceeds configured limit" in exc_info.value.message
+
+
+def test_validate_scale_rejects_threshold_symlink_swap_without_reading_external_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threshold_path = tmp_path / "thresholds.json"
+    threshold_path.write_text(json.dumps({"minimum_counts": {"segment_count": 1}}), encoding="utf-8")
+    external = tmp_path / "external-thresholds.json"
+    external.write_text(
+        json.dumps({"minimum_counts": {"segment_count": DEFAULT_MIN_SEGMENT_COUNT + 1000}}),
+        encoding="utf-8",
+    )
+    original_read = scale_validation.read_bytes_limited_no_follow
+    swapped = False
+
+    def swap_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == threshold_path and not swapped:
+            swapped = True
+            path.unlink()
+            path.symlink_to(external)
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(scale_validation, "read_bytes_limited_no_follow", swap_before_read)
+
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="threshold_symlink_swap",
+            thresholds_file=threshold_path,
+        )
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_SCALE_THRESHOLDS_INVALID"
+    assert external.read_text(encoding="utf-8").startswith("{")
+
+
+def test_validate_scale_rejects_threshold_oversized_swap_before_json_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threshold_path = tmp_path / "thresholds.json"
+    threshold_path.write_text(json.dumps({"minimum_counts": {"segment_count": 1}}), encoding="utf-8")
+    original_read = scale_validation.read_bytes_limited_no_follow
+    swapped = False
+
+    def enlarge_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == threshold_path and not swapped:
+            swapped = True
+            path.write_bytes(b"{" + (b" " * MAX_EVIDENCE_PAYLOAD_BYTES))
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(scale_validation, "read_bytes_limited_no_follow", enlarge_before_read)
+
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="threshold_oversized_swap",
+            thresholds_file=threshold_path,
+        )
+
+    assert swapped is True
     assert exc_info.value.error_code == "PRODUCTION_SCALE_THRESHOLDS_INVALID"
     assert "exceeds configured limit" in exc_info.value.message
 
