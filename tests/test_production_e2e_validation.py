@@ -429,7 +429,7 @@ def test_validate_e2e_blocks_dependency_summary_swap_to_symlink_before_fd_open(
 
     def swap_summary_before_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
         nonlocal swapped
-        if Path(path) == summary_path.resolve() and not swapped:
+        if dir_fd is not None and path == summary_path.name and not swapped:
             swapped = True
             summary_path.unlink()
             summary_path.symlink_to(symlink_target)
@@ -456,6 +456,57 @@ def test_validate_e2e_blocks_dependency_summary_swap_to_symlink_before_fd_open(
     assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
     assert "target-met-run" not in json.dumps(dependency)
     assert target_payload not in json.dumps(dependency)
+
+
+def test_validate_e2e_opens_dependency_summary_by_bound_parent_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    full_path_open_attempts: list[Path] = []
+    basename_opens: list[str] = []
+    original_open = os.open
+
+    def guarded_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if dir_fd is None and Path(path) == summary_path.resolve():
+            full_path_open_attempts.append(Path(path))
+            raise AssertionError("dependency evidence file must be opened relative to the bound parent fd")
+        if dir_fd is not None and path == summary_path.name:
+            basename_opens.append(str(path))
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(e2e_validation_module.os, "open", guarded_open)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="bound-parent-fd",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "bound-parent-fd" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "ready"
+    assert dependency["status"] == "consumed"
+    assert full_path_open_attempts == []
+    assert basename_opens == ["summary.json"]
 
 
 def test_validate_e2e_blocks_dependency_parent_swap_to_symlink_before_summary_open(

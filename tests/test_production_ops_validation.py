@@ -807,7 +807,7 @@ def test_validate_ops_blocks_dependency_summary_swap_to_symlink_before_fd_open(
 
     def swap_summary_before_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
         nonlocal swapped
-        if Path(path) == summary_path.resolve() and not swapped:
+        if dir_fd is not None and path == summary_path.name and not swapped:
             swapped = True
             summary_path.unlink()
             summary_path.symlink_to(symlink_target)
@@ -833,6 +833,53 @@ def test_validate_ops_blocks_dependency_summary_swap_to_symlink_before_fd_open(
     assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK"
     assert "accepted_dependency_evidence" not in slurm
     assert hashlib.sha256(target_bytes).hexdigest() not in json.dumps(slurm)
+
+
+def test_validate_ops_opens_dependency_summary_and_receipt_by_bound_parent_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    receipt_path = root / "accepted_dependency_evidence.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+    full_path_open_attempts: list[Path] = []
+    basename_opens: list[str] = []
+    original_open = os.open
+
+    def guarded_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if dir_fd is None and Path(path) in {summary_path.resolve(), receipt_path.resolve()}:
+            full_path_open_attempts.append(Path(path))
+            raise AssertionError("dependency evidence file must be opened relative to the bound parent fd")
+        if dir_fd is not None and path in {summary_path.name, receipt_path.name}:
+            basename_opens.append(str(path))
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(ops_validation_module.os, "open", guarded_open)
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="bound_parent_fd",
+            slurm_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "bound_parent_fd" / "ops" / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert slurm["status"] == "accepted"
+    assert full_path_open_attempts == []
+    assert basename_opens == ["summary.json", "accepted_dependency_evidence.json"]
 
 
 def test_validate_ops_blocks_dependency_root_swap_to_symlink_before_summary_open(
@@ -958,7 +1005,7 @@ def test_validate_ops_blocks_dependency_receipt_swap_to_symlink_before_fd_open(
 
     def swap_receipt_before_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
         nonlocal swapped
-        if Path(path) == receipt_path.resolve() and not swapped:
+        if dir_fd is not None and path == receipt_path.name and not swapped:
             swapped = True
             receipt_path.unlink()
             receipt_path.symlink_to(symlink_target)

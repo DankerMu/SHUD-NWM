@@ -1667,32 +1667,64 @@ def _read_descriptor_bound_payload(
     path = evidence_path.path
     _verify_bound_directory_identity(evidence_path.root, evidence_path.root_stat, path_unsafe_code)
     _verify_bound_directory_identity(evidence_path.parent, evidence_path.parent_stat, path_unsafe_code)
-    flags = os.O_RDONLY
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    dir_flags = os.O_RDONLY | nofollow_flag
     if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NONBLOCK"):
-        flags |= os.O_NONBLOCK
-    nofollow_supported = hasattr(os, "O_NOFOLLOW")
-    if nofollow_supported:
-        flags |= os.O_NOFOLLOW
-        pre_open_stat = None
-    else:
-        pre_open_stat = path.lstat()
-
+        dir_flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
     try:
-        fd = os.open(path, flags)
+        dir_fd = os.open(evidence_path.parent, dir_flags)
     except OSError as error:
-        if error.errno == errno.ELOOP:
+        raise ProductionOpsValidationError(
+            path_unsafe_code,
+            f"Dependency evidence directory changed while opening evidence: {evidence_path.parent}",
+        ) from error
+    try:
+        opened_dir_stat = os.fstat(dir_fd)
+        if (
+            not stat.S_ISDIR(opened_dir_stat.st_mode)
+            or opened_dir_stat.st_dev != evidence_path.parent_stat.st_dev
+            or opened_dir_stat.st_ino != evidence_path.parent_stat.st_ino
+        ):
+            raise ProductionOpsValidationError(
+                path_unsafe_code,
+                f"Dependency evidence directory changed while opening evidence: {evidence_path.parent}",
+            )
+
+        try:
+            pre_open_stat = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as error:
+            raise ProductionOpsValidationError(
+                path_unsafe_code,
+                f"Dependency evidence file changed while it was being opened: {path}",
+            ) from error
+        if stat.S_ISLNK(pre_open_stat.st_mode):
             raise ProductionOpsValidationError(
                 symlink_code,
                 f"Dependency evidence file must not be a symlink: {path}",
-            ) from error
-        raise
+            )
+
+        flags = os.O_RDONLY | nofollow_flag
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+
+        try:
+            fd = os.open(path.name, flags, dir_fd=dir_fd)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise ProductionOpsValidationError(
+                    symlink_code,
+                    f"Dependency evidence file must not be a symlink: {path}",
+                ) from error
+            raise
+    finally:
+        os.close(dir_fd)
     try:
         opened_stat = os.fstat(fd)
-        if pre_open_stat is not None and (
-            opened_stat.st_dev != pre_open_stat.st_dev or opened_stat.st_ino != pre_open_stat.st_ino
-        ):
+        if opened_stat.st_dev != pre_open_stat.st_dev or opened_stat.st_ino != pre_open_stat.st_ino:
             raise ProductionOpsValidationError(
                 path_unsafe_code,
                 f"Dependency evidence file changed while it was being opened: {path}",
