@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
 import os
 import platform
 import re
+import stat
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
@@ -1561,14 +1563,87 @@ def _read_bounded_json(path: Path, *, too_large_code: str, too_large_message: st
 
 
 def _read_bounded_json_with_digest(path: Path, *, too_large_code: str, too_large_message: str) -> tuple[Any, str]:
-    with path.open("rb") as handle:
-        content = handle.read(MAX_EVIDENCE_PAYLOAD_BYTES + 1)
-    if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
-        raise ProductionOpsValidationError(
-            too_large_code,
-            too_large_message.format(limit=MAX_EVIDENCE_PAYLOAD_BYTES),
-        )
+    content = _read_descriptor_bound_payload(
+        path,
+        too_large_code=too_large_code,
+        too_large_message=too_large_message,
+        symlink_code="PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK",
+        path_unsafe_code="PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+        invalid_code=(
+            "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID"
+            if "ACCEPTED_EVIDENCE" in too_large_code
+            else "PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID"
+        ),
+    )
     return json.loads(content.decode("utf-8")), hashlib.sha256(content).hexdigest()
+
+
+def _read_descriptor_bound_payload(
+    path: Path,
+    *,
+    too_large_code: str,
+    too_large_message: str,
+    symlink_code: str,
+    path_unsafe_code: str,
+    invalid_code: str,
+) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    nofollow_supported = hasattr(os, "O_NOFOLLOW")
+    if nofollow_supported:
+        flags |= os.O_NOFOLLOW
+        pre_open_stat = None
+    else:
+        pre_open_stat = path.lstat()
+
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ProductionOpsValidationError(
+                symlink_code,
+                f"Dependency evidence file must not be a symlink: {path}",
+            ) from error
+        raise
+    try:
+        opened_stat = os.fstat(fd)
+        if pre_open_stat is not None and (
+            opened_stat.st_dev != pre_open_stat.st_dev or opened_stat.st_ino != pre_open_stat.st_ino
+        ):
+            raise ProductionOpsValidationError(
+                path_unsafe_code,
+                f"Dependency evidence file changed while it was being opened: {path}",
+            )
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise ProductionOpsValidationError(
+                invalid_code,
+                f"Dependency evidence path must be a regular file: {path}",
+            )
+        if opened_stat.st_size > MAX_EVIDENCE_PAYLOAD_BYTES:
+            raise ProductionOpsValidationError(
+                too_large_code,
+                too_large_message.format(limit=MAX_EVIDENCE_PAYLOAD_BYTES),
+            )
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(64 * 1024, MAX_EVIDENCE_PAYLOAD_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_EVIDENCE_PAYLOAD_BYTES:
+                raise ProductionOpsValidationError(
+                    too_large_code,
+                    too_large_message.format(limit=MAX_EVIDENCE_PAYLOAD_BYTES),
+                )
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 def _default_setting_value(config: ProductionOpsConfig, service: str, setting: str) -> str:

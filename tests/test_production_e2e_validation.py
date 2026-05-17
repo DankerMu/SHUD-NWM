@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from services.production_closure import e2e_validation as e2e_validation_module
 from services.production_closure import slurm_validation
 from services.production_closure.e2e_validation import (
     MAX_EVIDENCE_PAYLOAD_BYTES,
@@ -389,6 +391,71 @@ def test_validate_e2e_blocks_oversized_dependency_summary(tmp_path: Path) -> Non
     assert summary["status"] == "blocked"
     assert dependency["status"] == "blocked"
     assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_SUMMARY_TOO_LARGE"
+
+
+def test_validate_e2e_blocks_dependency_summary_swap_to_symlink_before_fd_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    symlink_target = tmp_path / "symlink-target-summary.json"
+    symlink_target.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "target-met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    target_payload = symlink_target.read_text(encoding="utf-8")
+    swapped = False
+    original_open = os.open
+
+    def swap_summary_before_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        nonlocal swapped
+        if Path(path) == summary_path.resolve() and not swapped:
+            swapped = True
+            summary_path.unlink()
+            summary_path.symlink_to(symlink_target)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(e2e_validation_module.os, "open", swap_summary_before_open)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="summary-swap",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "summary-swap" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert swapped is True
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
+    assert "target-met-run" not in json.dumps(dependency)
+    assert target_payload not in json.dumps(dependency)
 
 
 @pytest.mark.parametrize(
