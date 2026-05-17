@@ -368,9 +368,12 @@ uv run nhms-production validate-met \
   --run-id "$(date -u +m10-149-%Y%m%dT%H%M%SZ)"
 ```
 
-The lane records GFS, IFS, ERA5, and CLDAS source states. Fast mode uses
-`deterministic_fixture` for enabled GFS/IFS/ERA5 sources and `restricted` for
-CLDAS. If source-specific live gates such as
+The lane records GFS, IFS, ERA5, and CLDAS source states. Fast mode executes
+`deterministic_fixture` for enabled GFS only, records enabled IFS/ERA5 as
+`skipped` in this GFS-only raw/canonical/forcing lane, and records CLDAS as
+`restricted`. `source_config.json` also includes `configured_execution_mode`
+so configured deterministic IFS/ERA5 capability is visible without claiming
+that source work executed. If source-specific live gates such as
 `NHMS_PRODUCTION_MET_ALLOW_LIVE_NETWORK=1` and
 `NHMS_PRODUCTION_MET_LIVE_GFS=1` are set, the current #149 lane records
 `not_executed` rather than claiming live success; live network execution is left
@@ -408,9 +411,10 @@ The bundle is written under
   policy, cycle window, object prefix, selected deterministic Basins-backed
   model/version, CLDAS restricted reason, evidence root, and bounded resource
   limits.
-- `source_config.json`: GFS, IFS, ERA5, and CLDAS source status plus execution
-  mode from `deterministic_fixture`, `live_executed`, `skipped`, `restricted`,
-  or `not_executed`; credentials are represented by source names only.
+- `source_config.json`: GFS, IFS, ERA5, and CLDAS source status, configured
+  execution mode, and actual lane execution mode from
+  `deterministic_fixture`, `live_executed`, `skipped`, `restricted`, or
+  `not_executed`; credentials are represented by source names only.
 - `raw_cycle_manifest.json`: bounded deterministic source cycle evidence with
   source ID, cycle time, forecast hours, file counts, byte counts, checksums,
   retry counts, raw/object URIs, and skipped/restricted source evidence.

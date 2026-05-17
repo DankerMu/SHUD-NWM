@@ -510,6 +510,7 @@ def _source_config_payload(config: ProductionMetConfig) -> dict[str, Any]:
     sources = []
     for source in SOURCE_ORDER:
         status = _source_status(config, source)
+        configured_execution_mode = _source_configured_execution_mode(config, source, status)
         execution_mode = _source_execution_mode(config, source, status)
         endpoint = _configured_endpoint(source)
         sources.append(
@@ -517,6 +518,7 @@ def _source_config_payload(config: ProductionMetConfig) -> dict[str, Any]:
                 "source": source,
                 "source_id": SOURCE_STORAGE_ID[source],
                 "status": status,
+                "configured_execution_mode": configured_execution_mode,
                 "execution_mode": execution_mode,
                 "endpoint_identity": endpoint,
                 "source_auth_reference": _source_auth_reference(source, execution_mode),
@@ -543,6 +545,7 @@ def _write_raw_source_evidence(config: ProductionMetConfig, store: LocalObjectSt
     total_bytes = 0
     for source in SOURCE_ORDER:
         status = _source_status(config, source)
+        configured_execution_mode = _source_configured_execution_mode(config, source, status)
         execution_mode = _source_execution_mode(config, source, status)
         if execution_mode != "deterministic_fixture":
             source_entries.append(
@@ -550,6 +553,7 @@ def _write_raw_source_evidence(config: ProductionMetConfig, store: LocalObjectSt
                     "source": source,
                     "source_id": SOURCE_STORAGE_ID[source],
                     "status": _raw_unavailable_status(status, execution_mode),
+                    "configured_execution_mode": configured_execution_mode,
                     "execution_mode": execution_mode,
                     "reason": _source_reason(config, source, status, execution_mode),
                     "cycle_time": None,
@@ -560,12 +564,9 @@ def _write_raw_source_evidence(config: ProductionMetConfig, store: LocalObjectSt
                     "retry_count": 0,
                     "raw_uri": None,
                     "object_uri": None,
+                    "canonical_lineage_required": False,
                 }
             )
-            continue
-
-        if source != "GFS":
-            source_entries.append(_skipped_noncanonical_source(config, source, execution_mode))
             continue
 
         manifest = _write_deterministic_source_manifest(config, store, source)
@@ -597,29 +598,6 @@ def _raw_unavailable_status(status: str, execution_mode: str) -> str:
     if execution_mode == "not_executed":
         return "not_executed"
     return "unavailable"
-
-
-def _skipped_noncanonical_source(config: ProductionMetConfig, source: str, execution_mode: str) -> dict[str, Any]:
-    return {
-        "source": source,
-        "source_id": SOURCE_STORAGE_ID[source],
-        "status": "skipped",
-        "execution_mode": "skipped",
-        "reason": (
-            f"{source} deterministic fixture is available but skipped in this closure lane because "
-            "raw-to-canonical and forcing lineage is selected for GFS only"
-        ),
-        "configured_execution_mode": execution_mode,
-        "cycle_time": None,
-        "selected_forecast_hours": [],
-        "file_count": 0,
-        "byte_count": 0,
-        "checksums": [],
-        "retry_count": 0,
-        "raw_uri": None,
-        "object_uri": None,
-        "canonical_lineage_required": False,
-    }
 
 
 def _raw_aggregate_status(source_entries: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
@@ -1664,7 +1642,7 @@ def _source_status(config: ProductionMetConfig, source: str) -> str:
     return "enabled" if source in config.enabled_sources else "disabled"
 
 
-def _source_execution_mode(config: ProductionMetConfig, source: str, status: str) -> str:
+def _source_configured_execution_mode(config: ProductionMetConfig, source: str, status: str) -> str:
     if status == "restricted":
         return "restricted"
     if status == "disabled":
@@ -1678,11 +1656,23 @@ def _source_execution_mode(config: ProductionMetConfig, source: str, status: str
     return "deterministic_fixture"
 
 
+def _source_execution_mode(config: ProductionMetConfig, source: str, status: str) -> str:
+    configured_execution_mode = _source_configured_execution_mode(config, source, status)
+    if source in {"IFS", "ERA5"} and configured_execution_mode == "deterministic_fixture":
+        return "skipped"
+    return configured_execution_mode
+
+
 def _source_reason(config: ProductionMetConfig, source: str, status: str, execution_mode: str) -> str:
     if source == "CLDAS":
         return config.cldas_restricted_reason
     if status == "disabled":
         return "source not included in enabled source subset"
+    if source in {"IFS", "ERA5"} and execution_mode == "skipped":
+        return (
+            f"{source} deterministic fixture is configured but skipped in this closure lane because "
+            "raw-to-canonical and forcing lineage is selected for GFS only"
+        )
     if execution_mode == "not_executed":
         if config.cached_fallback_policy == "disabled":
             return "cached/deterministic fallback policy is disabled and no live executor is available"
@@ -1695,6 +1685,8 @@ def _source_reason(config: ProductionMetConfig, source: str, status: str, execut
 def _source_auth_reference(source: str, execution_mode: str) -> str:
     if execution_mode == "deterministic_fixture":
         return "public-path-or-none"
+    if execution_mode == "skipped":
+        return "not-required"
     if source == "ERA5":
         return "env:CDSAPI_KEY"
     if source == "IFS":
@@ -1898,10 +1890,10 @@ def _validate_object_prefix_safe(prefix: str) -> None:
         )
     for raw_segment in parsed.path.split("/"):
         segment = unquote(raw_segment)
-        if segment in {".", ".."}:
+        if "/" in segment or "\\" in segment or segment in {".", ".."}:
             raise ProductionMetValidationError(
                 "PRODUCTION_MET_OBJECT_PREFIX_UNSAFE",
-                "Met object prefix path segments must not contain '.' or '..'.",
+                "Met object prefix path segments must not contain '.', '..', or decoded path separators.",
             )
         decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(segment)
         if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in decoded_parts):

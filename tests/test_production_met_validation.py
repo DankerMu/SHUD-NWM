@@ -52,6 +52,15 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     source_modes = {source["source"]: source["execution_mode"] for source in source_config["sources"]}
     assert source_modes == {
         "GFS": "deterministic_fixture",
+        "IFS": "skipped",
+        "ERA5": "skipped",
+        "CLDAS": "restricted",
+    }
+    configured_source_modes = {
+        source["source"]: source["configured_execution_mode"] for source in source_config["sources"]
+    }
+    assert configured_source_modes == {
+        "GFS": "deterministic_fixture",
         "IFS": "deterministic_fixture",
         "ERA5": "deterministic_fixture",
         "CLDAS": "restricted",
@@ -127,6 +136,9 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
         "s3://nhms-prod/met?token=secret",
         "s3://nhms-prod/met/../other",
         "s3://nhms-prod/met/%2e%2e/other",
+        "s3://nhms-prod/met/%2e%2e%2fother",
+        "s3://nhms-prod/met/%2f..%2fother",
+        "s3://nhms-prod/met/%2e%2e%5cother",
         "s3://nhms-prod/met/./other",
     ],
 )
