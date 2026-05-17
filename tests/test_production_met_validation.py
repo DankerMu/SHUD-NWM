@@ -210,6 +210,21 @@ def test_validate_met_bounds_block_before_unbounded_work(
     assert not (tmp_path / "artifacts" / "bounded" / "met" / "local-object-store").exists()
 
 
+def test_validate_met_manifest_bound_counts_actual_deterministic_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_MET_MAX_MANIFEST_ENTRIES", "16")
+
+    summary = validate_met(ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="actualbound"))
+
+    lane_dir = tmp_path / "artifacts" / "actualbound" / "met"
+    assert summary["status"] == "ready"
+    raw = _read_json(lane_dir / "raw_cycle_manifest.json")
+    assert raw["total_file_count"] == 15
+    assert raw["bounds"]["max_manifest_entries"] == 16
+
+
 def test_validate_met_rejects_path_escape_before_writing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     try:
         exit_code = slurm_validation.main(

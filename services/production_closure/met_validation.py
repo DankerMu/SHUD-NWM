@@ -1100,7 +1100,11 @@ def _validate_config(config: ProductionMetConfig) -> None:
 
 
 def _validate_deterministic_shape(config: ProductionMetConfig) -> None:
-    deterministic_enabled = [source for source in DETERMINISTIC_SOURCES if source in config.enabled_sources]
+    deterministic_enabled = [
+        source
+        for source in DETERMINISTIC_SOURCES
+        if _source_execution_mode(config, source, _source_status(config, source)) == "deterministic_fixture"
+    ]
     entry_count = sum(
         len(_source_variables(source)) * len(config.forecast_hours) + 1 for source in deterministic_enabled
     )
