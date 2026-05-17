@@ -79,8 +79,21 @@ def test_validate_ops_default_lane_writes_required_release_blocked_evidence(tmp_
     assert config["status"] == "blocked"
     assert all(item["required_settings"] for item in config["services"])
     assert any(blocker["error_code"] == "PRODUCTION_OPS_CONFIG_UNSAFE_SETTING" for blocker in config["blockers"])
+    assert any(blocker["error_code"] == "PRODUCTION_OPS_CONFIG_MISSING_SETTING" for blocker in config["blockers"])
     for service in config["services"]:
         assert Path(service["template_reference"]).is_file()
+        assert {item["setting"] for item in service["setting_source_metadata"]} == set(service["required_settings"])
+    blockers_by_setting = {
+        (blocker["service"], blocker["setting"])
+        for blocker in config["blockers"]
+        if blocker["error_code"] == "PRODUCTION_OPS_CONFIG_MISSING_SETTING"
+    }
+    for service in config["services"]:
+        for setting in service["required_settings"]:
+            assert (service["service"], setting) in blockers_by_setting
+            metadata = next(item for item in service["setting_source_metadata"] if item["setting"] == setting)
+            assert metadata["source"] == "generated_default"
+            assert metadata["missing_required"] is True
 
 
 def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path: Path) -> None:
@@ -195,7 +208,7 @@ def test_validate_ops_dependency_closure_accepts_real_summaries_but_keeps_live_c
     ]:
         root = tmp_path / name
         root.mkdir()
-        _write_dependency_summary(root / "summary.json", name, issue, schema, status)
+        _write_dependency_summary(root / "summary.json", name, issue, schema, status, accepted=True)
         roots[name] = root
 
     summary = validate_ops(
@@ -217,6 +230,91 @@ def test_validate_ops_dependency_closure_accepts_real_summaries_but_keeps_live_c
     assert summary["status"] == "release_blocked"
     assert summary["dependency_status"] == "accepted"
     assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("summary_fields", "expected_status"),
+    [
+        ({"deterministic_fixture": True}, "skipped"),
+        ({"execution_mode": "deterministic_fixture"}, "skipped"),
+        ({"live_slurm_executed": False}, "skipped"),
+        ({}, "blocked"),
+        (
+            {
+                "accepted_dependency_evidence": {
+                    "accepted": True,
+                    "receipt_id": "missing-fields",
+                    "execution_mode": "accepted_live_evidence",
+                    "deterministic_fixture": False,
+                    "final_production_readiness_claimed": False,
+                }
+            },
+            "blocked",
+        ),
+    ],
+)
+def test_validate_ops_dependency_closure_rejects_unproven_ready_summaries(
+    tmp_path: Path,
+    summary_fields: dict,
+    expected_status: str,
+) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    _write_dependency_summary(
+        root / "summary.json",
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        extra=summary_fields,
+    )
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="unproven_deps",
+            slurm_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "unproven_deps" / "ops" / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert slurm["status"] == expected_status
+    assert slurm["final_production_readiness_claimed"] is False
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING"
+    assert dependency["status"] == "release_blocked"
+    assert summary["status"] == "release_blocked"
+    assert summary["dependency_status"] == "release_blocked"
+
+
+def test_validate_ops_dependency_closure_rejects_final_readiness_claimed_summary(tmp_path: Path) -> None:
+    root = tmp_path / "object_store"
+    root.mkdir()
+    _write_dependency_summary(
+        root / "summary.json",
+        "object_store",
+        148,
+        "nhms.production_closure.object_store.v1",
+        "ready",
+        accepted=True,
+        extra={"final_production_readiness_claimed": True},
+    )
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="final_claimed_dep",
+            object_store_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "final_claimed_dep" / "ops" / "dependency_closure.json")
+    object_store = next(item for item in dependency["dependencies"] if item["dependency"] == "object_store")
+    assert object_store["status"] == "blocked"
+    assert object_store["summary_final_production_readiness_claimed"] is True
+    assert object_store["final_production_readiness_claimed"] is False
+    assert object_store["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING"
+    assert summary["status"] == "release_blocked"
 
 
 def test_validate_ops_dependency_statuses_record_skipped_blocked_and_not_executed(tmp_path: Path) -> None:
@@ -414,6 +512,35 @@ def test_validate_ops_live_ready_config_knobs_do_not_claim_live_execution(tmp_pa
     assert {alert["execution_mode"] for alert in alerts["alerts"]} == {"not_executed"}
 
 
+def test_validate_ops_env_supplied_config_values_are_not_marked_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for service, settings in {
+        "api": ("DATABASE_URL", "AUTH_BACKEND", "AUDIT_LOG_DESTINATION", "CORS_ALLOWED_ORIGINS"),
+        "orchestrator": ("PIPELINE_DATABASE_URL", "OBJECT_STORE_PREFIX", "SLURM_GATEWAY_URL", "WORKSPACE_ROOT"),
+        "slurm_gateway": ("SLURM_PARTITION", "SLURM_ACCOUNT", "SLURM_SHARED_LOG_ROOT", "SBATCH_TEMPLATE_ROOT"),
+        "tile_publisher": ("TILE_OBJECT_PREFIX", "TILE_LAYER_REGISTRY", "TILE_ERROR_TOPIC"),
+        "frontend": ("VITE_API_BASE_URL", "VITE_AUTH_MODE", "VITE_MAP_STYLE_URL"),
+        "database": ("DATABASE_URL", "POSTGIS_ENABLED", "TIMESCALE_ENABLED", "MIGRATION_LOCK"),
+        "object_store": ("OBJECT_STORE_ROOT", "OBJECT_STORE_PREFIX", "OBJECT_STORE_CREDENTIAL_SOURCE"),
+        "source_adapters": ("GFS_CONFIG", "IFS_CONFIG", "ERA5_CONFIG", "CLDAS_RESTRICTED_REASON"),
+        "workspace_roots": ("RUN_WORKSPACE_ROOT", "SHARED_LOG_ROOT", "ARTIFACT_RETENTION_POLICY"),
+    }.items():
+        for setting in settings:
+            monkeypatch.setenv(f"NHMS_PRODUCTION_OPS_{service.upper()}_{setting}", _safe_config_value(setting))
+
+    validate_ops(ProductionOpsConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="env_config"))
+
+    config = _read_json(tmp_path / "artifacts" / "env_config" / "ops" / "config_validation.json")
+    assert not [
+        blocker for blocker in config["blockers"] if blocker["error_code"] == "PRODUCTION_OPS_CONFIG_MISSING_SETTING"
+    ]
+    for service in config["services"]:
+        assert all(item["source"] == "environment" for item in service["setting_source_metadata"])
+        assert all(item["missing_required"] is False for item in service["setting_source_metadata"])
+
+
 @pytest.mark.parametrize(
     ("env_name", "value"),
     [
@@ -586,20 +713,53 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _write_dependency_summary(path: Path, name: str, issue: int, schema: str, status: str) -> None:
+def _write_dependency_summary(
+    path: Path,
+    name: str,
+    issue: int,
+    schema: str,
+    status: str,
+    *,
+    accepted: bool = False,
+    extra: dict | None = None,
+) -> None:
+    payload = {
+        "schema": schema,
+        "issue": issue,
+        "run_id": f"{name}-run",
+        "status": status,
+        "evidence_dir": str(path.parent),
+        "final_production_readiness_claimed": False,
+    }
+    if accepted:
+        payload["accepted_dependency_evidence"] = {
+            "accepted": True,
+            "receipt_id": f"{name}-accepted-receipt",
+            "accepted_at": "2026-05-17T00:00:00Z",
+            "execution_mode": "accepted_live_evidence",
+            "deterministic_fixture": False,
+            "final_production_readiness_claimed": False,
+        }
+    if extra:
+        payload.update(extra)
     path.write_text(
-        json.dumps(
-            {
-                "schema": schema,
-                "issue": issue,
-                "run_id": f"{name}-run",
-                "status": status,
-                "evidence_dir": str(path.parent),
-                "final_production_readiness_claimed": False,
-            }
-        ),
+        json.dumps(payload),
         encoding="utf-8",
     )
+
+
+def _safe_config_value(setting: str) -> str:
+    if "URL" in setting:
+        return "https://prod.example/internal"
+    if "ROOT" in setting:
+        return "/srv/nhms/prod"
+    if "PREFIX" in setting:
+        return "s3://nhms-prod/releases"
+    if setting.endswith("ENABLED"):
+        return "true"
+    if setting.endswith("REASON"):
+        return "restricted-source-approved-by-ops"
+    return f"prod_{setting.lower()}"
 
 
 def _percent_encode_rounds(value: str, rounds: int) -> str:

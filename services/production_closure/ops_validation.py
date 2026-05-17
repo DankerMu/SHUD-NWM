@@ -150,6 +150,8 @@ DEPENDENCY_CONTRACTS = {
     "scale": {"issue": 151, "schema": "nhms.production_closure.scale.v1", "allowed_statuses": {"ready"}},
 }
 EXPLICIT_BLOCKED_DEPENDENCY_STATUSES = {"blocked", "failed", "failure", "error", "not_executed", "missing", "unknown"}
+ACCEPTED_DEPENDENCY_RECEIPT_KEY = "accepted_dependency_evidence"
+ACCEPTED_DEPENDENCY_EXECUTION_MODES = {"accepted_live_evidence", "live_executed", "consumed_live_evidence"}
 
 
 class ProductionOpsValidationError(RuntimeError):
@@ -391,13 +393,36 @@ def _production_config_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     blockers: list[dict[str, Any]] = []
     for service, required_settings in SERVICE_CONFIGS.items():
         settings = {}
+        setting_source_metadata = []
         service_blockers = []
         for setting in required_settings:
-            value = os.getenv(f"NHMS_PRODUCTION_OPS_{service.upper()}_{setting}")
+            env_name = f"NHMS_PRODUCTION_OPS_{service.upper()}_{setting}"
+            value = os.getenv(env_name)
+            source = "environment"
             if value is None:
                 value = _default_setting_value(config, service, setting)
+                source = "generated_default"
             _validate_config_value_safe(value, service, setting)
             settings[setting] = value
+            setting_source_metadata.append(
+                {
+                    "setting": setting,
+                    "env_name": env_name,
+                    "source": source,
+                    "missing_required": source == "generated_default",
+                    "generated_default": source == "generated_default",
+                }
+            )
+            if source == "generated_default":
+                service_blockers.append(
+                    {
+                        "error_code": "PRODUCTION_OPS_CONFIG_MISSING_SETTING",
+                        "service": service,
+                        "setting": setting,
+                        "source": source,
+                        "reason": "Required production setting was not supplied and was filled by a generated default.",
+                    }
+                )
             if _is_unsafe_setting(service, setting, value):
                 service_blockers.append(
                     {
@@ -418,6 +443,7 @@ def _production_config_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 "template_reference": SERVICE_CONFIG_TEMPLATE,
                 "required_settings": list(required_settings),
                 "settings": settings,
+                "setting_source_metadata": setting_source_metadata,
                 "blockers": service_blockers,
             }
         )
@@ -909,27 +935,174 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             summary=summary,
             error_code="PRODUCTION_OPS_DEPENDENCY_CONTRACT_MISMATCH",
         )
-    status = "accepted" if summary_status in contract["allowed_statuses"] else "blocked"
     if summary_status in EXPLICIT_BLOCKED_DEPENDENCY_STATUSES:
         status = summary_status if summary_status in {"blocked", "not_executed"} else "blocked"
-    return {
+        return _dependency_from_summary(
+            name,
+            contract,
+            summary_path,
+            summary,
+            status=status,
+            execution_mode="not_executed",
+            deterministic_fixture=_summary_has_deterministic_evidence(summary),
+            final_production_readiness_claimed=False,
+            error_code="PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
+            reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
+        )
+    if summary_status not in contract["allowed_statuses"]:
+        return _dependency_from_summary(
+            name,
+            contract,
+            summary_path,
+            summary,
+            status="blocked",
+            execution_mode="not_executed",
+            deterministic_fixture=_summary_has_deterministic_evidence(summary),
+            final_production_readiness_claimed=False,
+            error_code="PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
+            reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
+        )
+    accepted, reason = _has_accepted_dependency_evidence(summary)
+    if not accepted:
+        deterministic_fixture = _summary_has_deterministic_evidence(summary)
+        return _dependency_from_summary(
+            name,
+            contract,
+            summary_path,
+            summary,
+            status="skipped" if deterministic_fixture else "blocked",
+            execution_mode=_dependency_execution_mode(summary, deterministic_fixture),
+            deterministic_fixture=deterministic_fixture,
+            final_production_readiness_claimed=False,
+            error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING",
+            reason=reason,
+        )
+    receipt = summary[ACCEPTED_DEPENDENCY_RECEIPT_KEY]
+    return _dependency_from_summary(
+        name,
+        contract,
+        summary_path,
+        summary,
+        status="accepted",
+        execution_mode=str(receipt["execution_mode"]),
+        deterministic_fixture=False,
+        final_production_readiness_claimed=False,
+        reason="Accepted production closure dependency summary consumed with explicit non-deterministic receipt.",
+        receipt=receipt,
+    )
+
+
+def _dependency_from_summary(
+    name: str,
+    contract: Mapping[str, Any],
+    summary_path: Path,
+    summary: Mapping[str, Any],
+    *,
+    status: str,
+    execution_mode: str,
+    deterministic_fixture: bool,
+    final_production_readiness_claimed: bool,
+    reason: str,
+    error_code: str | None = None,
+    receipt: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
         "dependency": name,
         "issue": contract["issue"],
         "schema": summary.get("schema"),
         "status": status,
-        "execution_mode": "consumed_evidence" if status == "accepted" else "not_executed",
+        "execution_mode": execution_mode,
         "summary_path": str(summary_path),
-        "summary_status": summary_status,
+        "summary_status": str(summary.get("status", "unknown")),
         "run_id": summary.get("run_id"),
         "evidence_dir": summary.get("evidence_dir"),
-        "deterministic_fixture": False,
-        "final_production_readiness_claimed": bool(summary.get("final_production_readiness_claimed", False)),
-        "reason": (
-            "Accepted production closure dependency summary consumed."
-            if status == "accepted"
-            else f"Dependency summary status {summary_status!r} is not accepted for final ops readiness."
-        ),
+        "deterministic_fixture": deterministic_fixture,
+        "final_production_readiness_claimed": final_production_readiness_claimed,
+        "summary_final_production_readiness_claimed": bool(summary.get("final_production_readiness_claimed", False)),
+        "reason": reason,
     }
+    if error_code is not None:
+        payload["error_code"] = error_code
+    if receipt is not None:
+        payload["accepted_dependency_evidence"] = {
+            "receipt_id": receipt["receipt_id"],
+            "accepted_at": receipt["accepted_at"],
+            "execution_mode": receipt["execution_mode"],
+            "deterministic_fixture": receipt["deterministic_fixture"],
+            "final_production_readiness_claimed": receipt["final_production_readiness_claimed"],
+        }
+    return payload
+
+
+def _has_accepted_dependency_evidence(summary: Mapping[str, Any]) -> tuple[bool, str]:
+    if _summary_has_deterministic_evidence(summary):
+        return False, "Dependency summary is deterministic/non-live evidence and cannot be accepted by ops closure."
+    if summary.get("final_production_readiness_claimed") is not False:
+        return False, "Dependency summary must explicitly set final_production_readiness_claimed=false."
+    receipt = summary.get(ACCEPTED_DEPENDENCY_RECEIPT_KEY)
+    if not isinstance(receipt, Mapping):
+        return False, f"Dependency summary is missing {ACCEPTED_DEPENDENCY_RECEIPT_KEY} receipt fields."
+    required = ("accepted", "receipt_id", "accepted_at", "execution_mode", "deterministic_fixture")
+    missing = [field for field in required if field not in receipt]
+    if missing:
+        return False, f"Dependency accepted-evidence receipt is missing fields: {', '.join(missing)}."
+    if receipt.get("accepted") is not True:
+        return False, "Dependency accepted-evidence receipt must set accepted=true."
+    if receipt.get("final_production_readiness_claimed") is not False:
+        return False, "Dependency accepted-evidence receipt must set final_production_readiness_claimed=false."
+    if receipt.get("deterministic_fixture") is not False:
+        return False, "Dependency accepted-evidence receipt must set deterministic_fixture=false."
+    execution_mode = str(receipt.get("execution_mode", ""))
+    if execution_mode not in ACCEPTED_DEPENDENCY_EXECUTION_MODES:
+        return False, "Dependency accepted-evidence receipt must use a non-deterministic accepted execution mode."
+    if _is_deterministic_execution_mode(execution_mode):
+        return False, "Dependency accepted-evidence receipt execution mode must not be deterministic."
+    for receipt_field in ("receipt_id", "accepted_at"):
+        if not str(receipt.get(receipt_field, "")).strip():
+            return False, f"Dependency accepted-evidence receipt field {receipt_field} must be non-empty."
+    return True, "Accepted dependency evidence receipt is present."
+
+
+def _summary_has_deterministic_evidence(summary: Mapping[str, Any]) -> bool:
+    if summary.get("deterministic_fixture") is True:
+        return True
+    for key, value in _walk_summary_fields(summary):
+        if key in {"execution_mode", "configured_execution_mode", "cached_fallback_policy", "dataset_source"}:
+            if _is_deterministic_execution_mode(str(value)):
+                return True
+        if key.startswith("live_") and key.endswith("_executed") and value is False:
+            return True
+        if key.startswith("live_") and key.endswith("_delivered") and value is False:
+            return True
+        if key.startswith("live_") and key.endswith("_status") and str(value) != "executed":
+            return True
+    return False
+
+
+def _walk_summary_fields(value: Any) -> tuple[tuple[str, Any], ...]:
+    fields: list[tuple[str, Any]] = []
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            fields.append((str(key), nested))
+            fields.extend(_walk_summary_fields(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            fields.extend(_walk_summary_fields(nested))
+    return tuple(fields)
+
+
+def _is_deterministic_execution_mode(value: str) -> bool:
+    normalized = value.strip().lower()
+    return any(marker in normalized for marker in ("deterministic", "fixture", "simulated", "dry_run", "not_executed"))
+
+
+def _dependency_execution_mode(summary: Mapping[str, Any], deterministic_fixture: bool) -> str:
+    mode = summary.get("execution_mode")
+    if isinstance(mode, str) and mode:
+        return mode
+    if deterministic_fixture:
+        return "deterministic_fixture"
+    return "not_executed"
 
 
 def _invalid_dependency(

@@ -667,7 +667,10 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   self-contained execution policy.
 - `config_validation.json`: API, orchestrator, Slurm gateway, tile publisher,
   frontend, database, object store, source adapter, and workspace root required
-  settings, redacted values, and stable unsafe-setting blockers.
+  settings, redacted values, source metadata, and stable missing/unsafe-setting
+  blockers. `setting_source_metadata` records whether each
+  required setting came from the environment or from a generated default; every
+  generated default remains release-blocking until explicitly supplied.
   Root/path settings reject dot segments, traversal, and backslash separators.
   The checked-in service config template is
   `docs/runbooks/production-service-config.md`.
@@ -691,6 +694,13 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
 - `dependency_closure.json`, `environment.json`, and `summary.json`: #147-#151
   accepted/skipped/blocked/not-executed dependency closure, redacted
   environment, final release blockers, live flags, and evidence file index.
+  Accepted dependency closure requires a matching issue/schema/status plus an
+  `accepted_dependency_evidence` receipt with `accepted=true`, non-empty
+  `receipt_id` and `accepted_at`, `deterministic_fixture=false`,
+  `final_production_readiness_claimed=false`, and a non-deterministic
+  `execution_mode` such as `accepted_live_evidence`. Deterministic summaries or
+  summaries with missing live/accepted receipt fields are recorded as skipped or
+  blocked, not accepted.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs, symlinked evidence roots, oversized payloads,
