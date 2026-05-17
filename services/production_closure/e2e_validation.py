@@ -49,6 +49,8 @@ DERIVED_SEGMENT_IDS = ("seg_a", "seg_b")
 EXPECTED_TIMESTEP_HOURS = (0, 3)
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
 MAX_PERCENT_DECODE_ROUNDS = 4
+MAX_DEPENDENCY_SUMMARY_DEPTH = 128
+MAX_DEPENDENCY_SUMMARY_NODES = 10_000
 DEPENDENCY_SUMMARY_CONTRACTS = {
     "slurm": {
         "issue": 147,
@@ -407,7 +409,7 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
     summary_path = summary_evidence.path
     try:
         summary, _summary_sha256 = _read_dependency_summary_json(summary_evidence)
-    except (ProductionE2EValidationError, OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+    except (ProductionE2EValidationError, OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError) as error:
         error_code = (
             error.error_code
             if isinstance(error, ProductionE2EValidationError)
@@ -425,7 +427,16 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "reason": f"Dependency summary could not be read: {error}",
         }
     if not isinstance(summary, Mapping):
-        return _invalid_dependency_summary(name, summary_path, "Dependency summary JSON must be an object.")
+        return _invalid_dependency_summary(
+            name,
+            summary_path,
+            "Dependency summary JSON must be an object.",
+            error_code="PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID",
+        )
+    try:
+        _validate_dependency_summary_complexity(summary)
+    except ProductionE2EValidationError as error:
+        return _invalid_dependency_summary(name, summary_path, error.message, error_code=error.error_code)
 
     summary_status = str(summary.get("status", "unknown"))
     summary_schema = summary.get("schema")
@@ -481,9 +492,10 @@ def _invalid_dependency_summary(
     reason: str,
     *,
     summary: Mapping[str, Any] | None = None,
+    error_code: str | None = None,
 ) -> dict[str, Any]:
     contract = DEPENDENCY_SUMMARY_CONTRACTS[name]
-    return {
+    dependency = {
         "dependency": name,
         "status": "blocked",
         "execution_mode": "not_executed",
@@ -496,6 +508,34 @@ def _invalid_dependency_summary(
         "expected_issue": contract["issue"],
         "reason": reason,
     }
+    if error_code is not None:
+        dependency["error_code"] = error_code
+    return dependency
+
+
+def _validate_dependency_summary_complexity(summary: Mapping[str, Any]) -> None:
+    stack: list[tuple[Any, int]] = [(summary, 0)]
+    visited_nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        visited_nodes += 1
+        if visited_nodes > MAX_DEPENDENCY_SUMMARY_NODES:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID",
+                (
+                    "Dependency summary exceeds configured complexity limit of "
+                    f"{MAX_DEPENDENCY_SUMMARY_NODES} visited JSON nodes."
+                ),
+            )
+        if depth > MAX_DEPENDENCY_SUMMARY_DEPTH:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID",
+                f"Dependency summary exceeds configured nesting limit of {MAX_DEPENDENCY_SUMMARY_DEPTH} levels.",
+            )
+        if isinstance(current, Mapping):
+            stack.extend((nested, depth + 1) for nested in reversed(tuple(current.values())))
+        elif isinstance(current, list):
+            stack.extend((nested, depth + 1) for nested in reversed(current))
 
 
 def _dependency_summary_path(root: Path, name: str) -> _BoundDependencyEvidencePath | None:

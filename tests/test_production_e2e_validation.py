@@ -9,6 +9,8 @@ import pytest
 from services.production_closure import e2e_validation as e2e_validation_module
 from services.production_closure import slurm_validation
 from services.production_closure.e2e_validation import (
+    MAX_DEPENDENCY_SUMMARY_DEPTH,
+    MAX_DEPENDENCY_SUMMARY_NODES,
     MAX_EVIDENCE_PAYLOAD_BYTES,
     ProductionE2EConfig,
     ProductionE2EValidationError,
@@ -391,6 +393,75 @@ def test_validate_e2e_blocks_oversized_dependency_summary(tmp_path: Path) -> Non
     assert summary["status"] == "blocked"
     assert dependency["status"] == "blocked"
     assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_SUMMARY_TOO_LARGE"
+
+
+def test_validate_e2e_blocks_too_deep_dependency_summary(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    nested: object = "leaf"
+    for _ in range(MAX_DEPENDENCY_SUMMARY_DEPTH + 2):
+        nested = [nested]
+    (root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "deep-met-run",
+                "status": "ready",
+                "bounded_nested_payload": nested,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="deepdep",
+            met_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "deepdep" / "e2e"
+    dependency = _read_json(lane_dir / "dependency_status.json")["dependencies"][0]
+    assert summary["status"] == "blocked"
+    assert (lane_dir / "summary.json").is_file()
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID"
+    assert "nesting limit" in dependency["reason"]
+
+
+def test_validate_e2e_blocks_too_many_node_dependency_summary(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    (root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "wide-met-run",
+                "status": "ready",
+                "bounded_wide_payload": [None] * MAX_DEPENDENCY_SUMMARY_NODES,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="widedeps",
+            met_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "widedeps" / "e2e"
+    dependency = _read_json(lane_dir / "dependency_status.json")["dependencies"][0]
+    assert summary["status"] == "blocked"
+    assert (lane_dir / "summary.json").is_file()
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID"
+    assert "complexity limit" in dependency["reason"]
 
 
 def test_validate_e2e_blocks_dependency_summary_swap_to_symlink_before_fd_open(
