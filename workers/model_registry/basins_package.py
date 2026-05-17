@@ -13,7 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from packages.common.object_store import MAX_OBJECT_MANIFEST_BYTES, LocalObjectStore, ObjectStoreError
 from packages.common.storage import validate_object_path
 
 from .basins_discovery import (
@@ -31,6 +31,7 @@ BASINS_MIGRATION_REPORT_SCHEMA_VERSION = "basins.migration.v1"
 FORCING_SAMPLE_FILE_LIMIT = 5
 FORCING_SAMPLE_BYTE_LIMIT = 64 * 1024
 FORCING_SAMPLE_LINE_LIMIT = 1000
+MAX_EXISTING_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
 _OS_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _OS_MKDIR_SUPPORTS_DIR_FD = os.mkdir in os.supports_dir_fd
 _OS_RENAME_SUPPORTS_DIR_FD = os.rename in os.supports_dir_fd
@@ -1298,6 +1299,7 @@ def _read_existing_manifest(
                 model_id=model_id,
                 version=version,
                 manifest_uri=manifest_uri,
+                max_bytes=MAX_EXISTING_MANIFEST_BYTES,
             ).decode("utf-8")
         )
     except (ObjectStoreError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
@@ -1708,6 +1710,7 @@ def _read_object_bytes_no_symlinks(
     model_id: str,
     version: str,
     manifest_uri: str,
+    max_bytes: int | None = None,
 ) -> bytes:
     try:
         with _open_object_file_no_symlinks(
@@ -1717,7 +1720,24 @@ def _read_object_bytes_no_symlinks(
             version=version,
             manifest_uri=manifest_uri,
         ) as handle:
-            return handle.read()
+            if max_bytes is None:
+                return handle.read()
+            if max_bytes < 0:
+                raise ValueError("max_bytes must be non-negative.")
+            chunks = []
+            remaining = max_bytes + 1
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+            if len(content) > max_bytes:
+                raise ObjectStoreError(
+                    f"Object {key} exceeds read limit: {len(content)} bytes > {max_bytes} bytes"
+                )
+            return content
     except OSError as error:
         raise ObjectStoreError(f"Failed to read object {key}: {error}") from error
 

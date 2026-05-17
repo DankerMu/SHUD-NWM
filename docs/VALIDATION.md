@@ -305,11 +305,20 @@ The bundle is written under
   package manifest evidence published to the production-like object URI prefix.
 - `stored_object_verification.json`: rereads the stored manifest/package objects
   and verifies sizes and SHA-256 checksums from stored bytes.
-- `registry_api_runtime_consumption.json`: local registry source preparation,
-  API-response fixture, and runtime staging/cfg-generation evidence. Fast mode
-  records DB/API as `not_executed` instead of fabricating live success, and
-  verifies runtime package sources use the configured object URI prefix rather
-  than `data/Basins` or `/volume/...`.
+- `registry_api_runtime_consumption.json`: local registry import-source
+  preparation, optional live registry DB import, deterministic API contract
+  fixture, and runtime staging/cfg-generation evidence. Fast mode records live
+  DB import and live API execution as `not_executed` with
+  `api_contract_source=local_import_source`; this proves the object-URI
+  consumption contract without claiming live registry/API success. Set
+  `NHMS_PRODUCTION_OBJECT_STORE_RUN_REGISTRY_IMPORT=1` and provide
+  `NHMS_PRODUCTION_OBJECT_STORE_REGISTRY_DATABASE_URL` or `DATABASE_URL` to
+  require a live registry import report. When that opt-in is enabled, missing or
+  failed DB import blocks the bundle instead of falling back to local-only
+  success; a successful import uses `api_contract_source=live_registry_import`
+  and records inserted/updated/idempotency fields. The runtime smoke writes
+  validation-only forcing under `runs/<run_id>/input/scratch/runtime-staging/`
+  and refuses to overwrite an existing scratch object.
 - `runtime_staging_manifest.json`: full runtime manifest written during local
   staging, including object URI inputs/outputs used by the generated SHUD
   runtime configuration.

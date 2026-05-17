@@ -233,6 +233,7 @@ def _import_prepared_sources(sources: ImportSources, database_url: str) -> dict[
         "segment_count": sources.geometry.segment_count,
         "row_counts": row_counts,
         "model_package_uri": sources.manifest["model_package_uri"],
+        "manifest_uri": sources.manifest["manifest_uri"],
         "package_checksum": sources.manifest["package_checksum"],
     }
 

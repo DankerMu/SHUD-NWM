@@ -258,7 +258,7 @@ Must add/change for #148:
 - A documented opt-in `validate-object-store` lane or equivalent command that records object-store target/root/prefix, credential source, cleanup policy, copied Basins root, selected model/version, and evidence root under `artifacts/production-closure/<run_id>/object-store/`.
 - Reuse M9 `basins-migration-report` to accept copied roots and reject symlink-only roots with stable error evidence before package/import work.
 - Reuse Basins package publication against production-like object storage and verify manifest/object bytes/checksums from the stored objects.
-- Reuse registry import/API/runtime evidence to prove model package consumption uses object URI prefix, not `data/Basins` or `/volume/...` source paths.
+- Reuse registry import-source preparation plus deterministic API-contract/runtime evidence to prove model package consumption uses object URI prefix, not `data/Basins` or `/volume/...` source paths. Fast evidence prepares local import sources and marks live DB import/API execution as `not_executed`; when live registry inputs are explicitly enabled, validation must run the registry DB import and block on missing or failed import evidence instead of claiming local-only success.
 - Add cleanup/rollback evidence for failed publish/import attempts and prove no model becomes active implicitly.
 
 Issue #148 risk packs:
@@ -283,7 +283,7 @@ Issue #148 required evidence:
 - Copied-root migration test: copied synthetic Basins root -> migration report with file count, byte count, inventory checksum, source/target metadata, and `production_ready=true`.
 - Symlink-root rejection test: symlink Basins root -> stable blocker/error evidence and no production-ready bundle or package/import writes.
 - Stored-object verification test: publish package to production-like local object store -> manifest URI/package URI/per-file checksums/package checksum verified by rereading object bytes.
-- Registry/API/runtime consumption test: imported package evidence and runtime/API smoke -> object URI prefix is used and development source paths are not runtime package sources.
+- Registry/API/runtime consumption test: default fast evidence prepares registry import sources and API/runtime contract smoke, while opt-in live registry evidence imports to the configured DB when enabled -> object URI prefix is used and development source paths are not runtime package sources; evidence must not claim live DB/API success unless that integration actually ran.
 - Cleanup/rollback test: simulated publish/import failure after partial work -> evidence lists written keys/rows, cleanup/quarantine result, and active model state remains unchanged.
 - Redaction test: endpoint/root/prefix/manifest/API evidence containing credential-shaped URI values -> emitted evidence removes userinfo/query/fragment/secrets.
 - Local verification commands: OpenSpec strict validation, `uv run ruff check .`, targeted Basins package/registry/runtime/API tests, and documented opt-in validation command when `NHMS_RUN_PRODUCTION_CLOSURE=1`.

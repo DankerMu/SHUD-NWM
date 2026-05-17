@@ -80,10 +80,19 @@ def test_validate_object_store_synthetic_copied_root_success(
     assert consumption["uses_object_uri_prefix"] is True
     assert consumption["runtime_dev_path_leak"] is False
     assert consumption["forbidden_runtime_source_fragments"] == []
-    assert consumption["registry"]["status"] == "local_sources_prepared"
+    assert consumption["registry"]["status"] == "local_contract_prepared"
     assert consumption["registry"]["db_import_status"] == "not_executed"
+    assert consumption["registry"]["live_registry_import"] is False
+    assert consumption["registry"]["acceptance_evidence"] == "local_contract_smoke"
     assert consumption["registry"]["implicit_activation"] is False
     assert consumption["api"]["live_api_status"] == "not_executed"
+    assert consumption["api"]["live_api"] is False
+    assert consumption["api"]["acceptance_evidence"] == "local_contract_smoke"
+    assert consumption["api"]["api_contract_source"] == "local_import_source"
+    assert consumption["api_contract_source"] == "local_import_source"
+    assert consumption["acceptance_evidence"] == "local_contract_smoke"
+    assert consumption["live_registry_import"] is False
+    assert consumption["live_api"] is False
     assert consumption["runtime"]["status"] == "prepared"
     assert consumption["runtime"]["execution_status"] == "not_executed"
 
@@ -152,6 +161,8 @@ def test_validate_object_store_rejects_unsafe_prefix_before_writing_evidence(
         "s3://nhms-prod/password=abc/m10",
         "s3://nhms-prod/credential=abc/m10",
         "s3://nhms-prod/x-amz-signature=abc/m10",
+        "s3://nhms-prod/path%3Ftoken=secret/m10",
+        "s3://nhms-prod/path%23x-amz-signature=abc/m10",
     ],
 )
 def test_validate_object_store_rejects_sensitive_prefix_shapes_without_lane_evidence(
@@ -376,13 +387,204 @@ def test_validate_object_store_runtime_evidence_has_no_development_source_leak(
     consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
     values = [
         consumption["runtime"]["runtime_manifest"]["model_package_uri"],
+        consumption["runtime"]["runtime_manifest"]["manifest_uri"],
         consumption["runtime"]["runtime_manifest"]["forcing_uri"],
         consumption["api"]["model_response_fixture"]["model_package_uri"],
+        consumption["api"]["model_response_fixture"]["manifest_uri"],
         consumption["registry"]["model_package_uri"],
     ]
     assert all(value.startswith("s3://nhms-prod/runtime-prefix/") for value in values)
     assert all("data/Basins" not in value and "/volume/" not in value for value in values)
     assert consumption["runtime_dev_path_leak"] is False
+    assert consumption["runtime"]["scratch_prefix"] == "runs/m10_148_runtime/input/scratch/runtime-staging"
+    assert consumption["runtime"]["validation_object_keys"] == [
+        "runs/m10_148_runtime/input/scratch/runtime-staging/forcing/gfs/2026051600/basin_v1/"
+        f"{consumption['api']['model_response_fixture']['model_id']}/forcing.tsd.forc"
+    ]
+
+
+def test_validate_object_store_live_registry_import_opt_in_requires_database_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/runtime-prefix")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_RUN_REGISTRY_IMPORT", "1")
+    monkeypatch.delenv("NHMS_PRODUCTION_OBJECT_STORE_REGISTRY_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_import_no_db"]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    lane_dir = tmp_path / "artifacts" / "m10_148_import_no_db" / "object-store"
+    consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert summary["status"] == "blocked"
+    assert consumption["status"] == "blocked"
+    assert consumption["registry"]["status"] == "blocked"
+    assert consumption["registry"]["db_import_status"] == "blocked"
+    assert consumption["registry"]["error_code"] == "PRODUCTION_OBJECT_STORE_REGISTRY_DATABASE_URL_MISSING"
+    assert consumption["registry"]["live_registry_import"] is False
+    assert consumption["acceptance_evidence"] == "live_registry_import_blocked"
+    assert consumption["api"]["api_contract_source"] == "local_import_source"
+
+
+def test_validate_object_store_live_registry_import_opt_in_records_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/runtime-prefix")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_RUN_REGISTRY_IMPORT", "1")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_REGISTRY_DATABASE_URL", "postgresql://user:pass@db.example/nhms")
+
+    def fake_import_basins_registry(
+        *,
+        inventory_path: str | Path,
+        package_manifest_path: str | Path,
+        database_url: str | None = None,
+        output_path: str | Path | None = None,
+    ) -> dict[str, object]:
+        assert Path(inventory_path).exists()
+        manifest = json.loads(Path(package_manifest_path).read_text(encoding="utf-8"))
+        assert database_url == "postgresql://user:pass@db.example/nhms"
+        assert output_path is None
+        return {
+            "schema_version": "basins.registry_import.v1",
+            "status": "imported",
+            "model_id": manifest["model_id"],
+            "basin_id": "basins_basin_a",
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": "river_v1",
+            "mesh_version_id": "mesh_v1",
+            "active": False,
+            "segment_count": 2,
+            "row_counts": {
+                "basin": 1,
+                "basin_version": 1,
+                "river_network_version": 1,
+                "river_segment": 2,
+                "mesh_version": 1,
+                "model_instance": 1,
+            },
+            "model_package_uri": manifest["model_package_uri"],
+            "manifest_uri": manifest["manifest_uri"],
+            "package_checksum": manifest["package_checksum"],
+        }
+
+    monkeypatch.setattr(object_store_validation, "import_basins_registry", fake_import_basins_registry)
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_import_live"]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    lane_dir = tmp_path / "artifacts" / "m10_148_import_live" / "object-store"
+    consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert summary["status"] == "ready"
+    assert consumption["status"] == "ready"
+    assert consumption["live_registry_import"] is True
+    assert consumption["acceptance_evidence"] == "live_registry_import_contract_smoke"
+    assert consumption["api_contract_source"] == "live_registry_import"
+    assert consumption["registry"]["status"] == "imported"
+    assert consumption["registry"]["db_import_status"] == "imported"
+    assert consumption["registry"]["live_registry_import"] is True
+    assert consumption["registry"]["inserted_total"] == 7
+    assert consumption["registry"]["updated_total"] == 0
+    assert consumption["registry"]["idempotent"] is False
+    assert consumption["registry"]["implicit_activation"] is False
+    assert consumption["api"]["api_contract_source"] == "live_registry_import"
+    values = [
+        consumption["registry"]["model_package_uri"],
+        consumption["registry"]["manifest_uri"],
+        consumption["api"]["model_response_fixture"]["model_package_uri"],
+        consumption["api"]["model_response_fixture"]["manifest_uri"],
+        consumption["runtime"]["runtime_manifest"]["model_package_uri"],
+        consumption["runtime"]["runtime_manifest"]["manifest_uri"],
+    ]
+    assert all(value.startswith("s3://nhms-prod/runtime-prefix/") for value in values)
+    assert all("data/Basins" not in value and "/volume/" not in value for value in values)
+
+
+def test_validate_object_store_runtime_smoke_does_not_clobber_production_like_forcing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_root = tmp_path / "object-store"
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/runtime-prefix")
+    production_like_forcing = object_root / "forcing" / "gfs" / "2026051600" / "basin_v1"
+    production_like_forcing.mkdir(parents=True)
+    existing_file = production_like_forcing / "basins_basin_a_shud" / "forcing.tsd.forc"
+    existing_file.parent.mkdir()
+    existing_file.write_text("do not clobber\n", encoding="utf-8")
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-object-store",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "m10_148_no_clobber",
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    assert existing_file.read_text(encoding="utf-8") == "do not clobber\n"
+    scratch_root = object_root / "runs" / "m10_148_no_clobber" / "input" / "scratch"
+    scratch_forcing = next(scratch_root.rglob("forcing.tsd.forc"))
+    assert scratch_forcing.read_text(encoding="utf-8") == "forcing\n"
+
+
+def test_validate_object_store_refuses_existing_runtime_scratch_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_root = tmp_path / "object-store"
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/runtime-prefix")
+    existing_file = (
+        object_root
+        / "runs"
+        / "m10_148_scratch_exists"
+        / "input"
+        / "scratch"
+        / "runtime-staging"
+        / "forcing"
+        / "gfs"
+        / "2026051600"
+        / "basin_v1"
+        / "basins_basin_a_shud"
+        / "forcing.tsd.forc"
+    )
+    existing_file.parent.mkdir(parents=True)
+    existing_file.write_text("existing scratch\n", encoding="utf-8")
+
+    try:
+        exit_code = slurm_validation.main(
+            [
+                "validate-object-store",
+                "--evidence-root",
+                str(tmp_path / "artifacts"),
+                "--run-id",
+                "m10_148_scratch_exists",
+            ]
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "PRODUCTION_OBJECT_STORE_VALIDATION_OBJECT_EXISTS" in captured.err
+    assert existing_file.read_text(encoding="utf-8") == "existing scratch\n"
 
 
 def test_validate_object_store_invalid_target_fails_without_evidence(

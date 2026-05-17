@@ -10,6 +10,8 @@ from urllib.parse import unquote, urlparse
 
 from packages.common.storage import validate_object_path
 
+MAX_OBJECT_MANIFEST_BYTES = 16 * 1024 * 1024
+
 
 class ObjectStoreError(RuntimeError):
     """Raised when an object-store operation fails."""

@@ -24,7 +24,9 @@ The system SHALL reuse M9 Basins package publication against production-like obj
 
 - **WHEN** a Basins package is published to the configured object store prefix
 - **THEN** manifest URI, package URI, per-file checksums, and package checksum are verified from stored bytes
-- **AND** registry import and API responses use stable object URIs rather than local development source paths
+- **AND** default fast evidence prepares local registry import sources and API/runtime contract responses using stable object URIs rather than local development source paths
+- **AND** when live registry import is explicitly enabled, the registry DB import runs against the configured database URL and missing or failed import evidence blocks validation
+- **AND** evidence explicitly records whether API contract smoke was sourced from local import sources or live registry import, and does not claim live DB/API success unless those integrations actually ran
 
 ### Requirement: Publish/import rollback is safe
 

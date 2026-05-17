@@ -32,7 +32,7 @@
 - [x] 2.1 Define production object-store configuration contract for endpoint/root/prefix, credentials, path containment, redaction, and local/S3 parity.
 - [x] 2.2 Reuse M9 migration-report capability to produce production evidence from a copied Basins root; symlink-only roots must fail production readiness.
 - [x] 2.3 Reuse M9 package publication against a production-like object store and verify manifest/object checksums from stored bytes.
-- [x] 2.4 Import published package into registry and prove model/API/runtime consumption uses object URIs rather than development source paths.
+- [x] 2.4 Import published package into registry when live registry import is explicitly enabled, otherwise prepare deterministic local import sources; in both modes prove API-contract/runtime consumption uses object URIs rather than development source paths, and never claim live DB/API success unless it actually ran.
 - [x] 2.5 Add cleanup/rollback and conflict evidence for partially failed publish/import operations.
 - [x] 2.6 Document validation command and evidence files under `artifacts/production-closure/<run_id>/object-store/`, including migration report, package manifest, registry import report, API/runtime smoke, cleanup report, and fast-regression commands.
 

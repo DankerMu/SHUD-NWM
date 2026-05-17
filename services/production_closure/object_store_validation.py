@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from packages.common.object_store import MAX_OBJECT_MANIFEST_BYTES, LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.basins_package import (
@@ -24,6 +24,7 @@ from workers.model_registry.basins_package import (
 )
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
+    import_basins_registry,
     prepare_basins_import_sources,
 )
 from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, SHUDRuntimeError
@@ -33,9 +34,9 @@ DEFAULT_OBJECT_STORE_TARGET = "local-production-like"
 DEFAULT_CLEANUP_POLICY = "quarantine"
 FORBIDDEN_RUNTIME_SOURCE_FRAGMENTS = ("data/Basins", "/volume/")
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-MAX_STORED_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_STORED_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
 SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
-    r"(?:^|[;&])[^=/?#;&]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|"
+    r"(?:^|[;?#&])[^=/?#;&]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|"
     r"session[_-]?key|signature|x-amz-signature)[^=/?#;&]*=",
     re.IGNORECASE,
 )
@@ -126,6 +127,8 @@ class ProductionObjectStoreConfig:
     source_uri: str
     model_id: str | None
     version: str
+    run_registry_import: bool = False
+    registry_database_url: str | None = None
     force: bool = False
 
     @property
@@ -157,6 +160,9 @@ class ProductionObjectStoreConfig:
         )
         root_from_env = os.getenv("NHMS_PRODUCTION_BASINS_ROOT", "").strip()
         resolved_basins_root = basins_root or (Path(root_from_env).expanduser() if root_from_env else None)
+        registry_database_url = (
+            os.getenv("NHMS_PRODUCTION_OBJECT_STORE_REGISTRY_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
+        ).strip()
         return cls(
             evidence_root=resolved_evidence_root,
             run_id=resolved_run_id,
@@ -171,6 +177,8 @@ class ProductionObjectStoreConfig:
             source_uri=os.getenv("NHMS_PRODUCTION_BASINS_SOURCE_URI", DEFAULT_BASINS_MIGRATION_SOURCE_URI),
             model_id=model_id or os.getenv("NHMS_PRODUCTION_BASINS_MODEL_ID") or None,
             version=version or os.getenv("NHMS_PRODUCTION_BASINS_VERSION", "vproduction-object-store-local"),
+            run_registry_import=_truthy_env(os.getenv("NHMS_PRODUCTION_OBJECT_STORE_RUN_REGISTRY_IMPORT")),
+            registry_database_url=registry_database_url or None,
             force=force,
         )
 
@@ -593,43 +601,43 @@ def _consumption_evidence(
             inventory_path=inventory_path,
             package_manifest_path=package_manifest_raw_path,
         )
-        registry = {
-            "status": "local_sources_prepared",
-            "db_import_status": "not_executed",
-            "db_import_reason": (
-                "fast lane does not require PostgreSQL/PostGIS; geometry and manifest contracts were validated locally."
-            ),
-            "model_id": sources.ids["model_id"],
-            "basin_id": sources.ids["basin_id"],
-            "basin_version_id": sources.ids["basin_version_id"],
-            "river_network_version_id": sources.ids["river_network_version_id"],
-            "mesh_version_id": sources.ids["mesh_version_id"],
-            "segment_count": sources.geometry.segment_count,
-            "active": False,
-            "implicit_activation": False,
-            "model_package_uri": manifest["model_package_uri"],
-            "package_checksum": manifest["package_checksum"],
-        }
+        registry = _registry_import_evidence(config, inventory_path, package_manifest_raw_path, manifest, sources)
     except BasinsRegistryImportError as error:
         registry = {"status": "blocked", **error.to_payload(), "implicit_activation": False}
 
     runtime = _runtime_staging_evidence(config, store, manifest, writer)
+    api_contract_source = (
+        "live_registry_import" if registry.get("live_registry_import") is True else "local_import_source"
+    )
+    api_fixture_model_package_uri = str(registry.get("model_package_uri") or manifest["model_package_uri"])
+    api_fixture_manifest_uri = str(registry.get("manifest_uri") or manifest["manifest_uri"])
+    api_fixture_package_checksum = str(registry.get("package_checksum") or manifest["package_checksum"])
     api = {
         "status": "local_contract",
+        "api_contract_source": api_contract_source,
         "live_api_status": "not_executed",
         "live_api_reason": "fast lane does not require a running API or registry database.",
+        "live_api": False,
+        "acceptance_evidence": "registry_import_contract_smoke"
+        if api_contract_source == "live_registry_import"
+        else "local_contract_smoke",
         "model_response_fixture": {
-            "model_id": manifest["model_id"],
+            "model_id": registry.get("model_id") or manifest["model_id"],
             "active": False,
-            "model_package_uri": manifest["model_package_uri"],
-            "manifest_uri": manifest["manifest_uri"],
-            "package_checksum": manifest["package_checksum"],
+            "model_package_uri": api_fixture_model_package_uri,
+            "manifest_uri": api_fixture_manifest_uri,
+            "package_checksum": api_fixture_package_checksum,
         },
     }
     runtime_source_values = [
         manifest.get("model_package_uri"),
+        manifest.get("manifest_uri"),
         runtime.get("runtime_manifest", {}).get("model_package_uri"),
+        runtime.get("runtime_manifest", {}).get("manifest_uri"),
         api["model_response_fixture"]["model_package_uri"],
+        api["model_response_fixture"]["manifest_uri"],
+        registry.get("model_package_uri"),
+        registry.get("manifest_uri"),
     ]
     forbidden = _forbidden_runtime_source_fragments(runtime_source_values)
     prefix_ok = all(
@@ -643,6 +651,7 @@ def _consumption_evidence(
         and prefix_ok
         and not forbidden
     )
+    acceptance_evidence = _consumption_acceptance_evidence(registry)
     return {
         "schema": "nhms.production_closure.object_store.consumption.v1",
         "status": "ready" if consumption_ready else "blocked",
@@ -654,7 +663,118 @@ def _consumption_evidence(
         "forbidden_runtime_source_fragments": forbidden,
         "runtime_dev_path_leak": bool(forbidden),
         "implicit_activation": False,
+        "live_registry_import": registry.get("live_registry_import") is True,
+        "live_api": api["live_api"] is True,
+        "api_contract_source": api_contract_source,
+        "acceptance_evidence": acceptance_evidence,
+        "acceptance_note": _consumption_acceptance_note(registry),
     }
+
+
+def _registry_import_evidence(
+    config: ProductionObjectStoreConfig,
+    inventory_path: Path,
+    package_manifest_raw_path: Path,
+    manifest: dict[str, Any],
+    sources: Any,
+) -> dict[str, Any]:
+    local_contract = {
+        "model_id": sources.ids["model_id"],
+        "basin_id": sources.ids["basin_id"],
+        "basin_version_id": sources.ids["basin_version_id"],
+        "river_network_version_id": sources.ids["river_network_version_id"],
+        "mesh_version_id": sources.ids["mesh_version_id"],
+        "segment_count": sources.geometry.segment_count,
+        "active": False,
+        "implicit_activation": False,
+        "model_package_uri": manifest["model_package_uri"],
+        "manifest_uri": manifest["manifest_uri"],
+        "package_checksum": manifest["package_checksum"],
+    }
+    if not config.run_registry_import:
+        return {
+            "status": "local_contract_prepared",
+            "db_import_status": "not_executed",
+            "db_import_reason": (
+                "fast lane does not require PostgreSQL/PostGIS; geometry and manifest contracts were validated locally."
+            ),
+            "live_registry_import": False,
+            "acceptance_evidence": "local_contract_smoke",
+            **local_contract,
+        }
+    if not config.registry_database_url:
+        return {
+            "status": "blocked",
+            "db_import_status": "blocked",
+            "error_code": "PRODUCTION_OBJECT_STORE_REGISTRY_DATABASE_URL_MISSING",
+            "message": (
+                "NHMS_PRODUCTION_OBJECT_STORE_RUN_REGISTRY_IMPORT=1 requires "
+                "NHMS_PRODUCTION_OBJECT_STORE_REGISTRY_DATABASE_URL or DATABASE_URL."
+            ),
+            "live_registry_import": False,
+            "acceptance_evidence": "live_registry_import_blocked",
+            **local_contract,
+        }
+    try:
+        report = import_basins_registry(
+            inventory_path=inventory_path,
+            package_manifest_path=package_manifest_raw_path,
+            database_url=config.registry_database_url,
+        )
+    except BasinsRegistryImportError as error:
+        return {
+            "status": "blocked",
+            "db_import_status": "blocked",
+            **error.to_payload(),
+            "live_registry_import": False,
+            "acceptance_evidence": "live_registry_import_blocked",
+            **local_contract,
+        }
+    row_counts = report.get("row_counts") if isinstance(report.get("row_counts"), dict) else {}
+    inserted_row_counts = {str(key): int(value) for key, value in row_counts.items() if isinstance(value, int)}
+    inserted_total = sum(inserted_row_counts.values())
+    return {
+        "status": "imported",
+        "db_import_status": report.get("status", "imported"),
+        "live_registry_import": True,
+        "acceptance_evidence": "live_registry_import",
+        "registry_import_report": report,
+        "inserted_row_counts": inserted_row_counts,
+        "inserted_total": inserted_total,
+        "updated_row_counts": {},
+        "updated_total": 0,
+        "idempotent": report.get("status") == "already_imported" or inserted_total == 0,
+        **local_contract,
+        "active": report.get("active", False),
+        "model_package_uri": report.get("model_package_uri", manifest["model_package_uri"]),
+        "manifest_uri": report.get("manifest_uri", manifest["manifest_uri"]),
+        "package_checksum": report.get("package_checksum", manifest["package_checksum"]),
+    }
+
+
+def _consumption_acceptance_note(registry: dict[str, Any]) -> str:
+    if registry.get("live_registry_import") is True:
+        return (
+            "Live registry DB import evidence ran by explicit opt-in. The API contract smoke is deterministic "
+            "and sourced from that live registry import report; live API execution remains explicitly not executed."
+        )
+    if registry.get("status") == "blocked":
+        return (
+            "Registry/API/runtime consumption is blocked because live registry import was requested but did not "
+            "produce successful DB import evidence."
+        )
+    return (
+        "Default fast validation prepares local registry import sources and proves the API/runtime object-URI "
+        "contract locally. Live DB import and live API execution are explicitly not executed in this lane."
+    )
+
+
+def _consumption_acceptance_evidence(registry: dict[str, Any]) -> str:
+    if registry.get("live_registry_import") is True:
+        return "live_registry_import_contract_smoke"
+    if registry.get("status") == "blocked":
+        return "live_registry_import_blocked"
+    return "local_contract_smoke"
 
 
 def _runtime_staging_evidence(
@@ -663,8 +783,9 @@ def _runtime_staging_evidence(
     manifest: dict[str, Any],
     writer: EvidenceWriter,
 ) -> dict[str, Any]:
-    forcing_key = f"forcing/gfs/2026051600/basin_v1/{manifest['model_id']}/forcing.tsd.forc"
-    store.write_bytes_atomic(forcing_key, b"forcing\n")
+    scratch_prefix = f"runs/{config.run_id}/input/scratch/runtime-staging"
+    forcing_key = f"{scratch_prefix}/forcing/gfs/2026051600/basin_v1/{manifest['model_id']}/forcing.tsd.forc"
+    _write_validation_scratch_object(store, forcing_key, b"forcing\n")
     runtime_manifest = {
         "run_id": f"{config.run_id}_runtime_staging",
         "run_type": "forecast",
@@ -687,9 +808,9 @@ def _runtime_staging_evidence(
         },
         "runtime": {"output_interval_minutes": 1440},
         "outputs": {
-            "run_manifest_uri": store.uri_for_key(f"runs/{config.run_id}_runtime_staging/input/manifest.json"),
-            "output_uri": store.uri_for_key(f"runs/{config.run_id}_runtime_staging/output/"),
-            "log_uri": store.uri_for_key(f"runs/{config.run_id}_runtime_staging/logs/"),
+            "run_manifest_uri": store.uri_for_key(f"runs/{config.run_id}/input/runtime-staging/manifest.json"),
+            "output_uri": store.uri_for_key(f"runs/{config.run_id}/output/runtime-staging/"),
+            "log_uri": store.uri_for_key(f"runs/{config.run_id}/logs/runtime-staging/"),
         },
     }
     runtime_config = SHUDRuntimeConfig(
@@ -718,8 +839,10 @@ def _runtime_staging_evidence(
             "message": error.message,
             "runtime_manifest": {
                 "model_package_uri": runtime_manifest["model"]["model_package_uri"],
+                "manifest_uri": manifest["manifest_uri"],
                 "forcing_uri": runtime_manifest["forcing"]["forcing_uri"],
             },
+            "validation_object_keys": [forcing_key],
         }
     staged_files = sorted(path.relative_to(input_dir).as_posix() for path in input_dir.rglob("*") if path.is_file())
     evidence = {
@@ -730,15 +853,33 @@ def _runtime_staging_evidence(
         ),
         "runtime_manifest": {
             "model_package_uri": runtime_manifest["model"]["model_package_uri"],
+            "manifest_uri": manifest["manifest_uri"],
             "forcing_uri": runtime_manifest["forcing"]["forcing_uri"],
             "run_manifest_uri": runtime_manifest["outputs"]["run_manifest_uri"],
         },
+        "scratch_prefix": scratch_prefix,
+        "validation_object_keys": [forcing_key],
         "staged_file_count": len(staged_files),
         "staged_files": staged_files,
         "generated_cfg_path": str(cfg_path),
     }
     writer.write_json(config.lane_dir / "runtime_staging_manifest.json", runtime_manifest)
     return evidence
+
+
+def _write_validation_scratch_object(store: LocalObjectStore, key: str, content: bytes) -> str:
+    normalized_key = store.normalize_key(key)
+    if not normalized_key.startswith("runs/"):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_VALIDATION_KEY_UNSAFE",
+            "Validation-created runtime scratch objects must stay under runs/<run_id>/.",
+        )
+    if store.exists(normalized_key):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_VALIDATION_OBJECT_EXISTS",
+            f"Validation scratch object already exists and will not be overwritten: {normalized_key}",
+        )
+    return store.write_bytes_atomic(normalized_key, content)
 
 
 def _cleanup_rollback_evidence(
@@ -805,6 +946,8 @@ def _preflight_payload(config: ProductionObjectStoreConfig) -> dict[str, Any]:
         "source_uri": config.source_uri,
         "selected_model": config.model_id or "first-valid-model",
         "version": config.version,
+        "run_registry_import": config.run_registry_import,
+        "registry_database_url_configured": config.registry_database_url is not None,
         "evidence_root": str(config.evidence_root),
     }
 
@@ -879,6 +1022,10 @@ def _default_model_id(inventory: dict[str, Any]) -> str:
         "PRODUCTION_OBJECT_STORE_NO_PUBLISHABLE_MODEL",
         "Basins inventory does not contain a valid publishable model.",
     )
+
+
+def _truthy_env(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _forbidden_runtime_source_fragments(values: Sequence[Any]) -> list[str]:
