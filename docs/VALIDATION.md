@@ -319,6 +319,13 @@ The bundle is written under
   and records inserted/updated/idempotency fields. The runtime smoke writes
   validation-only forcing under `runs/<run_id>/input/scratch/runtime-staging/`
   and refuses to overwrite an existing scratch object.
+- `summary.json`: issue/schema/status plus summary-level execution markers
+  consumed by ops dependency closure. Default fast mode remains
+  `status=ready` for the object-store lane but records
+  `deterministic_fixture=true`, `live_registry_import=false`,
+  `live_api=false`, `live_api_status=not_executed`, and
+  `final_production_readiness_claimed=false`, so ops cannot treat it as an
+  accepted live dependency even if a sidecar receipt is present.
 - `runtime_staging_manifest.json`: full runtime manifest written during local
   staging, including object URI inputs/outputs used by the generated SHUD
   runtime configuration.
@@ -708,9 +715,11 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   bindings, non-empty non-deterministic `receipt_id`, non-empty `accepted_at`,
   `deterministic_fixture=false`, `final_production_readiness_claimed=false`,
   and a non-deterministic `execution_mode` such as
-  `accepted_live_evidence`. Deterministic or non-live summaries, summaries that
-  claim final production readiness, or summaries with missing/mismatched receipt
-  fields are recorded as skipped or blocked, not accepted.
+  `accepted_live_evidence`. The producer summary itself must also expose
+  non-deterministic/live proof; a sidecar receipt alone is not enough.
+  Deterministic or non-live summaries, summaries that claim final production
+  readiness, or summaries with missing/mismatched receipt fields are recorded as
+  skipped or blocked, not accepted.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs, symlinked evidence roots, oversized payloads,

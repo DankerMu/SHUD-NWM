@@ -245,6 +245,12 @@ def test_validate_ops_dependency_closure_requires_external_acceptance_receipt_fo
         147,
         "nhms.production_closure.slurm.v1",
         "submitted",
+        extra={
+            "execution_mode": "accepted_live_evidence",
+            "deterministic_fixture": False,
+            "final_production_readiness_claimed": False,
+            "live_slurm_executed": True,
+        },
     )
 
     validate_ops(
@@ -281,6 +287,86 @@ def test_validate_ops_dependency_closure_requires_external_acceptance_receipt_fo
     )
 
 
+def test_validate_ops_rejects_object_store_fast_summary_even_with_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "object_store"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "object_store",
+        148,
+        "nhms.production_closure.object_store.v1",
+        "ready",
+        extra={
+            "execution_mode": "deterministic_fixture",
+            "deterministic_fixture": True,
+            "live_registry_import": False,
+            "live_api": False,
+            "live_api_status": "not_executed",
+            "api_contract_source": "local_import_source",
+            "final_production_readiness_claimed": False,
+        },
+    )
+    _write_dependency_acceptance_receipt(summary_path, "object_store", 148, "nhms.production_closure.object_store.v1")
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="object_store_fast_with_receipt",
+            object_store_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(
+        tmp_path / "artifacts" / "object_store_fast_with_receipt" / "ops" / "dependency_closure.json"
+    )
+    object_store = next(item for item in dependency["dependencies"] if item["dependency"] == "object_store")
+    assert object_store["status"] == "skipped"
+    assert object_store["deterministic_fixture"] is True
+    assert object_store["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING"
+    assert "deterministic/non-live" in object_store["reason"]
+
+
+def test_validate_ops_accepts_object_store_only_with_summary_live_proof_and_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "object_store"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "object_store",
+        148,
+        "nhms.production_closure.object_store.v1",
+        "ready",
+        extra={
+            "execution_mode": "accepted_live_evidence",
+            "deterministic_fixture": False,
+            "live_registry_import": True,
+            "live_api": True,
+            "live_api_status": "executed",
+            "final_production_readiness_claimed": False,
+        },
+    )
+    _write_dependency_acceptance_receipt(summary_path, "object_store", 148, "nhms.production_closure.object_store.v1")
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="object_store_live_with_receipt",
+            object_store_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(
+        tmp_path / "artifacts" / "object_store_live_with_receipt" / "ops" / "dependency_closure.json"
+    )
+    object_store = next(item for item in dependency["dependencies"] if item["dependency"] == "object_store")
+    assert object_store["status"] == "accepted"
+    assert object_store["deterministic_fixture"] is False
+    assert object_store["accepted_dependency_evidence"]["summary_sha256"] == hashlib.sha256(
+        summary_path.read_bytes()
+    ).hexdigest()
+
+
 def test_validate_ops_dependency_receipt_uses_bounded_summary_digest_without_second_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -294,6 +380,12 @@ def test_validate_ops_dependency_receipt_uses_bounded_summary_digest_without_sec
         147,
         "nhms.production_closure.slurm.v1",
         "submitted",
+        extra={
+            "execution_mode": "accepted_live_evidence",
+            "deterministic_fixture": False,
+            "final_production_readiness_claimed": False,
+            "live_slurm_executed": True,
+        },
     )
     summary_bytes = summary_path.read_bytes()
     expected_digest = hashlib.sha256(summary_bytes).hexdigest()
@@ -907,6 +999,23 @@ def _write_dependency_summary(
         "status": status,
         "evidence_dir": str(path.parent),
     }
+    if accepted:
+        payload.update(
+            {
+                "execution_mode": "accepted_live_evidence",
+                "deterministic_fixture": False,
+                "final_production_readiness_claimed": False,
+                f"live_{name}_executed": True,
+            }
+        )
+        if name == "object_store":
+            payload.update(
+                {
+                    "live_registry_import": True,
+                    "live_api": True,
+                    "live_api_status": "executed",
+                }
+            )
     if extra:
         payload.update(extra)
     path.write_text(

@@ -154,6 +154,7 @@ EXPLICIT_BLOCKED_DEPENDENCY_STATUSES = {"blocked", "failed", "failure", "error",
 ACCEPTED_DEPENDENCY_RECEIPT_KEY = "accepted_dependency_evidence"
 ACCEPTED_DEPENDENCY_RECEIPT_SCHEMA = "nhms.production_closure.ops.accepted_dependency_evidence.v1"
 ACCEPTED_DEPENDENCY_EXECUTION_MODES = {"accepted_live_evidence", "live_executed", "consumed_live_evidence"}
+LIVE_READY_DEPENDENCIES = frozenset(DEPENDENCY_CONTRACTS)
 ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 
 
@@ -1110,6 +1111,12 @@ def _has_accepted_dependency_evidence(
         return False, "Dependency summary is deterministic/non-live evidence and cannot be accepted by ops closure."
     if summary.get("final_production_readiness_claimed") is True:
         return False, "Dependency summary must not claim final production readiness."
+    if name in LIVE_READY_DEPENDENCIES and not _summary_has_accepted_live_proof(summary):
+        return (
+            False,
+            "Dependency summary is missing producer-level non-deterministic/live execution proof; "
+            "sidecar receipt alone is not sufficient.",
+        )
     required = (
         "schema",
         "accepted",
@@ -1164,10 +1171,16 @@ def _has_accepted_dependency_evidence(
 def _summary_has_deterministic_evidence(summary: Mapping[str, Any]) -> bool:
     if summary.get("deterministic_fixture") is True:
         return True
+    if summary.get("live_registry_import") is False or summary.get("live_api") is False:
+        return True
+    if summary.get("final_production_readiness_claimed") is False and summary.get("deterministic_fixture") is not False:
+        return True
     for key, value in _walk_summary_fields(summary):
         if key in {"execution_mode", "configured_execution_mode", "cached_fallback_policy", "dataset_source"}:
             if _is_deterministic_execution_mode(str(value)):
                 return True
+        if key.startswith("live_") and value is False:
+            return True
         if key.startswith("live_") and key.endswith("_executed") and value is False:
             return True
         if key.startswith("live_") and key.endswith("_delivered") and value is False:
@@ -1175,6 +1188,23 @@ def _summary_has_deterministic_evidence(summary: Mapping[str, Any]) -> bool:
         if key.startswith("live_") and key.endswith("_status") and str(value) != "executed":
             return True
     return False
+
+
+def _summary_has_accepted_live_proof(summary: Mapping[str, Any]) -> bool:
+    if summary.get("deterministic_fixture") is not False:
+        return False
+    execution_mode = str(summary.get("execution_mode", ""))
+    if execution_mode not in ACCEPTED_DEPENDENCY_EXECUTION_MODES and _is_deterministic_execution_mode(execution_mode):
+        return False
+    live_fields = [(key, value) for key, value in _walk_summary_fields(summary) if key.startswith("live_")]
+    if not live_fields:
+        return False
+    for key, value in live_fields:
+        if value is False:
+            return False
+        if key.endswith("_status") and str(value) != "executed":
+            return False
+    return any(value is True for _key, value in live_fields)
 
 
 def _walk_summary_fields(value: Any) -> tuple[tuple[str, Any], ...]:

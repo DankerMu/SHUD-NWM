@@ -271,6 +271,7 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
             version=config.version,
             migration_report=migration_report,
             package_manifest=manifest,
+            consumption=consumption,
         )
         writer.write_json(config.lane_dir / "summary.json", summary)
         return summary
@@ -1023,7 +1024,15 @@ def _summary(
     version: str | None = None,
     migration_report: dict[str, Any] | None = None,
     package_manifest: dict[str, Any] | None = None,
+    consumption: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    live_registry_import = consumption.get("live_registry_import") is True if consumption is not None else False
+    live_api = consumption.get("live_api") is True if consumption is not None else False
+    api_contract_source = str(consumption.get("api_contract_source", "")) if consumption is not None else ""
+    live_api_status = "not_executed"
+    if consumption is not None and isinstance(consumption.get("api"), dict):
+        live_api_status = str(consumption["api"].get("live_api_status", "not_executed"))
+    deterministic_fixture = not (live_registry_import and live_api)
     payload: dict[str, Any] = {
         "schema": "nhms.production_closure.object_store.v1",
         "issue": 148,
@@ -1032,6 +1041,19 @@ def _summary(
         "evidence_dir": str(config.lane_dir),
         "target": config.target,
         "object_store_prefix": config.object_store_prefix,
+        "execution_mode": "live_registry_import_and_live_api"
+        if not deterministic_fixture
+        else (
+            "live_registry_import_with_deterministic_api_contract"
+            if live_registry_import
+            else "deterministic_fixture"
+        ),
+        "deterministic_fixture": deterministic_fixture,
+        "live_registry_import": live_registry_import,
+        "live_api": live_api,
+        "live_api_status": live_api_status,
+        "api_contract_source": api_contract_source or "not_executed",
+        "final_production_readiness_claimed": False,
         "blockers": blockers,
         "files": [*files, "summary.json"],
     }

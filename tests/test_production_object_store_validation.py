@@ -46,6 +46,13 @@ def test_validate_object_store_synthetic_copied_root_success(
     assert summary["status"] == "ready"
     assert summary["evidence_dir"] == str(lane_dir)
     assert summary["object_store_prefix"] == "s3://nhms-prod/m10"
+    assert summary["execution_mode"] == "deterministic_fixture"
+    assert summary["deterministic_fixture"] is True
+    assert summary["live_registry_import"] is False
+    assert summary["live_api"] is False
+    assert summary["live_api_status"] == "not_executed"
+    assert summary["api_contract_source"] == "local_import_source"
+    assert summary["final_production_readiness_claimed"] is False
     assert "runtime_staging_manifest.json" in summary["files"]
     _assert_summary_files_match_lane_json(summary, lane_dir)
 
@@ -566,6 +573,13 @@ def test_validate_object_store_live_registry_import_opt_in_records_report(
     consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
     assert exit_code == 0
     assert summary["status"] == "ready"
+    assert summary["execution_mode"] == "live_registry_import_with_deterministic_api_contract"
+    assert summary["deterministic_fixture"] is True
+    assert summary["live_registry_import"] is True
+    assert summary["live_api"] is False
+    assert summary["live_api_status"] == "not_executed"
+    assert summary["api_contract_source"] == "live_registry_import"
+    assert summary["final_production_readiness_claimed"] is False
     assert consumption["status"] == "ready"
     assert consumption["live_registry_import"] is True
     assert consumption["acceptance_evidence"] == "live_registry_import_contract_smoke"
