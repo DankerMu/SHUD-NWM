@@ -221,8 +221,16 @@ class ProductionSlurmConfig:
             account=os.getenv("NHMS_PRODUCTION_SLURM_ACCOUNT", ""),
             partition=os.getenv("NHMS_PRODUCTION_SLURM_PARTITION", ""),
             workspace_root=workspace_root,
-            object_store_root=os.getenv("OBJECT_STORE_ROOT", str(workspace_root)),
-            object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
+            object_store_root=_object_store_env_value(
+                "NHMS_PRODUCTION_OBJECT_STORE_ROOT",
+                "OBJECT_STORE_ROOT",
+                str(workspace_root),
+            ),
+            object_store_prefix=_object_store_env_value(
+                "NHMS_PRODUCTION_OBJECT_STORE_PREFIX",
+                "OBJECT_STORE_PREFIX",
+                "",
+            ),
             model_id=os.getenv("NHMS_PRODUCTION_SLURM_MODEL_ID", "basins_qhh_shud"),
             model_package_uri=os.getenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", ""),
             solver_binary=os.getenv("SHUD_EXECUTABLE", os.getenv("NHMS_PRODUCTION_SLURM_SOLVER_BINARY", "shud_omp")),
@@ -429,6 +437,13 @@ def _validate_walltime(value: str) -> None:
             "PRODUCTION_SLURM_RESOURCE_INVALID",
             "NHMS_PRODUCTION_SLURM_WALLTIME hours must be bounded.",
         )
+
+
+def _object_store_env_value(production_name: str, generic_name: str, default: str) -> str:
+    production_value = os.getenv(production_name)
+    if production_value is not None:
+        return production_value
+    return os.getenv(generic_name, default)
 
 
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:

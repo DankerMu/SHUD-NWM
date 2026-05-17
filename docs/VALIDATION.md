@@ -267,6 +267,28 @@ uv run nhms-production validate-object-store \
   --run-id "$(date -u +m10-148-%Y%m%dT%H%M%SZ)"
 ```
 
+### Fast Regression Commands
+
+Local #148 verification uses these fast regression commands:
+
+```bash
+openspec validate m10-production-closure --strict --no-interactive
+.venv/bin/ruff check services/production_closure workers/model_registry tests/test_production_object_store_validation.py tests/test_production_slurm_validation.py tests/test_basins_package_publication.py docs/VALIDATION.md
+.venv/bin/pytest -q tests/test_production_object_store_validation.py tests/test_basins_package_publication.py tests/test_basins_registry_import.py tests/test_shud_runtime.py tests/test_model_registration.py tests/test_api_contract.py tests/test_openapi_drift.py tests/test_production_slurm_validation.py
+```
+
+The opt-in deterministic production-closure smoke is:
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 .venv/bin/nhms-production validate-object-store \
+  --evidence-root artifacts/production-closure \
+  --run-id local-148-production-closure
+```
+
+With synthetic local inputs it should report `status=ready`. When configured
+with missing real copied-root inputs, it should remain deterministic by writing a
+stable blocker bundle instead of fabricating production success.
+
 The Basins root must be copied data. A symlink-only root is blocked with
 `BASINS_MIGRATION_SYMLINK_TARGET` before package/import writes occur.
 

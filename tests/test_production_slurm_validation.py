@@ -12,6 +12,8 @@ from services.production_closure import slurm_validation
 def test_validate_slurm_fake_lane_writes_required_evidence_and_redacts(monkeypatch, tmp_path: Path, capsys) -> None:
     evidence_root = tmp_path / "artifacts"
     secret_uri = "s3://user:pass@example.invalid/models/qhh/package?X-Amz-Signature=abc&token=secret"
+    monkeypatch.delenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", raising=False)
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
@@ -99,6 +101,37 @@ def test_validate_slurm_fake_lane_writes_required_evidence_and_redacts(monkeypat
     assert qc["malformed_task"]["error_code"] == "NON_FINITE_FLOW"
     assert qc["malformed_task"]["publication_blocked"] is True
     assert qc["sibling_success"]["publishable"] is True
+
+
+def test_validate_slurm_uses_documented_production_object_store_env_names(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/prod/models/qhh/package/")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "generic-object-store"))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://generic/prefix")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "production-object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://production/prefix")
+
+    exit_code = slurm_validation.main(
+        ["validate-slurm", "--evidence-root", str(evidence_root), "--run-id", "m10_148", "--fake-slurm"]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    lane_dir = evidence_root / "m10_148" / "slurm"
+    preflight = json.loads((lane_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight["object_store"]["root"] == str(tmp_path / "production-object-store")
+    assert preflight["object_store"]["prefix"] == "s3://production/prefix"
+
+    manifest_index = json.loads((lane_dir / "manifest_index.json").read_text(encoding="utf-8"))
+    assert manifest_index[0]["output_uri"] == "s3://production/prefix/runs/m10_148_success/output/"
 
 
 def test_validate_slurm_missing_preflight_writes_blocker_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
