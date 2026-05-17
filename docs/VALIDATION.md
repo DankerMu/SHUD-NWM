@@ -689,9 +689,9 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
 - `monitoring_alerts.json`: source latency, Slurm backlog, failed basin retries,
   object-store failure, stale analysis state, tile error, and API p95 alert
   evidence with metric, severity, observed value, threshold, dry-run or
-  not-executed mode, runbook link, and operator action. Dry-run targets are
-  recorded as configured; non-dry-run alert targets are recorded only as a
-  sanitized scheme/host identity with the path redacted and do not imply live
+  not-executed mode, runbook link, and operator action. Alert targets are
+  recorded only as a sanitized scheme/host identity with any path redacted,
+  including `dry-run://` targets with path components, and do not imply live
   sink delivery without delivery receipts.
 - `rollback_drills.json`: bad model activation, failed publish/import, failed
   source cycle, failed Slurm array, and bad tile release drills with command,

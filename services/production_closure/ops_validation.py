@@ -917,7 +917,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_MISSING",
         )
     try:
-        summary = _read_dependency_summary_json(summary_path)
+        summary, summary_sha256 = _read_dependency_summary_json(summary_path)
     except ProductionOpsValidationError as error:
         return _invalid_dependency(name, summary_path, "blocked", error.message, error_code=error.error_code)
     except (OSError, json.JSONDecodeError) as error:
@@ -1016,6 +1016,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             summary,
             receipt,
             summary_path=summary_path,
+            summary_sha256=summary_sha256,
             receipt_path=receipt_path,
         )
         receipt = {**receipt, "receipt_path": str(receipt_path)}
@@ -1102,6 +1103,7 @@ def _has_accepted_dependency_evidence(
     receipt: Mapping[str, Any],
     *,
     summary_path: Path,
+    summary_sha256: str,
     receipt_path: Path,
 ) -> tuple[bool, str]:
     if _summary_has_deterministic_evidence(summary):
@@ -1140,7 +1142,7 @@ def _has_accepted_dependency_evidence(
         return False, "Dependency accepted-evidence receipt run_id binding does not match."
     if receipt.get("summary_path") != str(summary_path):
         return False, "Dependency accepted-evidence receipt summary_path binding does not match."
-    if receipt.get("summary_sha256") != _sha256_file(summary_path):
+    if receipt.get("summary_sha256") != summary_sha256:
         return False, "Dependency accepted-evidence receipt checksum binding does not match."
     if receipt.get("final_production_readiness_claimed") is not False:
         return False, "Dependency accepted-evidence receipt must set final_production_readiness_claimed=false."
@@ -1357,8 +1359,8 @@ def _refuse_dependency_symlink_components(path: Path) -> None:
         raise ProductionOpsValidationError("PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK", error.message) from error
 
 
-def _read_dependency_summary_json(summary_path: Path) -> Any:
-    return _read_bounded_json(
+def _read_dependency_summary_json(summary_path: Path) -> tuple[Any, str]:
+    return _read_bounded_json_with_digest(
         summary_path,
         too_large_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_TOO_LARGE",
         too_large_message="Dependency summary exceeds configured limit of {limit} bytes.",
@@ -1374,6 +1376,15 @@ def _read_dependency_receipt_json(receipt_path: Path) -> Any:
 
 
 def _read_bounded_json(path: Path, *, too_large_code: str, too_large_message: str) -> Any:
+    parsed, _digest = _read_bounded_json_with_digest(
+        path,
+        too_large_code=too_large_code,
+        too_large_message=too_large_message,
+    )
+    return parsed
+
+
+def _read_bounded_json_with_digest(path: Path, *, too_large_code: str, too_large_message: str) -> tuple[Any, str]:
     with path.open("rb") as handle:
         content = handle.read(MAX_EVIDENCE_PAYLOAD_BYTES + 1)
     if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
@@ -1381,11 +1392,7 @@ def _read_bounded_json(path: Path, *, too_large_code: str, too_large_message: st
             too_large_code,
             too_large_message.format(limit=MAX_EVIDENCE_PAYLOAD_BYTES),
         )
-    return json.loads(content.decode("utf-8"))
-
-
-def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return json.loads(content.decode("utf-8")), hashlib.sha256(content).hexdigest()
 
 
 def _default_setting_value(config: ProductionOpsConfig, service: str, setting: str) -> str:
@@ -1443,10 +1450,10 @@ def _validate_config(config: ProductionOpsConfig) -> None:
 
 
 def _evidence_alert_target(value: str) -> str:
-    if value.startswith("dry-run://"):
-        return value
     parsed = urlsplit(value)
     identity = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "redacted-alert-target"
+    if parsed.scheme == "dry-run" and parsed.path in {"", "/"}:
+        return identity
     return f"{identity}/[redacted-alert-path]"
 
 

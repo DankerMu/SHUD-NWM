@@ -281,6 +281,48 @@ def test_validate_ops_dependency_closure_requires_external_acceptance_receipt_fo
     )
 
 
+def test_validate_ops_dependency_receipt_uses_bounded_summary_digest_without_second_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+    )
+    summary_bytes = summary_path.read_bytes()
+    expected_digest = hashlib.sha256(summary_bytes).hexdigest()
+    _write_dependency_acceptance_receipt(summary_path, "slurm", 147, "nhms.production_closure.slurm.v1")
+
+    original_read_bytes = Path.read_bytes
+
+    def fail_summary_read_bytes(path: Path) -> bytes:
+        if path == summary_path.resolve():
+            raise AssertionError("summary.json must not be re-read for receipt checksum validation")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_summary_read_bytes)
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="producer_receipt_single_read_digest",
+            slurm_evidence_root=root,
+        )
+    )
+    dependency = _read_json(
+        tmp_path / "artifacts" / "producer_receipt_single_read_digest" / "ops" / "dependency_closure.json"
+    )
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert slurm["status"] == "accepted"
+    assert slurm["accepted_dependency_evidence"]["summary_sha256"] == expected_digest
+
+
 @pytest.mark.parametrize(
     ("summary_fields", "expected_status"),
     [
@@ -748,6 +790,26 @@ def test_validate_ops_sanitizes_path_embedded_alert_target_tokens(
     assert "B00000000" not in evidence_text
     assert "raw-path-webhook-token" not in evidence_text
     assert "https://hooks.example/[redacted-alert-path]" in evidence_text
+
+
+def test_validate_ops_sanitizes_path_embedded_dry_run_alert_target_tokens(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_target = "dry-run://sink/raw-token/path"
+    monkeypatch.setenv("NHMS_PRODUCTION_OPS_ALERT_TARGET", raw_target)
+
+    assert _argparse_main(["--evidence-root", str(tmp_path / "artifacts"), "--run-id", "dry_run_path_token"]) == 0
+    captured = capsys.readouterr()
+    assert "raw-token" not in captured.out
+    assert "/path" not in captured.out
+
+    lane_dir = tmp_path / "artifacts" / "dry_run_path_token" / "ops"
+    evidence_text = "\n".join(path.read_text(encoding="utf-8") for path in lane_dir.glob("*.json"))
+    assert "raw-token" not in evidence_text
+    assert "dry-run://sink/raw-token/path" not in evidence_text
+    assert "dry-run://sink/[redacted-alert-path]" in evidence_text
 
 
 @pytest.mark.parametrize(
