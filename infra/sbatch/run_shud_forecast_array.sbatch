@@ -26,4 +26,7 @@ export SHUD_THREADS={{shud_threads}}
 export OMP_NUM_THREADS={{shud_threads}}
 
 mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
+if [[ "${SLURM_ARRAY_TASK_ID:-0}" == "1" ]]; then
+  echo "{{controlled_failure_log_marker | default('NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED')}}"
+fi
 nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"

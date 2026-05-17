@@ -122,6 +122,39 @@ def test_validate_slurm_missing_preflight_writes_blocker_artifact(tmp_path: Path
     assert preflight["schema"] == "nhms.production_closure.slurm.preflight.v1"
 
 
+def test_validate_slurm_blocked_submit_keeps_manifests_inside_evidence_lane(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.delenv("NHMS_PRODUCTION_SLURM_ACCOUNT", raising=False)
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "blockedsubmit",
+            "--submit",
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    lane_dir = tmp_path / "artifacts" / "blockedsubmit" / "slurm"
+    assert summary["status"] == "blocked"
+    assert summary["manifest_index_path"] == str(lane_dir / "manifest_index.json")
+    assert all(str(lane_dir) in path for path in summary["runtime_manifest_paths"])
+    assert not (workspace_root / "runs" / "blockedsubmit" / "input" / "manifest_index.json").exists()
+    assert not (workspace_root / "runs" / "blockedsubmit_success" / "input" / "manifest.json").exists()
+
+
 def test_validate_slurm_preflight_only_does_not_publish_planned_success(
     tmp_path: Path,
     monkeypatch,
@@ -167,6 +200,7 @@ def test_validate_slurm_preflight_only_does_not_publish_planned_success(
         ("--poll-timeout-seconds", "inf"),
         ("--poll-interval-seconds", "nan"),
         ("--poll-timeout-seconds", "-1"),
+        ("--poll-interval-seconds", "0"),
         ("--poll-interval-seconds", "301"),
         ("--poll-timeout-seconds", "86401"),
     ],
@@ -208,6 +242,65 @@ def test_validate_slurm_rejects_invalid_poll_env_without_evidence(
     assert not (tmp_path / "artifacts" / "badpollenv" / "slurm").exists()
 
 
+def test_validate_slurm_submit_fake_conflict_fails_without_evidence(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    try:
+        exit_code = slurm_validation.main(
+            [
+                "validate-slurm",
+                "--evidence-root",
+                str(tmp_path / "artifacts"),
+                "--run-id",
+                "conflict",
+                "--submit",
+                "--fake-slurm",
+            ]
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    assert exit_code == 1
+    assert "PRODUCTION_SLURM_SUBMIT_FAKE_CONFLICT" in capsys.readouterr().err
+    assert not (tmp_path / "artifacts" / "conflict" / "slurm").exists()
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value"),
+    [
+        ("NHMS_PRODUCTION_SLURM_PARTITION", "CPU\n#SBATCH --nodes=99"),
+        ("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends;rm"),
+        ("NHMS_PRODUCTION_SLURM_WALLTIME", "00:99:00"),
+        ("NHMS_PRODUCTION_SLURM_CPUS_PER_TASK", "0"),
+        ("NHMS_PRODUCTION_SLURM_MEMORY_GB", "4097"),
+    ],
+)
+def test_validate_slurm_rejects_invalid_resource_env_without_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    env_name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    monkeypatch.setenv(env_name, value)
+
+    try:
+        exit_code = slurm_validation.main(
+            ["validate-slurm", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "badresource"]
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    assert exit_code == 1
+    assert "PRODUCTION_SLURM_RESOURCE_INVALID" in capsys.readouterr().err
+    assert not (tmp_path / "artifacts" / "badresource" / "slurm").exists()
+
+
 def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
     tmp_path: Path,
     monkeypatch,
@@ -217,8 +310,10 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
-    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
     monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(slurm_validation.time, "sleep", lambda seconds: None)
     calls: list[list[str]] = []
 
     sacct_responses = [
@@ -235,6 +330,15 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
         assert kwargs["shell"] is False if "shell" in kwargs else True
         program = Path(command[0]).name
         if program == "sbatch":
+            log_dir = workspace_root / "submit147" / "logs"
+            assert log_dir.is_dir()
+            (log_dir / "7777_0.out").write_text("task 0 stdout\n", encoding="utf-8")
+            (log_dir / "7777_0.err").write_text("task 0 stderr\n", encoding="utf-8")
+            (log_dir / "7777_1.out").write_text(
+                f"{slurm_validation.CONTROLLED_FAILURE_LOG_MARKER}\n",
+                encoding="utf-8",
+            )
+            (log_dir / "7777_1.err").write_text("task 1 stderr\n", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="7777\n", stderr="")
         if program == "sacct":
             stdout = sacct_responses.pop(0) if sacct_responses else (
@@ -273,7 +377,7 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
             "submit147",
             "--submit",
             "--poll-interval-seconds",
-            "0",
+            "1",
             "--poll-timeout-seconds",
             "1",
         ]
@@ -302,8 +406,13 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
     assert partial["array_job_id"] == "7777"
     assert partial["tasks"][0]["job_id"] == "7777_0"
     assert partial["tasks"][0]["stderr_path"].endswith("/submit147/logs/7777_0.err")
+    assert partial["tasks"][0]["log_verified"] is True
     assert partial["tasks"][1]["job_id"] == "7777_1"
     assert partial["tasks"][1]["stderr_path"].endswith("/submit147/logs/7777_1.err")
+    assert partial["tasks"][1]["log_verified"] is True
+    qc = json.loads((lane_dir / "qc_blocking.json").read_text())
+    assert qc["malformed_task"]["evidence_verified"] is True
+    assert qc["malformed_task"]["publication_blocked"] is True
     retry_cancel = json.loads((lane_dir / "retry_cancel.json").read_text())
     assert retry_cancel["cancel"]["state"] == "not_executed"
     assert retry_cancel["cancel"]["job_id"] is None
@@ -317,6 +426,137 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
     assert "supersecret" not in evidence_text
     assert "9001" not in evidence_text
     assert "9002" not in evidence_text
+
+
+def test_validate_slurm_submit_blocks_when_shared_logs_are_missing(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            return subprocess.CompletedProcess(command, 0, stdout="6677\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "6677|COMPLETED|0:0|00:00:11|cn04|CPU\n"
+                    "6677_0|COMPLETED|0:0|00:00:10|cn04|CPU\n"
+                    "6677_1|FAILED|2:0|00:00:05|cn04|CPU\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "missinglogs",
+            "--submit",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    blocker_codes = {blocker["error_code"] for blocker in summary["blockers"]}
+    assert "SLURM_ARRAY_TASK_LOG_MISSING" in blocker_codes
+    assert "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING" in blocker_codes
+    lane_dir = tmp_path / "artifacts" / "missinglogs" / "slurm"
+    partial = json.loads((lane_dir / "array_partial_success.json").read_text())
+    assert all(task["publishable"] is False for task in partial["tasks"])
+    assert all(task["log_verified"] is False for task in partial["tasks"])
+    qc = json.loads((lane_dir / "qc_blocking.json").read_text())
+    assert qc["malformed_task"]["status"] == "not_verified"
+    assert qc["malformed_task"]["publication_blocked"] is False
+
+
+def test_validate_slurm_submit_blocks_when_controlled_failure_marker_missing(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            log_dir = workspace_root / "missingmarker" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            for task_id in (0, 1):
+                (log_dir / f"7788_{task_id}.out").write_text(f"task {task_id} stdout\n", encoding="utf-8")
+                (log_dir / f"7788_{task_id}.err").write_text(f"task {task_id} stderr\n", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="7788\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "7788|COMPLETED|0:0|00:00:11|cn04|CPU\n"
+                    "7788_0|COMPLETED|0:0|00:00:10|cn04|CPU\n"
+                    "7788_1|FAILED|2:0|00:00:05|cn04|CPU\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "missingmarker",
+            "--submit",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    assert [blocker["error_code"] for blocker in summary["blockers"]] == [
+        "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING"
+    ]
+    lane_dir = tmp_path / "artifacts" / "missingmarker" / "slurm"
+    partial = json.loads((lane_dir / "array_partial_success.json").read_text())
+    assert partial["tasks"][0]["publishable"] is True
+    assert partial["tasks"][1]["publishable"] is False
+    assert partial["tasks"][1]["error_code"] == "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING"
+    qc = json.loads((lane_dir / "qc_blocking.json").read_text())
+    assert qc["malformed_task"]["status"] == "not_verified"
+    assert qc["malformed_task"]["publication_blocked"] is False
 
 
 def test_validate_slurm_submit_blocks_when_task_accounting_rows_never_finish(
@@ -359,7 +599,7 @@ def test_validate_slurm_submit_blocks_when_task_accounting_rows_never_finish(
             "missingtasks",
             "--submit",
             "--poll-interval-seconds",
-            "0",
+            "1",
             "--poll-timeout-seconds",
             "0",
         ]
@@ -392,13 +632,19 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_does_not_occur(
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
-    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
     monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
 
     def fake_run(command, **kwargs):
         del kwargs
         program = Path(command[0]).name
         if program == "sbatch":
+            log_dir = workspace_root / "nofail" / "logs"
+            assert log_dir.is_dir()
+            for task_id in (0, 1):
+                (log_dir / f"9999_{task_id}.out").write_text(f"task {task_id} stdout\n", encoding="utf-8")
+                (log_dir / f"9999_{task_id}.err").write_text(f"task {task_id} stderr\n", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="9999\n", stderr="")
         if program == "sacct":
             return subprocess.CompletedProcess(
@@ -424,7 +670,7 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_does_not_occur(
             "nofail",
             "--submit",
             "--poll-interval-seconds",
-            "0",
+            "1",
             "--poll-timeout-seconds",
             "0",
         ]
@@ -488,7 +734,7 @@ def test_validate_slurm_submit_blocks_cancel_timeout_and_oom_as_controlled_failu
             f"block{state.split()[0].lower()}",
             "--submit",
             "--poll-interval-seconds",
-            "0",
+            "1",
             "--poll-timeout-seconds",
             "0",
         ]
@@ -530,7 +776,7 @@ def test_validate_slurm_submit_sbatch_failure_writes_blocked_bundle(
             "sbatchfailed",
             "--submit",
             "--poll-interval-seconds",
-            "0",
+            "1",
             "--poll-timeout-seconds",
             "0",
         ]

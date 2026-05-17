@@ -22,6 +22,8 @@ from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatew
 from services.slurm_gateway.real_backend import RealSlurmGateway, map_slurm_error_code
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+SAFE_SLURM_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+SLURM_WALLTIME_RE = re.compile(r"^(?:(?P<days>\d{1,3})-)?(?P<hours>\d{1,3}):(?P<minutes>[0-5]\d):(?P<seconds>[0-5]\d)$")
 SENSITIVE_URI_ASSIGNMENT_RE = re.compile(
     r"(?:^|[/?&;\s])[^/?&;\s=]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|"
     r"access[_-]?key|session[_-]?key|signature)[^/?&;\s=]*=[^/?&;\s]*",
@@ -44,6 +46,16 @@ DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 900.0
 MAX_POLL_INTERVAL_SECONDS = 300.0
 MAX_POLL_TIMEOUT_SECONDS = 86400.0
+MIN_POLL_INTERVAL_SECONDS = 1.0
+CONTROLLED_FAILURE_LOG_MARKER = "NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED"
+RESOURCE_LIMITS = {
+    "nodes": 128,
+    "ntasks": 4096,
+    "cpus_per_task": 256,
+    "memory_gb": 4096,
+    "shud_threads": 256,
+    "max_concurrent": 10000,
+}
 
 
 class ProductionValidationError(RuntimeError):
@@ -162,6 +174,8 @@ class ProductionSlurmConfig:
     solver_binary: str
     solver_module: str
     walltime: str
+    nodes: int
+    ntasks: int
     memory_gb: int
     cpus_per_task: int
     shud_threads: int
@@ -191,7 +205,10 @@ class ProductionSlurmConfig:
         resolved_run_id = _safe_run_id(run_id or datetime.now(UTC).strftime("m10-%Y%m%dT%H%M%SZ"))
         workspace_root = Path(os.getenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", "workspace")).expanduser()
         resolved_evidence_root = _safe_resolved_evidence_root(evidence_root)
-        return cls(
+        shud_threads_env_name = (
+            "SHUD_THREADS" if os.getenv("SHUD_THREADS") is not None else "NHMS_PRODUCTION_SLURM_SHUD_THREADS"
+        )
+        config = cls(
             evidence_root=resolved_evidence_root,
             run_id=resolved_run_id,
             cluster=os.getenv("NHMS_PRODUCTION_SLURM_CLUSTER", ""),
@@ -205,37 +222,61 @@ class ProductionSlurmConfig:
             solver_binary=os.getenv("SHUD_EXECUTABLE", os.getenv("NHMS_PRODUCTION_SLURM_SOLVER_BINARY", "shud_omp")),
             solver_module=os.getenv("NHMS_PRODUCTION_SLURM_SOLVER_MODULE", ""),
             walltime=os.getenv("NHMS_PRODUCTION_SLURM_WALLTIME", "00:30:00"),
-            memory_gb=int(os.getenv("NHMS_PRODUCTION_SLURM_MEMORY_GB", "8")),
-            cpus_per_task=int(os.getenv("NHMS_PRODUCTION_SLURM_CPUS_PER_TASK", "2")),
-            shud_threads=int(os.getenv("SHUD_THREADS", os.getenv("NHMS_PRODUCTION_SLURM_SHUD_THREADS", "2"))),
-            max_concurrent=int(os.getenv("NHMS_PRODUCTION_SLURM_MAX_CONCURRENT", "2")),
+            nodes=_positive_int_env("NHMS_PRODUCTION_SLURM_NODES", 1, maximum=RESOURCE_LIMITS["nodes"]),
+            ntasks=_positive_int_env("NHMS_PRODUCTION_SLURM_NTASKS", 1, maximum=RESOURCE_LIMITS["ntasks"]),
+            memory_gb=_positive_int_env("NHMS_PRODUCTION_SLURM_MEMORY_GB", 8, maximum=RESOURCE_LIMITS["memory_gb"]),
+            cpus_per_task=_positive_int_env(
+                "NHMS_PRODUCTION_SLURM_CPUS_PER_TASK",
+                2,
+                maximum=RESOURCE_LIMITS["cpus_per_task"],
+            ),
+            shud_threads=_positive_int_env(
+                shud_threads_env_name,
+                2,
+                maximum=RESOURCE_LIMITS["shud_threads"],
+            ),
+            max_concurrent=_positive_int_env(
+                "NHMS_PRODUCTION_SLURM_MAX_CONCURRENT",
+                2,
+                maximum=RESOURCE_LIMITS["max_concurrent"],
+            ),
             submit=submit,
             fake_slurm=fake_slurm,
-            poll_interval_seconds=_non_negative_float_option(
+            poll_interval_seconds=_poll_float_option(
                 poll_interval_seconds,
                 "NHMS_PRODUCTION_SLURM_POLL_INTERVAL_SECONDS",
                 DEFAULT_POLL_INTERVAL_SECONDS,
+                minimum=MIN_POLL_INTERVAL_SECONDS,
                 maximum=MAX_POLL_INTERVAL_SECONDS,
             ),
-            poll_timeout_seconds=_non_negative_float_option(
+            poll_timeout_seconds=_poll_float_option(
                 poll_timeout_seconds,
                 "NHMS_PRODUCTION_SLURM_POLL_TIMEOUT_SECONDS",
                 DEFAULT_POLL_TIMEOUT_SECONDS,
+                minimum=0.0,
                 maximum=MAX_POLL_TIMEOUT_SECONDS,
             ),
             force=force,
         )
+        _validate_config(config)
+        return config
 
 
 def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
     config = replace(config, evidence_root=_safe_resolved_evidence_root(config.evidence_root))
+    _validate_config(config)
     writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=config.force)
     writer.prepare()
     preflight = _preflight_payload(config)
     writer.write_json(config.lane_dir / "preflight.json", preflight)
 
     blockers = _preflight_blockers(config)
-    manifest_index = _write_manifest_index(config, writer)
+    use_shared_workspace_inputs = _uses_shared_workspace_inputs(config) and not blockers
+    manifest_index, manifest_tasks = _write_manifest_index(
+        config,
+        writer,
+        use_shared_workspace_inputs=use_shared_workspace_inputs,
+    )
     rendered_script = _render_production_template(config, manifest_index, writer)
     writer.write_text(config.lane_dir / "rendered_run_shud_forecast_array.sbatch", rendered_script)
 
@@ -248,7 +289,7 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
     retry_cancel = _retry_cancel_evidence(config, partial_success, accounting)
     writer.write_json(config.lane_dir / "retry_cancel.json", retry_cancel)
 
-    qc = _qc_blocking_evidence(config, partial_success)
+    qc = _qc_blocking_evidence(config, partial_success, accounting)
     writer.write_json(config.lane_dir / "qc_blocking.json", qc)
 
     metadata = _environment_metadata(config)
@@ -281,7 +322,7 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         "manifest_index_path": str(manifest_index),
         "runtime_manifest_paths": [
             task.get("manifest_path")
-            for task in _manifest_index_tasks(config)
+            for task in manifest_tasks
         ],
     }
     writer.write_json(config.lane_dir / "summary.json", summary)
@@ -303,6 +344,8 @@ def _preflight_payload(config: ProductionSlurmConfig) -> dict[str, Any]:
             "model_package_uri": config.model_package_uri,
             "walltime": config.walltime,
             "resources": {
+                "nodes": config.nodes,
+                "ntasks": config.ntasks,
                 "cpus_per_task": config.cpus_per_task,
                 "shud_threads": config.shud_threads,
                 "omp_num_threads": config.shud_threads,
@@ -329,6 +372,53 @@ def _safe_run_id(run_id: str) -> str:
     )
 
 
+def _validate_config(config: ProductionSlurmConfig) -> None:
+    if config.submit and config.fake_slurm:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_SUBMIT_FAKE_CONFLICT",
+            "--submit and --fake-slurm are mutually exclusive.",
+        )
+    _validate_slurm_identifier(config.partition, "NHMS_PRODUCTION_SLURM_PARTITION")
+    _validate_slurm_identifier(config.account, "NHMS_PRODUCTION_SLURM_ACCOUNT", allow_empty=True)
+    _validate_walltime(config.walltime)
+    for field_name, maximum in RESOURCE_LIMITS.items():
+        value = getattr(config, field_name)
+        if not isinstance(value, int) or value < 1 or value > maximum:
+            raise ProductionValidationError(
+                "PRODUCTION_SLURM_RESOURCE_INVALID",
+                f"{field_name} must be an integer between 1 and {maximum}.",
+            )
+
+
+def _validate_slurm_identifier(value: str, env_name: str, *, allow_empty: bool = False) -> None:
+    if value == "" and allow_empty:
+        return
+    if value == "":
+        return
+    if SAFE_SLURM_IDENTIFIER_RE.fullmatch(value):
+        return
+    raise ProductionValidationError(
+        "PRODUCTION_SLURM_RESOURCE_INVALID",
+        f"{env_name} must be a safe Slurm identifier.",
+    )
+
+
+def _validate_walltime(value: str) -> None:
+    match = SLURM_WALLTIME_RE.fullmatch(value)
+    if not match:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_RESOURCE_INVALID",
+            "NHMS_PRODUCTION_SLURM_WALLTIME must use [days-]HH:MM:SS with minute/second fields below 60.",
+        )
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours"))
+    if days == 0 and hours > 999:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_RESOURCE_INVALID",
+            "NHMS_PRODUCTION_SLURM_WALLTIME hours must be bounded.",
+        )
+
+
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
     root = evidence_root.expanduser()
     if root.exists() or root.is_symlink():
@@ -352,7 +442,33 @@ def _refuse_symlink_components(path: Path) -> None:
             )
 
 
-def _non_negative_float_option(value: float | None, env_name: str, default: float, *, maximum: float) -> float:
+def _positive_int_env(env_name: str, default: int, *, maximum: int) -> int:
+    raw_value = os.getenv(env_name)
+    if raw_value is None or raw_value == "":
+        return default
+    try:
+        resolved = int(raw_value, 10)
+    except ValueError as error:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_RESOURCE_INVALID",
+            f"{env_name} must be an integer between 1 and {maximum}.",
+        ) from error
+    if str(resolved) != raw_value.strip() or resolved < 1 or resolved > maximum:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_RESOURCE_INVALID",
+            f"{env_name} must be an integer between 1 and {maximum}.",
+        )
+    return resolved
+
+
+def _poll_float_option(
+    value: float | None,
+    env_name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
     raw_value = os.getenv(env_name) if value is None else value
     if raw_value is None or raw_value == "":
         return default
@@ -361,12 +477,12 @@ def _non_negative_float_option(value: float | None, env_name: str, default: floa
     except (TypeError, ValueError) as error:
         raise ProductionValidationError(
             "PRODUCTION_SLURM_POLL_OPTION_INVALID",
-            f"{env_name} must be a non-negative number.",
+            f"{env_name} must be a finite number between {minimum:g} and {maximum:g}.",
         ) from error
-    if not math.isfinite(resolved) or resolved < 0:
+    if not math.isfinite(resolved) or resolved < minimum:
         raise ProductionValidationError(
             "PRODUCTION_SLURM_POLL_OPTION_INVALID",
-            f"{env_name} must be a finite non-negative number.",
+            f"{env_name} must be a finite number between {minimum:g} and {maximum:g}.",
         )
     if resolved > maximum:
         raise ProductionValidationError(
@@ -394,33 +510,49 @@ def _preflight_blockers(config: ProductionSlurmConfig) -> list[dict[str, str]]:
     return blockers
 
 
-def _write_manifest_index(config: ProductionSlurmConfig, writer: EvidenceWriter) -> Path:
-    manifest_index = _manifest_index_path(config)
-    tasks = _manifest_index_tasks(config)
+def _write_manifest_index(
+    config: ProductionSlurmConfig,
+    writer: EvidenceWriter,
+    *,
+    use_shared_workspace_inputs: bool,
+) -> tuple[Path, list[dict[str, Any]]]:
+    manifest_index = _manifest_index_path(config, use_shared_workspace_inputs=use_shared_workspace_inputs)
+    tasks = _manifest_index_tasks(config, use_shared_workspace_inputs=use_shared_workspace_inputs)
     for task in tasks:
         _write_runtime_manifest(config, task, writer)
-    if _uses_shared_workspace_inputs(config):
+    if use_shared_workspace_inputs:
         writer.write_runtime_manifest_json(manifest_index, redact_payload(tasks))
         writer.write_json(config.lane_dir / "manifest_index.json", redact_payload(tasks))
     else:
         writer.write_json(manifest_index, redact_payload(tasks))
-    return manifest_index
+    return manifest_index, tasks
 
 
-def _manifest_index_tasks(config: ProductionSlurmConfig) -> list[dict[str, Any]]:
+def _manifest_index_tasks(
+    config: ProductionSlurmConfig,
+    *,
+    use_shared_workspace_inputs: bool,
+) -> list[dict[str, Any]]:
     return [
-        _task_manifest(config, task_id=0, run_id=f"{config.run_id}_success", model_id=config.model_id),
+        _task_manifest(
+            config,
+            task_id=0,
+            run_id=f"{config.run_id}_success",
+            model_id=config.model_id,
+            use_shared_workspace_inputs=use_shared_workspace_inputs,
+        ),
         _task_manifest(
             config,
             task_id=1,
             run_id=f"{config.run_id}_controlled_fail",
             model_id=f"{config.model_id}_fail",
+            use_shared_workspace_inputs=use_shared_workspace_inputs,
         ),
     ]
 
 
-def _manifest_index_path(config: ProductionSlurmConfig) -> Path:
-    if _uses_shared_workspace_inputs(config):
+def _manifest_index_path(config: ProductionSlurmConfig, *, use_shared_workspace_inputs: bool) -> Path:
+    if use_shared_workspace_inputs:
         return config.workspace_root / "runs" / config.run_id / "input" / "manifest_index.json"
     return config.lane_dir / "manifest_index.json"
 
@@ -429,8 +561,15 @@ def _uses_shared_workspace_inputs(config: ProductionSlurmConfig) -> bool:
     return config.submit and not config.fake_slurm
 
 
-def _task_manifest(config: ProductionSlurmConfig, *, task_id: int, run_id: str, model_id: str) -> dict[str, Any]:
-    input_root = config.workspace_root if _uses_shared_workspace_inputs(config) else config.lane_dir
+def _task_manifest(
+    config: ProductionSlurmConfig,
+    *,
+    task_id: int,
+    run_id: str,
+    model_id: str,
+    use_shared_workspace_inputs: bool,
+) -> dict[str, Any]:
+    input_root = config.workspace_root if use_shared_workspace_inputs else config.lane_dir
     output_uri = _object_uri(config, f"runs/{run_id}/output/")
     log_uri = _object_uri(config, f"runs/{run_id}/logs/")
     return {
@@ -541,8 +680,8 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
                 "resource_profiles:",
                 "  default:",
                 f"    partition: {json.dumps(config.partition or 'compute')}",
-                "    nodes: 1",
-                "    ntasks: 1",
+                f"    nodes: {config.nodes}",
+                f"    ntasks: {config.ntasks}",
                 f"    cpus_per_task: {config.cpus_per_task}",
                 f"    memory_gb: {config.memory_gb}",
                 f"    walltime: {json.dumps(config.walltime)}",
@@ -574,6 +713,7 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
         "object_store_root": config.object_store_root,
         "object_store_prefix": config.object_store_prefix,
         "model_package_uri": config.model_package_uri,
+        "controlled_failure_log_marker": CONTROLLED_FAILURE_LOG_MARKER,
     }
     return gateway.render_template("run_shud_forecast_array", manifest, str(manifest_index))
 
@@ -586,6 +726,7 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
             "commands": _inspection_commands(config),
             "records": [],
         }
+    _prepare_shared_log_dir(config)
     script_path = config.lane_dir / "rendered_run_shud_forecast_array.sbatch"
     array_spec = f"0-1%{max(1, min(config.max_concurrent, 2))}"
     submit_command = ["sbatch", "--parsable", f"--array={array_spec}"]
@@ -626,7 +767,7 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
     poll = _poll_sacct_for_expected_array(config, job_id, expected_task_ids={0, 1})
     sacct = poll["last_sacct"]
     records = poll["records"]
-    task_blockers = poll["blockers"]
+    task_blockers = [*poll["blockers"], *_submitted_log_blockers(config, job_id, records)]
     mode = "blocked" if task_blockers else "submitted"
     return {
         "mode": mode,
@@ -650,6 +791,45 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
         },
         "records": records,
     }
+
+
+def _prepare_shared_log_dir(config: ProductionSlurmConfig) -> Path:
+    log_dir = config.workspace_root / config.run_id / "logs"
+    _safe_workspace_path(config.workspace_root, log_dir)
+    if log_dir.exists() and not log_dir.is_dir():
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_LOG_DIR_INVALID",
+            f"Slurm log path exists but is not a directory: {log_dir}",
+        )
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_LOG_DIR_INVALID",
+            f"Failed to create Slurm log directory {log_dir}: {error}",
+        ) from error
+    return log_dir
+
+
+def _safe_workspace_path(workspace_root: Path, path: Path) -> Path:
+    root = workspace_root.expanduser()
+    if root.exists() or root.is_symlink():
+        _refuse_symlink_components(root)
+    parent = root.parent
+    if parent.exists() or parent.is_symlink():
+        _refuse_symlink_components(parent)
+    if path.exists() or path.is_symlink():
+        _refuse_symlink_components(path)
+    resolved_root = root.resolve(strict=False)
+    resolved_path = path.resolve(strict=False)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as error:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_WORKSPACE_PATH_UNSAFE",
+            "Shared Slurm workspace path must stay under workspace root.",
+        ) from error
+    return resolved_path
 
 
 def _poll_sacct_for_expected_array(
@@ -817,6 +997,67 @@ def _submitted_task_outcome_blockers(
     return blockers
 
 
+def _submitted_log_blockers(
+    config: ProductionSlurmConfig,
+    job_id: str,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    task_records = {int(record["task_id"]): record for record in records if record.get("task_id") is not None}
+    blockers: list[dict[str, Any]] = []
+    for task_id in (0, 1):
+        record = task_records.get(task_id)
+        if not record or str(record.get("state", "")) not in TERMINAL_SLURM_STATES:
+            continue
+        for suffix in ("out", "err"):
+            path = _slurm_log_file(config, job_id, task_id, suffix=suffix)
+            if not path.is_file():
+                blockers.append(
+                    {
+                        "error_code": "SLURM_ARRAY_TASK_LOG_MISSING",
+                        "field": f"task_{task_id}_{suffix}",
+                        "task_id": str(task_id),
+                        "path": str(path),
+                    }
+                )
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    handle.read(1)
+            except OSError:
+                blockers.append(
+                    {
+                        "error_code": "SLURM_ARRAY_TASK_LOG_UNREADABLE",
+                        "field": f"task_{task_id}_{suffix}",
+                        "task_id": str(task_id),
+                        "path": str(path),
+                    }
+                )
+    task1 = task_records.get(1)
+    if task1 and _is_controlled_failure_outcome(task1) and not _controlled_failure_marker_present(config, job_id):
+        blockers.append(
+            {
+                "error_code": "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING",
+                "field": "task_1_log",
+                "task_id": "1",
+                "marker": CONTROLLED_FAILURE_LOG_MARKER,
+            }
+        )
+    return blockers
+
+
+def _controlled_failure_marker_present(config: ProductionSlurmConfig, job_id: str) -> bool:
+    for suffix in ("out", "err"):
+        path = _slurm_log_file(config, job_id, 1, suffix=suffix)
+        if not path.is_file():
+            continue
+        try:
+            if CONTROLLED_FAILURE_LOG_MARKER in path.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _timeout_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not blockers:
         return [
@@ -913,7 +1154,20 @@ def _partial_success_evidence(config: ProductionSlurmConfig, accounting: dict[st
     tasks = []
     for record in task_records:
         task_id = int(record["task_id"])
-        succeeded = str(record.get("state", "")).upper() == "COMPLETED" and record.get("exit_code") == 0
+        log_blocked = _has_log_blocker(blockers, task_id)
+        succeeded = (
+            str(record.get("state", "")).upper() == "COMPLETED"
+            and record.get("exit_code") == 0
+            and not log_blocked
+        )
+        if task_id == 1 and _has_blocker(blockers, "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MISSING"):
+            succeeded = False
+            task_error_code = "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MISSING"
+        elif log_blocked:
+            task_error_code = _task_log_error_code(blockers, task_id)
+        else:
+            task_error_code = None if succeeded else record.get("error_code") or "SLURM_JOB_FAILED"
+        log_verified = bool(mode == "fake" or (accounting.get("job_id") and not log_blocked))
         tasks.append(
             {
                 "task_id": task_id,
@@ -921,15 +1175,15 @@ def _partial_success_evidence(config: ProductionSlurmConfig, accounting: dict[st
                 "run_id": f"{config.run_id}_{'success' if task_id == 0 else 'controlled_fail'}",
                 "publishable": succeeded,
                 "status": "succeeded" if succeeded else "blocked",
-                "error_code": None if succeeded else record.get("error_code") or "SLURM_JOB_FAILED",
+                "error_code": task_error_code,
                 "stdout_path": _slurm_log_path(config, accounting, task_id, suffix="out")
                 if accounting.get("job_id")
                 else None,
                 "stderr_path": _slurm_log_path(config, accounting, task_id, suffix="err")
                 if accounting.get("job_id")
                 else None,
-                "log_verified": bool(mode == "fake"),
-                "log_status": "verified" if mode == "fake" else "unverified",
+                "log_verified": log_verified,
+                "log_status": "verified" if log_verified else "blocked" if log_blocked else "unverified",
                 "retry_count": 0 if succeeded else 1,
                 "failure_stage": None if succeeded else "run_shud_forecast_array",
             }
@@ -972,9 +1226,38 @@ def _has_incomplete_accounting_blocker(blockers: list[dict[str, Any]]) -> bool:
     return any(blocker.get("error_code") in incomplete_codes for blocker in blockers)
 
 
+def _has_blocker(blockers: list[dict[str, Any]], error_code: str) -> bool:
+    return any(blocker.get("error_code") == error_code for blocker in blockers)
+
+
+def _has_log_blocker(blockers: list[dict[str, Any]], task_id: int) -> bool:
+    log_codes = {
+        "SLURM_ARRAY_TASK_LOG_MISSING",
+        "SLURM_ARRAY_TASK_LOG_UNREADABLE",
+        "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING",
+    }
+    return any(
+        blocker.get("error_code") in log_codes and blocker.get("task_id") == str(task_id)
+        for blocker in blockers
+    )
+
+
+def _task_log_error_code(blockers: list[dict[str, Any]], task_id: int) -> str:
+    for blocker in blockers:
+        if blocker.get("task_id") == str(task_id) and str(blocker.get("error_code", "")).startswith(
+            "SLURM_ARRAY_TASK_"
+        ):
+            return str(blocker["error_code"])
+    return "SLURM_ARRAY_TASK_LOG_MISSING"
+
+
 def _slurm_log_path(config: ProductionSlurmConfig, accounting: dict[str, Any], task_id: int, *, suffix: str) -> str:
     array_job_id = str(accounting.get("job_id") or "9001")
-    return str(config.workspace_root / config.run_id / "logs" / f"{array_job_id}_{task_id}.{suffix}")
+    return str(_slurm_log_file(config, array_job_id, task_id, suffix=suffix))
+
+
+def _slurm_log_file(config: ProductionSlurmConfig, array_job_id: str, task_id: int, *, suffix: str) -> Path:
+    return config.workspace_root / config.run_id / "logs" / f"{array_job_id}_{task_id}.{suffix}"
 
 
 def _blocked_partial_success(
@@ -1043,20 +1326,34 @@ def _retry_cancel_evidence(
     }
 
 
-def _qc_blocking_evidence(config: ProductionSlurmConfig, partial_success: dict[str, Any]) -> dict[str, Any]:
+def _qc_blocking_evidence(
+    config: ProductionSlurmConfig,
+    partial_success: dict[str, Any],
+    accounting: dict[str, Any],
+) -> dict[str, Any]:
     success = next((task for task in partial_success["tasks"] if task["publishable"]), None)
+    mode = str(accounting.get("mode", ""))
+    blockers = accounting.get("blockers") if isinstance(accounting.get("blockers"), list) else []
+    evidence_verified = mode == "fake" or (
+        mode == "submitted"
+        and not _has_blocker(blockers, "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING")
+        and _controlled_failure_marker_present(config, str(accounting.get("job_id") or ""))
+    )
+    malformed_status = "blocked" if evidence_verified else "not_verified"
     return {
         "schema": "nhms.production_closure.slurm.qc_blocking.v1",
         "malformed_task": {
             "task_id": 1,
             "run_id": f"{config.run_id}_controlled_fail",
-            "status": "blocked",
-            "error_code": "NON_FINITE_FLOW",
+            "status": malformed_status,
+            "error_code": "NON_FINITE_FLOW" if evidence_verified else "QC_BLOCKING_NOT_VERIFIED",
+            "evidence_verified": evidence_verified,
+            "marker": CONTROLLED_FAILURE_LOG_MARKER,
             "failure_stage": "parse_output_array",
-            "publication_blocked": True,
-            "frequency_blocked": True,
-            "tile_blocked": True,
-            "api_publication_blocked": True,
+            "publication_blocked": evidence_verified,
+            "frequency_blocked": evidence_verified,
+            "tile_blocked": evidence_verified,
+            "api_publication_blocked": evidence_verified,
         },
         "sibling_success": {
             "task_id": success.get("task_id") if success else 0,

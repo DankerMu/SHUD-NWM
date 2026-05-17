@@ -166,9 +166,9 @@ uv run nhms-production validate-slurm \
   --poll-timeout-seconds 900
 ```
 
-Poll options must be finite, non-negative values. `--poll-interval-seconds` is
-bounded to `300` seconds and `--poll-timeout-seconds` is bounded to `86400`
-seconds; invalid values fail before writing evidence with
+Poll options must be finite values. `--poll-interval-seconds` must be at least
+`1` and at most `300` seconds; `--poll-timeout-seconds` is bounded from `0` to
+`86400` seconds. Invalid values fail before writing evidence with
 `PRODUCTION_SLURM_POLL_OPTION_INVALID`.
 
 Submitted acceptance evidence requires terminal Slurm accounting rows for array
@@ -176,16 +176,21 @@ tasks `0` and `1`: task `0` must complete successfully, and task `1` must reach
 the expected explicit worker failure (`FAILED` with a nonzero exit code).
 Cancellation, timeout, node failure, preemption, or out-of-memory outcomes do
 not satisfy the controlled-failure contract. Missing terminal task outcomes,
-shared stdout/stderr logs, or QC blocking evidence block #147 acceptance. Use
-`--force` only for an intentional rerun of an existing `run_id`; the default
-protects audit evidence from accidental overwrite.
+shared stdout/stderr logs, or QC blocking evidence block #147 acceptance. The
+task `1` shared stdout/stderr evidence must include the
+`NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED` marker emitted by the
+rendered sbatch script before the expected worker failure. Use `--force` only
+for an intentional rerun of an existing `run_id`; the default protects audit
+evidence from accidental overwrite.
 
 In submit mode, the manifest index rendered into `NHMS_MANIFEST_INDEX` is copied
 under the configured shared workspace at
 `<workspace_root>/runs/<run_id>/input/manifest_index.json` so compute nodes can
 read it. Fake and no-submit preflight runs keep generated manifest inputs inside
 the evidence lane and are planned/preflight-only, not publishable acceptance
-evidence.
+evidence. If submit preflight is blocked, runtime manifests and the manifest
+index also stay inside the evidence lane and are not written to the shared
+workspace.
 
 If required preflight inputs or Slurm CLI tools are absent, the command writes a
 clear blocker bundle under `artifacts/production-closure/<run_id>/slurm/` and
@@ -205,12 +210,15 @@ contains:
 - `array_partial_success.json`: publishable sibling success and actionable
   failed task metadata. No-submit/preflight-only and blocked accounting bundles
   set `successful_outputs_remain_publishable=false` and do not invent concrete
-  job IDs.
+  job IDs. Submitted evidence only marks task outputs publishable after the
+  corresponding shared stdout/stderr logs are present and readable.
 - `retry_cancel.json`: retry/cancel evidence that does not mutate successful
   outputs. Submitted runs mark retry/cancel as `not_executed` unless explicit
   real cancellation/retry evidence exists.
 - `qc_blocking.json`: malformed SHUD output/QC blocking evidence for the
-  affected task while sibling success remains publishable.
+  affected task while sibling success remains publishable. Submitted runs mark
+  this evidence verified only when the controlled-failure marker is present in
+  task `1` shared logs.
 - `environment.json` and `summary.json`: redacted command/environment metadata
   and evidence file index.
 
