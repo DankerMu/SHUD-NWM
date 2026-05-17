@@ -585,24 +585,31 @@ def _dependency_summary_path(root: Path, name: str) -> _BoundDependencyEvidenceP
     if name == "object_store":
         candidates.append(root_path / "object-store" / "summary.json")
     for candidate in candidates:
-        if candidate.is_symlink():
+        _refuse_dependency_symlink_components(candidate.parent)
+        try:
+            candidate_stat = os.stat(candidate, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                f"Dependency summary file changed while it was being discovered: {candidate}",
+            ) from error
+        if stat.S_ISLNK(candidate_stat.st_mode):
             raise ProductionE2EValidationError(
                 "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK",
                 f"Dependency summary must not be a symlink: {candidate}",
             )
-        _refuse_dependency_symlink_components(candidate.parent)
-        if candidate.exists():
-            if not candidate.is_file():
-                continue
-            resolved_candidate = candidate.resolve(strict=True)
-            try:
-                resolved_candidate.relative_to(root_path)
-            except ValueError as error:
-                raise ProductionE2EValidationError(
-                    "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
-                    "Dependency summary file must stay under its supplied dependency root.",
-                ) from error
-            return _bind_dependency_evidence_path(resolved_candidate, root_path=root_path, root_stat=root_stat)
+        if not stat.S_ISREG(candidate_stat.st_mode):
+            continue
+        try:
+            candidate.relative_to(root_path)
+        except ValueError as error:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                "Dependency summary file must stay under its supplied dependency root.",
+            ) from error
+        return _bind_dependency_evidence_path(candidate, root_path=root_path, root_stat=root_stat)
     return None
 
 
@@ -843,7 +850,18 @@ def _write_shud_output_qc(
 def _safe_raw_shud_dir(config: ProductionE2EConfig) -> Path:
     raw_dir = config.lane_dir / "raw" / "shud"
     _validate_evidence_path_contained(config, raw_dir, path_kind="SHUD raw output directory")
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_directory_no_follow(raw_dir, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionE2EValidationError(
+            error_code,
+            f"Failed to prepare SHUD raw output directory {raw_dir}: {error}",
+        ) from error
     _validate_evidence_path_contained(config, raw_dir, path_kind="SHUD raw output directory")
     return raw_dir
 

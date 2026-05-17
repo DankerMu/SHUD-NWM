@@ -1483,24 +1483,31 @@ def _dependency_summary_path(root: Path, name: str) -> _BoundDependencyEvidenceP
     if name == "object_store":
         candidates.append(root_path / "object-store" / "summary.json")
     for candidate in candidates:
-        if candidate.is_symlink():
+        _refuse_dependency_symlink_components(candidate.parent)
+        try:
+            candidate_stat = os.stat(candidate, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                f"Dependency summary file changed while it was being discovered: {candidate}",
+            ) from error
+        if stat.S_ISLNK(candidate_stat.st_mode):
             raise ProductionOpsValidationError(
                 "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK",
                 f"Dependency summary must not be a symlink: {candidate}",
             )
-        _refuse_dependency_symlink_components(candidate.parent)
-        if candidate.exists():
-            if not candidate.is_file():
-                continue
-            resolved_candidate = candidate.resolve(strict=True)
-            try:
-                resolved_candidate.relative_to(root_path)
-            except ValueError as error:
-                raise ProductionOpsValidationError(
-                    "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
-                    "Dependency summary file must stay under its supplied dependency root.",
-                ) from error
-            return _bind_dependency_evidence_path(resolved_candidate, root_path=root_path, root_stat=root_stat)
+        if not stat.S_ISREG(candidate_stat.st_mode):
+            continue
+        try:
+            candidate.relative_to(root_path)
+        except ValueError as error:
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                "Dependency summary file must stay under its supplied dependency root.",
+            ) from error
+        return _bind_dependency_evidence_path(candidate, root_path=root_path, root_stat=root_stat)
     return None
 
 
@@ -1528,28 +1535,34 @@ def _dependency_acceptance_receipt_path(
         if candidate in seen:
             continue
         seen.add(candidate)
-        if candidate.is_symlink():
+        _refuse_dependency_symlink_components(candidate.parent)
+        try:
+            candidate_stat = os.stat(candidate, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                f"Dependency acceptance receipt changed while it was being discovered: {candidate}",
+            ) from error
+        if stat.S_ISLNK(candidate_stat.st_mode):
             raise ProductionOpsValidationError(
                 "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK",
                 f"Dependency acceptance receipt must not be a symlink: {candidate}",
             )
-        _refuse_dependency_symlink_components(candidate.parent)
-        if not candidate.exists():
-            continue
-        if not candidate.is_file():
+        if not stat.S_ISREG(candidate_stat.st_mode):
             raise ProductionOpsValidationError(
                 "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID",
                 f"Dependency acceptance receipt must be a file: {candidate}",
             )
-        resolved_candidate = candidate.resolve(strict=True)
         try:
-            resolved_candidate.relative_to(root_path)
+            candidate.relative_to(root_path)
         except ValueError as error:
             raise ProductionOpsValidationError(
                 "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
                 "Dependency acceptance receipt must stay under its supplied dependency root.",
             ) from error
-        return _bind_dependency_evidence_path(resolved_candidate, root_path=root_path, root_stat=root_stat)
+        return _bind_dependency_evidence_path(candidate, root_path=root_path, root_stat=root_stat)
     return None
 
 

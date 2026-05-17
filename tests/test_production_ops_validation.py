@@ -866,6 +866,54 @@ def test_validate_ops_blocks_dependency_summary_swap_to_symlink_before_fd_open(
     assert hashlib.sha256(target_bytes).hexdigest() not in json.dumps(slurm)
 
 
+def test_validate_ops_blocks_dependency_summary_swap_to_same_root_symlink_before_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(summary_path, "slurm", 147, "nhms.production_closure.slurm.v1", "submitted")
+    sibling = root / "sibling-summary.json"
+    _write_dependency_summary(
+        sibling,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+    original_stat = ops_validation_module.os.stat
+    swapped = False
+
+    def swap_summary_before_no_follow_stat(path, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == summary_path and kwargs.get("follow_symlinks") is False and not swapped:
+            swapped = True
+            summary_path.unlink()
+            summary_path.symlink_to(sibling)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(ops_validation_module.os, "stat", swap_summary_before_no_follow_stat)
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="summary_same_root_swap",
+            slurm_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "summary_same_root_swap" / "ops" / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert swapped is True
+    assert summary["status"] == "release_blocked"
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK"
+    assert "accepted_dependency_evidence" not in slurm
+    assert "sibling-summary" not in json.dumps(slurm)
+
+
 def test_validate_ops_opens_dependency_summary_and_receipt_by_bound_parent_fd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1062,6 +1110,55 @@ def test_validate_ops_blocks_dependency_receipt_swap_to_symlink_before_fd_open(
     assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK"
     assert "accepted_dependency_evidence" not in slurm
     assert hashlib.sha256(target_bytes).hexdigest() not in json.dumps(slurm)
+
+
+def test_validate_ops_blocks_dependency_receipt_swap_to_same_root_symlink_before_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+    receipt_path = root / "accepted_dependency_evidence.json"
+    sibling_receipt = root / "sibling-accepted_dependency_evidence.json"
+    sibling_receipt.write_bytes(receipt_path.read_bytes())
+    original_stat = ops_validation_module.os.stat
+    swapped = False
+
+    def swap_receipt_before_no_follow_stat(path, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == receipt_path and kwargs.get("follow_symlinks") is False and not swapped:
+            swapped = True
+            receipt_path.unlink()
+            receipt_path.symlink_to(sibling_receipt)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(ops_validation_module.os, "stat", swap_receipt_before_no_follow_stat)
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="receipt_same_root_swap",
+            slurm_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "receipt_same_root_swap" / "ops" / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert swapped is True
+    assert summary["status"] == "release_blocked"
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK"
+    assert "accepted_dependency_evidence" not in slurm
+    assert "sibling-accepted" not in json.dumps(slurm)
 
 
 def test_validate_ops_blocks_dependency_root_swap_to_symlink_before_receipt_open(

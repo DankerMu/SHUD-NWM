@@ -721,6 +721,58 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_marker_missing(
     assert qc["malformed_task"]["publication_blocked"] is False
 
 
+def test_validate_slurm_shared_log_dir_refuses_symlink_swap_before_mkdir_without_external_write(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    run_id = "logmkdirswap"
+    workspace_root = tmp_path / "shared-workspace"
+    external = tmp_path / "external-shared-logs"
+    external.mkdir()
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+    original_ensure = safe_fs.ensure_directory_no_follow
+    swapped = False
+
+    def swap_run_workspace_before_log_dir_create(path: Path, *, containment_root: Path | None = None) -> Path:
+        nonlocal swapped
+        if path == workspace_root / run_id / "logs" and not swapped:
+            swapped = True
+            (workspace_root / run_id).symlink_to(external, target_is_directory=True)
+        return original_ensure(path, containment_root=containment_root)
+
+    monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", swap_run_workspace_before_log_dir_create)
+    monkeypatch.setattr(slurm_validation, "ensure_directory_no_follow", swap_run_workspace_before_log_dir_create)
+
+    with pytest.raises(SystemExit) as exc_info:
+        slurm_validation.main(
+            [
+                "validate-slurm",
+                "--evidence-root",
+                str(tmp_path / "artifacts"),
+                "--run-id",
+                run_id,
+                "--submit",
+                "--poll-interval-seconds",
+                "1",
+                "--poll-timeout-seconds",
+                "0",
+            ]
+        )
+
+    assert exc_info.value.code == 1
+    assert swapped is True
+    captured = capsys.readouterr()
+    assert "PRODUCTION_SLURM_LOG_DIR_INVALID" in captured.err
+    assert "Traceback" not in captured.err
+    assert sorted(path.name for path in external.iterdir()) == []
+
+
 def test_validate_slurm_submit_blocks_when_controlled_failure_signature_missing(
     tmp_path: Path,
     monkeypatch,

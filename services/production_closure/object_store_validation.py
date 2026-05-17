@@ -248,7 +248,7 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
     if config.basins_root is None:
         _validate_lane_path_contained(config, basins_root, path_kind="synthetic basins fixture")
         _refuse_existing_descendant_symlinks(basins_root, path_kind="synthetic basins fixture")
-        write_synthetic_basins_fixture(basins_root)
+        write_synthetic_basins_fixture(basins_root, containment_root=config.lane_dir)
 
     blockers: list[dict[str, Any]] = []
     migration_report = _write_migration_evidence(config, writer, basins_root, blockers)
@@ -338,11 +338,11 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
             _cleanup_raw_lane_file(config, path, path_kind="raw cleanup file")
 
 
-def write_synthetic_basins_fixture(root: Path) -> dict[str, Any]:
+def write_synthetic_basins_fixture(root: Path, *, containment_root: Path | None = None) -> dict[str, Any]:
     input_name = "alias-a"
     model_dir = root / "basin-a"
     input_dir = model_dir / "input" / input_name
-    input_dir.mkdir(parents=True, exist_ok=True)
+    _safe_fixture_dir(input_dir, containment_root=containment_root)
     for suffix in (
         "cfg.para",
         "cfg.ic",
@@ -357,35 +357,98 @@ def write_synthetic_basins_fixture(root: Path) -> dict[str, Any]:
         "tsd.mf",
         "tsd.rl",
     ):
-        (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
-    (input_dir / f"{input_name}.sp.riv").write_text("2 6\n1 0 0 0.01 100 0\n", encoding="utf-8")
-    (input_dir / f"{input_name}.sp.rivseg").write_text("2 4\n1 1 1 100\n", encoding="utf-8")
+        _safe_fixture_write_text(input_dir / f"{input_name}.{suffix}", f"{suffix}\n", containment_root=containment_root)
+    _safe_fixture_write_text(
+        input_dir / f"{input_name}.sp.riv",
+        "2 6\n1 0 0 0.01 100 0\n",
+        containment_root=containment_root,
+    )
+    _safe_fixture_write_text(
+        input_dir / f"{input_name}.sp.rivseg",
+        "2 4\n1 1 1 100\n",
+        containment_root=containment_root,
+    )
     gis_dir = input_dir / "gis"
-    gis_dir.mkdir(exist_ok=True)
-    _write_domain_shapefile(gis_dir / "domain")
-    _write_line_shapefile(gis_dir / "river")
-    _write_line_shapefile(gis_dir / "seg")
+    _safe_fixture_dir(gis_dir, containment_root=containment_root)
+    _write_domain_shapefile(gis_dir / "domain", containment_root=containment_root)
+    _write_line_shapefile(gis_dir / "river", containment_root=containment_root)
+    _write_line_shapefile(gis_dir / "seg", containment_root=containment_root)
     forcing_dir = model_dir / "forcing"
-    forcing_dir.mkdir(exist_ok=True)
-    (forcing_dir / "X000001.csv").write_text("time,value\n2026-01-01,1\n", encoding="utf-8")
+    _safe_fixture_dir(forcing_dir, containment_root=containment_root)
+    _safe_fixture_write_text(
+        forcing_dir / "X000001.csv",
+        "time,value\n2026-01-01,1\n",
+        containment_root=containment_root,
+    )
     return discover_basins_inventory(root)
 
 
-def _write_domain_shapefile(base: Path) -> None:
+def _safe_fixture_dir(path: Path, *, containment_root: Path | None) -> None:
+    try:
+        ensure_directory_no_follow(path, containment_root=containment_root)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to prepare synthetic Basins fixture directory {path}: {error}",
+        ) from error
+
+
+def _safe_fixture_write_bytes(path: Path, content: bytes, *, containment_root: Path | None) -> None:
+    try:
+        atomic_write_bytes_no_follow(path, content, containment_root=containment_root)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to write synthetic Basins fixture file {path}: {error}",
+        ) from error
+
+
+def _safe_fixture_write_text(path: Path, content: str, *, containment_root: Path | None) -> None:
+    _safe_fixture_write_bytes(path, content.encode("utf-8"), containment_root=containment_root)
+
+
+def _write_domain_shapefile(base: Path, *, containment_root: Path | None = None) -> None:
     import shapefile
 
-    writer = shapefile.Writer(str(base), shapeType=shapefile.POLYGON)
+    target_base = base
+    if containment_root is not None:
+        temp_dir = tempfile.TemporaryDirectory(prefix="nhms-synthetic-basins-shp-")
+        target_base = Path(temp_dir.name) / base.name
+    else:
+        temp_dir = None
+    writer = shapefile.Writer(str(target_base), shapeType=shapefile.POLYGON)
     writer.field("ID", "N")
     writer.poly([[[100.0, 30.0], [101.0, 30.0], [101.0, 31.0], [100.0, 31.0], [100.0, 30.0]]])
     writer.record(1)
     writer.close()
-    _write_wgs84_prj(base.with_suffix(".prj"))
+    _write_wgs84_prj(base.with_suffix(".prj"), containment_root=containment_root)
+    if temp_dir is not None:
+        try:
+            _copy_fixture_shapefile_outputs(target_base, base, containment_root=containment_root)
+        finally:
+            temp_dir.cleanup()
 
 
-def _write_line_shapefile(base: Path) -> None:
+def _write_line_shapefile(base: Path, *, containment_root: Path | None = None) -> None:
     import shapefile
 
-    writer = shapefile.Writer(str(base), shapeType=shapefile.POLYLINE)
+    target_base = base
+    if containment_root is not None:
+        temp_dir = tempfile.TemporaryDirectory(prefix="nhms-synthetic-basins-shp-")
+        target_base = Path(temp_dir.name) / base.name
+    else:
+        temp_dir = None
+    writer = shapefile.Writer(str(target_base), shapeType=shapefile.POLYLINE)
     writer.field("SEG_ID", "N")
     writer.field("ORDER", "N")
     writer.field("DOWN_ID", "N")
@@ -395,16 +458,36 @@ def _write_line_shapefile(base: Path) -> None:
     writer.line([[[100.5, 30.4], [100.8, 30.8]]])
     writer.record(2, 2, 0, 60000.0)
     writer.close()
-    _write_wgs84_prj(base.with_suffix(".prj"))
+    _write_wgs84_prj(base.with_suffix(".prj"), containment_root=containment_root)
+    if temp_dir is not None:
+        try:
+            _copy_fixture_shapefile_outputs(target_base, base, containment_root=containment_root)
+        finally:
+            temp_dir.cleanup()
 
 
-def _write_wgs84_prj(path: Path) -> None:
-    path.write_text(
+def _write_wgs84_prj(path: Path, *, containment_root: Path | None = None) -> None:
+    _safe_fixture_write_text(
+        path,
         'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
         'SPHEROID["WGS_1984",6378137,298.257223563]],'
         'PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]]\n',
-        encoding="utf-8",
+        containment_root=containment_root,
     )
+
+
+def _copy_fixture_shapefile_outputs(source_base: Path, target_base: Path, *, containment_root: Path) -> None:
+    for suffix in (".shp", ".shx", ".dbf"):
+        source_path = source_base.with_suffix(suffix)
+        target_path = target_base.with_suffix(suffix)
+        try:
+            content = source_path.read_bytes()
+        except OSError as error:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+                f"Failed to read temporary synthetic Basins shapefile output {source_path}: {error}",
+            ) from error
+        _safe_fixture_write_bytes(target_path, content, containment_root=containment_root)
 
 
 def _write_migration_evidence(
@@ -988,8 +1071,19 @@ def _runtime_staging_evidence(
     output_dir = config.lane_dir / "runtime-workspace" / "runs" / runtime_manifest["run_id"] / "output"
     _validate_lane_path_contained(config, input_dir, path_kind="runtime input directory")
     _validate_lane_path_contained(config, output_dir, path_kind="runtime output directory")
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_directory_no_follow(input_dir, containment_root=config.lane_dir)
+        ensure_directory_no_follow(output_dir, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to prepare runtime staging workspace directory: {error}",
+        ) from error
     _validate_lane_path_contained(config, input_dir, path_kind="runtime input directory")
     _validate_lane_path_contained(config, output_dir, path_kind="runtime output directory")
     try:

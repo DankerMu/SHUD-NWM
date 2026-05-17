@@ -926,8 +926,8 @@ def _prepare_shared_log_dir(config: ProductionSlurmConfig) -> Path:
             f"Slurm log path exists but is not a directory: {log_dir}",
         )
     try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
+        ensure_directory_no_follow(log_dir, containment_root=config.workspace_root)
+    except (OSError, SafeFilesystemError) as error:
         raise ProductionValidationError(
             "PRODUCTION_SLURM_LOG_DIR_INVALID",
             f"Failed to create Slurm log directory {log_dir}: {error}",

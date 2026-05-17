@@ -531,6 +531,67 @@ def test_validate_e2e_blocks_dependency_summary_swap_to_symlink_before_fd_open(
     assert target_payload not in json.dumps(dependency)
 
 
+def test_validate_e2e_blocks_dependency_summary_swap_to_same_root_symlink_before_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    sibling = root / "sibling-summary.json"
+    sibling.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "same-root-sibling-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_stat = e2e_validation_module.os.stat
+    swapped = False
+
+    def swap_summary_before_no_follow_stat(path, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == summary_path and kwargs.get("follow_symlinks") is False and not swapped:
+            swapped = True
+            summary_path.unlink()
+            summary_path.symlink_to(sibling)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(e2e_validation_module.os, "stat", swap_summary_before_no_follow_stat)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="summary-same-root-swap",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "summary-same-root-swap" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert swapped is True
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
+    assert "same-root-sibling-run" not in json.dumps(dependency)
+
+
 def test_validate_e2e_opens_dependency_summary_by_bound_parent_fd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -891,6 +952,38 @@ def test_validate_e2e_force_refuses_symlinked_raw_parent_without_unlinking_exter
 
     assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_SYMLINK"
     assert external_file.read_text(encoding="utf-8") == "external evidence must remain\n"
+
+
+def test_validate_e2e_refuses_raw_shud_dir_symlink_swap_before_mkdir_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "rawmkdirswap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external-raw-mkdir"
+    external.mkdir()
+    raw_parent = config.lane_dir / "raw"
+    original_ensure = safe_fs.ensure_directory_no_follow
+    swapped = False
+
+    def swap_raw_parent_before_dir_create(path: Path, *, containment_root: Path | None = None) -> Path:
+        nonlocal swapped
+        if path == config.lane_dir / "raw" / "shud" and not swapped:
+            swapped = True
+            raw_parent.symlink_to(external, target_is_directory=True)
+        return original_ensure(path, containment_root=containment_root)
+
+    monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", swap_raw_parent_before_dir_create)
+    monkeypatch.setattr(e2e_validation_module, "ensure_directory_no_follow", swap_raw_parent_before_dir_create)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        e2e_validation_module._safe_raw_shud_dir(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert sorted(path.name for path in external.iterdir()) == []
 
 
 def test_validate_e2e_force_refuses_symlinked_stage_artifacts_without_unlinking_external_file(

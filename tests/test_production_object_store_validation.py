@@ -1258,6 +1258,114 @@ def test_validate_object_store_refuses_nested_synthetic_basins_symlink_without_e
     assert sorted(path.name for path in external_dir.iterdir()) == ["sentinel.txt"]
 
 
+def test_validate_object_store_synthetic_fixture_refuses_symlink_swap_before_mkdir_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / "fixture-mkdir-swap" / "object-store"
+    config = ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id="fixture-mkdir-swap")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external-fixture-mkdir"
+    external.mkdir()
+    fixture_root = lane_dir / "synthetic-basins"
+    original_ensure = safe_fs.ensure_directory_no_follow
+    swapped = False
+
+    def swap_fixture_root_before_dir_create(path: Path, *, containment_root: Path | None = None) -> Path:
+        nonlocal swapped
+        if path == fixture_root / "basin-a" / "input" / "alias-a" and not swapped:
+            swapped = True
+            fixture_root.symlink_to(external, target_is_directory=True)
+        return original_ensure(path, containment_root=containment_root)
+
+    monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", swap_fixture_root_before_dir_create)
+    monkeypatch.setattr(object_store_validation, "ensure_directory_no_follow", swap_fixture_root_before_dir_create)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        write_synthetic_basins_fixture(fixture_root, containment_root=lane_dir)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert sorted(path.name for path in external.iterdir()) == []
+
+
+def test_validate_object_store_synthetic_fixture_refuses_symlink_swap_before_write_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / "fixture-write-swap" / "object-store"
+    config = ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id="fixture-write-swap")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external-fixture-write"
+    external.mkdir()
+    external_file = external / "alias-a.cfg.para"
+    external_file.write_text("external must remain\n", encoding="utf-8")
+    fixture_root = lane_dir / "synthetic-basins"
+    input_dir = fixture_root / "basin-a" / "input" / "alias-a"
+    original_atomic_write = safe_fs.atomic_write_bytes_no_follow
+    swapped = False
+
+    def swap_input_dir_before_fixture_write(
+        path: Path,
+        content: bytes,
+        *,
+        containment_root: Path | None = None,
+        temp_suffix: str = "tmp",
+    ) -> Path:
+        nonlocal swapped
+        if path == input_dir / "alias-a.cfg.para" and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(input_dir, containment_root=lane_dir)
+            input_dir.symlink_to(external, target_is_directory=True)
+        return original_atomic_write(path, content, containment_root=containment_root, temp_suffix=temp_suffix)
+
+    monkeypatch.setattr(safe_fs, "atomic_write_bytes_no_follow", swap_input_dir_before_fixture_write)
+    monkeypatch.setattr(object_store_validation, "atomic_write_bytes_no_follow", swap_input_dir_before_fixture_write)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        write_synthetic_basins_fixture(fixture_root, containment_root=lane_dir)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert external_file.read_text(encoding="utf-8") == "external must remain\n"
+    assert sorted(path.name for path in external.iterdir()) == ["alias-a.cfg.para"]
+
+
+def test_validate_object_store_runtime_staging_refuses_symlink_swap_before_workspace_mkdir_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "runtime-mkdir-swap"
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / run_id / "object-store"
+    external = tmp_path / "external-runtime-workspace"
+    external.mkdir()
+    original_ensure = safe_fs.ensure_directory_no_follow
+    swapped = False
+
+    def swap_runtime_run_before_dir_create(path: Path, *, containment_root: Path | None = None) -> Path:
+        nonlocal swapped
+        if path == lane_dir / "runtime-workspace" / "runs" / f"{run_id}_runtime_staging" / "input" and not swapped:
+            swapped = True
+            runtime_root = lane_dir / "runtime-workspace"
+            runtime_root.symlink_to(external, target_is_directory=True)
+        return original_ensure(path, containment_root=containment_root)
+
+    monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", swap_runtime_run_before_dir_create)
+    monkeypatch.setattr(object_store_validation, "ensure_directory_no_follow", swap_runtime_run_before_dir_create)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id=run_id))
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert sorted(path.name for path in external.iterdir()) == []
+
+
 def test_validate_object_store_refuses_external_local_store_descendant_symlink_without_external_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
