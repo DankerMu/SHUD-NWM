@@ -510,6 +510,239 @@ def test_validate_object_store_runtime_evidence_has_no_development_source_leak(
     ]
 
 
+@pytest.mark.parametrize(
+    ("case", "keys", "budget"),
+    [
+        (
+            "file_count",
+            {"forcing/one.txt": b"one\n", "forcing/two.txt": b"two\n"},
+            {"max_file_count": 1, "max_directory_depth": 8, "max_total_bytes": 1024},
+        ),
+        (
+            "depth",
+            {"forcing/a/b/c.txt": b"deep\n"},
+            {"max_file_count": 4, "max_directory_depth": 2, "max_total_bytes": 1024},
+        ),
+        (
+            "total_bytes",
+            {"forcing/one.txt": b"one\n", "forcing/two.txt": b"two\n"},
+            {"max_file_count": 4, "max_directory_depth": 8, "max_total_bytes": 5},
+        ),
+        (
+            "node_count",
+            {"forcing/empty-dir/one.txt": b"one\n", "forcing/two.txt": b"two\n"},
+            {"max_file_count": 4, "max_directory_depth": 8, "max_total_bytes": 1024, "max_node_count": 2},
+        ),
+    ],
+)
+def test_runtime_forcing_prefix_budgets_block_before_staging_excessive_files(
+    tmp_path: Path,
+    case: str,
+    keys: dict[str, bytes],
+    budget: dict[str, int],
+) -> None:
+    config = ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=f"m10_148_{case}")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms-prod/runtime-prefix")
+    for key, content in keys.items():
+        store.write_bytes_atomic(f"runs/{config.run_id}/input/scratch/runtime-staging/{key}", content)
+    input_dir = config.lane_dir / "runtime-workspace" / "runs" / f"{config.run_id}_runtime_staging" / "input"
+    input_dir.mkdir(parents=True)
+    staging_budget = object_store_validation.RuntimeStagingBudget(
+        max_file_count=budget["max_file_count"],
+        max_node_count=budget.get("max_node_count", budget["max_file_count"]),
+        max_directory_depth=budget["max_directory_depth"],
+        max_total_bytes=budget["max_total_bytes"],
+        max_object_bytes=object_store_validation.MAX_RUNTIME_STAGING_OBJECT_BYTES,
+    )
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        object_store_validation._collect_runtime_object_or_prefix(
+            config,
+            store,
+            f"runs/{config.run_id}/input/scratch/runtime-staging/forcing/",
+            input_dir,
+            staging_budget,
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert list(input_dir.rglob("*")) == []
+
+
+@pytest.mark.parametrize(
+    ("case", "keys", "message"),
+    [
+        ("zero_byte_file", {"forcing/empty.txt": b""}, "must not be empty"),
+        ("empty_prefix", {}, "at least one non-empty regular file"),
+    ],
+)
+def test_runtime_forcing_prefix_rejects_zero_byte_or_empty_tree(
+    tmp_path: Path,
+    case: str,
+    keys: dict[str, bytes],
+    message: str,
+) -> None:
+    config = ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=f"m10_148_{case}")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms-prod/runtime-prefix")
+    prefix = Path(store.root) / "runs" / config.run_id / "input" / "scratch" / "runtime-staging" / "forcing"
+    prefix.mkdir(parents=True)
+    for key, content in keys.items():
+        store.write_bytes_atomic(f"runs/{config.run_id}/input/scratch/runtime-staging/{key}", content)
+    input_dir = config.lane_dir / "runtime-workspace" / "runs" / f"{config.run_id}_runtime_staging" / "input"
+    input_dir.mkdir(parents=True)
+    staging_budget = object_store_validation.RuntimeStagingBudget(
+        max_file_count=4,
+        max_node_count=4,
+        max_directory_depth=8,
+        max_total_bytes=1024,
+        max_object_bytes=object_store_validation.MAX_RUNTIME_STAGING_OBJECT_BYTES,
+    )
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        object_store_validation._collect_runtime_object_or_prefix(
+            config,
+            store,
+            f"runs/{config.run_id}/input/scratch/runtime-staging/forcing/",
+            input_dir,
+            staging_budget,
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert message in exc_info.value.message
+    assert list(input_dir.rglob("*")) == []
+
+
+def test_validate_object_store_blocks_package_object_changed_between_verification_and_runtime_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "m10_148_stage_tamper"
+    tampered = False
+    original_verify = object_store_validation._verify_stored_objects
+
+    def verify_then_tamper(store: LocalObjectStore, manifest: dict[str, object]) -> dict[str, object]:
+        nonlocal tampered
+        verification = original_verify(store, manifest)
+        package_entry = next(
+            entry
+            for entry in manifest["included_files"]
+            if isinstance(entry, dict) and entry.get("role") != "manifest"
+        )
+        store.write_bytes_atomic(str(package_entry["object_uri"]), b"tampered runtime package bytes\n")
+        tampered = True
+        return verification
+
+    monkeypatch.setattr(object_store_validation, "_verify_stored_objects", verify_then_tamper)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id))
+
+    assert tampered is True
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert "differ from verified manifest contract" in exc_info.value.message
+
+
+def test_validate_object_store_runtime_evidence_includes_package_and_forcing_size_sha_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/runtime-prefix")
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_receipts"]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    lane_dir = tmp_path / "artifacts" / "m10_148_receipts" / "object-store"
+    consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
+    stored = json.loads((lane_dir / "stored_object_verification.json").read_text(encoding="utf-8"))
+    package_receipts = consumption["runtime"]["staged_object_receipts"]["package"]
+    forcing_receipts = consumption["runtime"]["staged_object_receipts"]["forcing"]
+    forcing_prefix_receipt = consumption["runtime"]["forcing_prefix_receipt"]
+
+    assert package_receipts
+    assert forcing_receipts
+    assert forcing_prefix_receipt["file_count"] == len(forcing_receipts) == len(forcing_prefix_receipt["objects"])
+    for receipt in [*package_receipts, *forcing_receipts]:
+        assert receipt["size_bytes"] > 0
+        assert len(receipt["sha256"]) == 64
+        assert receipt["object_uri"].startswith("s3://nhms-prod/runtime-prefix/")
+        assert receipt["relative_path"]
+    verified_by_uri = {entry["object_uri"]: entry for entry in stored["entries"] if entry["role"] != "manifest"}
+    for receipt in package_receipts:
+        verified = verified_by_uri[receipt["object_uri"]]
+        assert receipt["verified_manifest_contract"] is True
+        assert receipt["relative_path"] == verified["relative_path"]
+        assert receipt["role"] == verified["role"]
+        assert receipt["size_bytes"] == verified["actual_size_bytes"]
+        assert receipt["sha256"] == verified["actual_sha256"]
+
+
+def test_validate_object_store_rejects_preexisting_runtime_workspace_stale_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "m10_148_stale_workspace"
+    evidence_root = tmp_path / "artifacts"
+    input_dir = (
+        evidence_root
+        / run_id
+        / "object-store"
+        / "runtime-workspace"
+        / "runs"
+        / f"{run_id}_runtime_staging"
+        / "input"
+    )
+    input_dir.mkdir(parents=True)
+    stale_file = input_dir / "stale.tsd.forc"
+    stale_file.write_text("stale forcing must not satisfy readiness\n", encoding="utf-8")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/runtime-prefix")
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(ProductionObjectStoreConfig.from_env(evidence_root=evidence_root, run_id=run_id))
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert "must be empty before runtime staging" in exc_info.value.message
+
+
+def test_validate_object_store_runtime_staged_files_are_receipt_derived(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/runtime-prefix")
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_receipt_files"]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    lane_dir = tmp_path / "artifacts" / "m10_148_receipt_files" / "object-store"
+    consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
+    runtime = consumption["runtime"]
+    input_dir = lane_dir / "runtime-workspace" / "runs" / "m10_148_receipt_files_runtime_staging" / "input"
+    runtime_input_relative = Path("runtime-workspace/runs/m10_148_receipt_files_runtime_staging/input")
+    receipt_files = {
+        Path(receipt["target_relative_path"]).relative_to(runtime_input_relative).as_posix()
+        for receipt in [
+            *runtime["staged_object_receipts"]["package"],
+            *runtime["staged_object_receipts"]["forcing"],
+        ]
+    }
+    generated_cfg = Path(runtime["generated_cfg_path"]).relative_to(input_dir).as_posix()
+    assert runtime["staged_files"] == sorted({*receipt_files, generated_cfg})
+    assert runtime["staged_file_count"] == len(runtime["staged_files"])
+
+
 def test_validate_object_store_live_registry_import_opt_in_requires_database_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
