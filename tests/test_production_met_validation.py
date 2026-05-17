@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import safe_fs
 from services.production_closure import slurm_validation
 from services.production_closure.met_validation import (
+    EvidenceWriter,
     ProductionMetConfig,
     ProductionMetValidationError,
     _forcing_qc_payload,
@@ -37,6 +39,11 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert exit_code == 0
     assert summary["status"] == "ready"
     assert summary["evidence_dir"] == str(lane_dir)
+    assert summary["execution_mode"] == "deterministic_fixture"
+    assert summary["deterministic_fixture"] is True
+    assert summary["live_met_executed"] is False
+    assert summary["live_source_count"] == 0
+    assert summary["final_production_readiness_claimed"] is False
     assert summary["object_prefix"] == "s3://nhms-prod/met/runs/m10_149/met"
     assert "raw_cycle_manifest.json" in summary["files"]
     assert sorted(summary["files"]) == sorted(path.name for path in lane_dir.glob("*.json") if path.is_file())
@@ -128,6 +135,17 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert "token=secret" not in evidence_text
     assert "user:pass@" not in evidence_text
     assert "https://example.invalid/gfs" in evidence_text
+
+
+def test_validate_met_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:
+    lane_path = tmp_path / "artifacts" / "file_lane" / "met"
+    lane_path.parent.mkdir(parents=True)
+    lane_path.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        validate_met(ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="file_lane"))
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
 
 
 @pytest.mark.parametrize(
@@ -238,6 +256,23 @@ def test_validate_met_rejects_path_escape_before_writing(tmp_path: Path, capsys:
     assert not (tmp_path / "artifacts").exists()
 
 
+@pytest.mark.parametrize("suffix", ["new-root", "missing/deep"])
+def test_validate_met_rejects_primary_evidence_root_under_existing_symlink(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    target_root = tmp_path / "target-root"
+    target_root.mkdir()
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        ProductionMetConfig.from_env(evidence_root=symlink_root / suffix, run_id="safe")
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_EVIDENCE_SYMLINK"
+    assert not (target_root / suffix).exists()
+
+
 def test_validate_met_same_run_requires_force_and_force_replaces_bundle(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -256,6 +291,71 @@ def test_validate_met_same_run_requires_force_and_force_replaces_bundle(
     assert slurm_validation.main([*args, "--force"]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["status"] == "ready"
+
+
+def test_met_evidence_writer_rejects_lane_parent_symlink_swap_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="swap")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_lane_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == config.lane_dir and not swapped:
+            swapped = True
+            config.lane_dir.rmdir()
+            config.lane_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_lane_parent)
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        writer.write_json(config.lane_dir / "summary.json", {"status": "ready"})
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "summary.json").exists()
+
+
+def test_validate_met_force_refuses_object_bundle_parent_symlink_swap_without_external_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = ["validate-met", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "swapbundle"]
+    assert slurm_validation.main(args) == 0
+    capsys.readouterr()
+    lane_dir = tmp_path / "artifacts" / "swapbundle" / "met"
+    object_root = lane_dir / "local-object-store"
+    external = tmp_path / "external-bundle"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("external must remain\n", encoding="utf-8")
+    original_open_child = safe_fs._open_child_dir
+    swapped = False
+
+    def swap_object_root(parent_fd: int, name: str, path_label: Path) -> int:
+        nonlocal swapped
+        if path_label == object_root and name == object_root.name and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(object_root, containment_root=lane_dir)
+            object_root.symlink_to(external, target_is_directory=True)
+        return original_open_child(parent_fd, name, path_label)
+
+    monkeypatch.setattr(safe_fs, "_open_child_dir", swap_object_root)
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        validate_met(
+            ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="swapbundle", force=True)
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_OBJECT_PATH_UNSAFE"
+    assert sentinel.read_text(encoding="utf-8") == "external must remain\n"
 
 
 def test_validate_met_disabled_sources_record_skipped_without_success(tmp_path: Path) -> None:

@@ -8,7 +8,6 @@ import os
 import platform
 import re
 import sys
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +16,12 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
+)
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:_-]{0,127}$")
@@ -213,6 +218,11 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
+            if not self.lane_dir.is_dir():
+                raise ProductionScaleValidationError(
+                    "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
             if any(self.lane_dir.iterdir()) and not self.force:
                 raise ProductionScaleValidationError(
                     "PRODUCTION_SCALE_EVIDENCE_EXISTS",
@@ -226,7 +236,19 @@ class EvidenceWriter:
                 "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE",
                 "Evidence lane directory must stay under evidence root.",
             ) from error
-        self.lane_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(self.evidence_root)
+            ensure_directory_no_follow(self.lane_dir, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_SCALE_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionScaleValidationError(
+                error_code,
+                f"Failed to prepare evidence lane {self.lane_dir}: {error}",
+            ) from error
 
     def write_json(self, path: Path, payload: Any) -> None:
         content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
@@ -244,13 +266,20 @@ class EvidenceWriter:
                 "PRODUCTION_SCALE_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.lane_dir)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_SCALE_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionScaleValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionScaleValidationError(
                 "PRODUCTION_SCALE_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",
@@ -272,7 +301,18 @@ class EvidenceWriter:
                 "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE",
                 "Evidence file path must stay under the current scale lane directory.",
             ) from error
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(path.parent, containment_root=self.lane_dir)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_SCALE_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionScaleValidationError(
+                error_code,
+                f"Failed to prepare evidence file parent {path.parent}: {error}",
+            ) from error
         return resolved_parent / path.name
 
 
@@ -821,12 +861,19 @@ def _summary(
     tile_evidence: Mapping[str, Any],
     frontend_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
+    live_db_executed = query_evidence["live_db_executed"]
+    live_api_executed = query_evidence["live_api_executed"]
+    live_frontend_executed = frontend_evidence["live_frontend_executed"]
+    deterministic_fixture = not (live_db_executed and live_api_executed and live_frontend_executed)
     return {
         "schema": "nhms.production_closure.scale.v1",
         "issue": 151,
         "run_id": config.run_id,
         "status": status,
         "evidence_dir": str(config.lane_dir),
+        "execution_mode": "live_scale_validation" if not deterministic_fixture else "deterministic_fixture",
+        "deterministic_fixture": deterministic_fixture,
+        "final_production_readiness_claimed": False,
         "dataset_source": config.dataset_source,
         "segment_count": dataset_manifest["segment_count"],
         "model_count": dataset_manifest["model_count"],
@@ -836,9 +883,9 @@ def _summary(
         "production_mvt_readiness_claimed": tile_evidence["production_mvt_readiness_claimed"],
         "query_status": query_evidence["status"],
         "frontend_status": frontend_evidence["status"],
-        "live_db_executed": query_evidence["live_db_executed"],
-        "live_api_executed": query_evidence["live_api_executed"],
-        "live_frontend_executed": frontend_evidence["live_frontend_executed"],
+        "live_db_executed": live_db_executed,
+        "live_api_executed": live_api_executed,
+        "live_frontend_executed": live_frontend_executed,
         "blockers": blockers,
         "ready_semantics": (
             "ready means deterministic thresholds pass and tile expectation is satisfied; GeoJSON compatibility "
@@ -925,16 +972,24 @@ def _load_thresholds(
     if thresholds_file is not None:
         _refuse_symlink_components(thresholds_file)
         try:
-            if thresholds_file.stat().st_size > MAX_EVIDENCE_PAYLOAD_BYTES:
+            content = read_bytes_limited_no_follow(thresholds_file, max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES)
+            if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
                 raise ProductionScaleValidationError(
                     "PRODUCTION_SCALE_THRESHOLDS_INVALID",
                     f"Thresholds file exceeds configured limit of {MAX_EVIDENCE_PAYLOAD_BYTES} bytes.",
                 )
-            raw = json.loads(thresholds_file.read_text(encoding="utf-8"))
+            raw = json.loads(content.decode("utf-8"))
+        except ProductionScaleValidationError:
+            raise
         except (OSError, json.JSONDecodeError) as error:
             raise ProductionScaleValidationError(
                 "PRODUCTION_SCALE_THRESHOLDS_INVALID",
                 f"Thresholds file could not be read as JSON: {error}",
+            ) from error
+        except SafeFilesystemError as error:
+            raise ProductionScaleValidationError(
+                "PRODUCTION_SCALE_THRESHOLDS_INVALID",
+                f"Thresholds file could not be read safely: {error}",
             ) from error
         if not isinstance(raw, Mapping):
             raise ProductionScaleValidationError(

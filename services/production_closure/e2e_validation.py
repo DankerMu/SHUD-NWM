@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
 import json
 import math
 import os
 import platform
 import re
+import stat
 import sys
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,6 +17,15 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
+    rmtree_no_follow,
+    stat_no_follow,
+    unlink_no_follow,
+)
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:_-]{0,127}$")
@@ -23,7 +34,7 @@ SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
     r"session[_-]?key|signature|x-amz-signature)[^=/?#;&]*=",
     re.IGNORECASE,
 )
-SENSITIVE_PREFIX_SEPARATOR_RE = re.compile(r"[/;?#&]")
+ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 DEFAULT_SOURCE_CYCLE = "2026-05-07T00:00:00Z"
 DEFAULT_MODEL_SET = ("basins_qhh_shud_fixture",)
 DEFAULT_OBJECT_PREFIX = "s3://nhms-production-like/e2e"
@@ -45,6 +56,10 @@ DOWNSTREAM_STAGE_NAMES = {"parse", "frequency", "tile", "api", "frontend"}
 DERIVED_SEGMENT_IDS = ("seg_a", "seg_b")
 EXPECTED_TIMESTEP_HOURS = (0, 3)
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
+MAX_RAW_SHUD_QC_BYTES = 256 * 1024
+MAX_PERCENT_DECODE_ROUNDS = 4
+MAX_DEPENDENCY_SUMMARY_DEPTH = 128
+MAX_DEPENDENCY_SUMMARY_NODES = 10_000
 DEPENDENCY_SUMMARY_CONTRACTS = {
     "slurm": {
         "issue": 147,
@@ -93,6 +108,11 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
+            if not self.lane_dir.is_dir():
+                raise ProductionE2EValidationError(
+                    "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
             if any(self.lane_dir.iterdir()) and not self.force:
                 raise ProductionE2EValidationError(
                     "PRODUCTION_E2E_EVIDENCE_EXISTS",
@@ -106,7 +126,19 @@ class EvidenceWriter:
                 "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
                 "Evidence lane directory must stay under evidence root.",
             ) from error
-        self.lane_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(self.evidence_root)
+            ensure_directory_no_follow(self.lane_dir, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionE2EValidationError(
+                error_code,
+                f"Failed to prepare evidence lane {self.lane_dir}: {error}",
+            ) from error
 
     def write_json(self, path: Path, payload: Any) -> None:
         content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
@@ -128,13 +160,20 @@ class EvidenceWriter:
                 "PRODUCTION_E2E_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.evidence_root)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionE2EValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionE2EValidationError(
                 "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",
@@ -155,8 +194,28 @@ class EvidenceWriter:
                 "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
                 "Evidence file path must stay under evidence root.",
             ) from error
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(path.parent, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionE2EValidationError(
+                error_code,
+                f"Failed to prepare evidence file parent {path.parent}: {error}",
+            ) from error
         return resolved_parent / path.name
+
+
+@dataclass(frozen=True)
+class _BoundDependencyEvidencePath:
+    path: Path
+    root: Path
+    root_stat: os.stat_result
+    parent: Path
+    parent_stat: os.stat_result
 
 
 @dataclass(frozen=True)
@@ -366,8 +425,21 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "expected_schema": contract["schema"],
             "reason": "No accepted dependency evidence root was supplied; using bounded deterministic equivalent.",
         }
-    summary_path = _dependency_summary_path(root, name)
-    if summary_path is None:
+    try:
+        summary_evidence = _dependency_summary_path(root, name)
+    except ProductionE2EValidationError as error:
+        return {
+            "dependency": name,
+            "status": "blocked",
+            "execution_mode": "not_executed",
+            "live_success_claimed": False,
+            "summary_path": str(root),
+            "expected_issue": contract["issue"],
+            "expected_schema": contract["schema"],
+            "error_code": error.error_code,
+            "reason": error.message,
+        }
+    if summary_evidence is None:
         return {
             "dependency": name,
             "status": "missing",
@@ -378,9 +450,15 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "expected_schema": contract["schema"],
             "reason": "Dependency evidence root was supplied but no summary.json was found.",
         }
+    summary_path = summary_evidence.path
     try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        summary, _summary_sha256 = _read_dependency_summary_json(summary_evidence)
+    except (ProductionE2EValidationError, OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError) as error:
+        error_code = (
+            error.error_code
+            if isinstance(error, ProductionE2EValidationError)
+            else "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID"
+        )
         return {
             "dependency": name,
             "status": "blocked",
@@ -389,10 +467,20 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "summary_path": str(summary_path),
             "expected_issue": contract["issue"],
             "expected_schema": contract["schema"],
+            "error_code": error_code,
             "reason": f"Dependency summary could not be read: {error}",
         }
     if not isinstance(summary, Mapping):
-        return _invalid_dependency_summary(name, summary_path, "Dependency summary JSON must be an object.")
+        return _invalid_dependency_summary(
+            name,
+            summary_path,
+            "Dependency summary JSON must be an object.",
+            error_code="PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID",
+        )
+    try:
+        _validate_dependency_summary_complexity(summary)
+    except ProductionE2EValidationError as error:
+        return _invalid_dependency_summary(name, summary_path, error.message, error_code=error.error_code)
 
     summary_status = str(summary.get("status", "unknown"))
     summary_schema = summary.get("schema")
@@ -448,9 +536,10 @@ def _invalid_dependency_summary(
     reason: str,
     *,
     summary: Mapping[str, Any] | None = None,
+    error_code: str | None = None,
 ) -> dict[str, Any]:
     contract = DEPENDENCY_SUMMARY_CONTRACTS[name]
-    return {
+    dependency = {
         "dependency": name,
         "status": "blocked",
         "execution_mode": "not_executed",
@@ -463,16 +552,268 @@ def _invalid_dependency_summary(
         "expected_issue": contract["issue"],
         "reason": reason,
     }
+    if error_code is not None:
+        dependency["error_code"] = error_code
+    return dependency
 
 
-def _dependency_summary_path(root: Path, name: str) -> Path | None:
-    candidates = [root / "summary.json", root / name / "summary.json"]
+def _validate_dependency_summary_complexity(summary: Mapping[str, Any]) -> None:
+    stack: list[tuple[Any, int]] = [(summary, 0)]
+    visited_nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        visited_nodes += 1
+        if visited_nodes > MAX_DEPENDENCY_SUMMARY_NODES:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID",
+                (
+                    "Dependency summary exceeds configured complexity limit of "
+                    f"{MAX_DEPENDENCY_SUMMARY_NODES} visited JSON nodes."
+                ),
+            )
+        if depth > MAX_DEPENDENCY_SUMMARY_DEPTH:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID",
+                f"Dependency summary exceeds configured nesting limit of {MAX_DEPENDENCY_SUMMARY_DEPTH} levels.",
+            )
+        if isinstance(current, Mapping):
+            stack.extend((nested, depth + 1) for nested in reversed(tuple(current.values())))
+        elif isinstance(current, list):
+            stack.extend((nested, depth + 1) for nested in reversed(current))
+
+
+def _dependency_summary_path(root: Path, name: str) -> _BoundDependencyEvidencePath | None:
+    root_path, root_stat = _safe_dependency_root(root)
+    candidates = [root_path / "summary.json", root_path / name / "summary.json"]
     if name == "object_store":
-        candidates.append(root / "object-store" / "summary.json")
+        candidates.append(root_path / "object-store" / "summary.json")
     for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        _refuse_dependency_symlink_components(candidate.parent)
+        try:
+            candidate_stat = os.stat(candidate, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                f"Dependency summary file changed while it was being discovered: {candidate}",
+            ) from error
+        if stat.S_ISLNK(candidate_stat.st_mode):
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK",
+                f"Dependency summary must not be a symlink: {candidate}",
+            )
+        if not stat.S_ISREG(candidate_stat.st_mode):
+            continue
+        try:
+            candidate.relative_to(root_path)
+        except ValueError as error:
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                "Dependency summary file must stay under its supplied dependency root.",
+            ) from error
+        return _bind_dependency_evidence_path(candidate, root_path=root_path, root_stat=root_stat)
     return None
+
+
+def _safe_dependency_root(root: Path) -> tuple[Path, os.stat_result]:
+    expanded = root.expanduser()
+    _refuse_dependency_symlink_components(expanded)
+    resolved_root = expanded.resolve(strict=False)
+    if expanded.exists() and not expanded.is_dir():
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+            f"Dependency evidence root must be a directory: {expanded}",
+        )
+    root_stat = _lstat_dependency_directory(
+        resolved_root,
+        symlink_code="PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK",
+        path_unsafe_code="PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+        message=f"Dependency evidence root must be a directory: {expanded}",
+    )
+    return resolved_root, root_stat
+
+
+def _bind_dependency_evidence_path(
+    path: Path,
+    *,
+    root_path: Path,
+    root_stat: os.stat_result,
+) -> _BoundDependencyEvidencePath:
+    parent = path.parent
+    parent_stat = _lstat_dependency_directory(
+        parent,
+        symlink_code="PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK",
+        path_unsafe_code="PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+        message=f"Dependency evidence parent must be a directory: {parent}",
+    )
+    return _BoundDependencyEvidencePath(
+        path=path,
+        root=root_path,
+        root_stat=root_stat,
+        parent=parent,
+        parent_stat=parent_stat,
+    )
+
+
+def _lstat_dependency_directory(
+    path: Path,
+    *,
+    symlink_code: str,
+    path_unsafe_code: str,
+    message: str,
+) -> os.stat_result:
+    try:
+        path_stat = path.lstat()
+    except OSError as error:
+        raise ProductionE2EValidationError(path_unsafe_code, message) from error
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise ProductionE2EValidationError(symlink_code, f"Dependency evidence path must not be a symlink: {path}")
+    if not stat.S_ISDIR(path_stat.st_mode):
+        raise ProductionE2EValidationError(path_unsafe_code, message)
+    return path_stat
+
+
+def _refuse_dependency_symlink_components(path: Path) -> None:
+    try:
+        _refuse_symlink_components(path)
+    except ProductionE2EValidationError as error:
+        raise ProductionE2EValidationError("PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK", error.message) from error
+
+
+def _read_dependency_summary_json(summary_path: _BoundDependencyEvidencePath) -> tuple[Any, str]:
+    content = _read_descriptor_bound_payload(
+        summary_path,
+        too_large_code="PRODUCTION_E2E_DEPENDENCY_SUMMARY_TOO_LARGE",
+        too_large_message="Dependency summary exceeds configured limit of {limit} bytes.",
+        symlink_code="PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK",
+        path_unsafe_code="PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+        invalid_code="PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID",
+    )
+    return json.loads(content.decode("utf-8")), hashlib.sha256(content).hexdigest()
+
+
+def _read_descriptor_bound_payload(
+    evidence_path: _BoundDependencyEvidencePath,
+    *,
+    too_large_code: str,
+    too_large_message: str,
+    symlink_code: str,
+    path_unsafe_code: str,
+    invalid_code: str,
+) -> bytes:
+    path = evidence_path.path
+    _verify_bound_directory_identity(evidence_path.root, evidence_path.root_stat, path_unsafe_code)
+    _verify_bound_directory_identity(evidence_path.parent, evidence_path.parent_stat, path_unsafe_code)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    dir_flags = os.O_RDONLY | nofollow_flag
+    if hasattr(os, "O_CLOEXEC"):
+        dir_flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    try:
+        dir_fd = os.open(evidence_path.parent, dir_flags)
+    except OSError as error:
+        raise ProductionE2EValidationError(
+            path_unsafe_code,
+            f"Dependency evidence directory changed while opening evidence: {evidence_path.parent}",
+        ) from error
+    try:
+        opened_dir_stat = os.fstat(dir_fd)
+        if (
+            not stat.S_ISDIR(opened_dir_stat.st_mode)
+            or opened_dir_stat.st_dev != evidence_path.parent_stat.st_dev
+            or opened_dir_stat.st_ino != evidence_path.parent_stat.st_ino
+        ):
+            raise ProductionE2EValidationError(
+                path_unsafe_code,
+                f"Dependency evidence directory changed while opening evidence: {evidence_path.parent}",
+            )
+
+        try:
+            pre_open_stat = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as error:
+            raise ProductionE2EValidationError(
+                path_unsafe_code,
+                f"Dependency evidence file changed while it was being opened: {path}",
+            ) from error
+        if stat.S_ISLNK(pre_open_stat.st_mode):
+            raise ProductionE2EValidationError(
+                symlink_code,
+                f"Dependency evidence file must not be a symlink: {path}",
+            )
+
+        flags = os.O_RDONLY | nofollow_flag
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+
+        try:
+            fd = os.open(path.name, flags, dir_fd=dir_fd)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise ProductionE2EValidationError(
+                    symlink_code,
+                    f"Dependency evidence file must not be a symlink: {path}",
+                ) from error
+            raise
+    finally:
+        os.close(dir_fd)
+    try:
+        opened_stat = os.fstat(fd)
+        if opened_stat.st_dev != pre_open_stat.st_dev or opened_stat.st_ino != pre_open_stat.st_ino:
+            raise ProductionE2EValidationError(
+                path_unsafe_code,
+                f"Dependency evidence file changed while it was being opened: {path}",
+            )
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise ProductionE2EValidationError(
+                invalid_code,
+                f"Dependency evidence path must be a regular file: {path}",
+            )
+        if opened_stat.st_size > MAX_EVIDENCE_PAYLOAD_BYTES:
+            raise ProductionE2EValidationError(
+                too_large_code,
+                too_large_message.format(limit=MAX_EVIDENCE_PAYLOAD_BYTES),
+            )
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(64 * 1024, MAX_EVIDENCE_PAYLOAD_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_EVIDENCE_PAYLOAD_BYTES:
+                raise ProductionE2EValidationError(
+                    too_large_code,
+                    too_large_message.format(limit=MAX_EVIDENCE_PAYLOAD_BYTES),
+                )
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _verify_bound_directory_identity(path: Path, expected: os.stat_result, path_unsafe_code: str) -> None:
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise ProductionE2EValidationError(
+            path_unsafe_code,
+            f"Dependency evidence directory changed while opening evidence: {path}",
+        ) from error
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or current.st_dev != expected.st_dev
+        or current.st_ino != expected.st_ino
+    ):
+        raise ProductionE2EValidationError(
+            path_unsafe_code,
+            f"Dependency evidence directory changed while opening evidence: {path}",
+        )
 
 
 def _derived_identifiers(config: ProductionE2EConfig) -> dict[str, Any]:
@@ -512,7 +853,18 @@ def _write_shud_output_qc(
 def _safe_raw_shud_dir(config: ProductionE2EConfig) -> Path:
     raw_dir = config.lane_dir / "raw" / "shud"
     _validate_evidence_path_contained(config, raw_dir, path_kind="SHUD raw output directory")
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_directory_no_follow(raw_dir, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_E2E_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionE2EValidationError(
+            error_code,
+            f"Failed to prepare SHUD raw output directory {raw_dir}: {error}",
+        ) from error
     _validate_evidence_path_contained(config, raw_dir, path_kind="SHUD raw output directory")
     return raw_dir
 
@@ -548,7 +900,13 @@ def _remove_current_qc_outputs(config: ProductionE2EConfig, *paths: Path) -> Non
                     "PRODUCTION_E2E_EVIDENCE_SYMLINK",
                     f"SHUD raw output must not be a symlink: {path}",
                 )
-            path.unlink()
+            try:
+                unlink_no_follow(path, containment_root=config.lane_dir)
+            except SafeFilesystemError as error:
+                raise ProductionE2EValidationError(
+                    "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+                    f"Failed to safely remove SHUD raw output {path}: {error}",
+                ) from error
 
 
 def _write_qc_fixture(
@@ -591,17 +949,17 @@ def _qc_result(
     _validate_evidence_path_contained(config, log_path, path_kind="SHUD raw output")
     retained_paths = {
         "raw_output_dir": str(rivqdown_path.parent),
-        "rivqdown": str(rivqdown_path) if rivqdown_path.exists() else None,
-        "log": str(log_path) if log_path.exists() else None,
+        "rivqdown": str(rivqdown_path) if _qc_exists(config, rivqdown_path) else None,
+        "log": str(log_path) if _qc_exists(config, log_path) else None,
     }
-    if not rivqdown_path.is_file():
+    if not _qc_regular_file(config, rivqdown_path):
         return _qc_blocked(
             config,
             "SHUD_RIVQDOWN_MISSING",
             "Required .rivqdown output is missing.",
             retained_paths,
         )
-    if not log_path.is_file():
+    if not _qc_regular_file(config, log_path):
         return _qc_blocked(
             config,
             "SHUD_REQUIRED_OUTPUT_MISSING",
@@ -609,9 +967,10 @@ def _qc_result(
             retained_paths,
         )
 
+    rivqdown_content = _read_raw_shud_qc_text(config, rivqdown_path)
     lines = [
         line.strip()
-        for line in rivqdown_path.read_text(encoding="utf-8").splitlines()
+        for line in rivqdown_content.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
     if len(lines) < 2:
@@ -719,6 +1078,48 @@ def _qc_blocked(
         },
         "next_step": "Inspect retained SHUD raw output and logs, regenerate valid .rivqdown, then rerun with --force.",
     }
+
+
+def _qc_exists(config: ProductionE2EConfig, path: Path) -> bool:
+    try:
+        stat_no_follow(path, containment_root=config.lane_dir)
+        return True
+    except FileNotFoundError:
+        return False
+    except SafeFilesystemError as error:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"Failed to bind SHUD raw output path {path}: {error}",
+        ) from error
+
+
+def _qc_regular_file(config: ProductionE2EConfig, path: Path) -> bool:
+    try:
+        path_stat = stat_no_follow(path, containment_root=config.lane_dir)
+    except FileNotFoundError:
+        return False
+    except SafeFilesystemError as error:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"Failed to bind SHUD raw output path {path}: {error}",
+        ) from error
+    return stat.S_ISREG(path_stat.st_mode)
+
+
+def _read_raw_shud_qc_text(config: ProductionE2EConfig, path: Path) -> str:
+    try:
+        content = read_bytes_limited_no_follow(path, max_bytes=MAX_RAW_SHUD_QC_BYTES, containment_root=config.lane_dir)
+    except (OSError, SafeFilesystemError) as error:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"Failed to read SHUD raw output {path}: {error}",
+        ) from error
+    if len(content) > MAX_RAW_SHUD_QC_BYTES:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"SHUD raw output exceeds configured limit of {MAX_RAW_SHUD_QC_BYTES} bytes: {path}",
+        )
+    return content.decode("utf-8")
 
 
 def _stage_manifest(
@@ -877,12 +1278,27 @@ def _summary(
     api_evidence: Mapping[str, Any],
     frontend_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
+    live_stage_fields = {
+        "live_db_executed": False,
+        "live_api_executed": api_evidence.get("live_api_executed") is True,
+        "live_slurm_executed": False,
+        "live_frontend_executed": frontend_evidence.get("live_frontend_executed") is True,
+    }
+    for stage in stage_manifest.get("stages", []):
+        if isinstance(stage, Mapping) and stage.get("stage") == "slurm":
+            live_stage_fields["live_slurm_executed"] = stage.get("live_success_claimed") is True
+            break
+    deterministic_fixture = not all(live_stage_fields.values())
     return {
         "schema": "nhms.production_closure.e2e.v1",
         "issue": 150,
         "run_id": config.run_id,
         "status": status,
         "evidence_dir": str(config.lane_dir),
+        "execution_mode": "live_e2e_executed" if not deterministic_fixture else "deterministic_fixture",
+        "deterministic_fixture": deterministic_fixture,
+        **live_stage_fields,
+        "final_production_readiness_claimed": False,
         "source_cycle": _format_time(config.source_cycle),
         "model_set": list(config.model_set),
         "db_target": config.db_target,
@@ -1149,18 +1565,13 @@ def _remove_current_stage_artifacts(config: ProductionE2EConfig, artifacts_dir: 
             "PRODUCTION_E2E_EVIDENCE_SYMLINK",
             f"stage_artifacts directory must not be a symlink: {artifacts_dir}",
         )
-    for path in sorted(artifacts_dir.rglob("*"), key=lambda item: len(item.parts), reverse=True):
-        _validate_evidence_path_contained(config, path, path_kind="stage artifact")
-        if path.is_symlink():
-            raise ProductionE2EValidationError(
-                "PRODUCTION_E2E_EVIDENCE_SYMLINK",
-                f"stage artifact must not be a symlink: {path}",
-            )
-        if path.is_dir():
-            path.rmdir()
-        else:
-            path.unlink()
-    artifacts_dir.rmdir()
+    try:
+        rmtree_no_follow(artifacts_dir, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE",
+            f"Failed to safely remove stage_artifacts directory {artifacts_dir}: {error}",
+        ) from error
 
 
 def _blocked_stage_artifact_payload(
@@ -1390,6 +1801,26 @@ def _validate_frontend_api_base(value: str) -> None:
             "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
             "Frontend API base must not contain userinfo credentials, query parameters, or fragments.",
         )
+    _guard_canonical_path_segments(
+        parsed.path,
+        error_code="PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+        message=(
+            "Frontend API base path must not contain credential assignments, traversal, "
+            "backslashes, query or fragment separators, or encoded separators."
+        ),
+    )
+    if any(
+        SENSITIVE_PREFIX_ASSIGNMENT_RE.search(decoded)
+        for decoded in _canonical_decode_steps(
+            value,
+            error_code="PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+            message="Frontend API base must not contain credential assignments or over-encoded percent escapes.",
+        )
+    ):
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+            "Frontend API base must not contain credential assignments.",
+        )
 
 
 def _validate_object_prefix_safe(prefix: str) -> None:
@@ -1415,19 +1846,48 @@ def _validate_object_prefix_safe(prefix: str) -> None:
             "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE",
             "E2E object prefix must not contain userinfo credentials, query parameters, or fragments.",
         )
-    for raw_segment in parsed.path.split("/"):
-        segment = unquote(raw_segment)
-        if "/" in segment or "\\" in segment or segment in {".", ".."}:
-            raise ProductionE2EValidationError(
-                "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE",
-                "E2E object prefix path segments must not contain '.', '..', or decoded path separators.",
-            )
-        decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(segment)
-        if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in decoded_parts):
-            raise ProductionE2EValidationError(
-                "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE",
-                "E2E object prefix path segments must not contain credential assignments.",
-            )
+    _guard_canonical_path_segments(
+        parsed.path,
+        error_code="PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE",
+        message=(
+            "E2E object prefix path segments must not contain credential assignments, traversal, "
+            "backslashes, query or fragment separators, or encoded separators."
+        ),
+    )
+
+
+def _canonical_decode_steps(value: str, *, error_code: str, message: str) -> tuple[str, ...]:
+    steps = [value]
+    current = value
+    for _ in range(MAX_PERCENT_DECODE_ROUNDS):
+        decoded = unquote(current)
+        if decoded == current:
+            break
+        steps.append(decoded)
+        current = decoded
+    if unquote(current) != current:
+        raise ProductionE2EValidationError(error_code, message)
+    return tuple(steps)
+
+
+def _guard_canonical_path_segments(path: str, *, error_code: str, message: str) -> None:
+    for raw_segment in path.split("/"):
+        if raw_segment == "":
+            continue
+        if ENCODED_SEPARATOR_RE.search(raw_segment):
+            raise ProductionE2EValidationError(error_code, message)
+        for segment in _canonical_decode_steps(raw_segment, error_code=error_code, message=message):
+            if (
+                "/" in segment
+                or "\\" in segment
+                or "?" in segment
+                or "#" in segment
+                or ";" in segment
+                or "&" in segment
+                or segment in {".", ".."}
+                or SENSITIVE_PREFIX_ASSIGNMENT_RE.search(segment)
+            ):
+                raise ProductionE2EValidationError(error_code, message)
 
 
 def _parse_model_set(value: str | None) -> tuple[str, ...]:
@@ -1470,11 +1930,7 @@ def _safe_run_id(run_id: str) -> str:
 
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
     root = evidence_root.expanduser()
-    if root.exists() or root.is_symlink():
-        _refuse_symlink_components(root)
-    parent = root.parent
-    if parent.exists() or parent.is_symlink():
-        _refuse_symlink_components(parent)
+    _refuse_symlink_components_to_deepest_existing(root)
     return root.resolve(strict=False)
 
 
@@ -1489,6 +1945,21 @@ def _refuse_symlink_components(path: Path) -> None:
                 "PRODUCTION_E2E_EVIDENCE_SYMLINK",
                 f"Evidence path component must not be a symlink: {current}",
             )
+
+
+def _refuse_symlink_components_to_deepest_existing(path: Path) -> None:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts:
+        if part == path.anchor or part == "":
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_EVIDENCE_SYMLINK",
+                f"Evidence path component must not be a symlink: {current}",
+            )
+        if not current.exists():
+            break
 
 
 def _dependency_root(env_name: str, value: Path | None) -> Path | None:

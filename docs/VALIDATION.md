@@ -228,7 +228,9 @@ contains:
   this evidence verified only when the controlled-failure marker is present in
   task `1` shared logs.
 - `environment.json` and `summary.json`: redacted command/environment metadata
-  and evidence file index.
+  and evidence file index. Summary markers include `execution_mode`,
+  `deterministic_fixture`, `live_slurm_executed`, `live_slurm_status`, and
+  `final_production_readiness_claimed=false` for ops dependency closure.
 
 Secrets and signed URL-shaped values are redacted from the rendered script and
 all JSON evidence touched by this lane.
@@ -319,6 +321,15 @@ The bundle is written under
   and records inserted/updated/idempotency fields. The runtime smoke writes
   validation-only forcing under `runs/<run_id>/input/scratch/runtime-staging/`
   and refuses to overwrite an existing scratch object.
+- `summary.json`: issue/schema/status plus summary-level execution markers
+  consumed by ops dependency closure. Default fast mode remains
+  `status=ready` for the object-store lane but records
+  `deterministic_fixture=true`, `live_registry_import=false`,
+  `live_api=false`, `live_api_status=not_executed`, and
+  `final_production_readiness_claimed=false`. Ops can consume this unchanged
+  producer summary only when an external accepted-dependency receipt binds to
+  it; the missing live registry/API proof remains an explicit ops release
+  blocker until live producer evidence exists.
 - `runtime_staging_manifest.json`: full runtime manifest written during local
   staging, including object URI inputs/outputs used by the generated SHUD
   runtime configuration.
@@ -326,7 +337,10 @@ The bundle is written under
   written keys/rows, cleanup or quarantine status, and
   `implicit_model_activation=false`.
 - `environment.json` and `summary.json`: redacted command/environment metadata
-  and evidence file index.
+  and evidence file index. Summary markers include `execution_mode`,
+  `deterministic_fixture`, `live_registry_import`, `live_api`,
+  `live_api_status`, `api_contract_source`, and
+  `final_production_readiness_claimed=false` for ops dependency closure.
 
 Secret-shaped userinfo, query strings, fragments, and sensitive assignment
 values are redacted from evidence.
@@ -507,7 +521,9 @@ The bundle is written under
   claim staging frontend readiness from mock-only data.
 - `environment.json` and `summary.json`: redacted command/environment metadata,
   stage statuses, blockers, object URIs, logs, QC result, tile artifacts, and
-  evidence file index.
+  evidence file index. Summary markers include `execution_mode`,
+  `deterministic_fixture`, DB/API/Slurm/frontend live execution booleans, and
+  `final_production_readiness_claimed=false` for ops dependency closure.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs are rejected before writes. Secret-shaped object/API,
@@ -595,7 +611,10 @@ Evidence is written under
   `live_frontend_executed=false`.
 - `resource_bounds_evidence.json`, `environment.json`, and `summary.json`:
   bounded oversized bbox, long time range, object-listing behavior, redacted
-  environment, final readiness, and file index.
+  environment, final readiness, and file index. Summary markers include
+  `execution_mode`, `deterministic_fixture`, DB/API/frontend live execution
+  booleans, and `final_production_readiness_claimed=false` for ops dependency
+  closure.
 
 MVT blocker semantics are explicit. In the default GeoJSON compatibility mode
 the lane may be `ready`, but `production_mvt_readiness_claimed=false`. If
@@ -619,6 +638,125 @@ uv run ruff check .
 uv run ruff check services/production_closure tests/test_production_scale_validation.py docs/VALIDATION.md progress.md
 uv run pytest -q tests/test_production_scale_validation.py
 uv run pytest -q tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_flood_alerts_api.py tests/test_openapi_drift.py
+```
+
+## M10 Production Ops / Security / Runbook Closure
+
+Issue #152 adds an opt-in `nhms-production validate-ops` lane. The default
+fast path is deterministic and self-contained: it does not require a real
+identity provider, credentials, alert sink, object store, Slurm, PostGIS/API,
+frontend server, or scheduler. It writes evidence, but the default summary is
+`release_blocked` with `final_production_readiness_claimed=false`.
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-ops \
+  --evidence-root artifacts/production-closure \
+  --run-id local-152-production-ops
+```
+
+Useful knobs:
+
+- `--auth-mode` / `NHMS_PRODUCTION_OPS_AUTH_MODE`: defaults to
+  `fallback_release_gated`. `backend_route_executed` is recorded as a requested
+  mode only in this lane; it does not set live backend auth flags without
+  validated live receipts.
+- `--required-roles` / `NHMS_PRODUCTION_OPS_REQUIRED_ROLES`: comma-separated
+  role list. It must include the action roles for model activation, rerun,
+  cancel, QC override, source config change, and tile republish.
+- `--alert-target` / `NHMS_PRODUCTION_OPS_ALERT_TARGET`: defaults to
+  `dry-run://ops-validation`. Userinfo, query strings, fragments, traversal,
+  and secret-shaped assignments are rejected.
+- `--deployment-config-source` and `--rollback-scope`: recorded in preflight
+  and evidence. The default rollback scope is simulated drills. A
+  `live_drill` value is a requested scope only; rollback evidence remains
+  simulated and `release_blocked` unless validated live receipts are consumed.
+- `--slurm-evidence-root`, `--object-store-evidence-root`,
+  `--met-evidence-root`, `--e2e-evidence-root`, and `--scale-evidence-root`:
+  optional dependency evidence roots for #147-#151. The original producer
+  `summary.json` files are consumed unchanged; accepted ops closure additionally
+  requires an external `accepted_dependency_evidence.json` receipt under the
+  same dependency evidence root.
+- `--dependency-statuses`: optional comma-separated statuses such as
+  `slurm=skipped,object_store=skipped,met=blocked,e2e=not_executed,scale=blocked`
+  for fixture validation. Explicit `accepted` is rejected with
+  `PRODUCTION_OPS_DEPENDENCY_STATUS_INVALID`; accepted dependency closure must
+  come from validated #147-#151 summary artifacts.
+
+Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
+
+- `preflight.json`: auth mode, roles, alert target identity, deployment config source,
+  rollback scope, dependency evidence roots/statuses, evidence root, and
+  self-contained execution policy.
+- `config_validation.json`: API, orchestrator, Slurm gateway, tile publisher,
+  frontend, database, object store, source adapter, and workspace root required
+  settings, redacted values, source metadata, and stable missing/unsafe-setting
+  blockers. `setting_source_metadata` records whether each
+  required setting came from the environment or from a generated default; every
+  generated default remains release-blocking until explicitly supplied.
+  Root/path/prefix settings reject unsafe URL authorities, dot segments,
+  traversal, backslash separators, encoded separators, and credential
+  assignments. The checked-in service config template is
+  `docs/runbooks/production-service-config.md`.
+- `auth_rbac.json` and `auth_release_blockers.json`: model activation, rerun,
+  cancel, QC override, source config change, and tile republish decisions for
+  allowed, denied, and release-blocked cases, with required roles, stable error
+  codes, execution modes, live-auth flags, no denied/release-blocked mutation,
+  residual risk, and removal criteria.
+- `audit_redaction.json`: allowed/denied/release-blocked audit rows with actor,
+  role, target, previous/new state, decision, reason, lineage, and redacted
+  secret-shaped fields across config/log/manifest/API/alert/PR/frontend shapes.
+- `monitoring_alerts.json`: source latency, Slurm backlog, failed basin retries,
+  object-store failure, stale analysis state, tile error, and API p95 alert
+  evidence with metric, severity, observed value, threshold, dry-run or
+  not-executed mode, runbook link, and operator action. Alert targets are
+  recorded only as a sanitized scheme/host identity with any path redacted,
+  including `dry-run://` targets with path components, and do not imply live
+  sink delivery without delivery receipts.
+- `rollback_drills.json`: bad model activation, failed publish/import, failed
+  source cycle, failed Slurm array, and bad tile release drills with command,
+  precondition, expected evidence, recovery, residual risk, dependency
+  references, requested scope, runbook link, and simulated execution flags.
+- `dependency_closure.json`, `environment.json`, and `summary.json`: #147-#151
+  accepted/skipped/blocked/not-executed dependency closure, redacted
+  environment, final release blockers, live flags, and evidence file index.
+  Accepted dependency closure requires a matching unchanged producer
+  `summary.json` issue/schema/status plus a sidecar
+  `accepted_dependency_evidence.json` receipt with schema
+  `nhms.production_closure.ops.accepted_dependency_evidence.v1`,
+  `accepted=true`, dependency/issue/schema/run ID/summary path/summary checksum
+  bindings, non-empty non-deterministic `receipt_id`, non-empty `accepted_at`,
+  `deterministic_fixture=false`, `final_production_readiness_claimed=false`,
+  and a non-deterministic `execution_mode` such as
+  `accepted_live_evidence`. The receipt is the ops acceptance proof; producer
+  summaries are consumed unchanged and are not required to invent live API,
+  frontend, registry, or scale fields their validators do not emit. If the
+  unchanged summary is deterministic or lacks lane-specific live proof, the
+  dependency item is still `accepted` by receipt but carries
+  `release_blockers`/`residual_risk`, and `dependency_closure.json` remains
+  `release_blocked`. Live-marker checks are dependency-specific, so unrelated
+  fields such as `live_registry_import=false`, `live_api=false`, or
+  `live_api_status=not_executed` on a Slurm/met/e2e/scale summary do not block
+  receipt acceptance. Summaries that claim final production readiness, missing
+  receipts, or receipts with missing/mismatched bindings are rejected as skipped
+  or blocked.
+
+Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
+supplied. Unsafe run IDs, symlinked evidence roots, oversized payloads,
+credential-shaped config/auth/alert values, unsafe root/path config values, and
+unsafe dependency status inputs fail with stable errors and no secret leakage.
+Dependency summary ingestion rejects symlinked roots/components, symlink summary
+files, summaries outside the supplied root, and summaries larger than the ops
+evidence payload limit.
+
+### Fast Regression Commands
+
+Local #152 verification uses these fast regression commands:
+
+```bash
+openspec validate m10-production-closure --strict --no-interactive
+uv run ruff check services/production_closure tests/test_production_ops_validation.py docs/VALIDATION.md docs/runbooks/api-latency.md docs/runbooks/tile-publish-error.md progress.md
+uv run pytest -q tests/test_production_ops_validation.py
+uv run pytest -q tests/test_production_ops_validation.py tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_production_slurm_validation.py
 ```
 
 ## Opt-In Real Basins Smoke

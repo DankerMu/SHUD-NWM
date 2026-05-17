@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from packages.common import safe_fs
+from services.production_closure import e2e_validation as e2e_validation_module
 from services.production_closure import slurm_validation
 from services.production_closure.e2e_validation import (
+    MAX_DEPENDENCY_SUMMARY_DEPTH,
+    MAX_DEPENDENCY_SUMMARY_NODES,
+    MAX_EVIDENCE_PAYLOAD_BYTES,
+    MAX_RAW_SHUD_QC_BYTES,
+    EvidenceWriter,
     ProductionE2EConfig,
     ProductionE2EValidationError,
     _argparse_main,
@@ -19,6 +27,13 @@ def test_validate_e2e_default_lane_writes_required_ready_evidence(tmp_path: Path
 
     lane_dir = tmp_path / "artifacts" / "m10_150" / "e2e"
     assert summary["status"] == "ready"
+    assert summary["execution_mode"] == "deterministic_fixture"
+    assert summary["deterministic_fixture"] is True
+    assert summary["live_db_executed"] is False
+    assert summary["live_api_executed"] is False
+    assert summary["live_slurm_executed"] is False
+    assert summary["live_frontend_executed"] is False
+    assert summary["final_production_readiness_claimed"] is False
     assert summary["stage_statuses"] == {
         "download": "ready",
         "canonical": "ready",
@@ -296,6 +311,403 @@ def test_validate_e2e_rejects_malformed_dependency_json(tmp_path: Path) -> None:
     assert dependency["execution_mode"] == "not_executed"
 
 
+def test_validate_e2e_blocks_symlinked_dependency_root(tmp_path: Path) -> None:
+    real_root = tmp_path / "real-met"
+    real_root.mkdir()
+    (real_root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    linked_root = tmp_path / "linked-met"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="symlinkrootdep",
+            met_evidence_root=linked_root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "symlinkrootdep" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
+
+
+def test_validate_e2e_blocks_symlinked_dependency_summary_file(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    external = tmp_path / "external-summary.json"
+    external.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "external-met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "summary.json").symlink_to(external)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="symlinkfiledep",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "symlinkfiledep" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
+
+
+def test_validate_e2e_blocks_oversized_dependency_summary(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    (root / "summary.json").write_bytes(b"{" + (b" " * MAX_EVIDENCE_PAYLOAD_BYTES))
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="oversizeddep",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "oversizeddep" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_SUMMARY_TOO_LARGE"
+
+
+def test_validate_e2e_blocks_too_deep_dependency_summary(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    nested: object = "leaf"
+    for _ in range(MAX_DEPENDENCY_SUMMARY_DEPTH + 2):
+        nested = [nested]
+    (root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "deep-met-run",
+                "status": "ready",
+                "bounded_nested_payload": nested,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="deepdep",
+            met_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "deepdep" / "e2e"
+    dependency = _read_json(lane_dir / "dependency_status.json")["dependencies"][0]
+    assert summary["status"] == "blocked"
+    assert (lane_dir / "summary.json").is_file()
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID"
+    assert "nesting limit" in dependency["reason"]
+
+
+def test_validate_e2e_blocks_too_many_node_dependency_summary(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    (root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "wide-met-run",
+                "status": "ready",
+                "bounded_wide_payload": [None] * MAX_DEPENDENCY_SUMMARY_NODES,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="widedeps",
+            met_evidence_root=root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "widedeps" / "e2e"
+    dependency = _read_json(lane_dir / "dependency_status.json")["dependencies"][0]
+    assert summary["status"] == "blocked"
+    assert (lane_dir / "summary.json").is_file()
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID"
+    assert "complexity limit" in dependency["reason"]
+
+
+def test_validate_e2e_blocks_dependency_summary_swap_to_symlink_before_fd_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    symlink_target = tmp_path / "symlink-target-summary.json"
+    symlink_target.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "target-met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    target_payload = symlink_target.read_text(encoding="utf-8")
+    swapped = False
+    original_open = os.open
+
+    def swap_summary_before_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        nonlocal swapped
+        if dir_fd is not None and path == summary_path.name and not swapped:
+            swapped = True
+            summary_path.unlink()
+            summary_path.symlink_to(symlink_target)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(e2e_validation_module.os, "open", swap_summary_before_open)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="summary-swap",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "summary-swap" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert swapped is True
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
+    assert "target-met-run" not in json.dumps(dependency)
+    assert target_payload not in json.dumps(dependency)
+
+
+def test_validate_e2e_blocks_dependency_summary_swap_to_same_root_symlink_before_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    sibling = root / "sibling-summary.json"
+    sibling.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "same-root-sibling-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_stat = e2e_validation_module.os.stat
+    swapped = False
+
+    def swap_summary_before_no_follow_stat(path, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == summary_path and kwargs.get("follow_symlinks") is False and not swapped:
+            swapped = True
+            summary_path.unlink()
+            summary_path.symlink_to(sibling)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(e2e_validation_module.os, "stat", swap_summary_before_no_follow_stat)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="summary-same-root-swap",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "summary-same-root-swap" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert swapped is True
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
+    assert "same-root-sibling-run" not in json.dumps(dependency)
+
+
+def test_validate_e2e_opens_dependency_summary_by_bound_parent_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    full_path_open_attempts: list[Path] = []
+    basename_opens: list[str] = []
+    original_open = os.open
+
+    def guarded_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if dir_fd is None and Path(path) == summary_path.resolve():
+            full_path_open_attempts.append(Path(path))
+            raise AssertionError("dependency evidence file must be opened relative to the bound parent fd")
+        if dir_fd is not None and path == summary_path.name:
+            basename_opens.append(str(path))
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(e2e_validation_module.os, "open", guarded_open)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="bound-parent-fd",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "bound-parent-fd" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "ready"
+    assert dependency["status"] == "consumed"
+    assert full_path_open_attempts == []
+    assert basename_opens == ["summary.json"]
+
+
+def test_validate_e2e_blocks_dependency_parent_swap_to_symlink_before_summary_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "deps"
+    summary_parent = root / "met"
+    summary_parent.mkdir(parents=True)
+    summary_path = summary_parent / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-met"
+    outside.mkdir()
+    (outside / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "outside-met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    swapped = False
+    original_verify = e2e_validation_module._verify_bound_directory_identity
+
+    def swap_parent_before_verify(path, expected, path_unsafe_code):
+        nonlocal swapped
+        if path == summary_parent.resolve() and not swapped:
+            swapped = True
+            summary_path.unlink()
+            summary_parent.rmdir()
+            summary_parent.symlink_to(outside, target_is_directory=True)
+        return original_verify(path, expected, path_unsafe_code)
+
+    monkeypatch.setattr(e2e_validation_module, "_verify_bound_directory_identity", swap_parent_before_verify)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="parent-swap",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "parent-swap" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert swapped is True
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE"
+    assert "outside-met-run" not in json.dumps(dependency)
+
+
 @pytest.mark.parametrize(
     ("fixture", "error_code"),
     [
@@ -348,6 +760,97 @@ def test_validate_e2e_rejects_unsafe_run_id_before_writes(tmp_path: Path) -> Non
     assert not (tmp_path / "artifacts").exists()
 
 
+@pytest.mark.parametrize("suffix", ["new-root", "missing/deep"])
+def test_validate_e2e_rejects_primary_evidence_root_under_existing_symlink(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    target_root = tmp_path / "target-root"
+    target_root.mkdir()
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        ProductionE2EConfig.from_env(evidence_root=symlink_root / suffix, run_id="safe")
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_SYMLINK"
+    assert not (target_root / suffix).exists()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "error_code"),
+    [
+        ("object_prefix", "s3://bucket/path%252Fchild", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%252F..", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%252Ftoken=secret", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%3Ftoken=secret", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%23token=secret", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path\\child", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("object_prefix", "s3://bucket/path%5Cchild", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("frontend_api_base", "https://frontend.example/api%252Fv1", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+        ("frontend_api_base", "https://frontend.example/api%252F..", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+        (
+            "frontend_api_base",
+            "https://frontend.example/api%252Ftoken=secret",
+            "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+        ),
+        (
+            "frontend_api_base",
+            "https://frontend.example/api%3Ftoken=secret",
+            "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+        ),
+        (
+            "frontend_api_base",
+            "https://frontend.example/api%23token=secret",
+            "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE",
+        ),
+        ("frontend_api_base", "https://frontend.example/api\\v1", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+        ("frontend_api_base", "https://frontend.example/api%5Cv1", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+    ],
+)
+def test_validate_e2e_rejects_encoded_api_and_object_path_material_before_writes(
+    tmp_path: Path,
+    field_name: str,
+    value: str,
+    error_code: str,
+) -> None:
+    kwargs = {field_name: value}
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="encoded_path", **kwargs)
+        validate_e2e(config)
+
+    assert exc_info.value.error_code == error_code
+    assert not (tmp_path / "artifacts" / "encoded_path").exists()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "prefix", "error_code"),
+    [
+        ("object_prefix", "s3://bucket/path", "PRODUCTION_E2E_OBJECT_PREFIX_UNSAFE"),
+        ("frontend_api_base", "https://frontend.example/api", "PRODUCTION_E2E_FRONTEND_API_BASE_UNSAFE"),
+    ],
+)
+def test_validate_e2e_rejects_over_encoded_api_and_object_path_material_before_writes(
+    tmp_path: Path,
+    field_name: str,
+    prefix: str,
+    error_code: str,
+) -> None:
+    encoded_secret_segment = _percent_encode_rounds("/token=secret", 5)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        config = ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="over_encoded_path",
+            **{field_name: f"{prefix}{encoded_secret_segment}"},
+        )
+        validate_e2e(config)
+
+    assert exc_info.value.error_code == error_code
+    assert not (tmp_path / "artifacts" / "over_encoded_path").exists()
+
+
 def test_validate_e2e_same_run_requires_force(tmp_path: Path) -> None:
     config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="same")
     validate_e2e(config)
@@ -391,6 +894,132 @@ def test_validate_e2e_force_does_not_reuse_stale_shud_raw_outputs(
     assert summary["status"] == "blocked"
     assert qc["error_code"] == error_code
     assert qc["retained_paths"][missing_name] is None
+
+
+def test_validate_e2e_qc_refuses_swapped_rivqdown_symlink_without_reading_external_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "qc-rivqdown-swap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    raw_dir = config.lane_dir / "raw" / "shud"
+    external = tmp_path / "external-qc"
+    external.mkdir()
+    external_target = external / f"{run_id}.rivqdown"
+    external_target.write_text(
+        "time,seg_a,seg_b\n2026-05-07T00:00:00Z,86400,172800\n2026-05-07T03:00:00Z,129600,216000\n",
+        encoding="utf-8",
+    )
+    original_read = e2e_validation_module.read_bytes_limited_no_follow
+    swapped = False
+
+    def swap_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == raw_dir / f"{run_id}.rivqdown" and not swapped:
+            swapped = True
+            path.unlink()
+            path.symlink_to(external_target)
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(e2e_validation_module, "read_bytes_limited_no_follow", swap_before_read)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert external_target.read_text(encoding="utf-8").startswith("time,seg_a,seg_b")
+
+
+def test_validate_e2e_qc_refuses_swapped_log_symlink_before_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "qc-log-swap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    raw_dir = config.lane_dir / "raw" / "shud"
+    external = tmp_path / "external-log"
+    external.mkdir()
+    external_log = external / "shud.log"
+    external_log.write_text("external log must remain\n", encoding="utf-8")
+    original_stat = e2e_validation_module.stat_no_follow
+    swapped = False
+
+    def swap_log_before_stat(path: Path, *, containment_root: Path | None = None):
+        nonlocal swapped
+        if path == raw_dir / "shud.log" and not swapped:
+            swapped = True
+            path.unlink()
+            path.symlink_to(external_log)
+        return original_stat(path, containment_root=containment_root)
+
+    monkeypatch.setattr(e2e_validation_module, "stat_no_follow", swap_log_before_stat)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert external_log.read_text(encoding="utf-8") == "external log must remain\n"
+
+
+def test_validate_e2e_qc_refuses_parent_symlink_swap_before_read_without_external_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "qc-parent-swap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    raw_dir = config.lane_dir / "raw" / "shud"
+    external = tmp_path / "external-parent-qc"
+    external.mkdir()
+    external_target = external / f"{run_id}.rivqdown"
+    external_target.write_text("external must remain\n", encoding="utf-8")
+    original_read = e2e_validation_module.read_bytes_limited_no_follow
+    swapped = False
+
+    def swap_parent_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == raw_dir / f"{run_id}.rivqdown" and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(raw_dir, containment_root=config.lane_dir)
+            raw_dir.symlink_to(external, target_is_directory=True)
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(e2e_validation_module, "read_bytes_limited_no_follow", swap_parent_before_read)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert external_target.read_text(encoding="utf-8") == "external must remain\n"
+
+
+def test_validate_e2e_qc_refuses_oversized_swapped_rivqdown_before_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "qc-oversized-swap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    raw_dir = config.lane_dir / "raw" / "shud"
+    original_read = e2e_validation_module.read_bytes_limited_no_follow
+    swapped = False
+
+    def enlarge_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == raw_dir / f"{run_id}.rivqdown" and not swapped:
+            swapped = True
+            path.write_bytes(b"x" * (MAX_RAW_SHUD_QC_BYTES + 1))
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(e2e_validation_module, "read_bytes_limited_no_follow", enlarge_before_read)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert "exceeds configured limit" in exc_info.value.message
 
 
 @pytest.mark.parametrize(
@@ -452,6 +1081,38 @@ def test_validate_e2e_force_refuses_symlinked_raw_parent_without_unlinking_exter
     assert external_file.read_text(encoding="utf-8") == "external evidence must remain\n"
 
 
+def test_validate_e2e_refuses_raw_shud_dir_symlink_swap_before_mkdir_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "rawmkdirswap"
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id)
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external-raw-mkdir"
+    external.mkdir()
+    raw_parent = config.lane_dir / "raw"
+    original_ensure = safe_fs.ensure_directory_no_follow
+    swapped = False
+
+    def swap_raw_parent_before_dir_create(path: Path, *, containment_root: Path | None = None) -> Path:
+        nonlocal swapped
+        if path == config.lane_dir / "raw" / "shud" and not swapped:
+            swapped = True
+            raw_parent.symlink_to(external, target_is_directory=True)
+        return original_ensure(path, containment_root=containment_root)
+
+    monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", swap_raw_parent_before_dir_create)
+    monkeypatch.setattr(e2e_validation_module, "ensure_directory_no_follow", swap_raw_parent_before_dir_create)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        e2e_validation_module._safe_raw_shud_dir(config)
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert sorted(path.name for path in external.iterdir()) == []
+
+
 def test_validate_e2e_force_refuses_symlinked_stage_artifacts_without_unlinking_external_file(
     tmp_path: Path,
 ) -> None:
@@ -469,6 +1130,117 @@ def test_validate_e2e_force_refuses_symlinked_stage_artifacts_without_unlinking_
 
     assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_SYMLINK"
     assert external_file.read_text(encoding="utf-8") == "external stage artifact must remain\n"
+
+
+def test_e2e_evidence_writer_rejects_lane_parent_symlink_swap_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="swap")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_lane_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == config.lane_dir and not swapped:
+            swapped = True
+            config.lane_dir.rmdir()
+            config.lane_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_lane_parent)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        writer.write_json(config.lane_dir / "summary.json", {"status": "ready"})
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "summary.json").exists()
+
+
+def test_validate_e2e_force_refuses_raw_parent_symlink_swap_without_external_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "rawswap"
+    validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id))
+    lane_dir = tmp_path / "artifacts" / run_id / "e2e"
+    raw_dir = lane_dir / "raw" / "shud"
+    external = tmp_path / "external-raw"
+    external.mkdir()
+    external_file = external / f"{run_id}.rivqdown"
+    external_file.write_text("external evidence must remain\n", encoding="utf-8")
+    original_open_parent = safe_fs._open_parent_dir
+    swapped = False
+
+    def swap_raw_parent(path: Path, *, containment_root: Path | None, create: bool):
+        nonlocal swapped
+        if path.parent == raw_dir and path.name == f"{run_id}.rivqdown" and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(raw_dir, containment_root=lane_dir)
+            raw_dir.symlink_to(external, target_is_directory=True)
+        return original_open_parent(path, containment_root=containment_root, create=create)
+
+    monkeypatch.setattr(safe_fs, "_open_parent_dir", swap_raw_parent)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id, force=True))
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert external_file.read_text(encoding="utf-8") == "external evidence must remain\n"
+
+
+def test_validate_e2e_force_refuses_stage_artifacts_parent_symlink_swap_without_external_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "stageswap"
+    validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id=run_id))
+    lane_dir = tmp_path / "artifacts" / run_id / "e2e"
+    artifacts_dir = lane_dir / "stage_artifacts"
+    external = tmp_path / "external-stage"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("external stage artifact must remain\n", encoding="utf-8")
+    original_open_child = safe_fs._open_child_dir
+    swapped = False
+
+    def swap_stage_root(parent_fd: int, name: str, path_label: Path) -> int:
+        nonlocal swapped
+        if path_label == artifacts_dir and name == artifacts_dir.name and not swapped:
+            swapped = True
+            safe_fs.rmtree_no_follow(artifacts_dir, containment_root=lane_dir)
+            artifacts_dir.symlink_to(external, target_is_directory=True)
+        return original_open_child(parent_fd, name, path_label)
+
+    monkeypatch.setattr(safe_fs, "_open_child_dir", swap_stage_root)
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(
+            ProductionE2EConfig.from_env(
+                evidence_root=tmp_path / "artifacts",
+                run_id=run_id,
+                shud_qc_fixture="missing_rivqdown",
+                force=True,
+            )
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
+    assert sentinel.read_text(encoding="utf-8") == "external stage artifact must remain\n"
+
+
+def test_validate_e2e_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:
+    lane_path = tmp_path / "artifacts" / "file_lane" / "e2e"
+    lane_path.parent.mkdir(parents=True)
+    lane_path.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ProductionE2EValidationError) as exc_info:
+        validate_e2e(ProductionE2EConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="file_lane"))
+
+    assert exc_info.value.error_code == "PRODUCTION_E2E_EVIDENCE_PATH_UNSAFE"
 
 
 def test_validate_e2e_rejects_multi_model_set_before_writes(tmp_path: Path) -> None:
@@ -592,3 +1364,10 @@ def _dependency_schema(dependency: str) -> str:
 
 def _dependency_issue(dependency: str) -> int:
     return {"met": 149, "slurm": 147, "object-store": 148}[dependency]
+
+
+def _percent_encode_rounds(value: str, rounds: int) -> str:
+    encoded = value
+    for _ in range(rounds):
+        encoded = "".join(f"%{byte:02X}" for byte in encoded.encode("utf-8"))
+    return encoded

@@ -504,3 +504,74 @@ Issue #151 non-goals / deferred:
 - Real MVT implementation may be deferred only with an explicit release blocker; #151 must not silently pass production tile readiness on GeoJSON compatibility delivery.
 - Full hydrologic skill validation and model calibration quality remain out of scope.
 - Permanent production deployment and continuous load testing infrastructure are out of scope; #151 emits bounded validation evidence and blockers.
+
+## Issue #152 Fixture Overlay: Production Ops, Security, and Runbook Readiness
+
+Fixture level: expanded
+
+Why expanded:
+
+- Touches production configuration validation, backend authorization gates, audit/redaction evidence, alert/monitoring rules, rollback drills, and the final acceptance surface for Issues #147-#151.
+- Must distinguish deterministic readiness evidence from real production enforcement without leaking credentials or claiming full auth completion when only a release gate is present.
+
+Change surface:
+
+- A new opt-in `validate-ops` production closure lane under `services/production_closure/*` and production closure CLI dispatch.
+- Production configuration templates or deterministic template evidence for API, orchestrator, Slurm gateway, tile publisher, frontend, database, object store, source adapters, and workspace roots.
+- Backend action authorization/audit evidence for model activation, rerun, cancel, QC override, source config change, and tile republish.
+- Alert and rollback evidence helpers, validation docs, `progress.md`, and targeted production ops tests.
+
+Must preserve:
+
+- Fast tests and default CI do not require production identity providers, production credentials, real alert sinks, real object storage, real Slurm, live PostGIS/API/frontend services, or a running scheduler.
+- Existing frontend RBAC gates remain compatible, but final readiness cannot rely on frontend-only RBAC for production-impacting backend actions.
+- Existing #147/#148/#149/#150/#151 closure lanes and evidence schemas remain readable; #152 consumes their completion status without rewriting their evidence.
+- Secret values and signed URLs never appear in config evidence, logs, audit rows, alert payloads, rollback reports, docs, PR comments, or frontend output.
+- Deferred auth is explicit: if full backend auth is not implemented, the lane must emit a release-blocking artifact listing affected actions, fallback, required roles, residual risk, and removal criteria.
+
+Must add/change for #152:
+
+- A documented opt-in `validate-ops` lane or equivalent command that records auth mode, required roles, alert target or dry-run sink, deployment config source, rollback drill scope, dependency evidence status for #147-#151, and evidence root under `artifacts/production-closure/<run_id>/ops/`.
+- Production config validation evidence for API, orchestrator, Slurm gateway, tile publisher, frontend, database, object store, source adapters, and workspace roots, with stable errors for missing/unsafe settings and no secret disclosure.
+- Backend authorization evidence that either enforces role checks for production-impacting actions or blocks them behind an explicit release gate. Required actions: model activation, rerun, cancel, QC override, source config change, and tile republish.
+- Audit evidence for allowed, denied, and release-blocked actions, including actor, role, target, previous/new state, decision, reason, lineage, and redacted secret-shaped fields; denied and release-blocked actions must not mutate state.
+- Secret redaction regressions across config templates, logs, manifests, audit rows, API payloads, alert payloads, rollback evidence, docs/PR evidence, and frontend-facing outputs.
+- Monitoring/alert evidence for source latency, Slurm queue backlog, failed basin retries, object-store failures, stale analysis state, tile errors, and API p95, including severity, sink/dry-run target, current value, threshold, runbook link, and recommended operator action.
+- Rollback drill evidence for bad model activation, failed publish/import, failed source cycle, failed Slurm array, and bad tile release, including preconditions, commands, expected evidence, recovery outcome, residual risk, and dependency artifact references.
+- Final dependency readiness evidence for #147-#151. The #152 dependency closure consumes unchanged producer summaries when a strongly bound external `accepted_dependency_evidence.json` receipt proves operator acceptance. Skipped, blocked, not_executed, missing-receipt, or invalid-receipt summaries are not accepted. Deterministic or live-proof-incomplete producer summaries may be accepted by receipt, but they must carry explicit release blockers/residual risk and keep final readiness release-blocked until live proof and the other ops gates are proven.
+- Run-scoped idempotent evidence behavior with unsafe run ID rejection, symlink/path containment, explicit same-run `--force`, bounded payloads, and no cross-run overwrite.
+
+Issue #152 risk packs:
+
+- Public API / CLI / script entry: selected - `validate-ops`, authorization/audit simulation, alert evidence, and rollback drill commands need stable JSON/error behavior.
+- Config / project setup: selected - auth mode, role map, alert target, deployment config source, service templates, dependency evidence roots, rollback scope, and evidence root are preflight inputs.
+- File IO / path safety / overwrite: selected - config templates, audit reports, alert payloads, rollback drill reports, dependency evidence references, and reruns must stay run-scoped and bounded.
+- Schema / columns / units / field names: selected - config, action decision, audit, alert, rollback, dependency status, and summary schemas must remain stable.
+- Geospatial / CRS / shapefile sidecars: not selected - #152 validates ops/security controls and only references geospatial evidence from #151.
+- Time series / forcing / temporal boundaries: selected - source latency, stale analysis state, API p95, and rollback drills reference time windows and freshness thresholds.
+- Numerical stability / conservation / NaN: selected - alert thresholds, API p95 samples, stale-state ages, queue backlog counts, and evidence payload metrics must reject malformed/non-finite values.
+- Solver runtime / performance / threading: selected - Slurm queue backlog and failed array rollback evidence must preserve #147/#150 runtime linkage without running solvers.
+- Resource limits / large input / discovery: selected - alert sets, audit events, dependency evidence references, rollback drill lists, and evidence payloads must be bounded.
+- Legacy compatibility / examples: selected - existing frontend RBAC tests, API contracts, production closure lanes, and validation docs must continue to pass.
+- Error handling / rollback / partial outputs: selected - rollback drills and release-blocking auth fallback are core #152 acceptance criteria.
+- Release / packaging / dependency compatibility: selected - Linux/CI fast path, deployment template portability, optional live auth/alert sinks, and frontend build compatibility must be explicit.
+- Documentation / migration notes: selected - production config/runbook/rollback validation docs, known limits, and progress updates must be updated.
+
+Issue #152 required evidence:
+
+- Preflight artifact: auth mode, required roles, alert sink/dry-run target, deployment config source, rollback scope, dependency evidence roots/status, and evidence root -> redacted JSON with stable missing/unsafe input errors.
+- Config template evidence: deterministic or supplied production config inputs -> service-by-service checks for API, orchestrator, Slurm gateway, tile publisher, frontend, database, object store, source adapters, and workspace roots, with unsafe/missing settings blocked and secrets redacted.
+- Authorization gate evidence: action matrix for model activation, rerun, cancel, QC override, source config change, and tile republish -> allowed/denied/release-blocked decisions, required roles, stable error codes, `execution_mode` from `backend_route_executed|policy_simulated|release_blocked`, `live_backend_auth_executed`, and no mutation on denied or release-blocked actions.
+- Audit/redaction evidence: allowed and denied actions plus secret-shaped config/API/frontend/audit values -> redacted audit rows, logs, manifests, payloads, docs, and PR-safe evidence.
+- Monitoring/alert evidence: injected or deterministic source latency, Slurm backlog, failed basin retries, object-store failure, stale analysis state, tile error, and API p95 breach -> severity, metric, threshold, observed value, `execution_mode` from `live_sink_delivered|dry_run_sink|not_executed`, `live_alert_sink_delivered`, sink/dry-run target, runbook link, and operator action.
+- Rollback drill evidence: bad model activation, failed publish/import, failed source cycle, failed Slurm array, and bad tile release -> command/precondition/evidence/recovery/residual-risk records, dependency artifact references, `execution_mode` from `live_drill|simulated_drill`, and `live_rollback_executed`.
+- Dependency closure evidence: accepted or deterministic summaries for #147-#151 -> final #152 summary records each dependency as accepted, skipped, blocked, or not_executed without fabricating live execution. Accepted summaries require unchanged producer issue/schema/status plus an external receipt binding dependency, issue, schema, run ID, summary path, checksum, non-deterministic receipt ID/time, `deterministic_fixture=false`, `final_production_readiness_claimed=false`, and non-deterministic execution mode. Missing producer live proof is recorded as release blockers/residual risk rather than requiring impossible producer fields.
+- Run-scoped idempotency/path/redaction test: reruns, unsafe run IDs, symlinked evidence roots, oversized evidence payloads, and credential-shaped auth/config/alert URLs -> no cross-run overwrite, stable blockers, bounded writes, and redacted output.
+- Local verification commands: OpenSpec strict validation, `uv run ruff check .`, targeted production ops/auth/redaction/audit/monitoring/rollback tests, frontend tests/build only when UI or generated types change, and documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-ops --evidence-root ...`.
+
+Issue #152 non-goals / deferred:
+
+- Full production identity-provider integration may be deferred only with an explicit release blocker; frontend-only RBAC is not sufficient for production backend readiness.
+- Permanent deployment automation, live pager routing, and continuous alert delivery infrastructure are out of scope for the deterministic fast lane.
+- Real production rollback execution is not required by default; deterministic drills must state when they are simulated and what live evidence would remove the blocker.
+- Hydrologic skill validation, true production MVT implementation, and long-running load tests remain outside #152.

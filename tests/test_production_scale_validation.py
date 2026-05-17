@@ -6,7 +6,8 @@ from urllib.parse import quote
 
 import pytest
 
-from services.production_closure import slurm_validation
+from packages.common import safe_fs
+from services.production_closure import scale_validation, slurm_validation
 from services.production_closure.scale_validation import (
     DEFAULT_MIN_MODEL_COUNT,
     DEFAULT_MIN_SEGMENT_COUNT,
@@ -26,6 +27,9 @@ def test_validate_scale_default_lane_writes_required_ready_evidence(tmp_path: Pa
 
     lane_dir = tmp_path / "artifacts" / "m10_151" / "scale"
     assert summary["status"] == "ready"
+    assert summary["execution_mode"] == "deterministic_fixture"
+    assert summary["deterministic_fixture"] is True
+    assert summary["final_production_readiness_claimed"] is False
     assert summary["dataset_source"] == "deterministic_large_fixture"
     assert summary["production_mvt_readiness_claimed"] is False
     assert summary["live_db_executed"] is False
@@ -258,6 +262,72 @@ def test_validate_scale_rejects_oversized_thresholds_file_before_json_parse(tmp_
     assert "exceeds configured limit" in exc_info.value.message
 
 
+def test_validate_scale_rejects_threshold_symlink_swap_without_reading_external_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threshold_path = tmp_path / "thresholds.json"
+    threshold_path.write_text(json.dumps({"minimum_counts": {"segment_count": 1}}), encoding="utf-8")
+    external = tmp_path / "external-thresholds.json"
+    external.write_text(
+        json.dumps({"minimum_counts": {"segment_count": DEFAULT_MIN_SEGMENT_COUNT + 1000}}),
+        encoding="utf-8",
+    )
+    original_read = scale_validation.read_bytes_limited_no_follow
+    swapped = False
+
+    def swap_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == threshold_path and not swapped:
+            swapped = True
+            path.unlink()
+            path.symlink_to(external)
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(scale_validation, "read_bytes_limited_no_follow", swap_before_read)
+
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="threshold_symlink_swap",
+            thresholds_file=threshold_path,
+        )
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_SCALE_THRESHOLDS_INVALID"
+    assert external.read_text(encoding="utf-8").startswith("{")
+
+
+def test_validate_scale_rejects_threshold_oversized_swap_before_json_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    threshold_path = tmp_path / "thresholds.json"
+    threshold_path.write_text(json.dumps({"minimum_counts": {"segment_count": 1}}), encoding="utf-8")
+    original_read = scale_validation.read_bytes_limited_no_follow
+    swapped = False
+
+    def enlarge_before_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        nonlocal swapped
+        if path == threshold_path and not swapped:
+            swapped = True
+            path.write_bytes(b"{" + (b" " * MAX_EVIDENCE_PAYLOAD_BYTES))
+        return original_read(path, max_bytes=max_bytes, containment_root=containment_root)
+
+    monkeypatch.setattr(scale_validation, "read_bytes_limited_no_follow", enlarge_before_read)
+
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="threshold_oversized_swap",
+            thresholds_file=threshold_path,
+        )
+
+    assert swapped is True
+    assert exc_info.value.error_code == "PRODUCTION_SCALE_THRESHOLDS_INVALID"
+    assert "exceeds configured limit" in exc_info.value.message
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -375,6 +445,46 @@ def test_scale_evidence_writer_rejects_files_outside_current_lane(tmp_path: Path
     assert exc_info.value.error_code == "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
 
 
+def test_scale_evidence_writer_rejects_lane_parent_symlink_swap_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProductionScaleConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="swap")
+    writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=True)
+    writer.prepare()
+    external = tmp_path / "external"
+    external.mkdir()
+    original_verify = safe_fs._verify_fd_matches_path
+    swapped = False
+
+    def swap_lane_parent(fd: int, path: Path) -> None:
+        nonlocal swapped
+        if path == config.lane_dir and not swapped:
+            swapped = True
+            config.lane_dir.rmdir()
+            config.lane_dir.symlink_to(external, target_is_directory=True)
+        original_verify(fd, path)
+
+    monkeypatch.setattr(safe_fs, "_verify_fd_matches_path", swap_lane_parent)
+
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        writer.write_json(config.lane_dir / "summary.json", {"status": "ready"})
+
+    assert exc_info.value.error_code == "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
+    assert not (external / "summary.json").exists()
+
+
+def test_validate_scale_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:
+    lane_path = tmp_path / "artifacts" / "file_lane" / "scale"
+    lane_path.parent.mkdir(parents=True)
+    lane_path.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ProductionScaleValidationError) as exc_info:
+        validate_scale(ProductionScaleConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="file_lane"))
+
+    assert exc_info.value.error_code == "PRODUCTION_SCALE_EVIDENCE_PATH_UNSAFE"
+
+
 def test_validate_scale_frontend_evidence_records_breakpoints_and_no_live_claim(tmp_path: Path) -> None:
     validate_scale(
         ProductionScaleConfig.from_env(
@@ -415,9 +525,11 @@ def test_validate_scale_run_id_idempotency_force_path_safety_and_redaction(
         ProductionScaleConfig.from_env(evidence_root=symlink_root, run_id="safe")
     assert symlink_exc.value.error_code == "PRODUCTION_SCALE_EVIDENCE_SYMLINK"
 
-    with pytest.raises(ProductionScaleValidationError) as nested_symlink_exc:
-        ProductionScaleConfig.from_env(evidence_root=symlink_root / "new-root", run_id="safe")
-    assert nested_symlink_exc.value.error_code == "PRODUCTION_SCALE_EVIDENCE_SYMLINK"
+    for suffix in ("new-root", "missing/deep"):
+        with pytest.raises(ProductionScaleValidationError) as nested_symlink_exc:
+            ProductionScaleConfig.from_env(evidence_root=symlink_root / suffix, run_id="safe")
+        assert nested_symlink_exc.value.error_code == "PRODUCTION_SCALE_EVIDENCE_SYMLINK"
+        assert not (target_root / suffix).exists()
 
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "supersecret")
     exit_code = slurm_validation._argparse_main(

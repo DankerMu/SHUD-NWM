@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import os
-import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    open_file_no_follow,
+    read_bytes_limited_no_follow,
+    read_bytes_no_follow,
+    stat_no_follow,
+    unlink_no_follow,
+)
 from packages.common.storage import validate_object_path
 
 MAX_OBJECT_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -36,19 +45,31 @@ class LocalObjectStore:
     object_store_prefix: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "root", Path(self.root).expanduser().resolve())
+        root = Path(self.root).expanduser()
+        root = root if root.is_absolute() else Path.cwd() / root
+        try:
+            ensure_directory_no_follow(root)
+        except SafeFilesystemError as error:
+            raise ObjectStoreError(f"Local object store root is unsafe: {error}") from error
+        object.__setattr__(self, "root", root)
 
     def exists(self, key_or_uri: str) -> bool:
+        path = self.resolve_path(key_or_uri)
+        if not self.root.exists():
+            return False
         try:
-            return self.resolve_path(key_or_uri).exists()
-        except OSError as error:
+            stat_no_follow(path, containment_root=self.root)
+            return True
+        except FileNotFoundError:
+            return False
+        except SafeFilesystemError as error:
             raise ObjectStoreError(f"Failed to check object existence for {key_or_uri}: {error}") from error
 
     def read_bytes(self, key_or_uri: str) -> bytes:
         path = self.resolve_path(key_or_uri)
         try:
-            return path.read_bytes()
-        except OSError as error:
+            return read_bytes_no_follow(path, containment_root=self.root)
+        except (OSError, SafeFilesystemError) as error:
             raise ObjectStoreError(f"Failed to read object {key_or_uri}: {error}") from error
 
     def read_bytes_limited(self, key_or_uri: str, *, max_bytes: int) -> bytes:
@@ -56,8 +77,7 @@ class LocalObjectStore:
             raise ValueError("max_bytes must be non-negative.")
         path = self.resolve_path(key_or_uri)
         try:
-            with path.open("rb") as handle:
-                content = handle.read(max_bytes + 1)
+            content = read_bytes_limited_no_follow(path, max_bytes=max_bytes, containment_root=self.root)
             if len(content) > max_bytes:
                 raise ObjectStoreError(
                     f"Object {key_or_uri} exceeds read limit: observed more than {max_bytes} bytes"
@@ -65,31 +85,25 @@ class LocalObjectStore:
             return content
         except ObjectStoreError:
             raise
-        except OSError as error:
+        except (OSError, SafeFilesystemError) as error:
             raise ObjectStoreError(f"Failed to read object {key_or_uri}: {error}") from error
 
     def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
         path = self.resolve_path(key_or_uri)
-        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_bytes(content)
-            os.replace(temp_path, path)
-        except OSError as error:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                raise ObjectStoreError(
-                    f"Failed to write object {key_or_uri}: {error}; cleanup also failed: {cleanup_error}"
-                ) from cleanup_error
+            ensure_directory_no_follow(self.root)
+            atomic_write_bytes_no_follow(path, content, containment_root=self.root, temp_suffix="part")
+        except (OSError, SafeFilesystemError) as error:
             raise ObjectStoreError(f"Failed to write object {key_or_uri}: {error}") from error
         return self.uri_for_key(self.normalize_key(key_or_uri))
 
     def delete(self, key_or_uri: str) -> None:
         path = self.resolve_path(key_or_uri)
+        if not self.root.exists():
+            return
         try:
-            path.unlink(missing_ok=True)
-        except OSError as error:
+            unlink_no_follow(path, containment_root=self.root, missing_ok=True)
+        except (OSError, SafeFilesystemError) as error:
             raise ObjectStoreError(f"Failed to delete object {key_or_uri}: {error}") from error
 
     def iter_bytes(self, key_or_uri: str, *, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
@@ -97,11 +111,16 @@ class LocalObjectStore:
             raise ValueError("chunk_size must be positive.")
         path = self.resolve_path(key_or_uri)
         try:
-            with path.open("rb") as handle:
-                while chunk := handle.read(chunk_size):
-                    yield chunk
+            file_fd = open_file_no_follow(path, containment_root=self.root)
+        except (OSError, SafeFilesystemError) as error:
+            raise ObjectStoreError(f"Failed to stream object {key_or_uri}: {error}") from error
+        try:
+            while chunk := os.read(file_fd, chunk_size):
+                yield chunk
         except OSError as error:
             raise ObjectStoreError(f"Failed to stream object {key_or_uri}: {error}") from error
+        finally:
+            os.close(file_fd)
 
     def checksum(self, key_or_uri: str) -> str:
         return self.size_and_checksum(key_or_uri)[1]
@@ -117,8 +136,8 @@ class LocalObjectStore:
     def size(self, key_or_uri: str) -> int:
         path = self.resolve_path(key_or_uri)
         try:
-            return path.stat().st_size
-        except OSError as error:
+            return stat_no_follow(path, containment_root=self.root).st_size
+        except (OSError, SafeFilesystemError) as error:
             raise ObjectStoreError(f"Failed to stat object {key_or_uri}: {error}") from error
 
     def resolve_path(self, key_or_uri: str) -> Path:
@@ -128,7 +147,7 @@ class LocalObjectStore:
             raise ValueError(validation.error)
 
         root = self.root
-        target = (root / key).resolve()
+        target = root / key
         try:
             target.relative_to(root)
         except ValueError as error:

@@ -6,16 +6,25 @@ import json
 import os
 import platform
 import re
+import stat
 import sys
-import uuid
+import tempfile
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packages.common.object_store import MAX_OBJECT_MANIFEST_BYTES, LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
+    stat_no_follow,
+    unlink_no_follow,
+)
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.basins_package import (
     BasinsPackageError,
@@ -27,14 +36,31 @@ from workers.model_registry.basins_registry_import import (
     import_basins_registry,
     prepare_basins_import_sources,
 )
-from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, SHUDRuntimeError
+from workers.shud_runtime.runtime import SHUDRuntimeError
 
 DEFAULT_BASINS_MIGRATION_SOURCE_URI = "/volume/data/nwm/Basins"
 DEFAULT_OBJECT_STORE_TARGET = "local-production-like"
 DEFAULT_CLEANUP_POLICY = "quarantine"
 FORBIDDEN_RUNTIME_SOURCE_FRAGMENTS = ("data/Basins", "/volume/")
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:_-]{0,127}$")
+MAX_PERCENT_DECODE_ROUNDS = 4
+ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 MAX_STORED_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
+MAX_RAW_INTERMEDIATE_BYTES = 64 * 1024 * 1024
+MAX_RUNTIME_STAGING_OBJECT_BYTES = 8 * 1024 * 1024
+MAX_RUNTIME_STAGING_FILE_COUNT = 128
+MAX_RUNTIME_STAGING_NODE_COUNT = 128
+MAX_RUNTIME_STAGING_DIRECTORY_DEPTH = 16
+MAX_RUNTIME_STAGING_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_DESCENDANT_SYMLINK_SCAN_NODES = 8192
+RUNTIME_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+RUNTIME_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
 SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
     r"(?:^|[;?#&])[^=/?#;&]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|"
     r"session[_-]?key|signature|x-amz-signature)[^=/?#;&]*=",
@@ -62,6 +88,11 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
+            if not self.lane_dir.is_dir():
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
         resolved_lane = self.lane_dir.resolve(strict=False)
         try:
             resolved_lane.relative_to(self.evidence_root)
@@ -70,7 +101,19 @@ class EvidenceWriter:
                 "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
                 "Evidence lane directory must stay under evidence root.",
             ) from error
-        self.lane_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(self.evidence_root)
+            ensure_directory_no_follow(self.lane_dir, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionObjectStoreValidationError(
+                error_code,
+                f"Failed to prepare evidence lane {self.lane_dir}: {error}",
+            ) from error
 
     def write_json(self, path: Path, payload: Any) -> None:
         self._write_bytes(path, json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n")
@@ -82,13 +125,20 @@ class EvidenceWriter:
                 "PRODUCTION_OBJECT_STORE_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.evidence_root)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionObjectStoreValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionObjectStoreValidationError(
                 "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",
@@ -109,7 +159,18 @@ class EvidenceWriter:
                 "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
                 "Evidence file path must stay under evidence root.",
             ) from error
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(path.parent, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionObjectStoreValidationError(
+                error_code,
+                f"Failed to prepare evidence file parent {path.parent}: {error}",
+            ) from error
         return resolved_parent / path.name
 
 
@@ -192,16 +253,118 @@ class PackageChecksumReconstruction:
     limitation: str | None = None
 
 
+@dataclass
+class RuntimeStagingBudget:
+    max_file_count: int
+    max_directory_depth: int
+    max_total_bytes: int
+    max_object_bytes: int
+    max_node_count: int | None = None
+    file_count: int = 0
+    total_bytes: int = 0
+    node_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.max_node_count is None:
+            self.max_node_count = self.max_file_count
+
+    def reserve_node(self, *, relative_path: str) -> None:
+        if self.node_count + 1 > int(self.max_node_count):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                (
+                    "Runtime staging prefix exceeds configured traversal node "
+                    f"limit of {self.max_node_count}: {relative_path}"
+                ),
+            )
+        self.node_count += 1
+
+    def reserve(self, *, relative_path: str, size_bytes: int) -> None:
+        depth = len(PurePosixPath(relative_path).parts)
+        if depth > self.max_directory_depth:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                (
+                    "Runtime staging object exceeds configured directory depth "
+                    f"limit of {self.max_directory_depth}: {relative_path}"
+                ),
+            )
+        if size_bytes > self.max_object_bytes:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                (
+                    "Runtime staging object exceeds configured per-object byte "
+                    f"limit of {self.max_object_bytes}: {relative_path}"
+                ),
+            )
+        if self.file_count + 1 > self.max_file_count:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                (
+                    "Runtime staging exceeds configured staged file count "
+                    f"limit of {self.max_file_count}."
+                ),
+            )
+        if self.total_bytes + size_bytes > self.max_total_bytes:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                (
+                    "Runtime staging exceeds configured total byte "
+                    f"limit of {self.max_total_bytes}."
+                ),
+            )
+        self.file_count += 1
+        self.total_bytes += size_bytes
+
+    def to_payload(self) -> dict[str, int]:
+        return {
+            "max_file_count": self.max_file_count,
+            "max_node_count": int(self.max_node_count),
+            "max_directory_depth": self.max_directory_depth,
+            "max_total_bytes": self.max_total_bytes,
+            "max_object_bytes": self.max_object_bytes,
+            "staged_file_count": self.file_count,
+            "traversed_node_count": self.node_count,
+            "staged_total_bytes": self.total_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeStagedObject:
+    target: Path
+    content: bytes
+    receipt: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RuntimeStagingPreparation:
+    cfg_path: Path
+    package_receipts: list[dict[str, Any]]
+    forcing_receipts: list[dict[str, Any]]
+    forcing_prefix_receipt: dict[str, Any] | None
+    staged_files: list[str]
+    budgets: dict[str, int]
+
+
+@dataclass(frozen=True)
+class RuntimePrefixCollection:
+    objects: list[RuntimeStagedObject]
+    prefix_receipt: dict[str, Any] | None = None
+
+
 def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]:
     config = replace(config, evidence_root=_safe_resolved_evidence_root(config.evidence_root))
     _validate_config(config)
     writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=config.force)
     writer.prepare()
+    _validate_internal_lane_paths(config)
     writer.write_json(config.lane_dir / "preflight.json", _preflight_payload(config))
 
     basins_root = config.basins_root or (config.lane_dir / "synthetic-basins")
     if config.basins_root is None:
-        write_synthetic_basins_fixture(basins_root)
+        _validate_lane_path_contained(config, basins_root, path_kind="synthetic basins fixture")
+        _refuse_existing_descendant_symlinks(basins_root, path_kind="synthetic basins fixture")
+        write_synthetic_basins_fixture(basins_root, containment_root=config.lane_dir)
 
     blockers: list[dict[str, Any]] = []
     migration_report = _write_migration_evidence(config, writer, basins_root, blockers)
@@ -222,18 +385,29 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
     cleanup_raw_files = [inventory_path, package_manifest_raw_path]
     try:
         inventory = discover_basins_inventory(basins_root)
-        write_inventory(inventory, inventory_path)
-        selected_model_id = config.model_id or _default_model_id(inventory)
-        store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
-        publish_result = publish_basins_package(
-            inventory_path=inventory_path,
-            model_id=selected_model_id,
-            version=config.version,
-            output_path=package_manifest_raw_path,
-            copy_forcing=False,
-            object_store=store,
+        _write_raw_worker_output(
+            config,
+            inventory_path,
+            path_kind="raw inventory file",
+            producer=lambda output_path: write_inventory(inventory, output_path),
         )
-        manifest = json.loads(package_manifest_raw_path.read_text(encoding="utf-8"))
+        selected_model_id = config.model_id or _default_model_id(inventory)
+        _validate_local_object_store_root(config)
+        store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
+        publish_result, package_manifest_bytes = _write_raw_worker_output(
+            config,
+            package_manifest_raw_path,
+            path_kind="raw package manifest file",
+            producer=lambda output_path: publish_basins_package(
+                inventory_path=inventory_path,
+                model_id=selected_model_id,
+                version=config.version,
+                output_path=output_path,
+                copy_forcing=False,
+                object_store=store,
+            ),
+        )
+        manifest = json.loads(package_manifest_bytes.decode("utf-8"))
         writer.write_json(config.lane_dir / "package_manifest.json", manifest)
         package_evidence = _package_manifest_evidence(publish_result, manifest)
         writer.write_json(config.lane_dir / "package_manifest_evidence.json", package_evidence)
@@ -241,7 +415,15 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
         stored_verification = _verify_stored_objects(store, manifest)
         writer.write_json(config.lane_dir / "stored_object_verification.json", stored_verification)
 
-        consumption = _consumption_evidence(config, writer, store, inventory_path, package_manifest_raw_path, manifest)
+        consumption = _consumption_evidence(
+            config,
+            writer,
+            store,
+            inventory_path,
+            package_manifest_raw_path,
+            manifest,
+            stored_verification,
+        )
         writer.write_json(config.lane_dir / "registry_api_runtime_consumption.json", consumption)
 
         cleanup = _cleanup_rollback_evidence(config, store, selected_model_id)
@@ -271,19 +453,20 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
             version=config.version,
             migration_report=migration_report,
             package_manifest=manifest,
+            consumption=consumption,
         )
         writer.write_json(config.lane_dir / "summary.json", summary)
         return summary
     finally:
         for path in cleanup_raw_files:
-            path.unlink(missing_ok=True)
+            _cleanup_raw_lane_file(config, path, path_kind="raw cleanup file")
 
 
-def write_synthetic_basins_fixture(root: Path) -> dict[str, Any]:
+def write_synthetic_basins_fixture(root: Path, *, containment_root: Path | None = None) -> dict[str, Any]:
     input_name = "alias-a"
     model_dir = root / "basin-a"
     input_dir = model_dir / "input" / input_name
-    input_dir.mkdir(parents=True, exist_ok=True)
+    _safe_fixture_dir(input_dir, containment_root=containment_root)
     for suffix in (
         "cfg.para",
         "cfg.ic",
@@ -298,35 +481,98 @@ def write_synthetic_basins_fixture(root: Path) -> dict[str, Any]:
         "tsd.mf",
         "tsd.rl",
     ):
-        (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
-    (input_dir / f"{input_name}.sp.riv").write_text("2 6\n1 0 0 0.01 100 0\n", encoding="utf-8")
-    (input_dir / f"{input_name}.sp.rivseg").write_text("2 4\n1 1 1 100\n", encoding="utf-8")
+        _safe_fixture_write_text(input_dir / f"{input_name}.{suffix}", f"{suffix}\n", containment_root=containment_root)
+    _safe_fixture_write_text(
+        input_dir / f"{input_name}.sp.riv",
+        "2 6\n1 0 0 0.01 100 0\n",
+        containment_root=containment_root,
+    )
+    _safe_fixture_write_text(
+        input_dir / f"{input_name}.sp.rivseg",
+        "2 4\n1 1 1 100\n",
+        containment_root=containment_root,
+    )
     gis_dir = input_dir / "gis"
-    gis_dir.mkdir(exist_ok=True)
-    _write_domain_shapefile(gis_dir / "domain")
-    _write_line_shapefile(gis_dir / "river")
-    _write_line_shapefile(gis_dir / "seg")
+    _safe_fixture_dir(gis_dir, containment_root=containment_root)
+    _write_domain_shapefile(gis_dir / "domain", containment_root=containment_root)
+    _write_line_shapefile(gis_dir / "river", containment_root=containment_root)
+    _write_line_shapefile(gis_dir / "seg", containment_root=containment_root)
     forcing_dir = model_dir / "forcing"
-    forcing_dir.mkdir(exist_ok=True)
-    (forcing_dir / "X000001.csv").write_text("time,value\n2026-01-01,1\n", encoding="utf-8")
+    _safe_fixture_dir(forcing_dir, containment_root=containment_root)
+    _safe_fixture_write_text(
+        forcing_dir / "X000001.csv",
+        "time,value\n2026-01-01,1\n",
+        containment_root=containment_root,
+    )
     return discover_basins_inventory(root)
 
 
-def _write_domain_shapefile(base: Path) -> None:
+def _safe_fixture_dir(path: Path, *, containment_root: Path | None) -> None:
+    try:
+        ensure_directory_no_follow(path, containment_root=containment_root)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to prepare synthetic Basins fixture directory {path}: {error}",
+        ) from error
+
+
+def _safe_fixture_write_bytes(path: Path, content: bytes, *, containment_root: Path | None) -> None:
+    try:
+        atomic_write_bytes_no_follow(path, content, containment_root=containment_root)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to write synthetic Basins fixture file {path}: {error}",
+        ) from error
+
+
+def _safe_fixture_write_text(path: Path, content: str, *, containment_root: Path | None) -> None:
+    _safe_fixture_write_bytes(path, content.encode("utf-8"), containment_root=containment_root)
+
+
+def _write_domain_shapefile(base: Path, *, containment_root: Path | None = None) -> None:
     import shapefile
 
-    writer = shapefile.Writer(str(base), shapeType=shapefile.POLYGON)
+    target_base = base
+    if containment_root is not None:
+        temp_dir = tempfile.TemporaryDirectory(prefix="nhms-synthetic-basins-shp-")
+        target_base = Path(temp_dir.name) / base.name
+    else:
+        temp_dir = None
+    writer = shapefile.Writer(str(target_base), shapeType=shapefile.POLYGON)
     writer.field("ID", "N")
     writer.poly([[[100.0, 30.0], [101.0, 30.0], [101.0, 31.0], [100.0, 31.0], [100.0, 30.0]]])
     writer.record(1)
     writer.close()
-    _write_wgs84_prj(base.with_suffix(".prj"))
+    _write_wgs84_prj(base.with_suffix(".prj"), containment_root=containment_root)
+    if temp_dir is not None:
+        try:
+            _copy_fixture_shapefile_outputs(target_base, base, containment_root=containment_root)
+        finally:
+            temp_dir.cleanup()
 
 
-def _write_line_shapefile(base: Path) -> None:
+def _write_line_shapefile(base: Path, *, containment_root: Path | None = None) -> None:
     import shapefile
 
-    writer = shapefile.Writer(str(base), shapeType=shapefile.POLYLINE)
+    target_base = base
+    if containment_root is not None:
+        temp_dir = tempfile.TemporaryDirectory(prefix="nhms-synthetic-basins-shp-")
+        target_base = Path(temp_dir.name) / base.name
+    else:
+        temp_dir = None
+    writer = shapefile.Writer(str(target_base), shapeType=shapefile.POLYLINE)
     writer.field("SEG_ID", "N")
     writer.field("ORDER", "N")
     writer.field("DOWN_ID", "N")
@@ -336,16 +582,36 @@ def _write_line_shapefile(base: Path) -> None:
     writer.line([[[100.5, 30.4], [100.8, 30.8]]])
     writer.record(2, 2, 0, 60000.0)
     writer.close()
-    _write_wgs84_prj(base.with_suffix(".prj"))
+    _write_wgs84_prj(base.with_suffix(".prj"), containment_root=containment_root)
+    if temp_dir is not None:
+        try:
+            _copy_fixture_shapefile_outputs(target_base, base, containment_root=containment_root)
+        finally:
+            temp_dir.cleanup()
 
 
-def _write_wgs84_prj(path: Path) -> None:
-    path.write_text(
+def _write_wgs84_prj(path: Path, *, containment_root: Path | None = None) -> None:
+    _safe_fixture_write_text(
+        path,
         'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
         'SPHEROID["WGS_1984",6378137,298.257223563]],'
         'PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]]\n',
-        encoding="utf-8",
+        containment_root=containment_root,
     )
+
+
+def _copy_fixture_shapefile_outputs(source_base: Path, target_base: Path, *, containment_root: Path) -> None:
+    for suffix in (".shp", ".shx", ".dbf"):
+        source_path = source_base.with_suffix(suffix)
+        target_path = target_base.with_suffix(suffix)
+        try:
+            content = source_path.read_bytes()
+        except OSError as error:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+                f"Failed to read temporary synthetic Basins shapefile output {source_path}: {error}",
+            ) from error
+        _safe_fixture_write_bytes(target_path, content, containment_root=containment_root)
 
 
 def _write_migration_evidence(
@@ -356,10 +622,15 @@ def _write_migration_evidence(
 ) -> dict[str, Any] | None:
     raw_path = config.lane_dir / ".migration_report.raw.json"
     try:
-        report = write_basins_migration_report(
-            basins_root=basins_root,
-            source_uri=config.source_uri,
-            output_path=raw_path,
+        report, _report_bytes = _write_raw_worker_output(
+            config,
+            raw_path,
+            path_kind="raw migration report file",
+            producer=lambda output_path: write_basins_migration_report(
+                basins_root=basins_root,
+                source_uri=config.source_uri,
+                output_path=output_path,
+            ),
         )
     except BasinsPackageError as error:
         blocker = error.to_payload()
@@ -368,9 +639,102 @@ def _write_migration_evidence(
         writer.write_json(config.lane_dir / "migration_blocker.json", blocker)
         return None
     finally:
-        raw_path.unlink(missing_ok=True)
+        _cleanup_raw_lane_file(config, raw_path, path_kind="raw migration report file")
     writer.write_json(config.lane_dir / "migration_report.json", report)
     return report
+
+
+def _write_raw_worker_output(
+    config: ProductionObjectStoreConfig,
+    raw_path: Path,
+    *,
+    path_kind: str,
+    producer: Callable[[Path], Any],
+) -> tuple[Any, bytes]:
+    _validate_lane_path_contained(config, raw_path, path_kind=path_kind)
+    with tempfile.TemporaryDirectory(prefix="nhms-object-store-validation-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        temp_path = temp_dir / raw_path.name
+        producer_succeeded = False
+        try:
+            result = producer(temp_path)
+            content = _read_raw_worker_output(temp_path, path_kind=path_kind)
+            producer_succeeded = True
+        finally:
+            try:
+                unlink_no_follow(temp_path, containment_root=temp_dir, missing_ok=True)
+            except (OSError, SafeFilesystemError) as error:
+                if producer_succeeded:
+                    raise ProductionObjectStoreValidationError(
+                        "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+                        f"Failed to safely remove temporary {path_kind} {temp_path}: {error}",
+                    ) from error
+    _write_raw_lane_bytes(config, raw_path, content, path_kind=path_kind)
+    return result, content
+
+
+def _read_raw_worker_output(path: Path, *, path_kind: str) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            content = handle.read(MAX_RAW_INTERMEDIATE_BYTES + 1)
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+            f"Failed to read temporary {path_kind} {path}: {error}",
+        ) from error
+    if len(content) > MAX_RAW_INTERMEDIATE_BYTES:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+            f"Temporary {path_kind} exceeds {MAX_RAW_INTERMEDIATE_BYTES} bytes: {path}",
+        )
+    return content
+
+
+def _write_raw_lane_bytes(
+    config: ProductionObjectStoreConfig,
+    raw_path: Path,
+    content: bytes,
+    *,
+    path_kind: str,
+) -> None:
+    _validate_lane_path_contained(config, raw_path, path_kind=path_kind)
+    try:
+        atomic_write_bytes_no_follow(raw_path, content, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to safely write {path_kind} {raw_path}: {error}",
+        ) from error
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+            f"Failed to safely write {path_kind} {raw_path}: {error}",
+        ) from error
+
+
+def _cleanup_raw_lane_file(config: ProductionObjectStoreConfig, raw_path: Path, *, path_kind: str) -> None:
+    try:
+        unlink_no_follow(raw_path, containment_root=config.lane_dir, missing_ok=True)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to safely remove {path_kind} {raw_path}: {error}",
+        ) from error
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED",
+            f"Failed to safely remove {path_kind} {raw_path}: {error}",
+        ) from error
 
 
 def _package_manifest_evidence(publish_result: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
@@ -595,6 +959,7 @@ def _consumption_evidence(
     inventory_path: Path,
     package_manifest_raw_path: Path,
     manifest: dict[str, Any],
+    stored_verification: dict[str, Any],
 ) -> dict[str, Any]:
     registry: dict[str, Any]
     try:
@@ -606,7 +971,7 @@ def _consumption_evidence(
     except BasinsRegistryImportError as error:
         registry = {"status": "blocked", **error.to_payload(), "implicit_activation": False}
 
-    runtime = _runtime_staging_evidence(config, store, manifest, writer)
+    runtime = _runtime_staging_evidence(config, store, manifest, stored_verification, writer)
     api_contract_source = (
         "live_registry_import" if registry.get("live_registry_import") is True else "local_import_source"
     )
@@ -782,6 +1147,7 @@ def _runtime_staging_evidence(
     config: ProductionObjectStoreConfig,
     store: LocalObjectStore,
     manifest: dict[str, Any],
+    stored_verification: dict[str, Any],
     writer: EvidenceWriter,
 ) -> dict[str, Any]:
     scratch_prefix = f"runs/{config.run_id}/input/scratch/runtime-staging"
@@ -814,25 +1180,36 @@ def _runtime_staging_evidence(
             "log_uri": store.uri_for_key(f"runs/{config.run_id}/logs/runtime-staging/"),
         },
     }
-    runtime_config = SHUDRuntimeConfig(
-        workspace_root=config.lane_dir / "runtime-workspace",
-        object_store_root=config.object_store_root,
-        object_store_prefix=config.object_store_prefix,
-        shud_executable="/bin/false",
-        output_interval_minutes=1440,
-        dry_run=True,
-    )
-    runtime = SHUDRuntime(
-        config=runtime_config,
-        object_store=store,
-    )
     input_dir = config.lane_dir / "runtime-workspace" / "runs" / runtime_manifest["run_id"] / "input"
     output_dir = config.lane_dir / "runtime-workspace" / "runs" / runtime_manifest["run_id"] / "output"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _validate_lane_path_contained(config, input_dir, path_kind="runtime input directory")
+    _validate_lane_path_contained(config, output_dir, path_kind="runtime output directory")
     try:
-        runtime.prepare_workspace(runtime_manifest, input_dir)
-        cfg_path = runtime.generate_cfg_para(runtime_manifest, input_dir, output_dir)
+        ensure_directory_no_follow(input_dir, containment_root=config.lane_dir)
+        ensure_directory_no_follow(output_dir, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to prepare runtime staging workspace directory: {error}",
+        ) from error
+    _validate_lane_path_contained(config, input_dir, path_kind="runtime input directory")
+    _validate_lane_path_contained(config, output_dir, path_kind="runtime output directory")
+    try:
+        preparation = _prepare_runtime_staging_workspace(
+            config,
+            store,
+            runtime_manifest,
+            manifest,
+            stored_verification,
+            input_dir,
+            output_dir,
+            allowed_forcing_keys={forcing_key},
+        )
     except SHUDRuntimeError as error:
         return {
             "status": "blocked",
@@ -845,7 +1222,8 @@ def _runtime_staging_evidence(
             },
             "validation_object_keys": [forcing_key],
         }
-    staged_files = sorted(path.relative_to(input_dir).as_posix() for path in input_dir.rglob("*") if path.is_file())
+    except ProductionObjectStoreValidationError:
+        raise
     evidence = {
         "status": "prepared",
         "execution_status": "not_executed",
@@ -860,9 +1238,16 @@ def _runtime_staging_evidence(
         },
         "scratch_prefix": scratch_prefix,
         "validation_object_keys": [forcing_key],
-        "staged_file_count": len(staged_files),
-        "staged_files": staged_files,
-        "generated_cfg_path": str(cfg_path),
+        "staged_file_count": len(preparation.staged_files),
+        "staged_total_bytes": preparation.budgets["staged_total_bytes"],
+        "staged_files": preparation.staged_files,
+        "staged_object_receipts": {
+            "package": preparation.package_receipts,
+            "forcing": preparation.forcing_receipts,
+        },
+        "forcing_prefix_receipt": preparation.forcing_prefix_receipt,
+        "staging_budgets": preparation.budgets,
+        "generated_cfg_path": str(preparation.cfg_path),
     }
     writer.write_json(config.lane_dir / "runtime_staging_manifest.json", runtime_manifest)
     return evidence
@@ -881,6 +1266,766 @@ def _write_validation_scratch_object(store: LocalObjectStore, key: str, content:
             f"Validation scratch object already exists and will not be overwritten: {normalized_key}",
         )
     return store.write_bytes_atomic(normalized_key, content)
+
+
+def _prepare_runtime_staging_workspace(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    runtime_manifest: dict[str, Any],
+    package_manifest: dict[str, Any],
+    stored_verification: dict[str, Any],
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    allowed_forcing_keys: set[str] | None = None,
+) -> RuntimeStagingPreparation:
+    _refuse_existing_descendant_symlinks(input_dir, path_kind="runtime input directory")
+    _refuse_existing_descendant_symlinks(output_dir, path_kind="runtime output directory")
+    budget = RuntimeStagingBudget(
+        max_file_count=MAX_RUNTIME_STAGING_FILE_COUNT,
+        max_node_count=MAX_RUNTIME_STAGING_NODE_COUNT,
+        max_directory_depth=MAX_RUNTIME_STAGING_DIRECTORY_DEPTH,
+        max_total_bytes=MAX_RUNTIME_STAGING_TOTAL_BYTES,
+        max_object_bytes=MAX_RUNTIME_STAGING_OBJECT_BYTES,
+    )
+    _assert_runtime_workspace_empty(config, input_dir, path_kind="runtime input directory")
+    _assert_runtime_workspace_empty(config, output_dir, path_kind="runtime output directory")
+    package_collection = _collect_runtime_package_objects(
+        config,
+        store,
+        package_manifest,
+        stored_verification,
+        input_dir,
+        budget,
+    )
+    forcing_collection = _collect_runtime_object_or_prefix(
+        config,
+        store,
+        runtime_manifest["forcing"]["forcing_uri"],
+        input_dir,
+        budget,
+        allowed_keys=allowed_forcing_keys,
+    )
+    staged_objects = [*package_collection.objects, *forcing_collection.objects]
+    _assert_runtime_staging_targets_unique(input_dir, staged_objects)
+    for staged_object in staged_objects:
+        _write_runtime_staging_bytes(config, staged_object.target, staged_object.content)
+    staged_receipts = staged_objects
+    staged_paths_by_suffix = _runtime_staged_paths_by_suffix(staged_receipts)
+    for suffix in (".mesh", ".para", ".calib", ".tsd.forc"):
+        if _first_staged_path(staged_paths_by_suffix, suffix) is None:
+            raise SHUDRuntimeError("WORKSPACE_INCOMPLETE", f"Missing required staged file: *{suffix}")
+    template_path = _first_staged_path(staged_paths_by_suffix, ".cfg.para") or _first_staged_path(
+        staged_paths_by_suffix, ".para"
+    )
+    if template_path is None:
+        raise SHUDRuntimeError("CFG_TEMPLATE_MISSING", "No .para template found in staged model package.")
+    template_content = _read_runtime_staging_text(config, template_path)
+    cfg_path = input_dir / f"{_safe_runtime_project_name(runtime_manifest)}.cfg.para"
+    content = "\n".join(line for line in template_content.splitlines() if ".cfg.ic" not in line)
+    replacements = {
+        "START_TIME": str(runtime_manifest["start_time"]),
+        "END_TIME": str(runtime_manifest["end_time"]),
+        "OUTPUT_DIR": str(output_dir),
+        "MODEL_OUTPUT_INTERVAL": str(runtime_manifest.get("runtime", {}).get("output_interval_minutes", 1440)),
+        "INIT_MODE": "1",
+        "SEGMENT_COUNT": str(runtime_manifest["model"]["segment_count"]),
+    }
+    for key, value in replacements.items():
+        content = _replace_or_append_runtime_cfg(content, key, value)
+    _write_runtime_staging_bytes(config, cfg_path, content.rstrip().encode("utf-8") + b"\n")
+    _refuse_existing_descendant_symlinks(input_dir, path_kind="runtime input directory")
+    _refuse_existing_descendant_symlinks(output_dir, path_kind="runtime output directory")
+    staged_files = _runtime_staged_files_from_receipts(input_dir, staged_receipts, cfg_path)
+    return RuntimeStagingPreparation(
+        cfg_path=cfg_path,
+        package_receipts=[staged.receipt for staged in package_collection.objects],
+        forcing_receipts=[staged.receipt for staged in forcing_collection.objects],
+        forcing_prefix_receipt=forcing_collection.prefix_receipt,
+        staged_files=staged_files,
+        budgets=budget.to_payload(),
+    )
+
+
+def _collect_runtime_package_objects(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    package_manifest: dict[str, Any],
+    stored_verification: dict[str, Any],
+    input_dir: Path,
+    budget: RuntimeStagingBudget,
+) -> RuntimePrefixCollection:
+    verification_by_uri = _runtime_verification_entries_by_uri(stored_verification)
+    objects: list[RuntimeStagedObject] = []
+    for entry in package_manifest.get("included_files", []):
+        if not isinstance(entry, dict) or entry.get("role") == "manifest":
+            continue
+        _assert_runtime_package_entry_verified(entry, verification_by_uri)
+        relative_path = _safe_runtime_relative_path(str(entry.get("relative_path", "")))
+        target = input_dir / relative_path
+        staged_object = _collect_runtime_object(
+            config,
+            store,
+            str(entry["object_uri"]),
+            target,
+            receipt_relative_path=relative_path.as_posix(),
+            budget=budget,
+            expected={
+                "object_uri": str(entry["object_uri"]),
+                "relative_path": relative_path.as_posix(),
+                "role": str(entry["role"]),
+                "size_bytes": int(entry["size_bytes"]),
+                "sha256": str(entry["sha256"]),
+            },
+            receipt_source="package_manifest",
+        )
+        objects.append(staged_object)
+    return RuntimePrefixCollection(objects=objects)
+
+
+def _collect_runtime_object(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    uri_or_key: str,
+    target: Path,
+    *,
+    receipt_relative_path: str,
+    budget: RuntimeStagingBudget,
+    expected: dict[str, Any] | None = None,
+    receipt_source: str,
+) -> RuntimeStagedObject:
+    _validate_lane_path_contained(config, target.parent, path_kind="runtime staging directory")
+    content = store.read_bytes_limited(uri_or_key, max_bytes=MAX_RUNTIME_STAGING_OBJECT_BYTES)
+    if len(content) > MAX_RUNTIME_STAGING_OBJECT_BYTES:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            (
+                "Runtime staging object exceeds configured limit of "
+                f"{MAX_RUNTIME_STAGING_OBJECT_BYTES} bytes: {uri_or_key}"
+            ),
+        )
+    if not content:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging object must not be empty: {uri_or_key}",
+        )
+    size_bytes = len(content)
+    sha256 = hashlib.sha256(content).hexdigest()
+    if expected is not None:
+        _assert_runtime_staged_object_matches_expected(
+            expected,
+            actual_object_uri=str(uri_or_key),
+            actual_relative_path=receipt_relative_path,
+            actual_size_bytes=size_bytes,
+            actual_sha256=sha256,
+        )
+    budget.reserve(relative_path=receipt_relative_path, size_bytes=size_bytes)
+    receipt = {
+        "source": receipt_source,
+        "object_uri": store.uri_for_key(store.normalize_key(uri_or_key)),
+        "relative_path": receipt_relative_path,
+        "target_relative_path": target.relative_to(config.lane_dir).as_posix(),
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+    }
+    if expected is not None:
+        receipt["role"] = expected["role"]
+        receipt["manifest_object_uri"] = expected["object_uri"]
+        receipt["manifest_relative_path"] = expected["relative_path"]
+        receipt["manifest_size_bytes"] = expected["size_bytes"]
+        receipt["manifest_sha256"] = expected["sha256"]
+        receipt["verified_manifest_contract"] = True
+    return RuntimeStagedObject(target=target, content=content, receipt=receipt)
+
+
+def _collect_runtime_object_or_prefix(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    uri_or_key: str,
+    input_dir: Path,
+    budget: RuntimeStagingBudget,
+    *,
+    allowed_keys: set[str] | None = None,
+) -> RuntimePrefixCollection:
+    normalized_key = store.normalize_key(uri_or_key)
+    source_path = store.resolve_path(normalized_key)
+    try:
+        source_stat = stat_no_follow(source_path, containment_root=store.root)
+    except FileNotFoundError as error:
+        raise SHUDRuntimeError("ARTIFACT_NOT_FOUND", f"Object storage artifact not found: {uri_or_key}") from error
+    except SafeFilesystemError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging source path is unsafe: {source_path}: {error}",
+        ) from error
+    if stat.S_ISREG(source_stat.st_mode):
+        if allowed_keys is not None and normalized_key not in allowed_keys:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging object is not validation-owned: {normalized_key}",
+            )
+        target = input_dir / source_path.name
+        return RuntimePrefixCollection(
+            objects=[
+                _collect_runtime_object(
+                    config,
+                    store,
+                    normalized_key,
+                    target,
+                    receipt_relative_path=source_path.name,
+                    budget=budget,
+                    receipt_source="forcing_object",
+                )
+            ],
+            prefix_receipt=None,
+        )
+    if stat.S_ISDIR(source_stat.st_mode):
+        return _collect_runtime_prefix_objects(
+            config,
+            store,
+            normalized_key,
+            source_path,
+            source_stat,
+            input_dir,
+            budget,
+            allowed_keys=allowed_keys,
+        )
+    raise SHUDRuntimeError(
+        "ARTIFACT_NOT_FOUND",
+        f"Object storage artifact is not a regular file or directory: {uri_or_key}",
+    )
+
+
+def _runtime_verification_entries_by_uri(stored_verification: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    for entry in stored_verification.get("entries", []):
+        if not isinstance(entry, dict) or entry.get("role") == "manifest":
+            continue
+        object_uri = str(entry.get("object_uri", ""))
+        if object_uri:
+            entries[object_uri] = entry
+    return entries
+
+
+def _assert_runtime_package_entry_verified(
+    manifest_entry: dict[str, Any],
+    verification_by_uri: dict[str, dict[str, Any]],
+) -> None:
+    object_uri = str(manifest_entry.get("object_uri", ""))
+    verification = verification_by_uri.get(object_uri)
+    if verification is None or verification.get("verified") is not True:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime package staging is missing a verified stored-object receipt for {object_uri}.",
+        )
+    expected_pairs = (
+        ("relative_path", str(manifest_entry.get("relative_path", "")), str(verification.get("relative_path", ""))),
+        ("role", str(manifest_entry.get("role", "")), str(verification.get("role", ""))),
+        (
+            "size_bytes",
+            int(manifest_entry.get("size_bytes", -1)),
+            int(verification.get("expected_size_bytes", -2)),
+        ),
+        ("sha256", str(manifest_entry.get("sha256", "")), str(verification.get("expected_sha256", ""))),
+    )
+    for field_name, expected, actual in expected_pairs:
+        if expected != actual:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime package staging verification receipt mismatch for {object_uri}: {field_name}.",
+            )
+
+
+def _assert_runtime_staged_object_matches_expected(
+    expected: dict[str, Any],
+    *,
+    actual_object_uri: str,
+    actual_relative_path: str,
+    actual_size_bytes: int,
+    actual_sha256: str,
+) -> None:
+    if str(expected["object_uri"]) != actual_object_uri:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            "Runtime package staging object URI changed before staging.",
+        )
+    if str(expected["relative_path"]) != actual_relative_path:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime package staging relative path changed before staging: {actual_relative_path}",
+        )
+    if int(expected["size_bytes"]) != actual_size_bytes or str(expected["sha256"]) != actual_sha256:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime package staging bytes differ from verified manifest contract: {actual_relative_path}",
+        )
+
+
+def _collect_runtime_prefix_objects(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    normalized_prefix_key: str,
+    source_path: Path,
+    source_stat: os.stat_result,
+    input_dir: Path,
+    budget: RuntimeStagingBudget,
+    *,
+    allowed_keys: set[str] | None = None,
+) -> RuntimePrefixCollection:
+    root_fd = _open_runtime_prefix_dir(source_path, store.root)
+    objects: list[RuntimeStagedObject] = []
+    receipts: list[dict[str, Any]] = []
+    prefix_digest = hashlib.sha256()
+    try:
+        _assert_runtime_prefix_identity(source_path, store.root, source_stat, root_fd)
+        _collect_runtime_prefix_dir_fd(
+            config,
+            store,
+            root_fd,
+            normalized_prefix_key,
+            source_path,
+            PurePosixPath(),
+            input_dir,
+            budget,
+            objects,
+            receipts,
+            prefix_digest,
+            allowed_keys=allowed_keys,
+        )
+        _assert_runtime_prefix_identity(source_path, store.root, source_stat, root_fd)
+    finally:
+        os.close(root_fd)
+    if not receipts:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging prefix must contain at least one non-empty regular file: {source_path}",
+        )
+    prefix_receipt = {
+        "source": "forcing_prefix",
+        "object_uri": store.uri_for_key(normalized_prefix_key.rstrip("/") + "/"),
+        "root_path": str(source_path),
+        "root_device": source_stat.st_dev,
+        "root_inode": source_stat.st_ino,
+        "file_count": len(receipts),
+        "total_bytes": sum(int(receipt["size_bytes"]) for receipt in receipts),
+        "aggregate_sha256": prefix_digest.hexdigest(),
+        "objects": receipts,
+    }
+    return RuntimePrefixCollection(objects=objects, prefix_receipt=prefix_receipt)
+
+
+def _collect_runtime_prefix_dir_fd(
+    config: ProductionObjectStoreConfig,
+    store: LocalObjectStore,
+    dir_fd: int,
+    normalized_prefix_key: str,
+    path_label: Path,
+    relative_dir: PurePosixPath,
+    input_dir: Path,
+    budget: RuntimeStagingBudget,
+    objects: list[RuntimeStagedObject],
+    receipts: list[dict[str, Any]],
+    prefix_digest: Any,
+    *,
+    allowed_keys: set[str] | None = None,
+) -> None:
+    entries: list[tuple[str, os.stat_result, Path, PurePosixPath]] = []
+    with os.scandir(dir_fd) as scanner:
+        for entry in scanner:
+            entry_relative = PurePosixPath(relative_dir, entry.name)
+            entry_path = path_label / entry.name
+            budget.reserve_node(relative_path=entry_relative.as_posix())
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    f"Failed to stat runtime staging prefix entry {entry_path}: {error}",
+                ) from error
+            entry_key = PurePosixPath(normalized_prefix_key, entry_relative.as_posix()).as_posix()
+            if allowed_keys is not None and not _runtime_prefix_entry_allowed(
+                entry_key,
+                entry_stat,
+                allowed_keys,
+            ):
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    f"Runtime staging prefix contains non-validation object: {entry_key}",
+                )
+            entries.append((entry.name, entry_stat, entry_path, entry_relative))
+    entries.sort(key=lambda item: item[0])
+    for entry_name, entry_stat, entry_path, entry_relative in entries:
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging prefix must not contain symlinks: {entry_path}",
+            )
+        if stat.S_ISDIR(entry_stat.st_mode):
+            relative_depth = len(entry_relative.parts)
+            if relative_depth > budget.max_directory_depth:
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    (
+                        "Runtime staging prefix exceeds configured directory depth "
+                        f"limit of {budget.max_directory_depth}: {entry_relative.as_posix()}"
+                    ),
+                )
+            child_fd = _open_runtime_prefix_child_dir(dir_fd, entry_name, entry_path, entry_stat)
+            try:
+                _collect_runtime_prefix_dir_fd(
+                    config,
+                    store,
+                    child_fd,
+                    normalized_prefix_key,
+                    entry_path,
+                    entry_relative,
+                    input_dir,
+                    budget,
+                    objects,
+                    receipts,
+                    prefix_digest,
+                    allowed_keys=allowed_keys,
+                )
+            finally:
+                os.close(child_fd)
+            continue
+        if not stat.S_ISREG(entry_stat.st_mode):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging prefix entries must be regular files or directories: {entry_path}",
+            )
+        if entry_stat.st_size <= 0:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging prefix files must not be empty: {entry_path}",
+            )
+        relative_path = _safe_runtime_relative_path(entry_relative.as_posix())
+        relative_key = PurePosixPath(normalized_prefix_key, entry_relative.as_posix()).as_posix()
+        budget.reserve(relative_path=relative_path.as_posix(), size_bytes=entry_stat.st_size)
+        content = _read_runtime_prefix_file(dir_fd, entry_name, entry_path, entry_stat)
+        sha256 = hashlib.sha256(content).hexdigest()
+        target = input_dir / relative_path
+        receipt = {
+            "source": "forcing_prefix",
+            "object_uri": store.uri_for_key(relative_key),
+            "relative_path": entry_relative.as_posix(),
+            "target_relative_path": target.relative_to(config.lane_dir).as_posix(),
+            "size_bytes": len(content),
+            "sha256": sha256,
+        }
+        receipt_material = {
+            "object_uri": receipt["object_uri"],
+            "relative_path": receipt["relative_path"],
+            "size_bytes": receipt["size_bytes"],
+            "sha256": receipt["sha256"],
+        }
+        prefix_digest.update(_sha256_json(receipt_material).encode("ascii"))
+        receipts.append(receipt)
+        objects.append(RuntimeStagedObject(target=target, content=content, receipt=receipt))
+
+
+def _runtime_prefix_entry_allowed(entry_key: str, entry_stat: os.stat_result, allowed_keys: set[str]) -> bool:
+    if stat.S_ISDIR(entry_stat.st_mode):
+        return any(key.startswith(f"{entry_key}/") for key in allowed_keys)
+    return entry_key in allowed_keys
+
+
+def _open_runtime_prefix_dir(path: Path, containment_root: Path) -> int:
+    try:
+        fd = os.open(path, RUNTIME_DIR_FLAGS)
+        opened = os.fstat(fd)
+        stat_no_follow(path, containment_root=containment_root)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging prefix is not a directory: {path}",
+            )
+        return fd
+    except ProductionObjectStoreValidationError:
+        raise
+    except (OSError, SafeFilesystemError) as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Failed to open runtime staging prefix directory {path}: {error}",
+        ) from error
+
+
+def _open_runtime_prefix_child_dir(
+    parent_fd: int,
+    name: str,
+    path_label: Path,
+    expected_stat: os.stat_result,
+) -> int:
+    try:
+        child_fd = os.open(name, RUNTIME_DIR_FLAGS, dir_fd=parent_fd)
+        opened = os.fstat(child_fd)
+        if expected_stat.st_dev != opened.st_dev or expected_stat.st_ino != opened.st_ino:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging prefix directory changed during traversal: {path_label}",
+            )
+        return child_fd
+    except ProductionObjectStoreValidationError:
+        raise
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Failed to open runtime staging prefix directory {path_label}: {error}",
+        ) from error
+
+
+def _read_runtime_prefix_file(
+    parent_fd: int,
+    name: str,
+    path_label: Path,
+    expected_stat: os.stat_result,
+) -> bytes:
+    if not stat.S_ISREG(expected_stat.st_mode):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging prefix file must be a regular file: {path_label}",
+        )
+    if expected_stat.st_size > MAX_RUNTIME_STAGING_OBJECT_BYTES:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            (
+                "Runtime staging object exceeds configured per-object byte "
+                f"limit of {MAX_RUNTIME_STAGING_OBJECT_BYTES}: {path_label}"
+            ),
+        )
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(name, RUNTIME_READ_FLAGS, dir_fd=parent_fd)
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging prefix file must be a regular file: {path_label}",
+            )
+        if expected_stat.st_dev != opened.st_dev or expected_stat.st_ino != opened.st_ino:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging prefix file changed while being opened: {path_label}",
+            )
+        content = os.read(file_fd, MAX_RUNTIME_STAGING_OBJECT_BYTES + 1)
+    except ProductionObjectStoreValidationError:
+        raise
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Failed to read runtime staging prefix file {path_label}: {error}",
+        ) from error
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+    if len(content) > MAX_RUNTIME_STAGING_OBJECT_BYTES:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            (
+                "Runtime staging object exceeds configured per-object byte "
+                f"limit of {MAX_RUNTIME_STAGING_OBJECT_BYTES}: {path_label}"
+            ),
+        )
+    if len(content) != expected_stat.st_size:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging prefix file changed while being read: {path_label}",
+        )
+    return content
+
+
+def _assert_runtime_staging_targets_unique(input_dir: Path, staged_objects: Sequence[RuntimeStagedObject]) -> None:
+    targets_by_relative_path: dict[str, str] = {}
+    for staged_object in staged_objects:
+        try:
+            relative_path = staged_object.target.relative_to(input_dir).as_posix()
+        except ValueError as error:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"Runtime staging target escapes input directory: {staged_object.target}",
+            ) from error
+        object_uri = str(staged_object.receipt.get("object_uri", ""))
+        previous_uri = targets_by_relative_path.get(relative_path)
+        if previous_uri is not None:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                (
+                    "Runtime staging target path collision before write: "
+                    f"{relative_path} from {previous_uri} and {object_uri}"
+                ),
+            )
+        targets_by_relative_path[relative_path] = object_uri
+
+
+def _assert_runtime_prefix_identity(
+    source_path: Path,
+    containment_root: Path,
+    expected_stat: os.stat_result,
+    fd: int,
+) -> None:
+    try:
+        current_stat = stat_no_follow(source_path, containment_root=containment_root)
+    except (OSError, SafeFilesystemError) as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging prefix identity changed during traversal: {source_path}: {error}",
+        ) from error
+    opened = os.fstat(fd)
+    if (
+        expected_stat.st_dev != current_stat.st_dev
+        or expected_stat.st_ino != current_stat.st_ino
+        or expected_stat.st_dev != opened.st_dev
+        or expected_stat.st_ino != opened.st_ino
+    ):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging prefix identity changed during traversal: {source_path}",
+        )
+
+
+def _write_runtime_staging_bytes(config: ProductionObjectStoreConfig, target: Path, content: bytes) -> None:
+    _validate_lane_path_contained(config, target.parent, path_kind="runtime staging directory")
+    try:
+        atomic_write_bytes_no_follow(target, content, containment_root=config.lane_dir)
+    except SafeFilesystemError as error:
+        error_code = (
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_WRITE_FAILED"
+            if error.kind == "io"
+            else "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+        )
+        raise ProductionObjectStoreValidationError(
+            error_code,
+            f"Failed to write runtime staging file {target}: {error}",
+        ) from error
+
+
+def _read_runtime_staging_text(config: ProductionObjectStoreConfig, path: Path) -> str:
+    try:
+        content = read_bytes_limited_no_follow(
+            path,
+            max_bytes=MAX_RUNTIME_STAGING_OBJECT_BYTES,
+            containment_root=config.lane_dir,
+        )
+    except (OSError, SafeFilesystemError) as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Failed to read runtime staging file {path}: {error}",
+        ) from error
+    if len(content) > MAX_RUNTIME_STAGING_OBJECT_BYTES:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging file exceeds configured limit of {MAX_RUNTIME_STAGING_OBJECT_BYTES} bytes: {path}",
+        )
+    return content.decode("utf-8")
+
+
+def _assert_runtime_workspace_empty(config: ProductionObjectStoreConfig, root: Path, *, path_kind: str) -> None:
+    _validate_lane_path_contained(config, root, path_kind=path_kind)
+    if not root.exists():
+        return
+    try:
+        root_stat = stat_no_follow(root, containment_root=config.lane_dir)
+    except (OSError, SafeFilesystemError) as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Failed to inspect {path_kind} before runtime staging: {error}",
+        ) from error
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"{path_kind} must be a directory: {root}",
+        )
+    root_fd = _open_runtime_prefix_dir(root, config.lane_dir)
+    try:
+        _assert_directory_empty_fd(root_fd, root, path_kind=path_kind)
+    finally:
+        os.close(root_fd)
+
+
+def _assert_directory_empty_fd(root_fd: int, path_label: Path, *, path_kind: str) -> None:
+    count = 0
+    with os.scandir(root_fd) as scanner:
+        for entry in scanner:
+            count += 1
+            if count > MAX_DESCENDANT_SYMLINK_SCAN_NODES:
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    (
+                        f"{path_kind} exceeds configured preflight traversal "
+                        f"limit of {MAX_DESCENDANT_SYMLINK_SCAN_NODES}: {path_label}"
+                    ),
+                )
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                f"{path_kind} must be empty before runtime staging: {path_label / entry.name}",
+            )
+
+
+def _runtime_staged_paths_by_suffix(staged_objects: Sequence[RuntimeStagedObject]) -> dict[str, list[Path]]:
+    paths_by_suffix: dict[str, list[Path]] = {}
+    for staged in staged_objects:
+        paths_by_suffix.setdefault(staged.target.name, []).append(staged.target)
+        for suffix in staged.target.suffixes:
+            paths_by_suffix.setdefault(suffix, []).append(staged.target)
+    for paths in paths_by_suffix.values():
+        paths.sort()
+    return paths_by_suffix
+
+
+def _first_staged_path(paths_by_suffix: dict[str, list[Path]], suffix: str) -> Path | None:
+    matches = [
+        path
+        for paths_suffix, paths in paths_by_suffix.items()
+        if paths_suffix.endswith(suffix)
+        for path in paths
+        if path.name.endswith(suffix)
+    ]
+    return sorted(matches)[0] if matches else None
+
+
+def _runtime_staged_files_from_receipts(
+    input_dir: Path,
+    staged_objects: Sequence[RuntimeStagedObject],
+    cfg_path: Path,
+) -> list[str]:
+    staged_files = {staged.target.relative_to(input_dir).as_posix() for staged in staged_objects}
+    staged_files.add(cfg_path.relative_to(input_dir).as_posix())
+    return sorted(staged_files)
+
+
+def _safe_runtime_relative_path(value: str) -> Path:
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Runtime staging object path is unsafe: {value}",
+        )
+    return Path(*relative.parts)
+
+
+def _safe_runtime_project_name(runtime_manifest: dict[str, Any]) -> str:
+    name = str(runtime_manifest.get("model", {}).get("project_name") or runtime_manifest["model"]["model_id"])
+    if SAFE_IDENTIFIER_RE.fullmatch(name):
+        return name
+    raise ProductionObjectStoreValidationError(
+        "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+        f"Runtime staging project name is unsafe: {name}",
+    )
+
+
+def _replace_or_append_runtime_cfg(content: str, key: str, value: str) -> str:
+    lines = []
+    replaced = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{key} ") or stripped.startswith(f"{key}="):
+            lines.append(f"{key} = {value}")
+            replaced = True
+        else:
+            lines.append(line)
+    if not replaced:
+        lines.append(f"{key} = {value}")
+    return "\n".join(lines)
 
 
 def _cleanup_rollback_evidence(
@@ -1023,7 +2168,15 @@ def _summary(
     version: str | None = None,
     migration_report: dict[str, Any] | None = None,
     package_manifest: dict[str, Any] | None = None,
+    consumption: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    live_registry_import = consumption.get("live_registry_import") is True if consumption is not None else False
+    live_api = consumption.get("live_api") is True if consumption is not None else False
+    api_contract_source = str(consumption.get("api_contract_source", "")) if consumption is not None else ""
+    live_api_status = "not_executed"
+    if consumption is not None and isinstance(consumption.get("api"), dict):
+        live_api_status = str(consumption["api"].get("live_api_status", "not_executed"))
+    deterministic_fixture = not (live_registry_import and live_api)
     payload: dict[str, Any] = {
         "schema": "nhms.production_closure.object_store.v1",
         "issue": 148,
@@ -1032,6 +2185,19 @@ def _summary(
         "evidence_dir": str(config.lane_dir),
         "target": config.target,
         "object_store_prefix": config.object_store_prefix,
+        "execution_mode": "live_registry_import_and_live_api"
+        if not deterministic_fixture
+        else (
+            "live_registry_import_with_deterministic_api_contract"
+            if live_registry_import
+            else "deterministic_fixture"
+        ),
+        "deterministic_fixture": deterministic_fixture,
+        "live_registry_import": live_registry_import,
+        "live_api": live_api,
+        "live_api_status": live_api_status,
+        "api_contract_source": api_contract_source or "not_executed",
+        "final_production_readiness_claimed": False,
         "blockers": blockers,
         "files": [*files, "summary.json"],
     }
@@ -1114,6 +2280,178 @@ def _validate_config(config: ProductionObjectStoreConfig) -> None:
         _validate_object_store_prefix_safe(config.object_store_prefix)
 
 
+def _validate_internal_lane_paths(config: ProductionObjectStoreConfig) -> None:
+    for path, path_kind in (
+        (config.lane_dir / "synthetic-basins", "synthetic basins fixture"),
+        (config.lane_dir / ".inventory.raw.json", "raw inventory file"),
+        (config.lane_dir / ".package_manifest.raw.json", "raw package manifest file"),
+        (config.lane_dir / ".migration_report.raw.json", "raw migration report file"),
+        (config.lane_dir / "runtime-workspace", "runtime workspace"),
+    ):
+        _validate_lane_path_contained(config, path, path_kind=path_kind)
+    _validate_local_object_store_root(config)
+
+
+def _validate_local_object_store_root(config: ProductionObjectStoreConfig) -> None:
+    if config.object_store_root.is_symlink():
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+            f"local object store root must not be a symlink: {config.object_store_root}",
+        )
+    _refuse_symlink_components(config.object_store_root)
+    resolved_lane = config.lane_dir.resolve(strict=False)
+    try:
+        config.object_store_root.expanduser().resolve(strict=False).relative_to(resolved_lane)
+    except ValueError:
+        pass
+    else:
+        _validate_lane_path_contained(config, config.object_store_root, path_kind="local object store root")
+        _refuse_existing_descendant_symlinks(config.object_store_root, path_kind="local object store root")
+        return
+    try:
+        configured_root = config.object_store_root.expanduser().resolve(strict=False)
+        default_root = (config.lane_dir / "local-object-store").resolve(strict=False)
+        configured_root.relative_to(default_root)
+    except ValueError:
+        _refuse_run_scoped_local_object_store_symlinks(config)
+        return
+    _validate_lane_path_contained(config, config.object_store_root, path_kind="local object store root")
+    _refuse_existing_descendant_symlinks(config.object_store_root, path_kind="local object store root")
+
+
+def _validate_lane_path_contained(
+    config: ProductionObjectStoreConfig,
+    path: Path,
+    *,
+    path_kind: str,
+) -> None:
+    _refuse_symlink_components(path)
+    if path.is_symlink():
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+            f"{path_kind} must not be a symlink: {path}",
+        )
+    resolved_path = path.resolve(strict=False)
+    resolved_lane = config.lane_dir.resolve(strict=False)
+    try:
+        resolved_path.relative_to(config.evidence_root)
+        resolved_path.relative_to(resolved_lane)
+    except ValueError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"{path_kind} must stay under the current object-store evidence lane.",
+        ) from error
+
+
+def _refuse_run_scoped_local_object_store_symlinks(config: ProductionObjectStoreConfig) -> None:
+    root = config.object_store_root.expanduser()
+    for prefix in _run_scoped_local_object_store_prefixes(config):
+        _refuse_existing_descendant_symlinks(root / prefix, path_kind="local object store run prefix")
+
+
+def _run_scoped_local_object_store_prefixes(config: ProductionObjectStoreConfig) -> tuple[Path, ...]:
+    prefix_path = PurePosixPath(unquote(urlsplit(config.object_store_prefix).path).strip("/"))
+    prefixes = {
+        Path("runs") / config.run_id,
+        Path(*prefix_path.parts) if prefix_path.parts else Path(),
+        Path(config.version).parent,
+    }
+    return tuple(sorted((prefix for prefix in prefixes if str(prefix) != "."), key=str))
+
+
+def _refuse_existing_descendant_symlinks(root: Path, *, path_kind: str) -> None:
+    if root.is_symlink():
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+            f"{path_kind} must not contain symlinks: {root}",
+        )
+    if not root.exists():
+        return
+    try:
+        root_stat = stat_no_follow(root)
+    except SafeFilesystemError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+            f"{path_kind} must not contain symlinks: {root}",
+        ) from error
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return
+    root_fd = _open_existing_directory_fd(root, root_stat, path_kind=path_kind)
+    try:
+        node_count = 0
+        _refuse_descendant_symlinks_fd(
+            root_fd,
+            root,
+            path_kind=path_kind,
+            node_count=node_count,
+        )
+    finally:
+        os.close(root_fd)
+
+
+def _refuse_descendant_symlinks_fd(
+    dir_fd: int,
+    path_label: Path,
+    *,
+    path_kind: str,
+    node_count: int,
+) -> int:
+    with os.scandir(dir_fd) as scanner:
+        for entry in scanner:
+            node_count += 1
+            entry_path = path_label / entry.name
+            if node_count > MAX_DESCENDANT_SYMLINK_SCAN_NODES:
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    (
+                        f"{path_kind} exceeds configured symlink preflight traversal "
+                        f"limit of {MAX_DESCENDANT_SYMLINK_SCAN_NODES}: {path_label}"
+                    ),
+                )
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    f"Failed to stat {path_kind} entry {entry_path}: {error}",
+                ) from error
+            if stat.S_ISLNK(entry_stat.st_mode):
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+                    f"{path_kind} must not contain symlinks: {entry_path}",
+                )
+            if stat.S_ISDIR(entry_stat.st_mode):
+                child_fd = _open_runtime_prefix_child_dir(dir_fd, entry.name, entry_path, entry_stat)
+                try:
+                    node_count = _refuse_descendant_symlinks_fd(
+                        child_fd,
+                        entry_path,
+                        path_kind=path_kind,
+                        node_count=node_count,
+                    )
+                finally:
+                    os.close(child_fd)
+    return node_count
+
+
+def _open_existing_directory_fd(path: Path, expected_stat: os.stat_result, *, path_kind: str) -> int:
+    try:
+        fd = os.open(path, RUNTIME_DIR_FLAGS)
+        opened = os.fstat(fd)
+    except OSError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"Failed to open {path_kind} directory {path}: {error}",
+        ) from error
+    if expected_stat.st_dev != opened.st_dev or expected_stat.st_ino != opened.st_ino:
+        os.close(fd)
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"{path_kind} directory changed while being opened: {path}",
+        )
+    return fd
+
+
 def _validate_object_store_prefix_safe(prefix: str) -> None:
     if not prefix:
         return
@@ -1139,14 +2477,69 @@ def _validate_object_store_prefix_safe(prefix: str) -> None:
             "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
             "Object-store prefix must not contain fragments.",
         )
-    for raw_segment in parsed.path.split("/"):
-        segment = unquote(raw_segment)
-        decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(segment)
+    for decoded in _canonical_decode_steps(prefix):
+        if ENCODED_SEPARATOR_RE.search(decoded):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                "Object-store prefix path must not contain encoded separators.",
+            )
+        if SENSITIVE_PREFIX_ASSIGNMENT_RE.search(decoded):
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                "Object-store prefix must not contain credential assignments.",
+            )
+        decoded_parts = SENSITIVE_PREFIX_SEPARATOR_RE.split(decoded)
         if any(SENSITIVE_PREFIX_ASSIGNMENT_RE.search(part) for part in decoded_parts):
             raise ProductionObjectStoreValidationError(
                 "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
-                "Object-store prefix path segments must not contain credential assignments.",
+                "Object-store prefix must not contain credential assignments.",
             )
+        decoded_parsed = urlsplit(decoded)
+        if decoded_parsed.username or decoded_parsed.password:
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                "Object-store prefix must not contain userinfo credentials.",
+            )
+        _guard_url_authority(decoded_parsed.netloc)
+        for segment in decoded_parsed.path.split("/"):
+            if segment in {".", ".."} or "\\" in segment:
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+                    "Object-store prefix path must not contain traversal.",
+                )
+
+
+def _guard_url_authority(netloc: str) -> None:
+    if not netloc:
+        return
+    if "/" in netloc or "\\" in netloc:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix URL authority must not contain separators.",
+        )
+    host = netloc.rsplit("@", maxsplit=1)[-1].split(":", maxsplit=1)[0]
+    if host in {".", ".."} or any(segment in {"", ".", ".."} for segment in host.split(".")):
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix URL authority must not contain traversal.",
+        )
+
+
+def _canonical_decode_steps(value: str) -> tuple[str, ...]:
+    steps = [value]
+    current = value
+    for _ in range(MAX_PERCENT_DECODE_ROUNDS):
+        decoded = unquote(current)
+        if decoded == current:
+            break
+        steps.append(decoded)
+        current = decoded
+    if unquote(current) != current:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_PREFIX_UNSAFE",
+            "Object-store prefix contains over-encoded percent escapes.",
+        )
+    return tuple(steps)
 
 
 def _operational_prefix(value: str) -> str:
@@ -1174,11 +2567,7 @@ def _safe_run_id(run_id: str) -> str:
 
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
     root = evidence_root.expanduser()
-    if root.exists() or root.is_symlink():
-        _refuse_symlink_components(root)
-    parent = root.parent
-    if parent.exists() or parent.is_symlink():
-        _refuse_symlink_components(parent)
+    _refuse_symlink_components_to_deepest_existing(root)
     return root.resolve(strict=False)
 
 
@@ -1193,6 +2582,21 @@ def _refuse_symlink_components(path: Path) -> None:
                 "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
                 f"Evidence path component must not be a symlink: {current}",
             )
+
+
+def _refuse_symlink_components_to_deepest_existing(path: Path) -> None:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts:
+        if part == path.anchor or part == "":
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+                f"Evidence path component must not be a symlink: {current}",
+            )
+        if not current.exists():
+            break
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:

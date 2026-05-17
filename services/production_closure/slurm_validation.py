@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,12 @@ from typing import Any, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    unlink_no_follow,
+)
 from services.orchestrator.retry import compute_backoff_seconds, is_transient_error
 from services.production_closure.e2e_validation import (
     ProductionE2EConfig,
@@ -32,6 +39,11 @@ from services.production_closure.object_store_validation import (
     ProductionObjectStoreConfig,
     ProductionObjectStoreValidationError,
     validate_object_store,
+)
+from services.production_closure.ops_validation import (
+    ProductionOpsConfig,
+    ProductionOpsValidationError,
+    validate_ops,
 )
 from services.production_closure.scale_validation import (
     ProductionScaleConfig,
@@ -69,6 +81,7 @@ MAX_POLL_TIMEOUT_SECONDS = 86400.0
 MIN_POLL_INTERVAL_SECONDS = 1.0
 CONTROLLED_FAILURE_LOG_MARKER = "NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED"
 CONTROLLED_FAILURE_LOG_SIGNATURES = ("NON_FINITE_FLOW",)
+MAX_SLURM_LOG_BYTES = 1024 * 1024
 RESOURCE_LIMITS = {
     "nodes": 128,
     "ntasks": 4096,
@@ -98,7 +111,12 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
-        resolved_lane = self.lane_dir.resolve()
+            if not self.lane_dir.is_dir():
+                raise ProductionValidationError(
+                    "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
+        resolved_lane = self.lane_dir.resolve(strict=False)
         try:
             resolved_lane.relative_to(self.evidence_root)
         except ValueError as error:
@@ -106,7 +124,19 @@ class EvidenceWriter:
                 "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
                 "Evidence lane directory must stay under evidence root.",
             ) from error
-        self.lane_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(self.evidence_root)
+            ensure_directory_no_follow(self.lane_dir, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_SLURM_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionValidationError(
+                error_code,
+                f"Failed to prepare evidence lane {self.lane_dir}: {error}",
+            ) from error
 
     def write_json(self, path: Path, payload: Any) -> None:
         self.write_text(
@@ -139,35 +169,48 @@ class EvidenceWriter:
         exists_error_code: str = "PRODUCTION_SLURM_EVIDENCE_EXISTS",
         write_error_code: str = "PRODUCTION_SLURM_EVIDENCE_WRITE_FAILED",
     ) -> None:
-        safe_path = self._safe_file_path(path, allow_outside_evidence=allow_outside_evidence)
+        safe_path = self._safe_file_path(
+            path,
+            allow_outside_evidence=allow_outside_evidence,
+            file_label=file_label,
+            write_error_code=write_error_code,
+        )
         if safe_path.exists() and safe_path not in self._created_paths and not self.force:
             raise ProductionValidationError(
                 exists_error_code,
                 f"{file_label} already exists: {safe_path}. Use --force to overwrite an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            containment_root = None if allow_outside_evidence else self.evidence_root
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=containment_root)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = write_error_code if error.kind == "io" else "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+            raise ProductionValidationError(
+                error_code,
+                f"Failed to write {file_label.lower()} {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             raise ProductionValidationError(
                 write_error_code,
                 f"Failed to write {file_label.lower()} {safe_path}: {error}",
             ) from error
 
-    def _safe_file_path(self, path: Path, *, allow_outside_evidence: bool = False) -> Path:
+    def _safe_file_path(
+        self,
+        path: Path,
+        *,
+        allow_outside_evidence: bool = False,
+        file_label: str = "Evidence file",
+        write_error_code: str = "PRODUCTION_SLURM_EVIDENCE_WRITE_FAILED",
+    ) -> Path:
         if path.is_symlink():
             raise ProductionValidationError(
                 "PRODUCTION_SLURM_EVIDENCE_SYMLINK",
                 f"Evidence file must not be a symlink: {path}",
             )
         _refuse_symlink_components(path.parent)
-        resolved_parent = path.parent.resolve()
+        resolved_parent = path.parent.resolve(strict=False)
         if not allow_outside_evidence:
             try:
                 resolved_parent.relative_to(self.evidence_root)
@@ -176,8 +219,24 @@ class EvidenceWriter:
                     "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE",
                     "Evidence file path must stay under evidence root.",
                 ) from error
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            containment_root = None if allow_outside_evidence else self.evidence_root
+            ensure_directory_no_follow(path.parent, containment_root=containment_root)
+        except SafeFilesystemError as error:
+            error_code = write_error_code if error.kind == "io" else "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+            raise ProductionValidationError(
+                error_code,
+                f"Failed to prepare {file_label.lower()} parent {path.parent}: {error}",
+            ) from error
         return resolved_parent / path.name
+
+
+@dataclass(frozen=True)
+class _BoundSlurmLogPath:
+    path: Path
+    log_dir: Path
+    log_dir_stat: os.stat_result
+    basename: str
 
 
 @dataclass(frozen=True)
@@ -337,12 +396,19 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         status = "blocked"
     elif config.submit:
         status = "submitted"
+    live_slurm_executed = accounting.get("mode") == "submitted" and not blockers and not accounting_blockers
+    deterministic_fixture = not live_slurm_executed
     summary = {
         "schema": "nhms.production_closure.slurm.v1",
         "issue": 147,
         "run_id": config.run_id,
         "status": status,
         "evidence_dir": str(config.lane_dir),
+        "execution_mode": "live_slurm_submitted" if live_slurm_executed else "deterministic_fixture",
+        "deterministic_fixture": deterministic_fixture,
+        "live_slurm_executed": live_slurm_executed,
+        "live_slurm_status": "executed" if live_slurm_executed else "not_executed",
+        "final_production_readiness_claimed": False,
         "blockers": all_blockers,
         "files": [
             "preflight.json",
@@ -463,11 +529,7 @@ def _object_store_env_value(production_name: str, generic_name: str, default: st
 
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
     root = evidence_root.expanduser()
-    if root.exists() or root.is_symlink():
-        _refuse_symlink_components(root)
-    parent = root.parent
-    if parent.exists() or parent.is_symlink():
-        _refuse_symlink_components(parent)
+    _refuse_symlink_components_to_deepest_existing(root)
     return root.resolve(strict=False)
 
 
@@ -482,6 +544,21 @@ def _refuse_symlink_components(path: Path) -> None:
                 "PRODUCTION_SLURM_EVIDENCE_SYMLINK",
                 f"Evidence path component must not be a symlink: {current}",
             )
+
+
+def _refuse_symlink_components_to_deepest_existing(path: Path) -> None:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts:
+        if part == path.anchor or part == "":
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise ProductionValidationError(
+                "PRODUCTION_SLURM_EVIDENCE_SYMLINK",
+                f"Evidence path component must not be a symlink: {current}",
+            )
+        if not current.exists():
+            break
 
 
 def _positive_int_env(env_name: str, default: int, *, maximum: int) -> int:
@@ -849,8 +926,8 @@ def _prepare_shared_log_dir(config: ProductionSlurmConfig) -> Path:
             f"Slurm log path exists but is not a directory: {log_dir}",
         )
     try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
+        ensure_directory_no_follow(log_dir, containment_root=config.workspace_root)
+    except (OSError, SafeFilesystemError) as error:
         raise ProductionValidationError(
             "PRODUCTION_SLURM_LOG_DIR_INVALID",
             f"Failed to create Slurm log directory {log_dir}: {error}",
@@ -888,8 +965,8 @@ def _cleanup_shared_runtime_inputs(config: ProductionSlurmConfig) -> list[dict[s
             results.append({"path": str(path), "status": "unsafe", "error_code": error.error_code})
             continue
         try:
-            safe_path.unlink(missing_ok=True)
-        except OSError as error:
+            unlink_no_follow(safe_path, containment_root=config.workspace_root, missing_ok=True)
+        except (OSError, SafeFilesystemError) as error:
             results.append({"path": str(safe_path), "status": "failed", "error": str(error)})
             continue
         results.append({"path": str(safe_path), "status": "absent" if not safe_path.exists() else "failed"})
@@ -1094,28 +1171,9 @@ def _submitted_log_blockers(
             continue
         for suffix in ("out", "err"):
             path = _slurm_log_file(config, job_id, task_id, suffix=suffix)
-            if not path.is_file():
-                blockers.append(
-                    {
-                        "error_code": "SLURM_ARRAY_TASK_LOG_MISSING",
-                        "field": f"task_{task_id}_{suffix}",
-                        "task_id": str(task_id),
-                        "path": str(path),
-                    }
-                )
-                continue
-            try:
-                with path.open("r", encoding="utf-8") as handle:
-                    handle.read(1)
-            except OSError:
-                blockers.append(
-                    {
-                        "error_code": "SLURM_ARRAY_TASK_LOG_UNREADABLE",
-                        "field": f"task_{task_id}_{suffix}",
-                        "task_id": str(task_id),
-                        "path": str(path),
-                    }
-                )
+            blocker = _slurm_log_file_blocker(config, path, task_id=task_id, suffix=suffix)
+            if blocker:
+                blockers.append(blocker)
     task1 = task_records.get(1)
     if task1 and _is_controlled_failure_outcome(task1) and not _controlled_failure_log_evidence_present(config, job_id):
         blockers.append(
@@ -1147,13 +1205,214 @@ def _read_task_logs(config: ProductionSlurmConfig, job_id: str, *, task_id: int)
     contents: list[str] = []
     for suffix in ("out", "err"):
         path = _slurm_log_file(config, job_id, task_id, suffix=suffix)
-        if not path.is_file():
+        blocker, content = _validated_slurm_log_content(config, path, task_id=task_id, suffix=suffix)
+        if blocker or content is None:
             continue
-        try:
-            contents.append(path.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            continue
+        contents.append(content)
     return contents
+
+
+def _slurm_log_file_blocker(
+    config: ProductionSlurmConfig,
+    path: Path,
+    *,
+    task_id: int,
+    suffix: str,
+) -> dict[str, str] | None:
+    blocker, _content = _validated_slurm_log_content(config, path, task_id=task_id, suffix=suffix, read_content=False)
+    return blocker
+
+
+def _validated_slurm_log_content(
+    config: ProductionSlurmConfig,
+    path: Path,
+    *,
+    task_id: int,
+    suffix: str,
+    read_content: bool = True,
+) -> tuple[dict[str, str] | None, str | None]:
+    field = f"task_{task_id}_{suffix}"
+    bound_log, blocker = _bind_slurm_log_path(config, path, field=field, task_id=task_id)
+    if blocker:
+        return blocker, None
+    blocker = _validate_slurm_log_path(config, path, field=field, task_id=task_id)
+    if blocker:
+        return blocker, None
+    if bound_log is None:
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None
+
+    blocker, fd, pre_open_lstat = _open_bound_slurm_log_file(bound_log, field=field, task_id=task_id)
+    if blocker or fd is None or pre_open_lstat is None:
+        return blocker, None
+
+    try:
+        fd_stat = os.fstat(fd)
+        if pre_open_lstat and (fd_stat.st_dev != pre_open_lstat.st_dev or fd_stat.st_ino != pre_open_lstat.st_ino):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None
+        if not stat.S_ISREG(fd_stat.st_mode):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
+        if fd_stat.st_size > MAX_SLURM_LOG_BYTES:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_TOO_LARGE", field, task_id, path), None
+        if not read_content:
+            return None, None
+        content = _read_bounded_slurm_log_fd(fd)
+        if len(content) > MAX_SLURM_LOG_BYTES:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_TOO_LARGE", field, task_id, path), None
+        return None, content.decode("utf-8", errors="replace")
+    except OSError:
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None
+    finally:
+        os.close(fd)
+
+
+def _bind_slurm_log_path(
+    config: ProductionSlurmConfig,
+    path: Path,
+    *,
+    field: str,
+    task_id: int,
+) -> tuple[_BoundSlurmLogPath | None, dict[str, str] | None]:
+    log_dir = _slurm_log_dir(config)
+    try:
+        _refuse_symlink_components(log_dir)
+        resolved_log_dir = log_dir.resolve(strict=True)
+        resolved_parent = path.parent.resolve(strict=False)
+        resolved_path = path.resolve(strict=False)
+        resolved_path.relative_to(resolved_log_dir)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ProductionValidationError, ValueError):
+        return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    if resolved_parent != resolved_log_dir:
+        return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    try:
+        log_dir_stat = resolved_log_dir.lstat()
+    except OSError:
+        return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    if stat.S_ISLNK(log_dir_stat.st_mode) or not stat.S_ISDIR(log_dir_stat.st_mode):
+        return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    return _BoundSlurmLogPath(
+        path=path,
+        log_dir=resolved_log_dir,
+        log_dir_stat=log_dir_stat,
+        basename=path.name,
+    ), None
+
+
+def _open_bound_slurm_log_file(
+    bound_log: _BoundSlurmLogPath,
+    *,
+    field: str,
+    task_id: int,
+) -> tuple[dict[str, str] | None, int | None, os.stat_result | None]:
+    path = bound_log.path
+    if not _slurm_log_dir_identity_matches(bound_log):
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None, None
+
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    dir_flags = os.O_RDONLY | nofollow_flag
+    if hasattr(os, "O_CLOEXEC"):
+        dir_flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    try:
+        dir_fd = os.open(bound_log.log_dir, dir_flags)
+    except OSError:
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None, None
+
+    try:
+        opened_dir_stat = os.fstat(dir_fd)
+        if (
+            not stat.S_ISDIR(opened_dir_stat.st_mode)
+            or opened_dir_stat.st_dev != bound_log.log_dir_stat.st_dev
+            or opened_dir_stat.st_ino != bound_log.log_dir_stat.st_ino
+        ):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None, None
+
+        try:
+            pre_open_lstat = os.stat(bound_log.basename, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None, None
+        except OSError:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None, None
+        if stat.S_ISLNK(pre_open_lstat.st_mode):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path), None, None
+        if not stat.S_ISREG(pre_open_lstat.st_mode):
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNREADABLE", field, task_id, path), None, None
+
+        file_flags = os.O_RDONLY | nofollow_flag
+        if hasattr(os, "O_CLOEXEC"):
+            file_flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NONBLOCK"):
+            file_flags |= os.O_NONBLOCK
+        try:
+            fd = os.open(bound_log.basename, file_flags, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_MISSING", field, task_id, path), None, None
+        except OSError as error:
+            error_code = (
+                "SLURM_ARRAY_TASK_LOG_UNSAFE"
+                if nofollow_flag and error.errno == errno.ELOOP
+                else "SLURM_ARRAY_TASK_LOG_UNREADABLE"
+            )
+            return _slurm_log_blocker(error_code, field, task_id, path), None, None
+        return None, fd, pre_open_lstat
+    finally:
+        os.close(dir_fd)
+
+
+def _slurm_log_dir_identity_matches(bound_log: _BoundSlurmLogPath) -> bool:
+    try:
+        current = bound_log.log_dir.lstat()
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(current.st_mode)
+        and stat.S_ISDIR(current.st_mode)
+        and current.st_dev == bound_log.log_dir_stat.st_dev
+        and current.st_ino == bound_log.log_dir_stat.st_ino
+    )
+
+
+def _validate_slurm_log_path(
+    config: ProductionSlurmConfig,
+    path: Path,
+    *,
+    field: str,
+    task_id: int,
+) -> dict[str, str] | None:
+    try:
+        _refuse_symlink_components(path.parent)
+        resolved_path = path.resolve(strict=False)
+        resolved_log_dir = _slurm_log_dir(config).resolve(strict=False)
+        resolved_path.relative_to(resolved_log_dir)
+    except (OSError, ProductionValidationError, ValueError):
+        return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
+    return None
+
+
+def _slurm_log_blocker(error_code: str, field: str, task_id: int, path: Path) -> dict[str, str]:
+    blocker = {
+        "error_code": error_code,
+        "field": field,
+        "task_id": str(task_id),
+        "path": str(path),
+    }
+    if error_code == "SLURM_ARRAY_TASK_LOG_TOO_LARGE":
+        blocker["max_bytes"] = str(MAX_SLURM_LOG_BYTES)
+    return blocker
+
+
+def _read_bounded_slurm_log_fd(fd: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_SLURM_LOG_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def _timeout_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1331,7 +1590,9 @@ def _has_blocker(blockers: list[dict[str, Any]], error_code: str) -> bool:
 def _has_log_blocker(blockers: list[dict[str, Any]], task_id: int) -> bool:
     log_codes = {
         "SLURM_ARRAY_TASK_LOG_MISSING",
+        "SLURM_ARRAY_TASK_LOG_TOO_LARGE",
         "SLURM_ARRAY_TASK_LOG_UNREADABLE",
+        "SLURM_ARRAY_TASK_LOG_UNSAFE",
         "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING",
     }
     return any(
@@ -1355,7 +1616,11 @@ def _slurm_log_path(config: ProductionSlurmConfig, accounting: dict[str, Any], t
 
 
 def _slurm_log_file(config: ProductionSlurmConfig, array_job_id: str, task_id: int, *, suffix: str) -> Path:
-    return config.workspace_root / config.run_id / "logs" / f"{array_job_id}_{task_id}.{suffix}"
+    return _slurm_log_dir(config) / f"{array_job_id}_{task_id}.{suffix}"
+
+
+def _slurm_log_dir(config: ProductionSlurmConfig) -> Path:
+    return config.workspace_root / config.run_id / "logs"
 
 
 def _blocked_partial_success(
@@ -1777,6 +2042,64 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"PRODUCTION_SCALE_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("validate-ops")
+    @click.option("--evidence-root", type=click.Path(path_type=Path), required=True)
+    @click.option("--run-id")
+    @click.option("--auth-mode", default=None)
+    @click.option("--required-roles", default=None)
+    @click.option("--alert-target", default=None)
+    @click.option("--deployment-config-source", default=None)
+    @click.option("--rollback-scope", default=None)
+    @click.option("--slurm-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--object-store-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--met-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--e2e-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--scale-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--dependency-statuses", default=None)
+    @click.option("--force", is_flag=True, default=False)
+    def validate_ops_command(
+        evidence_root: Path,
+        run_id: str | None,
+        auth_mode: str | None,
+        required_roles: str | None,
+        alert_target: str | None,
+        deployment_config_source: str | None,
+        rollback_scope: str | None,
+        slurm_evidence_root: Path | None,
+        object_store_evidence_root: Path | None,
+        met_evidence_root: Path | None,
+        e2e_evidence_root: Path | None,
+        scale_evidence_root: Path | None,
+        dependency_statuses: str | None,
+        force: bool,
+    ) -> None:
+        try:
+            summary = validate_ops(
+                ProductionOpsConfig.from_env(
+                    evidence_root=evidence_root,
+                    run_id=run_id,
+                    auth_mode=auth_mode,
+                    required_roles=required_roles,
+                    alert_target=alert_target,
+                    deployment_config_source=deployment_config_source,
+                    rollback_scope=rollback_scope,
+                    slurm_evidence_root=slurm_evidence_root,
+                    object_store_evidence_root=object_store_evidence_root,
+                    met_evidence_root=met_evidence_root,
+                    e2e_evidence_root=e2e_evidence_root,
+                    scale_evidence_root=scale_evidence_root,
+                    dependency_statuses=dependency_statuses,
+                    force=force,
+                )
+            )
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
+        except ProductionOpsValidationError as error:
+            click.echo(f"{error.error_code}: {redact_text(error.message)}", err=True)
+            raise SystemExit(1) from error
+        except Exception as error:
+            click.echo(f"PRODUCTION_OPS_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
+            raise SystemExit(1) from error
+
     try:
         cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
     except click.ClickException as error:
@@ -1844,6 +2167,21 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     scale_parser.add_argument("--object-prefix", default=None)
     scale_parser.add_argument("--latency-fixture", default=None)
     scale_parser.add_argument("--force", action="store_true")
+    ops_parser = subparsers.add_parser("validate-ops")
+    ops_parser.add_argument("--evidence-root", type=Path, required=True)
+    ops_parser.add_argument("--run-id")
+    ops_parser.add_argument("--auth-mode", default=None)
+    ops_parser.add_argument("--required-roles", default=None)
+    ops_parser.add_argument("--alert-target", default=None)
+    ops_parser.add_argument("--deployment-config-source", default=None)
+    ops_parser.add_argument("--rollback-scope", default=None)
+    ops_parser.add_argument("--slurm-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--object-store-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--met-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--e2e-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--scale-evidence-root", type=Path, default=None)
+    ops_parser.add_argument("--dependency-statuses", default=None)
+    ops_parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "validate-slurm":
@@ -1999,6 +2337,40 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             return 1
         except Exception as error:
             print(f"PRODUCTION_SCALE_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "validate-ops":
+        try:
+            print(
+                json.dumps(
+                    redact_payload(
+                        validate_ops(
+                            ProductionOpsConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                auth_mode=args.auth_mode,
+                                required_roles=args.required_roles,
+                                alert_target=args.alert_target,
+                                deployment_config_source=args.deployment_config_source,
+                                rollback_scope=args.rollback_scope,
+                                slurm_evidence_root=args.slurm_evidence_root,
+                                object_store_evidence_root=args.object_store_evidence_root,
+                                met_evidence_root=args.met_evidence_root,
+                                e2e_evidence_root=args.e2e_evidence_root,
+                                scale_evidence_root=args.scale_evidence_root,
+                                dependency_statuses=args.dependency_statuses,
+                                force=args.force,
+                            )
+                        )
+                    ),
+                    sort_keys=True,
+                )
+            )
+        except ProductionOpsValidationError as error:
+            print(f"{error.error_code}: {redact_text(error.message)}", file=sys.stderr)
+            return 1
+        except Exception as error:
+            print(f"PRODUCTION_OPS_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")

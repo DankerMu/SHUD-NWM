@@ -150,13 +150,41 @@
 
 ## 6. Production Ops / Security / Runbook Readiness
 
-- [ ] 6.0 Record preflight: auth mode, required roles, alert target or dry-run sink, deployment config source, and rollback drill scope.
-- [ ] 6.1 Add production environment templates and validation docs for API/orchestrator/slurm-gateway/tile/frontend services.
-- [ ] 6.2 Enforce backend-side auth/RBAC boundary for operator/model-admin actions or document a release-blocking fallback; required actions include model activation, rerun, cancel, QC override, source config change, and tile republish.
-- [ ] 6.3 Add secret redaction tests for logs, manifests, audit rows, API payloads, PR evidence, and frontend output.
-- [ ] 6.4 Add monitoring/alert evidence for source latency, Slurm queue backlog, failed basin retries, object-store failures, stale analysis state, tile errors, and API p95.
-- [ ] 6.5 Add rollback drill documentation for bad model activation, failed publish/import, failed source cycle, failed Slurm array, and bad tile release.
-- [ ] 6.6 Update `progress.md` and `docs/VALIDATION.md` when each production closure evidence lane lands.
+- [x] 6.0 Record preflight: auth mode, required roles, alert target or dry-run sink, deployment config source, and rollback drill scope.
+- [x] 6.1 Add production environment templates and validation docs for API/orchestrator/slurm-gateway/tile/frontend services.
+- [x] 6.2 Enforce backend-side auth/RBAC boundary for operator/model-admin actions or document a release-blocking fallback; required actions include model activation, rerun, cancel, QC override, source config change, and tile republish.
+- [x] 6.3 Add secret redaction tests for logs, manifests, audit rows, API payloads, PR evidence, and frontend output.
+- [x] 6.4 Add monitoring/alert evidence for source latency, Slurm queue backlog, failed basin retries, object-store failures, stale analysis state, tile errors, and API p95.
+- [x] 6.5 Add rollback drill documentation for bad model activation, failed publish/import, failed source cycle, failed Slurm array, and bad tile release.
+- [x] 6.6 Update `progress.md` and `docs/VALIDATION.md` when each production closure evidence lane lands.
+
+### Issue #152 Evidence Map
+
+- [x] 6.E1 Preflight artifact: input fixture sets auth mode, required roles, alert sink or dry-run target, deployment config source, rollback drill scope, dependency evidence roots/status for #147-#151, and evidence root; expected output is redacted JSON under `artifacts/production-closure/<run_id>/ops/` with stable missing/unsafe input errors.
+- [x] 6.E2 Production config evidence: input deterministic or supplied config templates for API, orchestrator, Slurm gateway, tile publisher, frontend, database, object store, source adapters, and workspace roots; expected output records service-by-service required settings, unsafe/missing setting blockers, template source, and redacted values.
+- [x] 6.E3 Backend auth/RBAC evidence: input action matrix for model activation, rerun, cancel, QC override, source config change, and tile republish; expected output records allowed, denied, or release-blocked decisions with required roles, stable error codes, `execution_mode` from `backend_route_executed|policy_simulated|release_blocked`, `live_backend_auth_executed`, and no state mutation for denied or release-blocked actions. Release-blocker artifacts must enumerate every blocked action, residual risk, and removal criteria.
+- [x] 6.E4 Audit/redaction evidence: input allowed/denied actions and secret-shaped values across config, logs, manifests, audit rows, API payloads, alert payloads, PR evidence, and frontend-facing output; expected output redacts credentials and records actor, role, target, previous/new state, decision, reason, and lineage.
+- [x] 6.E5 Monitoring/alert evidence: input deterministic source latency, Slurm queue backlog, failed basin retries, object-store failure, stale analysis state, tile error, and API p95 breach; expected output records metric name, severity, observed value, threshold, `execution_mode` from `live_sink_delivered|dry_run_sink|not_executed`, `live_alert_sink_delivered`, sink/dry-run target, runbook link, and recommended operator action.
+- [x] 6.E6 Rollback drill evidence: input bad model activation, failed publish/import, failed source cycle, failed Slurm array, and bad tile release drills; expected output records commands, preconditions, expected evidence, recovery result, residual risk, dependency artifact references, `execution_mode` from `live_drill|simulated_drill`, and `live_rollback_executed`.
+- [x] 6.E7 Dependency closure evidence: input #147/#148/#149/#150/#151 accepted or deterministic summaries; expected output records each dependency as accepted, skipped, blocked, or not_executed without fabricating live Slurm/object-store/met/e2e/scale execution. Accepted dependency closure consumes the unchanged producer `summary.json` only when a strongly bound external `accepted_dependency_evidence.json` receipt is present. Deterministic or live-proof-incomplete producer summaries may be accepted by receipt but must carry explicit release blockers/residual risk, and final readiness remains release-blocked unless every dependency and live ops surface is proven.
+- [x] 6.E8 Run-scoped path/idempotency/redaction: input reruns, unsafe run IDs, symlinked evidence roots, oversized evidence payloads, credential-shaped auth/config/alert URLs, and cross-run paths; expected output refuses unsafe writes, requires explicit same-run `--force`, bounds payloads, and redacts stdout/evidence/docs.
+- [x] 6.E9 Fast-regression commands: expected passing commands include `openspec validate m10-production-closure --strict --no-interactive`, `uv run ruff check .`, targeted production ops/auth/redaction/audit/monitoring/rollback tests, frontend tests/build when UI/generated types change, and documented opt-in `NHMS_RUN_PRODUCTION_CLOSURE=1 ... validate-ops --evidence-root ...`.
+
+### Issue #152 Selected Risk Packs
+
+- [x] 6.R1 Public API / CLI / script entry: selected - `validate-ops`, action authorization simulation, alert evidence, and rollback drill entrypoints need stable JSON/error behavior.
+- [x] 6.R2 Config / project setup: selected - auth mode, role map, alert sink, deployment config source, service templates, dependency evidence roots, rollback scope, and evidence root are preflight inputs.
+- [x] 6.R3 File IO / path safety / overwrite: selected - config templates, audit reports, alert payloads, rollback drill reports, dependency evidence references, and reruns must stay run-scoped and bounded.
+- [x] 6.R4 Schema / time-series / audit contracts: selected - config, action decision, audit, alert, rollback, dependency status, freshness, p95, and summary schemas must remain stable.
+- [x] 6.R5 Numerical/resource bounds: selected - alert thresholds, API p95 samples, stale-state ages, queue backlog counts, audit/action enumeration, and evidence payload sizes must reject malformed, non-finite, or unbounded values.
+- [x] 6.R6 Legacy compatibility, release compatibility, error handling, rollback, and docs: selected - existing frontend RBAC gates, production closure lanes, release-blocking auth fallback, rollback drills, validation docs, and progress updates must remain compatible.
+
+### Issue #152 Deferred / Non-Goal Risk Packs
+
+- [x] 6.D1 Full production identity-provider integration may be deferred only with an explicit release blocker; frontend-only RBAC is not accepted as backend production readiness.
+- [x] 6.D2 Permanent deployment automation, live pager routing, and continuous alert delivery infrastructure are out of scope for the deterministic fast lane.
+- [x] 6.D3 Real production rollback execution is not required by default; deterministic drills must state simulation mode and live evidence needed to remove residual risk.
+- [x] 6.D4 Hydrologic skill validation, true production MVT implementation, and long-running load tests remain outside #152.
 
 ## Issue Dependencies
 

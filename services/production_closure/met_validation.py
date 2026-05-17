@@ -6,9 +6,7 @@ import math
 import os
 import platform
 import re
-import shutil
 import sys
-import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +15,12 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload, redact_text
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    rmtree_no_follow,
+)
 from packages.common.test_netcdf4 import encode_test_netcdf4
 from workers.canonical_converter.converter import (
     CanonicalConversionError,
@@ -108,6 +112,11 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
+            if not self.lane_dir.is_dir():
+                raise ProductionMetValidationError(
+                    "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
         resolved_lane = self.lane_dir.resolve(strict=False)
         try:
             resolved_lane.relative_to(self.evidence_root)
@@ -116,7 +125,19 @@ class EvidenceWriter:
                 "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE",
                 "Evidence lane directory must stay under evidence root.",
             ) from error
-        self.lane_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(self.evidence_root)
+            ensure_directory_no_follow(self.lane_dir, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_MET_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionMetValidationError(
+                error_code,
+                f"Failed to prepare evidence lane {self.lane_dir}: {error}",
+            ) from error
 
     def write_json(self, path: Path, payload: Any) -> None:
         content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
@@ -134,13 +155,20 @@ class EvidenceWriter:
                 "PRODUCTION_MET_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to replace an existing run_id bundle.",
             )
-        temp_path = safe_path.with_name(f".{safe_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            temp_path.write_bytes(content)
-            os.replace(temp_path, safe_path)
+            atomic_write_bytes_no_follow(safe_path, content, containment_root=self.evidence_root)
             self._created_paths.add(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_MET_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionMetValidationError(
+                error_code,
+                f"Failed to write evidence file {safe_path}: {error}",
+            ) from error
         except OSError as error:
-            temp_path.unlink(missing_ok=True)
             raise ProductionMetValidationError(
                 "PRODUCTION_MET_EVIDENCE_WRITE_FAILED",
                 f"Failed to write evidence file {safe_path}: {error}",
@@ -161,7 +189,18 @@ class EvidenceWriter:
                 "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE",
                 "Evidence file path must stay under evidence root.",
             ) from error
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory_no_follow(path.parent, containment_root=self.evidence_root)
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_MET_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionMetValidationError(
+                error_code,
+                f"Failed to prepare evidence file parent {path.parent}: {error}",
+            ) from error
         return resolved_parent / path.name
 
 
@@ -980,12 +1019,24 @@ def _summary(
     canonical_evidence: Mapping[str, Any],
     forcing_manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
+    source_modes = [
+        str(source.get("execution_mode"))
+        for source in raw_evidence.get("sources", [])
+        if isinstance(source, Mapping)
+    ]
+    live_source_count = sum(1 for mode in source_modes if mode == "live_executed")
+    deterministic_fixture = live_source_count == 0
     return {
         "schema": "nhms.production_closure.met.v1",
         "issue": 149,
         "run_id": config.run_id,
         "status": status,
         "evidence_dir": str(config.lane_dir),
+        "execution_mode": "live_source_ingest" if live_source_count else "deterministic_fixture",
+        "deterministic_fixture": deterministic_fixture,
+        "live_met_executed": live_source_count > 0,
+        "live_source_count": live_source_count,
+        "final_production_readiness_claimed": False,
         "object_prefix": config.object_prefix,
         "enabled_sources": list(config.enabled_sources),
         "cycle_time": _format_time(config.cycle_start),
@@ -1134,7 +1185,13 @@ def _prepare_object_bundle(config: ProductionMetConfig) -> None:
         )
     if object_root.exists() and config.force:
         _refuse_symlink_components(object_root)
-        shutil.rmtree(object_root)
+        try:
+            rmtree_no_follow(object_root, containment_root=config.lane_dir)
+        except SafeFilesystemError as error:
+            raise ProductionMetValidationError(
+                "PRODUCTION_MET_OBJECT_PATH_UNSAFE",
+                f"Failed to safely remove met validation object bundle {object_root}: {error}",
+            ) from error
 
 
 def _write_grid_definition(store: LocalObjectStore, config: ProductionMetConfig) -> str:
@@ -1843,11 +1900,7 @@ def _safe_run_id(run_id: str) -> str:
 
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
     root = evidence_root.expanduser()
-    if root.exists() or root.is_symlink():
-        _refuse_symlink_components(root)
-    parent = root.parent
-    if parent.exists() or parent.is_symlink():
-        _refuse_symlink_components(parent)
+    _refuse_symlink_components_to_deepest_existing(root)
     return root.resolve(strict=False)
 
 
@@ -1862,6 +1915,21 @@ def _refuse_symlink_components(path: Path) -> None:
                 "PRODUCTION_MET_EVIDENCE_SYMLINK",
                 f"Evidence path component must not be a symlink: {current}",
             )
+
+
+def _refuse_symlink_components_to_deepest_existing(path: Path) -> None:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts:
+        if part == path.anchor or part == "":
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise ProductionMetValidationError(
+                "PRODUCTION_MET_EVIDENCE_SYMLINK",
+                f"Evidence path component must not be a symlink: {current}",
+            )
+        if not current.exists():
+            break
 
 
 def _validate_object_prefix_safe(prefix: str) -> None:
