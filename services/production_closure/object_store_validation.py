@@ -10,7 +10,7 @@ import sys
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -169,6 +169,14 @@ class ProductionObjectStoreConfig:
         )
 
 
+@dataclass(frozen=True)
+class PackageChecksumReconstruction:
+    checksum: str | None
+    status: str
+    identity_basis: str
+    limitation: str | None = None
+
+
 def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]:
     config = replace(config, evidence_root=_safe_resolved_evidence_root(config.evidence_root))
     _validate_config(config)
@@ -218,7 +226,7 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
         stored_verification = _verify_stored_objects(store, manifest)
         writer.write_json(config.lane_dir / "stored_object_verification.json", stored_verification)
 
-        consumption = _consumption_evidence(config, writer, store, inventory_path, manifest)
+        consumption = _consumption_evidence(config, writer, store, inventory_path, package_manifest_raw_path, manifest)
         writer.write_json(config.lane_dir / "registry_api_runtime_consumption.json", consumption)
 
         cleanup = _cleanup_rollback_evidence(config, store, selected_model_id)
@@ -371,9 +379,17 @@ def _package_manifest_evidence(publish_result: dict[str, Any], manifest: dict[st
 def _verify_stored_objects(store: LocalObjectStore, manifest: dict[str, Any]) -> dict[str, Any]:
     stored_manifest_bytes = store.read_bytes(str(manifest["manifest_uri"]))
     stored_manifest = json.loads(stored_manifest_bytes.decode("utf-8"))
+    stored_manifest_sha256 = hashlib.sha256(stored_manifest_bytes).hexdigest()
+    package_checksum_reconstruction = _package_checksum_from_stored_manifest(stored_manifest)
+    package_checksum_verified = (
+        package_checksum_reconstruction.checksum
+        == stored_manifest.get("package_checksum")
+        == manifest.get("package_checksum")
+    )
+    package_checksum_matches_manifest = stored_manifest.get("package_checksum") == manifest.get("package_checksum")
     entries = []
-    all_verified = stored_manifest.get("package_checksum") == manifest.get("package_checksum")
-    for entry in manifest.get("included_files", []):
+    all_verified = package_checksum_matches_manifest
+    for entry in stored_manifest.get("included_files", []):
         if not isinstance(entry, dict):
             continue
         object_uri = str(entry["object_uri"])
@@ -381,8 +397,13 @@ def _verify_stored_objects(store: LocalObjectStore, manifest: dict[str, Any]) ->
         actual_sha256 = hashlib.sha256(content).hexdigest()
         actual_size = len(content)
         expected_sha256 = entry["sha256"]
+        manifest_payload_sha256 = None
+        final_manifest_sha256 = None
         if entry.get("role") == "manifest":
-            expected_sha256 = hashlib.sha256(content).hexdigest()
+            manifest_payload = _stored_manifest_payload_without_self_entry(stored_manifest)
+            manifest_payload_sha256 = hashlib.sha256(_deterministic_manifest_bytes(manifest_payload)).hexdigest()
+            final_manifest_sha256 = actual_sha256
+            actual_sha256 = manifest_payload_sha256
         verified = actual_sha256 == expected_sha256 and actual_size == entry["size_bytes"]
         all_verified = all_verified and verified
         entries.append(
@@ -395,6 +416,8 @@ def _verify_stored_objects(store: LocalObjectStore, manifest: dict[str, Any]) ->
                 "expected_sha256": expected_sha256,
                 "manifest_recorded_sha256": entry["sha256"] if entry.get("role") == "manifest" else None,
                 "actual_sha256": actual_sha256,
+                "manifest_payload_sha256": manifest_payload_sha256,
+                "final_manifest_sha256": final_manifest_sha256,
                 "verified": verified,
             }
         )
@@ -404,13 +427,152 @@ def _verify_stored_objects(store: LocalObjectStore, manifest: dict[str, Any]) ->
         "manifest_uri": manifest["manifest_uri"],
         "model_package_uri": manifest["model_package_uri"],
         "package_checksum": manifest["package_checksum"],
-        "package_checksum_confirmed_from_stored_manifest": (
-            stored_manifest.get("package_checksum") == manifest.get("package_checksum")
-        ),
-        "stored_manifest_sha256": hashlib.sha256(stored_manifest_bytes).hexdigest(),
+        "package_checksum_confirmed_from_stored_manifest": package_checksum_verified,
+        "package_checksum_matches_manifest": package_checksum_matches_manifest,
+        "package_checksum_reconstruction_status": package_checksum_reconstruction.status,
+        "package_checksum_source_model_identity_basis": package_checksum_reconstruction.identity_basis,
+        "package_checksum_reconstruction_limitation": package_checksum_reconstruction.limitation,
+        "stored_manifest_package_checksum": stored_manifest.get("package_checksum"),
+        "recomputed_package_checksum": package_checksum_reconstruction.checksum,
+        "stored_manifest_sha256": stored_manifest_sha256,
         "entry_count": len(entries),
         "entries": entries,
     }
+
+
+def _stored_manifest_payload_without_self_entry(stored_manifest: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(stored_manifest)
+    payload["included_files"] = [
+        entry
+        for entry in stored_manifest.get("included_files", [])
+        if isinstance(entry, dict) and entry.get("role") != "manifest"
+    ]
+    return payload
+
+
+def _package_checksum_from_stored_manifest(stored_manifest: dict[str, Any]) -> PackageChecksumReconstruction:
+    source_model_identity = _source_model_identity_for_package_checksum(stored_manifest)
+    if source_model_identity["identity"]["root_relative_resolved_path"] is None:
+        return PackageChecksumReconstruction(
+            checksum=None,
+            status="limited",
+            identity_basis=str(source_model_identity["basis"]),
+            limitation="stored_manifest_does_not_prove_root_relative_resolved_path",
+        )
+    included_files = [
+        {
+            "relative_path": entry["relative_path"],
+            "role": entry["role"],
+            "size_bytes": entry["size_bytes"],
+            "sha256": entry["sha256"],
+        }
+        for entry in stored_manifest.get("included_files", [])
+        if isinstance(entry, dict) and entry.get("role") != "manifest"
+    ]
+    checksum_material = {
+        "schema_version": stored_manifest.get("schema_version"),
+        "model_id": stored_manifest.get("model_id"),
+        "version": stored_manifest.get("version"),
+        "included_files": sorted(included_files, key=lambda item: (item["role"], item["relative_path"])),
+        "forcing": _forcing_checksum_material(stored_manifest.get("forcing")),
+        "copy_forcing": bool(stored_manifest.get("forcing", {}).get("payload_copied", False))
+        if isinstance(stored_manifest.get("forcing"), dict)
+        else False,
+        "source_model_identity": source_model_identity["identity"],
+    }
+    return PackageChecksumReconstruction(
+        checksum=_sha256_json(checksum_material),
+        status="confirmed",
+        identity_basis=str(source_model_identity["basis"]),
+    )
+
+
+def _source_model_identity_for_package_checksum(stored_manifest: dict[str, Any]) -> dict[str, Any]:
+    basin_slug = stored_manifest.get("basin_slug")
+    shud_input_name = stored_manifest.get("shud_input_name")
+    root_relative = stored_manifest.get("root_relative_resolved_path")
+    if isinstance(root_relative, str) and root_relative:
+        return {
+            "basis": "stored_manifest.root_relative_resolved_path",
+            "identity": {
+                "basin_slug": basin_slug,
+                "shud_input_name": shud_input_name,
+                "root_relative_resolved_path": root_relative,
+            },
+        }
+
+    inferred_root_relative = _infer_copied_root_relative_resolved_path(stored_manifest)
+    if inferred_root_relative is not None:
+        return {
+            "basis": "documented_148_copied_root_non_symlink_source_suffix",
+            "identity": {
+                "basin_slug": basin_slug,
+                "shud_input_name": shud_input_name,
+                "root_relative_resolved_path": inferred_root_relative,
+            },
+        }
+
+    return {
+        "basis": "unavailable",
+        "identity": {
+            "basin_slug": basin_slug,
+            "shud_input_name": shud_input_name,
+            "root_relative_resolved_path": None,
+        },
+    }
+
+
+def _infer_copied_root_relative_resolved_path(stored_manifest: dict[str, Any]) -> str | None:
+    """Infer only the documented #148 copied-root case.
+
+    Basins discovery sets root_relative_resolved_path equal to the basin slug when
+    a non-symlink copied root is scanned and the source/resolved model paths both
+    end with the basin slug. Without those manifest facts, the package checksum is
+    intentionally left unconfirmed instead of treating basin_slug as that field.
+    """
+    if stored_manifest.get("source_is_symlink") is not False:
+        return None
+    basin_slug = stored_manifest.get("basin_slug")
+    source_path = stored_manifest.get("source_path")
+    resolved_source_path = stored_manifest.get("resolved_source_path")
+    if not all(isinstance(value, str) and value for value in (basin_slug, source_path, resolved_source_path)):
+        return None
+    basin_parts = PurePosixPath(str(basin_slug)).parts
+    if not basin_parts or any(part in {"", ".", ".."} for part in basin_parts):
+        return None
+    if PurePosixPath(str(basin_slug)).is_absolute():
+        return None
+    source_parts = Path(str(source_path)).parts
+    resolved_parts = Path(str(resolved_source_path)).parts
+    if tuple(source_parts[-len(basin_parts) :]) != basin_parts:
+        return None
+    if tuple(resolved_parts[-len(basin_parts) :]) != basin_parts:
+        return None
+    return str(basin_slug)
+
+
+def _forcing_checksum_material(forcing: Any) -> Any:
+    if not isinstance(forcing, dict):
+        return forcing
+    return {
+        "policy": forcing.get("policy"),
+        "csv_count": forcing.get("csv_count"),
+        "byte_count": forcing.get("byte_count"),
+        "aggregate_checksum": forcing.get("aggregate_checksum"),
+        "payload_copied": forcing.get("payload_copied"),
+        "copied_file_count": forcing.get("copied_file_count"),
+        "copied_byte_count": forcing.get("copied_byte_count"),
+    }
+
+
+def _deterministic_manifest_bytes(payload: dict[str, Any]) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _sha256_json(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _consumption_evidence(
@@ -418,13 +580,14 @@ def _consumption_evidence(
     writer: EvidenceWriter,
     store: LocalObjectStore,
     inventory_path: Path,
+    package_manifest_raw_path: Path,
     manifest: dict[str, Any],
 ) -> dict[str, Any]:
     registry: dict[str, Any]
     try:
         sources = prepare_basins_import_sources(
             inventory_path=inventory_path,
-            package_manifest_path=config.lane_dir / "package_manifest.json",
+            package_manifest_path=package_manifest_raw_path,
         )
         registry = {
             "status": "local_sources_prepared",

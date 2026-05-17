@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 
 import pytest
 
-from services.production_closure import slurm_validation
-from services.production_closure.object_store_validation import write_synthetic_basins_fixture
+from packages.common.object_store import LocalObjectStore
+from services.production_closure import object_store_validation, slurm_validation
+from services.production_closure.object_store_validation import (
+    ProductionObjectStoreConfig,
+    _verify_stored_objects,
+    validate_object_store,
+    write_synthetic_basins_fixture,
+)
 
 
 def _assert_summary_files_match_lane_json(summary: dict[str, object], lane_dir: Path) -> None:
@@ -53,8 +60,17 @@ def test_validate_object_store_synthetic_copied_root_success(
     stored = json.loads((lane_dir / "stored_object_verification.json").read_text(encoding="utf-8"))
     assert stored["status"] == "verified"
     assert stored["package_checksum_confirmed_from_stored_manifest"] is True
+    assert (
+        stored["package_checksum_source_model_identity_basis"]
+        == "documented_148_copied_root_non_symlink_source_suffix"
+    )
+    assert stored["package_checksum_reconstruction_limitation"] is None
+    assert stored["recomputed_package_checksum"] == stored["package_checksum"]
     assert stored["entry_count"] > 0
     assert all(entry["verified"] is True for entry in stored["entries"])
+    manifest_entry = next(entry for entry in stored["entries"] if entry["role"] == "manifest")
+    assert manifest_entry["actual_sha256"] == manifest_entry["manifest_recorded_sha256"]
+    assert manifest_entry["final_manifest_sha256"] != manifest_entry["manifest_recorded_sha256"]
 
     consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
     assert consumption["status"] == "ready"
@@ -84,6 +100,163 @@ def test_validate_object_store_synthetic_copied_root_success(
     assert "AWS_SECRET_ACCESS_KEY" not in evidence_text
     assert "https://example.invalid:9000/path" in evidence_text
     assert "s3://nhms-prod/m10" in evidence_text
+
+
+def test_validate_object_store_registry_uses_raw_manifest_when_evidence_redacts_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original_prepare = object_store_validation.prepare_basins_import_sources
+    observed_manifest_paths: list[Path] = []
+    observed_raw_prefixes: list[str] = []
+
+    def recording_prepare(*, inventory_path: Path, package_manifest_path: Path) -> object:
+        observed_manifest_paths.append(package_manifest_path)
+        raw_manifest = json.loads(package_manifest_path.read_text(encoding="utf-8"))
+        observed_raw_prefixes.append(str(raw_manifest["model_package_uri"]))
+        return original_prepare(inventory_path=inventory_path, package_manifest_path=package_manifest_path)
+
+    monkeypatch.setattr(object_store_validation, "prepare_basins_import_sources", recording_prepare)
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv(
+        "NHMS_PRODUCTION_OBJECT_STORE_PREFIX",
+        "s3://AWS_SECRET_ACCESS_KEY:super-secret@nhms-prod/token=secret/m10?X-Amz-Signature=secret",
+    )
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_raw_manifest"]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    lane_dir = tmp_path / "artifacts" / "m10_148_raw_manifest" / "object-store"
+    manifest_evidence = json.loads((lane_dir / "package_manifest.json").read_text(encoding="utf-8"))
+    consumption = json.loads((lane_dir / "registry_api_runtime_consumption.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert summary["status"] == "ready"
+    assert consumption["registry"]["status"] == "local_sources_prepared"
+    assert consumption["status"] == "ready"
+    assert observed_manifest_paths == [lane_dir / ".package_manifest.raw.json"]
+    assert observed_raw_prefixes[0].startswith("s3://nhms-prod/token=secret/m10/models/")
+    assert manifest_evidence["model_package_uri"] == "s3://nhms-prod/token=[redacted]"
+    assert manifest_evidence["manifest_uri"] == "s3://nhms-prod/token=[redacted]"
+    evidence_text = "\n".join(path.read_text(encoding="utf-8") for path in lane_dir.glob("*.json"))
+    assert "AWS_SECRET_ACCESS_KEY" not in evidence_text
+    assert "super-secret" not in evidence_text
+    assert "X-Amz-Signature" not in evidence_text
+    assert "token=secret" not in evidence_text
+
+
+def test_verify_stored_objects_blocks_tampered_manifest_self_entry_checksum(
+    tmp_path: Path,
+) -> None:
+    summary = validate_object_store(
+        ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m10_148_manifest_self")
+    )
+    manifest_uri = str(summary["manifest_uri"])
+    manifest_path = tmp_path / "artifacts" / "m10_148_manifest_self" / "object-store" / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    store = LocalObjectStore(
+        tmp_path / "artifacts" / "m10_148_manifest_self" / "object-store" / "local-object-store",
+        "s3://nhms-production-like/m10_148_manifest_self",
+    )
+    stored_manifest = json.loads(store.read_bytes(manifest_uri).decode("utf-8"))
+    manifest_entry = next(entry for entry in stored_manifest["included_files"] if entry["role"] == "manifest")
+    manifest_entry["sha256"] = hashlib.sha256(store.read_bytes(manifest_uri)).hexdigest()
+    tampered_manifest_bytes = json.dumps(stored_manifest, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    store.write_bytes_atomic(manifest_uri, tampered_manifest_bytes)
+
+    verification = _verify_stored_objects(store, manifest)
+
+    blocked_entry = next(entry for entry in verification["entries"] if entry["role"] == "manifest")
+    assert verification["status"] == "blocked"
+    assert blocked_entry["verified"] is False
+    assert blocked_entry["actual_sha256"] != blocked_entry["manifest_recorded_sha256"]
+
+
+def test_verify_stored_objects_reports_limited_package_checksum_when_identity_not_provable(
+    tmp_path: Path,
+) -> None:
+    summary = validate_object_store(
+        ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m10_148_limited_checksum")
+    )
+    manifest_uri = str(summary["manifest_uri"])
+    manifest_path = tmp_path / "artifacts" / "m10_148_limited_checksum" / "object-store" / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    store = LocalObjectStore(
+        tmp_path / "artifacts" / "m10_148_limited_checksum" / "object-store" / "local-object-store",
+        "s3://nhms-production-like/m10_148_limited_checksum",
+    )
+    stored_manifest = json.loads(store.read_bytes(manifest_uri).decode("utf-8"))
+    stored_manifest.pop("source_path")
+    stored_manifest.pop("resolved_source_path")
+    manifest_entry = next(entry for entry in stored_manifest["included_files"] if entry["role"] == "manifest")
+    manifest_payload = object_store_validation._stored_manifest_payload_without_self_entry(stored_manifest)
+    manifest_entry["sha256"] = hashlib.sha256(
+        object_store_validation._deterministic_manifest_bytes(manifest_payload)
+    ).hexdigest()
+    for _ in range(5):
+        manifest_bytes = object_store_validation._deterministic_manifest_bytes(stored_manifest)
+        if manifest_entry["size_bytes"] == len(manifest_bytes):
+            break
+        manifest_entry["size_bytes"] = len(manifest_bytes)
+    store.write_bytes_atomic(manifest_uri, object_store_validation._deterministic_manifest_bytes(stored_manifest))
+
+    verification = _verify_stored_objects(store, manifest)
+
+    manifest_verification = next(entry for entry in verification["entries"] if entry["role"] == "manifest")
+    assert verification["status"] == "verified"
+    assert verification["package_checksum_matches_manifest"] is True
+    assert verification["package_checksum_confirmed_from_stored_manifest"] is False
+    assert verification["package_checksum_reconstruction_status"] == "limited"
+    assert verification["package_checksum_source_model_identity_basis"] == "unavailable"
+    assert (
+        verification["package_checksum_reconstruction_limitation"]
+        == "stored_manifest_does_not_prove_root_relative_resolved_path"
+    )
+    assert verification["recomputed_package_checksum"] is None
+    assert manifest_verification["verified"] is True
+
+
+def test_validate_object_store_uses_documented_env_names_without_generic_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    basins_root = tmp_path / "copied-basins"
+    inventory = write_synthetic_basins_fixture(basins_root)
+    model_id = next(model["model_id"] for model in inventory["models"] if model["status"] == "valid")
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_TARGET", "local-production-like")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(tmp_path / "documented-object-store"))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", "s3://nhms-prod/documented")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_CREDENTIAL_SOURCE", "workload-identity")
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_CLEANUP_POLICY", "retain")
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_ROOT", str(basins_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_MODEL_ID", model_id)
+    monkeypatch.setenv("NHMS_PRODUCTION_BASINS_VERSION", "vdocumented-env")
+
+    exit_code = slurm_validation.main(
+        ["validate-object-store", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "m10_148_docenv"]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    lane_dir = tmp_path / "artifacts" / "m10_148_docenv" / "object-store"
+    preflight = json.loads((lane_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert summary["status"] == "ready"
+    assert summary["model_id"] == model_id
+    assert summary["version"] == "vdocumented-env"
+    assert summary["object_store_prefix"] == "s3://nhms-prod/documented"
+    assert preflight["target"] == "local-production-like"
+    assert preflight["object_store_root"] == str(tmp_path / "documented-object-store")
+    assert preflight["object_store_prefix"] == "s3://nhms-prod/documented"
+    assert preflight["credential_source"] == "[redacted]"
+    assert preflight["cleanup_policy"] == "retain"
+    assert preflight["copied_basins_root"] == str(basins_root)
+    assert preflight["selected_model"] == model_id
+    assert preflight["version"] == "vdocumented-env"
 
 
 def test_validate_object_store_symlink_root_blocks_before_package_or_import(
