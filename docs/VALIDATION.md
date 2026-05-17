@@ -326,8 +326,10 @@ The bundle is written under
   `status=ready` for the object-store lane but records
   `deterministic_fixture=true`, `live_registry_import=false`,
   `live_api=false`, `live_api_status=not_executed`, and
-  `final_production_readiness_claimed=false`, so ops cannot treat it as an
-  accepted live dependency even if a sidecar receipt is present.
+  `final_production_readiness_claimed=false`. Ops can consume this unchanged
+  producer summary only when an external accepted-dependency receipt binds to
+  it; the missing live registry/API proof remains an explicit ops release
+  blocker until live producer evidence exists.
 - `runtime_staging_manifest.json`: full runtime manifest written during local
   staging, including object URI inputs/outputs used by the generated SHUD
   runtime configuration.
@@ -725,17 +727,18 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   bindings, non-empty non-deterministic `receipt_id`, non-empty `accepted_at`,
   `deterministic_fixture=false`, `final_production_readiness_claimed=false`,
   and a non-deterministic `execution_mode` such as
-  `accepted_live_evidence`. The producer summary itself must also expose
-  recognized lane-specific non-deterministic/live proof; a sidecar receipt
-  alone is not enough. The recognized summary contracts are
-  `live_slurm_executed=true` plus `live_slurm_status=executed` for #147,
-  `live_registry_import=true`, `live_api=true`, and
-  `live_api_status=executed` for #148, `live_met_executed=true` with
-  `live_source_count>=1` for #149, and all documented live execution booleans
-  true for #150/#151. Arbitrary `live_*` fields are ignored.
-  Deterministic or non-live summaries, summaries that claim final production
-  readiness, or summaries with missing/mismatched receipt fields are recorded as
-  skipped or blocked, not accepted.
+  `accepted_live_evidence`. The receipt is the ops acceptance proof; producer
+  summaries are consumed unchanged and are not required to invent live API,
+  frontend, registry, or scale fields their validators do not emit. If the
+  unchanged summary is deterministic or lacks lane-specific live proof, the
+  dependency item is still `accepted` by receipt but carries
+  `release_blockers`/`residual_risk`, and `dependency_closure.json` remains
+  `release_blocked`. Live-marker checks are dependency-specific, so unrelated
+  fields such as `live_registry_import=false`, `live_api=false`, or
+  `live_api_status=not_executed` on a Slurm/met/e2e/scale summary do not block
+  receipt acceptance. Summaries that claim final production readiness, missing
+  receipts, or receipts with missing/mismatched bindings are rejected as skipped
+  or blocked.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs, symlinked evidence roots, oversized payloads,

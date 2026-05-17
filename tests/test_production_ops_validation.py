@@ -227,6 +227,7 @@ def test_validate_ops_dependency_closure_accepts_real_summaries_but_keeps_live_c
     dependency = _read_json(tmp_path / "artifacts" / "accepted_deps" / "ops" / "dependency_closure.json")
     assert dependency["status"] == "accepted"
     assert {item["status"] for item in dependency["dependencies"]} == {"accepted"}
+    assert dependency["blockers"] == []
     assert dependency["final_production_readiness_claimed"] is False
     assert summary["status"] == "release_blocked"
     assert summary["dependency_status"] == "accepted"
@@ -288,7 +289,7 @@ def test_validate_ops_dependency_closure_requires_external_acceptance_receipt_fo
     )
 
 
-def test_validate_ops_rejects_object_store_fast_summary_even_with_receipt(tmp_path: Path) -> None:
+def test_validate_ops_accepts_object_store_fast_summary_with_live_proof_blocker(tmp_path: Path) -> None:
     root = tmp_path / "object_store"
     root.mkdir()
     summary_path = root / "summary.json"
@@ -322,10 +323,16 @@ def test_validate_ops_rejects_object_store_fast_summary_even_with_receipt(tmp_pa
         tmp_path / "artifacts" / "object_store_fast_with_receipt" / "ops" / "dependency_closure.json"
     )
     object_store = next(item for item in dependency["dependencies"] if item["dependency"] == "object_store")
-    assert object_store["status"] == "skipped"
-    assert object_store["deterministic_fixture"] is True
-    assert object_store["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING"
-    assert "deterministic/non-live" in object_store["reason"]
+    assert object_store["status"] == "accepted"
+    assert object_store["deterministic_fixture"] is False
+    assert object_store["summary_deterministic_fixture"] is True
+    assert object_store["accepted_dependency_evidence"]["summary_sha256"] == hashlib.sha256(
+        summary_path.read_bytes()
+    ).hexdigest()
+    assert object_store["release_blockers"][0]["error_code"] == (
+        "PRODUCTION_OPS_DEPENDENCY_PRODUCER_LIVE_PROOF_MISSING"
+    )
+    assert dependency["status"] == "release_blocked"
 
 
 def test_validate_ops_accepts_object_store_only_with_summary_live_proof_and_receipt(tmp_path: Path) -> None:
@@ -368,6 +375,91 @@ def test_validate_ops_accepts_object_store_only_with_summary_live_proof_and_rece
     ).hexdigest()
 
 
+@pytest.mark.parametrize(
+    ("name", "issue", "schema", "status", "extra"),
+    [
+        (
+            "object_store",
+            148,
+            "nhms.production_closure.object_store.v1",
+            "ready",
+            {
+                "execution_mode": "deterministic_fixture",
+                "deterministic_fixture": True,
+                "live_registry_import": False,
+                "live_api": False,
+                "live_api_status": "not_executed",
+                "final_production_readiness_claimed": False,
+            },
+        ),
+        (
+            "e2e",
+            150,
+            "nhms.production_closure.e2e.v1",
+            "ready",
+            {
+                "execution_mode": "deterministic_fixture",
+                "deterministic_fixture": True,
+                "live_db_executed": False,
+                "live_api_executed": False,
+                "live_slurm_executed": False,
+                "live_frontend_executed": False,
+                "final_production_readiness_claimed": False,
+            },
+        ),
+        (
+            "scale",
+            151,
+            "nhms.production_closure.scale.v1",
+            "ready",
+            {
+                "execution_mode": "deterministic_fixture",
+                "deterministic_fixture": True,
+                "live_db_executed": False,
+                "live_api_executed": False,
+                "live_frontend_executed": False,
+                "final_production_readiness_claimed": False,
+            },
+        ),
+    ],
+)
+def test_validate_ops_consumes_real_producer_summary_shapes_with_receipt_as_accepted_blocked(
+    tmp_path: Path,
+    name: str,
+    issue: int,
+    schema: str,
+    status: str,
+    extra: dict,
+) -> None:
+    root = tmp_path / name
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(summary_path, name, issue, schema, status, extra=extra)
+    _write_dependency_acceptance_receipt(summary_path, name, issue, schema)
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id=f"{name}_real_shape_with_receipt",
+            object_store_evidence_root=root if name == "object_store" else None,
+            e2e_evidence_root=root if name == "e2e" else None,
+            scale_evidence_root=root if name == "scale" else None,
+        )
+    )
+
+    dependency = _read_json(
+        tmp_path / "artifacts" / f"{name}_real_shape_with_receipt" / "ops" / "dependency_closure.json"
+    )
+    item = next(item for item in dependency["dependencies"] if item["dependency"] == name)
+    assert item["status"] == "accepted"
+    assert item["summary_deterministic_fixture"] is True
+    assert item["accepted_dependency_evidence"]["summary_sha256"] == hashlib.sha256(
+        summary_path.read_bytes()
+    ).hexdigest()
+    assert item["release_blockers"][0]["error_code"] == "PRODUCTION_OPS_DEPENDENCY_PRODUCER_LIVE_PROOF_MISSING"
+    assert dependency["status"] == "release_blocked"
+
+
 def test_validate_ops_accepts_live_dependency_with_unrelated_false_live_fields(tmp_path: Path) -> None:
     root = tmp_path / "slurm"
     root.mkdir()
@@ -382,6 +474,9 @@ def test_validate_ops_accepts_live_dependency_with_unrelated_false_live_fields(t
         extra={
             "live_alert_sink_delivered": False,
             "live_frontend_executed": False,
+            "live_registry_import": False,
+            "live_api": False,
+            "live_api_status": "not_executed",
         },
     )
     _write_dependency_acceptance_receipt(summary_path, "slurm", 147, "nhms.production_closure.slurm.v1")
@@ -435,10 +530,9 @@ def test_validate_ops_rejects_spoofed_live_field_even_with_receipt(tmp_path: Pat
 
     dependency = _read_json(tmp_path / "artifacts" / "spoofed_live_field" / "ops" / "dependency_closure.json")
     slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
-    assert slurm["status"] == "blocked"
+    assert slurm["status"] == "accepted"
     assert slurm["deterministic_fixture"] is False
-    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING"
-    assert "producer-level non-deterministic/live execution proof" in slurm["reason"]
+    assert slurm["release_blockers"][0]["error_code"] == "PRODUCTION_OPS_DEPENDENCY_PRODUCER_LIVE_PROOF_MISSING"
 
 
 def test_validate_ops_dependency_receipt_uses_bounded_summary_digest_without_second_read(

@@ -904,6 +904,19 @@ def test_validate_object_store_refuses_same_run_lane_child_symlink_without_exter
     assert sorted(path.name for path in external_dir.iterdir()) == ["sentinel.txt"]
 
 
+def test_validate_object_store_existing_lane_regular_file_raises_stable_error(tmp_path: Path) -> None:
+    lane_path = tmp_path / "artifacts" / "file_lane" / "object-store"
+    lane_path.parent.mkdir(parents=True)
+    lane_path.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(
+            ProductionObjectStoreConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="file_lane")
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+
+
 def test_validate_object_store_refuses_nested_synthetic_basins_symlink_without_external_write(
     tmp_path: Path,
 ) -> None:
@@ -929,6 +942,37 @@ def test_validate_object_store_refuses_nested_synthetic_basins_symlink_without_e
     assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK"
     assert external_file.read_text(encoding="utf-8") == "external must remain\n"
     assert sorted(path.name for path in external_dir.iterdir()) == ["sentinel.txt"]
+
+
+def test_validate_object_store_refuses_external_local_store_descendant_symlink_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    run_id = "external-store-symlink"
+    object_root = tmp_path / "external-object-store"
+    target_prefix = object_root / "models" / "existing"
+    symlink_parent = object_root / "runs"
+    target_prefix.mkdir(parents=True)
+    symlink_parent.mkdir()
+    sentinel = target_prefix / "sentinel.txt"
+    sentinel.write_text("external must remain\n", encoding="utf-8")
+    (symlink_parent / run_id).symlink_to(target_prefix, target_is_directory=True)
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("NHMS_PRODUCTION_OBJECT_STORE_PREFIX", f"s3://nhms-prod/runs/{run_id}")
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(
+            ProductionObjectStoreConfig.from_env(
+                evidence_root=evidence_root,
+                run_id=run_id,
+                force=True,
+            )
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK"
+    assert sentinel.read_text(encoding="utf-8") == "external must remain\n"
+    assert sorted(path.name for path in target_prefix.iterdir()) == ["sentinel.txt"]
 
 
 def test_validate_object_store_refuses_nested_local_store_symlink_without_external_write(

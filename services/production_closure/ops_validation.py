@@ -816,6 +816,15 @@ def _dependency_closure_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                     "reason": dependency["reason"],
                 }
             )
+        for blocker in dependency.get("release_blockers", ()):
+            blockers.append(
+                {
+                    "error_code": blocker["error_code"],
+                    "dependency": name,
+                    "status": dependency["status"],
+                    "reason": blocker["message"],
+                }
+            )
     return {
         "schema": "nhms.production_closure.ops.dependency_closure.v1",
         "run_id": config.run_id,
@@ -1080,6 +1089,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING",
             reason=reason,
         )
+    release_blockers = _accepted_dependency_live_proof_blockers(name, summary)
     return _dependency_from_summary(
         name,
         contract,
@@ -1094,6 +1104,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             "ops acceptance receipt."
         ),
         receipt=receipt,
+        release_blockers=release_blockers,
     )
 
 
@@ -1110,6 +1121,7 @@ def _dependency_from_summary(
     reason: str,
     error_code: str | None = None,
     receipt: Mapping[str, Any] | None = None,
+    release_blockers: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     payload = {
         "dependency": name,
@@ -1122,10 +1134,18 @@ def _dependency_from_summary(
         "run_id": summary.get("run_id"),
         "evidence_dir": summary.get("evidence_dir"),
         "deterministic_fixture": deterministic_fixture,
+        "summary_deterministic_fixture": bool(summary.get("deterministic_fixture", False)),
         "final_production_readiness_claimed": final_production_readiness_claimed,
         "summary_final_production_readiness_claimed": bool(summary.get("final_production_readiness_claimed", False)),
         "reason": reason,
     }
+    if release_blockers:
+        payload["release_blockers"] = list(release_blockers)
+        payload["residual_risk"] = (
+            "Ops acceptance consumed the unchanged producer summary by receipt, but the producer summary does not "
+            "prove live execution for this dependency. Release remains blocked until the producer validator emits "
+            "that live proof or an equivalent audited production evidence path is supplied."
+        )
     if error_code is not None:
         payload["error_code"] = error_code
     if receipt is not None:
@@ -1152,16 +1172,8 @@ def _has_accepted_dependency_evidence(
     summary_sha256: str,
     receipt_path: Path,
 ) -> tuple[bool, str]:
-    if _summary_has_deterministic_evidence(summary, dependency=name):
-        return False, "Dependency summary is deterministic/non-live evidence and cannot be accepted by ops closure."
     if summary.get("final_production_readiness_claimed") is True:
         return False, "Dependency summary must not claim final production readiness."
-    if name in LIVE_READY_DEPENDENCIES and not _summary_has_accepted_live_proof(name, summary):
-        return (
-            False,
-            "Dependency summary is missing producer-level non-deterministic/live execution proof; "
-            "sidecar receipt alone is not sufficient.",
-        )
     required = (
         "schema",
         "accepted",
@@ -1213,10 +1225,42 @@ def _has_accepted_dependency_evidence(
     return True, "Accepted dependency evidence receipt is present."
 
 
+def _accepted_dependency_live_proof_blockers(name: str, summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    deterministic_summary = _summary_has_deterministic_evidence(summary, dependency=name)
+    if deterministic_summary:
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_OPS_DEPENDENCY_PRODUCER_LIVE_PROOF_MISSING",
+                "message": (
+                    "Accepted dependency receipt is present, but the unchanged producer summary is marked as "
+                    "deterministic or non-live evidence."
+                ),
+                "removal_criteria": (
+                    "Archive a producer summary for this dependency that records non-deterministic live execution "
+                    "without deterministic fixture markers."
+                ),
+            }
+        )
+    if name in LIVE_READY_DEPENDENCIES and not _summary_has_accepted_live_proof(name, summary):
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_OPS_DEPENDENCY_PRODUCER_LIVE_PROOF_MISSING",
+                "message": (
+                    "Accepted dependency receipt is present, but the unchanged producer summary is missing "
+                    "dependency-specific live execution proof."
+                ),
+                "removal_criteria": (
+                    "Archive a producer summary with the dependency-specific live execution fields emitted by the "
+                    "producer validator, or attach an equivalent audited production evidence path."
+                ),
+            }
+        )
+    return blockers
+
+
 def _summary_has_deterministic_evidence(summary: Mapping[str, Any], *, dependency: str | None = None) -> bool:
     if summary.get("deterministic_fixture") is True:
-        return True
-    if summary.get("live_registry_import") is False or summary.get("live_api") is False:
         return True
     if summary.get("final_production_readiness_claimed") is False and summary.get("deterministic_fixture") is not False:
         return True
@@ -1232,7 +1276,7 @@ def _summary_has_deterministic_evidence(summary: Mapping[str, Any], *, dependenc
 
 
 def _recognized_live_boolean_evidence_fields(dependency: str | None = None) -> set[str]:
-    fields: set[str] = {"live_registry_import", "live_api"}
+    fields: set[str] = set()
     contracts = (
         (PRODUCER_LIVE_PROOF_CONTRACTS[dependency],)
         if dependency in PRODUCER_LIVE_PROOF_CONTRACTS
@@ -1244,7 +1288,7 @@ def _recognized_live_boolean_evidence_fields(dependency: str | None = None) -> s
 
 
 def _recognized_live_status_evidence_fields(dependency: str | None = None) -> set[str]:
-    fields: set[str] = {"live_api_status"}
+    fields: set[str] = set()
     contracts = (
         (PRODUCER_LIVE_PROOF_CONTRACTS[dependency],)
         if dependency in PRODUCER_LIVE_PROOF_CONTRACTS

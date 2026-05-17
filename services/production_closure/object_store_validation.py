@@ -64,6 +64,11 @@ class EvidenceWriter:
         _refuse_symlink_components(self.lane_dir.parent)
         if self.lane_dir.exists() or self.lane_dir.is_symlink():
             _refuse_symlink_components(self.lane_dir)
+            if not self.lane_dir.is_dir():
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    f"Evidence lane path must be a directory: {self.lane_dir}.",
+                )
         resolved_lane = self.lane_dir.resolve(strict=False)
         try:
             resolved_lane.relative_to(self.evidence_root)
@@ -1171,6 +1176,8 @@ def _validate_local_object_store_root(config: ProductionObjectStoreConfig) -> No
             f"local object store root must not be a symlink: {config.object_store_root}",
         )
     _refuse_symlink_components(config.object_store_root)
+    if config.target == "local-production-like":
+        _refuse_existing_descendant_symlinks(config.object_store_root, path_kind="local object store root")
     resolved_lane = config.lane_dir.resolve(strict=False)
     try:
         config.object_store_root.expanduser().resolve(strict=False).relative_to(resolved_lane)
