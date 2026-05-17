@@ -8,6 +8,7 @@ import pytest
 
 from services.production_closure import slurm_validation
 from services.production_closure.ops_validation import (
+    MAX_EVIDENCE_PAYLOAD_BYTES,
     MAX_PERCENT_DECODE_ROUNDS,
     EvidenceWriter,
     ProductionOpsConfig,
@@ -78,6 +79,8 @@ def test_validate_ops_default_lane_writes_required_release_blocked_evidence(tmp_
     assert config["status"] == "blocked"
     assert all(item["required_settings"] for item in config["services"])
     assert any(blocker["error_code"] == "PRODUCTION_OPS_CONFIG_UNSAFE_SETTING" for blocker in config["blockers"])
+    for service in config["services"]:
+        assert Path(service["template_reference"]).is_file()
 
 
 def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path: Path) -> None:
@@ -155,6 +158,7 @@ def test_validate_ops_monitoring_alerts_and_rollback_drills_cover_required_surfa
         assert isinstance(alert["observed_value"], float)
         assert isinstance(alert["threshold"], float)
         assert alert["runbook_link"].startswith("docs/runbooks/")
+        assert Path(alert["runbook_link"]).is_file()
         assert alert["recommended_operator_action"]
 
     assert {item["drill"] for item in rollback["drills"]} == {
@@ -175,6 +179,7 @@ def test_validate_ops_monitoring_alerts_and_rollback_drills_cover_required_surfa
         assert drill["recovery_result"]
         assert drill["residual_risk"]
         assert drill["dependency_artifact_references"]
+        assert Path(drill["runbook_link"]).is_file()
 
 
 def test_validate_ops_dependency_closure_accepts_real_summaries_but_keeps_live_control_gate(
@@ -190,19 +195,7 @@ def test_validate_ops_dependency_closure_accepts_real_summaries_but_keeps_live_c
     ]:
         root = tmp_path / name
         root.mkdir()
-        (root / "summary.json").write_text(
-            json.dumps(
-                {
-                    "schema": schema,
-                    "issue": issue,
-                    "run_id": f"{name}-run",
-                    "status": status,
-                    "evidence_dir": str(root),
-                    "final_production_readiness_claimed": False,
-                }
-            ),
-            encoding="utf-8",
-        )
+        _write_dependency_summary(root / "summary.json", name, issue, schema, status)
         roots[name] = root
 
     summary = validate_ops(
@@ -231,21 +224,219 @@ def test_validate_ops_dependency_statuses_record_skipped_blocked_and_not_execute
         ProductionOpsConfig.from_env(
             evidence_root=tmp_path / "artifacts",
             run_id="dep_statuses",
-            dependency_statuses="slurm=accepted,object_store=skipped,met=blocked,e2e=not_executed,scale=accepted",
+            dependency_statuses="slurm=skipped,object_store=skipped,met=blocked,e2e=not_executed,scale=blocked",
         )
     )
 
     dependency = _read_json(tmp_path / "artifacts" / "dep_statuses" / "ops" / "dependency_closure.json")
     statuses = {item["dependency"]: item["status"] for item in dependency["dependencies"]}
     assert statuses == {
-        "slurm": "accepted",
+        "slurm": "skipped",
         "object_store": "skipped",
         "met": "blocked",
         "e2e": "not_executed",
-        "scale": "accepted",
+        "scale": "blocked",
     }
     assert dependency["deterministic_fixture"] is True
     assert summary["status"] == "release_blocked"
+
+
+def test_validate_ops_rejects_explicit_accepted_dependency_status(tmp_path: Path) -> None:
+    with pytest.raises(ProductionOpsValidationError) as exc_info:
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="accepted_status",
+            dependency_statuses="slurm=accepted",
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OPS_DEPENDENCY_STATUS_INVALID"
+
+
+def test_validate_ops_hardens_dependency_summary_paths_and_sizes(tmp_path: Path) -> None:
+    valid_root = tmp_path / "valid"
+    valid_root.mkdir()
+    _write_dependency_summary(
+        valid_root / "summary.json",
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+    )
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.symlink_to(valid_root, target_is_directory=True)
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="dep_symlink_root",
+            slurm_evidence_root=symlink_root,
+        )
+    )
+    dependency = _read_json(tmp_path / "artifacts" / "dep_symlink_root" / "ops" / "dependency_closure.json")
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert summary["status"] == "release_blocked"
+    assert slurm["status"] == "blocked"
+    assert slurm["error_code"] == "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK"
+
+    file_link_root = tmp_path / "file-link-root"
+    file_link_root.mkdir()
+    outside = tmp_path / "outside-summary.json"
+    _write_dependency_summary(outside, "met", 149, "nhms.production_closure.met.v1", "ready")
+    (file_link_root / "summary.json").symlink_to(outside)
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="dep_symlink_file",
+            met_evidence_root=file_link_root,
+        )
+    )
+    met = next(
+        item
+        for item in _read_json(tmp_path / "artifacts" / "dep_symlink_file" / "ops" / "dependency_closure.json")[
+            "dependencies"
+        ]
+        if item["dependency"] == "met"
+    )
+    assert met["status"] == "blocked"
+    assert met["error_code"] == "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK"
+
+    oversized_root = tmp_path / "oversized-root"
+    oversized_root.mkdir()
+    (oversized_root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.scale.v1",
+                "issue": 151,
+                "run_id": "scale-run",
+                "status": "ready",
+                "payload": "x" * MAX_EVIDENCE_PAYLOAD_BYTES,
+            }
+        ),
+        encoding="utf-8",
+    )
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="dep_oversized",
+            scale_evidence_root=oversized_root,
+        )
+    )
+    scale = next(
+        item
+        for item in _read_json(tmp_path / "artifacts" / "dep_oversized" / "ops" / "dependency_closure.json")[
+            "dependencies"
+        ]
+        if item["dependency"] == "scale"
+    )
+    assert scale["status"] == "blocked"
+    assert scale["error_code"] == "PRODUCTION_OPS_DEPENDENCY_SUMMARY_TOO_LARGE"
+
+
+def test_validate_ops_resolves_dependency_summary_shapes_in_rollback_references(tmp_path: Path) -> None:
+    run_root = tmp_path / "dependencies"
+    slurm_root = run_root / "slurm"
+    object_store_root = run_root / "object-store"
+    slurm_root.mkdir(parents=True)
+    object_store_root.mkdir()
+    _write_dependency_summary(
+        slurm_root / "summary.json",
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+    )
+    _write_dependency_summary(
+        object_store_root / "summary.json",
+        "object_store",
+        148,
+        "nhms.production_closure.object_store.v1",
+        "ready",
+    )
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="dep_shapes",
+            slurm_evidence_root=run_root,
+            object_store_evidence_root=run_root,
+        )
+    )
+
+    rollback = _read_json(tmp_path / "artifacts" / "dep_shapes" / "ops" / "rollback_drills.json")
+    first_drill_refs = rollback["drills"][0]["dependency_artifact_references"]
+    assert {"dependency": "slurm", "drill": "bad_model_activation", "summary": str(slurm_root / "summary.json")} in (
+        first_drill_refs
+    )
+    assert {
+        "dependency": "object_store",
+        "drill": "bad_model_activation",
+        "summary": str(object_store_root / "summary.json"),
+    } in first_drill_refs
+
+
+def test_validate_ops_live_drill_scope_remains_release_blocked_without_receipts(tmp_path: Path) -> None:
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="live_scope",
+            rollback_scope="live_drill",
+        )
+    )
+
+    rollback = _read_json(tmp_path / "artifacts" / "live_scope" / "ops" / "rollback_drills.json")
+    assert summary["status"] == "release_blocked"
+    assert summary["live_rollback_executed"] is False
+    assert rollback["status"] == "release_blocked"
+    assert rollback["requested_scope"] == "live_drill"
+    assert rollback["live_rollback_executed"] is False
+    assert {drill["execution_mode"] for drill in rollback["drills"]} == {"simulated_drill"}
+    assert {drill["live_rollback_executed"] for drill in rollback["drills"]} == {False}
+
+
+def test_validate_ops_live_ready_config_knobs_do_not_claim_live_execution(tmp_path: Path) -> None:
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="live_knobs",
+            auth_mode="backend_route_executed",
+            alert_target="https://alerts.example/ops",
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "live_knobs" / "ops"
+    auth = _read_json(lane_dir / "auth_rbac.json")
+    alerts = _read_json(lane_dir / "monitoring_alerts.json")
+    assert summary["live_backend_auth_executed"] is False
+    assert summary["live_alert_sink_delivered"] is False
+    assert auth["model_activation_boundary"]["backend_enforcement_available"] is False
+    assert auth["model_activation_boundary"]["requested_auth_mode"] == "backend_route_executed"
+    assert alerts["status"] == "release_blocked"
+    assert {alert["execution_mode"] for alert in alerts["alerts"]} == {"not_executed"}
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value"),
+    [
+        ("NHMS_PRODUCTION_OPS_ORCHESTRATOR_WORKSPACE_ROOT", "../workspace"),
+        ("NHMS_PRODUCTION_OPS_SLURM_GATEWAY_SLURM_SHARED_LOG_ROOT", "/scratch/../logs"),
+        ("NHMS_PRODUCTION_OPS_SLURM_GATEWAY_SBATCH_TEMPLATE_ROOT", "templates\\prod"),
+        ("NHMS_PRODUCTION_OPS_OBJECT_STORE_OBJECT_STORE_ROOT", "s3://bucket/%2E%2E/root"),
+        ("NHMS_PRODUCTION_OPS_WORKSPACE_ROOTS_RUN_WORKSPACE_ROOT", "runs/%2E"),
+        ("NHMS_PRODUCTION_OPS_WORKSPACE_ROOTS_SHARED_LOG_ROOT", "logs%5Cprod"),
+    ],
+)
+def test_validate_ops_rejects_unsafe_config_root_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(env_name, value)
+
+    with pytest.raises(ProductionOpsValidationError) as exc_info:
+        validate_ops(ProductionOpsConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="bad_config_root"))
+
+    assert exc_info.value.error_code == "PRODUCTION_OPS_CONFIG_VALUE_UNSAFE"
 
 
 def test_validate_ops_run_id_idempotency_path_safety_payload_limit_and_secret_redaction(
@@ -393,6 +584,22 @@ def test_validate_ops_click_and_argparse_dispatch(tmp_path: Path, capsys: pytest
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_dependency_summary(path: Path, name: str, issue: int, schema: str, status: str) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema": schema,
+                "issue": issue,
+                "run_id": f"{name}-run",
+                "status": status,
+                "evidence_dir": str(path.parent),
+                "final_production_readiness_claimed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _percent_encode_rounds(value: str, rounds: int) -> str:

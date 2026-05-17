@@ -638,8 +638,9 @@ NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-ops \
 Useful knobs:
 
 - `--auth-mode` / `NHMS_PRODUCTION_OPS_AUTH_MODE`: defaults to
-  `fallback_release_gated`; live backend auth must be supplied before final
-  readiness can be claimed.
+  `fallback_release_gated`. `backend_route_executed` is recorded as a requested
+  mode only in this lane; it does not set live backend auth flags without
+  validated live receipts.
 - `--required-roles` / `NHMS_PRODUCTION_OPS_REQUIRED_ROLES`: comma-separated
   role list. It must include the action roles for model activation, rerun,
   cancel, QC override, source config change, and tile republish.
@@ -647,13 +648,17 @@ Useful knobs:
   `dry-run://ops-validation`. Userinfo, query strings, fragments, traversal,
   and secret-shaped assignments are rejected.
 - `--deployment-config-source` and `--rollback-scope`: recorded in preflight
-  and evidence. The default rollback scope is simulated drills.
+  and evidence. The default rollback scope is simulated drills. A
+  `live_drill` value is a requested scope only; rollback evidence remains
+  simulated and `release_blocked` unless validated live receipts are consumed.
 - `--slurm-evidence-root`, `--object-store-evidence-root`,
   `--met-evidence-root`, `--e2e-evidence-root`, and `--scale-evidence-root`:
   optional accepted dependency summaries for #147-#151.
 - `--dependency-statuses`: optional comma-separated statuses such as
-  `slurm=accepted,object_store=skipped,met=blocked,e2e=not_executed,scale=accepted`
-  for fixture validation.
+  `slurm=skipped,object_store=skipped,met=blocked,e2e=not_executed,scale=blocked`
+  for fixture validation. Explicit `accepted` is rejected with
+  `PRODUCTION_OPS_DEPENDENCY_STATUS_INVALID`; accepted dependency closure must
+  come from validated #147-#151 summary artifacts.
 
 Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
 
@@ -663,6 +668,9 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
 - `config_validation.json`: API, orchestrator, Slurm gateway, tile publisher,
   frontend, database, object store, source adapter, and workspace root required
   settings, redacted values, and stable unsafe-setting blockers.
+  Root/path settings reject dot segments, traversal, and backslash separators.
+  The checked-in service config template is
+  `docs/runbooks/production-service-config.md`.
 - `auth_rbac.json` and `auth_release_blockers.json`: model activation, rerun,
   cancel, QC override, source config change, and tile republish decisions for
   allowed, denied, and release-blocked cases, with required roles, stable error
@@ -673,20 +681,24 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   secret-shaped fields across config/log/manifest/API/alert/PR/frontend shapes.
 - `monitoring_alerts.json`: source latency, Slurm backlog, failed basin retries,
   object-store failure, stale analysis state, tile error, and API p95 alert
-  evidence with metric, severity, observed value, threshold, dry-run/live mode,
-  runbook link, and operator action.
+  evidence with metric, severity, observed value, threshold, dry-run or
+  not-executed mode, runbook link, and operator action. Non-dry-run alert
+  targets do not imply live sink delivery without delivery receipts.
 - `rollback_drills.json`: bad model activation, failed publish/import, failed
   source cycle, failed Slurm array, and bad tile release drills with command,
   precondition, expected evidence, recovery, residual risk, dependency
-  references, and simulated/live execution flags.
+  references, requested scope, runbook link, and simulated execution flags.
 - `dependency_closure.json`, `environment.json`, and `summary.json`: #147-#151
   accepted/skipped/blocked/not-executed dependency closure, redacted
   environment, final release blockers, live flags, and evidence file index.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs, symlinked evidence roots, oversized payloads,
-credential-shaped config/auth/alert values, and unsafe dependency status inputs
-fail with stable errors and no secret leakage.
+credential-shaped config/auth/alert values, unsafe root/path config values, and
+unsafe dependency status inputs fail with stable errors and no secret leakage.
+Dependency summary ingestion rejects symlinked roots/components, symlink summary
+files, summaries outside the supplied root, and summaries larger than the ops
+evidence payload limit.
 
 ### Fast Regression Commands
 

@@ -29,6 +29,8 @@ DEFAULT_REQUIRED_ROLES = ("operator", "model_admin", "source_admin", "tile_admin
 DEFAULT_ALERT_TARGET = "dry-run://ops-validation"
 DEFAULT_DEPLOYMENT_CONFIG_SOURCE = "generated_deterministic_templates"
 DEFAULT_ROLLBACK_SCOPE = "simulated_drills"
+SERVICE_CONFIG_TEMPLATE = "docs/runbooks/production-service-config.md"
+ROLLBACK_RUNBOOK = "docs/runbooks/rollback-drills.md"
 MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
 MAX_PERCENT_DECODE_ROUNDS = 4
 
@@ -413,6 +415,7 @@ def _production_config_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 "service": service,
                 "status": "blocked" if service_blockers else "ready",
                 "template_source": config.deployment_config_source,
+                "template_reference": SERVICE_CONFIG_TEMPLATE,
                 "required_settings": list(required_settings),
                 "settings": settings,
                 "blockers": service_blockers,
@@ -487,8 +490,9 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
         "status": "release_blocked",
         "auth_mode": config.auth_mode,
         "model_activation_boundary": {
-            "backend_enforcement_available": config.auth_mode == "backend_route_executed",
-            "fallback_release_gate": config.auth_mode != "backend_route_executed",
+            "backend_enforcement_available": False,
+            "requested_auth_mode": config.auth_mode,
+            "fallback_release_gate": True,
             "frontend_only_rbac_accepted_for_production": False,
         },
         "required_roles": list(config.required_roles),
@@ -667,8 +671,8 @@ def _monitoring_alert_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
 
 
 def _rollback_drill_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
-    execution_mode = "live_drill" if config.rollback_scope == "live_drill" else "simulated_drill"
-    live_rollback_executed = execution_mode == "live_drill"
+    execution_mode = "simulated_drill"
+    live_rollback_executed = False
     drills = []
     for drill, fixture in ROLLBACK_DRILLS.items():
         drills.append(
@@ -684,29 +688,29 @@ def _rollback_drill_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 "recovery_result": fixture["recovery"],
                 "residual_risk": (
                     "Simulated drill only; live rollback execution evidence is required before final readiness."
-                    if not live_rollback_executed
-                    else "Live drill evidence must be reviewed against current production state before release."
                 ),
                 "dependency_artifact_references": _dependency_artifact_references(config, drill),
+                "runbook_link": ROLLBACK_RUNBOOK,
+                "requested_scope": config.rollback_scope,
                 "execution_mode": execution_mode,
                 "live_rollback_executed": live_rollback_executed,
             }
         )
     blockers = []
-    if not live_rollback_executed:
-        blockers.append(
-            {
-                "error_code": "PRODUCTION_OPS_ROLLBACK_DRILL_RELEASE_BLOCKED",
-                "message": "Rollback drills are simulated; live rollback execution evidence is not present.",
-                "removal_criteria": (
-                    "Run each drill in a production-like environment and archive command output and recovery state."
-                ),
-            }
-        )
+    blockers.append(
+        {
+            "error_code": "PRODUCTION_OPS_ROLLBACK_DRILL_RELEASE_BLOCKED",
+            "message": "Rollback drills are simulated; live rollback execution evidence is not present.",
+            "removal_criteria": (
+                "Run each drill in a production-like environment and archive command output and recovery state."
+            ),
+        }
+    )
     return {
         "schema": "nhms.production_closure.ops.rollback_drills.v1",
         "run_id": config.run_id,
-        "status": "ready" if not blockers else "release_blocked",
+        "status": "release_blocked",
+        "requested_scope": config.rollback_scope,
         "drills": drills,
         "live_rollback_executed": live_rollback_executed,
         "blockers": blockers,
@@ -858,15 +862,38 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             "final_production_readiness_claimed": False,
             "reason": "No accepted dependency evidence root was supplied; deterministic fast-path summary used.",
         }
-    summary_path = _dependency_summary_path(root, name)
-    if summary_path is None:
-        return _invalid_dependency(name, root, "not_executed", "Dependency evidence root has no summary.json.")
     try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary_path = _dependency_summary_path(root, name)
+    except ProductionOpsValidationError as error:
+        return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code)
+    if summary_path is None:
+        return _invalid_dependency(
+            name,
+            root,
+            "not_executed",
+            "Dependency evidence root has no summary.json.",
+            error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_MISSING",
+        )
+    try:
+        summary = _read_dependency_summary_json(summary_path)
+    except ProductionOpsValidationError as error:
+        return _invalid_dependency(name, summary_path, "blocked", error.message, error_code=error.error_code)
     except (OSError, json.JSONDecodeError) as error:
-        return _invalid_dependency(name, summary_path, "blocked", f"Dependency summary could not be read: {error}")
+        return _invalid_dependency(
+            name,
+            summary_path,
+            "blocked",
+            f"Dependency summary could not be read: {error}",
+            error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+        )
     if not isinstance(summary, Mapping):
-        return _invalid_dependency(name, summary_path, "blocked", "Dependency summary JSON must be an object.")
+        return _invalid_dependency(
+            name,
+            summary_path,
+            "blocked",
+            "Dependency summary JSON must be an object.",
+            error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+        )
     schema_matches = summary.get("schema") == contract["schema"]
     issue_matches = summary.get("issue") == contract["issue"]
     summary_status = str(summary.get("status", "unknown"))
@@ -880,6 +907,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
                 f"got issue={summary.get('issue')!r}, schema={summary.get('schema')!r}."
             ),
             summary=summary,
+            error_code="PRODUCTION_OPS_DEPENDENCY_CONTRACT_MISMATCH",
         )
     status = "accepted" if summary_status in contract["allowed_statuses"] else "blocked"
     if summary_status in EXPLICIT_BLOCKED_DEPENDENCY_STATUSES:
@@ -911,6 +939,7 @@ def _invalid_dependency(
     reason: str,
     *,
     summary: Mapping[str, Any] | None = None,
+    error_code: str = "PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
 ) -> dict[str, Any]:
     contract = DEPENDENCY_CONTRACTS[name]
     return {
@@ -921,6 +950,7 @@ def _invalid_dependency(
         "execution_mode": "not_executed",
         "summary_path": str(path),
         "summary_status": summary.get("status", "unknown") if summary else "unknown",
+        "error_code": error_code,
         "deterministic_fixture": False,
         "final_production_readiness_claimed": False,
         "reason": reason,
@@ -928,22 +958,39 @@ def _invalid_dependency(
 
 
 def _dependency_summary_path(root: Path, name: str) -> Path | None:
-    candidates = [root / "summary.json", root / name / "summary.json"]
+    resolved_root = _safe_dependency_root(root)
+    candidates = [resolved_root / "summary.json", resolved_root / name / "summary.json"]
     if name == "object_store":
-        candidates.append(root / "object-store" / "summary.json")
+        candidates.append(resolved_root / "object-store" / "summary.json")
     for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        if candidate.is_symlink():
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK",
+                f"Dependency summary must not be a symlink: {candidate}",
+            )
+        _refuse_dependency_symlink_components(candidate.parent)
+        if candidate.exists():
+            if not candidate.is_file():
+                continue
+            resolved_candidate = candidate.resolve(strict=True)
+            try:
+                resolved_candidate.relative_to(resolved_root)
+            except ValueError as error:
+                raise ProductionOpsValidationError(
+                    "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                    "Dependency summary file must stay under its supplied dependency root.",
+                ) from error
+            return resolved_candidate
     return None
 
 
 def _dependency_status_from_explicit(value: str) -> str:
     normalized = value.strip().lower()
-    allowed = {"accepted", "skipped", "blocked", "not_executed"}
+    allowed = {"skipped", "blocked", "not_executed"}
     if normalized not in allowed:
         raise ProductionOpsValidationError(
             "PRODUCTION_OPS_DEPENDENCY_STATUS_INVALID",
-            "Dependency statuses must be accepted, skipped, blocked, or not_executed.",
+            "Dependency statuses must be skipped, blocked, or not_executed; accepted requires a validated summary.",
         )
     return normalized
 
@@ -952,7 +999,26 @@ def _dependency_artifact_references(config: ProductionOpsConfig, drill: str) -> 
     references = []
     for name, root in config.dependency_roots.items():
         if root is not None:
-            references.append({"dependency": name, "drill": drill, "summary": str(root / "summary.json")})
+            try:
+                summary = _dependency_summary_path(root, name)
+            except ProductionOpsValidationError as error:
+                references.append(
+                    {
+                        "dependency": name,
+                        "drill": drill,
+                        "summary": str(root),
+                        "error_code": error.error_code,
+                        "status": "blocked",
+                    }
+                )
+            else:
+                references.append(
+                    {
+                        "dependency": name,
+                        "drill": drill,
+                        "summary": str(summary if summary is not None else root / "summary.json"),
+                    }
+                )
     if not references:
         references.append(
             {
@@ -962,6 +1028,36 @@ def _dependency_artifact_references(config: ProductionOpsConfig, drill: str) -> 
             }
         )
     return references
+
+
+def _safe_dependency_root(root: Path) -> Path:
+    expanded = root.expanduser()
+    _refuse_dependency_symlink_components(expanded)
+    resolved_root = expanded.resolve(strict=False)
+    if expanded.exists() and not expanded.is_dir():
+        raise ProductionOpsValidationError(
+            "PRODUCTION_OPS_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+            f"Dependency evidence root must be a directory: {expanded}",
+        )
+    return resolved_root
+
+
+def _refuse_dependency_symlink_components(path: Path) -> None:
+    try:
+        _refuse_symlink_components(path)
+    except ProductionOpsValidationError as error:
+        raise ProductionOpsValidationError("PRODUCTION_OPS_DEPENDENCY_EVIDENCE_SYMLINK", error.message) from error
+
+
+def _read_dependency_summary_json(summary_path: Path) -> Any:
+    with summary_path.open("rb") as handle:
+        content = handle.read(MAX_EVIDENCE_PAYLOAD_BYTES + 1)
+    if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
+        raise ProductionOpsValidationError(
+            "PRODUCTION_OPS_DEPENDENCY_SUMMARY_TOO_LARGE",
+            f"Dependency summary exceeds configured limit of {MAX_EVIDENCE_PAYLOAD_BYTES} bytes.",
+        )
+    return json.loads(content.decode("utf-8"))
 
 
 def _default_setting_value(config: ProductionOpsConfig, service: str, setting: str) -> str:
@@ -1005,6 +1101,9 @@ def _validate_config(config: ProductionOpsConfig) -> None:
     _validate_identifier(config.auth_mode, "auth_mode")
     _validate_identifier(config.deployment_config_source, "deployment_config_source")
     _validate_identifier(config.rollback_scope, "rollback_scope")
+    for status in config.dependency_statuses.values():
+        if status:
+            _dependency_status_from_explicit(status)
     for role in config.required_roles:
         _validate_identifier(role, "required_role")
     missing_roles = sorted(set(ACTION_MATRIX.values()) - set(config.required_roles))
@@ -1042,6 +1141,16 @@ def _validate_config_value_safe(value: str, service: str, setting: str) -> None:
                 "PRODUCTION_OPS_CONFIG_VALUE_UNSAFE",
                 f"{service}.{setting} must not contain credential assignments.",
             )
+    if _is_path_or_root_setting(setting):
+        _guard_canonical_path_segments(
+            value,
+            error_code="PRODUCTION_OPS_CONFIG_VALUE_UNSAFE",
+            field_name=f"{service}.{setting}",
+        )
+
+
+def _is_path_or_root_setting(setting: str) -> bool:
+    return setting.endswith("ROOT") or "PATH" in setting
 
 
 def _validate_target_safe(value: str, field_name: str, error_code: str) -> None:
