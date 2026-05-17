@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
 
 from packages.common.object_store import LocalObjectStore
+from packages.common.storage import validate_object_path
 
 SECONDS_PER_DAY = 86_400.0
 VARIABLE_Q_DOWN = "q_down"
@@ -244,6 +245,11 @@ def parse_rivqdown_file(
                     "NON_NUMERIC_FLOW",
                     f"Row {line_number} contains non-numeric flow value {value_token!r}",
                 ) from error
+            if not math.isfinite(value_m3d):
+                raise OutputParsingError(
+                    "NON_FINITE_FLOW",
+                    f"Row {line_number} contains non-finite flow value {value_token!r}",
+                )
 
             rows.append(
                 RiverTimeseriesRow(
@@ -635,13 +641,19 @@ def _is_rivqdown_path(path: Path) -> bool:
 
 
 def _resolve_object_path_allowing_directory(object_store: LocalObjectStore, key_or_uri: str) -> Path:
-    key = _object_key(key_or_uri, object_store.object_store_prefix)
+    try:
+        key = object_store.normalize_key(key_or_uri)
+    except ValueError as error:
+        raise OutputParsingError("OUTPUT_URI_INVALID", str(error)) from error
+    validation = validate_object_path(f"{key.rstrip('/')}/_directory_probe")
+    if not validation.valid:
+        raise OutputParsingError("OUTPUT_URI_INVALID", str(validation.error))
     root = Path(object_store.root)
     target = (root / key).resolve()
     try:
         target.relative_to(root)
     except ValueError as error:
-        raise ValueError(f"Object key escapes object store root: {key_or_uri}") from error
+        raise OutputParsingError("OUTPUT_URI_INVALID", f"Object key escapes object store root: {key_or_uri}") from error
     return target
 
 
@@ -650,6 +662,4 @@ def _object_key(uri_or_key: str, object_store_prefix: str) -> str:
     prefix = object_store_prefix.rstrip("/")
     if prefix and candidate.startswith(prefix + "/"):
         candidate = candidate[len(prefix) + 1 :]
-    elif candidate.startswith("s3://"):
-        candidate = urlparse(candidate).path.strip("/")
     return candidate.strip("/")

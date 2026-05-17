@@ -8,7 +8,9 @@
 
 - Epic #120 已完成并关闭；子 issue #121-#126 全部关闭。
 - 最新合并工作：PR #132，merge commit `ccc7f9bfaea4b5dfb125bdd5b8a4c36ca1ac1c88`。
-- 基于 `data/Basins` 已创建并基本收口 M9 OpenSpec change：`openspec/changes/m9-basins-model-assets/`；GitHub Epic #133，子 issue #134-#139 覆盖 discovery、package、registry import、activation、runtime/API 与前端类型/文档验证。
+- M9 Basins 已完成并关闭：GitHub Epic #133，子 issue #134-#139 全部关闭；PR #144、#145 已合并。
+- M10 生产环境闭环已完成 OpenSpec 设计和 issue 拆分：`openspec/changes/m10-production-closure/`，GitHub Epic #146，子 issue #147-#152 覆盖真实 Slurm+SHUD workload、生产对象存储/Basins copied-data、真实气象源+QC、staging E2E、全国规模/MVT 性能、生产运维安全 runbook。
+- M10 #147 Real Slurm + SHUD workload closure 已新增 opt-in `nhms-production validate-slurm` 证据 lane：默认 fake/deterministic，不依赖真实 Slurm/SHUD/生产密钥；生产 preflight 缺失时写 blocker artifact 到 `artifacts/production-closure/<run_id>/slurm/`。
 - CI 覆盖 markdown lint、OpenAPI lint、JSON Schema 校验、真实 PostgreSQL/PostGIS/Timescale 集成、后端测试、前端 build/test、bundle size。
 - #126 后本地基线：`uv run pytest -q` -> `586 passed, 3 skipped`；真实 DB integration 为显式 opt-in，GitHub CI 已跑通。
 - 当前有效代码入口：`apps/api`、`apps/frontend`、`services/orchestrator`、`services/slurm_gateway`、`services/tile_publisher`、`workers/*` 下划线包、`infra/sbatch`。
@@ -24,6 +26,8 @@
 - Canonical conversion、forcing production、SHUD runtime adapter、output parser、state manager、洪水频率拟合、重现期计算、tile publisher 已实现。
 - Orchestrator 支持 forecast/analysis/hindcast 链路、Slurm job array、retry/cancel 一致性、partial success、publish stage、pipeline persistence。
 - Real Slurm gateway 已实现 `sbatch`、`sacct`、`scancel`、`sinfo`、array job、日志读取、模板白名单，并有 fake-binary smoke。
+- #147 Slurm closure lane 已覆盖 redacted preflight、canonical `infra/sbatch` SHUD array rendering、fake/real `sacct` evidence schema、array partial success、retry/cancel evidence、malformed SHUD output/QC blocking evidence和 redacted environment metadata。
+- 测试环境真实 Slurm 基础 smoke 已通过：集群 `shudhpc`，默认 account `friends`，`CPU`/`GPU` 分区可见；`CPU` 分区 job `5684` 在 `cn04` 完成，`COMPLETED` / `0:0`。后续可复用命令见 `docs/VALIDATION.md`。
 - 真实 DB 集成测试已覆盖从零迁移、幂等迁移、确定性 seed、API/空间查询、worker chain、fake real-Slurm 边界。
 
 ## 前端已实现
@@ -67,7 +71,8 @@
 - 外部真实气象下载通过 adapter/mock 测试覆盖；没有提交可作为生产 fixture 的 live GFS/IFS/ERA5 数据包。
 - CLDAS 仍是权限受限/后续工作；未实现 CLDAS adapter、数据质量检查、best_available 生产路径。
 - Worker-chain smoke 使用本地 `LocalObjectStore`，未覆盖真实 MinIO/S3。
-- Slurm smoke 使用 fake binaries，未连接真实 Slurm 集群。
+- Slurm 已完成最小真实集群 smoke，但尚未跑生产级 SHUD workload、job array、大日志回收、失败重试和 accounting 长链路。
+- Slurm #147 生产级 evidence lane 已落地；真实集群 SHUD workload 仍需在具备 copied/package URI、solver/module 和共享 workspace 的主机上按 `docs/VALIDATION.md` opt-in 命令运行并归档真实 `sacct`/日志。
 - 尚缺生产规模性能证据：全国矢量瓦片、大河网、全国 7 天逐小时预报、真实数据库 query plan/压测。
 
 ## M9 Basins 资产发现进展
@@ -138,7 +143,7 @@
 
 ## 已知技术风险 / 注意事项
 
-- 当前仍未完成生产级真实环境闭环：真实 Slurm 集群、真实对象存储、真实气象源凭据、全国规模数据和压测证据仍需专项验证。
+- 当前仍未完成生产级真实环境闭环：真实 Slurm 生产 workload、真实对象存储、真实气象源凭据、全国规模数据和压测证据仍需专项验证。
 - 若生产要求真实 `application/x-protobuf` MVT，需要把洪水 tile 从当前 GeoJSON 兼容交付升级为 PostGIS tile clipping + MVT 编码，并同步 API/OpenAPI/前端合同。
 - 生产身份认证/授权尚未完成；当前 RBAC 主要是前端 gate + dev/test role override。
 - 历史 OpenSpec proposal/tasks 保留当时路径和任务状态用于审计，不作为当前开发入口；判断完成度以源码、测试、README 和本文为准。
@@ -158,4 +163,5 @@
 - 先明确下一条主线：生产数据接入、前端效果图对齐、CLDAS 启用、真实 MVT tile、生产 auth/RBAC。
 - 如果做前端对齐，优先补资产管理完整 UI 路由、气象空间展示、气象代站查询，因为这些是缺失路由，不只是样式差距。
 - 如果做数据就绪，Basins-backed runtime/API/frontend consumption 已有合约和 fixture 证据；下一步应转向真实对象存储闭环、生产迁移脚本或全国规模验证。
-- 如果做生产化，优先验证真实 Slurm 集群、真实对象存储、真实气象源凭据与下载稳定性。
+- 如果做生产化，优先验证真实 Slurm 生产 workload、真实对象存储、真实气象源凭据与下载稳定性。
+- M10 issue 依赖：#147/#148/#149 可先并行推进；#150 依赖三者最小证据；#151 依赖 #148 和全国数据/大 fixture；#152 可先做但最终验收依赖 #147-#151 证据。

@@ -15,6 +15,7 @@ import yaml
 from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
+from packages.common.redaction import redact_payload
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ConfigurationError,
@@ -436,12 +437,13 @@ class RealSlurmGateway(SlurmGateway):
         manifest_dict.setdefault("stage_name", manifest_dict.get("stage") or job_type)
         manifest_dict.setdefault("workspace_dir", str(Path(self.settings.workspace_dir)))
         manifest_dict.setdefault("manifest_index_path", manifest_index_path)
-        self._validate_manifest(manifest_dict)
+        redacted_manifest = redact_payload(manifest_dict)
+        self._validate_manifest(redacted_manifest)
 
         resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
-        context = {**manifest_dict, **resource_profile}
-        context["manifest"] = manifest_dict
-        context["manifest_index_path"] = manifest_index_path or str(manifest_dict.get("manifest_index_path") or "")
+        context = redact_payload({**redacted_manifest, **resource_profile})
+        context["manifest"] = redacted_manifest
+        context["manifest_index_path"] = manifest_index_path or str(redacted_manifest.get("manifest_index_path") or "")
 
         environment = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
         template = environment.from_string(template_path.read_text(encoding="utf-8"))

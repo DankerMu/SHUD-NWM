@@ -251,6 +251,41 @@ def test_publish_tiles_template_does_not_render_database_url_secret(tmp_path: Pa
     assert "set -euo pipefail" in rendered
 
 
+def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract_and_redacts(tmp_path: Path) -> None:
+    secret_uri = "s3://user:pass@bucket/prod?token=secret&X-Amz-Signature=abc"
+    manifest = {
+        **_render_manifest(tmp_path, "run_shud_forecast_array"),
+        "object_store_root": secret_uri,
+        "object_store_prefix": "s3://user:pass@bucket/prefix?token=secret",
+        "account": "friends",
+    }
+
+    rendered = _gateway(tmp_path).render_template(
+        "run_shud_forecast_array",
+        manifest,
+        str(tmp_path / "manifest_index.json"),
+    )
+
+    assert "#SBATCH --output=" in rendered
+    assert "/logs/%A_%a.out" in rendered
+    assert "#SBATCH --error=" in rendered
+    assert "/logs/%A_%a.err" in rendered
+    assert "#SBATCH --cpus-per-task=8" in rendered
+    assert "#SBATCH --account=friends" in rendered
+    assert "#SBATCH --mem=32G" in rendered
+    assert "#SBATCH --time=01:00:00" in rendered
+    assert "export SHUD_THREADS=8" in rendered
+    assert "export OMP_NUM_THREADS=8" in rendered
+    assert 'export NHMS_MANIFEST_INDEX="' in rendered
+    assert (
+        'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" '
+        '--task-id "${SLURM_ARRAY_TASK_ID:-0}"'
+    ) in rendered
+    assert "user:pass@" not in rendered
+    assert "token=secret" not in rendered
+    assert "X-Amz-Signature" not in rendered
+
+
 def test_download_source_cycle_cli_accepts_template_args(monkeypatch):
     class FakeAdapter:
         config = SimpleNamespace(source_id="gfs")

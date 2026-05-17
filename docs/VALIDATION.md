@@ -60,6 +60,179 @@ uv run pytest -q \
   tests/test_openapi_drift.py
 ```
 
+## Real Slurm Smoke
+
+Use the real cluster smoke only on a host with Slurm CLI access. Keep log paths
+on shared storage such as `/scratch/frd_muziyao/slurm-smoke/`; `/tmp` can be
+compute-node-local and may not be readable from the login node after completion.
+
+Observed test environment on 2026-05-16:
+
+- Host/user: `xnode` / `frd_muziyao`.
+- Cluster/account: `shudhpc`, default Slurm account `friends`.
+- CLI tools: `/usr/bin/sinfo`, `/usr/bin/squeue`, `/usr/bin/sbatch`,
+  `/usr/bin/sacct`, `/usr/bin/scancel`.
+- Partitions: `CPU*` and `GPU`, both up with `10-00:00:00` time limit.
+- Smoke job `5684` ran on `cn04` and completed with `COMPLETED` / `0:0`.
+
+Non-destructive inspection commands:
+
+```bash
+sinfo -o '%P|%a|%l|%D|%t|%N'
+squeue -u "$USER" -o '%i|%P|%j|%u|%T|%M|%D|%R'
+sacctmgr show user "$USER" format=User,DefaultAccount,Admin,Cluster%20 -P
+scontrol show config | rg 'ClusterName|SlurmctldHost|AccountingStorageType|JobAcctGatherType|SelectType'
+```
+
+Minimal shared-output smoke script:
+
+```bash
+mkdir -p /scratch/frd_muziyao/slurm-smoke
+cat >/scratch/frd_muziyao/slurm-smoke/smoke.sbatch <<'EOF'
+#!/usr/bin/env bash
+#SBATCH --job-name=nhms-smoke
+#SBATCH --partition=CPU
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --time=00:02:00
+#SBATCH --output=/scratch/frd_muziyao/slurm-smoke/slurm-%j.out
+#SBATCH --error=/scratch/frd_muziyao/slurm-smoke/slurm-%j.err
+set -euo pipefail
+echo "SLURM_SMOKE_START $(date -Iseconds) host=$(hostname) job=${SLURM_JOB_ID:-none} cwd=$(pwd)"
+python3 - <<'PY'
+import os
+import sys
+print("PYTHON_OK", sys.version.split()[0], os.environ.get("SLURM_JOB_ID"))
+PY
+echo "SLURM_SMOKE_DONE $(date -Iseconds)"
+EOF
+
+jobid=$(sbatch --parsable /scratch/frd_muziyao/slurm-smoke/smoke.sbatch)
+echo "$jobid"
+sacct -j "$jobid" --format=JobIDRaw,JobName,Partition,State,ExitCode,Elapsed,NodeList -P
+```
+
+Expected result after completion: `State=COMPLETED`, `ExitCode=0:0`, stdout
+contains `SLURM_SMOKE_START`, `PYTHON_OK`, and `SLURM_SMOKE_DONE`, and stderr is
+empty. This only proves Slurm submission/accounting/log retrieval works; SHUD
+solver runtime, job arrays, retry behavior, and production-scale logs still need
+separate validation.
+
+## M10 #147 Production Slurm Closure
+
+Issue #147 adds an opt-in production closure lane for the real Slurm + SHUD
+workload evidence bundle. Default tests remain fake/deterministic and do not
+require Slurm, a live SHUD solver, copied Basins root, object-store credentials,
+external network, or production secrets.
+
+Fast deterministic evidence command:
+
+```bash
+uv run nhms-production validate-slurm \
+  --evidence-root artifacts/production-closure \
+  --run-id local-147 \
+  --fake-slurm
+```
+
+Production preflight command (does not submit work and is not #147 acceptance
+evidence):
+
+```bash
+export NHMS_RUN_PRODUCTION_CLOSURE=1
+export NHMS_PRODUCTION_SLURM_CLUSTER=shudhpc
+export NHMS_PRODUCTION_SLURM_ACCOUNT=friends
+export NHMS_PRODUCTION_SLURM_PARTITION=CPU
+export NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production
+export NHMS_PRODUCTION_SLURM_MODEL_ID=basins_qhh_shud
+export NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI=s3://nhms-prod/models/basins_qhh_shud/v1/package/
+export NHMS_PRODUCTION_SLURM_WALLTIME=00:30:00
+export NHMS_PRODUCTION_SLURM_CPUS_PER_TASK=2
+export NHMS_PRODUCTION_SLURM_MEMORY_GB=8
+export NHMS_PRODUCTION_SLURM_SHUD_THREADS=2
+uv run nhms-production validate-slurm \
+  --evidence-root artifacts/production-closure \
+  --run-id "$(date -u +m10-147-%Y%m%dT%H%M%SZ)"
+```
+
+Production acceptance command:
+
+```bash
+uv run nhms-production validate-slurm \
+  --evidence-root artifacts/production-closure \
+  --run-id "$(date -u +m10-147-submit-%Y%m%dT%H%M%SZ)" \
+  --submit \
+  --poll-interval-seconds 15 \
+  --poll-timeout-seconds 900
+```
+
+Poll options must be finite values. `--poll-interval-seconds` must be at least
+`1` and at most `300` seconds; `--poll-timeout-seconds` is bounded from `0` to
+`86400` seconds. Invalid values fail before writing evidence with
+`PRODUCTION_SLURM_POLL_OPTION_INVALID`.
+
+Submitted acceptance evidence requires terminal Slurm accounting rows for array
+tasks `0` and `1`: task `0` must complete successfully, and task `1` must reach
+the expected explicit worker failure (`FAILED` with a nonzero exit code).
+Cancellation, timeout, node failure, preemption, or out-of-memory outcomes do
+not satisfy the controlled-failure contract. Missing terminal task outcomes,
+shared stdout/stderr logs, or QC blocking evidence block #147 acceptance. The
+task `1` shared stdout/stderr evidence must include the
+`NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED` marker emitted by the
+rendered sbatch script and the `NON_FINITE_FLOW` worker/QC error signature from
+the intended malformed-output path. The rendered script emits this validation
+failure only when the selected task manifest declares
+`expected_outcome=controlled_failure`; that branch invokes the repository
+output-parser `.rivqdown` parser on a minimal NaN fixture so the signature comes
+from the QC/parser path rather than a bare shell shortcut. Ordinary task `1`
+workloads do not get the validation marker. Use `--force` only for an
+intentional rerun of an existing `run_id`; the default protects audit evidence
+from accidental overwrite.
+
+In submit mode, the manifest index rendered into `NHMS_MANIFEST_INDEX` is copied
+under the configured shared workspace at
+`<workspace_root>/runs/<run_id>/input/manifest_index.json` so compute nodes can
+read it. Fake and no-submit preflight runs keep generated manifest inputs inside
+the evidence lane and are planned/preflight-only, not publishable acceptance
+evidence. If submit preflight is blocked, runtime manifests and the manifest
+index also stay inside the evidence lane and are not written to the shared
+workspace. If `sbatch` rejects the submission, the validator removes the shared
+runtime manifests/index written for that attempted submission before writing the
+blocked evidence bundle.
+
+If required preflight inputs or Slurm CLI tools are absent, the command writes a
+clear blocker bundle under `artifacts/production-closure/<run_id>/slurm/` and
+returns success so default validation does not fail unpredictably. The bundle
+contains:
+
+- `preflight.json`: redacted cluster/account/partition, shared workspace,
+  solver, model package URI, walltime/resources, object roots, and evidence root.
+- `rendered_run_shud_forecast_array.sbatch`: canonical `infra/sbatch` rendering
+  with shared stdout/stderr, `cpus_per_task`, memory, walltime, `SHUD_THREADS`,
+  `OMP_NUM_THREADS`, workspace/object roots, and manifest-index command.
+- `manifest_index.json`: two-task array fixture for success and controlled
+  failure; submit mode also copies this index into the shared workspace for the
+  rendered sbatch script.
+- `slurm_accounting.json`: fake or attached Slurm accounting fields with job ID,
+  state, exit code, elapsed, node list, partition, and array task rows.
+- `array_partial_success.json`: publishable sibling success and actionable
+  failed task metadata. No-submit/preflight-only and blocked accounting bundles
+  set `successful_outputs_remain_publishable=false` and do not invent concrete
+  job IDs. Submitted evidence only marks task outputs publishable after the
+  corresponding shared stdout/stderr logs are present and readable.
+- `retry_cancel.json`: retry/cancel evidence that does not mutate successful
+  outputs. Submitted runs mark retry/cancel as `not_executed` unless explicit
+  real cancellation/retry evidence exists.
+- `qc_blocking.json`: malformed SHUD output/QC blocking evidence for the
+  affected task while sibling success remains publishable. Submitted runs mark
+  this evidence verified only when the controlled-failure marker is present in
+  task `1` shared logs.
+- `environment.json` and `summary.json`: redacted command/environment metadata
+  and evidence file index.
+
+Secrets and signed URL-shaped values are redacted from the rendered script and
+all JSON evidence touched by this lane.
+
 ## Opt-In Real Basins Smoke
 
 Run only when `data/Basins` exists and points at an accessible Basins tree.
@@ -140,6 +313,7 @@ corepack pnpm test:e2e
 
 ```bash
 openspec validate m9-basins-model-assets --strict --no-interactive
+openspec validate m10-production-closure --strict --no-interactive
 ```
 
 ## M9 Closeout Evidence
