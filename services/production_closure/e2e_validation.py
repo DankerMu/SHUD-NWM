@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -367,7 +368,20 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "expected_schema": contract["schema"],
             "reason": "No accepted dependency evidence root was supplied; using bounded deterministic equivalent.",
         }
-    summary_path = _dependency_summary_path(root, name)
+    try:
+        summary_path = _dependency_summary_path(root, name)
+    except ProductionE2EValidationError as error:
+        return {
+            "dependency": name,
+            "status": "blocked",
+            "execution_mode": "not_executed",
+            "live_success_claimed": False,
+            "summary_path": str(root),
+            "expected_issue": contract["issue"],
+            "expected_schema": contract["schema"],
+            "error_code": error.error_code,
+            "reason": error.message,
+        }
     if summary_path is None:
         return {
             "dependency": name,
@@ -380,8 +394,13 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "reason": "Dependency evidence root was supplied but no summary.json was found.",
         }
     try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        summary, _summary_sha256 = _read_dependency_summary_json(summary_path)
+    except (ProductionE2EValidationError, OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        error_code = (
+            error.error_code
+            if isinstance(error, ProductionE2EValidationError)
+            else "PRODUCTION_E2E_DEPENDENCY_SUMMARY_INVALID"
+        )
         return {
             "dependency": name,
             "status": "blocked",
@@ -390,6 +409,7 @@ def _read_dependency(name: str, root: Path | None) -> dict[str, Any]:
             "summary_path": str(summary_path),
             "expected_issue": contract["issue"],
             "expected_schema": contract["schema"],
+            "error_code": error_code,
             "reason": f"Dependency summary could not be read: {error}",
         }
     if not isinstance(summary, Mapping):
@@ -467,13 +487,60 @@ def _invalid_dependency_summary(
 
 
 def _dependency_summary_path(root: Path, name: str) -> Path | None:
-    candidates = [root / "summary.json", root / name / "summary.json"]
+    resolved_root = _safe_dependency_root(root)
+    candidates = [resolved_root / "summary.json", resolved_root / name / "summary.json"]
     if name == "object_store":
-        candidates.append(root / "object-store" / "summary.json")
+        candidates.append(resolved_root / "object-store" / "summary.json")
     for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        if candidate.is_symlink():
+            raise ProductionE2EValidationError(
+                "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK",
+                f"Dependency summary must not be a symlink: {candidate}",
+            )
+        _refuse_dependency_symlink_components(candidate.parent)
+        if candidate.exists():
+            if not candidate.is_file():
+                continue
+            resolved_candidate = candidate.resolve(strict=True)
+            try:
+                resolved_candidate.relative_to(resolved_root)
+            except ValueError as error:
+                raise ProductionE2EValidationError(
+                    "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+                    "Dependency summary file must stay under its supplied dependency root.",
+                ) from error
+            return resolved_candidate
     return None
+
+
+def _safe_dependency_root(root: Path) -> Path:
+    expanded = root.expanduser()
+    _refuse_dependency_symlink_components(expanded)
+    resolved_root = expanded.resolve(strict=False)
+    if expanded.exists() and not expanded.is_dir():
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_PATH_UNSAFE",
+            f"Dependency evidence root must be a directory: {expanded}",
+        )
+    return resolved_root
+
+
+def _refuse_dependency_symlink_components(path: Path) -> None:
+    try:
+        _refuse_symlink_components(path)
+    except ProductionE2EValidationError as error:
+        raise ProductionE2EValidationError("PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK", error.message) from error
+
+
+def _read_dependency_summary_json(summary_path: Path) -> tuple[Any, str]:
+    with summary_path.open("rb") as handle:
+        content = handle.read(MAX_EVIDENCE_PAYLOAD_BYTES + 1)
+    if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
+        raise ProductionE2EValidationError(
+            "PRODUCTION_E2E_DEPENDENCY_SUMMARY_TOO_LARGE",
+            f"Dependency summary exceeds configured limit of {MAX_EVIDENCE_PAYLOAD_BYTES} bytes.",
+        )
+    return json.loads(content.decode("utf-8")), hashlib.sha256(content).hexdigest()
 
 
 def _derived_identifiers(config: ProductionE2EConfig) -> dict[str, Any]:

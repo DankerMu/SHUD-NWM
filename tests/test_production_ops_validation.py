@@ -368,6 +368,44 @@ def test_validate_ops_accepts_object_store_only_with_summary_live_proof_and_rece
     ).hexdigest()
 
 
+def test_validate_ops_accepts_live_dependency_with_unrelated_false_live_fields(tmp_path: Path) -> None:
+    root = tmp_path / "slurm"
+    root.mkdir()
+    summary_path = root / "summary.json"
+    _write_dependency_summary(
+        summary_path,
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+        extra={
+            "live_alert_sink_delivered": False,
+            "live_frontend_executed": False,
+        },
+    )
+    _write_dependency_acceptance_receipt(summary_path, "slurm", 147, "nhms.production_closure.slurm.v1")
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="accepted_live_with_unrelated_false_fields",
+            slurm_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(
+        tmp_path
+        / "artifacts"
+        / "accepted_live_with_unrelated_false_fields"
+        / "ops"
+        / "dependency_closure.json"
+    )
+    slurm = next(item for item in dependency["dependencies"] if item["dependency"] == "slurm")
+    assert slurm["status"] == "accepted"
+    assert slurm["deterministic_fixture"] is False
+
+
 def test_validate_ops_rejects_spoofed_live_field_even_with_receipt(tmp_path: Path) -> None:
     root = tmp_path / "slurm"
     root.mkdir()

@@ -7,6 +7,7 @@ import pytest
 
 from services.production_closure import slurm_validation
 from services.production_closure.e2e_validation import (
+    MAX_EVIDENCE_PAYLOAD_BYTES,
     ProductionE2EConfig,
     ProductionE2EValidationError,
     _argparse_main,
@@ -301,6 +302,93 @@ def test_validate_e2e_rejects_malformed_dependency_json(tmp_path: Path) -> None:
     assert summary["status"] == "blocked"
     assert dependency["status"] == "blocked"
     assert dependency["execution_mode"] == "not_executed"
+
+
+def test_validate_e2e_blocks_symlinked_dependency_root(tmp_path: Path) -> None:
+    real_root = tmp_path / "real-met"
+    real_root.mkdir()
+    (real_root / "summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    linked_root = tmp_path / "linked-met"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="symlinkrootdep",
+            met_evidence_root=linked_root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "symlinkrootdep" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
+
+
+def test_validate_e2e_blocks_symlinked_dependency_summary_file(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    external = tmp_path / "external-summary.json"
+    external.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.production_closure.met.v1",
+                "issue": 149,
+                "run_id": "external-met-run",
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "summary.json").symlink_to(external)
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="symlinkfiledep",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "symlinkfiledep" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_EVIDENCE_SYMLINK"
+
+
+def test_validate_e2e_blocks_oversized_dependency_summary(tmp_path: Path) -> None:
+    root = tmp_path / "met"
+    root.mkdir()
+    (root / "summary.json").write_bytes(b"{" + (b" " * MAX_EVIDENCE_PAYLOAD_BYTES))
+
+    summary = validate_e2e(
+        ProductionE2EConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="oversizeddep",
+            met_evidence_root=root,
+        )
+    )
+
+    dependency = _read_json(tmp_path / "artifacts" / "oversizeddep" / "e2e" / "dependency_status.json")[
+        "dependencies"
+    ][0]
+    assert summary["status"] == "blocked"
+    assert dependency["status"] == "blocked"
+    assert dependency["error_code"] == "PRODUCTION_E2E_DEPENDENCY_SUMMARY_TOO_LARGE"
 
 
 @pytest.mark.parametrize(

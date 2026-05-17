@@ -1006,7 +1006,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             summary,
             status=status,
             execution_mode="not_executed",
-            deterministic_fixture=_summary_has_deterministic_evidence(summary),
+            deterministic_fixture=_summary_has_deterministic_evidence(summary, dependency=name),
             final_production_readiness_claimed=False,
             error_code="PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
             reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
@@ -1019,7 +1019,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             summary,
             status="blocked",
             execution_mode="not_executed",
-            deterministic_fixture=_summary_has_deterministic_evidence(summary),
+            deterministic_fixture=_summary_has_deterministic_evidence(summary, dependency=name),
             final_production_readiness_claimed=False,
             error_code="PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
             reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
@@ -1067,7 +1067,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
         )
         receipt = {**receipt, "receipt_path": str(receipt_path)}
     if not accepted:
-        deterministic_fixture = _summary_has_deterministic_evidence(summary)
+        deterministic_fixture = _summary_has_deterministic_evidence(summary, dependency=name)
         return _dependency_from_summary(
             name,
             contract,
@@ -1152,7 +1152,7 @@ def _has_accepted_dependency_evidence(
     summary_sha256: str,
     receipt_path: Path,
 ) -> tuple[bool, str]:
-    if _summary_has_deterministic_evidence(summary):
+    if _summary_has_deterministic_evidence(summary, dependency=name):
         return False, "Dependency summary is deterministic/non-live evidence and cannot be accepted by ops closure."
     if summary.get("final_production_readiness_claimed") is True:
         return False, "Dependency summary must not claim final production readiness."
@@ -1213,7 +1213,7 @@ def _has_accepted_dependency_evidence(
     return True, "Accepted dependency evidence receipt is present."
 
 
-def _summary_has_deterministic_evidence(summary: Mapping[str, Any]) -> bool:
+def _summary_has_deterministic_evidence(summary: Mapping[str, Any], *, dependency: str | None = None) -> bool:
     if summary.get("deterministic_fixture") is True:
         return True
     if summary.get("live_registry_import") is False or summary.get("live_api") is False:
@@ -1224,15 +1224,35 @@ def _summary_has_deterministic_evidence(summary: Mapping[str, Any]) -> bool:
         if key in {"execution_mode", "configured_execution_mode", "cached_fallback_policy", "dataset_source"}:
             if _is_deterministic_execution_mode(str(value)):
                 return True
-        if key.startswith("live_") and value is False:
+        if key in _recognized_live_boolean_evidence_fields(dependency) and value is False:
             return True
-        if key.startswith("live_") and key.endswith("_executed") and value is False:
-            return True
-        if key.startswith("live_") and key.endswith("_delivered") and value is False:
-            return True
-        if key.startswith("live_") and key.endswith("_status") and str(value) != "executed":
+        if key in _recognized_live_status_evidence_fields(dependency) and str(value) != "executed":
             return True
     return False
+
+
+def _recognized_live_boolean_evidence_fields(dependency: str | None = None) -> set[str]:
+    fields: set[str] = {"live_registry_import", "live_api"}
+    contracts = (
+        (PRODUCER_LIVE_PROOF_CONTRACTS[dependency],)
+        if dependency in PRODUCER_LIVE_PROOF_CONTRACTS
+        else PRODUCER_LIVE_PROOF_CONTRACTS.values()
+    )
+    for contract in contracts:
+        fields.update(str(field) for field in contract.get("required_true", ()))
+    return fields
+
+
+def _recognized_live_status_evidence_fields(dependency: str | None = None) -> set[str]:
+    fields: set[str] = {"live_api_status"}
+    contracts = (
+        (PRODUCER_LIVE_PROOF_CONTRACTS[dependency],)
+        if dependency in PRODUCER_LIVE_PROOF_CONTRACTS
+        else PRODUCER_LIVE_PROOF_CONTRACTS.values()
+    )
+    for contract in contracts:
+        fields.update(str(field) for field in contract.get("required_values", {}))
+    return fields
 
 
 def _summary_has_accepted_live_proof(name: str, summary: Mapping[str, Any]) -> bool:

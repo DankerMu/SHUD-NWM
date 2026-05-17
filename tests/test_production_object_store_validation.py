@@ -13,6 +13,7 @@ from packages.common.object_store import LocalObjectStore
 from services.production_closure import object_store_validation, slurm_validation
 from services.production_closure.object_store_validation import (
     ProductionObjectStoreConfig,
+    ProductionObjectStoreValidationError,
     _argparse_main,
     _verify_stored_objects,
     validate_object_store,
@@ -863,3 +864,95 @@ def test_local_object_store_read_bytes_limited_uses_bounded_read(
         store.read_bytes_limited(key, max_bytes=5)
 
     assert read_sizes == [6]
+
+
+@pytest.mark.parametrize(
+    "child_name",
+    [
+        "synthetic-basins",
+        ".inventory.raw.json",
+        ".package_manifest.raw.json",
+        ".migration_report.raw.json",
+        "runtime-workspace",
+        "local-object-store",
+    ],
+)
+def test_validate_object_store_refuses_same_run_lane_child_symlink_without_external_write(
+    tmp_path: Path,
+    child_name: str,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / "symlink-child" / "object-store"
+    external_dir = tmp_path / "external-target"
+    external_dir.mkdir()
+    external_file = external_dir / "sentinel.txt"
+    external_file.write_text("external must remain\n", encoding="utf-8")
+    lane_dir.mkdir(parents=True)
+    (lane_dir / child_name).symlink_to(external_dir, target_is_directory=True)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(
+            ProductionObjectStoreConfig.from_env(
+                evidence_root=evidence_root,
+                run_id="symlink-child",
+                force=True,
+            )
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK"
+    assert external_file.read_text(encoding="utf-8") == "external must remain\n"
+    assert sorted(path.name for path in external_dir.iterdir()) == ["sentinel.txt"]
+
+
+def test_validate_object_store_refuses_nested_synthetic_basins_symlink_without_external_write(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / "nested-symlink" / "object-store"
+    fixture_dir = lane_dir / "synthetic-basins"
+    external_dir = tmp_path / "external-nested-target"
+    external_dir.mkdir()
+    external_file = external_dir / "sentinel.txt"
+    external_file.write_text("external must remain\n", encoding="utf-8")
+    fixture_dir.mkdir(parents=True)
+    (fixture_dir / "basin-a").symlink_to(external_dir, target_is_directory=True)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(
+            ProductionObjectStoreConfig.from_env(
+                evidence_root=evidence_root,
+                run_id="nested-symlink",
+                force=True,
+            )
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK"
+    assert external_file.read_text(encoding="utf-8") == "external must remain\n"
+    assert sorted(path.name for path in external_dir.iterdir()) == ["sentinel.txt"]
+
+
+def test_validate_object_store_refuses_nested_local_store_symlink_without_external_write(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "artifacts"
+    lane_dir = evidence_root / "nested-store-symlink" / "object-store"
+    store_dir = lane_dir / "local-object-store"
+    external_dir = tmp_path / "external-store-target"
+    external_dir.mkdir()
+    external_file = external_dir / "sentinel.txt"
+    external_file.write_text("external must remain\n", encoding="utf-8")
+    store_dir.mkdir(parents=True)
+    (store_dir / "runs").symlink_to(external_dir, target_is_directory=True)
+
+    with pytest.raises(ProductionObjectStoreValidationError) as exc_info:
+        validate_object_store(
+            ProductionObjectStoreConfig.from_env(
+                evidence_root=evidence_root,
+                run_id="nested-store-symlink",
+                force=True,
+            )
+        )
+
+    assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK"
+    assert external_file.read_text(encoding="utf-8") == "external must remain\n"
+    assert sorted(path.name for path in external_dir.iterdir()) == ["sentinel.txt"]

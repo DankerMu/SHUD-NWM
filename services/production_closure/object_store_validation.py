@@ -199,10 +199,13 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
     _validate_config(config)
     writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=config.force)
     writer.prepare()
+    _validate_internal_lane_paths(config)
     writer.write_json(config.lane_dir / "preflight.json", _preflight_payload(config))
 
     basins_root = config.basins_root or (config.lane_dir / "synthetic-basins")
     if config.basins_root is None:
+        _validate_lane_path_contained(config, basins_root, path_kind="synthetic basins fixture")
+        _refuse_existing_descendant_symlinks(basins_root, path_kind="synthetic basins fixture")
         write_synthetic_basins_fixture(basins_root)
 
     blockers: list[dict[str, Any]] = []
@@ -224,9 +227,12 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
     cleanup_raw_files = [inventory_path, package_manifest_raw_path]
     try:
         inventory = discover_basins_inventory(basins_root)
+        _validate_lane_path_contained(config, inventory_path, path_kind="raw inventory file")
         write_inventory(inventory, inventory_path)
         selected_model_id = config.model_id or _default_model_id(inventory)
+        _validate_local_object_store_root(config)
         store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
+        _validate_lane_path_contained(config, package_manifest_raw_path, path_kind="raw package manifest file")
         publish_result = publish_basins_package(
             inventory_path=inventory_path,
             model_id=selected_model_id,
@@ -279,6 +285,7 @@ def validate_object_store(config: ProductionObjectStoreConfig) -> dict[str, Any]
         return summary
     finally:
         for path in cleanup_raw_files:
+            _validate_lane_path_contained(config, path, path_kind="raw cleanup file")
             path.unlink(missing_ok=True)
 
 
@@ -359,6 +366,7 @@ def _write_migration_evidence(
 ) -> dict[str, Any] | None:
     raw_path = config.lane_dir / ".migration_report.raw.json"
     try:
+        _validate_lane_path_contained(config, raw_path, path_kind="raw migration report file")
         report = write_basins_migration_report(
             basins_root=basins_root,
             source_uri=config.source_uri,
@@ -371,6 +379,7 @@ def _write_migration_evidence(
         writer.write_json(config.lane_dir / "migration_blocker.json", blocker)
         return None
     finally:
+        _validate_lane_path_contained(config, raw_path, path_kind="raw migration report file")
         raw_path.unlink(missing_ok=True)
     writer.write_json(config.lane_dir / "migration_report.json", report)
     return report
@@ -825,14 +834,19 @@ def _runtime_staging_evidence(
         output_interval_minutes=1440,
         dry_run=True,
     )
+    _validate_lane_path_contained(config, runtime_config.workspace_root, path_kind="runtime workspace")
     runtime = SHUDRuntime(
         config=runtime_config,
         object_store=store,
     )
     input_dir = config.lane_dir / "runtime-workspace" / "runs" / runtime_manifest["run_id"] / "input"
     output_dir = config.lane_dir / "runtime-workspace" / "runs" / runtime_manifest["run_id"] / "output"
+    _validate_lane_path_contained(config, input_dir, path_kind="runtime input directory")
+    _validate_lane_path_contained(config, output_dir, path_kind="runtime output directory")
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    _validate_lane_path_contained(config, input_dir, path_kind="runtime input directory")
+    _validate_lane_path_contained(config, output_dir, path_kind="runtime output directory")
     try:
         runtime.prepare_workspace(runtime_manifest, input_dir)
         cfg_path = runtime.generate_cfg_para(runtime_manifest, input_dir, output_dir)
@@ -1136,6 +1150,79 @@ def _validate_config(config: ProductionObjectStoreConfig) -> None:
     _validate_object_store_prefix_safe(config.configured_object_store_prefix)
     if config.object_store_prefix != config.configured_object_store_prefix:
         _validate_object_store_prefix_safe(config.object_store_prefix)
+
+
+def _validate_internal_lane_paths(config: ProductionObjectStoreConfig) -> None:
+    for path, path_kind in (
+        (config.lane_dir / "synthetic-basins", "synthetic basins fixture"),
+        (config.lane_dir / ".inventory.raw.json", "raw inventory file"),
+        (config.lane_dir / ".package_manifest.raw.json", "raw package manifest file"),
+        (config.lane_dir / ".migration_report.raw.json", "raw migration report file"),
+        (config.lane_dir / "runtime-workspace", "runtime workspace"),
+    ):
+        _validate_lane_path_contained(config, path, path_kind=path_kind)
+    _validate_local_object_store_root(config)
+
+
+def _validate_local_object_store_root(config: ProductionObjectStoreConfig) -> None:
+    if config.object_store_root.is_symlink():
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+            f"local object store root must not be a symlink: {config.object_store_root}",
+        )
+    _refuse_symlink_components(config.object_store_root)
+    resolved_lane = config.lane_dir.resolve(strict=False)
+    try:
+        config.object_store_root.expanduser().resolve(strict=False).relative_to(resolved_lane)
+    except ValueError:
+        pass
+    else:
+        _validate_lane_path_contained(config, config.object_store_root, path_kind="local object store root")
+        _refuse_existing_descendant_symlinks(config.object_store_root, path_kind="local object store root")
+        return
+    try:
+        configured_root = config.object_store_root.expanduser().resolve(strict=False)
+        default_root = (config.lane_dir / "local-object-store").resolve(strict=False)
+        configured_root.relative_to(default_root)
+    except ValueError:
+        return
+    _validate_lane_path_contained(config, config.object_store_root, path_kind="local object store root")
+    _refuse_existing_descendant_symlinks(config.object_store_root, path_kind="local object store root")
+
+
+def _validate_lane_path_contained(
+    config: ProductionObjectStoreConfig,
+    path: Path,
+    *,
+    path_kind: str,
+) -> None:
+    _refuse_symlink_components(path)
+    if path.is_symlink():
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+            f"{path_kind} must not be a symlink: {path}",
+        )
+    resolved_path = path.resolve(strict=False)
+    resolved_lane = config.lane_dir.resolve(strict=False)
+    try:
+        resolved_path.relative_to(config.evidence_root)
+        resolved_path.relative_to(resolved_lane)
+    except ValueError as error:
+        raise ProductionObjectStoreValidationError(
+            "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+            f"{path_kind} must stay under the current object-store evidence lane.",
+        ) from error
+
+
+def _refuse_existing_descendant_symlinks(root: Path, *, path_kind: str) -> None:
+    if not root.exists() or root.is_symlink():
+        return
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise ProductionObjectStoreValidationError(
+                "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK",
+                f"{path_kind} must not contain symlinks: {path}",
+            )
 
 
 def _validate_object_store_prefix_safe(prefix: str) -> None:
