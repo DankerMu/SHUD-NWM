@@ -33,6 +33,7 @@ The system SHALL support the GIS design's source/scenario choices for overview a
 - **WHEN** Best Available is selected
 - **THEN** the UI MUST show which source/run/cycle was actually used for the visible map or detail data
 - **AND** fallback to a different source MUST not occur silently
+- **AND** until a backend best-available endpoint supports map/detail surfaces directly, frontend requests to run, pipeline, flood, and forecast APIs MUST use the resolved concrete GFS or IFS source/scenario, or expose Best Available as unavailable when no concrete source can be resolved
 
 #### Scenario: GFS and IFS comparison is available
 - **WHEN** GFS + IFS 对比 is selected and both sources have comparable data

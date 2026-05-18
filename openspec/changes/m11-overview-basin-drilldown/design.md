@@ -41,6 +41,12 @@ Add read-only aggregation endpoints only if adapter composition creates repeated
 - `GET /api/v1/overview/summary`
 - `GET /api/v1/basins/{basin_id}/summary`
 
+Issue #161 closure note: the overview adapter may fetch real basin-version/bbox data only
+when the measured request plan stays inside the documented threshold and does not create
+per-basin N+1 fan-out. When basin-version/bbox composition would require N+1 or exceed the
+request budget, page-facing links and summaries must mark that surface aggregation-needed
+instead of fabricating basin-version IDs or claiming full reuse of existing APIs.
+
 ### D3: View-model adapters as the contract between pages and APIs
 
 Pages and components should consume typed view models rather than raw API responses. Adapters should normalize nullable fields, IDs, warning levels, units, time strings, and empty collections.
@@ -53,6 +59,15 @@ Suggested view-model groups:
 - `BasinDetail`: basin identity, selected basin version, bbox, segment count, warning distribution, latest run metadata.
 - `BasinSegmentRow`: river segment id, display name, current Q, return period, warning level, quality flag, source, cycle time.
 - `SelectedSegmentDetail`: IDs, basin/model metadata, current forecast values, data source, lineage/quality status, trend points, and handoff URLs.
+
+For M11 #161, the page-facing view models include typed placeholders and unavailable states
+for surfaces that are required by the larger OpenSpec but not rendered as first-class page
+components in this issue: pipeline stages, job tables, stage-duration/success-rate metrics,
+flood return-period map features/tiles, flood-alert segment lists, and full lineage graph
+visualization. The adapter composes pipeline status, queue depth, flood summary/ranking,
+layer valid-times, forecast series, timeline, and lineage status; richer monitoring tables,
+metrics charts, flood map rendering, and lineage graph UI remain downstream page/component
+work and must not be silently represented with fake values.
 
 ### D4: Shared map primitives, not one-off map implementations
 
@@ -211,6 +226,84 @@ Issue #160 non-goals:
   data refresh, legends, full basin segment detail, and production MVT remain in issues #161-#165.
 - Backend/OpenAPI changes are not part of #160 unless implementation proves route/query tests
   cannot be completed without a contract fix.
+
+## Issue #161 Fixture Slice
+
+Fixture level: expanded. Issue #161 introduces shared frontend data contracts and adapters
+that compose multiple backend APIs and normalize IDs, timestamps, units, warning states,
+freshness, partial failures, and unavailable reasons for later overview and basin pages.
+Mandatory expanded triggers are public frontend data contracts, schema/field normalization,
+time-series valid-time metadata, existing API reuse, and legacy workflow compatibility.
+
+Repair intensity: high. The work touches shared adapter/helper behavior that later route,
+map, timeline, and detail pages will consume. It must not add backend endpoints unless the
+documented aggregation decision rule is met and fully evidenced.
+
+Change surface:
+
+- New frontend view-model types and adapter/store modules for M11 overview and basin data.
+- API composition over existing `/api/v1/basins`, basin version, model, river segment,
+  flood alert, forecast series, layer valid-time, pipeline, jobs/metrics, tile, and lineage
+  contracts where already available.
+- Unit tests for normal, partial, unavailable, invalid-query, freshness, and source/scenario
+  provenance cases.
+- No OpenAPI/backend changes unless adapter composition exceeds the endpoint decision rule.
+
+Must preserve:
+
+- Existing forecast, flood alert, monitoring, model asset, API type, and M11 route tests keep
+  passing.
+- Existing raw API response types remain generated from `openapi/nhms.v1.yaml`; adapters sit
+  between these raw contracts and pages/components.
+- `basin_id`, `basin_version_id`, `river_segment_id`, `model_id`, `run_id`, `source`, `cycle`,
+  and `validTime` remain explicit in view models and handoff data.
+- Unavailable data is represented as explicit `unavailableReason`, `qualityNote`, or partial
+  state rather than fabricated default business values.
+
+Must add/change for #161:
+
+- Typed view models for `OverviewBasin`, `OverviewSummary`, `LayerState`, `BasinDetail`,
+  `BasinSegmentRow`, `SelectedSegmentDetail`, and source/scenario selection state.
+- Adapter functions or a store that compose existing APIs and normalize IDs, units, warning
+  levels, timestamps, nullable fields, freshness metadata, source/scenario provenance, and
+  unavailable reasons.
+- Request de-duplication or caching for shared overview resources so repeated route/source/
+  layer/filter changes do not blindly issue duplicate requests.
+- A measurable aggregation endpoint decision helper/result: add no endpoint when existing
+  composition is sufficient; if the rule is met, include OpenAPI/backend/frontend coverage in
+  the same issue.
+
+Risk packs considered for #161:
+
+- Public API / CLI / script entry: selected - view models are public frontend contracts for
+  overview/basin page entrypoints and handoff links.
+- Config / project setup: not selected - no deployment or project configuration change.
+- File IO / path safety / overwrite: not selected - no filesystem reads/writes.
+- Schema / columns / units / field names: selected - adapter normalization depends on API
+  schema field names, units, IDs, and optional/null values.
+- Geospatial / CRS / shapefile sidecars: selected - basin bbox, river segment geometry, and
+  map-feature availability must be passed through honestly without CRS fabrication.
+- Time series / forcing / temporal boundaries: selected - source/cycle/validTime/layer
+  valid-time metadata and forecast/timeline points must stay explicit and canonical.
+- Numerical stability / conservation / NaN: not selected - no solver/numerical computation.
+- Solver runtime / performance / threading: not selected - no SHUD runtime change.
+- Resource limits / large input / discovery: selected - adapter composition must avoid
+  unbounded per-basin N+1 calls and document the aggregation endpoint threshold.
+- Legacy compatibility / examples: selected - existing forecast/flood/monitoring/model asset
+  consumers and tests must continue to pass.
+- Error handling / rollback / partial outputs: selected - partial endpoint failures and
+  unavailable data must produce stable view-model states.
+- Release / packaging / dependency compatibility: selected - no new dependency unless
+  justified; frontend build/test path remains stable.
+- Documentation / migration notes: selected - the endpoint decision rule and non-goals must
+  be visible in OpenSpec/tasks or developer notes.
+
+Issue #161 non-goals:
+
+- Full map rendering, basin popup interaction, segment list UI, timeline controls, selected
+  segment panel UI, visual evidence refresh, and production MVT remain in issues #162-#165.
+- Backend aggregation endpoints are non-goals unless the decision rule is actually met by
+  measured request count, per-basin N+1 behavior, or a missing required field.
 
 ## Verification Strategy
 

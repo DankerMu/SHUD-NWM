@@ -5,6 +5,7 @@ import App from '@/App'
 import { useAuthStore } from '@/stores/auth'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useMonitoringStore } from '@/stores/monitoring'
+import { useOverviewDataStore } from '@/stores/overviewData'
 
 vi.mock('@/components/map/MapView', () => ({
   MapView: () => <div aria-label="河网地图">mock map</div>,
@@ -19,8 +20,10 @@ vi.mock('@/components/flood/FloodAlertMap', () => ({
 }))
 
 const noopAsync = vi.fn().mockResolvedValue(undefined)
+const overviewAsync = vi.fn().mockResolvedValue(undefined)
 
 beforeEach(() => {
+  overviewAsync.mockResolvedValue(undefined)
   useAuthStore.setState({ role: 'viewer' })
   useFloodAlertStore.setState({
     selectedRunId: null,
@@ -57,6 +60,16 @@ beforeEach(() => {
     fetchAll: noopAsync,
     fetchJobs: noopAsync,
   })
+  useOverviewDataStore.setState({
+    overview: null,
+    basinDetail: null,
+    loading: false,
+    basinLoading: false,
+    error: null,
+    basinError: null,
+    loadOverview: overviewAsync,
+    loadBasinDetail: overviewAsync,
+  })
 })
 
 describe('App route state', () => {
@@ -80,6 +93,129 @@ describe('App route state', () => {
     expect(screen.getByText('gfs')).toBeInTheDocument()
     expect(screen.getAllByText('flood-return-period').length).toBeGreaterThan(0)
     expect(screen.getAllByText('terrain').length).toBeGreaterThan(0)
+  })
+
+  it('does not emit fabricated basin or basin-version IDs when overview data is unavailable', async () => {
+    window.history.pushState({}, '', '/overview')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: '等待可用流域' })
+    expect(link).toHaveAttribute('href', '/overview')
+    expect(link).not.toHaveAttribute('href', expect.stringContaining('bv-demo'))
+    expect(link).not.toHaveAttribute('href', expect.stringContaining('basin-demo'))
+  })
+
+  it('does not render static basin labels when overview basin inventory is empty', async () => {
+    useOverviewDataStore.setState({
+      overview: {
+        basins: [],
+        layers: [],
+        aggregationDecision: {
+          needsAggregationEndpoint: false,
+          reason: 'reuse-existing',
+          evidence: 'test',
+        },
+        summary: {
+          completedCyclesToday: null,
+          runningJobs: null,
+          warningSegmentCount: null,
+          latestUpdate: null,
+          totalBasins: 0,
+          totalSegments: null,
+          sourceSelection: {
+            requestedSource: 'gfs',
+            resolvedSource: 'GFS',
+            scenarioIds: ['forecast_gfs_deterministic'],
+            cycleTime: null,
+            validTime: null,
+            comparisonAvailable: false,
+            provenanceLabel: 'GFS / latest cycle / current valid time',
+            unavailableReason: null,
+          },
+          freshness: {
+            updatedAt: null,
+            cycleTime: null,
+            validTime: null,
+            runId: null,
+            source: 'GFS',
+            isStale: false,
+            staleAfterHours: 6,
+            unavailableReason: 'No freshness metadata is available.',
+          },
+          qualityNotes: [],
+          partialErrors: [],
+        },
+      },
+    })
+    window.history.pushState({}, '', '/overview')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(screen.getByText('暂无可用流域数据')).toBeInTheDocument()
+    expect(screen.queryByText('长江流域')).not.toBeInTheDocument()
+    expect(screen.queryByText('黄河流域')).not.toBeInTheDocument()
+    expect(screen.queryByText('珠江流域')).not.toBeInTheDocument()
+    expect(screen.queryByText('松辽流域')).not.toBeInTheDocument()
+  })
+
+  it('renders unavailable markers for null overview summary fields and preserves real zero values', async () => {
+    useOverviewDataStore.setState({
+      overview: {
+        basins: [],
+        layers: [],
+        aggregationDecision: {
+          needsAggregationEndpoint: false,
+          reason: 'reuse-existing',
+          evidence: 'test',
+        },
+        summary: {
+          completedCyclesToday: 0,
+          runningJobs: null,
+          warningSegmentCount: null,
+          latestUpdate: null,
+          totalBasins: 0,
+          totalSegments: null,
+          sourceSelection: {
+            requestedSource: 'gfs',
+            resolvedSource: 'GFS',
+            scenarioIds: ['forecast_gfs_deterministic'],
+            cycleTime: null,
+            validTime: null,
+            comparisonAvailable: false,
+            provenanceLabel: 'GFS / latest cycle / current valid time',
+            unavailableReason: null,
+          },
+          freshness: {
+            updatedAt: null,
+            cycleTime: null,
+            validTime: null,
+            runId: null,
+            source: 'GFS',
+            isStale: false,
+            staleAfterHours: 6,
+            unavailableReason: 'No freshness metadata is available.',
+          },
+          qualityNotes: [],
+          partialErrors: [],
+        },
+      },
+    })
+    window.history.pushState({}, '', '/overview')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(screen.getByText('0')).toBeInTheDocument()
+    expect(screen.getByText('当前运行中').parentElement).toHaveTextContent('-')
+    expect(screen.getByText('超警河段').parentElement).toHaveTextContent('-')
+    expect(screen.getByText('最新更新时间').parentElement).toHaveTextContent('-')
+    expect(screen.queryByText('23')).not.toBeInTheDocument()
+    expect(screen.queryByText('7')).not.toBeInTheDocument()
+    expect(screen.queryByText('18')).not.toBeInTheDocument()
+    expect(screen.queryByText('08:00')).not.toBeInTheDocument()
   })
 
   it('routes /forecast to the preserved hydrologic forecast workflow', async () => {
@@ -118,6 +254,68 @@ describe('App route state', () => {
     )
     expect(normalizedRouteReplacements).toHaveLength(1)
     replaceState.mockRestore()
+  })
+
+  it('renders an unavailable state for invalid basin segment deep links', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: {
+        detail: {
+          basinId: 'basin-demo',
+          displayName: 'Demo Basin',
+          basinGroup: null,
+          selectedBasinVersionId: 'bv-001',
+          basinVersions: [],
+          bbox: null,
+          segmentCount: 1,
+          warningDistribution: {
+            normal: 0,
+            elevated: 0,
+            watch: 0,
+            warning: 0,
+            high_risk: 0,
+            severe: 0,
+            extreme: 0,
+            unavailable: 1,
+          },
+          activeModelCount: 0,
+          latestRun: {
+            updatedAt: null,
+            cycleTime: null,
+            validTime: null,
+            runId: null,
+            source: 'GFS',
+            isStale: false,
+            staleAfterHours: 6,
+            unavailableReason: null,
+          },
+          sourceSelection: {
+            requestedSource: 'gfs',
+            resolvedSource: 'GFS',
+            scenarioIds: ['forecast_gfs_deterministic'],
+            cycleTime: null,
+            validTime: null,
+            comparisonAvailable: false,
+            provenanceLabel: 'GFS / latest cycle / current valid time',
+            unavailableReason: null,
+          },
+          unavailableReason: null,
+          partialErrors: [],
+        },
+        segments: [],
+        selectedSegment: null,
+        layers: [],
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&segmentId=missing-seg')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByText('未找到河段 missing-seg')).toBeInTheDocument()
+    expect(screen.getByText('当前流域版本中没有匹配的河段数据。')).toBeInTheDocument()
+    expect(screen.queryByText('已恢复 missing-seg')).not.toBeInTheDocument()
   })
 
   it('normalizes invalid overview query values without repeated URL updates', async () => {

@@ -73,7 +73,6 @@ function inferRunType(runId: string, jobType: string | null | undefined) {
 function inferScenario(runId: string) {
   const value = runId.toLowerCase()
   if (value.includes('ifs')) return 'forecast_ifs_deterministic'
-  if (value.includes('best')) return 'best_available'
   if (value.includes('analysis')) return 'analysis_true_field'
   return 'forecast_gfs_deterministic'
 }
