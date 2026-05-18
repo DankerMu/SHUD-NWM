@@ -467,8 +467,10 @@ export function resolveM11ValidTimeCorrection(
   const activeLayer = layers.find((layer) => layer.layerId === state.layer)
   if (activeLayer) {
     if (activeLayer.validTimes.length === 0) return state.validTime ? null : undefined
+    const current = normalizeIso(state.validTime)
+    if (current && activeLayer.validTimes.includes(current)) return undefined
     const nextValidTime = activeLayer.currentValidTime ?? activeLayer.validTimes[activeLayer.validTimes.length - 1] ?? null
-    return normalizeIso(state.validTime) === nextValidTime ? undefined : nextValidTime
+    return current === nextValidTime ? undefined : nextValidTime
   }
 
   const validTimes = normalizeValidTimes(derivedTimes?.validTimes)

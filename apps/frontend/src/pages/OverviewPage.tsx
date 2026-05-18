@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
+import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
+import type { M11Bbox } from '@/lib/m11/overviewDataContracts'
 import { BasinLink, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
   type M11QueryPatch,
@@ -54,6 +56,9 @@ export function OverviewPage() {
   const summary = currentOverview?.summary
   const sourceSelection = summary?.sourceSelection ?? null
   const firstBasin = basins[0]
+  const mapFitTo = useMemo(() => bboxToMapFit(firstBasin?.bbox), [firstBasin?.bbox])
+  const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
+  const handleMapOverlayClick = useCallback((_interaction: M11MapOverlayInteraction) => undefined, [])
   const emptyBasinReason =
     !loading && basins.length === 0
       ? error ??
@@ -79,6 +84,9 @@ export function OverviewPage() {
       state={state}
       layers={layers}
       sourceSelection={sourceSelection}
+      fitTo={mapFitTo}
+      onMapOverlayHover={handleMapOverlayHover}
+      onMapOverlayClick={handleMapOverlayClick}
       onQueryChange={handleQueryChange}
       mapLabel="全国总览地图"
       mapTitle="全国水文总览"
@@ -132,6 +140,17 @@ export function OverviewPage() {
       }
     />
   )
+}
+
+function bboxToMapFit(bbox: M11Bbox | null | undefined) {
+  if (!bbox) return null
+  return {
+    bounds: [
+      [bbox.minLon, bbox.minLat],
+      [bbox.maxLon, bbox.maxLat],
+    ] as [[number, number], [number, number]],
+    padding: 36,
+  }
 }
 
 function SummaryMetric({ value, label, tone = 'default' }: { value: string; label: string; tone?: 'default' | 'warning' }) {

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
+import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
+import type { M11Bbox } from '@/lib/m11/overviewDataContracts'
 import { M11Layout, SegmentSearchStub, StateReadout } from '@/pages/m11/M11Shell'
 import {
   type M11QueryPatch,
@@ -69,6 +71,9 @@ export function BasinDetailPage() {
   const detail = currentBasinData?.detail
   const selectedSegment = currentBasinData?.selectedSegment
   const invalidSegmentRequested = Boolean(state.segmentId && currentBasinData && !loading && !selectedSegment)
+  const mapFitTo = useMemo(() => bboxToMapFit(detail?.bbox), [detail?.bbox])
+  const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
+  const handleMapOverlayClick = useCallback((_interaction: M11MapOverlayInteraction) => undefined, [])
 
   return (
     <M11Layout
@@ -78,6 +83,9 @@ export function BasinDetailPage() {
       layers={layers}
       sourceSelection={sourceSelection}
       derivedTimeline={derivedTimeline}
+      fitTo={mapFitTo}
+      onMapOverlayHover={handleMapOverlayHover}
+      onMapOverlayClick={handleMapOverlayClick}
       onQueryChange={handleQueryChange}
       mapLabel="流域钻取地图"
       mapTitle={`${detail?.displayName ?? basinId} 流域钻取`}
@@ -133,4 +141,15 @@ export function BasinDetailPage() {
       }
     />
   )
+}
+
+function bboxToMapFit(bbox: M11Bbox | null | undefined) {
+  if (!bbox) return null
+  return {
+    bounds: [
+      [bbox.minLon, bbox.minLat],
+      [bbox.maxLon, bbox.maxLat],
+    ] as [[number, number], [number, number]],
+    padding: 36,
+  }
 }

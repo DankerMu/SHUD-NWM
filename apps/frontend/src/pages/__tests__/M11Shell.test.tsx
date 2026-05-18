@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import type { ReactNode } from 'react'
+import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { BrowserRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -21,51 +21,64 @@ import { useOverviewDataStore } from '@/stores/overviewData'
 
 const mapSources: Array<Record<string, unknown>> = []
 const mapLayers: Array<Record<string, unknown>> = []
+const fitBoundsCalls: Array<unknown[]> = []
+const flyToCalls: Array<unknown> = []
 
 vi.mock('react-map-gl/maplibre', () => ({
-  default: ({
-    children,
-    mapStyle,
-    interactiveLayerIds,
-    onMouseMove,
-    onMouseLeave,
-    onClick,
-  }: {
-    children: ReactNode
-    mapStyle: unknown
-    interactiveLayerIds?: string[]
-    onMouseMove?: (event: unknown) => void
-    onMouseLeave?: (event: unknown) => void
-    onClick?: (event: unknown) => void
-  }) => (
-    <div
-      data-testid="mock-maplibre-map"
-      data-map-style={JSON.stringify(mapStyle)}
-      data-interactive-layer-ids={(interactiveLayerIds ?? []).join(',')}
-      onMouseMove={() =>
-        onMouseMove?.({
-          target: { getCanvas: () => ({ style: {} }) },
-          features: [],
-          point: { x: 0, y: 0 },
-        })
-      }
-      onMouseLeave={() =>
-        onMouseLeave?.({
-          target: { getCanvas: () => ({ style: {} }) },
-          features: [],
-          point: { x: 0, y: 0 },
-        })
-      }
-      onClick={() =>
-        onClick?.({
-          target: { getCanvas: () => ({ style: {} }) },
-          features: [],
-          point: { x: 0, y: 0 },
-        })
-      }
-    >
-      {children}
-    </div>
+  default: forwardRef(
+    (
+      {
+        children,
+        mapStyle,
+        interactiveLayerIds,
+        onMouseMove,
+        onMouseLeave,
+        onClick,
+      }: {
+        children: ReactNode
+        mapStyle: unknown
+        interactiveLayerIds?: string[]
+        onMouseMove?: (event: unknown) => void
+        onMouseLeave?: (event: unknown) => void
+        onClick?: (event: unknown) => void
+      },
+      ref,
+    ) => {
+      useImperativeHandle(ref, () => ({
+        fitBounds: (...args: unknown[]) => fitBoundsCalls.push(args),
+        flyTo: (args: unknown) => flyToCalls.push(args),
+      }))
+      return (
+        <div
+          data-testid="mock-maplibre-map"
+          data-map-style={JSON.stringify(mapStyle)}
+          data-interactive-layer-ids={(interactiveLayerIds ?? []).join(',')}
+          onMouseMove={() =>
+            onMouseMove?.({
+              target: { getCanvas: () => ({ style: {} }) },
+              features: [],
+              point: { x: 0, y: 0 },
+            })
+          }
+          onMouseLeave={() =>
+            onMouseLeave?.({
+              target: { getCanvas: () => ({ style: {} }) },
+              features: [],
+              point: { x: 0, y: 0 },
+            })
+          }
+          onClick={() =>
+            onClick?.({
+              target: { getCanvas: () => ({ style: {} }) },
+              features: [],
+              point: { x: 0, y: 0 },
+            })
+          }
+        >
+          {children}
+        </div>
+      )
+    },
   ),
   Source: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => {
     mapSources.push(props)
@@ -155,6 +168,8 @@ describe('M11 visual foundation shell', () => {
   beforeEach(() => {
     mapSources.length = 0
     mapLayers.length = 0
+    fitBoundsCalls.length = 0
+    flyToCalls.length = 0
     useOverviewDataStore.setState({
       ...useOverviewDataStore.getInitialState(),
       loadOverview: vi.fn().mockResolvedValue(undefined),
@@ -188,7 +203,7 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByLabelText('M11 时间轴')).toBeInTheDocument()
   })
 
-  it('switches basemaps through query patches and preserves active overlay state', async () => {
+  it('keeps default discharge unregistered while preserving controls and unavailable map status', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
 
@@ -196,35 +211,83 @@ describe('M11 visual foundation shell', () => {
 
     const surface = screen.getByTestId('m11-map-surface')
     expect(surface).toHaveAttribute('data-basemap', 'vector')
-    expect(surface).toHaveAttribute('data-registered-overlays', 'discharge')
-    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-discharge-line')
+    expect(surface).not.toHaveAttribute('data-registered-overlays')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
+    expect(screen.getByTestId('m11-map-unavailable')).toHaveTextContent('地图源尚未在本仓库实现')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+
+    await user.click(screen.getByRole('button', { name: '地形底图' }))
+    expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'terrain' })
+
+    rerender(<M11MapSurface state={{ ...state, basemap: 'terrain' }} layers={layers} onQueryChange={onQueryChange} />)
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'terrain')
+    expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays')
+
+    await user.click(screen.getByRole('button', { name: '卫星底图' }))
+    expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
+  })
+
+  it('registers flood return period geojson and keeps it through basemap switches using selected URL valid time', async () => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+    const floodState = { ...state, layer: 'flood-return-period' as const, validTime: '2026-05-18T06:00:00.000Z' }
+
+    const { rerender } = render(<M11MapSurface state={floodState} layers={layers} onQueryChange={onQueryChange} />)
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-flood-return-period-line')
     expect(mapSources.at(-1)).toMatchObject({
-      id: 'm11-discharge-source',
-      type: 'vector',
-      tiles: [expect.stringContaining('/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf')],
+      id: 'm11-flood-return-period-source',
+      type: 'geojson',
+      data: expect.stringContaining('/api/v1/tiles/flood-return-period?'),
     })
-    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-discharge-line', source: 'm11-discharge-source' })
+    expect(String(mapSources.at(-1)?.data)).toContain('valid_time=2026-05-18T06%3A00%3A00.000Z')
+    expect(String(mapSources.at(-1)?.data)).not.toContain('valid_time=2026-05-18T12%3A00%3A00.000Z')
+    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line', source: 'm11-flood-return-period-source' })
 
     await user.click(screen.getByRole('button', { name: '地形底图' }))
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'terrain' })
 
     mapSources.length = 0
     mapLayers.length = 0
-    rerender(<M11MapSurface state={{ ...state, basemap: 'terrain' }} layers={layers} onQueryChange={onQueryChange} />)
-    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'terrain')
-    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge')
-    expect(mapSources.at(-1)).toMatchObject({ id: 'm11-discharge-source', type: 'vector' })
-    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-discharge-line' })
+    rerender(<M11MapSurface state={{ ...floodState, basemap: 'terrain' }} layers={layers} onQueryChange={onQueryChange} />)
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
+    expect(mapSources.at(-1)).toMatchObject({ id: 'm11-flood-return-period-source', type: 'geojson' })
+    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line' })
+  })
 
-    await user.click(screen.getByRole('button', { name: '卫星底图' }))
-    expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
+  it('threads camera and overlay callbacks into the MapLibre primitive', () => {
+    const onOverlayHover = vi.fn()
+    const onOverlayClick = vi.fn()
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+        fitTo={{ bounds: [[100, 30], [105, 35]], padding: 24 }}
+        flyTo={{ center: [102, 32], zoom: 7 }}
+        onOverlayHover={onOverlayHover}
+        onOverlayClick={onOverlayClick}
+      />,
+    )
+
+    expect(fitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 24, duration: 450 }]])
+    expect(flyToCalls).toEqual([{ center: [102, 32], zoom: 7, duration: 450 }])
+
+    fireEvent.mouseMove(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayHover).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
+    fireEvent.mouseLeave(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayHover).toHaveBeenCalledWith(null)
+    fireEvent.click(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
   })
 
   it('does not advertise or register unavailable selected overlays', () => {
     render(<M11MapSurface state={{ ...state, layer: 'water-level' }} layers={layers} />)
 
     const surface = screen.getByTestId('m11-map-surface')
-    expect(surface).toHaveAttribute('data-registered-overlays', '')
+    expect(surface).not.toHaveAttribute('data-registered-overlays')
     expect(surface).not.toHaveAttribute('data-active-overlays')
     expect(screen.getByTestId('m11-map-unavailable')).toHaveTextContent('Layer has no valid times.')
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
@@ -300,6 +363,12 @@ describe('M11 visual foundation shell', () => {
     expect(model.dividerPercent).toBe(50)
     expect(resolveM11ValidTimeCorrection(staleState, layers)).toBe('2026-05-18T00:00:00.000Z')
     expect(resolveM11ValidTimeCorrection({ ...state, layer: 'flood-return-period' }, layers)).toBe('2026-05-18T12:00:00.000Z')
+    expect(
+      resolveM11ValidTimeCorrection(
+        { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
+        layers,
+      ),
+    ).toBeUndefined()
     expect(resolveM11ValidTimeCorrection({ ...state, layer: 'water-level' }, layers)).toBeNull()
   })
 

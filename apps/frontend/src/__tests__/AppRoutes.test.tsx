@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import type { ReactNode } from 'react'
+import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
@@ -10,18 +10,55 @@ import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
 
+const m11FitBoundsCalls: Array<unknown[]> = []
+const m11FlyToCalls: Array<unknown> = []
+
 vi.mock('@/components/map/MapView', () => ({
   MapView: () => <div aria-label="河网地图">mock map</div>,
 }))
 
 vi.mock('react-map-gl/maplibre', () => ({
-  default: ({ children, interactiveLayerIds }: { children: ReactNode; interactiveLayerIds?: string[] }) => (
-    <div data-testid="mock-m11-maplibre-map" data-interactive-layer-ids={(interactiveLayerIds ?? []).join(',')}>
-      {children}
-    </div>
+  default: forwardRef(
+    (
+      {
+        children,
+        interactiveLayerIds,
+        onMouseMove,
+        onMouseLeave,
+        onClick,
+      }: {
+        children: ReactNode
+        interactiveLayerIds?: string[]
+        onMouseMove?: (event: unknown) => void
+        onMouseLeave?: (event: unknown) => void
+        onClick?: (event: unknown) => void
+      },
+      ref,
+    ) => {
+      useImperativeHandle(ref, () => ({
+        fitBounds: (...args: unknown[]) => m11FitBoundsCalls.push(args),
+        flyTo: (args: unknown) => m11FlyToCalls.push(args),
+      }))
+      return (
+        <div
+          data-testid="mock-m11-maplibre-map"
+          data-interactive-layer-ids={(interactiveLayerIds ?? []).join(',')}
+          onMouseMove={() => onMouseMove?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+          onMouseLeave={() => onMouseLeave?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+          onClick={() => onClick?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+        >
+          {children}
+        </div>
+      )
+    },
   ),
   Source: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => (
-    <div data-testid="mock-m11-map-source" data-source-id={String(props.id ?? '')} data-source-type={String(props.type ?? '')}>
+    <div
+      data-testid="mock-m11-map-source"
+      data-source-id={String(props.id ?? '')}
+      data-source-type={String(props.type ?? '')}
+      data-source-data={String(props.data ?? '')}
+    >
       {children}
     </div>
   ),
@@ -143,6 +180,40 @@ function overviewSnapshot(layers: LayerState[], queryKey = '') {
   }
 }
 
+function overviewSnapshotWithBasin(layers: LayerState[], queryKey = '') {
+  return {
+    ...overviewSnapshot(layers, queryKey),
+    basins: [
+      {
+        basinId: 'basin-demo',
+        displayName: 'Demo Basin',
+        basinGroup: null,
+        parentBasinId: null,
+        level: 1,
+        bbox: { minLon: 100, minLat: 30, maxLon: 105, maxLat: 35 },
+        areaKm2: null,
+        riverCount: null,
+        activeModelCount: 1,
+        latestForecastTime: null,
+        warningCounts: {
+          normal: 0,
+          elevated: 0,
+          watch: 0,
+          warning: 0,
+          high_risk: 0,
+          severe: 0,
+          extreme: 0,
+          unavailable: 0,
+        },
+        basinVersions: [],
+        selectedBasinVersionId: 'bv-001',
+        unavailableReason: null,
+        qualityNote: null,
+      },
+    ],
+  }
+}
+
 function basinSnapshot(basinId: string, layers: LayerState[], queryKey = '') {
   return {
     requestScope: {
@@ -164,7 +235,7 @@ function basinSnapshot(basinId: string, layers: LayerState[], queryKey = '') {
       basinGroup: null,
       selectedBasinVersionId: 'bv-001',
       basinVersions: [],
-      bbox: null,
+      bbox: { minLon: 101, minLat: 31, maxLon: 104, maxLat: 34 },
       segmentCount: 1,
       warningDistribution: {
         normal: 0,
@@ -193,6 +264,8 @@ const overviewFloodScopeKey = 'source=gfs&layer=flood-return-period'
 const basinDefaultScopeKey = 'source=gfs&basinVersionId=bv-001&segmentId=seg-009'
 
 beforeEach(() => {
+  m11FitBoundsCalls.length = 0
+  m11FlyToCalls.length = 0
   overviewAsync.mockResolvedValue(undefined)
   useAuthStore.setState({ role: 'viewer' })
   useFloodAlertStore.setState({
@@ -310,6 +383,47 @@ describe('App route state', () => {
       loading: false,
     })
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+  })
+
+  it('preserves overview URL valid-time changes that are valid for the active layer', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      overview: overviewSnapshot(m11Layers, overviewDefaultScopeKey),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+
+    await user.click(screen.getByRole('button', { name: '上一个有效时刻' }))
+
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T00%3A00%3A00.000Z'))
+    expect(window.location.search).not.toContain('validTime=2026-05-18T06%3A00%3A00.000Z')
+  })
+
+  it('threads overview basin bbox and map handlers through the route surface', async () => {
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(m11Layers, overviewFloodScopeKey),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 36, duration: 450 }]]))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
+    expect(screen.getByTestId('mock-m11-map-source')).toHaveAttribute(
+      'data-source-data',
+      expect.stringContaining('valid_time=2026-05-18T06%3A00%3A00.000Z'),
+    )
+
+    await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
+    await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))
+    expect(screen.getByRole('heading', { name: '全国总览' })).toBeInTheDocument()
   })
 
   it('does not emit fabricated basin or basin-version IDs when overview data is unavailable', async () => {
@@ -611,6 +725,50 @@ describe('App route state', () => {
       basinLoading: false,
     })
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+  })
+
+  it('preserves basin URL valid-time changes that are valid for the active layer', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey),
+      basinLoading: false,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+
+    await user.click(screen.getByRole('button', { name: '上一个有效时刻' }))
+
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T00%3A00%3A00.000Z'))
+    expect(window.location.search).not.toContain('validTime=2026-05-18T06%3A00%3A00.000Z')
+  })
+
+  it('threads basin detail bbox and map handlers through the route surface', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey),
+      basinLoading: false,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[101, 31], [104, 34]], { padding: 36, duration: 450 }]]))
+
+    await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
+    await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))
+    expect(screen.getByRole('heading', { name: '流域分析' })).toBeInTheDocument()
   })
 
   it('renders an unavailable state for invalid basin segment deep links', async () => {

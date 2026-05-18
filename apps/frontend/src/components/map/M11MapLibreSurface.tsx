@@ -46,9 +46,7 @@ interface M11RegisteredOverlay {
   layerId: M11Layer
   sourceId: string
   layer: LayerProps
-  source:
-    | { type: 'geojson'; data: string }
-    | { type: 'vector'; tiles: string[]; minzoom: number; maxzoom: number }
+  source: { type: 'geojson'; data: string }
 }
 
 const CHINA_VIEW_STATE = {
@@ -71,12 +69,6 @@ const m11MapStyles: Record<M11Basemap, MapStyle> = {
     'Tiles © Esri',
   ),
   vector: rasterStyle('m11-vector', ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], '© OpenStreetMap contributors'),
-}
-
-const hydroVariables: Partial<Record<M11Layer, string>> = {
-  discharge: 'q_down',
-  'water-level': 'stage',
-  'warning-level': 'warning_level',
 }
 
 export function M11MapLibreSurface({
@@ -136,7 +128,7 @@ export function M11MapLibreSurface({
       data-testid="m11-map-surface"
       data-basemap={state.basemap}
       data-basemap-style={m11MapStyleUrls[state.basemap]}
-      data-registered-overlays={overlay?.layerId ?? ''}
+      {...(overlay ? { 'data-registered-overlays': overlay.layerId } : {})}
     >
       <Map
         ref={mapRef}
@@ -171,7 +163,9 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   if (!selectedLayer?.available) return null
 
   const runId = selectedLayer.freshness.runId
-  const validTime = selectedLayer.currentValidTime
+  const selectedValidTime = normalizeIso(state.validTime)
+  const validTime =
+    selectedValidTime && selectedLayer.validTimes.includes(selectedValidTime) ? selectedValidTime : selectedLayer.currentValidTime
   if (!runId || !validTime) return null
 
   const sourceId = `m11-${state.layer}-source`
@@ -191,45 +185,12 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
     }
   }
 
-  const variable = hydroVariables[state.layer]
-  if (!variable) return null
-
-  return {
-    layerId: state.layer,
-    sourceId,
-    source: {
-      type: 'vector',
-      tiles: [hydroVectorTileUrl(runId, variable, validTime)],
-      minzoom: 0,
-      maxzoom: 14,
-    },
-    layer: {
-      id: layerId,
-      type: 'line',
-      source: sourceId,
-      'source-layer': 'hydro',
-      paint: hydroLayerPaint(state.layer),
-    } as LayerProps,
-  }
+  return null
 }
 
 function M11OverlayPrimitive({ overlay }: { overlay: M11RegisteredOverlay }) {
-  if (overlay.source.type === 'geojson') {
-    return (
-      <Source id={overlay.sourceId} type="geojson" data={overlay.source.data} promoteId="segment_id">
-        <Layer {...overlay.layer} />
-      </Source>
-    )
-  }
-
   return (
-    <Source
-      id={overlay.sourceId}
-      type="vector"
-      tiles={overlay.source.tiles}
-      minzoom={overlay.source.minzoom}
-      maxzoom={overlay.source.maxzoom}
-    >
+    <Source id={overlay.sourceId} type="geojson" data={overlay.source.data} promoteId="segment_id">
       <Layer {...overlay.layer} />
     </Source>
   )
@@ -246,6 +207,9 @@ function m11SelectedLayerUnavailableReason(
   if (!selectedLayer.available) return selectedLayer.disabledReason ?? '当前图层没有可渲染的有效时间。'
   if (!selectedLayer.freshness.runId) return '当前图层缺少可追溯 run_id，地图不会注册叠加层。'
   if (!selectedLayer.currentValidTime) return '当前图层缺少有效时间，地图不会注册叠加层。'
+  if (state.layer === 'discharge' || state.layer === 'water-level' || state.layer === 'warning-level') {
+    return '当前水文图层的地图源尚未在本仓库实现，地图不会注册该叠加层。'
+  }
   return '当前图层缺少可用地图源，地图不会注册叠加层。'
 }
 
@@ -273,54 +237,8 @@ function floodReturnPeriodGeoJsonUrl(runId: string, validTime: string) {
   return buildApiUrl(`/api/v1/tiles/flood-return-period?${params.toString()}`)
 }
 
-function hydroVectorTileUrl(runId: string, variable: string, validTime: string) {
-  return buildApiUrl(
-    `/api/v1/tiles/hydro/${encodeURIComponent(runId)}/${encodeURIComponent(variable)}/${encodeURIComponent(validTime)}/{z}/{x}/{y}.pbf`,
-  )
-}
-
-function hydroLayerPaint(layer: M11Layer): LayerProps['paint'] {
-  if (layer === 'warning-level') {
-    return {
-      'line-color': [
-        'match',
-        ['coalesce', ['get', 'warning_level'], 'unavailable'],
-        'normal',
-        '#808080',
-        'elevated',
-        '#4A90D9',
-        'watch',
-        '#FFD700',
-        'warning',
-        '#FF8C00',
-        'high_risk',
-        '#FF4500',
-        'severe',
-        '#DC143C',
-        'extreme',
-        '#800080',
-        '#CCCCCC',
-      ],
-      'line-width': 3,
-      'line-opacity': 0.86,
-    }
-  }
-
-  return {
-    'line-color': [
-      'interpolate',
-      ['linear'],
-      ['coalesce', ['get', layer === 'water-level' ? 'stage' : 'q_down'], ['get', 'value'], 0],
-      0,
-      '#90CAF9',
-      1000,
-      '#1E88E5',
-      5000,
-      '#FF9800',
-      10000,
-      '#F44336',
-    ],
-    'line-width': 3,
-    'line-opacity': 0.84,
-  }
+function normalizeIso(value: string | null | undefined) {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
 }
