@@ -47,7 +47,7 @@ export function FloodAlertPage() {
   const clearForecastSelection = useForecastStore((state) => state.clearSelection)
 
   useEffect(() => {
-    const routeWarningLevel = routeState.warningLevel === 'major' ? 'high_risk' : routeState.warningLevel
+    const routeWarningLevel = normalizeRouteAlertLevel(routeState.warningLevel)
     if (isAlertLevel(routeWarningLevel) && routeWarningLevel !== useFloodAlertStore.getState().selectedAlertLevel) {
       setSelectedAlertLevel(routeWarningLevel)
     }
@@ -209,4 +209,11 @@ export function FloodAlertPage() {
       </div>
     </div>
   )
+}
+
+function normalizeRouteAlertLevel(value: string | null): AlertLevel | null {
+  if (value === 'orange') return 'warning'
+  if (value === 'red') return 'severe'
+  if (value === 'major') return 'high_risk'
+  return isAlertLevel(value) ? value : null
 }

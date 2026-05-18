@@ -5,8 +5,9 @@ import { BrowserRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
-import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import { normalizeLayerStates, type LayerState, type OverviewBasin, type SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
+import { buildBasinFeatureCollection } from '@/components/map/M11MapLibreSurface'
 import {
   LayerGroupControls,
   LayerLegendPanel,
@@ -258,11 +259,41 @@ describe('M11 visual foundation shell', () => {
       '--m11-timeline-height': '64px',
     })
     expect(shell).toHaveAttribute('data-layout', 'map-first-compact')
-    expect(shell.className).toContain('min-[1200px]:grid-cols-[260px_minmax(0,1fr)_300px]')
+    expect(shell.className).toContain('h-[calc(100vh-88px)]')
+    expect(shell.className).toContain('min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]')
+    expect(shell).toHaveAttribute('data-left-panel', 'expanded')
+    expect(shell).toHaveAttribute('data-right-panel', 'expanded')
     expect(m11VisualTokens.navHeight).toBe('56px')
     expect(m11VisualTokens.warningLevels.major).toBe('#FF8A65')
     expect(screen.getByLabelText('M11 左侧面板')).toBeInTheDocument()
     expect(screen.getByLabelText('M11 右侧面板')).toBeInTheDocument()
+    expect(screen.getByLabelText('M11 时间轴')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-timeline')).toHaveAttribute('data-first-viewport-visible', 'true')
+    expect(screen.getByTestId('m11-timeline-region')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '折叠左侧面板' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: '折叠右侧面板' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('collapses side panels while keeping the timeline mounted for 1280 compact layout', async () => {
+    window.history.pushState({}, '', '/overview')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    const user = userEvent.setup()
+    const shell = screen.getByTestId('m11-shell')
+
+    await user.click(screen.getByRole('button', { name: '折叠左侧面板' }))
+    expect(shell).toHaveAttribute('data-left-panel', 'collapsed')
+    expect(screen.getByRole('button', { name: '展开左侧面板' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByTestId('m11-timeline')).toHaveAttribute('data-first-viewport-visible', 'true')
+
+    await user.click(screen.getByRole('button', { name: '折叠右侧面板' }))
+    expect(shell).toHaveAttribute('data-right-panel', 'collapsed')
+    expect(screen.getByRole('button', { name: '展开右侧面板' })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByLabelText('M11 时间轴')).toBeInTheDocument()
   })
 
@@ -289,6 +320,56 @@ describe('M11 visual foundation shell', () => {
 
     await user.click(screen.getByRole('button', { name: '卫星底图' }))
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
+  })
+
+  it('marks only renderable overview layers available and keeps river network unavailable', () => {
+    const normalizedLayers = normalizeLayerStates({
+      query: state,
+      layers: [
+        { layer_id: 'discharge', layer_name: 'River discharge', layer_type: 'hydrology', variables: ['q_down'], metadata: null },
+        { layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: ['return_period'], metadata: null },
+        { layer_id: 'warning-level', layer_name: 'Warning level', layer_type: 'hydrology', variables: ['warning_level'], metadata: null },
+        { layer_id: 'river-network', layer_name: 'River network', layer_type: 'base', variables: ['geometry'], metadata: null },
+      ],
+      validTimesByLayerId: {
+        discharge: ['2026-05-18T00:00:00Z'],
+        'flood-return-period': ['2026-05-18T00:00:00Z'],
+        'warning-level': ['2026-05-18T00:00:00Z'],
+        'river-network': ['2026-05-18T00:00:00Z'],
+      },
+      resolvedRun: {
+        run_id: 'run-gfs',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'bv-001',
+        source_id: 'gfs',
+        cycle_time: '2026-05-18T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-18T00:00:00Z',
+        end_time: '2026-05-18T03:00:00Z',
+        created_at: '2026-05-18T00:00:00Z',
+        updated_at: '2026-05-18T04:00:00Z',
+      },
+    })
+
+    expect(normalizedLayers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({ available: true, disabledReason: null })
+    expect(normalizedLayers.find((layer) => layer.layerId === 'discharge')).toMatchObject({
+      available: false,
+      disabledReason: expect.stringContaining('no renderable map source'),
+    })
+    expect(normalizedLayers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({
+      available: false,
+      disabledReason: expect.stringContaining('no renderable map source'),
+    })
+    expect(normalizedLayers.find((layer) => layer.layerId === 'river-network')).toMatchObject({
+      available: false,
+      disabledReason: expect.stringContaining('no renderable map source'),
+    })
+
+    render(<LayerGroupControls state={state} layers={normalizedLayers} onQueryChange={vi.fn()} />)
+    expect(screen.getByText('河网')).toBeInTheDocument()
+    expect(screen.queryByText('已由图层 API 注册')).not.toBeInTheDocument()
   })
 
   it('registers flood return period geojson and keeps it through basemap switches using selected URL valid time', async () => {
@@ -467,6 +548,44 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('渲染预算')
     expect(mapSources).toHaveLength(0)
     expect(mapLayers).toHaveLength(0)
+  })
+
+  it('does not register under-vertex basin geometry with oversized coordinate tails', () => {
+    const tail = Array.from({ length: 32 }, (_, index) => index)
+    const oversizedBasins: OverviewBasin[] = [
+      {
+        ...overviewBasins[0],
+        boundary: {
+          type: 'MultiPolygon',
+          coordinates: [[[[100, 30, ...tail], [101, 30, ...tail], [101, 31, ...tail], [100, 31, ...tail], [100, 30, ...tail]]]],
+        },
+      },
+    ]
+
+    render(<M11MapSurface state={state} layers={layers} basins={oversizedBasins} />)
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '0')
+    expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('渲染预算')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('omits over-byte basin geometry from MapLibre feature collections', () => {
+    const coordinates = Array.from({ length: 50_000 }, (_, index) => [
+      100.1234567890123 + index / 100_000,
+      30.1234567890123 + index / 100_000,
+    ])
+    const featureCollection = buildBasinFeatureCollection(
+      [
+        {
+          ...overviewBasins[0],
+          boundary: { type: 'MultiPolygon', coordinates: [[[...coordinates]]] },
+        },
+      ],
+      undefined,
+    )
+
+    expect(featureCollection.features).toHaveLength(0)
   })
 
   it('renders grouped layers and marks meteorology/base placeholders unavailable without fake data', async () => {

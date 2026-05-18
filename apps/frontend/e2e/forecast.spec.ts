@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
+const apiBase = 'https://api.example.test'
+
 const forecastPayload = {
   segment_id: 'yangtze_rivnet_v01_riv_0007',
   issue_time: '2026-05-09T00:00:00Z',
@@ -203,7 +205,6 @@ test.describe('forecast page', () => {
   })
 
   test('uses the configured API base for model, river segment, and forecast series requests', async ({ page }) => {
-    const apiBase = 'https://api.example.test'
     const origins: string[] = []
     await page.route('**/api/v1/**', async (route) => {
       const url = new URL(route.request().url())

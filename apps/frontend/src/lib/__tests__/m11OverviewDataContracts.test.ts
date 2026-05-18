@@ -4,6 +4,7 @@ import type { components } from '@/api/types'
 import {
   createSourceScenarioSelection,
   decideAggregationEndpoint,
+  getM11BasinGeometryBudgetStatus,
   m11BasinGeometryBudget,
   normalizeBasinDetail,
   normalizeBasinSegmentRows,
@@ -308,6 +309,39 @@ describe('M11 overview data contracts', () => {
     })
   })
 
+  it('marks only flood return period as renderable when layer contracts lack source paths', () => {
+    const layers = normalizeLayerStates({
+      query,
+      layers: [
+        { layer_id: 'discharge', layer_name: 'River discharge', layer_type: 'hydrology', variables: ['q_down'], metadata: null },
+        { layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: ['return_period'], metadata: null },
+        { layer_id: 'warning-level', layer_name: 'Warning level', layer_type: 'hydrology', variables: ['warning_level'], metadata: null },
+        { layer_id: 'river-network', layer_name: 'River network', layer_type: 'base', variables: ['geometry'], metadata: null },
+      ],
+      validTimesByLayerId: {
+        discharge: ['2026-05-18T06:00:00Z'],
+        'flood-return-period': ['2026-05-18T06:00:00Z'],
+        'warning-level': ['2026-05-18T06:00:00Z'],
+        'river-network': ['2026-05-18T06:00:00Z'],
+      },
+      resolvedRun: run,
+    })
+
+    expect(layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({ available: true, disabledReason: null })
+    expect(layers.find((layer) => layer.layerId === 'discharge')).toMatchObject({
+      available: false,
+      disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
+    })
+    expect(layers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({
+      available: false,
+      disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
+    })
+    expect(layers.find((layer) => layer.layerId === 'river-network')).toMatchObject({
+      available: false,
+      disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
+    })
+  })
+
   it('derives best layer freshness from a resolved concrete run', () => {
     const layers = normalizeLayerStates({
       query: { ...query, source: 'ifs', cycle: null },
@@ -382,6 +416,45 @@ describe('M11 overview data contracts', () => {
       qualityFlag: 'unavailable',
       unavailableReason: 'No flood-alert value is available for this segment/time.',
     })
+  })
+
+  it('sanitizes accepted basin geometry before retention', () => {
+    const status = getM11BasinGeometryBudgetStatus({
+      type: 'MultiPolygon',
+      coordinates: [[[[100, 30, 8], [101, 30, 9], [101, 31, 10], [100, 31, 11], [100, 30, 8]]]],
+    })
+
+    expect(status.ok).toBe(true)
+    expect(status.sanitizedGeometry?.coordinates[0][0][0]).toEqual([100, 30, 8])
+    expect(status.serializedBytes).toBeGreaterThan(0)
+  })
+
+  it('rejects under-vertex basin geometry with oversized coordinate dimensions', () => {
+    const tail = Array.from({ length: 8 }, (_, index) => index)
+    const status = getM11BasinGeometryBudgetStatus({
+      type: 'MultiPolygon',
+      coordinates: [[[[100, 30, ...tail], [101, 30, ...tail], [101, 31, ...tail], [100, 31, ...tail], [100, 30, ...tail]]]],
+    })
+
+    expect(status.ok).toBe(false)
+    expect(status.reason).toContain('coordinate dimensions')
+    expect(status.sanitizedGeometry).toBeNull()
+  })
+
+  it('rejects under-vertex basin geometry over the serialized byte budget', () => {
+    const coordinates = Array.from({ length: m11BasinGeometryBudget.maxVertices }, (_, index) => [
+      100.1234567890123 + index / 100_000,
+      30.1234567890123 + index / 100_000,
+    ])
+    const status = getM11BasinGeometryBudgetStatus({
+      type: 'MultiPolygon',
+      coordinates: [[[...coordinates]]],
+    })
+
+    expect(status.ok).toBe(false)
+    expect(status.vertexCount).toBe(m11BasinGeometryBudget.maxVertices)
+    expect(status.reason).toContain('serialized-size budget')
+    expect(status.sanitizedGeometry).toBeNull()
   })
 
   it('matches flood-alert rows by basin version as well as duplicated segment IDs', () => {

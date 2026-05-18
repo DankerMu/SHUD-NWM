@@ -4,7 +4,7 @@ import { AlertTriangle, ArrowRight, ExternalLink, Layers, Rows3 } from 'lucide-r
 
 import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
-import type { M11Bbox, OverviewBasin } from '@/lib/m11/overviewDataContracts'
+import type { M11Bbox, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import { BasinLink, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
   defaultM11QueryState,
@@ -148,8 +148,8 @@ export function OverviewPage() {
             : '流域清单暂不可用')
       : null
   const selectedBasinLinkTarget = selectedBasin ? basinAnalysisHref(selectedBasin, state) : '/overview'
-  const monitoringHref = contextHref('/monitoring', state)
-  const floodAlertsHref = contextHref('/flood-alerts', state)
+  const monitoringHandoff = contextHandoff('/monitoring', state, sourceSelection)
+  const floodAlertsHandoff = contextHandoff('/flood-alerts', state, sourceSelection)
   const partialErrors = summary?.partialErrors ?? []
   const unavailableBasinCount = basins.filter((basin) => basin.unavailableReason).length
   const boundaryCount = basins.filter((basin) => basin.boundary).length
@@ -222,8 +222,8 @@ export function OverviewPage() {
           ) : null}
           <LayerLegendPanel state={state} layers={layers} />
           <div className="space-y-2">
-            <SummaryLink to={monitoringHref} title="产品监控摘要" description="查看流水线、队列与作业状态" />
-            <SummaryLink to={floodAlertsHref} title="洪水预警摘要" description="带入 source/cycle/validTime 上下文" />
+            <SummaryLink to={monitoringHandoff.href} title="产品监控摘要" description={monitoringHandoff.description} />
+            <SummaryLink to={floodAlertsHandoff.href} title="洪水预警摘要" description={floodAlertsHandoff.description} />
           </div>
           <StateReadout state={state} />
         </>
@@ -492,15 +492,69 @@ function basinAnalysisHref(basin: OverviewBasin, state: ReturnType<typeof parseM
   return `/basins/${encodeURIComponent(basin.basinId)}${search ? `?${search}` : ''}`
 }
 
-function contextHref(pathname: string, state: ReturnType<typeof parseM11QueryState>) {
+export function contextHandoff(
+  pathname: string,
+  state: ReturnType<typeof parseM11QueryState>,
+  sourceSelection: SourceScenarioSelectionState | null,
+) {
+  const sourceContext = resolvedDestinationSourceContext(state, sourceSelection)
   const search = serializeM11QueryState({
     ...defaultM11QueryState,
-    source: state.source,
-    cycle: state.cycle,
-    validTime: state.validTime,
+    source: sourceContext.source,
+    cycle: sourceContext.cycle,
+    validTime: sourceContext.validTime,
     warningLevel: state.warningLevel,
   })
-  return `${pathname}${search ? `?${search}` : ''}`
+  return {
+    href: `${pathname}${search ? `?${search}` : ''}`,
+    description: sourceContext.description,
+  }
+}
+
+function resolvedDestinationSourceContext(
+  state: ReturnType<typeof parseM11QueryState>,
+  sourceSelection: SourceScenarioSelectionState | null,
+): { source: 'gfs' | 'ifs' | 'best'; cycle: string | null; validTime: string | null; description: string } {
+  if (state.source === 'compare') {
+    return {
+      source: defaultM11QueryState.source,
+      cycle: null,
+      validTime: null,
+      description: 'GFS+IFS 对比暂不支持跨页保真，已省略具体源上下文',
+    }
+  }
+
+  if (state.source === 'gfs' || state.source === 'ifs') {
+    return {
+      source: state.source,
+      cycle: state.cycle,
+      validTime: state.validTime,
+      description: `带入 ${state.source.toUpperCase()} source/cycle/validTime 上下文`,
+    }
+  }
+
+  const concreteSource = concreteSourceFromSelection(sourceSelection)
+  if (!concreteSource) {
+    return {
+      source: defaultM11QueryState.source,
+      cycle: null,
+      validTime: null,
+      description: '等待 Best Available 解析到具体源后带入上下文',
+    }
+  }
+
+  return {
+    source: concreteSource,
+    cycle: sourceSelection?.cycleTime ?? state.cycle,
+    validTime: sourceSelection?.validTime ?? state.validTime,
+    description: `带入 ${concreteSource.toUpperCase()} source/cycle/validTime 上下文`,
+  }
+}
+
+function concreteSourceFromSelection(sourceSelection: SourceScenarioSelectionState | null): 'gfs' | 'ifs' | null {
+  if (sourceSelection?.resolvedSource === 'GFS') return 'gfs'
+  if (sourceSelection?.resolvedSource === 'IFS') return 'ifs'
+  return null
 }
 
 function modelAssetPlaceholderHref(basin: OverviewBasin) {

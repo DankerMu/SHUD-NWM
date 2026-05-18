@@ -4,6 +4,7 @@ import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
+import { contextHandoff } from '@/pages/OverviewPage'
 import { useAuthStore } from '@/stores/auth'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useMonitoringStore } from '@/stores/monitoring'
@@ -673,6 +674,81 @@ describe('App route state', () => {
     expect(screen.getByTestId('m11-basin-popup')).toHaveTextContent('模型河段数')
   })
 
+  it('resolves best summary links to the concrete overview source identity', async () => {
+    const ifsSelection = {
+      ...m11SourceSelection,
+      resolvedSource: 'IFS' as const,
+      scenarioIds: ['forecast_ifs_deterministic'],
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      validTime: '2026-05-18T06:00:00.000Z',
+      provenanceLabel: 'Best Available (IFS) / cycle 2026-05-18T00:00:00.000Z / valid 2026-05-18T06:00:00.000Z',
+    }
+    expect(
+      contextHandoff(
+        '/monitoring',
+        {
+          ...overviewSnapshot(m11Layers).requestScope,
+          source: 'best',
+          layer: 'discharge',
+          basemap: 'vector',
+        },
+        ifsSelection,
+      ),
+    ).toMatchObject({
+      href: '/monitoring?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z',
+    })
+    expect(
+      contextHandoff(
+        '/flood-alerts',
+        {
+          ...overviewSnapshot(m11Layers).requestScope,
+          source: 'best',
+          layer: 'discharge',
+          basemap: 'vector',
+        },
+        ifsSelection,
+      ),
+    ).toMatchObject({
+      href: '/flood-alerts?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z',
+    })
+  })
+
+  it('omits concrete destination source context for compare summary links', async () => {
+    const baseSnapshot = overviewSnapshot(m11Layers, 'source=compare', 'source=compare')
+    useOverviewDataStore.setState({
+      overview: {
+        ...baseSnapshot,
+        requestScope: {
+          ...baseSnapshot.requestScope,
+          source: 'compare',
+          cycle: '2026-05-18T00:00:00.000Z',
+          validTime: '2026-05-18T06:00:00.000Z',
+          dataKey: 'source=compare&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z',
+          queryKey: 'source=compare&cycle=2026-05-18T00%3A00%3A00.000Z',
+        },
+        summary: {
+          ...m11Summary(),
+          sourceSelection: {
+            ...m11SourceSelection,
+            requestedSource: 'compare',
+            resolvedSource: 'GFS+IFS',
+            scenarioIds: ['forecast_gfs_deterministic', 'forecast_ifs_deterministic'],
+            provenanceLabel: 'GFS+IFS / cycle 2026-05-18T00:00:00.000Z / valid 2026-05-18T06:00:00.000Z',
+          },
+        },
+      },
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=compare&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute('href', '/monitoring')
+    expect(screen.getByRole('link', { name: /洪水预警摘要/ })).toHaveAttribute('href', '/flood-alerts')
+    expect(screen.getAllByText('GFS+IFS 对比暂不支持跨页保真，已省略具体源上下文')).toHaveLength(2)
+  })
+
   it('does not emit fabricated basin or basin-version IDs when overview data is unavailable', async () => {
     window.history.pushState({}, '', '/overview')
 
@@ -1252,7 +1328,6 @@ describe('App route state', () => {
 
     render(<App />)
 
-    await screen.findByText('加载中...')
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '预警统计' })).toBeInTheDocument()
     expect(screen.getByLabelText('洪水预警地图')).toBeInTheDocument()
@@ -1266,6 +1341,45 @@ describe('App route state', () => {
       validTime: '2026-05-12T03:00:00.000Z',
     })
     expect(useFloodAlertStore.getState().selectedAlertLevel).toBe('high_risk')
+  })
+
+  it.each([
+    ['orange', 'warning'],
+    ['red', 'severe'],
+    ['major', 'high_risk'],
+  ] as const)('normalizes %s warning query before hydrating the flood alert store', async (warningLevel, expectedLevel) => {
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    useFloodAlertStore.setState({ fetchLatestFrequencyDoneRun })
+    window.history.pushState({}, '', `/flood-alerts?warningLevel=${warningLevel}`)
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    expect(useFloodAlertStore.getState().selectedAlertLevel).toBe(expectedLevel)
+    expect(fetchLatestFrequencyDoneRun).toHaveBeenCalledWith({
+      source: null,
+      cycleTime: null,
+      validTime: null,
+    })
+  })
+
+  it('hydrates flood-alert requests from a resolved concrete IFS summary handoff', async () => {
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    useFloodAlertStore.setState({ fetchLatestFrequencyDoneRun })
+    window.history.pushState(
+      {},
+      '',
+      '/flood-alerts?source=ifs&cycle=2026-05-18T00:00:00.000Z&validTime=2026-05-18T06:00:00.000Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    expect(fetchLatestFrequencyDoneRun).toHaveBeenCalledWith({
+      source: 'ifs',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      validTime: '2026-05-18T06:00:00.000Z',
+    })
   })
 
   it('routes /monitoring through allowed RBAC to the monitoring workflow content', async () => {

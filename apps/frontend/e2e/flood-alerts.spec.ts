@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Request, type Route } from '@playwright/test'
 
+const apiBase = 'https://api.example.test'
+
 const run = {
   run_id: 'run-flood-1',
   run_type: 'forecast',
@@ -148,7 +150,6 @@ async function mockFloodApi(page: Page, onRequest?: (request: Request) => void) 
 
 test.describe('flood alerts page', () => {
   test('loads latest run, summary, ranking, tile, and selected segment timeline through configured API base', async ({ page }) => {
-    const apiBase = 'https://api.example.test'
     const forecastSeriesPath = '/api/v1/basin-versions/basin-v1/river-segments/seg-1/forecast-series'
     const calls: Array<{ origin: string; pathname: string }> = []
     await mockFloodApi(page, (request) => {

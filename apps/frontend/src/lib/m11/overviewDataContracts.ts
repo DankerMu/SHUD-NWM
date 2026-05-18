@@ -44,6 +44,8 @@ export const m11BasinGeometryBudget = {
   maxPolygons: 256,
   maxRings: 1024,
   maxVertices: 50_000,
+  maxCoordinateDimensions: 3,
+  maxSerializedBytes: 1_000_000,
 } as const
 
 export interface M11BasinGeometryBudgetStatus {
@@ -53,6 +55,8 @@ export interface M11BasinGeometryBudgetStatus {
   polygonCount: number
   ringCount: number
   vertexCount: number
+  serializedBytes: number
+  sanitizedGeometry: components['schemas']['GeoJsonMultiPolygon'] | null
 }
 
 export interface BasinVersionOption {
@@ -483,7 +487,8 @@ export function normalizeLayerStates(input: {
     const validTimes = apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes
     const currentValidTime = pickCurrentValidTime(validTimes, input.query.validTime)
     const isKnownRequired = (requiredLayers as string[]).includes(layerId)
-    const available = Boolean(apiLayer) && validTimes.length > 0
+    const renderable = isM11RenderableLayer(layerId)
+    const available = Boolean(apiLayer) && validTimes.length > 0 && renderable
     const availableSources = input.resolvedRun ? sourcesFromRuns([input.resolvedRun]) : []
     const sourceSelection = createSourceScenarioSelection(input.query, availableSources)
 
@@ -497,11 +502,13 @@ export function normalizeLayerStates(input: {
       validTimeSource: apiValidTimes.length > 0 ? 'api' : derivedValidTimes.length > 0 ? 'derived' : 'none',
       disabledReason: available
         ? null
-        : !apiLayer && isKnownRequired
-          ? 'Layer is not registered by the API.'
-          : validTimes.length === 0
-            ? 'Layer has no valid times.'
-            : null,
+        : apiLayer && validTimes.length > 0 && !renderable
+          ? 'Layer is registered but no renderable map source is implemented in this repository.'
+          : !apiLayer && isKnownRequired
+            ? 'Layer is not registered by the API.'
+            : validTimes.length === 0
+              ? 'Layer has no valid times.'
+              : null,
       freshness: createFreshnessMetadata({
         cycleTime: input.resolvedRun?.cycle_time ?? input.query.cycle,
         validTime: currentValidTime,
@@ -810,6 +817,7 @@ function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption
   return versions.map((version) => {
     const geometryStatus = getM11BasinGeometryBudgetStatus(version.geom)
     const bbox = geometryStatus.ok ? geometryStatus.bbox : null
+    const boundary = geometryStatus.ok ? geometryStatus.sanitizedGeometry : null
     return {
       basinVersionId: version.basin_version_id,
       versionLabel: version.version_label,
@@ -817,7 +825,7 @@ function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption
       validFrom: normalizeIsoString(version.valid_from),
       validTo: normalizeIsoString(version.valid_to),
       sourceUri: normalizeString(version.source_uri),
-      boundary: geometryStatus.ok ? (version.geom ?? null) : null,
+      boundary,
       bbox,
       unavailableReason: geometryStatus.reason ?? (bbox ? null : 'Basin geometry is unavailable.'),
     }
@@ -828,35 +836,44 @@ export function getM11BasinGeometryBudgetStatus(
   geom: components['schemas']['GeoJsonMultiPolygon'] | null | undefined,
 ): M11BasinGeometryBudgetStatus {
   if (!geom?.coordinates) {
-    return { ok: false, reason: 'Basin geometry is unavailable.', bbox: null, polygonCount: 0, ringCount: 0, vertexCount: 0 }
+    return geometryStatus(false, 'Basin geometry is unavailable.', null, 0, 0, 0, 0, null)
   }
   if (geom.type !== 'MultiPolygon' || !Array.isArray(geom.coordinates)) {
-    return { ok: false, reason: 'Basin geometry is malformed.', bbox: null, polygonCount: 0, ringCount: 0, vertexCount: 0 }
+    return geometryStatus(false, 'Basin geometry is malformed.', null, 0, 0, 0, serializedByteLength(geom), null)
   }
 
   let bbox: M11Bbox | null = null
   let polygonCount = 0
   let ringCount = 0
   let vertexCount = 0
+  const sanitizedCoordinates: number[][][][] = []
 
   for (const polygon of geom.coordinates as unknown[]) {
     if (!Array.isArray(polygon)) return geometryMalformed(polygonCount, ringCount, vertexCount)
     polygonCount += 1
     if (polygonCount > m11BasinGeometryBudget.maxPolygons) return geometryTooLarge(polygonCount, ringCount, vertexCount)
+    const sanitizedPolygon: number[][][] = []
 
     for (const ring of polygon) {
       if (!Array.isArray(ring)) return geometryMalformed(polygonCount, ringCount, vertexCount)
       ringCount += 1
       if (ringCount > m11BasinGeometryBudget.maxRings) return geometryTooLarge(polygonCount, ringCount, vertexCount)
+      const sanitizedRing: number[][] = []
 
       for (const coordinate of ring) {
         if (!Array.isArray(coordinate) || coordinate.length < 2) return geometryMalformed(polygonCount, ringCount, vertexCount)
+        if (coordinate.length > m11BasinGeometryBudget.maxCoordinateDimensions) {
+          return geometryTooWide(polygonCount, ringCount, vertexCount + 1)
+        }
         vertexCount += 1
         if (vertexCount > m11BasinGeometryBudget.maxVertices) return geometryTooLarge(polygonCount, ringCount, vertexCount)
 
         const lon = numberOrNull(coordinate[0])
         const lat = numberOrNull(coordinate[1])
         if (lon === null || lat === null) return geometryMalformed(polygonCount, ringCount, vertexCount)
+        const elevation = coordinate.length >= 3 ? numberOrNull(coordinate[2]) : null
+        if (coordinate.length >= 3 && elevation === null) return geometryMalformed(polygonCount, ringCount, vertexCount)
+        sanitizedRing.push(elevation === null ? [lon, lat] : [lon, lat, elevation])
         bbox = bbox
           ? {
               minLon: Math.min(bbox.minLon, lon),
@@ -866,33 +883,87 @@ export function getM11BasinGeometryBudgetStatus(
             }
           : { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat }
       }
+      sanitizedPolygon.push(sanitizedRing)
     }
+    sanitizedCoordinates.push(sanitizedPolygon)
   }
 
-  if (!bbox) return { ok: false, reason: 'Basin geometry is unavailable.', bbox: null, polygonCount, ringCount, vertexCount }
-  return { ok: true, reason: null, bbox, polygonCount, ringCount, vertexCount }
+  if (!bbox) return geometryStatus(false, 'Basin geometry is unavailable.', null, polygonCount, ringCount, vertexCount, 0, null)
+  const sanitizedGeometry = { type: 'MultiPolygon' as const, coordinates: sanitizedCoordinates }
+  const serializedBytes = serializedByteLength(sanitizedGeometry)
+  if (serializedBytes > m11BasinGeometryBudget.maxSerializedBytes) {
+    return geometryTooManyBytes(polygonCount, ringCount, vertexCount, serializedBytes)
+  }
+  return geometryStatus(true, null, bbox, polygonCount, ringCount, vertexCount, serializedBytes, sanitizedGeometry)
 }
 
 function geometryTooLarge(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
-  return {
-    ok: false,
-    reason: `Basin geometry exceeds client rendering budget (${vertexCount}/${m11BasinGeometryBudget.maxVertices} vertices).`,
-    bbox: null,
+  return geometryStatus(
+    false,
+    `Basin geometry exceeds client rendering budget (${vertexCount}/${m11BasinGeometryBudget.maxVertices} vertices).`,
+    null,
     polygonCount,
     ringCount,
     vertexCount,
-  }
+    0,
+    null,
+  )
+}
+
+function geometryTooWide(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
+  return geometryStatus(
+    false,
+    `Basin geometry coordinate dimensions exceed client rendering budget (${m11BasinGeometryBudget.maxCoordinateDimensions}).`,
+    null,
+    polygonCount,
+    ringCount,
+    vertexCount,
+    0,
+    null,
+  )
+}
+
+function geometryTooManyBytes(
+  polygonCount: number,
+  ringCount: number,
+  vertexCount: number,
+  serializedBytes: number,
+): M11BasinGeometryBudgetStatus {
+  return geometryStatus(
+    false,
+    `Basin geometry exceeds client serialized-size budget (${serializedBytes}/${m11BasinGeometryBudget.maxSerializedBytes} bytes).`,
+    null,
+    polygonCount,
+    ringCount,
+    vertexCount,
+    serializedBytes,
+    null,
+  )
 }
 
 function geometryMalformed(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
-  return {
-    ok: false,
-    reason: 'Basin geometry is malformed.',
-    bbox: null,
-    polygonCount,
-    ringCount,
-    vertexCount,
-  }
+  return geometryStatus(false, 'Basin geometry is malformed.', null, polygonCount, ringCount, vertexCount, 0, null)
+}
+
+function geometryStatus(
+  ok: boolean,
+  reason: string | null,
+  bbox: M11Bbox | null,
+  polygonCount: number,
+  ringCount: number,
+  vertexCount: number,
+  serializedBytes: number,
+  sanitizedGeometry: components['schemas']['GeoJsonMultiPolygon'] | null,
+): M11BasinGeometryBudgetStatus {
+  return { ok, reason, bbox, polygonCount, ringCount, vertexCount, serializedBytes, sanitizedGeometry }
+}
+
+function serializedByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length
+}
+
+function isM11RenderableLayer(layerId: string) {
+  return layerId === 'flood-return-period'
 }
 
 function polygonAreaKm2(geom: components['schemas']['GeoJsonMultiPolygon']): number | null {

@@ -336,7 +336,7 @@ function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection 
   )
 }
 
-function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): BasinFeatureCollection {
+export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): BasinFeatureCollection {
   const visible = visibleBasinIds ? new Set(visibleBasinIds) : null
   return {
     type: 'FeatureCollection',

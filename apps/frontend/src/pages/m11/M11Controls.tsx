@@ -214,6 +214,7 @@ export function LayerGroupControls({ state, layers = [], onQueryChange }: Shared
           const selected = state.layer === item.value
           const unavailableReason = layer?.disabledReason ?? (!layer ? '等待 /api/v1/layers 图层注册状态' : null)
           const available = Boolean(layer?.available)
+          const hasLayerMetadata = Boolean(layer)
           return (
             <button
               key={item.value}
@@ -230,7 +231,7 @@ export function LayerGroupControls({ state, layers = [], onQueryChange }: Shared
                 <span className="block text-xs text-neutral-700">{available ? item.description : unavailableReason}</span>
               </span>
               <span
-                className={cn('h-2.5 w-2.5 rounded-full', available ? 'bg-success' : selected ? 'bg-warning' : 'bg-neutral-300')}
+                className={cn('h-2.5 w-2.5 rounded-full', available ? 'bg-success' : hasLayerMetadata ? 'bg-warning' : 'bg-neutral-300')}
                 aria-hidden="true"
               />
             </button>
@@ -249,13 +250,11 @@ export function LayerGroupControls({ state, layers = [], onQueryChange }: Shared
       <div className="space-y-1">
         {basePlaceholders.map(([id, label]) => {
           const layer = layerById.get(id)
-          const isImplementedBase = id !== 'dem' && Boolean(layer?.available)
           return (
             <UnavailableLayerRow
               key={id}
               label={label}
               reason={id === 'dem' ? 'DEM 合同未在 M11 接入' : (layer?.disabledReason ?? '等待真实边界/河网图层数据')}
-              available={isImplementedBase}
             />
           )
         })}
@@ -350,6 +349,7 @@ export function M11Timeline({
       aria-label="M11 时间轴"
       data-testid="m11-timeline"
       data-valid-time-source={model.sourceKind}
+      data-first-viewport-visible="true"
     >
       <div className="flex items-center gap-1">
         <button

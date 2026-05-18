@@ -29,7 +29,10 @@ const overviewBasinVersion = {
   created_at: '2026-05-01T00:00:00Z',
 }
 
-async function mockOverviewApis(page: Page, options: { partialQueueFailure?: boolean; lowRequestPlan?: boolean } = {}) {
+async function mockOverviewApis(
+  page: Page,
+  options: { partialQueueFailure?: boolean; lowRequestPlan?: boolean; runSource?: 'gfs' | 'ifs' } = {},
+) {
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
 
@@ -76,10 +79,10 @@ async function mockOverviewApis(page: Page, options: { partialQueueFailure?: boo
               {
                 run_id: 'run-overview',
                 run_type: 'forecast',
-                scenario_id: 'forecast_gfs_deterministic',
+                scenario_id: options.runSource === 'ifs' ? 'forecast_ifs_deterministic' : 'forecast_gfs_deterministic',
                 model_id: 'model-demo',
                 basin_version_id: 'bv-001',
-                source_id: 'gfs',
+                source_id: options.runSource ?? 'gfs',
                 cycle_time: '2026-05-18T00:00:00Z',
                 status: 'frequency_done',
                 start_time: '2026-05-18T00:00:00Z',
@@ -342,6 +345,37 @@ test.describe('M11 navigation and route shells', () => {
     await expect(page.getByRole('heading', { name: '全国总览' })).toBeVisible()
     await page.getByRole('link', { name: /洪水预警摘要/ }).click()
     await expect(page).toHaveURL(/\/flood-alerts/)
+  })
+
+  test('resolves best summary links to concrete source and omits compare context', async ({ page }) => {
+    await mockOverviewApis(page, { runSource: 'ifs' })
+
+    await page.goto('/overview?source=best')
+
+    await expect(page.getByRole('heading', { name: '全国总览' })).toBeVisible()
+    await expect(page.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute('href', /\/monitoring\?source=ifs/)
+    await expect(page.getByRole('link', { name: /洪水预警摘要/ })).toHaveAttribute('href', /\/flood-alerts\?source=ifs/)
+
+    await page.goto('/overview?source=compare&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z')
+    await expect(page.getByText('GFS+IFS 对比暂不支持跨页保真，已省略具体源上下文').first()).toBeVisible()
+    await expect(page.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute('href', '/monitoring')
+    await expect(page.getByRole('link', { name: /洪水预警摘要/ })).toHaveAttribute('href', '/flood-alerts')
+  })
+
+  test('keeps timeline visible and side panels collapsible at 1280', async ({ page }) => {
+    await mockOverviewApis(page)
+    await page.setViewportSize({ width: 1280, height: 900 })
+
+    await page.goto('/overview')
+
+    await expect(page.getByTestId('m11-timeline')).toBeInViewport()
+    await expect(page.getByRole('button', { name: '折叠左侧面板' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '折叠右侧面板' })).toBeVisible()
+    await page.getByRole('button', { name: '折叠左侧面板' }).click()
+    await expect(page.getByTestId('m11-shell')).toHaveAttribute('data-left-panel', 'collapsed')
+    await page.getByRole('button', { name: '折叠右侧面板' }).click()
+    await expect(page.getByTestId('m11-shell')).toHaveAttribute('data-right-panel', 'collapsed')
+    await expect(page.getByTestId('m11-timeline')).toBeInViewport()
   })
 
   test('renders successful overview sections when an optional summary request fails', async ({ page }) => {
