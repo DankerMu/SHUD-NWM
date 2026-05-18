@@ -47,6 +47,7 @@ export interface BasinVersionOption {
   validFrom: string | null
   validTo: string | null
   sourceUri: string | null
+  boundary: components['schemas']['GeoJsonMultiPolygon'] | null
   bbox: M11Bbox | null
   unavailableReason: string | null
 }
@@ -79,6 +80,7 @@ export interface OverviewBasin {
   basinGroup: string | null
   parentBasinId: string | null
   level: number
+  boundary: components['schemas']['GeoJsonMultiPolygon'] | null
   bbox: M11Bbox | null
   areaKm2: number | null
   riverCount: number | null
@@ -130,6 +132,7 @@ export interface BasinDetail {
   basinGroup: string | null
   selectedBasinVersionId: string | null
   basinVersions: BasinVersionOption[]
+  boundary: components['schemas']['GeoJsonMultiPolygon'] | null
   bbox: M11Bbox | null
   segmentCount: number | null
   warningDistribution: Record<M11WarningLevel, number>
@@ -306,6 +309,7 @@ export function createEmptyBasinDetail(
     basinGroup: null,
     selectedBasinVersionId: null,
     basinVersions: [],
+    boundary: null,
     bbox: null,
     segmentCount: null,
     warningDistribution: { ...emptyWarningCounts },
@@ -377,8 +381,9 @@ export function normalizeOverviewBasins(input: {
       basinGroup: normalizeString(basin.basin_group),
       parentBasinId: null,
       level: basin.basin_group ? 2 : 1,
+      boundary: selectedVersion?.boundary ?? null,
       bbox: selectedVersion?.bbox ?? null,
-      areaKm2: null,
+      areaKm2: selectedVersion?.boundary ? polygonAreaKm2(selectedVersion.boundary) : null,
       riverCount: sumNullable(basinModels.map((model) => numberOrNull(model.segment_count))),
       activeModelCount: basinModels.filter((model) => model.active_flag).length,
       latestForecastTime: latestIso(basinRuns.map((run) => run.cycle_time ?? run.updated_at ?? run.created_at)),
@@ -522,6 +527,7 @@ export function normalizeBasinDetail(input: {
     basinGroup: normalizeString(input.basin?.basin_group),
     selectedBasinVersionId: selectedVersionId,
     basinVersions: versions,
+    boundary: selectedVersion?.boundary ?? null,
     bbox: selectedVersion?.bbox ?? null,
     segmentCount: input.segments?.total ?? input.segments?.features.length ?? null,
     warningDistribution: warningCountsFromRanking(input.rankingItems ?? []),
@@ -795,6 +801,7 @@ function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption
       validFrom: normalizeIsoString(version.valid_from),
       validTo: normalizeIsoString(version.valid_to),
       sourceUri: normalizeString(version.source_uri),
+      boundary: version.geom ?? null,
       bbox,
       unavailableReason: bbox ? null : 'Basin geometry is unavailable.',
     }
@@ -831,6 +838,41 @@ function bboxFromMultiPolygon(geom: components['schemas']['GeoJsonMultiPolygon']
   }
 
   return bbox
+}
+
+function polygonAreaKm2(geom: components['schemas']['GeoJsonMultiPolygon']): number | null {
+  if (!geom.coordinates.length) return null
+  const earthRadiusKm = 6371.0088
+  let area = 0
+
+  geom.coordinates.forEach((polygon) => {
+    polygon.forEach((ring, ringIndex) => {
+      if (ring.length < 4) return
+      const ringArea = Math.abs(sphericalRingArea(ring, earthRadiusKm))
+      area += ringIndex === 0 ? ringArea : -ringArea
+    })
+  })
+
+  return area > 0 ? Math.round(area) : null
+}
+
+function sphericalRingArea(ring: number[][], earthRadiusKm: number): number {
+  let sum = 0
+  for (let index = 0; index < ring.length; index += 1) {
+    const current = ring[index]
+    const next = ring[(index + 1) % ring.length]
+    if (!current || !next || current.length < 2 || next.length < 2) continue
+    const lon1 = degreesToRadians(current[0])
+    const lon2 = degreesToRadians(next[0])
+    const lat1 = degreesToRadians(current[1])
+    const lat2 = degreesToRadians(next[1])
+    sum += (lon2 - lon1) * (2 + Math.sin(lat1) + Math.sin(lat2))
+  }
+  return (sum * earthRadiusKm * earthRadiusKm) / 2
+}
+
+function degreesToRadians(value: number) {
+  return (value * Math.PI) / 180
 }
 
 function warningCountsFromRanking(items: ApiFloodAlertRankingItem[]): Record<M11WarningLevel, number> {

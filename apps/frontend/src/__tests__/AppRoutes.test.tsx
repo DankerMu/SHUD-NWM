@@ -46,6 +46,12 @@ vi.mock('react-map-gl/maplibre', () => ({
           onMouseMove={() => onMouseMove?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
           onMouseLeave={() => onMouseLeave?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
           onClick={() => onClick?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+          onDoubleClick={() =>
+            onClick?.({
+              target: { getCanvas: () => ({ style: {} }) },
+              features: [{ layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'basin-demo' } }],
+            })
+          }
         >
           {children}
         </div>
@@ -192,6 +198,10 @@ function overviewSnapshotWithBasin(layers: LayerState[], queryKey = '', dataKey 
         basinGroup: null,
         parentBasinId: null,
         level: 1,
+        boundary: {
+          type: 'MultiPolygon',
+          coordinates: [[[[100, 30], [105, 30], [105, 35], [100, 35], [100, 30]]]],
+        },
         bbox: { minLon: 100, minLat: 30, maxLon: 105, maxLat: 35 },
         areaKm2: null,
         riverCount: null,
@@ -239,6 +249,10 @@ function basinSnapshot(basinId: string, layers: LayerState[], queryKey = '', dat
       basinGroup: null,
       selectedBasinVersionId: 'bv-001',
       basinVersions: [],
+      boundary: {
+        type: 'MultiPolygon',
+        coordinates: [[[[101, 31], [104, 31], [104, 34], [101, 34], [101, 31]]]],
+      },
       bbox: { minLon: 101, minLat: 31, maxLon: 104, maxLat: 34 },
       segmentCount: 1,
       warningDistribution: {
@@ -497,7 +511,7 @@ describe('App route state', () => {
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 36, duration: 450 }]]))
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
-    expect(screen.getByTestId('mock-m11-map-source')).toHaveAttribute(
+    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute(
       'data-source-data',
       expect.stringContaining('valid_time=2026-05-18T06%3A00%3A00.000Z'),
     )
@@ -505,6 +519,70 @@ describe('App route state', () => {
     await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
     await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))
     expect(screen.getByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+  })
+
+  it('syncs basin visibility toggles to the overview map source and preserves local state', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(
+        m11Layers,
+        overviewDefaultScopeKey,
+        overviewValid06ScopeKey,
+      ),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'basin-demo'))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '1')
+
+    await user.click(screen.getByRole('checkbox', { name: 'Demo Basin 可见' }))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', '')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '0')
+    expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('当前没有可见流域边界')
+
+    await user.click(screen.getByRole('button', { name: '全选' }))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'basin-demo')
+  })
+
+  it('renders overview popup actions and context summary links', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(
+        m11Layers,
+        'source=gfs',
+        overviewValid06ScopeKey,
+      ),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basemap=satellite')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(await screen.findByTestId('m11-basin-popup')).toHaveTextContent('Demo Basin')
+    expect(screen.getByRole('link', { name: /进入分析/ })).toHaveAttribute(
+      'href',
+      '/basins/basin-demo?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basemap=satellite&basinVersionId=bv-001',
+    )
+    expect(screen.getByRole('link', { name: /查看详情/ })).toHaveAttribute(
+      'href',
+      '/monitoring?basinId=basin-demo&basinVersionId=bv-001',
+    )
+    expect(screen.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute(
+      'href',
+      '/monitoring?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z',
+    )
+    expect(screen.getByRole('link', { name: /洪水预警摘要/ })).toHaveAttribute(
+      'href',
+      '/flood-alerts?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z',
+    )
+
+    await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
+    expect(screen.getByTestId('m11-basin-popup')).toHaveTextContent('模型河段数')
   })
 
   it('does not emit fabricated basin or basin-version IDs when overview data is unavailable', async () => {
@@ -748,6 +826,7 @@ describe('App route state', () => {
           basinGroup: null,
           selectedBasinVersionId: 'bv-001',
           basinVersions: [],
+          boundary: null,
           bbox: null,
           segmentCount: 1,
           warningDistribution: {
@@ -959,6 +1038,7 @@ describe('App route state', () => {
           basinGroup: null,
           selectedBasinVersionId: 'bv-001',
           basinVersions: [],
+          boundary: null,
           bbox: null,
           segmentCount: 1,
           warningDistribution: {
@@ -1078,6 +1158,7 @@ describe('App route state', () => {
 
     render(<App />)
 
+    await screen.findByText('加载中...')
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '预警统计' })).toBeInTheDocument()
     expect(screen.getByLabelText('洪水预警地图')).toBeInTheDocument()

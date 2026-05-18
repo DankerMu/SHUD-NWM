@@ -302,6 +302,7 @@ describe('useOverviewDataStore', () => {
 
     expect(snapshot.basins[0]).toMatchObject({
       selectedBasinVersionId: 'yangtze_v2026_01',
+      boundary: basinVersion.geom,
       bbox: { minLon: 100, minLat: 30, maxLon: 101, maxLat: 31 },
     })
     expect(snapshot.aggregationDecision).toMatchObject({ needsAggregationEndpoint: false, reason: 'reuse-existing' })
@@ -731,6 +732,7 @@ describe('useOverviewDataStore', () => {
     expect(snapshot.detail).toMatchObject({
       basinId: 'yangtze',
       selectedBasinVersionId: 'yangtze_v2026_01',
+      boundary: basinVersion.geom,
       segmentCount: 1,
     })
     expect(snapshot.segments[0]).toMatchObject({ currentQ: 123, qUnit: 'm3/s', warningLevel: 'warning' })

@@ -14,11 +14,11 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { buildApiUrl } from '@/api/base'
 import { floodTileLayerPaint } from '@/components/flood/alertLevels'
 import { cn } from '@/lib/cn'
-import type { LayerState } from '@/lib/m11/overviewDataContracts'
+import type { LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryState } from '@/lib/m11/queryState'
 
 export interface M11MapOverlayInteraction {
-  layerId: M11Layer
+  layerId: M11Layer | 'basin-boundaries'
   event: MapLayerMouseEvent
 }
 
@@ -35,6 +35,8 @@ export interface M11MapCameraFlyTo {
 interface M11MapLibreSurfaceProps {
   state: M11QueryState
   layers: LayerState[]
+  basins?: OverviewBasin[]
+  visibleBasinIds?: string[]
   className?: string
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
@@ -47,6 +49,29 @@ interface M11RegisteredOverlay {
   sourceId: string
   layer: LayerProps
   source: { type: 'geojson'; data: string }
+}
+
+interface BasinFeatureProperties {
+  basin_id: string
+  basin_name: string
+  basin_group: string | null
+  area_km2: number | null
+  river_count: number | null
+  active_model_count: number
+  latest_forecast_time: string | null
+  selected_basin_version_id: string | null
+  unavailable_reason: string | null
+}
+
+interface BasinFeature {
+  type: 'Feature'
+  geometry: NonNullable<OverviewBasin['boundary']>
+  properties: BasinFeatureProperties
+}
+
+interface BasinFeatureCollection {
+  type: 'FeatureCollection'
+  features: BasinFeature[]
 }
 
 const CHINA_VIEW_STATE = {
@@ -74,6 +99,8 @@ const m11MapStyles: Record<M11Basemap, MapStyle> = {
 export function M11MapLibreSurface({
   state,
   layers,
+  basins = [],
+  visibleBasinIds,
   className,
   fitTo,
   flyTo,
@@ -84,8 +111,12 @@ export function M11MapLibreSurface({
   const lastFitKeyRef = useRef<string | null>(null)
   const lastFlyKeyRef = useRef<string | null>(null)
   const overlay = useMemo(() => buildM11RegisteredOverlay(state, layers), [layers, state])
+  const basinFeatureCollection = useMemo(
+    () => buildBasinFeatureCollection(basins, visibleBasinIds),
+    [basins, visibleBasinIds],
+  )
   const unavailableReason = useMemo(() => m11SelectedLayerUnavailableReason(state, layers, overlay), [layers, overlay, state])
-  const interactiveLayerIds = overlay ? [overlay.layer.id] : []
+  const interactiveLayerIds = [...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []), ...(overlay ? [overlay.layer.id] : [])]
 
   useEffect(() => {
     if (!fitTo) return
@@ -105,6 +136,11 @@ export function M11MapLibreSurface({
 
   const handleMouseMove = useCallback(
     (event: MapLayerMouseEvent) => {
+      if (eventHasOverlayFeature(event, 'm11-basin-fill')) {
+        onOverlayHover?.({ layerId: 'basin-boundaries', event })
+        event.target.getCanvas().style.cursor = 'pointer'
+        return
+      }
       if (!overlay || !eventHasOverlayFeature(event, overlay.layer.id)) {
         onOverlayHover?.(null)
         event.target.getCanvas().style.cursor = ''
@@ -126,6 +162,10 @@ export function M11MapLibreSurface({
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
+      if (eventHasOverlayFeature(event, 'm11-basin-fill')) {
+        onOverlayClick?.({ layerId: 'basin-boundaries', event })
+        return
+      }
       if (overlay && eventHasOverlayFeature(event, overlay.layer.id)) onOverlayClick?.({ layerId: overlay.layerId, event })
     },
     [onOverlayClick, overlay],
@@ -138,6 +178,8 @@ export function M11MapLibreSurface({
       data-basemap={state.basemap}
       data-basemap-style={m11MapStyleUrls[state.basemap]}
       {...(overlay ? { 'data-registered-overlays': overlay.layerId } : {})}
+      data-basin-feature-count={basinFeatureCollection.features.length}
+      data-visible-basin-ids={basinFeatureCollection.features.map((feature) => feature.properties.basin_id).join(',')}
     >
       <Map
         ref={mapRef}
@@ -151,8 +193,19 @@ export function M11MapLibreSurface({
       >
         <NavigationControl position="top-left" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
+        {basinFeatureCollection.features.length > 0 ? <M11BasinPrimitive collection={basinFeatureCollection} /> : null}
         {overlay ? <M11OverlayPrimitive overlay={overlay} /> : null}
       </Map>
+
+      {basins.length > 0 && basinFeatureCollection.features.length === 0 ? (
+        <div
+          className="absolute left-5 top-20 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          role="status"
+          data-testid="m11-basin-layer-unavailable"
+        >
+          当前没有可见流域边界。请在左侧流域树恢复选择。
+        </div>
+      ) : null}
 
       {unavailableReason ? (
         <div
@@ -203,6 +256,72 @@ function M11OverlayPrimitive({ overlay }: { overlay: M11RegisteredOverlay }) {
       <Layer {...overlay.layer} />
     </Source>
   )
+}
+
+function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection }) {
+  return (
+    <Source id="m11-basin-boundaries-source" type="geojson" data={collection} promoteId="basin_id">
+      <Layer
+        id="m11-basin-fill"
+        type="fill"
+        source="m11-basin-boundaries-source"
+        paint={{
+          'fill-color': '#1E88E5',
+          'fill-opacity': 0.14,
+        }}
+      />
+      <Layer
+        id="m11-basin-outline"
+        type="line"
+        source="m11-basin-boundaries-source"
+        paint={{
+          'line-color': '#0F3460',
+          'line-width': 1.4,
+          'line-opacity': 0.72,
+        }}
+      />
+      <Layer
+        id="m11-basin-label"
+        type="symbol"
+        source="m11-basin-boundaries-source"
+        layout={{
+          'text-field': ['get', 'basin_name'],
+          'text-size': 12,
+          'text-anchor': 'center',
+          'text-allow-overlap': false,
+        }}
+        paint={{
+          'text-color': '#0A1929',
+          'text-halo-color': '#FFFFFF',
+          'text-halo-width': 1,
+        }}
+      />
+    </Source>
+  )
+}
+
+function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): BasinFeatureCollection {
+  const visible = visibleBasinIds ? new Set(visibleBasinIds) : null
+  return {
+    type: 'FeatureCollection',
+    features: basins
+      .filter((basin) => basin.boundary && (!visible || visible.has(basin.basinId)))
+      .map((basin) => ({
+        type: 'Feature',
+        geometry: basin.boundary as NonNullable<OverviewBasin['boundary']>,
+        properties: {
+          basin_id: basin.basinId,
+          basin_name: basin.displayName,
+          basin_group: basin.basinGroup,
+          area_km2: basin.areaKm2,
+          river_count: basin.riverCount,
+          active_model_count: basin.activeModelCount,
+          latest_forecast_time: basin.latestForecastTime,
+          selected_basin_version_id: basin.selectedBasinVersionId,
+          unavailable_reason: basin.unavailableReason,
+        },
+      })),
+  }
 }
 
 function m11SelectedLayerUnavailableReason(

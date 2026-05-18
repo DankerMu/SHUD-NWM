@@ -21,7 +21,7 @@ import {
   type M11MapOverlayInteraction,
 } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
-import type { LayerState, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryPatch, M11QueryState, M11Source } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
@@ -40,6 +40,8 @@ interface SharedControlProps {
 }
 
 interface M11MapSurfaceProps extends SharedControlProps {
+  basins?: OverviewBasin[]
+  visibleBasinIds?: string[]
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
@@ -111,6 +113,8 @@ const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
 export function M11MapSurface({
   state,
   layers = [],
+  basins = [],
+  visibleBasinIds,
   onQueryChange,
   fitTo,
   flyTo,
@@ -122,6 +126,8 @@ export function M11MapSurface({
       <M11MapLibreSurface
         state={state}
         layers={layers}
+        basins={basins}
+        visibleBasinIds={visibleBasinIds}
         fitTo={fitTo}
         flyTo={flyTo}
         onOverlayHover={onOverlayHover}

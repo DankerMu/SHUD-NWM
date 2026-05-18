@@ -13,6 +13,153 @@ async function fulfill(route: Route, data: unknown) {
   })
 }
 
+const overviewBasinVersion = {
+  basin_version_id: 'bv-001',
+  basin_id: 'basin-demo',
+  version_label: 'v2026_01',
+  geom: {
+    type: 'MultiPolygon',
+    coordinates: [[[[100, 30], [105, 30], [105, 35], [100, 35], [100, 30]]]],
+  },
+  active_flag: true,
+  valid_from: '2026-01-01T00:00:00Z',
+  valid_to: null,
+  source_uri: null,
+  checksum: null,
+  created_at: '2026-05-01T00:00:00Z',
+}
+
+async function mockOverviewApis(page: Page, options: { partialQueueFailure?: boolean; lowRequestPlan?: boolean } = {}) {
+  await page.route('**/api/v1/**', async (route) => {
+    const url = new URL(route.request().url())
+
+    if (url.pathname === '/api/v1/basins') {
+      return fulfill(route, [
+        {
+          basin_id: 'basin-demo',
+          basin_name: 'Demo Basin',
+          basin_group: 'major',
+          description: null,
+          created_at: '2026-05-01T00:00:00Z',
+        },
+      ])
+    }
+    if (url.pathname === '/api/v1/basins/basin-demo/versions') return fulfill(route, [overviewBasinVersion])
+    if (url.pathname === '/api/v1/models') {
+      return fulfill(route, {
+        items: [
+          {
+            model_id: 'model-demo',
+            model_name: 'Demo SHUD',
+            basin_id: 'basin-demo',
+            basin_name: 'Demo Basin',
+            basin_version_id: 'bv-001',
+            river_network_version_id: 'rn-v1',
+            mesh_version_id: 'mesh-v1',
+            calibration_version_id: 'cal-v1',
+            segment_count: 2,
+            active_flag: true,
+            shud_code_version: 'v1',
+            created_at: '2026-05-01T00:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 200,
+        offset: 0,
+      })
+    }
+    if (url.pathname === '/api/v1/runs') {
+      return fulfill(route, {
+        items: options.lowRequestPlan
+          ? []
+          : [
+              {
+                run_id: 'run-overview',
+                run_type: 'forecast',
+                scenario_id: 'forecast_gfs_deterministic',
+                model_id: 'model-demo',
+                basin_version_id: 'bv-001',
+                source_id: 'gfs',
+                cycle_time: '2026-05-18T00:00:00Z',
+                status: 'frequency_done',
+                start_time: '2026-05-18T00:00:00Z',
+                end_time: '2026-05-18T03:00:00Z',
+                created_at: '2026-05-18T00:00:00Z',
+                updated_at: '2026-05-18T04:00:00Z',
+              },
+            ],
+        total: options.lowRequestPlan ? 0 : 1,
+        limit: 20,
+        offset: 0,
+      })
+    }
+    if (url.pathname === '/api/v1/layers') {
+      return fulfill(route, [
+        { layer_id: 'discharge', layer_name: 'River discharge', layer_type: 'hydrology', variables: ['q_down'] },
+        { layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: ['return_period'] },
+      ])
+    }
+    if (url.pathname.startsWith('/api/v1/layers/') && url.pathname.endsWith('/valid-times')) {
+      return fulfill(route, ['2026-05-18T00:00:00Z', '2026-05-18T06:00:00Z'])
+    }
+    if (url.pathname === '/api/v1/queue/depth') {
+      if (options.partialQueueFailure) return route.fulfill({ status: 503, contentType: 'application/json', body: '{}' })
+      return fulfill(route, { running: 1, pending: 0, idle: 3 })
+    }
+    if (url.pathname === '/api/v1/pipeline/status') {
+      return fulfill(route, {
+        source: 'GFS',
+        cycle_time: '2026-05-18T00:00:00Z',
+        current_state: 'running',
+        started_at: '2026-05-18T00:00:00Z',
+        updated_at: '2026-05-18T04:00:00Z',
+        job_counts: { succeeded: 3, failed: 0, running: 1, pending: 0 },
+      })
+    }
+    if (url.pathname === '/api/v1/flood-alerts/summary') {
+      return fulfill(route, {
+        run_id: 'run-overview',
+        total_segments: 2,
+        usable_curves: 2,
+        unavailable_count: 0,
+        quality_note: null,
+        levels: [{ level: 'warning', count: 1, color: '#FFB74D' }],
+      })
+    }
+    if (url.pathname === '/api/v1/flood-alerts/ranking') {
+      return fulfill(route, {
+        items: [
+          {
+            rank: 1,
+            river_segment_id: 'seg-demo',
+            segment_id: 'seg-demo',
+            segment_name: 'Demo Segment',
+            basin_version_id: 'bv-001',
+            q_value: 123,
+            q_unit: 'm3/s',
+            return_period: 20,
+            warning_level: 'warning',
+            duration: '1h',
+            valid_time: '2026-05-18T06:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 200,
+        offset: 0,
+      })
+    }
+    if (url.pathname === '/api/v1/tiles/flood-return-period') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'FeatureCollection', features: [] }),
+      })
+    }
+
+    throw new Error(`Unhandled overview API request: ${url.pathname}`)
+  })
+}
+
 async function mockFloodWorkflowApis(page: Page) {
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
@@ -154,17 +301,52 @@ async function selectOperatorRole(page: Page) {
 
 test.describe('M11 navigation and route shells', () => {
   test('renders the national overview shell at / and /overview', async ({ page }) => {
-    await page.route('**/api/v1/**', (route) => route.abort())
+    await mockOverviewApis(page)
 
     await page.goto('/')
     await expect(page.getByRole('heading', { name: '全国总览' })).toBeVisible()
     await expect(page.getByLabel('全国总览地图')).toBeVisible()
     await expect(page.getByRole('link', { name: /全国总览/ })).toBeVisible()
+    await expect(page.getByLabel('全国流域树')).toContainText('Demo Basin')
 
     await page.goto('/overview?source=gfs&layer=flood-return-period&basemap=terrain')
     await expect(page.getByRole('heading', { name: '全国总览' })).toBeVisible()
     await expect(page.getByLabel('全国总览地图').getByText('flood-return-period')).toBeVisible()
     await expect(page.getByLabel('全国总览地图').getByText('terrain')).toBeVisible()
+  })
+
+  test('supports overview basin visibility, source/layer changes, popup drill-down, and summary links', async ({ page }) => {
+    await mockOverviewApis(page, { lowRequestPlan: true })
+
+    await page.goto('/overview?source=gfs')
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'basin-demo')
+
+    await page.getByRole('checkbox', { name: 'Demo Basin 可见' }).click()
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', '')
+    await expect(page.getByTestId('m11-basin-layer-unavailable')).toBeVisible()
+    await page.getByRole('button', { name: '全选' }).click()
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'basin-demo')
+
+    await page.getByRole('button', { name: /洪水重现期/ }).click()
+    await expect(page).toHaveURL(/layer=flood-return-period/)
+    await page.getByRole('button', { name: /^IFS/ }).click()
+    await expect(page).toHaveURL(/source=ifs/)
+
+    await expect(page.getByTestId('m11-basin-popup')).toContainText('Demo Basin')
+    await expect(page.getByRole('link', { name: /进入分析/ })).toHaveAttribute('href', /\/basins\/basin-demo.*basinVersionId=bv-001/)
+    await page.getByRole('link', { name: /产品监控摘要/ }).click()
+    await expect(page).toHaveURL(/\/monitoring/)
+  })
+
+  test('renders successful overview sections when an optional summary request fails', async ({ page }) => {
+    await mockOverviewApis(page, { partialQueueFailure: true })
+
+    await page.goto('/overview?source=gfs')
+
+    await expect(page.getByRole('heading', { name: '全国总览' })).toBeVisible()
+    await expect(page.getByLabel('全国流域树')).toContainText('Demo Basin')
+    await expect(page.getByText('queue: 暂不可用').first()).toBeVisible()
+    await expect(page.getByText('径流量图例')).toBeVisible()
   })
 
   test('renders basin drill-down shell with restored query state', async ({ page }) => {

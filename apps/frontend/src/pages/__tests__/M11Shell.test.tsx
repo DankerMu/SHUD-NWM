@@ -5,7 +5,7 @@ import { BrowserRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
-import type { LayerState, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
 import {
   LayerGroupControls,
@@ -166,6 +166,39 @@ const layers: LayerState[] = [
     disabledReason: 'Layer has no valid times.',
     freshness: { ...freshness, validTime: null, unavailableReason: 'No valid-time metadata is available.' },
     legend: [],
+  },
+]
+
+const overviewBasins: OverviewBasin[] = [
+  {
+    basinId: 'yangtze',
+    displayName: 'Yangtze Basin',
+    basinGroup: 'major',
+    parentBasinId: null,
+    level: 1,
+    boundary: {
+      type: 'MultiPolygon',
+      coordinates: [[[[100, 30], [101, 30], [101, 31], [100, 31], [100, 30]]]],
+    },
+    bbox: { minLon: 100, minLat: 30, maxLon: 101, maxLat: 31 },
+    areaKm2: 12_000,
+    riverCount: 2,
+    activeModelCount: 1,
+    latestForecastTime: '2026-05-18T00:00:00.000Z',
+    warningCounts: {
+      normal: 0,
+      elevated: 0,
+      watch: 0,
+      warning: 1,
+      high_risk: 0,
+      severe: 0,
+      extreme: 0,
+      unavailable: 0,
+    },
+    basinVersions: [],
+    selectedBasinVersionId: 'yangtze_v2026_01',
+    unavailableReason: null,
+    qualityNote: null,
   },
 ]
 
@@ -334,6 +367,30 @@ describe('M11 visual foundation shell', () => {
     expect(surface).not.toHaveAttribute('data-active-overlays')
     expect(screen.getByTestId('m11-map-unavailable')).toHaveTextContent('Layer has no valid times.')
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('registers visible basin boundaries and labels without claiming hidden basin geometry', () => {
+    const { rerender } = render(<M11MapSurface state={state} layers={layers} basins={overviewBasins} />)
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '1')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'yangtze')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-basin-fill')
+    expect(mapSources.at(-1)).toMatchObject({
+      id: 'm11-basin-boundaries-source',
+      type: 'geojson',
+    })
+    expect(mapLayers.map((layer) => layer.id)).toEqual(
+      expect.arrayContaining(['m11-basin-fill', 'm11-basin-outline', 'm11-basin-label']),
+    )
+
+    mapSources.length = 0
+    mapLayers.length = 0
+    rerender(<M11MapSurface state={state} layers={layers} basins={overviewBasins} visibleBasinIds={[]} />)
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '0')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
+    expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('当前没有可见流域边界')
     expect(mapSources).toHaveLength(0)
     expect(mapLayers).toHaveLength(0)
   })

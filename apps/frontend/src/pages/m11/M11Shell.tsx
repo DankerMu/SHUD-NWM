@@ -2,7 +2,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Clock, ListFilter, MapPinned, Search } from 'lucide-react'
 
-import type { LayerState, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryPatch, M11QueryState } from '@/lib/m11/queryState'
 import { serializeM11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
@@ -19,6 +19,8 @@ interface M11LayoutProps {
   mapTitle: string
   mapMeta: string
   layers?: LayerState[]
+  basins?: OverviewBasin[]
+  visibleBasinIds?: string[]
   sourceSelection?: SourceScenarioSelectionState | null
   derivedTimeline?: M11TimelineDerivedTimes | null
   fitTo?: M11MapCameraFit | null
@@ -39,6 +41,8 @@ export function M11Layout({
   mapTitle,
   mapMeta,
   layers = [],
+  basins = [],
+  visibleBasinIds,
   sourceSelection = null,
   derivedTimeline = null,
   fitTo = null,
@@ -69,6 +73,8 @@ export function M11Layout({
         <M11MapSurface
           state={state}
           layers={layers}
+          basins={basins}
+          visibleBasinIds={visibleBasinIds}
           onQueryChange={onQueryChange}
           fitTo={fitTo}
           flyTo={flyTo}

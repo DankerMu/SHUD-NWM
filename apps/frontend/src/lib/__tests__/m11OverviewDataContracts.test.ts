@@ -191,6 +191,7 @@ describe('M11 overview data contracts', () => {
       riverCount: 2,
       latestForecastTime: '2026-05-18T00:00:00.000Z',
       warningCounts: { warning: 1 },
+      boundary: basinVersion.geom,
       bbox: { minLon: 100, minLat: 30, maxLon: 101, maxLat: 31 },
     })
     expect(basins[1]).toMatchObject({
@@ -361,6 +362,7 @@ describe('M11 overview data contracts', () => {
     expect(detail).toMatchObject({
       basinId: 'yangtze',
       selectedBasinVersionId: 'yangtze_v2026_01',
+      boundary: basinVersion.geom,
       segmentCount: 2,
       activeModelCount: 1,
       warningDistribution: { warning: 1 },

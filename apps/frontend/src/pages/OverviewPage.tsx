@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { AlertTriangle, ArrowRight, ExternalLink, Layers, Rows3 } from 'lucide-react'
 
 import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
-import type { M11Bbox } from '@/lib/m11/overviewDataContracts'
+import { cn } from '@/lib/cn'
+import type { M11Bbox, OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import { BasinLink, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
   defaultM11QueryState,
@@ -13,6 +15,8 @@ import {
 } from '@/lib/m11/queryState'
 import { LayerGroupControls, LayerLegendPanel, SourceScenarioControls, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { overviewSnapshotMatchesQuery, overviewSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
+
+const NONE_VISIBLE_SENTINEL = '__none__'
 
 export function OverviewPage() {
   const location = useLocation()
@@ -43,6 +47,8 @@ export function OverviewPage() {
   const currentOverview = overviewMatchesQuery ? overview : null
   const metadataLayers = overviewMetadataMatchesQuery ? (overview?.layers ?? []) : []
   const layers = currentOverview?.layers ?? metadataLayers
+  const [visibleBasinIds, setVisibleBasinIds] = useState<Set<string>>(() => new Set())
+  const [selectedBasinId, setSelectedBasinId] = useState<string | null>(null)
 
   const handleQueryChange = useCallback(
     (patch: M11QueryPatch) => {
@@ -72,10 +78,46 @@ export function OverviewPage() {
   const basins = currentOverview?.basins ?? []
   const summary = currentOverview?.summary
   const sourceSelection = summary?.sourceSelection ?? null
-  const firstBasin = basins[0]
-  const mapFitTo = useMemo(() => bboxToMapFit(firstBasin?.bbox), [firstBasin?.bbox])
+  const visibleBasinIdList = useMemo(() => {
+    if (basins.length === 0) return []
+    if (visibleBasinIds.size === 0) return basins.map((basin) => basin.basinId)
+    if (visibleBasinIds.has(NONE_VISIBLE_SENTINEL)) return []
+    return basins.filter((basin) => visibleBasinIds.has(basin.basinId)).map((basin) => basin.basinId)
+  }, [basins, visibleBasinIds])
+  const visibleBasins = useMemo(
+    () =>
+      visibleBasinIds.size === 0
+        ? basins
+        : visibleBasinIds.has(NONE_VISIBLE_SENTINEL)
+          ? []
+          : basins.filter((basin) => visibleBasinIds.has(basin.basinId)),
+    [basins, visibleBasinIds],
+  )
+  const selectedBasin = basins.find((basin) => basin.basinId === selectedBasinId) ?? visibleBasins[0] ?? basins[0] ?? null
+  const mapFitTo = useMemo(() => bboxToMapFit(unionBasinBbox(visibleBasins) ?? selectedBasin?.bbox), [selectedBasin?.bbox, visibleBasins])
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
-  const handleMapOverlayClick = useCallback((_interaction: M11MapOverlayInteraction) => undefined, [])
+  const handleMapOverlayClick = useCallback(
+    (interaction: M11MapOverlayInteraction) => {
+      const feature = interaction.event.features?.[0]
+      const basinId = feature?.properties?.basin_id
+      if (typeof basinId === 'string') setSelectedBasinId(basinId)
+    },
+    [],
+  )
+  useEffect(() => {
+    if (basins.length === 0) {
+      setVisibleBasinIds((current) => (current.size === 0 ? current : new Set()))
+      setSelectedBasinId((current) => (current === null ? current : null))
+      return
+    }
+    const basinIds = new Set([NONE_VISIBLE_SENTINEL, ...basins.map((basin) => basin.basinId)])
+    setVisibleBasinIds((current) => {
+      if (current.size === 0) return current
+      const next = new Set([...current].filter((basinId) => basinIds.has(basinId)))
+      return next.size === current.size ? current : next
+    })
+    setSelectedBasinId((current) => (current && basinIds.has(current) && current !== NONE_VISIBLE_SENTINEL ? current : basins[0]?.basinId ?? null))
+  }, [basins])
   const emptyBasinReason =
     !loading && basins.length === 0
       ? error ??
@@ -85,14 +127,13 @@ export function OverviewPage() {
             ? currentOverview.aggregationDecision.evidence
             : '流域清单暂不可用')
       : null
-  const basinSearch = firstBasin
-    ? serializeM11QueryState({
-        ...state,
-        basinVersionId: state.basinVersionId ?? firstBasin.selectedBasinVersionId,
-        segmentId: state.segmentId,
-      })
-    : serializeM11QueryState(state)
-  const basinLinkTarget = firstBasin ? `/basins/${encodeURIComponent(firstBasin.basinId)}${basinSearch ? `?${basinSearch}` : ''}` : '/overview'
+  const selectedBasinLinkTarget = selectedBasin ? basinAnalysisHref(selectedBasin, state) : '/overview'
+  const monitoringHref = contextHref('/monitoring', state)
+  const floodAlertsHref = contextHref('/flood-alerts', state)
+  const partialErrors = summary?.partialErrors ?? []
+  const unavailableBasinCount = basins.filter((basin) => basin.unavailableReason).length
+  const boundaryCount = basins.filter((basin) => basin.boundary).length
+  const selectedLayer = layers.find((layer) => layer.layerId === state.layer)
 
   return (
     <M11Layout
@@ -100,6 +141,8 @@ export function OverviewPage() {
       subtitle="全国流域、图层和运行态势"
       state={state}
       layers={layers}
+      basins={basins}
+      visibleBasinIds={visibleBasinIdList}
       sourceSelection={sourceSelection}
       fitTo={mapFitTo}
       onMapOverlayHover={handleMapOverlayHover}
@@ -107,55 +150,65 @@ export function OverviewPage() {
       onQueryChange={handleQueryChange}
       mapLabel="全国总览地图"
       mapTitle="全国水文总览"
-      mapMeta="初始地图壳保留全国范围、流域边界、河网和图层占位，不加载未实现的真实适配器。"
+      mapMeta={`全国范围 73E-135E / 18N-53N；已接入 ${boundaryCount}/${basins.length} 个可用流域边界，河网与气象图层按合同可用性呈现。`}
       left={
         <>
           <SourceScenarioControls state={state} sourceSelection={sourceSelection} onQueryChange={handleQueryChange} />
-          <div className="space-y-2">
-            <div className="text-sm font-semibold text-neutral-900">流域管理</div>
-            {basins.length > 0 ? (
-              basins.map((basin) => (
-                <label key={basin.basinId} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-neutral-700">
-                  <input type="checkbox" defaultChecked className="h-4 w-4" />
-                  {basin.displayName}
-                </label>
-              ))
-            ) : (
-              <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
-                {loading ? '流域清单加载中' : emptyBasinReason}
-              </div>
-            )}
-          </div>
+          <BasinVisibilityTree
+            basins={basins}
+            visibleBasinIds={visibleBasinIds}
+            loading={loading}
+            emptyReason={emptyBasinReason}
+            selectedBasinId={selectedBasin?.basinId ?? null}
+            onSelectBasin={setSelectedBasinId}
+            onSetVisibleBasinIds={setVisibleBasinIds}
+          />
           <LayerGroupControls state={state} layers={layers} onQueryChange={handleQueryChange} />
-          <BasinLink to={basinLinkTarget}>{firstBasin ? '进入流域分析' : '等待可用流域'}</BasinLink>
+          {unavailableBasinCount > 0 ? (
+            <ScopedNotice tone="warning">
+              {unavailableBasinCount} 个流域缺少已发布版本或边界，地图不会绘制对应边界。
+            </ScopedNotice>
+          ) : null}
+          <BasinLink to={selectedBasinLinkTarget}>{selectedBasin ? '进入流域分析' : '等待可用流域'}</BasinLink>
         </>
       }
       right={
         <>
+          <section className="space-y-2" aria-label="M11 底图与图层摘要">
+            <div className="flex items-center gap-2 text-sm font-semibold text-neutral-900">
+              <Layers className="h-4 w-4 text-primary-600" aria-hidden="true" />
+              当前图层
+            </div>
+            <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
+              <div className="font-medium text-neutral-900">{selectedLayer?.displayName ?? state.layer}</div>
+              <div className="mt-1">
+                {selectedLayer?.available
+                  ? `${selectedLayer.validTimes.length} 个有效时刻 / ${selectedLayer.validTimeSource}`
+                  : selectedLayer?.disabledReason ?? '当前图层暂不可渲染'}
+              </div>
+            </div>
+          </section>
           <div className="grid grid-cols-2 gap-3">
             <SummaryMetric value={formatMetric(summary?.completedCyclesToday)} label="今日完成周期" />
             <SummaryMetric value={formatMetric(summary?.runningJobs)} label="当前运行中" />
             <SummaryMetric value={formatMetric(summary?.warningSegmentCount)} label="超警河段" tone="warning" />
             <SummaryMetric value={formatTime(summary?.latestUpdate) ?? '-'} label="最新更新时间" />
           </div>
-          {loading || error ? (
-            <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
-              {loading ? '总览数据加载中' : error}
-            </div>
+          {loading || error ? <ScopedNotice>{loading ? '总览数据加载中' : error}</ScopedNotice> : null}
+          {partialErrors.length > 0 ? (
+            <ScopedNotice tone="warning">{partialErrors[0]}</ScopedNotice>
           ) : null}
           <LayerLegendPanel state={state} layers={layers} />
           <div className="space-y-2">
-            <Link className="block rounded border border-neutral-300 p-3 hover:bg-primary-50" to="/monitoring">
-              产品监控摘要
-            </Link>
-            <Link className="block rounded border border-neutral-300 p-3 hover:bg-primary-50" to="/flood-alerts">
-              洪水预警摘要
-            </Link>
+            <SummaryLink to={monitoringHref} title="产品监控摘要" description="查看流水线、队列与作业状态" />
+            <SummaryLink to={floodAlertsHref} title="洪水预警摘要" description="带入 source/cycle/validTime 上下文" />
           </div>
           <StateReadout state={state} />
         </>
       }
-    />
+    >
+      {selectedBasin ? <BasinPopup basin={selectedBasin} state={state} /> : null}
+    </M11Layout>
   )
 }
 
@@ -179,6 +232,259 @@ function SummaryMetric({ value, label, tone = 'default' }: { value: string; labe
       <div className="mt-1 text-xs text-neutral-700">{label}</div>
     </div>
   )
+}
+
+function BasinVisibilityTree({
+  basins,
+  visibleBasinIds,
+  loading,
+  emptyReason,
+  selectedBasinId,
+  onSelectBasin,
+  onSetVisibleBasinIds,
+}: {
+  basins: OverviewBasin[]
+  visibleBasinIds: Set<string>
+  loading: boolean
+  emptyReason: string | null
+  selectedBasinId: string | null
+  onSelectBasin: (basinId: string) => void
+  onSetVisibleBasinIds: (ids: Set<string>) => void
+}) {
+  const groups = useMemo(() => groupBasins(basins), [basins])
+  const allVisible = basins.length > 0 && (visibleBasinIds.size === 0 || visibleBasinIds.size === basins.length)
+  const noneVisible = visibleBasinIds.has(NONE_VISIBLE_SENTINEL)
+  const isVisible = useCallback(
+    (basinId: string) => !noneVisible && (visibleBasinIds.size === 0 || visibleBasinIds.has(basinId)),
+    [noneVisible, visibleBasinIds],
+  )
+
+  return (
+    <section className="space-y-3" aria-label="全国流域树">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-neutral-900">
+          <Rows3 className="h-4 w-4 text-primary-600" aria-hidden="true" />
+          流域管理
+        </div>
+        <div className="flex items-center gap-1 text-xs">
+          <button
+            type="button"
+            className="cursor-pointer rounded border border-neutral-300 px-2 py-1 text-neutral-700 hover:bg-neutral-50"
+            onClick={() => onSetVisibleBasinIds(new Set())}
+          >
+            全选
+          </button>
+          <button
+            type="button"
+            className="cursor-pointer rounded border border-neutral-300 px-2 py-1 text-neutral-700 hover:bg-neutral-50"
+            onClick={() => onSetVisibleBasinIds(new Set())}
+            disabled={basins.length === 0}
+          >
+            重置
+          </button>
+          <button
+            type="button"
+            className="cursor-pointer rounded border border-neutral-300 px-2 py-1 text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:text-neutral-500"
+            onClick={() => onSetVisibleBasinIds(new Set([NONE_VISIBLE_SENTINEL]))}
+            disabled={basins.length === 0}
+          >
+            全不选
+          </button>
+        </div>
+      </div>
+      {basins.length > 0 ? (
+        <div className="max-h-[18rem] space-y-3 overflow-auto pr-1">
+          {groups.map((group) => (
+            <div key={group.name} className="space-y-1">
+              <div className="text-xs font-semibold text-primary-700">{group.name}</div>
+              {group.basins.map((basin) => {
+                const checked = !noneVisible && (allVisible || isVisible(basin.basinId))
+                return (
+                  <label
+                    key={basin.basinId}
+                    className={cn(
+                      'flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-sm transition-colors',
+                      selectedBasinId === basin.basinId ? 'bg-primary-50 text-primary-700' : 'text-neutral-700 hover:bg-neutral-50',
+                    )}
+                    data-testid={`m11-basin-row-${basin.basinId}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      className="mt-0.5 h-4 w-4"
+                      aria-label={`${basin.displayName} 可见`}
+                      onChange={(event) => {
+                        const next = noneVisible
+                          ? new Set<string>()
+                          : allVisible
+                            ? new Set(basins.map((item) => item.basinId))
+                            : new Set(visibleBasinIds)
+                        next.delete(NONE_VISIBLE_SENTINEL)
+                        if (event.target.checked) next.add(basin.basinId)
+                        else next.delete(basin.basinId)
+                        onSetVisibleBasinIds(next.size === 0 ? new Set([NONE_VISIBLE_SENTINEL]) : next)
+                      }}
+                    />
+                    <span className="min-w-0 flex-1" onClick={() => onSelectBasin(basin.basinId)}>
+                      <span className="block truncate font-medium">{basin.displayName}</span>
+                      <span className="block truncate text-xs text-neutral-500">
+                        {basin.selectedBasinVersionId ?? basin.unavailableReason ?? '版本不可用'}
+                      </span>
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
+          {loading ? '流域清单加载中' : emptyReason}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function BasinPopup({ basin, state }: { basin: OverviewBasin; state: ReturnType<typeof parseM11QueryState> }) {
+  const disabled = Boolean(basin.unavailableReason || !basin.selectedBasinVersionId)
+  return (
+    <aside
+      className="absolute right-[calc(var(--m11-right-panel-width)+1.5rem)] top-24 z-[200] w-[min(22.5rem,calc(100%-3rem))] rounded-md border border-neutral-300 bg-white shadow-lg max-xl:right-6"
+      aria-label="流域信息弹窗"
+      data-testid="m11-basin-popup"
+    >
+      <div className="border-b border-neutral-300 px-4 py-3">
+        <div className="text-base font-semibold text-neutral-900">{basin.displayName}</div>
+        <div className="mt-0.5 text-xs text-neutral-700">{basin.basinGroup ?? '未分组流域'}</div>
+      </div>
+      <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-2 px-4 py-3 text-sm">
+        <dt className="text-neutral-700">流域面积</dt>
+        <dd className="font-mono text-neutral-900">{formatArea(basin.areaKm2)}</dd>
+        <dt className="text-neutral-700">模型河段数</dt>
+        <dd className="font-mono text-neutral-900">{formatMetric(basin.riverCount)}</dd>
+        <dt className="text-neutral-700">活跃模型版本</dt>
+        <dd className="font-mono text-neutral-900">{basin.activeModelCount}</dd>
+        <dt className="text-neutral-700">最新预报时间</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{formatDateTime(basin.latestForecastTime) ?? '-'}</dd>
+      </dl>
+      {basin.unavailableReason ? (
+        <div className="mx-4 mb-3 flex items-start gap-2 rounded border border-warning/40 bg-neutral-50 p-2 text-xs text-neutral-700">
+          <AlertTriangle className="mt-0.5 h-4 w-4 text-warning" aria-hidden="true" />
+          {basin.unavailableReason}
+        </div>
+      ) : null}
+      <div className="flex justify-end gap-2 border-t border-neutral-300 px-4 py-3">
+        <Link
+          to={modelAssetPlaceholderHref(basin)}
+          className="inline-flex h-9 items-center gap-1 rounded border border-primary-600 px-3 text-sm font-medium text-primary-600 hover:bg-primary-50"
+        >
+          查看详情
+          <ExternalLink className="h-4 w-4" aria-hidden="true" />
+        </Link>
+        {disabled ? (
+          <button
+            type="button"
+            disabled
+            className="inline-flex h-9 cursor-not-allowed items-center gap-1 rounded bg-neutral-100 px-3 text-sm font-medium text-neutral-500"
+          >
+            进入分析
+          </button>
+        ) : (
+          <Link
+            to={basinAnalysisHref(basin, state)}
+            className="inline-flex h-9 items-center gap-1 rounded bg-primary-600 px-3 text-sm font-medium text-white hover:bg-primary-700"
+          >
+            进入分析
+            <ArrowRight className="h-4 w-4" aria-hidden="true" />
+          </Link>
+        )}
+      </div>
+    </aside>
+  )
+}
+
+function SummaryLink({ to, title, description }: { to: string; title: string; description: string }) {
+  return (
+    <Link className="block rounded border border-neutral-300 p-3 transition-colors hover:bg-primary-50" to={to}>
+      <span className="block text-sm font-medium text-neutral-900">{title}</span>
+      <span className="mt-1 block text-xs text-neutral-700">{description}</span>
+    </Link>
+  )
+}
+
+function ScopedNotice({ children, tone = 'default' }: { children: string | null | undefined; tone?: 'default' | 'warning' }) {
+  if (!children) return null
+  return (
+    <div
+      className={cn(
+        'rounded-md border p-3 text-xs text-neutral-700',
+        tone === 'warning' ? 'border-warning/40 bg-primary-50' : 'border-neutral-300 bg-neutral-50',
+      )}
+    >
+      {children}
+    </div>
+  )
+}
+
+function groupBasins(basins: OverviewBasin[]) {
+  const groups = new Map<string, OverviewBasin[]>()
+  basins.forEach((basin) => {
+    const groupName = basin.basinGroup ?? '未分组流域'
+    groups.set(groupName, [...(groups.get(groupName) ?? []), basin])
+  })
+  return [...groups.entries()].map(([name, groupBasins]) => ({ name, basins: groupBasins }))
+}
+
+function unionBasinBbox(basins: OverviewBasin[]) {
+  return basins.reduce<M11Bbox | null>((bbox, basin) => {
+    if (!basin.bbox) return bbox
+    return bbox
+      ? {
+          minLon: Math.min(bbox.minLon, basin.bbox.minLon),
+          minLat: Math.min(bbox.minLat, basin.bbox.minLat),
+          maxLon: Math.max(bbox.maxLon, basin.bbox.maxLon),
+          maxLat: Math.max(bbox.maxLat, basin.bbox.maxLat),
+        }
+      : basin.bbox
+  }, null)
+}
+
+function basinAnalysisHref(basin: OverviewBasin, state: ReturnType<typeof parseM11QueryState>) {
+  const search = serializeM11QueryState({
+    ...state,
+    basinVersionId: state.basinVersionId ?? basin.selectedBasinVersionId,
+    segmentId: state.segmentId,
+  })
+  return `/basins/${encodeURIComponent(basin.basinId)}${search ? `?${search}` : ''}`
+}
+
+function contextHref(pathname: string, state: ReturnType<typeof parseM11QueryState>) {
+  const search = serializeM11QueryState({
+    ...defaultM11QueryState,
+    source: state.source,
+    cycle: state.cycle,
+    validTime: state.validTime,
+    warningLevel: state.warningLevel,
+  })
+  return `${pathname}${search ? `?${search}` : ''}`
+}
+
+function modelAssetPlaceholderHref(basin: OverviewBasin) {
+  const params = new URLSearchParams({ basinId: basin.basinId })
+  if (basin.selectedBasinVersionId) params.set('basinVersionId', basin.selectedBasinVersionId)
+  return `/monitoring?${params.toString()}`
+}
+
+function formatArea(value: number | null | undefined) {
+  return value === null || value === undefined ? '-' : `${value.toLocaleString('en-US')} km2`
+}
+
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`
 }
 
 function formatMetric(value: number | null | undefined) {
