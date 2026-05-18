@@ -18,6 +18,11 @@ type ApiFloodAlertTimeline = components['schemas']['FloodAlertTimeline']
 type ApiFloodAlertTimelinePoint = components['schemas']['FloodAlertTimelinePoint']
 type ApiFloodFrequencyThresholds = components['schemas']['FloodFrequencyThresholds']
 
+let latestRunRequestId = 0
+let summaryRequestId = 0
+let rankingRequestId = 0
+let timelineRequestId = 0
+
 export interface FloodAlertLevelCount {
   level: AlertLevel
   count: number
@@ -288,6 +293,10 @@ function explicitContextMissReason(context: { source?: string | null; cycleTime?
   return null
 }
 
+function sameNullableValue(left: string | number | null | undefined, right: string | number | null | undefined) {
+  return (left ?? null) === (right ?? null)
+}
+
 export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   selectedRunId: null,
   latestRun: null,
@@ -327,6 +336,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   setTopLimit: (limit) => set({ topLimit: limit }),
   setBasinId: (basinId) => set({ basinId }),
   fetchLatestFrequencyDoneRun: async (context) => {
+    const requestId = ++latestRunRequestId
     set({ loading: true, error: null, empty: false })
     try {
       const explicitContext = Boolean(context?.source || context?.cycleTime)
@@ -358,6 +368,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const validTimes = buildValidTimes(latestRun)
       const requestedValidTime = normalizeIso(context?.validTime)
       const contextMissReason = latestRun ? null : explicitContextMissReason(context)
+      if (requestId !== latestRunRequestId) return
       set({
         latestRun,
         selectedRunId: nextRunId,
@@ -374,6 +385,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         timelineLoading: runChanged ? false : get().timelineLoading,
       })
     } catch (error) {
+      if (requestId !== latestRunRequestId) return
       const message = getApiErrorMessage(error, '获取最新预警 Run 失败')
       set({ loading: false, error: message, empty: false })
       throw error
@@ -384,17 +396,28 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
     if (!runId) return
 
     const validTime = options?.validTime ?? get().selectedValidTime
-    set({ summaryLoading: true, error: null })
+    const alertThreshold = get().alertThreshold
+    const requestId = ++summaryRequestId
+    set({ summaryLoading: true, error: null, summaryData: null })
+    const isCurrentRequest = () => {
+      const state = get()
+      return (
+        requestId === summaryRequestId &&
+        state.selectedRunId === runId &&
+        sameNullableValue(state.selectedValidTime, validTime) &&
+        sameNullableValue(state.alertThreshold, alertThreshold)
+      )
+    }
     try {
       const payload = await fetchJson<ApiFloodAlertSummary>('/api/v1/flood-alerts/summary', {
         run_id: runId,
-        threshold: get().alertThreshold,
+        threshold: alertThreshold,
         valid_time: validTime,
       })
-      if (get().selectedRunId !== runId) return
+      if (!isCurrentRequest()) return
       set({ summaryData: normalizeSummary(payload), summaryLoading: false, error: null })
     } catch (error) {
-      if (get().selectedRunId !== runId) return
+      if (!isCurrentRequest()) return
       const message = getApiErrorMessage(error, '预警统计加载失败')
       set({ summaryLoading: false, error: message })
       throw error
@@ -406,19 +429,31 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
 
     const validTime = options?.validTime ?? get().selectedValidTime
     const limit = options?.limit ?? get().topLimit
-    set({ rankingLoading: true, error: null })
+    const basinId = get().basinId
+    const requestId = ++rankingRequestId
+    set({ rankingLoading: true, error: null, rankingData: null })
+    const isCurrentRequest = () => {
+      const state = get()
+      return (
+        requestId === rankingRequestId &&
+        state.selectedRunId === runId &&
+        sameNullableValue(state.selectedValidTime, validTime) &&
+        state.basinId === basinId &&
+        state.topLimit === limit
+      )
+    }
     try {
       const payload = await fetchJson<ApiFloodAlertRanking>('/api/v1/flood-alerts/ranking', {
         run_id: runId,
         limit,
         offset: 0,
-        basin_id: get().basinId,
+        basin_id: basinId,
         valid_time: validTime,
       })
-      if (get().selectedRunId !== runId) return
+      if (!isCurrentRequest()) return
       set({ rankingData: normalizeRanking(payload, limit), rankingLoading: false, error: null })
     } catch (error) {
-      if (get().selectedRunId !== runId) return
+      if (!isCurrentRequest()) return
       const message = getApiErrorMessage(error, '预警排名加载失败')
       set({ rankingLoading: false, error: message })
       throw error
@@ -428,14 +463,17 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
     const runId = get().selectedRunId
     if (!runId) return
 
-    set({ timelineLoading: true, error: null })
+    const requestId = ++timelineRequestId
+    set({ timelineLoading: true, error: null, timelineData: null })
+    const isCurrentRequest = () => requestId === timelineRequestId && get().selectedRunId === runId
     try {
       const payload = await fetchJson<ApiFloodAlertTimeline>('/api/v1/flood-alerts/timeline', {
         run_id: runId,
         segment_id: segmentId,
       })
-      if (get().selectedRunId !== runId) return
+      if (!isCurrentRequest()) return
       const timeline = normalizeTimeline(payload)
+      if (timeline.segmentId !== segmentId && timeline.riverSegmentId !== segmentId) return
       set((state) => ({
         timelineData: timeline,
         validTimes: mergeTimelineValidTimes(state.validTimes, timeline),
@@ -443,7 +481,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         error: null,
       }))
     } catch (error) {
-      if (get().selectedRunId !== runId) return
+      if (!isCurrentRequest()) return
       const message = getApiErrorMessage(error, '河段预警详情加载失败')
       set({ timelineLoading: false, error: message })
       throw error
