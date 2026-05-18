@@ -77,4 +77,3 @@ function SummaryMetric({ value, label, tone = 'default' }: { value: string; labe
     </div>
   )
 }
-

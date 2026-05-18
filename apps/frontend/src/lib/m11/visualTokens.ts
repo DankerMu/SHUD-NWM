@@ -32,4 +32,3 @@ export const m11VisualTokens = {
 } as const
 
 export type M11WarningLevel = keyof typeof m11VisualTokens.warningLevels
-
