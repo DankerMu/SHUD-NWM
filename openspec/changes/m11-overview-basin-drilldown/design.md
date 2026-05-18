@@ -399,6 +399,104 @@ Issue #162 non-goals:
 - Implementing real meteorology/temperature/precipitation/station/DEM data contracts is out of
   scope; controls must show these as unavailable rather than rendering fake layers.
 
+## Issue #163 Fixture Slice
+
+Fixture level: expanded. Issue #163 turns the M11 shell, adapters, map primitives, source/layer
+controls, and timeline into the default national overview operator page. Mandatory expanded
+triggers are public route entrypoints, geospatial map rendering, time-series valid-time state,
+schema/view-model consumption, legacy route compatibility, partial-failure behavior, and visual
+evidence across supported viewports.
+
+Repair intensity: high. The page combines shared M11 adapters, query state, MapLibre layer
+registration, UI controls, and existing forecast/flood/monitoring navigation surfaces. Review
+and fixes must treat stale source/time/layer state, unavailable geospatial data, partial summary
+failures, and existing route compatibility as cross-surface invariants rather than isolated
+widget bugs.
+
+Change surface:
+
+- `OverviewPage` and overview-scoped components under the M11 frontend module.
+- Basin tree visibility state, basin popup actions, summary panels, and overview empty/degraded
+  states.
+- Overview map wiring that reuses shared MapLibre, basemap, layer, legend, source/scenario, and
+  timeline controls from issues #160-#162.
+- Links from overview summaries and basin popups to `/basins/:basinId`, `/monitoring`, and
+  `/flood-alerts` with context query parameters.
+- Component tests, Playwright interaction tests, and issue-scoped `agent-browser` screenshot
+  evidence for 1920, 1440, and 1280 viewport classes.
+
+Must preserve:
+
+- `/`, `/overview`, `/forecast`, `/flood-alerts`, `/monitoring`, and `/basins/:basinId` remain
+  reachable with their issue #160 query-state behavior.
+- M11 adapters remain the source of truth for basin identity, active basin version, model counts,
+  warning summaries, source/scenario provenance, layer valid times, and unavailable reasons.
+- Shared map controls from #162 continue to correct stale valid times, bound playback timers,
+  preserve active overlays across basemap changes, and mark unsupported meteorology/station/DEM
+  layers unavailable.
+- Existing forecast, flood alert, monitoring, route, adapter, map-control, and build tests keep
+  passing.
+- No fake basin boundaries, river geometry, warning values, forecast times, model counts, or
+  meteorology layers are introduced when the underlying adapter/source marks data unavailable.
+
+Must add/change for #163:
+
+- National overview page matching effect-image-1 map-first layout with 56px nav, approximately
+  280px left panel, 320-360px right panel, central China map extent, and 64px bottom timeline at
+  the documented desktop viewport classes.
+- Basin tree grouped by available hierarchy with all-select, none-select, per-basin visibility,
+  empty inventory state, and map visibility synchronization.
+- Overview map rendering for available basin boundaries/labels, river network, and active
+  hydrologic risk layer, with scoped loading/error/unavailable overlays.
+- Basin click popup with basin name, area, model river segment count, active model/version count,
+  latest forecast time, "查看详情" handoff, and "进入分析" drill-down.
+- Right panel basemap selector, active-layer legend, forecast run summary, warning summary,
+  source/scenario provenance, and context-preserving links to monitoring/flood-alert routes.
+- Degraded states for no basin inventory, no published basin version, invalid source/cycle/
+  valid-time data, partial summary failures, unavailable meteorology layers, and map source
+  failure.
+
+Risk packs considered for #163:
+
+- Public API / CLI / script entry: selected - `/` and `/overview` are public operator
+  entrypoints; popup and summary actions navigate to public app routes with query context.
+- Config / project setup: not selected - no deployment, environment, or project configuration
+  contract changes are expected.
+- File IO / path safety / overwrite: not selected - no application filesystem operations beyond
+  test/screenshot artifacts.
+- Schema / columns / units / field names: selected - page UI consumes normalized basin/version,
+  model, river count, warning summary, layer, valid-time, source, and provenance fields.
+- Geospatial / CRS / shapefile sidecars: selected - overview map uses basin bbox/boundary,
+  national extent, labels, river network, and hydrologic layers without fabricating geometry.
+- Time series / forcing / temporal boundaries: selected - source/cycle/validTime, layer valid
+  times, latest forecast time, stale-time correction, and summary context links are page-visible.
+- Numerical stability / conservation / NaN: not selected - no solver or hydrologic numerical
+  computation is changed.
+- Solver runtime / performance / threading: not selected - no SHUD runtime or parallel solver
+  behavior is changed.
+- Resource limits / large input / discovery: selected - map source registration, visibility
+  toggles, summary refreshes, and screenshot/e2e flows must avoid unbounded requests, timers, or
+  render loops.
+- Legacy compatibility / examples: selected - existing forecast, flood alert, monitoring, and
+  M11 shell routes/tests must remain stable after overview becomes the real default page.
+- Error handling / rollback / partial outputs: selected - partial API failures, invalid query
+  values, missing basin versions, unavailable layers, and map source failures must stay scoped
+  and recoverable.
+- Release / packaging / dependency compatibility: selected - frontend tests/build/e2e must pass
+  without adding unvetted dependencies or browser-only assumptions that break CI.
+- Documentation / migration notes: selected - overview limitations, visual evidence location,
+  and unavailable data behavior must be discoverable in OpenSpec/tests or developer notes.
+
+Issue #163 non-goals:
+
+- Basin drill-down segment discovery/list workflow, forecast-to-basin handoff, selected segment
+  detail, trend sparkline, and basin map segment coloring remain issues #164-#165.
+- Production MVT/PBF, backend aggregation endpoints, authentication changes, model asset
+  management pages, meteorology pages, and full-screen forecast detail are out of scope unless a
+  narrowly scoped compatibility fix is required by local verification.
+- Basin visibility persistence may remain page/store-local unless an explicit tested
+  `visibleBasins` URL parameter is implemented.
+
 ## Verification Strategy
 
 - `cd apps/frontend && corepack pnpm test`
