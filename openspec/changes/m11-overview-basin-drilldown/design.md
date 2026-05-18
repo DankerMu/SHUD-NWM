@@ -609,6 +609,105 @@ Issue #164 non-goals:
 - No backend/OpenAPI aggregation endpoint unless the existing M11 adapter decision rule is met
   and the same PR includes OpenAPI, generated types, backend tests, and frontend tests.
 
+## Issue #165 Fixture Slice
+
+Fixture level: expanded. Issue #165 completes the user-facing M11 basin analysis workflow with
+basin-scoped river rendering, hover/click interaction, selected segment detail, trend preview,
+visual evidence, developer notes, and final delivery validation. Mandatory expanded triggers are
+public route/query entrypoints, MapLibre geospatial rendering, schema/unit/source metadata,
+time-series forecast context, resource limits for geometry/map interaction, visual evidence, and
+legacy route compatibility.
+
+Repair intensity: high. This is the final Epic #159 integration issue and touches shared basin
+map primitives, selected segment detail state, source/cycle/validTime handoffs, visual evidence,
+and documentation. Fixes and reviews must close invariants across map sources, list rows, URL
+state, selected detail payloads, trend data, lineage/quality data, and unchanged forecast,
+flood-alert, overview, and monitoring routes.
+
+Change surface:
+
+- Basin detail map rendering and interaction surfaces, including basin boundary, basin-scoped
+  river LineStrings, color expressions, hover tooltip, click selection, and selected/hover style.
+- Selected segment detail panel and trend sparkline in `BasinDetailPage` or its basin-scoped
+  child components.
+- Shared M11 adapters/stores where selected segment detail, trend points, comparison state,
+  lineage/quality status, and map geometry are normalized.
+- Component/unit tests, Playwright interaction tests, final `agent-browser` screenshot evidence,
+  frontend developer notes, and progress documentation.
+
+Must preserve:
+
+- `/`, `/overview`, `/forecast`, `/flood-alerts`, `/monitoring`, and `/basins/:basinId` remain
+  reachable and keep their post-#164 route/query behavior.
+- Basin list/search/filter, URL `segmentId` sync, missing bbox fallback, invalid segment state,
+  forecast-to-basin handoff, basin-to-forecast handoff, flood-alert detail forecast isolation,
+  and selected segment geometry budgets from #164 remain intact.
+- Shared source/layer/basemap/timeline controls continue to correct stale valid times, preserve
+  URL state, bound playback, and mark unsupported meteorology/station/DEM layers unavailable.
+- The UI does not fabricate city/station labels, river geometries, water-level deltas, lineage,
+  comparison series, trend points, model asset pages, meteorology layers, or production MVT data
+  when the adapter/source marks them unavailable.
+- Existing forecast, flood-alert, monitoring, overview, adapter, MapLibre, route, E2E, preview,
+  and build tests continue to pass.
+
+Must add/change for #165:
+
+- Basin detail map renders available basin boundary and basin-scoped river network with active
+  discharge, return-period, or warning-level coloring; missing geometry stays scoped and honest.
+- Hovering a river segment exposes a tooltip/highlight with segment name/ID, current Q/unit,
+  return period, and warning level when available.
+- Clicking a map segment updates `segmentId`, selects/scrolls the matching row, loads selected
+  segment detail, updates map selected styling, and keeps source/time unavailable states scoped.
+- Selected segment detail panel shows identity, basin/model metadata, current Q, optional
+  water-level delta, return-period/warning state, forecast valid time, source/cycle,
+  lineage/quality status, "查看详情" handoff, and comparison availability/overlay behavior.
+- Trend sparkline renders selected segment trend points with current value/direction when data
+  exists and an explicit unavailable/empty state when it does not.
+- Final `agent-browser` screenshots cover overview and basin detail at 1920x1080, 1440x900, and
+  1280x900; developer notes and progress docs record delivered M11 scope and deferred follow-ups.
+
+Risk packs considered for #165:
+
+- Public API / CLI / script entry: selected - `/basins/:basinId`, overview drill-down, map
+  click selection, detail handoff links, and shareable query URLs are public operator
+  entrypoints.
+- Config / project setup: not selected - no deployment, environment, or project configuration
+  contract changes are expected.
+- File IO / path safety / overwrite: not selected - no application filesystem operations are
+  introduced beyond local test/screenshot artifacts.
+- Schema / columns / units / field names: selected - segment IDs, basin/model metadata, Q units,
+  water-level deltas, return-period bins, warning levels, source/cycle labels, lineage/quality
+  fields, and handoff URLs are page-visible and request-critical.
+- Geospatial / CRS / shapefile sidecars: selected - basin boundary, river LineStrings,
+  city/station labels, hover/click hit targets, selected geometry, and missing/malformed
+  geometry handling are core behavior.
+- Time series / forcing / temporal boundaries: selected - selected segment forecast valid time,
+  source/cycle, trend points, comparison availability, stale response rejection, and valid-time
+  changes are core behavior.
+- Numerical stability / conservation / NaN: not selected - no solver or hydrologic numerical
+  computation is changed beyond display of normalized API values.
+- Solver runtime / performance / threading: not selected - no SHUD runtime, threading, or solver
+  behavior is changed.
+- Resource limits / large input / discovery: selected - river rendering, geometry retention,
+  hover/click events, scroll-to-row behavior, visual screenshot capture, and detail reloads must
+  stay bounded.
+- Legacy compatibility / examples: selected - all existing #160-#164 frontend workflows and
+  route tests must remain stable.
+- Error handling / rollback / partial outputs: selected - missing geometry, unavailable
+  lineage/quality/trend/comparison data, failed detail payloads, and partial map data failures
+  must be scoped and recoverable.
+- Release / packaging / dependency compatibility: selected - frontend test/build/e2e/preview
+  commands must pass without unvetted runtime dependencies.
+- Documentation / migration notes: selected - developer notes, visual evidence paths, final
+  progress documentation, limitations, and deferred follow-ups are deliverables.
+
+Issue #165 non-goals:
+
+- Production MVT/PBF backend pipeline, full-screen forecast detail page, meteorology pages,
+  full model asset management page, authentication/authorization redesign, live ingestion
+  changes, and backend operations changes remain out of scope unless a narrowly scoped
+  compatibility fix is required and fully tested.
+
 ## Verification Strategy
 
 - `cd apps/frontend && corepack pnpm test`
