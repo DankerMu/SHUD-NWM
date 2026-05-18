@@ -49,7 +49,10 @@ vi.mock('react-map-gl/maplibre', () => ({
           onDoubleClick={() =>
             onClick?.({
               target: { getCanvas: () => ({ style: {} }) },
-              features: [{ layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'basin-demo' } }],
+              features: [
+                { layer: { id: 'm11-flood-return-period-line' }, properties: { segment_id: 'overlay-first' } },
+                { layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'basin-demo' } },
+              ],
             })
           }
         >
@@ -79,6 +82,18 @@ vi.mock('@/components/forecast/ForecastPanel', () => ({
 
 vi.mock('@/components/flood/FloodAlertMap', () => ({
   FloodAlertMap: () => <div>mock flood map</div>,
+}))
+
+vi.mock('@/components/charts/QueueDonut', () => ({
+  QueueDonut: () => <div>mock queue chart</div>,
+}))
+
+vi.mock('@/components/charts/StageDurationBar', () => ({
+  StageDurationBar: () => <div>mock stage chart</div>,
+}))
+
+vi.mock('@/components/charts/TrendLine', () => ({
+  TrendLine: () => <div>mock trend chart</div>,
 }))
 
 const noopAsync = vi.fn().mockResolvedValue(undefined)
@@ -221,6 +236,51 @@ function overviewSnapshotWithBasin(layers: LayerState[], queryKey = '', dataKey 
         selectedBasinVersionId: 'bv-001',
         unavailableReason: null,
         qualityNote: null,
+      },
+    ],
+  }
+}
+
+function overviewSnapshotWithBasins(layers: LayerState[], queryKey = '', dataKey = queryKey, basinVersionId = 'bv-sibling') {
+  const base = overviewSnapshotWithBasin(layers, queryKey, dataKey, 'basin-demo')
+  base.requestScope.basinVersionId = basinVersionId
+  return {
+    ...base,
+    basins: [
+      {
+        ...base.basins[0],
+        basinVersions: [
+          {
+            basinVersionId: 'bv-001',
+            versionLabel: 'v2026_01',
+            active: true,
+            validFrom: null,
+            validTo: null,
+            sourceUri: null,
+            boundary: base.basins[0].boundary,
+            bbox: base.basins[0].bbox,
+            unavailableReason: null,
+          },
+        ],
+      },
+      {
+        ...base.basins[0],
+        basinId: 'basin-sibling',
+        displayName: 'Sibling Basin',
+        selectedBasinVersionId: 'bv-sibling',
+        basinVersions: [
+          {
+            basinVersionId: 'bv-sibling',
+            versionLabel: 'v2026_02',
+            active: true,
+            validFrom: null,
+            validTo: null,
+            sourceUri: null,
+            boundary: base.basins[0].boundary,
+            bbox: base.basins[0].bbox,
+            unavailableReason: null,
+          },
+        ],
       },
     ],
   }
@@ -548,21 +608,51 @@ describe('App route state', () => {
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'basin-demo')
   })
 
-  it('renders overview popup actions and context summary links', async () => {
+  it('does not expose popup or enabled analysis when all basins are hidden', async () => {
     const user = userEvent.setup()
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(
         m11Layers,
-        'source=gfs',
+        overviewDefaultScopeKey,
         overviewValid06ScopeKey,
       ),
       loading: false,
     })
-    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basemap=satellite')
+    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z')
 
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-basin-popup')).not.toBeInTheDocument()
+    expect(screen.getByText('等待可见流域选择')).toHaveAttribute('aria-disabled', 'true')
+
+    await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
+    expect(screen.getByTestId('m11-basin-popup')).toHaveTextContent('Demo Basin')
+
+    await user.click(screen.getByRole('button', { name: '全不选' }))
+    expect(screen.queryByTestId('m11-basin-popup')).not.toBeInTheDocument()
+    expect(screen.getByText('等待可见流域选择')).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.queryByRole('link', { name: '进入流域分析' })).not.toBeInTheDocument()
+  })
+
+  it('renders overview popup actions and context summary links after a basin click', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasins(
+        m11Layers,
+        'source=gfs&basinVersionId=bv-sibling',
+        'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-sibling',
+      ),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basemap=satellite&basinVersionId=bv-sibling')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-basin-popup')).not.toBeInTheDocument()
+
+    await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
     expect(await screen.findByTestId('m11-basin-popup')).toHaveTextContent('Demo Basin')
     expect(screen.getByRole('link', { name: /进入分析/ })).toHaveAttribute(
       'href',
@@ -580,8 +670,6 @@ describe('App route state', () => {
       'href',
       '/flood-alerts?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z',
     )
-
-    await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
     expect(screen.getByTestId('m11-basin-popup')).toHaveTextContent('模型河段数')
   })
 
@@ -591,10 +679,9 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
-    const link = screen.getByRole('link', { name: '等待可用流域' })
-    expect(link).toHaveAttribute('href', '/overview')
-    expect(link).not.toHaveAttribute('href', expect.stringContaining('bv-demo'))
-    expect(link).not.toHaveAttribute('href', expect.stringContaining('basin-demo'))
+    const disabledTarget = screen.getByText('等待可见流域选择')
+    expect(disabledTarget).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.queryByRole('link', { name: /进入流域分析|等待可用流域/ })).not.toBeInTheDocument()
   })
 
   it('encodes overview drill-down basin ids as one path segment and preserves query serialization', async () => {
@@ -612,6 +699,7 @@ describe('App route state', () => {
 
     render(<App />)
 
+    await userEvent.setup().click(await screen.findByText('Demo Basin'))
     const link = await screen.findByRole('link', { name: '进入流域分析' })
     const href = link.getAttribute('href') ?? ''
     const url = new URL(href, window.location.origin)
@@ -1110,6 +1198,7 @@ describe('App route state', () => {
   })
 
   it('routes /flood-alerts to the flood alert workflow content', async () => {
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
     useFloodAlertStore.setState({
       selectedRunId: 'run-flood-1',
       latestRun: {
@@ -1153,8 +1242,13 @@ describe('App route state', () => {
         limit: 20,
         offset: 0,
       },
+      fetchLatestFrequencyDoneRun,
     })
-    window.history.pushState({}, '', '/flood-alerts?warningLevel=major')
+    window.history.pushState(
+      {},
+      '',
+      '/flood-alerts?source=gfs&cycle=2026-05-12T00:00:00Z&validTime=2026-05-12T03:00:00Z&warningLevel=major',
+    )
 
     render(<App />)
 
@@ -1166,6 +1260,12 @@ describe('App route state', () => {
     expect(screen.getByRole('heading', { name: '风险排名' })).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /Flood Segment 1/ })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /洪水预警/ })).toHaveClass('border-accent')
+    expect(fetchLatestFrequencyDoneRun).toHaveBeenCalledWith({
+      source: 'gfs',
+      cycleTime: '2026-05-12T00:00:00.000Z',
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+    expect(useFloodAlertStore.getState().selectedAlertLevel).toBe('high_risk')
   })
 
   it('routes /monitoring through allowed RBAC to the monitoring workflow content', async () => {
@@ -1213,11 +1313,17 @@ describe('App route state', () => {
       jobTotal: 1,
       queue: { running: 2, pending: 4, idle: 6 },
     })
-    window.history.pushState({}, '', '/monitoring')
+    window.history.pushState({}, '', '/monitoring?source=ifs&cycle=2026-05-18T00:00:00Z')
 
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        source: 'IFS',
+        cycleTime: '2026-05-18T00:00:00.000Z',
+      }),
+    )
     expect(screen.queryByText('权限不足')).not.toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '当前周期' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '七阶段流水线' })).toBeInTheDocument()

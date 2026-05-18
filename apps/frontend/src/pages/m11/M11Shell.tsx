@@ -56,20 +56,21 @@ export function M11Layout({
 
   return (
     <div
-      className="grid min-h-[calc(100vh-88px)] gap-0 overflow-hidden rounded-md border border-neutral-300 bg-white shadow-md xl:grid-cols-[var(--m11-left-panel-width)_minmax(0,1fr)_var(--m11-right-panel-width)] xl:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]"
+      className="grid min-h-[calc(100vh-88px)] gap-0 overflow-hidden rounded-md border border-neutral-300 bg-white shadow-md min-[1200px]:grid-cols-[260px_minmax(0,1fr)_300px] min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)] min-[1440px]:grid-cols-[var(--m11-left-panel-width)_minmax(0,1fr)_var(--m11-right-panel-width)]"
       data-testid="m11-shell"
+      data-layout="map-first-compact"
       style={{
         '--m11-left-panel-width': m11VisualTokens.leftPanelWidth,
         '--m11-right-panel-width': m11VisualTokens.rightPanelWidth,
         '--m11-timeline-height': m11VisualTokens.timelineHeight,
       } as CSSProperties}
     >
-      <aside className="min-h-0 border-b border-neutral-300 bg-white xl:border-b-0 xl:border-r" aria-label="M11 左侧面板">
+      <aside className="min-h-0 border-b border-neutral-300 bg-white min-[1200px]:border-b-0 min-[1200px]:border-r" aria-label="M11 左侧面板">
         <PanelHeader title={title} subtitle={subtitle} />
         <div className="space-y-5 p-4 text-sm">{left}</div>
       </aside>
 
-      <section className="relative min-h-[30rem] overflow-hidden bg-[#d7e7ef] xl:min-h-0" aria-label={mapLabel}>
+      <section className="relative min-h-[30rem] overflow-hidden bg-[#d7e7ef] min-[1200px]:min-h-0" aria-label={mapLabel}>
         <M11MapSurface
           state={state}
           layers={layers}
@@ -104,14 +105,14 @@ export function M11Layout({
       </section>
 
       <aside
-        className="min-h-0 border-t border-neutral-300 bg-white xl:border-l xl:border-t-0"
+        className="min-h-0 border-t border-neutral-300 bg-white min-[1200px]:border-l min-[1200px]:border-t-0"
         aria-label="M11 右侧面板"
       >
         <PanelHeader title="运行态势" subtitle="摘要与图例" />
         <div className="space-y-5 p-4 text-sm">{right}</div>
       </aside>
 
-      <div className="relative xl:col-span-3">
+      <div className="relative min-[1200px]:col-span-3">
         <M11Timeline
           state={state}
           layers={layers}
@@ -158,7 +159,19 @@ export function StateReadout({ state, basinId }: { state: M11QueryState; basinId
   )
 }
 
-export function BasinLink({ to, children }: { to: string; children: ReactNode }) {
+export function BasinLink({ to, children, disabled = false }: { to: string; children: ReactNode; disabled?: boolean }) {
+  if (disabled) {
+    return (
+      <span
+        aria-disabled="true"
+        className="flex h-9 cursor-not-allowed items-center justify-between rounded border border-neutral-300 px-3 text-sm font-medium text-neutral-500"
+      >
+        {children}
+        <ChevronRight className="h-4 w-4" aria-hidden="true" />
+      </span>
+    )
+  }
+
   return (
     <Link
       to={to}

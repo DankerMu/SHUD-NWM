@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 
 import { AlertRankingPanel } from '@/components/flood/AlertRankingPanel'
 import { AlertStatsPanel } from '@/components/flood/AlertStatsPanel'
@@ -9,12 +10,16 @@ import { SegmentAlertDetail } from '@/components/flood/SegmentAlertDetail'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
 import { formatDate } from '@/lib/format'
+import { parseM11QueryState } from '@/lib/m11/queryState'
 import type { AlertLevel } from '@/components/flood/alertLevels'
+import { isAlertLevel } from '@/components/flood/alertLevels'
 import type { FloodAlertRankingItem } from '@/stores/floodAlert'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useForecastStore } from '@/stores/forecast'
 
 export function FloodAlertPage() {
+  const location = useLocation()
+  const routeState = useMemo(() => parseM11QueryState(location.search), [location.search])
   const toast = useToast((state) => state.toast)
   const selectedRunId = useFloodAlertStore((state) => state.selectedRunId)
   const latestRun = useFloodAlertStore((state) => state.latestRun)
@@ -42,14 +47,22 @@ export function FloodAlertPage() {
   const clearForecastSelection = useForecastStore((state) => state.clearSelection)
 
   useEffect(() => {
-    void fetchLatestFrequencyDoneRun().catch((error) => {
+    const routeWarningLevel = routeState.warningLevel === 'major' ? 'high_risk' : routeState.warningLevel
+    if (isAlertLevel(routeWarningLevel) && routeWarningLevel !== useFloodAlertStore.getState().selectedAlertLevel) {
+      setSelectedAlertLevel(routeWarningLevel)
+    }
+    void fetchLatestFrequencyDoneRun({
+      source: routeState.source === 'gfs' || routeState.source === 'ifs' ? routeState.source : null,
+      cycleTime: routeState.cycle,
+      validTime: routeState.validTime,
+    }).catch((error) => {
       toast({
         title: '预警 Run 加载失败',
         description: getApiErrorMessage(error, '获取最新预警 Run 失败'),
         variant: 'destructive',
       })
     })
-  }, [fetchLatestFrequencyDoneRun, toast])
+  }, [fetchLatestFrequencyDoneRun, routeState.cycle, routeState.source, routeState.validTime, routeState.warningLevel, setSelectedAlertLevel, toast])
 
   const refreshSnapshots = useCallback(
     async (validTime = selectedValidTime, limit = topLimit) => {

@@ -108,7 +108,7 @@ interface FloodAlertState {
   setSelectedValidTime: (validTime: string | null) => void
   setTopLimit: (limit: 10 | 20 | 50) => void
   setBasinId: (basinId: string) => void
-  fetchLatestFrequencyDoneRun: () => Promise<void>
+  fetchLatestFrequencyDoneRun: (context?: { source?: string | null; cycleTime?: string | null; validTime?: string | null }) => Promise<void>
   fetchSummary: (options?: { validTime?: string | null }) => Promise<void>
   fetchRanking: (options?: { validTime?: string | null; limit?: 10 | 20 | 50 }) => Promise<void>
   fetchTimeline: (segmentId: string) => Promise<void>
@@ -255,6 +255,23 @@ function sortLatestRuns(runs: ApiHydroRun[]) {
   })
 }
 
+function normalizeIso(value: string | null | undefined) {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
+}
+
+function sourceMatches(run: ApiHydroRun, source: string | null | undefined) {
+  if (!source) return true
+  return run.source_id?.toLowerCase() === source.toLowerCase()
+}
+
+function cycleMatches(run: ApiHydroRun, cycleTime: string | null | undefined) {
+  const normalized = normalizeIso(cycleTime)
+  if (!normalized) return true
+  return normalizeIso(run.cycle_time) === normalized
+}
+
 export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   selectedRunId: null,
   latestRun: null,
@@ -281,7 +298,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   setSelectedValidTime: (validTime) => set({ selectedValidTime: validTime }),
   setTopLimit: (limit) => set({ topLimit: limit }),
   setBasinId: (basinId) => set({ basinId }),
-  fetchLatestFrequencyDoneRun: async () => {
+  fetchLatestFrequencyDoneRun: async (context) => {
     set({ loading: true, error: null, empty: false })
     try {
       const { data, error } = await client.GET('/api/v1/runs', {
@@ -290,12 +307,16 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       if (error) throw new Error(getApiErrorMessage(error, '获取最新预警 Run 失败'))
       const payload = unwrapApiData<ApiHydroRunPage>(data, '获取最新预警 Run 失败')
       const runs = payload.items
-      const latestRun = sortLatestRuns(runs).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(runs)[0] ?? null
+      const matchingRuns = runs.filter((run) => sourceMatches(run, context?.source) && cycleMatches(run, context?.cycleTime))
+      const candidates = matchingRuns.length > 0 ? matchingRuns : runs
+      const latestRun = sortLatestRuns(candidates).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(candidates)[0] ?? null
+      const validTimes = buildValidTimes(latestRun)
+      const requestedValidTime = normalizeIso(context?.validTime)
       set({
         latestRun,
         selectedRunId: latestRun?.run_id ?? null,
-        validTimes: buildValidTimes(latestRun),
-        selectedValidTime: null,
+        validTimes,
+        selectedValidTime: requestedValidTime && validTimes.includes(requestedValidTime) ? requestedValidTime : null,
         loading: false,
         empty: latestRun === null,
         error: null,

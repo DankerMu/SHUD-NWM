@@ -34,6 +34,7 @@ vi.mock('react-map-gl/maplibre', () => ({
         onMouseMove,
         onMouseLeave,
         onClick,
+        onError,
       }: {
         children: ReactNode
         mapStyle: unknown
@@ -41,11 +42,13 @@ vi.mock('react-map-gl/maplibre', () => ({
         onMouseMove?: (event: unknown) => void
         onMouseLeave?: (event: unknown) => void
         onClick?: (event: unknown) => void
+        onError?: (event: unknown) => void
       },
       ref,
     ) => {
       const canvasStyle: Record<string, string> = {}
       const overlayFeature = { layer: { id: 'm11-flood-return-period-line' }, properties: { segment_id: 'seg-1' } }
+      const basinFeature = { layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'yangtze' } }
       useImperativeHandle(ref, () => ({
         fitBounds: (...args: unknown[]) => fitBoundsCalls.push(args),
         flyTo: (args: unknown) => flyToCalls.push(args),
@@ -90,6 +93,15 @@ vi.mock('react-map-gl/maplibre', () => ({
               point: { x: 1, y: 1 },
             })
           }
+          onContextMenu={(event) => {
+            event.preventDefault()
+            onClick?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [overlayFeature, basinFeature],
+              point: { x: 2, y: 2 },
+            })
+          }}
+          onFocus={() => onError?.({ error: { message: 'mock source failed' } })}
         >
           {children}
         </div>
@@ -245,6 +257,8 @@ describe('M11 visual foundation shell', () => {
       '--m11-right-panel-width': '340px',
       '--m11-timeline-height': '64px',
     })
+    expect(shell).toHaveAttribute('data-layout', 'map-first-compact')
+    expect(shell.className).toContain('min-[1200px]:grid-cols-[260px_minmax(0,1fr)_300px]')
     expect(m11VisualTokens.navHeight).toBe('56px')
     expect(m11VisualTokens.warningLevels.major).toBe('#FF8A65')
     expect(screen.getByLabelText('M11 左侧面板')).toBeInTheDocument()
@@ -337,6 +351,27 @@ describe('M11 visual foundation shell', () => {
     expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
   })
 
+  it('dispatches the matched basin feature when overlay features are returned first', () => {
+    const onOverlayClick = vi.fn()
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+        basins={overviewBasins}
+        onOverlayClick={onOverlayClick}
+      />,
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayClick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        layerId: 'basin-boundaries',
+        feature: expect.objectContaining({ properties: { basin_id: 'yangtze' } }),
+      }),
+    )
+  })
+
   it('does not repeat equal camera fit commands across rerenders', () => {
     const { rerender } = render(
       <M11MapSurface
@@ -371,6 +406,25 @@ describe('M11 visual foundation shell', () => {
     expect(mapLayers).toHaveLength(0)
   })
 
+  it('shows a scoped map source error while keeping other controls usable', async () => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+        basins={overviewBasins}
+        onQueryChange={onQueryChange}
+      />,
+    )
+
+    fireEvent.focus(screen.getByTestId('mock-maplibre-map'))
+    expect(screen.getByTestId('m11-map-source-error')).toHaveTextContent('mock source failed')
+    await user.click(screen.getByRole('button', { name: '卫星底图' }))
+    expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
+  })
+
   it('registers visible basin boundaries and labels without claiming hidden basin geometry', () => {
     const { rerender } = render(<M11MapSurface state={state} layers={layers} basins={overviewBasins} />)
 
@@ -391,6 +445,26 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '0')
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
     expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('当前没有可见流域边界')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('does not register oversized basin geometry as a map source', () => {
+    const coordinates: number[][] = []
+    for (let index = 0; index < 50_002; index += 1) {
+      coordinates.push([100 + index * 0.00001, 30])
+    }
+    const oversizedBasins: OverviewBasin[] = [
+      {
+        ...overviewBasins[0],
+        boundary: { type: 'MultiPolygon', coordinates: [[[...coordinates]]] },
+      },
+    ]
+
+    render(<M11MapSurface state={state} layers={layers} basins={oversizedBasins} />)
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '0')
+    expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('渲染预算')
     expect(mapSources).toHaveLength(0)
     expect(mapLayers).toHaveLength(0)
   })

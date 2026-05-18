@@ -332,10 +332,16 @@ test.describe('M11 navigation and route shells', () => {
     await page.getByRole('button', { name: /^IFS/ }).click()
     await expect(page).toHaveURL(/source=ifs/)
 
+    await expect(page.getByTestId('m11-basin-popup')).toHaveCount(0)
+    await page.getByText('Demo Basin').click()
     await expect(page.getByTestId('m11-basin-popup')).toContainText('Demo Basin')
     await expect(page.getByRole('link', { name: /进入分析/ })).toHaveAttribute('href', /\/basins\/basin-demo.*basinVersionId=bv-001/)
     await page.getByRole('link', { name: /产品监控摘要/ }).click()
     await expect(page).toHaveURL(/\/monitoring/)
+    await page.goBack()
+    await expect(page.getByRole('heading', { name: '全国总览' })).toBeVisible()
+    await page.getByRole('link', { name: /洪水预警摘要/ }).click()
+    await expect(page).toHaveURL(/\/flood-alerts/)
   })
 
   test('renders successful overview sections when an optional summary request fails', async ({ page }) => {

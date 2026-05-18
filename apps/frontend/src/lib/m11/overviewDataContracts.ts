@@ -40,6 +40,21 @@ export interface M11Bbox {
   maxLat: number
 }
 
+export const m11BasinGeometryBudget = {
+  maxPolygons: 256,
+  maxRings: 1024,
+  maxVertices: 50_000,
+} as const
+
+export interface M11BasinGeometryBudgetStatus {
+  ok: boolean
+  reason: string | null
+  bbox: M11Bbox | null
+  polygonCount: number
+  ringCount: number
+  vertexCount: number
+}
+
 export interface BasinVersionOption {
   basinVersionId: string
   versionLabel: string
@@ -793,7 +808,8 @@ function forecastUnit(forecast: ApiForecastPayload | null | undefined): string |
 
 function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption[] {
   return versions.map((version) => {
-    const bbox = bboxFromMultiPolygon(version.geom)
+    const geometryStatus = getM11BasinGeometryBudgetStatus(version.geom)
+    const bbox = geometryStatus.ok ? geometryStatus.bbox : null
     return {
       basinVersionId: version.basin_version_id,
       versionLabel: version.version_label,
@@ -801,43 +817,82 @@ function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption
       validFrom: normalizeIsoString(version.valid_from),
       validTo: normalizeIsoString(version.valid_to),
       sourceUri: normalizeString(version.source_uri),
-      boundary: version.geom ?? null,
+      boundary: geometryStatus.ok ? (version.geom ?? null) : null,
       bbox,
-      unavailableReason: bbox ? null : 'Basin geometry is unavailable.',
+      unavailableReason: geometryStatus.reason ?? (bbox ? null : 'Basin geometry is unavailable.'),
     }
   })
 }
 
-function bboxFromMultiPolygon(geom: components['schemas']['GeoJsonMultiPolygon'] | null | undefined): M11Bbox | null {
-  if (!geom?.coordinates) return null
+export function getM11BasinGeometryBudgetStatus(
+  geom: components['schemas']['GeoJsonMultiPolygon'] | null | undefined,
+): M11BasinGeometryBudgetStatus {
+  if (!geom?.coordinates) {
+    return { ok: false, reason: 'Basin geometry is unavailable.', bbox: null, polygonCount: 0, ringCount: 0, vertexCount: 0 }
+  }
+  if (geom.type !== 'MultiPolygon' || !Array.isArray(geom.coordinates)) {
+    return { ok: false, reason: 'Basin geometry is malformed.', bbox: null, polygonCount: 0, ringCount: 0, vertexCount: 0 }
+  }
+
   let bbox: M11Bbox | null = null
-  const stack: unknown[] = [geom.coordinates]
+  let polygonCount = 0
+  let ringCount = 0
+  let vertexCount = 0
 
-  while (stack.length > 0) {
-    const current = stack.pop()
-    if (!Array.isArray(current)) continue
+  for (const polygon of geom.coordinates as unknown[]) {
+    if (!Array.isArray(polygon)) return geometryMalformed(polygonCount, ringCount, vertexCount)
+    polygonCount += 1
+    if (polygonCount > m11BasinGeometryBudget.maxPolygons) return geometryTooLarge(polygonCount, ringCount, vertexCount)
 
-    if (current.length >= 2 && typeof current[0] !== 'object' && typeof current[1] !== 'object') {
-      const lon = numberOrNull(current[0])
-      const lat = numberOrNull(current[1])
-      if (lon === null || lat === null) continue
-      bbox = bbox
-        ? {
-            minLon: Math.min(bbox.minLon, lon),
-            minLat: Math.min(bbox.minLat, lat),
-            maxLon: Math.max(bbox.maxLon, lon),
-            maxLat: Math.max(bbox.maxLat, lat),
-          }
-        : { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat }
-      continue
-    }
+    for (const ring of polygon) {
+      if (!Array.isArray(ring)) return geometryMalformed(polygonCount, ringCount, vertexCount)
+      ringCount += 1
+      if (ringCount > m11BasinGeometryBudget.maxRings) return geometryTooLarge(polygonCount, ringCount, vertexCount)
 
-    for (let index = current.length - 1; index >= 0; index -= 1) {
-      stack.push(current[index])
+      for (const coordinate of ring) {
+        if (!Array.isArray(coordinate) || coordinate.length < 2) return geometryMalformed(polygonCount, ringCount, vertexCount)
+        vertexCount += 1
+        if (vertexCount > m11BasinGeometryBudget.maxVertices) return geometryTooLarge(polygonCount, ringCount, vertexCount)
+
+        const lon = numberOrNull(coordinate[0])
+        const lat = numberOrNull(coordinate[1])
+        if (lon === null || lat === null) return geometryMalformed(polygonCount, ringCount, vertexCount)
+        bbox = bbox
+          ? {
+              minLon: Math.min(bbox.minLon, lon),
+              minLat: Math.min(bbox.minLat, lat),
+              maxLon: Math.max(bbox.maxLon, lon),
+              maxLat: Math.max(bbox.maxLat, lat),
+            }
+          : { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat }
+      }
     }
   }
 
-  return bbox
+  if (!bbox) return { ok: false, reason: 'Basin geometry is unavailable.', bbox: null, polygonCount, ringCount, vertexCount }
+  return { ok: true, reason: null, bbox, polygonCount, ringCount, vertexCount }
+}
+
+function geometryTooLarge(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
+  return {
+    ok: false,
+    reason: `Basin geometry exceeds client rendering budget (${vertexCount}/${m11BasinGeometryBudget.maxVertices} vertices).`,
+    bbox: null,
+    polygonCount,
+    ringCount,
+    vertexCount,
+  }
+}
+
+function geometryMalformed(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
+  return {
+    ok: false,
+    reason: 'Basin geometry is malformed.',
+    bbox: null,
+    polygonCount,
+    ringCount,
+    vertexCount,
+  }
 }
 
 function polygonAreaKm2(geom: components['schemas']['GeoJsonMultiPolygon']): number | null {

@@ -228,4 +228,33 @@ describe('useFloodAlertStore', () => {
     })
     expect(useFloodAlertStore.getState().timelineData?.segmentId).toBe('seg-1')
   })
+
+  it('hydrates latest flood-alert run and valid time from overview query context', async () => {
+    const siblingRun = {
+      ...latestRun,
+      run_id: 'run-sibling',
+      source_id: 'ifs',
+      cycle_time: '2026-05-11T00:00:00Z',
+      start_time: '2026-05-11T00:00:00Z',
+      end_time: '2026-05-11T03:00:00Z',
+    }
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [siblingRun, { ...latestRun, source_id: 'gfs' }],
+        total: 2,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'gfs',
+      cycleTime: '2026-05-12T00:00:00.000Z',
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+
+    expect(useFloodAlertStore.getState().selectedRunId).toBe('run-1')
+    expect(useFloodAlertStore.getState().selectedValidTime).toBe('2026-05-12T03:00:00.000Z')
+  })
 })

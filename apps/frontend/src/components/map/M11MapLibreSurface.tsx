@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Map, {
   Layer,
   NavigationControl,
@@ -14,12 +14,13 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { buildApiUrl } from '@/api/base'
 import { floodTileLayerPaint } from '@/components/flood/alertLevels'
 import { cn } from '@/lib/cn'
-import type { LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
+import { getM11BasinGeometryBudgetStatus, type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryState } from '@/lib/m11/queryState'
 
 export interface M11MapOverlayInteraction {
   layerId: M11Layer | 'basin-boundaries'
   event: MapLayerMouseEvent
+  feature?: NonNullable<MapLayerMouseEvent['features']>[number]
 }
 
 export interface M11MapCameraFit {
@@ -110,13 +111,27 @@ export function M11MapLibreSurface({
   const mapRef = useRef<MapRef | null>(null)
   const lastFitKeyRef = useRef<string | null>(null)
   const lastFlyKeyRef = useRef<string | null>(null)
+  const [mapSourceError, setMapSourceError] = useState<string | null>(null)
   const overlay = useMemo(() => buildM11RegisteredOverlay(state, layers), [layers, state])
   const basinFeatureCollection = useMemo(
     () => buildBasinFeatureCollection(basins, visibleBasinIds),
     [basins, visibleBasinIds],
   )
+  const skippedBasinGeometryCount = useMemo(
+    () =>
+      basins.filter((basin) => {
+        if (!basin.boundary) return false
+        const visible = visibleBasinIds ? visibleBasinIds.includes(basin.basinId) : true
+        return visible && !getM11BasinGeometryBudgetStatus(basin.boundary).ok
+      }).length,
+    [basins, visibleBasinIds],
+  )
   const unavailableReason = useMemo(() => m11SelectedLayerUnavailableReason(state, layers, overlay), [layers, overlay, state])
   const interactiveLayerIds = [...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []), ...(overlay ? [overlay.layer.id] : [])]
+
+  useEffect(() => {
+    setMapSourceError(null)
+  }, [basinFeatureCollection.features.length, overlay?.sourceId, state.basemap, state.layer, state.validTime])
 
   useEffect(() => {
     if (!fitTo) return
@@ -136,17 +151,19 @@ export function M11MapLibreSurface({
 
   const handleMouseMove = useCallback(
     (event: MapLayerMouseEvent) => {
-      if (eventHasOverlayFeature(event, 'm11-basin-fill')) {
-        onOverlayHover?.({ layerId: 'basin-boundaries', event })
+      const basinFeature = findEventFeature(event, 'm11-basin-fill')
+      if (basinFeature) {
+        onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
         event.target.getCanvas().style.cursor = 'pointer'
         return
       }
-      if (!overlay || !eventHasOverlayFeature(event, overlay.layer.id)) {
+      const overlayFeature = overlay ? findEventFeature(event, overlay.layer.id) : null
+      if (!overlay || !overlayFeature) {
         onOverlayHover?.(null)
         event.target.getCanvas().style.cursor = ''
         return
       }
-      onOverlayHover?.({ layerId: overlay.layerId, event })
+      onOverlayHover?.({ layerId: overlay.layerId, event, feature: overlayFeature })
       event.target.getCanvas().style.cursor = 'pointer'
     },
     [onOverlayHover, overlay],
@@ -162,14 +179,20 @@ export function M11MapLibreSurface({
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
-      if (eventHasOverlayFeature(event, 'm11-basin-fill')) {
-        onOverlayClick?.({ layerId: 'basin-boundaries', event })
+      const basinFeature = findEventFeature(event, 'm11-basin-fill')
+      if (basinFeature) {
+        onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
         return
       }
-      if (overlay && eventHasOverlayFeature(event, overlay.layer.id)) onOverlayClick?.({ layerId: overlay.layerId, event })
+      const overlayFeature = overlay ? findEventFeature(event, overlay.layer.id) : null
+      if (overlay && overlayFeature) onOverlayClick?.({ layerId: overlay.layerId, event, feature: overlayFeature })
     },
     [onOverlayClick, overlay],
   )
+
+  const handleMapError = useCallback((event: { error?: { message?: string } }) => {
+    setMapSourceError(event.error?.message ?? '地图源加载失败，受影响图层暂不可用。')
+  }, [])
 
   return (
     <div
@@ -189,6 +212,7 @@ export function M11MapLibreSurface({
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
+        onError={handleMapError}
         attributionControl
       >
         <NavigationControl position="top-left" visualizePitch />
@@ -203,7 +227,9 @@ export function M11MapLibreSurface({
           role="status"
           data-testid="m11-basin-layer-unavailable"
         >
-          当前没有可见流域边界。请在左侧流域树恢复选择。
+          {skippedBasinGeometryCount > 0
+            ? '当前可见流域边界超过客户端渲染预算，地图不会注册过大的边界源。'
+            : '当前没有可见流域边界。请在左侧流域树恢复选择。'}
         </div>
       ) : null}
 
@@ -214,6 +240,16 @@ export function M11MapLibreSurface({
           data-testid="m11-map-unavailable"
         >
           {unavailableReason}
+        </div>
+      ) : null}
+
+      {mapSourceError ? (
+        <div
+          className="absolute left-5 top-32 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          role="status"
+          data-testid="m11-map-source-error"
+        >
+          {mapSourceError}
         </div>
       ) : null}
     </div>
@@ -305,7 +341,7 @@ function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: s
   return {
     type: 'FeatureCollection',
     features: basins
-      .filter((basin) => basin.boundary && (!visible || visible.has(basin.basinId)))
+      .filter((basin) => basin.boundary && getM11BasinGeometryBudgetStatus(basin.boundary).ok && (!visible || visible.has(basin.basinId)))
       .map((basin) => ({
         type: 'Feature',
         geometry: basin.boundary as NonNullable<OverviewBasin['boundary']>,
@@ -365,8 +401,8 @@ function floodReturnPeriodGeoJsonUrl(runId: string, validTime: string) {
   return buildApiUrl(`/api/v1/tiles/flood-return-period?${params.toString()}`)
 }
 
-function eventHasOverlayFeature(event: MapLayerMouseEvent, layerId: string) {
-  return event.features?.some((feature) => feature.layer?.id === layerId) ?? false
+function findEventFeature(event: MapLayerMouseEvent, layerId: string) {
+  return event.features?.find((feature) => feature.layer?.id === layerId) ?? null
 }
 
 function mapFitKey(fitTo: M11MapCameraFit) {

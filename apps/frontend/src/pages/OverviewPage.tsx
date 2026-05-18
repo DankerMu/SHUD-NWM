@@ -49,6 +49,7 @@ export function OverviewPage() {
   const layers = currentOverview?.layers ?? metadataLayers
   const [visibleBasinIds, setVisibleBasinIds] = useState<Set<string>>(() => new Set())
   const [selectedBasinId, setSelectedBasinId] = useState<string | null>(null)
+  const [popupBasinId, setPopupBasinId] = useState<string | null>(null)
 
   const handleQueryChange = useCallback(
     (patch: M11QueryPatch) => {
@@ -93,21 +94,35 @@ export function OverviewPage() {
           : basins.filter((basin) => visibleBasinIds.has(basin.basinId)),
     [basins, visibleBasinIds],
   )
-  const selectedBasin = basins.find((basin) => basin.basinId === selectedBasinId) ?? visibleBasins[0] ?? basins[0] ?? null
+  const visibleBasinSet = useMemo(() => new Set(visibleBasinIdList), [visibleBasinIdList])
+  const selectedBasin =
+    selectedBasinId && visibleBasinSet.has(selectedBasinId) ? (basins.find((basin) => basin.basinId === selectedBasinId) ?? null) : null
+  const popupBasin = popupBasinId && popupBasinId === selectedBasin?.basinId ? selectedBasin : null
   const mapFitTo = useMemo(() => bboxToMapFit(unionBasinBbox(visibleBasins) ?? selectedBasin?.bbox), [selectedBasin?.bbox, visibleBasins])
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {
-      const feature = interaction.event.features?.[0]
+      const feature = interaction.feature ?? interaction.event.features?.find((item) => item.layer?.id === 'm11-basin-fill')
       const basinId = feature?.properties?.basin_id
-      if (typeof basinId === 'string') setSelectedBasinId(basinId)
+      if (typeof basinId === 'string' && visibleBasinSet.has(basinId)) {
+        setSelectedBasinId(basinId)
+        setPopupBasinId(basinId)
+      }
     },
-    [],
+    [visibleBasinSet],
+  )
+  const handleSelectBasin = useCallback(
+    (basinId: string) => {
+      setSelectedBasinId(basinId)
+      setPopupBasinId(visibleBasinSet.has(basinId) ? basinId : null)
+    },
+    [visibleBasinSet],
   )
   useEffect(() => {
     if (basins.length === 0) {
       setVisibleBasinIds((current) => (current.size === 0 ? current : new Set()))
       setSelectedBasinId((current) => (current === null ? current : null))
+      setPopupBasinId((current) => (current === null ? current : null))
       return
     }
     const basinIds = new Set([NONE_VISIBLE_SENTINEL, ...basins.map((basin) => basin.basinId)])
@@ -116,8 +131,13 @@ export function OverviewPage() {
       const next = new Set([...current].filter((basinId) => basinIds.has(basinId)))
       return next.size === current.size ? current : next
     })
-    setSelectedBasinId((current) => (current && basinIds.has(current) && current !== NONE_VISIBLE_SENTINEL ? current : basins[0]?.basinId ?? null))
+    setSelectedBasinId((current) => (current && basinIds.has(current) && current !== NONE_VISIBLE_SENTINEL ? current : null))
+    setPopupBasinId((current) => (current && basinIds.has(current) && current !== NONE_VISIBLE_SENTINEL ? current : null))
   }, [basins])
+  useEffect(() => {
+    setPopupBasinId((current) => (current && visibleBasinSet.has(current) ? current : null))
+    setSelectedBasinId((current) => (current && visibleBasinSet.has(current) ? current : null))
+  }, [visibleBasinSet])
   const emptyBasinReason =
     !loading && basins.length === 0
       ? error ??
@@ -160,7 +180,7 @@ export function OverviewPage() {
             loading={loading}
             emptyReason={emptyBasinReason}
             selectedBasinId={selectedBasin?.basinId ?? null}
-            onSelectBasin={setSelectedBasinId}
+            onSelectBasin={handleSelectBasin}
             onSetVisibleBasinIds={setVisibleBasinIds}
           />
           <LayerGroupControls state={state} layers={layers} onQueryChange={handleQueryChange} />
@@ -169,7 +189,9 @@ export function OverviewPage() {
               {unavailableBasinCount} 个流域缺少已发布版本或边界，地图不会绘制对应边界。
             </ScopedNotice>
           ) : null}
-          <BasinLink to={selectedBasinLinkTarget}>{selectedBasin ? '进入流域分析' : '等待可用流域'}</BasinLink>
+          <BasinLink to={selectedBasinLinkTarget} disabled={!selectedBasin}>
+            {selectedBasin ? '进入流域分析' : '等待可见流域选择'}
+          </BasinLink>
         </>
       }
       right={
@@ -207,7 +229,7 @@ export function OverviewPage() {
         </>
       }
     >
-      {selectedBasin ? <BasinPopup basin={selectedBasin} state={state} /> : null}
+      {popupBasin ? <BasinPopup basin={popupBasin} state={state} /> : null}
     </M11Layout>
   )
 }
@@ -325,7 +347,13 @@ function BasinVisibilityTree({
                         onSetVisibleBasinIds(next.size === 0 ? new Set([NONE_VISIBLE_SENTINEL]) : next)
                       }}
                     />
-                    <span className="min-w-0 flex-1" onClick={() => onSelectBasin(basin.basinId)}>
+                    <span
+                      className="min-w-0 flex-1"
+                      onClick={(event) => {
+                        event.preventDefault()
+                        onSelectBasin(basin.basinId)
+                      }}
+                    >
                       <span className="block truncate font-medium">{basin.displayName}</span>
                       <span className="block truncate text-xs text-neutral-500">
                         {basin.selectedBasinVersionId ?? basin.unavailableReason ?? '版本不可用'}
@@ -451,9 +479,14 @@ function unionBasinBbox(basins: OverviewBasin[]) {
 }
 
 function basinAnalysisHref(basin: OverviewBasin, state: ReturnType<typeof parseM11QueryState>) {
+  const selectedVersionIds = new Set(basin.basinVersions.map((version) => version.basinVersionId))
+  const basinVersionId =
+    state.basinVersionId && selectedVersionIds.has(state.basinVersionId)
+      ? state.basinVersionId
+      : basin.selectedBasinVersionId
   const search = serializeM11QueryState({
     ...state,
-    basinVersionId: state.basinVersionId ?? basin.selectedBasinVersionId,
+    basinVersionId,
     segmentId: state.segmentId,
   })
   return `/basins/${encodeURIComponent(basin.basinId)}${search ? `?${search}` : ''}`

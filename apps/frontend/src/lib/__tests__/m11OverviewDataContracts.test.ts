@@ -4,6 +4,7 @@ import type { components } from '@/api/types'
 import {
   createSourceScenarioSelection,
   decideAggregationEndpoint,
+  m11BasinGeometryBudget,
   normalizeBasinDetail,
   normalizeBasinSegmentRows,
   normalizeLayerStates,
@@ -636,6 +637,34 @@ describe('M11 overview data contracts', () => {
       maxLon: 101.9999,
       maxLat: 30,
     })
+  })
+
+  it('marks oversized single MultiPolygon boundaries unavailable before bbox or area processing', () => {
+    const ring: number[][] = []
+    for (let index = 0; index < m11BasinGeometryBudget.maxVertices + 2; index += 1) {
+      ring.push([100 + index * 0.00001, 30])
+    }
+
+    const [normalized] = normalizeOverviewBasins({
+      basins: [basin],
+      versionsByBasinId: {
+        yangtze: [
+          {
+            ...basinVersion,
+            geom: {
+              type: 'MultiPolygon',
+              coordinates: [[[...ring]]],
+            },
+          },
+        ],
+      },
+    })
+
+    expect(normalized.boundary).toBeNull()
+    expect(normalized.bbox).toBeNull()
+    expect(normalized.areaKm2).toBeNull()
+    expect(normalized.basinVersions[0].unavailableReason).toContain('exceeds client rendering budget')
+    expect(normalized.qualityNote).toBe('One or more basin versions have missing geometry.')
   })
 
   it('returns measurable aggregation endpoint decisions for all rule branches', () => {
