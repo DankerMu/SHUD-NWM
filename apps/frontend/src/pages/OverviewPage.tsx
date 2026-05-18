@@ -11,7 +11,7 @@ import {
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
 import { LayerGroupControls, LayerLegendPanel, SourceScenarioControls, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
-import { overviewSnapshotMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
+import { overviewSnapshotMatchesQuery, overviewSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 
 export function OverviewPage() {
   const location = useLocation()
@@ -24,8 +24,10 @@ export function OverviewPage() {
   const loadOverview = useOverviewDataStore((store) => store.loadOverview)
   const needsQueryReplacement = needsM11QueryReplacement(location.search)
   const overviewMatchesQuery = overviewSnapshotMatchesQuery(overview, state)
+  const overviewMetadataMatchesQuery = overviewSnapshotMetadataMatchesQuery(overview, state)
   const currentOverview = overviewMatchesQuery ? overview : null
-  const layers = currentOverview?.layers ?? []
+  const metadataLayers = overviewMetadataMatchesQuery ? (overview?.layers ?? []) : []
+  const layers = currentOverview?.layers ?? metadataLayers
 
   const handleQueryChange = useCallback(
     (patch: M11QueryPatch) => {
@@ -46,11 +48,11 @@ export function OverviewPage() {
   }, [loadOverview, needsQueryReplacement, state])
 
   useEffect(() => {
-    if (needsQueryReplacement || loading || !overviewMatchesQuery || layers.length === 0) return
-    const correctedValidTime = resolveM11ValidTimeCorrection(state, layers)
+    if (needsQueryReplacement || loading || !overviewMetadataMatchesQuery || metadataLayers.length === 0) return
+    const correctedValidTime = resolveM11ValidTimeCorrection(state, metadataLayers)
     if (correctedValidTime === undefined) return
     handleQueryChange({ validTime: correctedValidTime })
-  }, [handleQueryChange, layers, loading, needsQueryReplacement, overviewMatchesQuery, state])
+  }, [handleQueryChange, loading, metadataLayers, needsQueryReplacement, overviewMetadataMatchesQuery, state])
 
   const basins = currentOverview?.basins ?? []
   const summary = currentOverview?.summary

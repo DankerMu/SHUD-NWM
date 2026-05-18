@@ -81,24 +81,33 @@ export function M11MapLibreSurface({
   onOverlayClick,
 }: M11MapLibreSurfaceProps) {
   const mapRef = useRef<MapRef | null>(null)
+  const lastFitKeyRef = useRef<string | null>(null)
+  const lastFlyKeyRef = useRef<string | null>(null)
   const overlay = useMemo(() => buildM11RegisteredOverlay(state, layers), [layers, state])
   const unavailableReason = useMemo(() => m11SelectedLayerUnavailableReason(state, layers, overlay), [layers, overlay, state])
   const interactiveLayerIds = overlay ? [overlay.layer.id] : []
 
   useEffect(() => {
     if (!fitTo) return
+    const fitKey = mapFitKey(fitTo)
+    if (fitKey === lastFitKeyRef.current) return
+    lastFitKeyRef.current = fitKey
     mapRef.current?.fitBounds(fitTo.bounds, { padding: fitTo.padding ?? 32, duration: 450 })
   }, [fitTo])
 
   useEffect(() => {
     if (!flyTo) return
+    const flyKey = mapFlyKey(flyTo)
+    if (flyKey === lastFlyKeyRef.current) return
+    lastFlyKeyRef.current = flyKey
     mapRef.current?.flyTo({ center: flyTo.center, zoom: flyTo.zoom, duration: 450 })
   }, [flyTo])
 
   const handleMouseMove = useCallback(
     (event: MapLayerMouseEvent) => {
-      if (!overlay) {
+      if (!overlay || !eventHasOverlayFeature(event, overlay.layer.id)) {
         onOverlayHover?.(null)
+        event.target.getCanvas().style.cursor = ''
         return
       }
       onOverlayHover?.({ layerId: overlay.layerId, event })
@@ -117,7 +126,7 @@ export function M11MapLibreSurface({
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
-      if (overlay) onOverlayClick?.({ layerId: overlay.layerId, event })
+      if (overlay && eventHasOverlayFeature(event, overlay.layer.id)) onOverlayClick?.({ layerId: overlay.layerId, event })
     },
     [onOverlayClick, overlay],
   )
@@ -235,6 +244,19 @@ function floodReturnPeriodGeoJsonUrl(runId: string, validTime: string) {
     valid_time: validTime,
   })
   return buildApiUrl(`/api/v1/tiles/flood-return-period?${params.toString()}`)
+}
+
+function eventHasOverlayFeature(event: MapLayerMouseEvent, layerId: string) {
+  return event.features?.some((feature) => feature.layer?.id === layerId) ?? false
+}
+
+function mapFitKey(fitTo: M11MapCameraFit) {
+  const [[minLon, minLat], [maxLon, maxLat]] = fitTo.bounds
+  return `${minLon},${minLat},${maxLon},${maxLat},${fitTo.padding ?? 32}`
+}
+
+function mapFlyKey(flyTo: M11MapCameraFlyTo) {
+  return `${flyTo.center[0]},${flyTo.center[1]},${flyTo.zoom ?? ''}`
 }
 
 function normalizeIso(value: string | null | undefined) {

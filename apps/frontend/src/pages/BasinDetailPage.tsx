@@ -16,7 +16,7 @@ import {
   SourceScenarioControls,
   resolveM11ValidTimeCorrection,
 } from '@/pages/m11/M11Controls'
-import { basinSnapshotMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
+import { basinSnapshotMatchesQuery, basinSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 
 export function BasinDetailPage() {
   const { basinId = 'unknown' } = useParams()
@@ -30,8 +30,10 @@ export function BasinDetailPage() {
   const loadBasinDetail = useOverviewDataStore((store) => store.loadBasinDetail)
   const needsQueryReplacement = needsM11QueryReplacement(location.search)
   const basinMatchesQuery = basinSnapshotMatchesQuery(basinData, basinId, state)
+  const basinMetadataMatchesQuery = basinSnapshotMetadataMatchesQuery(basinData, basinId, state)
   const currentBasinData = basinMatchesQuery ? basinData : null
-  const layers = currentBasinData?.layers ?? []
+  const metadataLayers = basinMetadataMatchesQuery ? (basinData?.layers ?? []) : []
+  const layers = currentBasinData?.layers ?? metadataLayers
   const sourceSelection = currentBasinData?.selectedSegment?.sourceSelection ?? currentBasinData?.detail.sourceSelection ?? null
   const derivedTimeline = useMemo(() => {
     const points = currentBasinData?.selectedSegment?.trendPoints ?? []
@@ -62,11 +64,11 @@ export function BasinDetailPage() {
   }, [basinId, loadBasinDetail, needsQueryReplacement, state])
 
   useEffect(() => {
-    if (needsQueryReplacement || loading || !basinMatchesQuery) return
-    const correctedValidTime = resolveM11ValidTimeCorrection(state, layers, derivedTimeline)
+    if (needsQueryReplacement || loading || !basinMetadataMatchesQuery) return
+    const correctedValidTime = resolveM11ValidTimeCorrection(state, metadataLayers, derivedTimeline)
     if (correctedValidTime === undefined) return
     handleQueryChange({ validTime: correctedValidTime })
-  }, [basinMatchesQuery, derivedTimeline, handleQueryChange, layers, loading, needsQueryReplacement, state])
+  }, [basinMetadataMatchesQuery, derivedTimeline, handleQueryChange, loading, metadataLayers, needsQueryReplacement, state])
 
   const detail = currentBasinData?.detail
   const selectedSegment = currentBasinData?.selectedSegment

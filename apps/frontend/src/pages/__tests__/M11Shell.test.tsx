@@ -44,6 +44,8 @@ vi.mock('react-map-gl/maplibre', () => ({
       },
       ref,
     ) => {
+      const canvasStyle: Record<string, string> = {}
+      const overlayFeature = { layer: { id: 'm11-flood-return-period-line' }, properties: { segment_id: 'seg-1' } }
       useImperativeHandle(ref, () => ({
         fitBounds: (...args: unknown[]) => fitBoundsCalls.push(args),
         flyTo: (args: unknown) => flyToCalls.push(args),
@@ -55,23 +57,37 @@ vi.mock('react-map-gl/maplibre', () => ({
           data-interactive-layer-ids={(interactiveLayerIds ?? []).join(',')}
           onMouseMove={() =>
             onMouseMove?.({
-              target: { getCanvas: () => ({ style: {} }) },
+              target: { getCanvas: () => ({ style: canvasStyle }) },
               features: [],
               point: { x: 0, y: 0 },
             })
           }
           onMouseLeave={() =>
             onMouseLeave?.({
-              target: { getCanvas: () => ({ style: {} }) },
+              target: { getCanvas: () => ({ style: canvasStyle }) },
               features: [],
               point: { x: 0, y: 0 },
             })
           }
           onClick={() =>
             onClick?.({
-              target: { getCanvas: () => ({ style: {} }) },
+              target: { getCanvas: () => ({ style: canvasStyle }) },
               features: [],
               point: { x: 0, y: 0 },
+            })
+          }
+          onPointerMove={() =>
+            onMouseMove?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [overlayFeature],
+              point: { x: 1, y: 1 },
+            })
+          }
+          onDoubleClick={() =>
+            onClick?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [overlayFeature],
+              point: { x: 1, y: 1 },
             })
           }
         >
@@ -276,11 +292,38 @@ describe('M11 visual foundation shell', () => {
     expect(flyToCalls).toEqual([{ center: [102, 32], zoom: 7, duration: 450 }])
 
     fireEvent.mouseMove(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayHover).toHaveBeenCalledWith(null)
+    expect(onOverlayHover).not.toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
+    fireEvent.pointerMove(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayHover).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
     fireEvent.mouseLeave(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayHover).toHaveBeenCalledWith(null)
     fireEvent.click(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayClick).not.toHaveBeenCalled()
+    fireEvent.doubleClick(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
+  })
+
+  it('does not repeat equal camera fit commands across rerenders', () => {
+    const { rerender } = render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+        fitTo={{ bounds: [[100, 30], [105, 35]], padding: 24 }}
+      />,
+    )
+
+    expect(fitBoundsCalls).toHaveLength(1)
+
+    rerender(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+        fitTo={{ bounds: [[100, 30], [105, 35]], padding: 24 }}
+      />,
+    )
+
+    expect(fitBoundsCalls).toHaveLength(1)
   })
 
   it('does not advertise or register unavailable selected overlays', () => {

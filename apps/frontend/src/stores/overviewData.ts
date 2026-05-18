@@ -41,9 +41,11 @@ import { defaultM11QueryState, serializeM11QueryState, type M11QueryState } from
 
 export interface M11SnapshotRequestScope {
   queryKey: string
+  dataKey: string
   source: M11QueryState['source']
   layer: M11QueryState['layer']
   cycle: string | null
+  validTime: string | null
   basemap: M11QueryState['basemap']
   basinVersionId: string | null
   segmentId: string | null
@@ -174,13 +176,19 @@ function requestScopeQueryKey(query: M11QueryState) {
   return serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap, validTime: null })
 }
 
+function requestScopeDataKey(query: M11QueryState) {
+  return serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap })
+}
+
 function overviewRequestScope(query: M11QueryState): M11OverviewRequestScope {
   return {
     kind: 'overview',
     queryKey: requestScopeQueryKey(query),
+    dataKey: requestScopeDataKey(query),
     source: query.source,
     layer: query.layer,
     cycle: query.cycle,
+    validTime: query.validTime,
     basemap: query.basemap,
     basinVersionId: query.basinVersionId,
     segmentId: query.segmentId,
@@ -198,10 +206,24 @@ function basinRequestScope(basinId: string, query: M11QueryState): M11BasinReque
 }
 
 export function overviewSnapshotMatchesQuery(snapshot: OverviewDataSnapshot | null | undefined, query: M11QueryState) {
+  return snapshot?.requestScope?.dataKey === requestScopeDataKey(query)
+}
+
+export function overviewSnapshotMetadataMatchesQuery(snapshot: OverviewDataSnapshot | null | undefined, query: M11QueryState) {
   return snapshot?.requestScope?.queryKey === requestScopeQueryKey(query)
 }
 
 export function basinSnapshotMatchesQuery(
+  snapshot: BasinDataSnapshot | null | undefined,
+  basinId: string,
+  query: M11QueryState,
+) {
+  return snapshot?.requestScope?.kind === 'basin-detail' &&
+    snapshot.requestScope.basinId === basinId &&
+    snapshot.requestScope.dataKey === requestScopeDataKey(query)
+}
+
+export function basinSnapshotMetadataMatchesQuery(
   snapshot: BasinDataSnapshot | null | undefined,
   basinId: string,
   query: M11QueryState,
