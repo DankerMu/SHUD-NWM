@@ -14,6 +14,7 @@ interface ForecastPanelProps {
   loading: boolean
   error: string | null
   includeAnalysis: boolean
+  contextNote?: string | null
   onClose: () => void
   onRetry: () => void
 }
@@ -24,6 +25,7 @@ export function ForecastPanel({
   loading,
   error,
   includeAnalysis,
+  contextNote = null,
   onClose,
   onRetry,
 }: ForecastPanelProps) {
@@ -44,6 +46,11 @@ export function ForecastPanel({
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
         <SegmentInfo segment={segment} />
+        {contextNote ? (
+          <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-muted" role="status">
+            {contextNote}
+          </div>
+        ) : null}
         <ScenarioSelector />
 
         {forecastData ? (

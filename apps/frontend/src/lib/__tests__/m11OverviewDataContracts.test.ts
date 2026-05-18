@@ -424,6 +424,38 @@ describe('M11 overview data contracts', () => {
     })
   })
 
+  it.each([
+    ['orange', 'warning'],
+    ['warning', 'warning'],
+    ['major', 'high_risk'],
+    ['red', 'severe'],
+    ['severe', 'severe'],
+    ['extreme', 'extreme'],
+  ] as const)('filters %s warning query values with normalized row semantics', (warningLevel, expectedLevel) => {
+    const rows = normalizeBasinSegmentRows({
+      query: { ...query, warningLevel, q: null },
+      featureCollection: {
+        ...featureCollection,
+        features: [
+          featureCollection.features[0],
+          {
+            ...featureCollection.features[1],
+            properties: {
+              ...featureCollection.features[1].properties,
+              segment_id: `seg-${expectedLevel}`,
+              river_segment_id: `river-${expectedLevel}`,
+            },
+          },
+        ],
+      },
+      rankingItems: [
+        { ...rankingItem, warning_level: expectedLevel === 'high_risk' ? 'major' : expectedLevel },
+      ],
+    })
+
+    expect(rows.map((row) => row.warningLevel)).toEqual([expectedLevel])
+  })
+
   it('sanitizes accepted basin geometry before retention', () => {
     const status = getM11BasinGeometryBudgetStatus({
       type: 'MultiPolygon',
@@ -586,7 +618,9 @@ describe('M11 overview data contracts', () => {
       warningLevel: 'warning',
       comparisonAvailable: true,
       lineageStatus: 'available',
-      handoffUrl: '/forecast?segmentId=yangtze_rivnet_v12_riv_000123&basinVersionId=yangtze_v2026_01',
+      handoffUrl:
+        '/forecast?source=compare&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&segmentId=yangtze_rivnet_v12_riv_000123',
+      geometry: featureCollection.features[0].geometry,
     })
     expect(detail.sourceSelection).toMatchObject({
       requestedSource: 'compare',

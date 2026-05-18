@@ -2,6 +2,7 @@ import { useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Clock, MapPinned, PanelLeftClose, PanelRightClose } from 'lucide-react'
 
+import type { components } from '@/api/types'
 import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryPatch, M11QueryState } from '@/lib/m11/queryState'
 import { serializeM11QueryState } from '@/lib/m11/queryState'
@@ -23,6 +24,7 @@ interface M11LayoutProps {
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
   selectedSegmentId?: string | null
+  selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   sourceSelection?: SourceScenarioSelectionState | null
   derivedTimeline?: M11TimelineDerivedTimes | null
   fitTo?: M11MapCameraFit | null
@@ -46,6 +48,7 @@ export function M11Layout({
   basins = [],
   visibleBasinIds,
   selectedSegmentId = null,
+  selectedSegmentGeometry = null,
   sourceSelection = null,
   derivedTimeline = null,
   fitTo = null,
@@ -93,6 +96,7 @@ export function M11Layout({
           basins={basins}
           visibleBasinIds={visibleBasinIds}
           selectedSegmentId={selectedSegmentId}
+          selectedSegmentGeometry={selectedSegmentGeometry}
           onQueryChange={onQueryChange}
           fitTo={fitTo}
           flyTo={flyTo}

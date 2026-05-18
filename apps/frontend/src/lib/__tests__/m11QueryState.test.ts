@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   defaultM11QueryState,
+  m11QueryHref,
   needsM11QueryReplacement,
   parseM11QueryState,
   serializeM11QueryState,
@@ -99,5 +100,15 @@ describe('M11 query state helpers', () => {
     expect(canonical).toBe('cycle=2026-05-18T00%3A30%3A15.250Z&validTime=2026-05-18T00%3A00%3A00.123Z')
     expect(needsM11QueryReplacement(canonical)).toBe(false)
     expect(needsM11QueryReplacement(`?${canonical}`)).toBe(false)
+  })
+
+  it('can explicitly clear segment identity when a handoff changes basin version', () => {
+    const state = parseM11QueryState(
+      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-a&segmentId=seg-a&warningLevel=orange&q=mainstem',
+    )
+
+    expect(m11QueryHref('/basins/basin-b', state, { basinVersionId: 'bv-b', segmentId: null })).toBe(
+      '/basins/basin-b?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-b&warningLevel=orange&q=mainstem',
+    )
   })
 })

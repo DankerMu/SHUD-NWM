@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
+import type { M11Source } from '@/lib/m11/queryState'
 
 export interface ForecastSegmentInfo {
   segmentId: string
@@ -41,6 +42,8 @@ export interface ForecastData {
 
 export interface FetchForecastOptions {
   includeAnalysis?: boolean
+  issueTime?: string | null
+  source?: M11Source | null
 }
 
 interface ForecastState {
@@ -240,13 +243,14 @@ async function fetchForecastSeries(
   segment: ForecastSegmentInfo,
   includeAnalysis: boolean,
   selectedScenarios: string[],
+  options: Pick<FetchForecastOptions, 'issueTime'> = {},
 ) {
   if (!segment.basinVersionId) {
     throw new Error('缺少 basin_version_id，无法请求河段预报')
   }
 
   const query = {
-    issue_time: 'latest',
+    issue_time: options.issueTime ?? 'latest',
     variables: 'q_down',
     scenarios: selectedScenarios.join(','),
     include_analysis: includeAnalysis,
@@ -303,13 +307,13 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
     if (!segment) return
 
     const includeAnalysis = options?.includeAnalysis ?? get().includeAnalysis
-    const selectedScenarios = get().selectedScenarios.length > 0 ? get().selectedScenarios : ['GFS']
+    const selectedScenarios = selectedScenariosForSource(options?.source, get().selectedScenarios)
     const requestedSegmentId = segment.segmentId
     const requestNonce = get().requestNonce + 1
     set({ loading: true, error: null, forecastData: null, includeAnalysis, requestNonce })
 
     try {
-      const payload = await fetchForecastSeries(segment, includeAnalysis, selectedScenarios)
+      const payload = await fetchForecastSeries(segment, includeAnalysis, selectedScenarios, { issueTime: options?.issueTime })
       const state = get()
       if (state.requestNonce !== requestNonce || state.selectedSegment?.segmentId !== requestedSegmentId) return
 
@@ -336,3 +340,10 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
 }))
+
+function selectedScenariosForSource(source: M11Source | null | undefined, selectedScenarios: string[]) {
+  if (source === 'ifs') return ['IFS']
+  if (source === 'compare') return ['GFS', 'IFS']
+  if (source === 'gfs') return ['GFS']
+  return selectedScenarios.length > 0 ? selectedScenarios : ['GFS']
+}

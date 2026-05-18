@@ -11,6 +11,7 @@ import Map, {
 import type { LayerProps } from 'react-map-gl/maplibre'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
+import type { components } from '@/api/types'
 import { floodTileLayerPaint } from '@/components/flood/alertLevels'
 import { cn } from '@/lib/cn'
 import {
@@ -43,6 +44,7 @@ interface M11MapLibreSurfaceProps {
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
   selectedSegmentId?: string | null
+  selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   className?: string
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
@@ -108,6 +110,7 @@ export function M11MapLibreSurface({
   basins = [],
   visibleBasinIds,
   selectedSegmentId = null,
+  selectedSegmentGeometry = null,
   className,
   fitTo,
   flyTo,
@@ -135,6 +138,15 @@ export function M11MapLibreSurface({
     [basins, visibleBasinIds],
   )
   const renderableOverlay = overlay && overlayData ? overlay : null
+  const selectedSegmentFeatureCollection = useMemo(
+    () => buildSelectedSegmentFeatureCollection(selectedSegmentId, selectedSegmentGeometry),
+    [selectedSegmentGeometry, selectedSegmentId],
+  )
+  const selectedSegmentMapState = selectedSegmentId
+    ? selectedSegmentFeatureCollection.features.length > 0
+      ? 'selected-layer'
+      : 'unavailable'
+    : 'idle'
   const unavailableReason = useMemo(
     () => overlayUnavailableReason ?? m11SelectedLayerUnavailableReason(state, layers, overlay, overlayData),
     [layers, overlay, overlayData, overlayUnavailableReason, state],
@@ -248,7 +260,8 @@ export function M11MapLibreSurface({
       data-basin-feature-count={basinFeatureCollection.features.length}
       data-visible-basin-ids={basinFeatureCollection.features.map((feature) => feature.properties.basin_id).join(',')}
       data-selected-segment-id={selectedSegmentId ?? ''}
-      data-segment-highlight-hook={selectedSegmentId ? 'selected-row' : 'idle'}
+      data-segment-highlight-hook={selectedSegmentMapState}
+      data-selected-segment-map-state={selectedSegmentMapState}
     >
       <Map
         ref={mapRef}
@@ -265,6 +278,9 @@ export function M11MapLibreSurface({
         <ScaleControl position="bottom-left" unit="metric" />
         {basinFeatureCollection.features.length > 0 ? <M11BasinPrimitive collection={basinFeatureCollection} /> : null}
         {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} /> : null}
+        {selectedSegmentFeatureCollection.features.length > 0 ? (
+          <M11SelectedSegmentPrimitive collection={selectedSegmentFeatureCollection} />
+        ) : null}
       </Map>
 
       {basins.length > 0 && basinFeatureCollection.features.length === 0 ? (
@@ -289,6 +305,16 @@ export function M11MapLibreSurface({
         </div>
       ) : null}
 
+      {selectedSegmentMapState === 'unavailable' ? (
+        <div
+          className="absolute left-5 top-44 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          role="status"
+          data-testid="m11-selected-segment-map-unavailable"
+        >
+          选中河段缺少可渲染几何，地图不会绘制河段高亮。
+        </div>
+      ) : null}
+
       {mapSourceError ? (
         <div
           className="absolute left-5 top-32 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
@@ -300,6 +326,19 @@ export function M11MapLibreSurface({
       ) : null}
     </div>
   )
+}
+
+interface SelectedSegmentFeature {
+  type: 'Feature'
+  geometry: components['schemas']['GeoJsonLineString']
+  properties: {
+    segment_id: string
+  }
+}
+
+interface SelectedSegmentFeatureCollection {
+  type: 'FeatureCollection'
+  features: SelectedSegmentFeature[]
 }
 
 export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerState[]): M11RegisteredOverlay | null {
@@ -380,6 +419,52 @@ function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection 
       />
     </Source>
   )
+}
+
+function M11SelectedSegmentPrimitive({ collection }: { collection: SelectedSegmentFeatureCollection }) {
+  return (
+    <Source id="m11-selected-segment-source" type="geojson" data={collection} promoteId="segment_id">
+      <Layer
+        id="m11-selected-segment-halo"
+        type="line"
+        source="m11-selected-segment-source"
+        paint={{
+          'line-color': '#FFFFFF',
+          'line-width': 8,
+          'line-opacity': 0.7,
+        }}
+      />
+      <Layer
+        id="m11-selected-segment-line"
+        type="line"
+        source="m11-selected-segment-source"
+        paint={{
+          'line-color': '#F97316',
+          'line-width': 5,
+          'line-opacity': 0.95,
+        }}
+      />
+    </Source>
+  )
+}
+
+function buildSelectedSegmentFeatureCollection(
+  selectedSegmentId: string | null | undefined,
+  geometry: components['schemas']['GeoJsonLineString'] | null | undefined,
+): SelectedSegmentFeatureCollection {
+  return {
+    type: 'FeatureCollection',
+    features:
+      selectedSegmentId && geometry
+        ? [
+            {
+              type: 'Feature',
+              geometry,
+              properties: { segment_id: selectedSegmentId },
+            },
+          ]
+        : [],
+  }
 }
 
 export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): BasinFeatureCollection {

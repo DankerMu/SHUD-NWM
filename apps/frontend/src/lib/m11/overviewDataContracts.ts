@@ -1,4 +1,5 @@
 import type { components } from '@/api/types'
+import { m11QueryHref } from '@/lib/m11/queryState'
 import type { M11Layer, M11QueryState, M11Source } from '@/lib/m11/queryState'
 
 export type ApiBasin = components['schemas']['Basin']
@@ -179,6 +180,7 @@ export interface BasinSegmentRow {
   cycleTime: string | null
   validTime: string | null
   hasGeometry: boolean
+  geometry: components['schemas']['GeoJsonLineString'] | null
   unavailableReason: string | null
 }
 
@@ -212,6 +214,7 @@ export interface SelectedSegmentDetail {
   lineageStatus: 'available' | 'unavailable' | 'failed'
   lineageUnavailableReason: string | null
   handoffUrl: string
+  geometry: components['schemas']['GeoJsonLineString'] | null
   freshness: FreshnessMetadata
   unavailableReason: string | null
 }
@@ -621,7 +624,7 @@ export function normalizeBasinSegmentRows(input: {
 }
 
 export function normalizeSelectedSegmentDetail(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>
+  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'warningLevel' | 'layer' | 'basemap' | 'q'>
   basin?: ApiBasin | null
   basinVersionId: string
   segmentId: string
@@ -659,6 +662,7 @@ export function normalizeSelectedSegmentDetail(input: {
     input.feature?.properties.river_segment_id ??
     input.floodTimeline?.river_segment_id ??
     input.segmentId
+  const geometry = input.segment?.geom ?? input.feature?.geometry ?? null
 
   return {
     basinId: input.basin?.basin_id ?? input.model?.basin_id ?? null,
@@ -688,7 +692,18 @@ export function normalizeSelectedSegmentDetail(input: {
         : normalizeString(input.lineageError) ??
           normalizeString(input.lineageUnavailableReason) ??
           'Lineage is unavailable for this segment/time.',
-    handoffUrl: `/forecast?segmentId=${encodeURIComponent(riverSegmentId)}&basinVersionId=${encodeURIComponent(input.basinVersionId)}`,
+    handoffUrl: m11QueryHref('/forecast', {
+      source: input.query.source,
+      cycle: selectionQuery.cycle,
+      validTime: input.query.validTime ?? currentPoint?.validTime ?? null,
+      layer: input.query.layer,
+      basemap: input.query.basemap,
+      basinVersionId: input.basinVersionId,
+      segmentId: riverSegmentId,
+      warningLevel: input.query.warningLevel,
+      q: input.query.q,
+    }),
+    geometry,
     freshness: createFreshnessMetadata({
       updatedAt: input.forecast && 'issue_time' in input.forecast ? input.forecast.issue_time : input.resolvedRun?.updated_at ?? null,
       cycleTime: input.resolvedRun?.cycle_time ?? selectionQuery.cycle,
@@ -1098,6 +1113,7 @@ function segmentRowFromFeature(
     cycleTime: query.cycle,
     validTime: normalizeIsoString(alert?.valid_time) ?? query.validTime,
     hasGeometry: Boolean(feature.geometry),
+    geometry: feature.geometry ?? null,
     unavailableReason: alert ? null : 'No flood-alert value is available for this segment/time.',
   }
 }

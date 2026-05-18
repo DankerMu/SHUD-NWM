@@ -267,6 +267,60 @@ test.describe('forecast page', () => {
     )
   })
 
+  test('preserves forecast deep-link context in basin handoff and forecast request', async ({ page }) => {
+    const forecastQueries: Array<Record<string, string | null>> = []
+    await page.route('**/api/v1/**', async (route) => {
+      const url = new URL(route.request().url())
+
+      if (url.pathname === '/api/v1/models') {
+        return fulfill(route, {
+          items: [
+            {
+              model_id: 'model-1',
+              basin_id: 'backend-basin',
+              basin_version_id: 'backend-basin-v1',
+              river_network_version_id: 'backend-rivnet-v1',
+              mesh_version_id: 'mesh-1',
+              calibration_version_id: 'cal-1',
+              shud_code_version: '2.0',
+              active_flag: true,
+              model_package_uri: 's3://models/model-1',
+              resource_profile: {},
+              created_at: '2026-05-09T00:00:00Z',
+            },
+          ],
+          total: 1,
+          limit: 1,
+          offset: 0,
+        })
+      }
+      if (url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments') return fulfill(route, riverSegments)
+      if (url.pathname.endsWith('/forecast-series')) {
+        forecastQueries.push({
+          issueTime: url.searchParams.get('issue_time'),
+          scenarios: url.searchParams.get('scenarios'),
+        })
+        return fulfill(route, forecastPayload)
+      }
+      throw new Error(`Unhandled mocked API route: ${url.pathname}`)
+    })
+
+    await page.goto(
+      '/forecast?segmentId=backend-seg-7&basinVersionId=backend-basin-v1&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange',
+      { waitUntil: 'domcontentloaded' },
+    )
+
+    await expect(page.getByRole('heading', { name: '预报工作台' })).toBeVisible()
+    await expect
+      .poll(() => forecastQueries.at(-1))
+      .toMatchObject({ issueTime: '2026-05-18T00:00:00.000Z', scenarios: 'IFS' })
+    await expect(page.getByRole('link', { name: '进入流域分析' })).toHaveAttribute(
+      'href',
+      '/basins/backend-basin?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=backend-basin-v1&segmentId=backend-seg-7&warningLevel=orange',
+    )
+    await expect(page.getByText(/已保留 validTime=2026-05-18T06:00:00.000Z/)).toBeVisible()
+  })
+
   test('renders the forecast chart after a segment click', async ({ page }) => {
     await mockForecastApi(page)
     await gotoForecastPage(page)

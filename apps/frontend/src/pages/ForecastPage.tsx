@@ -5,7 +5,7 @@ import { ForecastPanel } from '@/components/forecast/ForecastPanel'
 import { MapView, type ForecastBasinContext } from '@/components/map/MapView'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
-import { parseM11QueryState } from '@/lib/m11/queryState'
+import { m11QueryHref, parseM11QueryState } from '@/lib/m11/queryState'
 import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 
 export function ForecastPage() {
@@ -21,21 +21,27 @@ export function ForecastPage() {
   const toast = useToast((state) => state.toast)
   const lastRouteHandoffKey = useRef<string | null>(null)
   const [basinContext, setBasinContext] = useState<ForecastBasinContext | null>(null)
+  const routeState = useMemo(() => parseM11QueryState(location.search), [location.search])
   const routeSegment = useMemo(() => {
-    const routeState = parseM11QueryState(location.search)
     if (!routeState.segmentId || !routeState.basinVersionId) return null
     return {
       segmentId: routeState.segmentId,
       basinVersionId: routeState.basinVersionId,
     }
-  }, [location.search])
-  const routeHandoffKey = routeSegment ? `${routeSegment.basinVersionId}::${routeSegment.segmentId}` : null
+  }, [routeState])
+  const routeHandoffKey = routeSegment
+    ? `${routeSegment.basinVersionId}::${routeSegment.segmentId}::${routeState.source}::${routeState.cycle ?? 'latest'}`
+    : null
 
   const loadSegmentForecast = useCallback(
-    async (segment: ForecastSegmentInfo) => {
+    async (segment: ForecastSegmentInfo, forecastContext: typeof routeState | null = null) => {
       selectSegment(segment)
       try {
-        await fetchForecast({ includeAnalysis: true })
+        await fetchForecast({
+          includeAnalysis: true,
+          issueTime: forecastContext?.cycle ?? undefined,
+          source: forecastContext?.source ?? undefined,
+        })
       } catch (error) {
         toast({
           title: '预报曲线加载失败',
@@ -63,13 +69,14 @@ export function ForecastPage() {
     }
 
     lastRouteHandoffKey.current = routeHandoffKey
-    void loadSegmentForecast(routeSegment)
+    void loadSegmentForecast(routeSegment, routeState)
   }, [
     forecastData?.segmentId,
     loadSegmentForecast,
     loading,
     routeHandoffKey,
     routeSegment,
+    routeState,
     selectedSegment?.basinVersionId,
     selectedSegment?.segmentId,
   ])
@@ -100,21 +107,27 @@ export function ForecastPage() {
       </section>
 
       {selectedSegment ? (
-        <ForecastPanel
-          segment={selectedSegment}
-          forecastData={forecastData}
-          loading={loading}
-          error={error}
-          includeAnalysis={includeAnalysis}
-          onClose={clearSelection}
-          onRetry={retryForecast}
-        />
+        <div className="flex h-full min-h-0 flex-col gap-3">
+          <div className="rounded-lg border border-border bg-panel px-4 py-3">
+            <ForecastBasinHandoff context={basinContext} routeState={routeState} />
+          </div>
+          <ForecastPanel
+            segment={selectedSegment}
+            forecastData={forecastData}
+            loading={loading}
+            error={error}
+            includeAnalysis={includeAnalysis}
+            contextNote={routeState.validTime ? `已保留 validTime=${routeState.validTime} 于 URL；当前预报曲线请求按 cycle/source 取序列。` : null}
+            onClose={clearSelection}
+            onRetry={retryForecast}
+          />
+        </div>
       ) : (
         <aside className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-panel">
           <div className="grid min-h-72 flex-1 place-items-center p-4 text-center text-sm text-muted">
             <div>
               <p>请在地图上选择河段查看预报</p>
-              <ForecastBasinHandoff context={basinContext} />
+          <ForecastBasinHandoff context={basinContext} routeState={routeState} />
             </div>
           </div>
         </aside>
@@ -123,13 +136,16 @@ export function ForecastPage() {
   )
 }
 
-function ForecastBasinHandoff({ context }: { context: ForecastBasinContext | null }) {
+function ForecastBasinHandoff({ context, routeState }: { context: ForecastBasinContext | null; routeState: ReturnType<typeof parseM11QueryState> }) {
   if (!context) return null
-  const params = new URLSearchParams({ basinVersionId: context.basinVersionId })
+  const href = m11QueryHref(`/basins/${encodeURIComponent(context.basinId)}`, routeState, {
+    basinVersionId: context.basinVersionId,
+    segmentId: routeState.basinVersionId === context.basinVersionId ? routeState.segmentId : null,
+  })
 
   return (
     <Link
-      to={`/basins/${encodeURIComponent(context.basinId)}?${params.toString()}`}
+      to={href}
       className="mt-3 inline-flex h-9 items-center rounded border border-primary-600 px-3 text-sm font-medium text-primary-600 hover:bg-primary-50"
     >
       进入流域分析

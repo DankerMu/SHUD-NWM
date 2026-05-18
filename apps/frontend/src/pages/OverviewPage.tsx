@@ -8,6 +8,7 @@ import type { M11Bbox, OverviewBasin, SourceScenarioSelectionState } from '@/lib
 import { BasinLink, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
   defaultM11QueryState,
+  m11QueryHref,
   type M11QueryPatch,
   needsM11QueryReplacement,
   parseM11QueryState,
@@ -484,12 +485,11 @@ function basinAnalysisHref(basin: OverviewBasin, state: ReturnType<typeof parseM
     state.basinVersionId && selectedVersionIds.has(state.basinVersionId)
       ? state.basinVersionId
       : basin.selectedBasinVersionId
-  const search = serializeM11QueryState({
-    ...state,
+  const segmentId = basinVersionId && basinVersionId === state.basinVersionId ? state.segmentId : null
+  return m11QueryHref(`/basins/${encodeURIComponent(basin.basinId)}`, state, {
     basinVersionId,
-    segmentId: state.segmentId,
+    segmentId,
   })
-  return `/basins/${encodeURIComponent(basin.basinId)}${search ? `?${search}` : ''}`
 }
 
 export function contextHandoff(

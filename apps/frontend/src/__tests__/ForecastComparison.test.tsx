@@ -129,6 +129,37 @@ describe('forecast comparison UI', () => {
     expect(query).toMatchObject({ scenarios: 'GFS,IFS', include_analysis: true })
   })
 
+  it('uses route handoff source and cycle options without changing default forecast behavior', async () => {
+    let query: Record<string, unknown> | undefined
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const options = args[1] as { params?: { query?: Record<string, unknown> } }
+      query = options.params?.query
+      return success({
+        segment_id: 'seg-1',
+        issue_time: '2026-05-18T00:00:00Z',
+        unit: 'm3/s',
+        series: [],
+        frequency_thresholds: null,
+      }) as never
+    })
+    resetForecastStore({
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1' },
+      selectedScenarios: ['GFS'],
+    })
+
+    await useForecastStore.getState().fetchForecast({
+      source: 'ifs',
+      issueTime: '2026-05-18T00:00:00.000Z',
+      includeAnalysis: true,
+    })
+
+    expect(query).toMatchObject({
+      issue_time: '2026-05-18T00:00:00.000Z',
+      scenarios: 'IFS',
+      include_analysis: true,
+    })
+  })
+
   it('preserves spliced forecast thresholds from include-analysis responses', async () => {
     vi.mocked(client.GET).mockResolvedValue(
       success({
