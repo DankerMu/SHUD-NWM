@@ -96,8 +96,9 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?basinVersionId=bv-001&segmentId=seg-009&source=best&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange&q=main',
+      '/basins/basin-demo?basinVersionId=bv-001&segmentId=seg-009&source=best&cycle=2026-05-18T00:00:00.123456Z&validTime=2026-05-18T14:00:00.250001%2B08:00&warningLevel=orange&q=main',
     )
+    const replaceState = vi.spyOn(window.history, 'replaceState')
 
     render(<App />)
 
@@ -105,16 +106,35 @@ describe('App route state', () => {
     expect(screen.getByText('basin-demo')).toBeInTheDocument()
     expect(screen.getByText('seg-009')).toBeInTheDocument()
     expect(screen.getAllByText('orange').length).toBeGreaterThan(0)
-    await waitFor(() => expect(window.location.search).toContain('cycle=2026-05-18T00%3A00%3A00.000Z'))
+    await waitFor(() =>
+      expect(window.location.search).toBe(
+        '?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange&q=main',
+      ),
+    )
+    const normalizedRouteReplacements = replaceState.mock.calls.filter(([, , url]) =>
+      String(url).endsWith(
+        '/basins/basin-demo?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange&q=main',
+      ),
+    )
+    expect(normalizedRouteReplacements).toHaveLength(1)
+    replaceState.mockRestore()
   })
 
-  it('normalizes invalid query values without repeated URL updates', async () => {
-    window.history.pushState({}, '', '/overview?source=unknown&basemap=bad&warningLevel=invalid')
+  it('normalizes invalid overview query values without repeated URL updates', async () => {
+    window.history.pushState(
+      {},
+      '',
+      '/overview?source=unknown&basemap=bad&warningLevel=invalid&cycle=2026-02-30T00:00:00.123456Z&validTime=2026-05-18T00:00:00.123456',
+    )
+    const replaceState = vi.spyOn(window.history, 'replaceState')
 
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(window.location.search).toBe(''))
+    const normalizedRouteReplacements = replaceState.mock.calls.filter(([, , url]) => String(url).endsWith('/overview'))
+    expect(normalizedRouteReplacements).toHaveLength(1)
+    replaceState.mockRestore()
   })
 
   it('routes /flood-alerts to the flood alert workflow content', async () => {

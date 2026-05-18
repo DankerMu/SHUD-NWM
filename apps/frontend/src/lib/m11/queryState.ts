@@ -39,7 +39,7 @@ function isOneOf<T extends readonly string[]>(value: string | null, allowed: T):
 }
 
 const rfc3339InstantPattern =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 
 function parseInteger(value: string) {
   return Number.parseInt(value, 10)
@@ -47,6 +47,7 @@ function parseInteger(value: string) {
 
 function offsetMinutes(value: string) {
   if (value === 'Z') return 0
+  if (value === '-00:00') return null
   const sign = value[0] === '-' ? -1 : 1
   const hours = parseInteger(value.slice(1, 3))
   const minutes = parseInteger(value.slice(4, 6))
@@ -56,7 +57,10 @@ function offsetMinutes(value: string) {
 
 function fractionalMilliseconds(value: string | undefined) {
   if (!value) return 0
-  return parseInteger(value.slice(1).padEnd(3, '0'))
+  // Canonical query instants use Date.toISOString(), so fractional precision is
+  // normalized to JavaScript's millisecond precision. Extra RFC3339 fractional
+  // digits are accepted and truncated to the first three digits here.
+  return parseInteger(value.slice(1, 4).padEnd(3, '0'))
 }
 
 function normalizeIsoInstant(value: string | null) {

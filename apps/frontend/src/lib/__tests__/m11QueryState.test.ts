@@ -56,8 +56,12 @@ describe('M11 query state helpers', () => {
     ['invalid minute', '2026-05-18T00:60:00Z'],
     ['invalid second', '2026-05-18T00:00:60Z'],
     ['timezone-less timestamp', '2026-05-18T00:00:00'],
+    ['timezone-less fractional timestamp', '2026-05-18T00:00:00.123456'],
     ['date-only value', '2026-05-18'],
     ['numeric value', '1779062400000'],
+    ['bad offset hour', '2026-05-18T00:00:00+24:00'],
+    ['bad offset minute', '2026-05-18T00:00:00+08:60'],
+    ['unknown local offset', '2026-05-18T00:00:00-00:00'],
     ['overflow after offset', '2026-12-31T24:00:00+08:00'],
   ])('rejects %s for forecast instants', (_label, value) => {
     expect(parseM11QueryState(`cycle=${encodeURIComponent(value)}&validTime=${encodeURIComponent(value)}`)).toMatchObject({
@@ -67,9 +71,33 @@ describe('M11 query state helpers', () => {
   })
 
   it('normalizes valid explicit-offset RFC3339 instants to UTC', () => {
-    const state = parseM11QueryState('cycle=2026-05-18T08:30:15.25%2B08:00&validTime=2026-05-17T23:45:00-02:30')
+    const state = parseM11QueryState('cycle=2026-05-18T08:30:15.250001%2B08:00&validTime=2026-05-17T23:45:00-02:30')
 
     expect(state.cycle).toBe('2026-05-18T00:30:15.250Z')
     expect(state.validTime).toBe('2026-05-18T02:15:00.000Z')
+  })
+
+  it('accepts RFC3339 fractional seconds beyond milliseconds and documents UTC millisecond precision', () => {
+    const state = parseM11QueryState(
+      'cycle=2026-05-18T00%3A00%3A00.123456Z&validTime=2026-05-18T00%3A00%3A00.123456Z',
+    )
+
+    expect(state.cycle).toBe('2026-05-18T00:00:00.123Z')
+    expect(state.validTime).toBe('2026-05-18T00:00:00.123Z')
+    expect(serializeM11QueryState(state)).toBe(
+      'cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T00%3A00%3A00.123Z',
+    )
+  })
+
+  it('does not request replacement after parse/serialize canonicalization', () => {
+    const canonical = serializeM11QueryState(
+      parseM11QueryState(
+        'cycle=2026-05-18T08%3A30%3A15.250001%2B08%3A00&validTime=2026-05-18T00%3A00%3A00.123456Z',
+      ),
+    )
+
+    expect(canonical).toBe('cycle=2026-05-18T00%3A30%3A15.250Z&validTime=2026-05-18T00%3A00%3A00.123Z')
+    expect(needsM11QueryReplacement(canonical)).toBe(false)
+    expect(needsM11QueryReplacement(`?${canonical}`)).toBe(false)
   })
 })
