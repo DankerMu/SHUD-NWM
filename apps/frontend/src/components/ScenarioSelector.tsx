@@ -23,7 +23,7 @@ export function ScenarioSelector() {
 
   const handleScenarioChange = (scenario: string) => {
     toggleScenario(scenario)
-    void fetchForecast({ includeAnalysis }).catch(() => undefined)
+    void fetchForecast({ includeAnalysis, useSelectedScenarios: true }).catch(() => undefined)
   }
 
   return (

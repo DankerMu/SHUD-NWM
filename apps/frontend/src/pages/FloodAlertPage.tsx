@@ -129,6 +129,7 @@ export function FloodAlertPage() {
   }
 
   const tileFallbackTime = useMemo(() => latestRun?.end_time ?? validTimes.at(-1) ?? null, [latestRun, validTimes])
+  const floodRunForecastIssueTime = useMemo(() => normalizeRunCycleTime(latestRun?.cycle_time), [latestRun?.cycle_time])
 
   if (loading) {
     return (
@@ -200,6 +201,8 @@ export function FloodAlertPage() {
           <SegmentAlertDetail
             segment={selectedSegment}
             basinVersionId={selectedSegment.basinVersionId ?? latestRun?.basin_version_id}
+            forecastSource={sourceFromRun(latestRun?.source_id ?? latestRun?.scenario_id)}
+            forecastIssueTime={floodRunForecastIssueTime}
             onClose={closeDetail}
           />
         ) : (
@@ -223,4 +226,17 @@ function normalizeRouteAlertLevel(value: string | null): AlertLevel | null {
   if (value === 'red') return 'severe'
   if (value === 'major') return 'high_risk'
   return isAlertLevel(value) ? value : null
+}
+
+function sourceFromRun(value: string | null | undefined) {
+  const normalized = value?.toLowerCase() ?? ''
+  if (normalized.includes('ifs')) return 'ifs'
+  if (normalized.includes('gfs')) return 'gfs'
+  return null
+}
+
+function normalizeRunCycleTime(value: string | null | undefined) {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value
 }

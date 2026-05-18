@@ -7,6 +7,7 @@ import { alertLevelColor, alertLevelLabel } from '@/components/flood/alertLevels
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
+import type { M11Source } from '@/lib/m11/queryState'
 import type { ForecastData } from '@/stores/forecast'
 import { useForecastStore } from '@/stores/forecast'
 import type {
@@ -19,6 +20,8 @@ import { useFloodAlertStore } from '@/stores/floodAlert'
 interface SegmentAlertDetailProps {
   segment: FloodAlertRankingItem | null
   basinVersionId?: string | null
+  forecastSource?: M11Source | null
+  forecastIssueTime?: string | null
   onClose: () => void
 }
 
@@ -140,7 +143,13 @@ function buildTimelineOption(timeline: FloodAlertTimeline | null) {
   }
 }
 
-export function SegmentAlertDetail({ segment, basinVersionId, onClose }: SegmentAlertDetailProps) {
+export function SegmentAlertDetail({
+  segment,
+  basinVersionId,
+  forecastSource = null,
+  forecastIssueTime = null,
+  onClose,
+}: SegmentAlertDetailProps) {
   const toast = useToast((state) => state.toast)
   const timeline = useFloodAlertStore((state) => state.timelineData)
   const timelineLoading = useFloodAlertStore((state) => state.timelineLoading)
@@ -171,8 +180,13 @@ export function SegmentAlertDetail({ segment, basinVersionId, onClose }: Segment
       name: segment.segmentName ?? undefined,
       basinVersionId,
     })
-    void fetchForecast({ includeAnalysis: true }).catch(() => undefined)
-  }, [basinVersionId, fetchForecast, segment, selectForecastSegment])
+    void fetchForecast({
+      includeAnalysis: true,
+      ignoreActiveRequestContext: true,
+      source: forecastSource,
+      issueTime: forecastIssueTime,
+    }).catch(() => undefined)
+  }, [basinVersionId, fetchForecast, forecastIssueTime, forecastSource, segment, selectForecastSegment])
 
   const forecastOption = useMemo(
     () => buildForecastOption(forecastData, timeline, segment?.segmentName || segment?.riverSegmentId),

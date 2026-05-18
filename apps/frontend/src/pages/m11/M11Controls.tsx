@@ -12,6 +12,7 @@ import {
   Trees,
 } from 'lucide-react'
 
+import type { components } from '@/api/types'
 import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
 import {
   M11MapLibreSurface,
@@ -42,6 +43,8 @@ interface SharedControlProps {
 interface M11MapSurfaceProps extends SharedControlProps {
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
+  selectedSegmentId?: string | null
+  selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
@@ -115,6 +118,8 @@ export function M11MapSurface({
   layers = [],
   basins = [],
   visibleBasinIds,
+  selectedSegmentId = null,
+  selectedSegmentGeometry = null,
   onQueryChange,
   fitTo,
   flyTo,
@@ -128,6 +133,8 @@ export function M11MapSurface({
         layers={layers}
         basins={basins}
         visibleBasinIds={visibleBasinIds}
+        selectedSegmentId={selectedSegmentId}
+        selectedSegmentGeometry={selectedSegmentGeometry}
         fitTo={fitTo}
         flyTo={flyTo}
         onOverlayHover={onOverlayHover}

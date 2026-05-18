@@ -29,14 +29,60 @@ const overviewBasinVersion = {
   created_at: '2026-05-01T00:00:00Z',
 }
 
+const basinRiverSegments = {
+  type: 'FeatureCollection',
+  total: 2,
+  feature_total: 2,
+  limit: 1000,
+  offset: 0,
+  features: [
+    {
+      type: 'Feature',
+      properties: {
+        segment_id: 'seg-001',
+        river_segment_id: 'seg-001',
+        basin_version_id: 'bv-001',
+        river_network_version_id: 'rn-v1',
+        name: 'North Branch 001',
+        stream_order: 1,
+        length_m: 800,
+      },
+      geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+    },
+    {
+      type: 'Feature',
+      properties: {
+        segment_id: 'seg-009',
+        river_segment_id: 'seg-009',
+        basin_version_id: 'bv-001',
+        river_network_version_id: 'rn-v1',
+        name: 'Main Stem 009',
+        stream_order: 3,
+        length_m: 1200,
+      },
+      geometry: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+    },
+  ],
+}
+
 async function mockOverviewApis(
   page: Page,
-  options: { partialQueueFailure?: boolean; lowRequestPlan?: boolean; runSource?: 'gfs' | 'ifs' } = {},
+  options: {
+    partialQueueFailure?: boolean
+    lowRequestPlan?: boolean
+    runSource?: 'gfs' | 'ifs'
+    invalidBasin?: boolean
+    missingBbox?: boolean
+    noSegments?: boolean
+    calls?: Array<{ path: string; query: Record<string, string> }>
+  } = {},
 ) {
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
+    options.calls?.push({ path: url.pathname, query: Object.fromEntries(url.searchParams.entries()) })
 
     if (url.pathname === '/api/v1/basins') {
+      if (options.invalidBasin) return fulfill(route, [])
       return fulfill(route, [
         {
           basin_id: 'basin-demo',
@@ -47,7 +93,10 @@ async function mockOverviewApis(
         },
       ])
     }
-    if (url.pathname === '/api/v1/basins/basin-demo/versions') return fulfill(route, [overviewBasinVersion])
+    if (url.pathname === '/api/v1/basins/basin-demo/versions') {
+      return fulfill(route, options.missingBbox ? [{ ...overviewBasinVersion, geom: null }] : [overviewBasinVersion])
+    }
+    if (url.pathname.startsWith('/api/v1/basins/') && url.pathname.endsWith('/versions')) return fulfill(route, [])
     if (url.pathname === '/api/v1/models') {
       return fulfill(route, {
         items: [
@@ -134,9 +183,9 @@ async function mockOverviewApis(
         items: [
           {
             rank: 1,
-            river_segment_id: 'seg-demo',
-            segment_id: 'seg-demo',
-            segment_name: 'Demo Segment',
+            river_segment_id: 'seg-009',
+            segment_id: 'seg-009',
+            segment_name: 'Main Stem 009',
             basin_version_id: 'bv-001',
             q_value: 123,
             q_unit: 'm3/s',
@@ -157,6 +206,85 @@ async function mockOverviewApis(
         contentType: 'application/json',
         body: JSON.stringify({ type: 'FeatureCollection', features: [] }),
       })
+    }
+    if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments') {
+      if (options.noSegments) return fulfill(route, { ...basinRiverSegments, total: 0, feature_total: 0, features: [] })
+      return fulfill(route, basinRiverSegments)
+    }
+    if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments/seg-001') {
+      return fulfill(route, {
+        river_segment_id: 'seg-001',
+        river_network_version_id: 'rn-v1',
+        segment_order: 1,
+        downstream_segment_id: null,
+        length_m: 800,
+        geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+        properties_json: {},
+        created_at: '2026-05-01T00:00:00Z',
+      })
+    }
+    if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments/seg-009') {
+      return fulfill(route, {
+        river_segment_id: 'seg-009',
+        river_network_version_id: 'rn-v1',
+        segment_order: 3,
+        downstream_segment_id: null,
+        length_m: 1200,
+        geom: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+        properties_json: {},
+        created_at: '2026-05-01T00:00:00Z',
+      })
+    }
+    if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments/seg-009/forecast-series') {
+      return fulfill(route, {
+        river_segment_id: 'seg-009',
+        issue_time: '2026-05-18T00:00:00Z',
+        variable: 'q_down',
+        unit: 'm3/s',
+        frequency_thresholds: null,
+        segments: [
+          {
+            scenario: 'forecast_ifs_deterministic',
+            scenario_id: 'forecast_ifs_deterministic',
+            source: 'IFS',
+            segment_role: 'future_7_days',
+            data: [{ valid_time: '2026-05-18T06:00:00Z', value: 456 }],
+          },
+        ],
+      })
+    }
+    if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments/seg-001/forecast-series') {
+      return fulfill(route, {
+        river_segment_id: 'seg-001',
+        issue_time: '2026-05-18T00:00:00Z',
+        variable: 'q_down',
+        unit: 'm3/s',
+        frequency_thresholds: null,
+        segments: [
+          {
+            scenario: 'forecast_gfs_deterministic',
+            scenario_id: 'forecast_gfs_deterministic',
+            source: 'GFS',
+            segment_role: 'future_7_days',
+            data: [{ valid_time: '2026-05-18T06:00:00Z', value: 111 }],
+          },
+        ],
+      })
+    }
+    if (url.pathname === '/api/v1/flood-alerts/timeline') {
+      return fulfill(route, {
+        run_id: 'run-overview',
+        segment_id: url.searchParams.get('segment_id') ?? 'seg-009',
+        river_segment_id: url.searchParams.get('segment_id') ?? 'seg-009',
+        timesteps: [],
+        timeline: [],
+        peak: { valid_time: '2026-05-18T06:00:00Z', return_period: 20, warning_level: 'warning', q_value: 456 },
+        frequency_thresholds: null,
+        quality_note: null,
+      })
+    }
+    if (url.pathname === '/api/v1/lineage/river-point') {
+      return fulfill(route, { target_type: 'river_point', target_id: url.searchParams.get('segment_id') ?? 'seg-009', nodes: [], edges: [] })
     }
 
     throw new Error(`Unhandled overview API request: ${url.pathname}`)
@@ -395,19 +523,96 @@ test.describe('M11 navigation and route shells', () => {
     await expect(page.getByText('径流量图例')).toBeVisible()
   })
 
-  test('renders basin drill-down shell with restored query state', async ({ page }) => {
-    await page.route('**/api/v1/**', (route) => route.abort())
+  test('renders basin drill-down shell with restored query state and segment discovery', async ({ page }) => {
+    await mockOverviewApis(page, { runSource: 'ifs' })
 
     await page.goto(
-      '/basins/basin-demo?basinVersionId=bv-001&segmentId=seg-009&source=best&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange&q=main',
+      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=flood-return-period&basemap=satellite&warningLevel=orange&q=main&basinVersionId=bv-001&segmentId=seg-009',
     )
 
     await expect(page.getByRole('heading', { name: '流域分析' })).toBeVisible()
     await expect(page.getByLabel('流域钻取地图')).toBeVisible()
-    await expect(page.getByText('basin-demo', { exact: true })).toBeVisible()
-    await expect(page.getByText('seg-009').first()).toBeVisible()
-    await expect(page.getByText('orange').first()).toBeVisible()
+    await expect(page.getByLabel('河段发现')).toContainText('Demo Basin')
+    await expect(page.getByLabel('河段发现')).toContainText('bv-001')
+    await expect(page.getByPlaceholder('搜索河段名称或 ID')).toHaveValue('main')
+    await expect(page.getByLabel('预警筛选')).toHaveValue('orange')
+    await expect(page.getByRole('listitem').filter({ hasText: 'Main Stem 009' })).toHaveAttribute('aria-current', 'true')
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'satellite')
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-009')
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
     await expect(page).toHaveURL(/cycle=2026-05-18T00%3A00%3A00.000Z/)
+
+    await page.getByPlaceholder('搜索河段名称或 ID').fill('north')
+    await expect(page).toHaveURL(/q=north/)
+    await page.getByLabel('预警筛选').selectOption('')
+    await expect(page).not.toHaveURL(/warningLevel=orange/)
+  })
+
+  test('keeps basin search and warning filters local to URL/list state', async ({ page }) => {
+    const calls: Array<{ path: string; query: Record<string, string> }> = []
+    await mockOverviewApis(page, { calls })
+
+    await page.goto('/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+    await expect(page.getByRole('heading', { name: '流域分析' })).toBeVisible()
+    await expect(page.getByText('North Branch 001')).toBeVisible()
+    await expect(page.getByText('Main Stem 009')).toBeVisible()
+    const initialSegmentLoads = calls.filter((call) => call.path === '/api/v1/basin-versions/bv-001/river-segments').length
+
+    await page.getByPlaceholder('搜索河段名称或 ID').fill('north')
+    await expect(page).toHaveURL(/q=north/)
+    await expect(page.getByText('North Branch 001')).toBeVisible()
+    await expect(page.getByText('Main Stem 009')).toHaveCount(0)
+    await page.getByLabel('预警筛选').selectOption('orange')
+    await expect(page).toHaveURL(/warningLevel=orange/)
+    await expect(page.getByText('没有匹配的河段')).toBeVisible()
+
+    expect(calls.filter((call) => call.path === '/api/v1/basin-versions/bv-001/river-segments')).toHaveLength(initialSegmentLoads)
+  })
+
+  test('drops stale overview segment identity when drilling into a different basin version', async ({ page }) => {
+    await mockOverviewApis(page, { lowRequestPlan: true })
+
+    await page.goto('/overview?source=gfs&basinVersionId=bv-stale&segmentId=seg-stale')
+    await page.getByText('Demo Basin').click()
+
+    await expect(page.getByTestId('m11-basin-popup')).toBeVisible()
+    await expect(page.getByRole('link', { name: /进入分析/ })).toHaveAttribute('href', /basinVersionId=bv-001/)
+    await expect(page.getByRole('link', { name: /进入分析/ })).not.toHaveAttribute('href', /segmentId=seg-stale/)
+  })
+
+  test('renders invalid basin, missing bbox, no segments, invalid segment, and row-click selected detail states', async ({ page }) => {
+    await mockOverviewApis(page, { invalidBasin: true })
+    await page.goto('/basins/not-a-real-basin')
+    await expect(page.getByLabel('流域不可用')).toContainText('Basin was not found.')
+
+    await page.unroute('**/api/v1/**')
+    await mockOverviewApis(page, { missingBbox: true })
+    await page.goto('/basins/basin-demo?basinVersionId=bv-001')
+    await expect(page.getByLabel('缺少流域 bbox')).toContainText('73,18,135,54')
+
+    await page.unroute('**/api/v1/**')
+    await mockOverviewApis(page, { noSegments: true })
+    await page.goto('/basins/basin-demo?basinVersionId=bv-001')
+    await expect(page.getByText('该流域暂无已发布的预报数据')).toBeVisible()
+
+    await page.unroute('**/api/v1/**')
+    await mockOverviewApis(page)
+    await page.goto('/basins/basin-demo?basinVersionId=bv-001&segmentId=missing-seg')
+    await expect(page.getByText('未找到河段 missing-seg').first()).toBeVisible()
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', '')
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'idle')
+
+    const detailRequest = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return url.pathname === '/api/v1/basin-versions/bv-001/river-segments/seg-001' && response.status() === 200
+    })
+    await page.getByRole('listitem').filter({ hasText: 'North Branch 001' }).click()
+    await detailRequest
+    await expect(page).toHaveURL(/segmentId=seg-001/)
+    await expect(page.getByRole('listitem').filter({ hasText: 'North Branch 001' })).toHaveAttribute('aria-current', 'true')
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-001')
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
+    await expect(page.getByText('已恢复 seg-001')).toBeVisible()
   })
 
   test('keeps forecast workflow route reachable', async ({ page }) => {

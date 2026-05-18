@@ -246,6 +246,90 @@ describe('useFloodAlertStore', () => {
     expect(useFloodAlertStore.getState().timelineData?.segmentId).toBe('seg-1')
   })
 
+  it('normalizes legacy warning aliases in summary, ranking, and timeline payloads', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        const parsed = new URL(url)
+        if (parsed.pathname === '/api/v1/flood-alerts/summary') {
+          return floodResponse({
+            run_id: 'run-1',
+            levels: [
+              { level: 'orange', count: 2, color: '#f59e0b' },
+              { level: 'red', count: 1, color: '#dc2626' },
+              { level: 'major', count: 3, color: '#f97316' },
+            ],
+            total_segments: 6,
+            usable_curves: 6,
+            unavailable_count: 0,
+            quality_note: null,
+          })
+        }
+        if (parsed.pathname === '/api/v1/flood-alerts/ranking') {
+          return floodResponse({
+            items: [
+              {
+                rank: 1,
+                river_segment_id: 'seg-orange',
+                segment_id: 'seg-orange',
+                return_period: 20,
+                warning_level: 'orange',
+              },
+              {
+                rank: 2,
+                river_segment_id: 'seg-red',
+                segment_id: 'seg-red',
+                return_period: 50,
+                warning_level: 'red',
+              },
+              {
+                rank: 3,
+                river_segment_id: 'seg-major',
+                segment_id: 'seg-major',
+                return_period: 30,
+                warning_level: 'major',
+              },
+            ],
+            total: 3,
+            limit: 20,
+            offset: 0,
+          })
+        }
+        if (parsed.pathname === '/api/v1/flood-alerts/timeline') {
+          return floodResponse({
+            run_id: 'run-1',
+            segment_id: 'seg-orange',
+            river_segment_id: 'seg-orange',
+            timesteps: [
+              { valid_time: '2026-05-12T00:00:00Z', return_period: 20, warning_level: 'orange', q_value: 1 },
+            ],
+            peak: { valid_time: '2026-05-12T02:00:00Z', return_period: 30, warning_level: 'major', q_value: 3 },
+            frequency_thresholds: null,
+            quality_note: null,
+          })
+        }
+        throw new Error(`Unexpected flood request ${url}`)
+      }),
+    )
+
+    await useFloodAlertStore.getState().fetchSummary()
+    await useFloodAlertStore.getState().fetchRanking()
+    await useFloodAlertStore.getState().fetchTimeline('seg-orange')
+
+    expect(useFloodAlertStore.getState().summaryData?.levels.map((level) => level.level)).toEqual([
+      'warning',
+      'severe',
+      'high_risk',
+    ])
+    expect(useFloodAlertStore.getState().rankingData?.items.map((item) => item.warningLevel)).toEqual([
+      'warning',
+      'severe',
+      'high_risk',
+    ])
+    expect(useFloodAlertStore.getState().timelineData?.timesteps[0].warningLevel).toBe('warning')
+    expect(useFloodAlertStore.getState().timelineData?.peak?.warningLevel).toBe('high_risk')
+  })
+
   it('hydrates latest flood-alert run and valid time from overview query context', async () => {
     const siblingRun = {
       ...latestRun,

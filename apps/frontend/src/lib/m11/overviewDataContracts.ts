@@ -1,4 +1,5 @@
 import type { components } from '@/api/types'
+import { m11QueryHref } from '@/lib/m11/queryState'
 import type { M11Layer, M11QueryState, M11Source } from '@/lib/m11/queryState'
 
 export type ApiBasin = components['schemas']['Basin']
@@ -48,6 +49,12 @@ export const m11BasinGeometryBudget = {
   maxSerializedBytes: 1_000_000,
 } as const
 
+export const m11SelectedSegmentGeometryBudget = {
+  maxCoordinates: 10_000,
+  maxCoordinateDimensions: 3,
+  maxSerializedBytes: 250_000,
+} as const
+
 export interface M11BasinGeometryBudgetStatus {
   ok: boolean
   reason: string | null
@@ -57,6 +64,14 @@ export interface M11BasinGeometryBudgetStatus {
   vertexCount: number
   serializedBytes: number
   sanitizedGeometry: components['schemas']['GeoJsonMultiPolygon'] | null
+}
+
+export interface M11SelectedSegmentGeometryBudgetStatus {
+  ok: boolean
+  reason: string | null
+  coordinateCount: number
+  serializedBytes: number
+  sanitizedGeometry: components['schemas']['GeoJsonLineString'] | null
 }
 
 export interface BasinVersionOption {
@@ -179,6 +194,7 @@ export interface BasinSegmentRow {
   cycleTime: string | null
   validTime: string | null
   hasGeometry: boolean
+  geometry: components['schemas']['GeoJsonLineString'] | null
   unavailableReason: string | null
 }
 
@@ -212,6 +228,7 @@ export interface SelectedSegmentDetail {
   lineageStatus: 'available' | 'unavailable' | 'failed'
   lineageUnavailableReason: string | null
   handoffUrl: string
+  geometry: components['schemas']['GeoJsonLineString'] | null
   freshness: FreshnessMetadata
   unavailableReason: string | null
 }
@@ -609,9 +626,15 @@ export function normalizeBasinSegmentRows(input: {
     alertById.set(versionedSegmentKey(item.basin_version_id, item.segment_id), rankingLike)
   })
 
-  const rows = features.map((feature) => segmentRowFromFeature(feature, alertById, input.query))
-  const normalizedFilter = normalizeWarningLevel(input.query.warningLevel)
-  const search = input.query.q?.toLowerCase() ?? null
+  return features.map((feature) => segmentRowFromFeature(feature, alertById, input.query))
+}
+
+export function filterBasinSegmentRows(
+  rows: BasinSegmentRow[],
+  query: Pick<M11QueryState, 'warningLevel' | 'q'>,
+): BasinSegmentRow[] {
+  const normalizedFilter = normalizeWarningLevel(query.warningLevel)
+  const search = query.q?.toLowerCase() ?? null
 
   return rows.filter((row) => {
     if (normalizedFilter && row.warningLevel !== normalizedFilter) return false
@@ -621,7 +644,7 @@ export function normalizeBasinSegmentRows(input: {
 }
 
 export function normalizeSelectedSegmentDetail(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>
+  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'warningLevel' | 'layer' | 'basemap' | 'q'>
   basin?: ApiBasin | null
   basinVersionId: string
   segmentId: string
@@ -649,6 +672,10 @@ export function normalizeSelectedSegmentDetail(input: {
       ? { ...input.query, cycle: input.resolvedRun?.cycle_time ?? input.resolvedQuery?.cycle ?? input.query.cycle }
       : input.resolvedQuery ?? input.query
   const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
+  const handoffSource =
+    input.query.source === 'best' && (sourceSelection.resolvedSource === 'GFS' || sourceSelection.resolvedSource === 'IFS')
+      ? (sourceSelection.resolvedSource.toLowerCase() as M11Source)
+      : input.query.source
   const currentPoint = pickCurrentTrendPoint(forecastSeries, input.query.validTime, sourceSelection)
   const alert = input.floodAlert
   const timelinePeak = input.floodTimeline?.peak ?? null
@@ -659,6 +686,7 @@ export function normalizeSelectedSegmentDetail(input: {
     input.feature?.properties.river_segment_id ??
     input.floodTimeline?.river_segment_id ??
     input.segmentId
+  const geometryStatus = getM11SelectedSegmentGeometryBudgetStatus(input.segment?.geom ?? input.feature?.geometry ?? null)
 
   return {
     basinId: input.basin?.basin_id ?? input.model?.basin_id ?? null,
@@ -688,7 +716,18 @@ export function normalizeSelectedSegmentDetail(input: {
         : normalizeString(input.lineageError) ??
           normalizeString(input.lineageUnavailableReason) ??
           'Lineage is unavailable for this segment/time.',
-    handoffUrl: `/forecast?segmentId=${encodeURIComponent(riverSegmentId)}&basinVersionId=${encodeURIComponent(input.basinVersionId)}`,
+    handoffUrl: m11QueryHref('/forecast', {
+      source: handoffSource,
+      cycle: selectionQuery.cycle,
+      validTime: input.query.validTime ?? currentPoint?.validTime ?? null,
+      layer: input.query.layer,
+      basemap: input.query.basemap,
+      basinVersionId: input.basinVersionId,
+      segmentId: riverSegmentId,
+      warningLevel: input.query.warningLevel,
+      q: input.query.q,
+    }),
+    geometry: geometryStatus.sanitizedGeometry,
     freshness: createFreshnessMetadata({
       updatedAt: input.forecast && 'issue_time' in input.forecast ? input.forecast.issue_time : input.resolvedRun?.updated_at ?? null,
       cycleTime: input.resolvedRun?.cycle_time ?? selectionQuery.cycle,
@@ -697,7 +736,8 @@ export function normalizeSelectedSegmentDetail(input: {
       source: sourceSelection.resolvedSource,
       unavailableReason: forecastSeries.length > 0 || alert ? null : 'No forecast or flood-alert values are available.',
     }),
-    unavailableReason: !input.segment && !input.feature ? 'Segment geometry/detail is unavailable.' : null,
+    unavailableReason:
+      (!input.segment && !input.feature ? 'Segment geometry/detail is unavailable.' : null) ?? geometryStatus.reason,
   }
 }
 
@@ -738,6 +778,10 @@ function numberOrNull(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null
   const numberValue = Number(value)
   return Number.isFinite(numberValue) ? numberValue : null
+}
+
+function finiteNumberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
 function numberOrZero(value: unknown): number {
@@ -905,6 +949,74 @@ export function getM11BasinGeometryBudgetStatus(
   return geometryStatus(true, null, bbox, polygonCount, ringCount, vertexCount, serializedBytes, sanitizedGeometry)
 }
 
+export function getM11SelectedSegmentGeometryBudgetStatus(
+  geom: components['schemas']['GeoJsonLineString'] | null | undefined,
+): M11SelectedSegmentGeometryBudgetStatus {
+  if (!geom?.coordinates) {
+    return selectedSegmentGeometryStatus(false, 'Selected segment geometry is unavailable.', 0, 0, null)
+  }
+  if (geom.type !== 'LineString' || !Array.isArray(geom.coordinates)) {
+    return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', 0, serializedByteLength(geom), null)
+  }
+
+  const sanitizedCoordinates: number[][] = []
+  let coordinateCount = 0
+
+  for (const coordinate of geom.coordinates as unknown[]) {
+    if (!Array.isArray(coordinate) || coordinate.length < 2) {
+      return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null)
+    }
+    if (coordinate.length > m11SelectedSegmentGeometryBudget.maxCoordinateDimensions) {
+      return selectedSegmentGeometryStatus(
+        false,
+        `Selected segment geometry coordinate dimensions exceed client rendering budget (${m11SelectedSegmentGeometryBudget.maxCoordinateDimensions}).`,
+        coordinateCount + 1,
+        0,
+        null,
+      )
+    }
+    coordinateCount += 1
+    if (coordinateCount > m11SelectedSegmentGeometryBudget.maxCoordinates) {
+      return selectedSegmentGeometryStatus(
+        false,
+        `Selected segment geometry exceeds client rendering budget (${coordinateCount}/${m11SelectedSegmentGeometryBudget.maxCoordinates} coordinates).`,
+        coordinateCount,
+        0,
+        null,
+      )
+    }
+
+    const lon = finiteNumberOrNull(coordinate[0])
+    const lat = finiteNumberOrNull(coordinate[1])
+    if (lon === null || lat === null) {
+      return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null)
+    }
+    const elevation = coordinate.length >= 3 ? finiteNumberOrNull(coordinate[2]) : null
+    if (coordinate.length >= 3 && elevation === null) {
+      return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null)
+    }
+    sanitizedCoordinates.push(elevation === null ? [lon, lat] : [lon, lat, elevation])
+  }
+
+  if (sanitizedCoordinates.length < 2) {
+    return selectedSegmentGeometryStatus(false, 'Selected segment geometry requires at least two coordinates.', coordinateCount, 0, null)
+  }
+
+  const sanitizedGeometry = { type: 'LineString' as const, coordinates: sanitizedCoordinates }
+  const serializedBytes = serializedByteLength(sanitizedGeometry)
+  if (serializedBytes > m11SelectedSegmentGeometryBudget.maxSerializedBytes) {
+    return selectedSegmentGeometryStatus(
+      false,
+      `Selected segment geometry exceeds client serialized-size budget (${serializedBytes}/${m11SelectedSegmentGeometryBudget.maxSerializedBytes} bytes).`,
+      coordinateCount,
+      serializedBytes,
+      null,
+    )
+  }
+
+  return selectedSegmentGeometryStatus(true, null, coordinateCount, serializedBytes, sanitizedGeometry)
+}
+
 function geometryTooLarge(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
   return geometryStatus(
     false,
@@ -971,6 +1083,16 @@ function geometryStatus(
   sanitizedGeometry: components['schemas']['GeoJsonMultiPolygon'] | null,
 ): M11BasinGeometryBudgetStatus {
   return { ok, reason, bbox, polygonCount, ringCount, vertexCount, serializedBytes, sanitizedGeometry }
+}
+
+function selectedSegmentGeometryStatus(
+  ok: boolean,
+  reason: string | null,
+  coordinateCount: number,
+  serializedBytes: number,
+  sanitizedGeometry: components['schemas']['GeoJsonLineString'] | null,
+): M11SelectedSegmentGeometryBudgetStatus {
+  return { ok, reason, coordinateCount, serializedBytes, sanitizedGeometry }
 }
 
 function serializedByteLength(value: unknown): number {
@@ -1081,6 +1203,7 @@ function segmentRowFromFeature(
     alertById.get(versionedSegmentKey(props.basin_version_id, props.segment_id))
   const sourceSelection = createSourceScenarioSelection(query, alert ? [sourceFromQuery(query.source)] : [])
   const warningLevel = normalizeWarningLevel(alert?.warning_level) ?? 'unavailable'
+  const geometryStatus = getM11SelectedSegmentGeometryBudgetStatus(feature.geometry)
   return {
     riverSegmentId: props.river_segment_id,
     segmentId: props.segment_id,
@@ -1097,8 +1220,9 @@ function segmentRowFromFeature(
     source: sourceSelection.resolvedSource,
     cycleTime: query.cycle,
     validTime: normalizeIsoString(alert?.valid_time) ?? query.validTime,
-    hasGeometry: Boolean(feature.geometry),
-    unavailableReason: alert ? null : 'No flood-alert value is available for this segment/time.',
+    hasGeometry: Boolean(geometryStatus.sanitizedGeometry),
+    geometry: geometryStatus.sanitizedGeometry,
+    unavailableReason: geometryStatus.reason ?? (alert ? null : 'No flood-alert value is available for this segment/time.'),
   }
 }
 

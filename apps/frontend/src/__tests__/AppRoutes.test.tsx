@@ -1,6 +1,6 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
@@ -25,7 +25,26 @@ function success<T>(data: T) {
 }
 
 vi.mock('@/components/map/MapView', () => ({
-  MapView: () => <div aria-label="河网地图">mock map</div>,
+  MapView: ({
+    onBasinContextLoaded,
+    onSegmentSelect,
+  }: {
+    onBasinContextLoaded?: (context: { basinId: string; basinVersionId: string } | null) => void
+    onSegmentSelect?: (segment: ForecastSegmentInfo) => void
+  }) => {
+    useEffect(() => {
+      onBasinContextLoaded?.({ basinId: 'basin-demo', basinVersionId: 'bv-001' })
+    }, [onBasinContextLoaded])
+    return (
+      <button
+        type="button"
+        aria-label="河网地图"
+        onClick={() => onSegmentSelect?.({ segmentId: 'seg-010', basinVersionId: 'bv-001' })}
+      >
+        mock map
+      </button>
+    )
+  },
 }))
 
 vi.mock('@/api/client', () => ({
@@ -97,15 +116,21 @@ type MockForecastPanelProps = {
   segment: ForecastSegmentInfo
   loading: boolean
   error: string | null
+  contextNote?: string | null
+  onRetry?: () => void
 }
 
 vi.mock('@/components/forecast/ForecastPanel', () => ({
-  ForecastPanel: ({ segment, loading, error }: MockForecastPanelProps) => (
+  ForecastPanel: ({ segment, loading, error, contextNote, onRetry }: MockForecastPanelProps) => (
     <aside>
       mock forecast panel
       <div>{segment.segmentId}</div>
       <div>{segment.basinVersionId}</div>
       <div>{loading ? 'forecast loading' : 'forecast idle'}</div>
+      <button type="button" onClick={onRetry}>
+        mock retry forecast
+      </button>
+      {contextNote ? <div>{contextNote}</div> : null}
       {error ? <div>{error}</div> : null}
     </aside>
   ),
@@ -332,6 +357,28 @@ function basinSnapshot(
   dataKey = queryKey,
   currentQ: number | null = 12,
   comparisonAvailable = true,
+  segments = [
+    {
+      riverSegmentId: 'seg-009',
+      segmentId: 'seg-009',
+      displayName: 'Main Stem 009',
+      basinVersionId: 'bv-001',
+      streamOrder: 3,
+      lengthM: 1200,
+      currentQ,
+      qUnit: 'm3/s',
+      returnPeriod: 10,
+      warningLevel: 'warning' as const,
+      qualityFlag: 'ok' as const,
+      qualityNote: null,
+      source: 'GFS' as const,
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      validTime: '2026-05-18T06:00:00.000Z',
+      hasGeometry: true,
+      geometry: { type: 'LineString' as const, coordinates: [[101, 31], [102, 32]] },
+      unavailableReason: null,
+    },
+  ],
 ) {
   return {
     requestScope: {
@@ -377,7 +424,7 @@ function basinSnapshot(
       unavailableReason: null,
       partialErrors: [],
     },
-    segments: [],
+    segments,
     selectedSegment: currentQ === null
       ? null
       : {
@@ -403,7 +450,8 @@ function basinSnapshot(
           comparisonAvailable,
           lineageStatus: 'available' as const,
           lineageUnavailableReason: null,
-          handoffUrl: '/forecast?segmentId=seg-009&basinVersionId=bv-001',
+          handoffUrl: '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
+          geometry: { type: 'LineString' as const, coordinates: [[101, 31], [102, 32]] },
           freshness: m11LayerFreshness,
           unavailableReason: null,
         },
@@ -700,12 +748,16 @@ describe('App route state', () => {
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasins(
         m11Layers,
-        'source=gfs&basinVersionId=bv-sibling',
-        'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-sibling',
+        'source=gfs&basinVersionId=bv-sibling&segmentId=seg-sibling',
+        'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-sibling&segmentId=seg-sibling',
       ),
       loading: false,
     })
-    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basemap=satellite&basinVersionId=bv-sibling')
+    window.history.pushState(
+      {},
+      '',
+      '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basemap=satellite&basinVersionId=bv-sibling&segmentId=seg-sibling',
+    )
 
     render(<App />)
 
@@ -718,6 +770,7 @@ describe('App route state', () => {
       'href',
       '/basins/basin-demo?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basemap=satellite&basinVersionId=bv-001',
     )
+    expect(screen.getByRole('link', { name: /进入分析/ }).getAttribute('href')).not.toContain('segmentId=seg-sibling')
     expect(screen.getByRole('link', { name: /查看详情/ })).toHaveAttribute(
       'href',
       '/monitoring?basinId=basin-demo&basinVersionId=bv-001',
@@ -1034,7 +1087,27 @@ describe('App route state', () => {
 
     expect((await screen.findAllByLabelText('河网地图')).length).toBeGreaterThan(0)
     expect(screen.getByText('请在地图上选择河段查看预报')).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: '进入流域分析' })).toHaveAttribute(
+      'href',
+      '/basins/basin-demo?basinVersionId=bv-001',
+    )
     expect(screen.getByRole('link', { name: /水文预报/ })).toHaveClass('border-accent')
+  })
+
+  it('clears stale forecast segment context when basin handoff changes basin version', async () => {
+    window.history.pushState(
+      {},
+      '',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-route&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange&q=main',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByText('mock forecast panel')).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: '进入流域分析' })).toHaveAttribute(
+      'href',
+      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&warningLevel=orange&q=main',
+    )
   })
 
   it('hydrates forecast segment selection and loads forecast data from direct handoff query params', async () => {
@@ -1048,13 +1121,22 @@ describe('App route state', () => {
       }),
       error: undefined,
     } as never)
-    window.history.pushState({}, '', '/forecast?segmentId=seg-009&basinVersionId=bv-001')
+    window.history.pushState(
+      {},
+      '',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange',
+    )
 
     render(<App />)
 
     expect(await screen.findByText('mock forecast panel')).toBeInTheDocument()
     expect(screen.getByText('seg-009')).toBeInTheDocument()
     expect(screen.getByText('bv-001')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '进入流域分析' })).toHaveAttribute(
+      'href',
+      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange',
+    )
+    expect(screen.getByText(/已保留 validTime=2026-05-18T06:00:00.000Z/)).toBeInTheDocument()
     await waitFor(() =>
       expect(client.GET).toHaveBeenCalledWith(
         '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
@@ -1065,9 +1147,9 @@ describe('App route state', () => {
               segment_id: 'seg-009',
             },
             query: {
-              issue_time: 'latest',
+              issue_time: '2026-05-18T00:00:00.000Z',
               variables: 'q_down',
-              scenarios: 'GFS',
+              scenarios: 'IFS',
               include_analysis: true,
             },
           },
@@ -1084,6 +1166,161 @@ describe('App route state', () => {
     )
   })
 
+  it.each([
+    ['ifs', 'IFS', ['IFS']],
+    ['compare', 'GFS,IFS', ['GFS', 'IFS']],
+  ] as const)('keeps %s forecast route context across retry and map selection', async (source, scenarios, selectedScenarios) => {
+    const user = userEvent.setup()
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const options = args[1] as { params?: { path?: Record<string, unknown>; query?: Record<string, unknown> } }
+      return {
+        data: success({
+          segment_id: options.params?.path?.segment_id ?? 'seg-009',
+          issue_time: '2026-05-18T00:00:00Z',
+          unit: 'm3/s',
+          series: [],
+          frequency_thresholds: null,
+        }),
+        error: undefined,
+      } as never
+    })
+    window.history.pushState(
+      {},
+      '',
+      `/forecast?segmentId=seg-009&basinVersionId=bv-001&source=${source}&cycle=2026-05-18T00:00:00Z`,
+    )
+
+    render(<App />)
+
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        selectedScenarios,
+        forecastData: { segmentId: 'seg-009' },
+      }),
+    )
+    await user.click(screen.getByRole('button', { name: 'mock retry forecast' }))
+    await user.click(screen.getByRole('button', { name: '河网地图' }))
+
+    await waitFor(() => expect(useForecastStore.getState().selectedSegment?.segmentId).toBe('seg-010'))
+    const forecastCalls = vi.mocked(client.GET).mock.calls.filter(([path]) =>
+      String(path).endsWith('/forecast-series'),
+    )
+    expect(forecastCalls).toHaveLength(3)
+    expect(
+      forecastCalls.map(([, options]) => {
+        const params = (options as { params?: { path?: Record<string, unknown>; query?: Record<string, unknown> } }).params
+        return {
+          segmentId: params?.path?.segment_id,
+          issueTime: params?.query?.issue_time,
+          scenarios: params?.query?.scenarios,
+        }
+      }),
+    ).toEqual([
+      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+      { segmentId: 'seg-010', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+    ])
+  })
+
+  it('re-requests forecast data when the same segment route source and cycle change during loading', async () => {
+    let resolveFirstRequest: (() => void) | undefined
+    const forecastCalls: Array<{
+      segmentId: unknown
+      issueTime: unknown
+      scenarios: unknown
+    }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const options = args[1] as { params?: { path?: Record<string, unknown>; query?: Record<string, unknown> } }
+      const call = {
+        segmentId: options.params?.path?.segment_id,
+        issueTime: options.params?.query?.issue_time,
+        scenarios: options.params?.query?.scenarios,
+      }
+      forecastCalls.push(call)
+
+      if (forecastCalls.length === 1) {
+        await new Promise<void>((resolve) => {
+          resolveFirstRequest = resolve
+        })
+        return {
+          data: success({
+            segment_id: 'seg-009',
+            issue_time: '2026-05-18T00:00:00Z',
+            unit: 'm3/s',
+            series: [
+              {
+                scenario_id: 'forecast_ifs_deterministic',
+                source: 'IFS',
+                segment_role: 'future_7_days',
+                cycle_time: '2026-05-18T00:00:00.000Z',
+                points: [['2026-05-18T06:00:00Z', 1]],
+              },
+            ],
+            frequency_thresholds: null,
+          }),
+          error: undefined,
+        } as never
+      }
+
+      return {
+        data: success({
+          segment_id: 'seg-009',
+          issue_time: '2026-05-19T00:00:00Z',
+          unit: 'm3/s',
+          series: [
+            {
+              scenario_id: 'forecast_gfs_deterministic',
+              source: 'GFS',
+              segment_role: 'future_7_days',
+              cycle_time: '2026-05-19T00:00:00.000Z',
+              points: [['2026-05-19T06:00:00Z', 2]],
+            },
+          ],
+          frequency_thresholds: null,
+        }),
+        error: undefined,
+      } as never
+    })
+
+    window.history.pushState(
+      {},
+      '',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001&source=ifs&cycle=2026-05-18T00:00:00Z',
+    )
+
+    render(<App />)
+
+    await waitFor(() => expect(forecastCalls).toHaveLength(1))
+    window.history.pushState(
+      {},
+      '',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001&source=gfs&cycle=2026-05-19T00:00:00Z',
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+
+    await waitFor(() => expect(forecastCalls).toHaveLength(2))
+    resolveFirstRequest?.()
+
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        selectedScenarios: ['GFS'],
+        activeRequestContext: { source: 'gfs', issueTime: '2026-05-19T00:00:00.000Z' },
+        forecastData: {
+          segmentId: 'seg-009',
+          issueTime: '2026-05-19T00:00:00Z',
+          sourceAttribution: 'GFS',
+          cycleAttribution: 'GFS: 05-19 00Z',
+        },
+        loading: false,
+      }),
+    )
+    expect(forecastCalls).toEqual([
+      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios: 'IFS' },
+      { segmentId: 'seg-009', issueTime: '2026-05-19T00:00:00.000Z', scenarios: 'GFS' },
+    ])
+  })
+
   it('routes basin deep links and restores normalized query state once', async () => {
     window.history.pushState(
       {},
@@ -1095,8 +1332,8 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
-    expect(screen.getByText('basin-demo')).toBeInTheDocument()
-    expect(screen.getByText('seg-009')).toBeInTheDocument()
+    expect(screen.getAllByText('basin-demo').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('seg-009').length).toBeGreaterThan(0)
     expect(screen.getAllByText('orange').length).toBeGreaterThan(0)
     await waitFor(() =>
       expect(window.location.search).toBe(
@@ -1109,6 +1346,78 @@ describe('App route state', () => {
       ),
     )
     expect(normalizedRouteReplacements).toHaveLength(1)
+    replaceState.mockRestore()
+  })
+
+  it('restores full basin deep links with segment discovery filters and selected map hook', async () => {
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...basinSnapshot(
+          'basin-demo',
+          m11Layers,
+          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
+          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
+          456,
+          true,
+        ),
+        requestScope: {
+          kind: 'basin-detail',
+          queryKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
+          dataKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
+          basinId: 'basin-demo',
+          source: 'ifs',
+          layer: 'flood-return-period',
+          cycle: '2026-05-18T00:00:00.000Z',
+          validTime: '2026-05-18T06:00:00.000Z',
+          basemap: 'satellite',
+          basinVersionId: 'bv-001',
+          segmentId: 'seg-009',
+          warningLevel: null,
+          q: null,
+        },
+      },
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=flood-return-period&basemap=satellite&warningLevel=orange&q=main&basinVersionId=bv-001&segmentId=seg-009',
+    )
+    const replaceState = vi.spyOn(window.history, 'replaceState')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadBasinDetail).toHaveBeenCalledWith(
+        'basin-demo',
+        expect.objectContaining({
+          source: 'ifs',
+          cycle: '2026-05-18T00:00:00.000Z',
+          validTime: '2026-05-18T06:00:00.000Z',
+          layer: 'flood-return-period',
+          basemap: 'vector',
+          warningLevel: null,
+          q: null,
+          basinVersionId: 'bv-001',
+          segmentId: 'seg-009',
+        }),
+      ),
+    )
+    expect(screen.getByLabelText('河段发现')).toHaveTextContent('Demo Basin')
+    expect(screen.getByDisplayValue('main')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('橙色')).toBeInTheDocument()
+    expect(screen.getByRole('listitem', { current: true })).toHaveTextContent('Main Stem 009')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'satellite')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-009')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-segment-highlight-hook', 'selected-layer')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
+    expect(screen.getAllByTestId('mock-m11-map-layer').map((layer) => layer.getAttribute('data-layer-id'))).toContain('m11-selected-segment-line')
+    const normalizedReplacements = replaceState.mock.calls.filter(([, , url]) => String(url).includes('/basins/basin-demo?'))
+    expect(normalizedReplacements).toHaveLength(1)
     replaceState.mockRestore()
   })
 
@@ -1181,6 +1490,7 @@ describe('App route state', () => {
           lineageStatus: 'available',
           lineageUnavailableReason: null,
           handoffUrl: '/forecast',
+          geometry: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
           freshness: m11LayerFreshness,
           unavailableReason: null,
         },
@@ -1203,6 +1513,121 @@ describe('App route state', () => {
     await waitFor(() =>
       expect(overviewAsync).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ layer: 'flood-return-period' })),
     )
+  })
+
+  it('filters basin segment rows and syncs row selection into the URL', async () => {
+    const user = userEvent.setup()
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot(
+        'basin-demo',
+        m11Layers,
+        'source=gfs&basinVersionId=bv-001',
+        'source=gfs&basinVersionId=bv-001&segmentId=seg-009',
+        null,
+        true,
+        [
+          {
+            riverSegmentId: 'seg-001',
+            segmentId: 'seg-001',
+            displayName: 'North Branch 001',
+            basinVersionId: 'bv-001',
+            streamOrder: 1,
+            lengthM: 800,
+            currentQ: 88,
+            qUnit: 'm3/s',
+            returnPeriod: 2,
+            warningLevel: 'watch',
+            qualityFlag: 'ok',
+            qualityNote: null,
+            source: 'GFS',
+            cycleTime: null,
+            validTime: null,
+            hasGeometry: true,
+            geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+            unavailableReason: null,
+          },
+          {
+            riverSegmentId: 'seg-009',
+            segmentId: 'seg-009',
+            displayName: 'Main Stem 009',
+            basinVersionId: 'bv-001',
+            streamOrder: 3,
+            lengthM: 1200,
+            currentQ: 456,
+            qUnit: 'm3/s',
+            returnPeriod: 10,
+            warningLevel: 'warning',
+            qualityFlag: 'ok',
+            qualityNote: null,
+            source: 'GFS',
+            cycleTime: null,
+            validTime: null,
+            hasGeometry: true,
+            geometry: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+            unavailableReason: null,
+          },
+        ],
+      ),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByText('North Branch 001')).toBeInTheDocument()
+    expect(screen.getByText('Main Stem 009')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByPlaceholderText('搜索河段名称或 ID'), { target: { value: 'main' } })
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('main')
+    expect(screen.queryByText('North Branch 001')).not.toBeInTheDocument()
+    expect(screen.getByText('Main Stem 009')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('预警筛选'), { target: { value: 'orange' } })
+    expect(new URLSearchParams(window.location.search).get('warningLevel')).toBe('orange')
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByPlaceholderText('搜索河段名称或 ID'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('预警筛选'), { target: { value: '' } })
+    await user.click(screen.getByText('North Branch 001').closest('button') as HTMLButtonElement)
+    expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-001')
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
+  })
+
+  it.each([
+    ['warning', '警戒'],
+    ['major', '高风险'],
+    ['severe', '严重'],
+    ['extreme', '极端'],
+    ['orange', '橙色'],
+    ['red', '红色'],
+  ] as const)('renders an honest basin warning filter option for %s route values', async (warningLevel, label) => {
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...basinSnapshot(
+          'basin-demo',
+          m11Layers,
+          `source=gfs&basinVersionId=bv-001&segmentId=seg-009&warningLevel=${warningLevel}`,
+        ),
+        requestScope: {
+          ...basinSnapshot('basin-demo', m11Layers).requestScope,
+          queryKey: 'source=gfs&basinVersionId=bv-001&segmentId=seg-009',
+          dataKey: 'source=gfs&basinVersionId=bv-001&segmentId=seg-009',
+          warningLevel: null,
+        },
+      },
+      basinLoading: false,
+    })
+    window.history.pushState({}, '', `/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&warningLevel=${warningLevel}`)
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByLabelText('预警筛选')).toHaveValue(warningLevel)
+    expect(screen.getByDisplayValue(label)).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('全部预警')).not.toBeInTheDocument()
   })
 
   it('updates basin basemap URL and map style without reloading basin data', async () => {
@@ -1247,10 +1672,62 @@ describe('App route state', () => {
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '查看详情' })).toHaveAttribute(
       'href',
-      '/forecast?segmentId=seg-009&basinVersionId=bv-001',
+      '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
     )
     expect(screen.getByRole('button', { name: '对比预报' })).toBeDisabled()
     expect(screen.queryByRole('link', { name: '对比预报' })).not.toBeInTheDocument()
+  })
+
+  it('renders selected basin segment handoffs with the resolved concrete best source and cycle', async () => {
+    const resolvedCycle = '2026-05-18T00:00:00.000Z'
+    const bestBasinQueryKey = `cycle=${encodeURIComponent(resolvedCycle)}&basinVersionId=bv-001&segmentId=seg-009`
+    const bestBasinDataKey = `cycle=${encodeURIComponent(resolvedCycle)}&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009`
+    const ifsSelectedSegment = {
+      ...basinSnapshot('basin-demo', m11Layers).selectedSegment!,
+      sourceSelection: {
+        ...m11SourceSelection,
+        requestedSource: 'best' as const,
+        resolvedSource: 'IFS' as const,
+        scenarioIds: ['forecast_ifs_deterministic'],
+        cycleTime: resolvedCycle,
+        comparisonAvailable: true,
+      },
+      trendPoints: [
+        {
+          validTime: '2026-05-18T06:00:00.000Z',
+          value: 456,
+          source: 'IFS' as const,
+          scenarioId: 'forecast_ifs_deterministic',
+          role: 'future_7_days',
+          isAnalysis: false,
+        },
+      ],
+      handoffUrl:
+        '/forecast?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
+    }
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...basinSnapshot('basin-demo', m11Layers, bestBasinQueryKey, bestBasinDataKey),
+        selectedSegment: ifsSelectedSegment,
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=best&cycle=2026-05-18T00:00:00Z&basinVersionId=bv-001&segmentId=seg-009',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    for (const linkName of ['查看详情', '对比预报']) {
+      const href = screen.getByRole('link', { name: linkName }).getAttribute('href')
+      expect(href).toContain('/forecast?source=ifs&')
+      expect(href).toContain('cycle=2026-05-18T00%3A00%3A00.000Z')
+      expect(href).not.toContain('source=best')
+    }
   })
 
   it('enables selected basin segment comparison handoff when comparison data is available', async () => {
@@ -1266,7 +1743,7 @@ describe('App route state', () => {
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '对比预报' })).toHaveAttribute(
       'href',
-      '/forecast?segmentId=seg-009&basinVersionId=bv-001',
+      '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
     )
   })
 
@@ -1359,6 +1836,52 @@ describe('App route state', () => {
     await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
     await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))
     expect(screen.getByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+  })
+
+  it('uses fallback extent for missing bbox without blocking segment discovery', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey),
+        detail: {
+          ...basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey).detail,
+          bbox: null,
+          boundary: null,
+        },
+      },
+      basinLoading: false,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByLabelText('缺少流域 bbox')).toHaveTextContent('73,18,135,54')
+    expect(screen.getByText('Main Stem 009')).toBeInTheDocument()
+    await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[73, 18], [135, 54]], { padding: 36, duration: 450 }]]))
+  })
+
+  it('shows no-segment empty state and disables segment filters', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...basinSnapshot('basin-demo', m11Layers, 'basinVersionId=bv-001', 'basinVersionId=bv-001', null, true, []),
+        detail: {
+          ...basinSnapshot('basin-demo', m11Layers).detail,
+          segmentCount: 0,
+          unavailableReason: 'Selected basin version has no river segment data.',
+        },
+        segments: [],
+        selectedSegment: null,
+      },
+      basinLoading: false,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByText('该流域暂无已发布的预报数据')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('搜索河段名称或 ID')).toBeDisabled()
+    expect(screen.getByLabelText('预警筛选')).toBeDisabled()
   })
 
   it('renders a scoped not-found state for invalid basin ids with overview recovery', async () => {
@@ -1470,9 +1993,11 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
-    expect(screen.getByText('未找到河段 missing-seg')).toBeInTheDocument()
+    expect(screen.getAllByText('未找到河段 missing-seg').length).toBeGreaterThan(0)
     expect(screen.getByText('当前流域版本中没有匹配的河段数据。')).toBeInTheDocument()
     expect(screen.queryByText('已恢复 missing-seg')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', '')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'idle')
   })
 
   it('normalizes invalid overview query values without repeated URL updates', async () => {
@@ -1560,6 +2085,245 @@ describe('App route state', () => {
       validTime: '2026-05-12T03:00:00.000Z',
     })
     expect(useFloodAlertStore.getState().selectedAlertLevel).toBe('high_risk')
+  })
+
+  it('does not leak forecast route source and cycle into flood-alert segment detail forecast requests', async () => {
+    const user = userEvent.setup()
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    const fetchTimeline = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        segment_id: 'seg-1',
+        issue_time: '2026-05-12T00:00:00Z',
+        unit: 'm3/s',
+        series: [
+          {
+            scenario_id: 'forecast_gfs_deterministic',
+            source: 'GFS',
+            segment_role: 'future_7_days',
+            cycle_time: '2026-05-12T00:00:00.000Z',
+            points: [['2026-05-12T03:00:00Z', 1234]],
+          },
+        ],
+        frequency_thresholds: null,
+      }),
+      error: undefined,
+    } as never)
+    useForecastStore.setState({
+      activeRequestContext: { source: 'ifs', issueTime: '2026-05-18T00:00:00.000Z' },
+      selectedScenarios: ['IFS'],
+    })
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-flood-1',
+      latestRun: {
+        run_id: 'run-flood-1',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'basin-v1',
+        source_id: 'gfs',
+        cycle_time: '2026-05-12T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-12T00:00:00Z',
+        end_time: '2026-05-12T03:00:00Z',
+        created_at: '2026-05-12T00:00:00Z',
+        updated_at: '2026-05-12T04:00:00Z',
+      },
+      validTimes: ['2026-05-12T03:00:00.000Z'],
+      summaryData: {
+        runId: 'run-flood-1',
+        levels: [{ level: 'warning', count: 1, color: '#f59e0b' }],
+        totalSegments: 1,
+        usableCurves: 1,
+        unavailableCount: 0,
+      },
+      rankingData: {
+        items: [
+          {
+            rank: 1,
+            riverSegmentId: 'seg-1',
+            segmentId: 'seg-1',
+            segmentName: 'Flood Segment 1',
+            basinVersionId: 'basin-v1',
+            qValue: 1234,
+            qUnit: 'm3/s',
+            returnPeriod: 20,
+            warningLevel: 'warning',
+            validTime: '2026-05-12T03:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-flood-1',
+        segmentId: 'seg-1',
+        riverSegmentId: 'seg-1',
+        timesteps: [],
+        peak: null,
+        frequencyThresholds: null,
+        qualityNote: null,
+      },
+      fetchLatestFrequencyDoneRun,
+      fetchTimeline,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/flood-alerts',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    await user.click(screen.getByRole('row', { name: /Flood Segment 1/ }))
+
+    await waitFor(() =>
+      expect(client.GET).toHaveBeenCalledWith(
+        '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
+        expect.objectContaining({
+          params: expect.objectContaining({
+            path: { basin_version_id: 'basin-v1', segment_id: 'seg-1' },
+            query: expect.objectContaining({
+              issue_time: '2026-05-12T00:00:00.000Z',
+              scenarios: 'GFS',
+              include_analysis: true,
+            }),
+          }),
+        }),
+      ),
+    )
+    const query = vi.mocked(client.GET).mock.calls.find(([path]) => String(path).endsWith('/forecast-series'))?.[1]?.params
+      ?.query as Record<string, unknown>
+    expect(query.issue_time).not.toBe('2026-05-18T00:00:00.000Z')
+    expect(query.issue_time).not.toBe('latest')
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        forecastData: {
+          segmentId: 'seg-1',
+          issueTime: '2026-05-12T00:00:00Z',
+          sourceAttribution: 'GFS',
+        },
+        loading: false,
+      }),
+    )
+    expect(screen.getByTestId('mock-echarts-option')).toHaveTextContent('GFS 预报')
+  })
+
+  it('binds flood-alert detail forecast requests to an explicitly routed older flood run cycle', async () => {
+    const user = userEvent.setup()
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    const fetchTimeline = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        segment_id: 'seg-older',
+        issue_time: '2026-05-12T00:00:00Z',
+        unit: 'm3/s',
+        series: [
+          {
+            scenario_id: 'forecast_gfs_deterministic',
+            source: 'GFS',
+            segment_role: 'future_7_days',
+            cycle_time: '2026-05-12T00:00:00.000Z',
+            points: [['2026-05-12T03:00:00Z', 456]],
+          },
+        ],
+        frequency_thresholds: null,
+      }),
+      error: undefined,
+    } as never)
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-older-gfs',
+      latestRun: {
+        run_id: 'run-older-gfs',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'basin-v1',
+        source_id: 'gfs',
+        cycle_time: '2026-05-12T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-12T00:00:00Z',
+        end_time: '2026-05-12T03:00:00Z',
+        created_at: '2026-05-12T00:00:00Z',
+        updated_at: '2026-05-12T04:00:00Z',
+      },
+      validTimes: ['2026-05-12T03:00:00.000Z'],
+      summaryData: {
+        runId: 'run-older-gfs',
+        levels: [{ level: 'warning', count: 1, color: '#f59e0b' }],
+        totalSegments: 1,
+        usableCurves: 1,
+        unavailableCount: 0,
+      },
+      rankingData: {
+        items: [
+          {
+            rank: 1,
+            riverSegmentId: 'seg-older',
+            segmentId: 'seg-older',
+            segmentName: 'Older Flood Segment',
+            basinVersionId: 'basin-v1',
+            qValue: 456,
+            qUnit: 'm3/s',
+            returnPeriod: 10,
+            warningLevel: 'watch',
+            validTime: '2026-05-12T03:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-older-gfs',
+        segmentId: 'seg-older',
+        riverSegmentId: 'seg-older',
+        timesteps: [],
+        peak: null,
+        frequencyThresholds: null,
+        qualityNote: null,
+      },
+      fetchLatestFrequencyDoneRun,
+      fetchTimeline,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/flood-alerts?source=gfs&cycle=2026-05-12T00:00:00Z&validTime=2026-05-12T03:00:00Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    expect(fetchLatestFrequencyDoneRun).toHaveBeenCalledWith({
+      source: 'gfs',
+      cycleTime: '2026-05-12T00:00:00.000Z',
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+    await user.click(screen.getByRole('row', { name: /Older Flood Segment/ }))
+
+    await waitFor(() =>
+      expect(client.GET).toHaveBeenCalledWith(
+        '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
+        expect.objectContaining({
+          params: expect.objectContaining({
+            path: { basin_version_id: 'basin-v1', segment_id: 'seg-older' },
+            query: expect.objectContaining({
+              issue_time: '2026-05-12T00:00:00.000Z',
+              scenarios: 'GFS',
+            }),
+          }),
+        }),
+      ),
+    )
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        forecastData: { segmentId: 'seg-older', sourceAttribution: 'GFS' },
+        loading: false,
+      }),
+    )
   })
 
   it.each([

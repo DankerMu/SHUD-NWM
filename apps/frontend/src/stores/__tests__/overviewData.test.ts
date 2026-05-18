@@ -4,7 +4,7 @@ import { client } from '@/api/client'
 import { clearOverviewDataCache, useOverviewDataStore } from '@/stores/overviewData'
 import type { M11QueryState } from '@/lib/m11/queryState'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
-import { normalizeLayerStates } from '@/lib/m11/overviewDataContracts'
+import { filterBasinSegmentRows, normalizeLayerStates } from '@/lib/m11/overviewDataContracts'
 
 vi.mock('@/api/client', () => ({
   client: {
@@ -772,6 +772,9 @@ describe('useOverviewDataStore', () => {
       riverSegmentId: 'seg-123',
       lineageStatus: 'failed',
       lineageUnavailableReason: '河段追溯暂不可用',
+      handoffUrl:
+        '/forecast?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&segmentId=seg-123',
+      geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
     })
     expect(calls.find((call) => call.path === '/api/v1/models')?.query).toMatchObject({
       basin_version_id: 'yangtze_v2026_01',
@@ -789,6 +792,88 @@ describe('useOverviewDataStore', () => {
       valid_time: '2026-05-18T06:00:00Z',
       variable: 'q_down',
     })
+  })
+
+  it('treats basin search and warning filters as local list state outside the basin load identity', async () => {
+    const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []
+    const multiFeatureCollection = {
+      ...featureCollection,
+      total: 2,
+      feature_total: 2,
+      features: [
+        featureCollection.features[0],
+        {
+          ...featureCollection.features[0],
+          properties: {
+            ...featureCollection.features[0].properties,
+            segment_id: 'seg-456',
+            river_segment_id: 'seg-456',
+            name: 'North Branch 456',
+          },
+        },
+      ],
+    }
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query, pathParams: options?.params?.path })
+
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success(multiFeatureCollection) as never
+      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return success({
+          river_segment_id: options?.params?.path?.segment_id,
+          river_network_version_id: 'yangtze_rivnet_v12',
+          segment_order: 1,
+          downstream_segment_id: null,
+          length_m: 1000,
+          geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+          properties_json: {},
+          created_at: '2026-05-01T00:00:00Z',
+        }) as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        return success({
+          river_segment_id: options?.params?.path?.segment_id,
+          issue_time: '2026-05-18T00:00:00Z',
+          variable: 'q_down',
+          unit: 'm3/s',
+          frequency_thresholds: null,
+          segments: [],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/timeline') {
+        return success({
+          run_id: 'run-gfs-1',
+          segment_id: options?.params?.query?.segment_id,
+          river_segment_id: options?.params?.query?.segment_id,
+          timesteps: [],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }) as never
+      }
+      if (path === '/api/v1/lineage/river-point') return success({ target_type: 'river_point', target_id: 'seg-123', nodes: [], edges: [] }) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const filteredQuery = { ...query, warningLevel: 'orange' as const, q: 'north' }
+    const firstSnapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', query)
+    const secondSnapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', filteredQuery)
+
+    expect(secondSnapshot.requestScope.dataKey).toBe(firstSnapshot.requestScope.dataKey)
+    expect(secondSnapshot.requestScope).toMatchObject({ warningLevel: null, q: null })
+    expect(calls.filter((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments')).toHaveLength(1)
+    expect(calls.filter((call) => call.path === '/api/v1/runs')).toHaveLength(1)
+    expect(calls.find((call) => call.path === '/api/v1/flood-alerts/ranking')?.query).not.toHaveProperty('warningLevel')
   })
 
   it('does not mark basin detail not-found when the basin list lookup fails', async () => {
@@ -1521,6 +1606,8 @@ describe('useOverviewDataStore', () => {
       runId: ifsRun.run_id,
       source: 'IFS',
     })
+    expect(snapshot.selectedSegment?.handoffUrl).toContain('/forecast?source=ifs&')
+    expect(snapshot.selectedSegment?.handoffUrl).not.toContain('source=best')
     expect(snapshot.layers.find((layer) => layer.layerId === 'flood-return-period')?.freshness).toMatchObject({
       runId: ifsRun.run_id,
       source: 'IFS',
@@ -1747,7 +1834,8 @@ describe('useOverviewDataStore', () => {
     expect(snapshot.selectedSegment).toMatchObject({
       riverSegmentId: 'river-seg-123',
       segmentId: 'display-seg-123',
-      handoffUrl: '/forecast?segmentId=river-seg-123&basinVersionId=yangtze_v2026_01',
+      handoffUrl:
+        '/forecast?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&segmentId=river-seg-123',
     })
     expect(
       calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')?.pathParams,
@@ -1839,8 +1927,8 @@ describe('useOverviewDataStore', () => {
 
     const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', filteredQuery)
 
-    expect(snapshot.segments).toHaveLength(1)
-    expect(snapshot.segments[0].riverSegmentId).toBe('seg-123')
+    expect(snapshot.segments).toHaveLength(2)
+    expect(filterBasinSegmentRows(snapshot.segments, filteredQuery)).toMatchObject([{ riverSegmentId: 'seg-123' }])
     expect(snapshot.selectedSegment).toMatchObject({
       riverSegmentId: 'filtered-river',
       segmentId: 'filtered-display',

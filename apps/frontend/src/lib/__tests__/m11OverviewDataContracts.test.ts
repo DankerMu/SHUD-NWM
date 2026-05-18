@@ -4,8 +4,11 @@ import type { components } from '@/api/types'
 import {
   createSourceScenarioSelection,
   decideAggregationEndpoint,
+  filterBasinSegmentRows,
   getM11BasinGeometryBudgetStatus,
+  getM11SelectedSegmentGeometryBudgetStatus,
   m11BasinGeometryBudget,
+  m11SelectedSegmentGeometryBudget,
   normalizeBasinDetail,
   normalizeBasinSegmentRows,
   normalizeLayerStates,
@@ -379,7 +382,7 @@ describe('M11 overview data contracts', () => {
     })
   })
 
-  it('normalizes basin detail and segment rows with query-driven filters and unavailable rows', () => {
+  it('normalizes basin detail and segment rows with local filters and unavailable rows', () => {
     const detail = normalizeBasinDetail({
       query,
       basin,
@@ -389,11 +392,14 @@ describe('M11 overview data contracts', () => {
       rankingItems: [rankingItem],
       latestRun: run,
     })
-    const rows = normalizeBasinSegmentRows({
-      query: { ...query, warningLevel: 'orange', q: 'Yichang' },
-      featureCollection,
-      rankingItems: [rankingItem],
-    })
+    const rows = filterBasinSegmentRows(
+      normalizeBasinSegmentRows({
+        query: { ...query, warningLevel: 'orange', q: 'Yichang' },
+        featureCollection,
+        rankingItems: [rankingItem],
+      }),
+      { warningLevel: 'orange', q: 'Yichang' },
+    )
     const allRows = normalizeBasinSegmentRows({
       query: { ...query, warningLevel: null, q: null },
       featureCollection,
@@ -422,6 +428,39 @@ describe('M11 overview data contracts', () => {
       qualityFlag: 'unavailable',
       unavailableReason: 'No flood-alert value is available for this segment/time.',
     })
+  })
+
+  it.each([
+    ['orange', 'warning'],
+    ['warning', 'warning'],
+    ['major', 'high_risk'],
+    ['red', 'severe'],
+    ['severe', 'severe'],
+    ['extreme', 'extreme'],
+  ] as const)('filters %s warning query values with normalized row semantics', (warningLevel, expectedLevel) => {
+    const rows = filterBasinSegmentRows(
+      normalizeBasinSegmentRows({
+        query: { ...query, warningLevel, q: null },
+        featureCollection: {
+          ...featureCollection,
+          features: [
+            featureCollection.features[0],
+            {
+              ...featureCollection.features[1],
+              properties: {
+                ...featureCollection.features[1].properties,
+                segment_id: `seg-${expectedLevel}`,
+                river_segment_id: `river-${expectedLevel}`,
+              },
+            },
+          ],
+        },
+        rankingItems: [{ ...rankingItem, warning_level: expectedLevel === 'high_risk' ? 'major' : expectedLevel }],
+      }),
+      { warningLevel, q: null },
+    )
+
+    expect(rows.map((row) => row.warningLevel)).toEqual([expectedLevel])
   })
 
   it('sanitizes accepted basin geometry before retention', () => {
@@ -586,7 +625,9 @@ describe('M11 overview data contracts', () => {
       warningLevel: 'warning',
       comparisonAvailable: true,
       lineageStatus: 'available',
-      handoffUrl: '/forecast?segmentId=yangtze_rivnet_v12_riv_000123&basinVersionId=yangtze_v2026_01',
+      handoffUrl:
+        '/forecast?source=compare&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&segmentId=yangtze_rivnet_v12_riv_000123',
+      geometry: featureCollection.features[0].geometry,
     })
     expect(detail.sourceSelection).toMatchObject({
       requestedSource: 'compare',
@@ -594,6 +635,90 @@ describe('M11 overview data contracts', () => {
       comparisonAvailable: true,
     })
     expect(detail.trendPoints.map((point) => point.source)).toEqual(['GFS', 'GFS', 'IFS'])
+  })
+
+  it('sanitizes malformed and oversized selected segment LineString geometry before detail storage', () => {
+    const malformed = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'LineString',
+      coordinates: [[100, 30]],
+    })
+    const tooManyCoordinates = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'LineString',
+      coordinates: Array.from({ length: m11SelectedSegmentGeometryBudget.maxCoordinates + 1 }, (_, index) => [
+        100 + index / 100_000,
+        30,
+      ]),
+    })
+    const tooManyDimensions = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'LineString',
+      coordinates: [
+        [100, 30],
+        [101, 31, 1, 2],
+      ],
+    })
+
+    expect(malformed).toMatchObject({
+      ok: false,
+      reason: 'Selected segment geometry requires at least two coordinates.',
+      sanitizedGeometry: null,
+    })
+    expect(tooManyCoordinates).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('exceeds client rendering budget'),
+      sanitizedGeometry: null,
+    })
+    expect(tooManyDimensions).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('coordinate dimensions exceed'),
+      sanitizedGeometry: null,
+    })
+  })
+
+  it('keeps selected segment detail usable while omitting invalid selected segment geometry', () => {
+    const detail = normalizeSelectedSegmentDetail({
+      query,
+      basin,
+      basinVersionId: 'yangtze_v2026_01',
+      segmentId: 'yangtze_rivnet_v12_riv_000123',
+      segment: {
+        ...segment,
+        geom: { type: 'LineString', coordinates: [[Number.NaN, 30], [101, 31]] },
+      },
+      feature: featureCollection.features[0],
+      model,
+      floodAlert: rankingItem,
+    })
+
+    expect(detail).toMatchObject({
+      riverSegmentId: 'yangtze_rivnet_v12_riv_000123',
+      displayName: 'Yichang mainstem',
+      currentQ: 5242,
+      geometry: null,
+      unavailableReason: 'Selected segment geometry is malformed.',
+    })
+  })
+
+  it('sanitizes basin segment row geometry from river feature collections', () => {
+    const rows = normalizeBasinSegmentRows({
+      query: { ...query, warningLevel: null, q: null },
+      featureCollection: {
+        ...featureCollection,
+        features: [
+          {
+            ...featureCollection.features[0],
+            geometry: { type: 'LineString', coordinates: [[100, 30], ['101' as unknown as number, 31]] },
+          },
+        ],
+      },
+      rankingItems: [rankingItem],
+    })
+
+    expect(rows[0]).toMatchObject({
+      riverSegmentId: 'yangtze_rivnet_v12_riv_000123',
+      hasGeometry: false,
+      geometry: null,
+      unavailableReason: 'Selected segment geometry is malformed.',
+    })
   })
 
   it('exposes unavailable source/scenario and failed lineage instead of fabricating values', () => {
@@ -670,6 +795,8 @@ describe('M11 overview data contracts', () => {
       runId: 'fcst_ifs_2026051800_yangtze_shud_v12',
       source: 'IFS',
     })
+    expect(detail.handoffUrl).toContain('/forecast?source=ifs&')
+    expect(detail.handoffUrl).not.toContain('source=best')
   })
 
   it('uses all relevant runs for overview compare availability', () => {

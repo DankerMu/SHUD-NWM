@@ -1,7 +1,8 @@
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronRight, Clock, ListFilter, MapPinned, PanelLeftClose, PanelRightClose, Search } from 'lucide-react'
+import { ChevronRight, Clock, MapPinned, PanelLeftClose, PanelRightClose } from 'lucide-react'
 
+import type { components } from '@/api/types'
 import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryPatch, M11QueryState } from '@/lib/m11/queryState'
 import { serializeM11QueryState } from '@/lib/m11/queryState'
@@ -22,6 +23,8 @@ interface M11LayoutProps {
   layers?: LayerState[]
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
+  selectedSegmentId?: string | null
+  selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   sourceSelection?: SourceScenarioSelectionState | null
   derivedTimeline?: M11TimelineDerivedTimes | null
   fitTo?: M11MapCameraFit | null
@@ -44,6 +47,8 @@ export function M11Layout({
   layers = [],
   basins = [],
   visibleBasinIds,
+  selectedSegmentId = null,
+  selectedSegmentGeometry = null,
   sourceSelection = null,
   derivedTimeline = null,
   fitTo = null,
@@ -90,6 +95,8 @@ export function M11Layout({
           layers={layers}
           basins={basins}
           visibleBasinIds={visibleBasinIds}
+          selectedSegmentId={selectedSegmentId}
+          selectedSegmentGeometry={selectedSegmentGeometry}
           onQueryChange={onQueryChange}
           fitTo={fitTo}
           flyTo={flyTo}
@@ -222,20 +229,5 @@ export function BasinLink({ to, children, disabled = false }: { to: string; chil
       {children}
       <ChevronRight className="h-4 w-4" aria-hidden="true" />
     </Link>
-  )
-}
-
-export function SegmentSearchStub({ query }: { query: string | null }) {
-  return (
-    <div className="space-y-2">
-      <label className="flex h-9 items-center gap-2 rounded border border-neutral-300 bg-white px-3 text-sm">
-        <Search className="h-4 w-4 text-neutral-500" aria-hidden="true" />
-        <span className="min-w-0 truncate text-neutral-700">{query ?? '搜索河段'}</span>
-      </label>
-      <div className="flex items-center gap-2 text-xs text-neutral-700">
-        <ListFilter className="h-4 w-4" aria-hidden="true" />
-        预警筛选与河段列表将在后续数据合同中接入
-      </div>
-    </div>
   )
 }

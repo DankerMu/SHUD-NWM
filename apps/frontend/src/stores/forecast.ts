@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
+import type { M11Source } from '@/lib/m11/queryState'
 
 export interface ForecastSegmentInfo {
   segmentId: string
@@ -41,6 +42,15 @@ export interface ForecastData {
 
 export interface FetchForecastOptions {
   includeAnalysis?: boolean
+  issueTime?: string | null
+  source?: M11Source | null
+  useSelectedScenarios?: boolean
+  ignoreActiveRequestContext?: boolean
+}
+
+export interface ForecastRequestContext {
+  issueTime?: string | null
+  source?: M11Source | null
 }
 
 interface ForecastState {
@@ -50,9 +60,12 @@ interface ForecastState {
   error: string | null
   includeAnalysis: boolean
   selectedScenarios: string[]
+  activeRequestContext: ForecastRequestContext | null
+  activeForecastRequest: ForecastRequestIdentity | null
   requestNonce: number
   selectSegment: (segment: ForecastSegmentInfo) => void
   toggleScenario: (scenario: string) => void
+  setRequestContext: (context: ForecastRequestContext | null) => void
   fetchForecast: (options?: FetchForecastOptions) => Promise<void>
   clearSelection: () => void
   setLoading: (loading: boolean) => void
@@ -94,6 +107,16 @@ type RiverSeriesSegment = RiverSeriesResponse['series'][number] & {
   available_lead_hours?: number | null
 }
 type ForecastApiPayload = RiverSeriesResponse | SplicedForecastResponse
+
+interface ForecastRequestIdentity {
+  nonce: number
+  segmentId: string
+  basinVersionId?: string
+  issueTime?: string | null
+  scenarios: string
+  contextIssueTimeBound: boolean
+  contextScenariosBound: boolean
+}
 
 function isAnalysisScenario(scenario: string) {
   return scenario === 'analysis_true_field' || scenario.toLowerCase().includes('analysis')
@@ -236,17 +259,56 @@ function buildCycleAttribution(series: ForecastSeries[], fallbackIssueTime: stri
   return [...new Set(cycleEntries)].filter(Boolean).join(' | ')
 }
 
+function isCurrentForecastRequest(state: ForecastState, request: ForecastRequestIdentity) {
+  const activeForecastRequest = state.activeForecastRequest
+  if (
+    !activeForecastRequest ||
+    activeForecastRequest.nonce !== request.nonce ||
+    activeForecastRequest.segmentId !== request.segmentId ||
+    activeForecastRequest.basinVersionId !== request.basinVersionId ||
+    activeForecastRequest.issueTime !== request.issueTime ||
+    activeForecastRequest.scenarios !== request.scenarios ||
+    activeForecastRequest.contextIssueTimeBound !== request.contextIssueTimeBound ||
+    activeForecastRequest.contextScenariosBound !== request.contextScenariosBound
+  ) {
+    return false
+  }
+
+  if (
+    state.requestNonce !== request.nonce ||
+    state.selectedSegment?.segmentId !== request.segmentId ||
+    state.selectedSegment.basinVersionId !== request.basinVersionId
+  ) {
+    return false
+  }
+
+  if (request.contextIssueTimeBound || request.contextScenariosBound) {
+    const activeRequestContext = state.activeRequestContext
+    if (!activeRequestContext) return false
+    if (request.contextIssueTimeBound && activeRequestContext.issueTime !== request.issueTime) return false
+    if (
+      request.contextScenariosBound &&
+      selectedScenariosForSource(activeRequestContext.source, state.selectedScenarios).join(',') !== request.scenarios
+    ) {
+      return false
+    }
+  }
+
+  return true
+}
+
 async function fetchForecastSeries(
   segment: ForecastSegmentInfo,
   includeAnalysis: boolean,
   selectedScenarios: string[],
+  options: Pick<FetchForecastOptions, 'issueTime'> = {},
 ) {
   if (!segment.basinVersionId) {
     throw new Error('缺少 basin_version_id，无法请求河段预报')
   }
 
   const query = {
-    issue_time: 'latest',
+    issue_time: options.issueTime ?? 'latest',
     variables: 'q_down',
     scenarios: selectedScenarios.join(','),
     include_analysis: includeAnalysis,
@@ -276,6 +338,8 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
   error: null,
   includeAnalysis: true,
   selectedScenarios: ['GFS'],
+  activeRequestContext: null,
+  activeForecastRequest: null,
   requestNonce: 0,
   selectSegment: (segment) =>
     set({
@@ -283,6 +347,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       forecastData: null,
       loading: false,
       error: null,
+      activeForecastRequest: null,
     }),
   toggleScenario: (scenario) =>
     set((state) => {
@@ -292,26 +357,51 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
         return { selectedScenarios: state.selectedScenarios }
       }
 
+      const selectedScenarios = isSelected
+        ? state.selectedScenarios.filter((selected) => selected !== normalizedScenario)
+        : [...state.selectedScenarios, normalizedScenario]
+
       return {
-        selectedScenarios: isSelected
-          ? state.selectedScenarios.filter((selected) => selected !== normalizedScenario)
-          : [...state.selectedScenarios, normalizedScenario],
+        selectedScenarios,
+        activeRequestContext: state.activeRequestContext ? { ...state.activeRequestContext, source: null } : null,
+      }
+    }),
+  setRequestContext: (context) =>
+    set((state) => {
+      const selectedScenarios = selectedScenariosForSource(context?.source, state.selectedScenarios)
+      return {
+        activeRequestContext: context,
+        selectedScenarios,
       }
     }),
   fetchForecast: async (options) => {
     const segment = get().selectedSegment
     if (!segment) return
 
+    const activeRequestContext = options?.ignoreActiveRequestContext ? null : get().activeRequestContext
     const includeAnalysis = options?.includeAnalysis ?? get().includeAnalysis
-    const selectedScenarios = get().selectedScenarios.length > 0 ? get().selectedScenarios : ['GFS']
-    const requestedSegmentId = segment.segmentId
+    const source = options?.useSelectedScenarios ? null : (options?.source ?? activeRequestContext?.source)
+    const selectedScenarios = selectedScenariosForSource(source, get().selectedScenarios)
+    const issueTime = options?.issueTime ?? activeRequestContext?.issueTime
+    const contextIssueTimeBound = Boolean(activeRequestContext) && options?.issueTime == null
+    const contextScenariosBound =
+      Boolean(activeRequestContext) && !options?.useSelectedScenarios && options?.source == null
     const requestNonce = get().requestNonce + 1
-    set({ loading: true, error: null, forecastData: null, includeAnalysis, requestNonce })
+    const request: ForecastRequestIdentity = {
+      nonce: requestNonce,
+      segmentId: segment.segmentId,
+      basinVersionId: segment.basinVersionId,
+      issueTime,
+      scenarios: selectedScenarios.join(','),
+      contextIssueTimeBound,
+      contextScenariosBound,
+    }
+    set({ loading: true, error: null, forecastData: null, includeAnalysis, requestNonce, activeForecastRequest: request })
 
     try {
-      const payload = await fetchForecastSeries(segment, includeAnalysis, selectedScenarios)
+      const payload = await fetchForecastSeries(segment, includeAnalysis, selectedScenarios, { issueTime })
       const state = get()
-      if (state.requestNonce !== requestNonce || state.selectedSegment?.segmentId !== requestedSegmentId) return
+      if (!isCurrentForecastRequest(state, request)) return
 
       set({
         forecastData: normalizeForecastPayload(payload),
@@ -320,7 +410,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       })
     } catch (error) {
       const state = get()
-      if (state.requestNonce !== requestNonce || state.selectedSegment?.segmentId !== requestedSegmentId) return
+      if (!isCurrentForecastRequest(state, request)) return
       const message = getApiErrorMessage(error, '获取预报曲线失败')
       set({ error: message, loading: false, forecastData: null })
       throw error
@@ -332,7 +422,15 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       forecastData: null,
       loading: false,
       error: null,
+      activeForecastRequest: null,
     }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
 }))
+
+function selectedScenariosForSource(source: M11Source | null | undefined, selectedScenarios: string[]) {
+  if (source === 'ifs') return ['IFS']
+  if (source === 'compare') return ['GFS', 'IFS']
+  if (source === 'gfs') return ['GFS']
+  return selectedScenarios.length > 0 ? selectedScenarios : ['GFS']
+}

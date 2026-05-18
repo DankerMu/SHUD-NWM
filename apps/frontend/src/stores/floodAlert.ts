@@ -142,6 +142,9 @@ function stringOrNull(value: string | null | undefined): string | null {
 }
 
 function normalizeLevel(value: string | null | undefined): AlertLevel | null {
+  if (value === 'orange') return 'warning'
+  if (value === 'red') return 'severe'
+  if (value === 'major') return 'high_risk'
   return isAlertLevel(value) ? value : null
 }
 

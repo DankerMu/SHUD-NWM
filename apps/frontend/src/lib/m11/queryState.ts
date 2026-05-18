@@ -152,6 +152,15 @@ export function serializeM11QueryState(state: M11QueryState) {
   return params.toString()
 }
 
+export function serializeM11QueryHandoff(state: M11QueryState, patch: M11QueryPatch = {}) {
+  return serializeM11QueryState({ ...state, ...patch })
+}
+
+export function m11QueryHref(pathname: string, state: M11QueryState, patch: M11QueryPatch = {}) {
+  const search = serializeM11QueryHandoff(state, patch)
+  return `${pathname}${search ? `?${search}` : ''}`
+}
+
 export function normalizeM11QueryPatch(patch: M11QueryPatch) {
   const params = new URLSearchParams()
   Object.entries(patch).forEach(([key, value]) => {
