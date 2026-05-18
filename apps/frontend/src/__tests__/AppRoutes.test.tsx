@@ -1222,6 +1222,105 @@ describe('App route state', () => {
     ])
   })
 
+  it('re-requests forecast data when the same segment route source and cycle change during loading', async () => {
+    let resolveFirstRequest: (() => void) | undefined
+    const forecastCalls: Array<{
+      segmentId: unknown
+      issueTime: unknown
+      scenarios: unknown
+    }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const options = args[1] as { params?: { path?: Record<string, unknown>; query?: Record<string, unknown> } }
+      const call = {
+        segmentId: options.params?.path?.segment_id,
+        issueTime: options.params?.query?.issue_time,
+        scenarios: options.params?.query?.scenarios,
+      }
+      forecastCalls.push(call)
+
+      if (forecastCalls.length === 1) {
+        await new Promise<void>((resolve) => {
+          resolveFirstRequest = resolve
+        })
+        return {
+          data: success({
+            segment_id: 'seg-009',
+            issue_time: '2026-05-18T00:00:00Z',
+            unit: 'm3/s',
+            series: [
+              {
+                scenario_id: 'forecast_ifs_deterministic',
+                source: 'IFS',
+                segment_role: 'future_7_days',
+                cycle_time: '2026-05-18T00:00:00.000Z',
+                points: [['2026-05-18T06:00:00Z', 1]],
+              },
+            ],
+            frequency_thresholds: null,
+          }),
+          error: undefined,
+        } as never
+      }
+
+      return {
+        data: success({
+          segment_id: 'seg-009',
+          issue_time: '2026-05-19T00:00:00Z',
+          unit: 'm3/s',
+          series: [
+            {
+              scenario_id: 'forecast_gfs_deterministic',
+              source: 'GFS',
+              segment_role: 'future_7_days',
+              cycle_time: '2026-05-19T00:00:00.000Z',
+              points: [['2026-05-19T06:00:00Z', 2]],
+            },
+          ],
+          frequency_thresholds: null,
+        }),
+        error: undefined,
+      } as never
+    })
+
+    window.history.pushState(
+      {},
+      '',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001&source=ifs&cycle=2026-05-18T00:00:00Z',
+    )
+
+    render(<App />)
+
+    await waitFor(() => expect(forecastCalls).toHaveLength(1))
+    window.history.pushState(
+      {},
+      '',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001&source=gfs&cycle=2026-05-19T00:00:00Z',
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+
+    await waitFor(() => expect(forecastCalls).toHaveLength(2))
+    resolveFirstRequest?.()
+
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        selectedScenarios: ['GFS'],
+        activeRequestContext: { source: 'gfs', issueTime: '2026-05-19T00:00:00.000Z' },
+        forecastData: {
+          segmentId: 'seg-009',
+          issueTime: '2026-05-19T00:00:00Z',
+          sourceAttribution: 'GFS',
+          cycleAttribution: 'GFS: 05-19 00Z',
+        },
+        loading: false,
+      }),
+    )
+    expect(forecastCalls).toEqual([
+      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios: 'IFS' },
+      { segmentId: 'seg-009', issueTime: '2026-05-19T00:00:00.000Z', scenarios: 'GFS' },
+    ])
+  })
+
   it('routes basin deep links and restores normalized query state once', async () => {
     window.history.pushState(
       {},

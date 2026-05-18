@@ -69,21 +69,11 @@ export function ForecastPage() {
       return
     }
     if (lastRouteHandoffKey.current === routeHandoffKey) return
-    if (
-      selectedSegment?.segmentId === routeSegment.segmentId &&
-      selectedSegment.basinVersionId === routeSegment.basinVersionId &&
-      loading
-    ) {
-      lastRouteHandoffKey.current = routeHandoffKey
-      return
-    }
-
     lastRouteHandoffKey.current = routeHandoffKey
     void loadSegmentForecast(routeSegment)
   }, [
     forecastData?.segmentId,
     loadSegmentForecast,
-    loading,
     routeHandoffKey,
     routeSegment,
     selectedSegment?.basinVersionId,

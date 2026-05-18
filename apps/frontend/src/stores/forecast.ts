@@ -60,6 +60,7 @@ interface ForecastState {
   includeAnalysis: boolean
   selectedScenarios: string[]
   activeRequestContext: ForecastRequestContext | null
+  activeForecastRequest: ForecastRequestIdentity | null
   requestNonce: number
   selectSegment: (segment: ForecastSegmentInfo) => void
   toggleScenario: (scenario: string) => void
@@ -105,6 +106,14 @@ type RiverSeriesSegment = RiverSeriesResponse['series'][number] & {
   available_lead_hours?: number | null
 }
 type ForecastApiPayload = RiverSeriesResponse | SplicedForecastResponse
+
+interface ForecastRequestIdentity {
+  nonce: number
+  segmentId: string
+  basinVersionId?: string
+  issueTime?: string | null
+  scenarios: string
+}
 
 function isAnalysisScenario(scenario: string) {
   return scenario === 'analysis_true_field' || scenario.toLowerCase().includes('analysis')
@@ -247,6 +256,29 @@ function buildCycleAttribution(series: ForecastSeries[], fallbackIssueTime: stri
   return [...new Set(cycleEntries)].filter(Boolean).join(' | ')
 }
 
+function isCurrentForecastRequest(state: ForecastState, request: ForecastRequestIdentity) {
+  const activeForecastRequest = state.activeForecastRequest
+  if (
+    !activeForecastRequest ||
+    activeForecastRequest.nonce !== request.nonce ||
+    activeForecastRequest.segmentId !== request.segmentId ||
+    activeForecastRequest.basinVersionId !== request.basinVersionId ||
+    activeForecastRequest.issueTime !== request.issueTime ||
+    activeForecastRequest.scenarios !== request.scenarios
+  ) {
+    return false
+  }
+
+  return (
+    state.requestNonce === request.nonce &&
+    state.selectedSegment?.segmentId === request.segmentId &&
+    state.selectedSegment.basinVersionId === request.basinVersionId &&
+    (!state.activeRequestContext ||
+      (state.activeRequestContext.issueTime === request.issueTime &&
+        selectedScenariosForSource(state.activeRequestContext.source, state.selectedScenarios).join(',') === request.scenarios))
+  )
+}
+
 async function fetchForecastSeries(
   segment: ForecastSegmentInfo,
   includeAnalysis: boolean,
@@ -289,6 +321,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
   includeAnalysis: true,
   selectedScenarios: ['GFS'],
   activeRequestContext: null,
+  activeForecastRequest: null,
   requestNonce: 0,
   selectSegment: (segment) =>
     set({
@@ -296,6 +329,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       forecastData: null,
       loading: false,
       error: null,
+      activeForecastRequest: null,
     }),
   toggleScenario: (scenario) =>
     set((state) => {
@@ -331,14 +365,20 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
     const source = options?.useSelectedScenarios ? null : (options?.source ?? activeRequestContext?.source)
     const selectedScenarios = selectedScenariosForSource(source, get().selectedScenarios)
     const issueTime = options?.issueTime ?? activeRequestContext?.issueTime
-    const requestedSegmentId = segment.segmentId
     const requestNonce = get().requestNonce + 1
-    set({ loading: true, error: null, forecastData: null, includeAnalysis, requestNonce })
+    const request: ForecastRequestIdentity = {
+      nonce: requestNonce,
+      segmentId: segment.segmentId,
+      basinVersionId: segment.basinVersionId,
+      issueTime,
+      scenarios: selectedScenarios.join(','),
+    }
+    set({ loading: true, error: null, forecastData: null, includeAnalysis, requestNonce, activeForecastRequest: request })
 
     try {
       const payload = await fetchForecastSeries(segment, includeAnalysis, selectedScenarios, { issueTime })
       const state = get()
-      if (state.requestNonce !== requestNonce || state.selectedSegment?.segmentId !== requestedSegmentId) return
+      if (!isCurrentForecastRequest(state, request)) return
 
       set({
         forecastData: normalizeForecastPayload(payload),
@@ -347,7 +387,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       })
     } catch (error) {
       const state = get()
-      if (state.requestNonce !== requestNonce || state.selectedSegment?.segmentId !== requestedSegmentId) return
+      if (!isCurrentForecastRequest(state, request)) return
       const message = getApiErrorMessage(error, '获取预报曲线失败')
       set({ error: message, loading: false, forecastData: null })
       throw error
@@ -359,6 +399,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       forecastData: null,
       loading: false,
       error: null,
+      activeForecastRequest: null,
     }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
