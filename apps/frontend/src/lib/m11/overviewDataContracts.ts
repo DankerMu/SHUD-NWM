@@ -877,7 +877,7 @@ function segmentRowFromFeature(
 ): BasinSegmentRow {
   const props = feature.properties
   const alert = alertById.get(props.river_segment_id) ?? alertById.get(props.segment_id)
-  const sourceSelection = createSourceScenarioSelection(query, alert ? [sourceFromScenario('forecast_gfs_deterministic')] : [])
+  const sourceSelection = createSourceScenarioSelection(query, alert ? [sourceFromQuery(query.source)] : [])
   const warningLevel = normalizeWarningLevel(alert?.warning_level) ?? 'unavailable'
   return {
     riverSegmentId: props.river_segment_id,
@@ -938,6 +938,13 @@ function sourceFromScenario(scenarioId: string, explicitSource?: string | null):
   if (value.includes('best')) return 'Best Available'
   if (value.includes('gfs')) return 'GFS'
   return 'Unknown'
+}
+
+function sourceFromQuery(source: M11Source): M11ResolvedSource {
+  if (source === 'ifs') return 'IFS'
+  if (source === 'compare') return 'GFS+IFS'
+  if (source === 'best') return 'Best Available'
+  return 'GFS'
 }
 
 function sourcesFromRuns(runs: ApiHydroRun[]): M11ResolvedSource[] {

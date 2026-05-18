@@ -111,8 +111,10 @@ let overviewRequestNonce = 0
 let basinRequestNonce = 0
 let activeOverviewRequestKey: string | null = null
 let activeBasinRequestKey: string | null = null
+let cacheGeneration = 0
 
 export function clearOverviewDataCache() {
+  cacheGeneration += 1
   for (const key of cache.keys()) {
     deleteCacheEntry(key)
   }
@@ -151,8 +153,10 @@ async function cached<T>(key: string, loader: () => Promise<T>): Promise<T> {
   if (existing?.value !== undefined) return existing.value
   if (existing?.promise) return existing.promise
 
+  const generation = cacheGeneration
   const promise = loader()
     .then((value) => {
+      if (generation !== cacheGeneration) return value
       const timeoutId = window.setTimeout?.(() => {
         const current = cache.get(key) as CacheEntry<T> | undefined
         if (current?.value === value) deleteCacheEntry(key)
@@ -161,7 +165,7 @@ async function cached<T>(key: string, loader: () => Promise<T>): Promise<T> {
       return value
     })
     .catch((error) => {
-      deleteCacheEntry(key)
+      if (generation === cacheGeneration) deleteCacheEntry(key)
       throw error
     })
 

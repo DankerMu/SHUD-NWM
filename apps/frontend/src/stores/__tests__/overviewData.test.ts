@@ -171,6 +171,52 @@ beforeEach(() => {
 })
 
 describe('useOverviewDataStore', () => {
+  it('does not repopulate the shared cache when an in-flight request resolves after cache clear', async () => {
+    vi.useFakeTimers()
+    const calls: string[] = []
+    let basinCalls = 0
+    let releaseInitialBasins: (() => void) | null = null
+    const initialBasins = new Promise<unknown>((resolve) => {
+      releaseInitialBasins = () => resolve(success([]))
+    })
+
+    try {
+      vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+        const path = String(args[0])
+        calls.push(path)
+
+        if (path === '/api/v1/basins') {
+          basinCalls += 1
+          if (basinCalls === 1) return (await initialBasins) as never
+          return success([]) as never
+        }
+        if (path === '/api/v1/models') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
+        if (path === '/api/v1/runs') return success({ items: [], total: 0, limit: 20, offset: 0 }) as never
+        if (path === '/api/v1/layers') return success([]) as never
+        if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+        if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+        throw new Error(`Unexpected GET ${path}`)
+      })
+
+      const staleLoad = useOverviewDataStore.getState().loadOverview(query)
+      expect(releaseInitialBasins).toBeTypeOf('function')
+
+      clearOverviewDataCache()
+      expect(vi.getTimerCount()).toBe(0)
+      releaseInitialBasins?.()
+      await staleLoad
+
+      calls.length = 0
+      await useOverviewDataStore.getState().loadOverview(query)
+
+      expect(calls.filter((path) => path === '/api/v1/basins')).toHaveLength(1)
+      expect(vi.getTimerCount()).toBeGreaterThan(0)
+    } finally {
+      clearOverviewDataCache()
+      vi.useRealTimers()
+    }
+  })
+
   it('does not fetch basin-version fields when the measured overview plan exceeds the request threshold', async () => {
     const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []
 
@@ -736,6 +782,7 @@ describe('useOverviewDataStore', () => {
     })
     expect(JSON.stringify(calls)).not.toContain('best_available')
     expect(JSON.stringify(calls)).not.toContain('forecast_best_available')
+    expect(snapshot.segments[0].source).toBe('IFS')
     expect(snapshot.detail.sourceSelection).toMatchObject({
       requestedSource: 'best',
       resolvedSource: 'IFS',
@@ -743,6 +790,91 @@ describe('useOverviewDataStore', () => {
     })
     expect(snapshot.selectedSegment?.sourceSelection).toMatchObject({
       requestedSource: 'best',
+      resolvedSource: 'IFS',
+      scenarioIds: ['forecast_ifs_deterministic'],
+    })
+  })
+
+  it('preserves IFS source provenance on basin segment rows', async () => {
+    const ifsQuery = { ...query, source: 'ifs' as const }
+    const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query, pathParams: options?.params?.path })
+
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [ifsRun], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success(featureCollection) as never
+      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return success({
+          river_segment_id: 'seg-123',
+          river_network_version_id: 'yangtze_rivnet_v12',
+          segment_order: 1,
+          downstream_segment_id: null,
+          length_m: 1000,
+          geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+          properties_json: {},
+          created_at: '2026-05-01T00:00:00Z',
+        }) as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        return success({
+          river_segment_id: 'seg-123',
+          issue_time: '2026-05-18T00:00:00Z',
+          variable: 'q_down',
+          unit: 'm3/s',
+          frequency_thresholds: null,
+          segments: [
+            {
+              scenario: 'forecast_ifs_deterministic',
+              source: 'IFS',
+              segment_role: 'future_7_days',
+              data: [{ valid_time: '2026-05-18T06:00:00Z', value: 120 }],
+            },
+          ],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/timeline') {
+        return success({
+          run_id: 'run-ifs-1',
+          segment_id: 'seg-123',
+          river_segment_id: 'seg-123',
+          timesteps: [],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }) as never
+      }
+      if (path === '/api/v1/lineage/river-point') return success({ target_type: 'river_point', target_id: 'seg-123', nodes: [], edges: [] }) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', ifsQuery)
+
+    expect(calls.find((call) => call.path === '/api/v1/runs')?.query).toMatchObject({
+      source: 'IFS',
+      cycle_time: '2026-05-18T00:00:00Z',
+      status: 'frequency_done',
+    })
+    expect(calls.find((call) => call.path.endsWith('/forecast-series'))?.query).toMatchObject({
+      issue_time: '2026-05-18T00:00:00Z',
+      variables: 'q_down',
+      scenarios: 'forecast_ifs_deterministic',
+      include_analysis: true,
+    })
+    expect(JSON.stringify(calls)).not.toContain('best_available')
+    expect(JSON.stringify(calls)).not.toContain('forecast_best_available')
+    expect(snapshot.segments[0].source).toBe('IFS')
+    expect(snapshot.detail.sourceSelection).toMatchObject({
+      requestedSource: 'ifs',
       resolvedSource: 'IFS',
       scenarioIds: ['forecast_ifs_deterministic'],
     })
