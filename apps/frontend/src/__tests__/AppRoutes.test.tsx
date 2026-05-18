@@ -182,12 +182,12 @@ function overviewSnapshot(layers: LayerState[], queryKey = '', dataKey = queryKe
   }
 }
 
-function overviewSnapshotWithBasin(layers: LayerState[], queryKey = '', dataKey = queryKey) {
+function overviewSnapshotWithBasin(layers: LayerState[], queryKey = '', dataKey = queryKey, basinId = 'basin-demo') {
   return {
     ...overviewSnapshot(layers, queryKey, dataKey),
     basins: [
       {
-        basinId: 'basin-demo',
+        basinId,
         displayName: 'Demo Basin',
         basinGroup: null,
         parentBasinId: null,
@@ -391,11 +391,36 @@ describe('App route state', () => {
 
     await user.click(screen.getByRole('button', { name: '卫星底图' }))
     expect(window.location.search).toContain('basemap=satellite')
-    await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ basemap: 'satellite' })))
 
     await user.click(screen.getByRole('button', { name: /^IFS/ }))
     expect(window.location.search).toContain('source=ifs')
     await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ source: 'ifs' })))
+  })
+
+  it('updates overview basemap URL and map style without reloading overview data', async () => {
+    const user = userEvent.setup()
+    const loadOverview = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      overview: overviewSnapshot(m11Layers, overviewDefaultScopeKey),
+      loading: false,
+      loadOverview,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(loadOverview).toHaveBeenCalled())
+    const initialLoadCalls = loadOverview.mock.calls.length
+
+    await user.click(screen.getByRole('button', { name: '卫星底图' }))
+
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('source')).toBe('gfs')
+    expect(params.get('basemap')).toBe('satellite')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'satellite')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap-style', 'm11://basemaps/satellite')
+    expect(loadOverview).toHaveBeenCalledTimes(initialLoadCalls)
   })
 
   it('does not correct overview valid time from a stale source/layer snapshot', async () => {
@@ -492,6 +517,33 @@ describe('App route state', () => {
     expect(link).toHaveAttribute('href', '/overview')
     expect(link).not.toHaveAttribute('href', expect.stringContaining('bv-demo'))
     expect(link).not.toHaveAttribute('href', expect.stringContaining('basin-demo'))
+  })
+
+  it('encodes overview drill-down basin ids as one path segment and preserves query serialization', async () => {
+    const reservedBasinId = 'basin/demo?branch#run%25'
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(
+        m11Layers,
+        overviewFloodScopeKey,
+        overviewFloodValid06ScopeKey,
+        reservedBasinId,
+      ),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
+
+    render(<App />)
+
+    const link = await screen.findByRole('link', { name: '进入流域分析' })
+    const href = link.getAttribute('href') ?? ''
+    const url = new URL(href, window.location.origin)
+
+    expect(url.pathname).toBe(`/basins/${encodeURIComponent(reservedBasinId)}`)
+    expect(url.pathname.split('/')).toHaveLength(3)
+    expect(url.search).toBe(
+      '?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001',
+    )
+    expect(url.hash).toBe('')
   })
 
   it('does not render static basin labels when overview basin inventory is empty', async () => {
@@ -761,6 +813,35 @@ describe('App route state', () => {
     await waitFor(() =>
       expect(overviewAsync).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ layer: 'flood-return-period' })),
     )
+  })
+
+  it('updates basin basemap URL and map style without reloading basin data', async () => {
+    const user = userEvent.setup()
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalled())
+    const initialLoadCalls = loadBasinDetail.mock.calls.length
+
+    await user.click(screen.getByRole('button', { name: '地形底图' }))
+
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('source')).toBe('gfs')
+    expect(params.get('basemap')).toBe('terrain')
+    expect(params.get('basinVersionId')).toBe('bv-001')
+    expect(params.get('segmentId')).toBe('seg-009')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'terrain')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap-style', 'm11://basemaps/terrain')
+    expect(loadBasinDetail).toHaveBeenCalledTimes(initialLoadCalls)
   })
 
   it('does not correct basin valid time from a stale basin snapshot', async () => {

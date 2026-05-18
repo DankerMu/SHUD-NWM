@@ -5,6 +5,7 @@ import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurfa
 import type { M11Bbox } from '@/lib/m11/overviewDataContracts'
 import { M11Layout, SegmentSearchStub, StateReadout } from '@/pages/m11/M11Shell'
 import {
+  defaultM11QueryState,
   type M11QueryPatch,
   needsM11QueryReplacement,
   parseM11QueryState,
@@ -23,6 +24,20 @@ export function BasinDetailPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const state = useMemo(() => parseM11QueryState(location.search), [location.search])
+  const dataLoadState = useMemo(
+    () => ({
+      source: state.source,
+      cycle: state.cycle,
+      validTime: state.validTime,
+      layer: state.layer,
+      basemap: defaultM11QueryState.basemap,
+      basinVersionId: state.basinVersionId,
+      segmentId: state.segmentId,
+      warningLevel: state.warningLevel,
+      q: state.q,
+    }),
+    [state.basinVersionId, state.cycle, state.layer, state.q, state.segmentId, state.source, state.validTime, state.warningLevel],
+  )
   const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
   const basinData = useOverviewDataStore((store) => store.basinDetail)
   const loading = useOverviewDataStore((store) => store.basinLoading)
@@ -60,8 +75,8 @@ export function BasinDetailPage() {
 
   useEffect(() => {
     if (needsQueryReplacement) return
-    void loadBasinDetail(basinId, state).catch(() => undefined)
-  }, [basinId, loadBasinDetail, needsQueryReplacement, state])
+    void loadBasinDetail(basinId, dataLoadState).catch(() => undefined)
+  }, [basinId, dataLoadState, loadBasinDetail, needsQueryReplacement])
 
   useEffect(() => {
     if (needsQueryReplacement || loading || !basinMetadataMatchesQuery) return

@@ -5,6 +5,7 @@ import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurfa
 import type { M11Bbox } from '@/lib/m11/overviewDataContracts'
 import { BasinLink, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
+  defaultM11QueryState,
   type M11QueryPatch,
   needsM11QueryReplacement,
   parseM11QueryState,
@@ -17,6 +18,20 @@ export function OverviewPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const state = useMemo(() => parseM11QueryState(location.search), [location.search])
+  const dataLoadState = useMemo(
+    () => ({
+      source: state.source,
+      cycle: state.cycle,
+      validTime: state.validTime,
+      layer: state.layer,
+      basemap: defaultM11QueryState.basemap,
+      basinVersionId: state.basinVersionId,
+      segmentId: state.segmentId,
+      warningLevel: state.warningLevel,
+      q: state.q,
+    }),
+    [state.basinVersionId, state.cycle, state.layer, state.q, state.segmentId, state.source, state.validTime, state.warningLevel],
+  )
   const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
   const overview = useOverviewDataStore((store) => store.overview)
   const loading = useOverviewDataStore((store) => store.loading)
@@ -44,8 +59,8 @@ export function OverviewPage() {
 
   useEffect(() => {
     if (needsQueryReplacement) return
-    void loadOverview(state).catch(() => undefined)
-  }, [loadOverview, needsQueryReplacement, state])
+    void loadOverview(dataLoadState).catch(() => undefined)
+  }, [dataLoadState, loadOverview, needsQueryReplacement])
 
   useEffect(() => {
     if (needsQueryReplacement || loading || !overviewMetadataMatchesQuery || metadataLayers.length === 0) return
@@ -77,7 +92,7 @@ export function OverviewPage() {
         segmentId: state.segmentId,
       })
     : serializeM11QueryState(state)
-  const basinLinkTarget = firstBasin ? `/basins/${firstBasin.basinId}${basinSearch ? `?${basinSearch}` : ''}` : '/overview'
+  const basinLinkTarget = firstBasin ? `/basins/${encodeURIComponent(firstBasin.basinId)}${basinSearch ? `?${basinSearch}` : ''}` : '/overview'
 
   return (
     <M11Layout
