@@ -328,6 +328,78 @@ Non-goals for #163:
 - [ ] 5.5 Implement row selection that syncs `segmentId` into URL state, highlights the same map segment when geometry exists, and loads the detail panel.
 - [ ] 5.6 Add component and Playwright tests for basin deep link, forecast-to-basin handoff, invalid basin id, missing bbox, search/filter, row selection, query restoration, and no-segment empty state.
 
+### Issue #164 Evidence Matrix
+
+Selected risk packs:
+
+- Public API / CLI / script entry -> 5.1, 5.2, 5.3, route and forecast-handoff tests for
+  `/basins/:basinId` and `/forecast` basin selection entrypoints.
+- Schema / columns / units / field names -> 5.1, 5.4, 5.5, adapter/page tests for
+  `basin_id`, `basin_version_id`, `river_segment_id`, warning levels, Q units, and selected
+  version metadata.
+- Geospatial / CRS / shapefile sidecars -> 5.2, 5.5, fit-bounds fallback, missing bbox notes,
+  and segment/map highlight state without fabricating geometry.
+- Time series / forcing / temporal boundaries -> 5.1, 5.5, source/cycle/validTime restoration,
+  latest run metadata, valid-time correction, and selected segment reload behavior.
+- Resource limits / large input / discovery -> 5.4, bounded segment list rendering/search/filter
+  behavior and no unbounded per-row request fan-out.
+- Legacy compatibility / examples -> 5.3, preserved `/forecast`, `/flood-alerts`,
+  `/monitoring`, `/`, and `/overview` workflows.
+- Error handling / rollback / partial outputs -> 5.1, 5.2, 5.4, invalid basin, missing bbox,
+  no-segment, partial source/time unavailable, and failed basin-list lookup states.
+- Release / packaging / dependency compatibility -> frontend test/e2e/build commands; no new
+  unvetted dependencies.
+- Documentation / migration notes -> 5.3 and 5.6 evidence for shared basin workflow and
+  handoff limits.
+
+Required test inputs and expected outputs:
+
+- Route input `/basins/basin-demo?source=gfs&basinVersionId=bv-001` with bbox and segment
+  payloads -> page renders basin identity, selected `basin_version_id`, warning distribution,
+  latest run metadata, source/scenario controls, and fits map to basin bbox.
+- Route input `/basins/basin-demo?source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=flood-return-period&basemap=satellite&warningLevel=orange&q=main&basinVersionId=bv-001&segmentId=seg-009`
+  -> page restores the selected basin version, selected segment, search query, warning filter,
+  source/cycle/validTime, active layer, and basemap state; uses those canonical values for data
+  requests; and does not enter repeated URL replacement/update loops.
+- Route input `/basins/missing-basin` where basin inventory lookup succeeds without that ID ->
+  page renders scoped not-found state and a route back to 全国总览.
+- Route input `/basins/basin-demo` where bbox is absent but segment data exists -> map uses
+  documented fallback extent and shows a missing-geometry note without blocking segment list.
+- Route input with no river segment data -> left panel shows "该流域暂无已发布的预报数据" or an
+  equivalent concise no-data state and disables map/list actions requiring segments.
+- Segment list payload with multiple names, IDs, warning levels, Q values, and nullable fields
+  -> rows render stable names/IDs, Q/unit, warning color/state, selected row styling, and result
+  count.
+- Search query `q=main` and warning filter `warningLevel=orange` -> list filters without a full
+  page reload, empty/result count reflects filters, and URL query remains canonical.
+- Row click for `river_segment_id=seg-009` -> URL gains `segmentId=seg-009`, selected row is
+  highlighted or scrolled into view, map highlight state is updated when geometry exists, and
+  selected segment detail load is requested.
+- Forecast workflow basin selection -> choosing a basin from 水文预报 opens `/basins/:basinId`
+  with the same basin detail workflow, not a separate incompatible detail page.
+- Partial source/cycle/valid-time unavailable state -> basin geometry/list remains visible while
+  forecast/warning-dependent values are disabled or cleared with a scoped unavailable reason.
+
+Verification commands for #164:
+
+- `git diff --check`
+- `openspec validate m11-overview-basin-drilldown --strict --no-interactive`
+- `cd apps/frontend && corepack pnpm test`
+- `cd apps/frontend && corepack pnpm build`
+- `cd apps/frontend && corepack pnpm test:e2e`
+- `cd apps/frontend && corepack pnpm run test:e2e:preview`
+- If OpenAPI/backend changes are added: `cd apps/frontend && corepack pnpm check:api-types`,
+  `uv run ruff check .`, and focused `uv run pytest -q` for affected API tests.
+
+Non-goals for #164:
+
+- Full basin-scoped river-network rendering/coloring, hover tooltip, rich selected segment
+  detail panel, trend sparkline, final visual screenshot delivery, production MVT/PBF, full
+  full-screen forecast detail, meteorology pages, and model asset management remain #165 or
+  future follow-ups unless needed as minimal handoff placeholders.
+- No backend/OpenAPI aggregation endpoint unless the existing M11 adapter decision rule is met
+  and the same PR includes OpenAPI, generated types, backend tests, and frontend tests.
+
 ## 6. Basin map, segment detail, visual evidence, and delivery validation
 
 - [ ] 6.1 Render basin-scoped river network colored by discharge, return period, or warning level with basin boundary highlight and available city/station labels.
