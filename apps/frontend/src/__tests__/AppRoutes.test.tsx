@@ -14,6 +14,10 @@ import type { LayerState } from '@/lib/m11/overviewDataContracts'
 const m11FitBoundsCalls: Array<unknown[]> = []
 const m11FlyToCalls: Array<unknown> = []
 
+function geoJsonResponse(body: unknown) {
+  return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+}
+
 vi.mock('@/components/map/MapView', () => ({
   MapView: () => <div aria-label="河网地图">mock map</div>,
 }))
@@ -561,11 +565,7 @@ describe('App route state', () => {
   })
 
   it('threads overview basin bbox and map handlers through the route surface', async () => {
-    const tileFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      headers: new Headers(),
-      text: vi.fn().mockResolvedValue(JSON.stringify({ type: 'FeatureCollection', features: [] })),
-    })
+    const tileFetch = vi.fn().mockImplementation(async () => geoJsonResponse({ type: 'FeatureCollection', features: [] }))
     vi.stubGlobal('fetch', tileFetch)
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(

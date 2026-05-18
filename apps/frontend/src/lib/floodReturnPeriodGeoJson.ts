@@ -75,6 +75,10 @@ interface GeometryValidationState {
   maxCoordinateDimensions: number
 }
 
+type BoundedBodyReadResult =
+  | { ok: true; body: string; serializedBytes: number }
+  | { ok: false; code: FloodReturnPeriodRejectionCode; reason: string; serializedBytes: number }
+
 export function buildFloodReturnPeriodGeoJsonUrl(runId: string, validTime: string) {
   const params = new URLSearchParams({
     run_id: runId,
@@ -94,7 +98,8 @@ export async function fetchFloodReturnPeriodFeatureCollection(
   const response = await apiFetch(url, requestInit)
   if (!response.ok) return rejection('http', '洪水重现期地图数据暂不可用，地图暂不显示该叠加层。', 0, 0, 0)
 
-  const contentLength = Number(response.headers.get('content-length'))
+  const contentLengthHeader = response.headers.get('content-length')
+  const contentLength = contentLengthHeader === null ? Number.NaN : Number(contentLengthHeader)
   if (Number.isFinite(contentLength) && contentLength > maxSerializedBytes) {
     return rejection(
       'serialized_bytes',
@@ -105,26 +110,17 @@ export async function fetchFloodReturnPeriodFeatureCollection(
     )
   }
 
-  const body = await response.text()
-  const serializedBytes = byteLength(body)
-  if (serializedBytes > maxSerializedBytes) {
-    return rejection(
-      'serialized_bytes',
-      `洪水重现期地图数据超过客户端序列化预算（${serializedBytes}/${maxSerializedBytes} bytes），地图暂不显示该叠加层。`,
-      0,
-      0,
-      serializedBytes,
-    )
-  }
+  const boundedBody = await readBoundedResponseText(response, maxSerializedBytes)
+  if (!boundedBody.ok) return rejection(boundedBody.code, boundedBody.reason, 0, 0, boundedBody.serializedBytes)
 
   let payload: unknown
   try {
-    payload = JSON.parse(body) as unknown
+    payload = JSON.parse(boundedBody.body) as unknown
   } catch {
-    return rejection('json', '洪水重现期地图数据不是有效 JSON，地图暂不显示该叠加层。', 0, 0, serializedBytes)
+    return rejection('json', '洪水重现期地图数据不是有效 JSON，地图暂不显示该叠加层。', 0, 0, boundedBody.serializedBytes)
   }
 
-  return validateFloodReturnPeriodFeatureCollection(payload, { ...budget, serializedBytes })
+  return validateFloodReturnPeriodFeatureCollection(payload, { ...budget, serializedBytes: boundedBody.serializedBytes })
 }
 
 export function validateFloodReturnPeriodFeatureCollection(
@@ -225,14 +221,34 @@ function sanitizeGeometry(
     return { ok: false, code: 'malformed_geometry', reason: '洪水重现期地图数据包含不支持的几何类型，地图暂不显示该叠加层。' }
   }
 
-  const coordinates = sanitizeCoordinates(value.coordinates, state)
+  const coordinates = sanitizeCoordinatesForGeometry(value.type, value.coordinates, state)
   if (!coordinates.ok) return coordinates
   return { ok: true, geometry: { type: value.type, coordinates: coordinates.coordinates } }
 }
 
-function sanitizeCoordinates(
+function sanitizeCoordinatesForGeometry(
+  geometryType: Exclude<FloodGeometryType, 'GeometryCollection'>,
   value: unknown,
   state: GeometryValidationState,
+):
+  | { ok: true; coordinates: unknown }
+  | { ok: false; code: FloodReturnPeriodRejectionCode; reason: string } {
+  const depthByGeometryType: Record<Exclude<FloodGeometryType, 'GeometryCollection'>, number> = {
+    Point: 0,
+    MultiPoint: 1,
+    LineString: 1,
+    MultiLineString: 2,
+    Polygon: 2,
+    MultiPolygon: 3,
+  }
+  return sanitizeCoordinatesAtDepth(value, depthByGeometryType[geometryType], state, geometryType)
+}
+
+function sanitizeCoordinatesAtDepth(
+  value: unknown,
+  depth: number,
+  state: GeometryValidationState,
+  geometryType: Exclude<FloodGeometryType, 'GeometryCollection'>,
 ):
   | { ok: true; coordinates: unknown[] }
   | { ok: false; code: FloodReturnPeriodRejectionCode; reason: string } {
@@ -242,7 +258,14 @@ function sanitizeCoordinates(
   if (value.length === 0) {
     return { ok: false, code: 'malformed_geometry', reason: '洪水重现期地图数据包含空坐标几何，地图暂不显示该叠加层。' }
   }
-  if (isCoordinate(value)) {
+  if (depth === 0) {
+    if (!isCoordinate(value)) {
+      return {
+        ok: false,
+        code: 'malformed_geometry',
+        reason: `洪水重现期地图数据的 ${geometryType} 坐标层级与几何类型不匹配，地图暂不显示该叠加层。`,
+      }
+    }
     if (value.length > state.maxCoordinateDimensions) {
       return {
         ok: false,
@@ -261,9 +284,17 @@ function sanitizeCoordinates(
     return { ok: true, coordinates: [...value] }
   }
 
+  if (isCoordinate(value)) {
+    return {
+      ok: false,
+      code: 'malformed_geometry',
+      reason: `洪水重现期地图数据的 ${geometryType} 坐标层级与几何类型不匹配，地图暂不显示该叠加层。`,
+    }
+  }
+
   const nested: unknown[] = []
   for (const item of value) {
-    const child = sanitizeCoordinates(item, state)
+    const child = sanitizeCoordinatesAtDepth(item, depth - 1, state, geometryType)
     if (!child.ok) return child
     nested.push(child.coordinates)
   }
@@ -305,4 +336,50 @@ function serializedByteLength(value: unknown): number {
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).length
+}
+
+async function readBoundedResponseText(response: Response, maxSerializedBytes: number): Promise<BoundedBodyReadResult> {
+  if (!response.body) {
+    return {
+      ok: false,
+      code: 'serialized_bytes',
+      reason: '当前浏览器无法对洪水重现期地图数据执行有界读取，地图暂不显示该叠加层。',
+      serializedBytes: 0,
+    }
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let serializedBytes = 0
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value)
+      serializedBytes += chunk.byteLength
+      if (serializedBytes > maxSerializedBytes) {
+        await reader.cancel().catch(() => undefined)
+        return {
+          ok: false,
+          code: 'serialized_bytes',
+          reason: `洪水重现期地图数据超过客户端序列化预算（${serializedBytes}/${maxSerializedBytes} bytes），地图暂不显示该叠加层。`,
+          serializedBytes,
+        }
+      }
+      chunks.push(chunk)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const bodyBytes = new Uint8Array(serializedBytes)
+  let offset = 0
+  chunks.forEach((chunk) => {
+    bodyBytes.set(chunk, offset)
+    offset += chunk.byteLength
+  })
+  return { ok: true, body: new TextDecoder().decode(bodyBytes), serializedBytes }
 }

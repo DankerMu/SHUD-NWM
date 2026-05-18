@@ -249,12 +249,41 @@ describe('useFloodAlertStore', () => {
     } as never)
 
     await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
-      source: 'gfs',
+      source: 'ifs',
+      cycleTime: '2026-05-11T00:00:00.000Z',
+      validTime: '2026-05-11T03:00:00.000Z',
+    })
+
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
+      params: { query: { source: 'IFS', cycle_time: '2026-05-11T00:00:00.000Z', status: 'frequency_done', limit: 50 } },
+    })
+    expect(useFloodAlertStore.getState().selectedRunId).toBe('run-sibling')
+    expect(useFloodAlertStore.getState().selectedValidTime).toBe('2026-05-11T03:00:00.000Z')
+  })
+
+  it('does not fall back to an unrelated latest run when explicit overview context is absent', async () => {
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [{ ...latestRun, source_id: 'gfs' }],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'ifs',
       cycleTime: '2026-05-12T00:00:00.000Z',
       validTime: '2026-05-12T03:00:00.000Z',
     })
 
-    expect(useFloodAlertStore.getState().selectedRunId).toBe('run-1')
-    expect(useFloodAlertStore.getState().selectedValidTime).toBe('2026-05-12T03:00:00.000Z')
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
+      params: { query: { source: 'IFS', cycle_time: '2026-05-12T00:00:00.000Z', status: 'frequency_done', limit: 50 } },
+    })
+    expect(useFloodAlertStore.getState().selectedRunId).toBeNull()
+    expect(useFloodAlertStore.getState().latestRun).toBeNull()
+    expect(useFloodAlertStore.getState().empty).toBe(true)
+    expect(useFloodAlertStore.getState().error).toContain('未找到 IFS 周期 2026-05-12T00:00:00.000Z')
   })
 })

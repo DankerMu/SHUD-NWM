@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { validateFloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriodGeoJson'
+import {
+  fetchFloodReturnPeriodFeatureCollection,
+  validateFloodReturnPeriodFeatureCollection,
+} from '@/lib/floodReturnPeriodGeoJson'
 
 const feature = {
   type: 'Feature',
@@ -62,5 +65,73 @@ describe('flood return-period GeoJSON validation', () => {
         { maxSerializedBytes: 10 },
       ),
     ).toMatchObject({ ok: false, code: 'serialized_bytes' })
+  })
+
+  it('rejects coordinate nesting that does not match the declared geometry type', () => {
+    const cases = [
+      { type: 'Point', coordinates: [[100, 30]] },
+      { type: 'MultiPoint', coordinates: [100, 30] },
+      { type: 'LineString', coordinates: [100, 30] },
+      { type: 'MultiLineString', coordinates: [[100, 30], [101, 31]] },
+      { type: 'Polygon', coordinates: [[100, 30], [101, 31]] },
+      { type: 'MultiPolygon', coordinates: [[[100, 30], [101, 31]]] },
+    ]
+
+    for (const geometry of cases) {
+      expect(
+        validateFloodReturnPeriodFeatureCollection({
+          type: 'FeatureCollection',
+          features: [{ ...feature, geometry }],
+        }),
+      ).toMatchObject({ ok: false, code: 'malformed_geometry' })
+    }
+  })
+
+  it('recursively validates GeometryCollection coordinate nesting', () => {
+    expect(
+      validateFloodReturnPeriodFeatureCollection({
+        type: 'FeatureCollection',
+        features: [
+          {
+            ...feature,
+            geometry: {
+              type: 'GeometryCollection',
+              geometries: [{ type: 'Point', coordinates: [[100, 30]] }],
+            },
+          },
+        ],
+      }),
+    ).toMatchObject({ ok: false, code: 'malformed_geometry' })
+  })
+
+  it('rejects oversized streamed responses without materializing text', async () => {
+    const cancel = vi.fn()
+    const oversizedChunk = new TextEncoder().encode('x'.repeat(16))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers(),
+        body: {
+          getReader: () => ({
+            read: vi.fn().mockResolvedValueOnce({ done: false, value: oversizedChunk }),
+            cancel: vi.fn().mockImplementation(() => {
+              cancel()
+              return Promise.resolve()
+            }),
+            releaseLock: vi.fn(),
+          }),
+        },
+        text: vi.fn().mockRejectedValue(new Error('text() must not be called')),
+      }),
+    )
+
+    const result = await fetchFloodReturnPeriodFeatureCollection('/return-period.geojson', {
+      budget: { maxSerializedBytes: 8 },
+    })
+
+    expect(result).toMatchObject({ ok: false, code: 'serialized_bytes', serializedBytes: 16 })
+    expect(cancel).toHaveBeenCalled()
+    expect(fetch).toHaveBeenCalledWith('/return-period.geojson', {})
   })
 })

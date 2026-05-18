@@ -226,6 +226,22 @@ const sourceSelection: SourceScenarioSelectionState = {
   unavailableReason: null,
 }
 
+function geoJsonResponse(body: unknown) {
+  return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+}
+
+function oversizedStreamResponse(maxBytes: number) {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('x'.repeat(maxBytes + 1)))
+        controller.close()
+      },
+    }),
+    { headers: { 'content-type': 'application/json' } },
+  )
+}
+
 describe('M11 visual foundation shell', () => {
   beforeEach(() => {
     mapSources.length = 0
@@ -234,11 +250,7 @@ describe('M11 visual foundation shell', () => {
     flyToCalls.length = 0
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        headers: new Headers(),
-        text: vi.fn().mockResolvedValue(JSON.stringify({ type: 'FeatureCollection', features: [] })),
-      }),
+      vi.fn().mockImplementation(async () => geoJsonResponse({ type: 'FeatureCollection', features: [] })),
     )
     useOverviewDataStore.setState({
       ...useOverviewDataStore.getInitialState(),
@@ -419,16 +431,12 @@ describe('M11 visual foundation shell', () => {
   it('rejects oversized M11 flood return period payloads before registering a MapLibre source', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        headers: new Headers(),
-        text: vi.fn().mockResolvedValue(
-          JSON.stringify({
-            type: 'FeatureCollection',
-            features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
-          }),
-        ),
-      }),
+      vi.fn().mockResolvedValue(
+        geoJsonResponse({
+          type: 'FeatureCollection',
+          features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
+        }),
+      ),
     )
 
     render(
@@ -439,6 +447,22 @@ describe('M11 visual foundation shell', () => {
     )
 
     expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('超过客户端要素预算')
+    expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('rejects oversized streamed M11 flood return period payloads without registering a MapLibre source', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(oversizedStreamResponse(2_000_000)))
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+      />,
+    )
+
+    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('超过客户端序列化预算')
     expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays')
     expect(mapSources).toHaveLength(0)
     expect(mapLayers).toHaveLength(0)

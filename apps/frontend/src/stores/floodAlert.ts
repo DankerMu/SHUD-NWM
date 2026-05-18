@@ -272,6 +272,22 @@ function cycleMatches(run: ApiHydroRun, cycleTime: string | null | undefined) {
   return normalizeIso(run.cycle_time) === normalized
 }
 
+function sourceForRunsQuery(source: string | null | undefined) {
+  if (!source) return undefined
+  if (source.toLowerCase() === 'ifs') return 'IFS'
+  if (source.toLowerCase() === 'gfs') return 'GFS'
+  return source
+}
+
+function explicitContextMissReason(context: { source?: string | null; cycleTime?: string | null } | undefined) {
+  const source = context?.source ? context.source.toUpperCase() : null
+  const cycleTime = normalizeIso(context?.cycleTime)
+  if (source && cycleTime) return `未找到 ${source} 周期 ${cycleTime} 的已完成洪水预警 Run。`
+  if (source) return `未找到 ${source} 的已完成洪水预警 Run。`
+  if (cycleTime) return `未找到周期 ${cycleTime} 的已完成洪水预警 Run。`
+  return null
+}
+
 export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   selectedRunId: null,
   latestRun: null,
@@ -301,17 +317,32 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   fetchLatestFrequencyDoneRun: async (context) => {
     set({ loading: true, error: null, empty: false })
     try {
+      const explicitContext = Boolean(context?.source || context?.cycleTime)
+      const runsQuery: {
+        source?: string
+        cycle_time?: string
+        status: 'frequency_done'
+        limit: number
+      } = {
+        status: 'frequency_done',
+        limit: 50,
+      }
+      const source = sourceForRunsQuery(context?.source)
+      const cycleTime = normalizeIso(context?.cycleTime)
+      if (source) runsQuery.source = source
+      if (cycleTime) runsQuery.cycle_time = cycleTime
       const { data, error } = await client.GET('/api/v1/runs', {
-        params: { query: { status: 'frequency_done', limit: 50 } },
+        params: { query: runsQuery },
       })
       if (error) throw new Error(getApiErrorMessage(error, '获取最新预警 Run 失败'))
       const payload = unwrapApiData<ApiHydroRunPage>(data, '获取最新预警 Run 失败')
       const runs = payload.items
       const matchingRuns = runs.filter((run) => sourceMatches(run, context?.source) && cycleMatches(run, context?.cycleTime))
-      const candidates = matchingRuns.length > 0 ? matchingRuns : runs
+      const candidates = explicitContext ? matchingRuns : runs
       const latestRun = sortLatestRuns(candidates).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(candidates)[0] ?? null
       const validTimes = buildValidTimes(latestRun)
       const requestedValidTime = normalizeIso(context?.validTime)
+      const contextMissReason = latestRun ? null : explicitContextMissReason(context)
       set({
         latestRun,
         selectedRunId: latestRun?.run_id ?? null,
@@ -319,7 +350,10 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         selectedValidTime: requestedValidTime && validTimes.includes(requestedValidTime) ? requestedValidTime : null,
         loading: false,
         empty: latestRun === null,
-        error: null,
+        error: contextMissReason,
+        summaryData: latestRun ? get().summaryData : null,
+        rankingData: latestRun ? get().rankingData : null,
+        timelineData: latestRun ? get().timelineData : null,
       })
     } catch (error) {
       const message = getApiErrorMessage(error, '获取最新预警 Run 失败')

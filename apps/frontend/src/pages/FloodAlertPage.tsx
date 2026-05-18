@@ -136,7 +136,7 @@ export function FloodAlertPage() {
       <div className="grid min-h-[calc(100vh-7rem)] place-items-center rounded-lg border border-border bg-panel p-6 text-center">
         <div>
           <h1 className="text-lg font-semibold text-foreground">暂无洪水预警数据</h1>
-          <p className="mt-2 text-sm text-muted">当前没有已完成 frequency_done 的预报 Run。</p>
+          <p className="mt-2 text-sm text-muted">{error ?? '当前没有已完成 frequency_done 的预报 Run。'}</p>
         </div>
       </div>
     )
