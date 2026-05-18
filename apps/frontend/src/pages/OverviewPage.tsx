@@ -26,13 +26,17 @@ export function OverviewPage() {
     void loadOverview(state).catch(() => undefined)
   }, [loadOverview, needsQueryReplacement, state])
 
-  const basinSearch = serializeM11QueryState({
-    ...state,
-    basinVersionId: state.basinVersionId ?? overview?.basins[0]?.selectedBasinVersionId ?? 'bv-demo',
-    segmentId: state.segmentId,
-  })
   const basins = overview?.basins ?? []
   const summary = overview?.summary
+  const firstBasin = basins[0]
+  const basinSearch = firstBasin
+    ? serializeM11QueryState({
+        ...state,
+        basinVersionId: state.basinVersionId ?? firstBasin.selectedBasinVersionId,
+        segmentId: state.segmentId,
+      })
+    : serializeM11QueryState(state)
+  const basinLinkTarget = firstBasin ? `/basins/${firstBasin.basinId}${basinSearch ? `?${basinSearch}` : ''}` : '/overview'
 
   return (
     <M11Layout
@@ -57,18 +61,16 @@ export function OverviewPage() {
             ))}
           </div>
           <LayerList activeLayer={state.layer} />
-          <BasinLink to={`/basins/${basins[0]?.basinId ?? 'basin-demo'}${basinSearch ? `?${basinSearch}` : ''}`}>
-            进入示例流域分析
-          </BasinLink>
+          <BasinLink to={basinLinkTarget}>{firstBasin ? '进入流域分析' : '等待可用流域'}</BasinLink>
         </>
       }
       right={
         <>
           <div className="grid grid-cols-2 gap-3">
-            <SummaryMetric value={formatMetric(summary?.completedCyclesToday, '23')} label="今日完成周期" />
-            <SummaryMetric value={formatMetric(summary?.runningJobs, '7')} label="当前运行中" />
-            <SummaryMetric value={formatMetric(summary?.warningSegmentCount, '18')} label="超警河段" tone="warning" />
-            <SummaryMetric value={formatTime(summary?.latestUpdate) ?? '08:00'} label="最新更新时间" />
+            <SummaryMetric value={formatMetric(summary?.completedCyclesToday)} label="今日完成周期" />
+            <SummaryMetric value={formatMetric(summary?.runningJobs)} label="当前运行中" />
+            <SummaryMetric value={formatMetric(summary?.warningSegmentCount)} label="超警河段" tone="warning" />
+            <SummaryMetric value={formatTime(summary?.latestUpdate) ?? '-'} label="最新更新时间" />
           </div>
           {loading || error ? (
             <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
@@ -101,8 +103,8 @@ function SummaryMetric({ value, label, tone = 'default' }: { value: string; labe
   )
 }
 
-function formatMetric(value: number | null | undefined, fallback: string) {
-  return value === null || value === undefined ? fallback : String(value)
+function formatMetric(value: number | null | undefined) {
+  return value === null || value === undefined ? '-' : String(value)
 }
 
 function formatTime(value: string | null | undefined) {

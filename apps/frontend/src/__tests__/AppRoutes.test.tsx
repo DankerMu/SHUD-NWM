@@ -95,6 +95,75 @@ describe('App route state', () => {
     expect(screen.getAllByText('terrain').length).toBeGreaterThan(0)
   })
 
+  it('does not emit fabricated basin or basin-version IDs when overview data is unavailable', async () => {
+    window.history.pushState({}, '', '/overview')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: '等待可用流域' })
+    expect(link).toHaveAttribute('href', '/overview')
+    expect(link).not.toHaveAttribute('href', expect.stringContaining('bv-demo'))
+    expect(link).not.toHaveAttribute('href', expect.stringContaining('basin-demo'))
+  })
+
+  it('renders unavailable markers for null overview summary fields and preserves real zero values', async () => {
+    useOverviewDataStore.setState({
+      overview: {
+        basins: [],
+        layers: [],
+        aggregationDecision: {
+          needsAggregationEndpoint: false,
+          reason: 'reuse-existing',
+          evidence: 'test',
+        },
+        summary: {
+          completedCyclesToday: 0,
+          runningJobs: null,
+          warningSegmentCount: null,
+          latestUpdate: null,
+          totalBasins: 0,
+          totalSegments: null,
+          sourceSelection: {
+            requestedSource: 'gfs',
+            resolvedSource: 'GFS',
+            scenarioIds: ['forecast_gfs_deterministic'],
+            cycleTime: null,
+            validTime: null,
+            comparisonAvailable: false,
+            provenanceLabel: 'GFS / latest cycle / current valid time',
+            unavailableReason: null,
+          },
+          freshness: {
+            updatedAt: null,
+            cycleTime: null,
+            validTime: null,
+            runId: null,
+            source: 'GFS',
+            isStale: false,
+            staleAfterHours: 6,
+            unavailableReason: 'No freshness metadata is available.',
+          },
+          qualityNotes: [],
+          partialErrors: [],
+        },
+      },
+    })
+    window.history.pushState({}, '', '/overview')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(screen.getByText('0')).toBeInTheDocument()
+    expect(screen.getByText('当前运行中').parentElement).toHaveTextContent('-')
+    expect(screen.getByText('超警河段').parentElement).toHaveTextContent('-')
+    expect(screen.getByText('最新更新时间').parentElement).toHaveTextContent('-')
+    expect(screen.queryByText('23')).not.toBeInTheDocument()
+    expect(screen.queryByText('7')).not.toBeInTheDocument()
+    expect(screen.queryByText('18')).not.toBeInTheDocument()
+    expect(screen.queryByText('08:00')).not.toBeInTheDocument()
+  })
+
   it('routes /forecast to the preserved hydrologic forecast workflow', async () => {
     window.history.pushState({}, '', '/forecast')
 

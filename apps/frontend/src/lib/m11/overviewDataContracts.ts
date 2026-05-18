@@ -398,9 +398,10 @@ export function normalizeOverviewSummary(input: {
   pipeline?: ApiPipelineStatus | null
   queue?: ApiQueueDepth | null
   latestRun?: ApiHydroRun | null
+  runs?: ApiHydroRun[]
   partialErrors?: string[]
 }): OverviewSummary {
-  const availableSources = sourcesFromRuns(input.latestRun ? [input.latestRun] : [])
+  const availableSources = sourcesFromRuns(input.runs ?? (input.latestRun ? [input.latestRun] : []))
   const sourceSelection = createSourceScenarioSelection(input.query, availableSources)
   const levels = input.floodSummary?.levels ?? []
   const warningSegmentCount = levels
@@ -495,6 +496,7 @@ export function normalizeBasinDetail(input: {
   segments?: ApiRiverFeatureCollection | null
   rankingItems?: ApiFloodAlertRankingItem[]
   latestRun?: ApiHydroRun | null
+  runs?: ApiHydroRun[]
   partialErrors?: string[]
 }): BasinDetail {
   const basinId = input.basin?.basin_id ?? ''
@@ -506,7 +508,7 @@ export function normalizeBasinDetail(input: {
     null
   const selectedVersionId = selectedVersion?.basinVersionId ?? null
   const models = (input.models ?? []).filter((model) => !selectedVersionId || model.basin_version_id === selectedVersionId)
-  const sourceSelection = createSourceScenarioSelection(input.query, sourcesFromRuns(input.latestRun ? [input.latestRun] : []))
+  const sourceSelection = createSourceScenarioSelection(input.query, sourcesFromRuns(input.runs ?? (input.latestRun ? [input.latestRun] : [])))
 
   return {
     basinId,
@@ -591,6 +593,7 @@ export function normalizeSelectedSegmentDetail(input: {
   floodTimeline?: ApiFloodAlertTimeline | null
   lineage?: ApiLineageResponse | null
   lineageError?: string | null
+  lineageUnavailableReason?: string | null
   floodAlert?: ApiFloodAlertRankingItem | null
 }): SelectedSegmentDetail {
   const forecastSeries = normalizeForecastSeries(input.forecast)
@@ -630,7 +633,11 @@ export function normalizeSelectedSegmentDetail(input: {
     comparisonAvailable: sourceSelection.comparisonAvailable,
     lineageStatus,
     lineageUnavailableReason:
-      lineageStatus === 'available' ? null : normalizeString(input.lineageError) ?? 'Lineage is unavailable for this segment/time.',
+      lineageStatus === 'available'
+        ? null
+        : normalizeString(input.lineageError) ??
+          normalizeString(input.lineageUnavailableReason) ??
+          'Lineage is unavailable for this segment/time.',
     handoffUrl: `/forecast?segmentId=${encodeURIComponent(riverSegmentId)}&basinVersionId=${encodeURIComponent(input.basinVersionId)}`,
     freshness: createFreshnessMetadata({
       updatedAt: input.forecast && 'issue_time' in input.forecast ? input.forecast.issue_time : null,
@@ -773,22 +780,34 @@ function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption
 
 function bboxFromMultiPolygon(geom: components['schemas']['GeoJsonMultiPolygon'] | null | undefined): M11Bbox | null {
   if (!geom?.coordinates) return null
-  const points = geom.coordinates.flat(3) as unknown[]
-  const pairs: number[][] = []
-  for (let index = 0; index < points.length; index += 2) {
-    const lon = numberOrNull(points[index])
-    const lat = numberOrNull(points[index + 1])
-    if (lon !== null && lat !== null) pairs.push([lon, lat])
+  let bbox: M11Bbox | null = null
+  const stack: unknown[] = [geom.coordinates]
+
+  while (stack.length > 0) {
+    const current = stack.pop()
+    if (!Array.isArray(current)) continue
+
+    if (current.length >= 2 && typeof current[0] !== 'object' && typeof current[1] !== 'object') {
+      const lon = numberOrNull(current[0])
+      const lat = numberOrNull(current[1])
+      if (lon === null || lat === null) continue
+      bbox = bbox
+        ? {
+            minLon: Math.min(bbox.minLon, lon),
+            minLat: Math.min(bbox.minLat, lat),
+            maxLon: Math.max(bbox.maxLon, lon),
+            maxLat: Math.max(bbox.maxLat, lat),
+          }
+        : { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat }
+      continue
+    }
+
+    for (let index = current.length - 1; index >= 0; index -= 1) {
+      stack.push(current[index])
+    }
   }
-  if (pairs.length === 0) return null
-  const lons = pairs.map((point) => point[0])
-  const lats = pairs.map((point) => point[1])
-  return {
-    minLon: Math.min(...lons),
-    minLat: Math.min(...lats),
-    maxLon: Math.max(...lons),
-    maxLat: Math.max(...lats),
-  }
+
+  return bbox
 }
 
 function warningCountsFromRanking(items: ApiFloodAlertRankingItem[]): Record<M11WarningLevel, number> {

@@ -41,6 +41,12 @@ Add read-only aggregation endpoints only if adapter composition creates repeated
 - `GET /api/v1/overview/summary`
 - `GET /api/v1/basins/{basin_id}/summary`
 
+Issue #161 closure note: the overview adapter may fetch real basin-version/bbox data only
+when the measured request plan stays inside the documented threshold and does not create
+per-basin N+1 fan-out. When basin-version/bbox composition would require N+1 or exceed the
+request budget, page-facing links and summaries must mark that surface aggregation-needed
+instead of fabricating basin-version IDs or claiming full reuse of existing APIs.
+
 ### D3: View-model adapters as the contract between pages and APIs
 
 Pages and components should consume typed view models rather than raw API responses. Adapters should normalize nullable fields, IDs, warning levels, units, time strings, and empty collections.
@@ -53,6 +59,15 @@ Suggested view-model groups:
 - `BasinDetail`: basin identity, selected basin version, bbox, segment count, warning distribution, latest run metadata.
 - `BasinSegmentRow`: river segment id, display name, current Q, return period, warning level, quality flag, source, cycle time.
 - `SelectedSegmentDetail`: IDs, basin/model metadata, current forecast values, data source, lineage/quality status, trend points, and handoff URLs.
+
+For M11 #161, the page-facing view models include typed placeholders and unavailable states
+for surfaces that are required by the larger OpenSpec but not rendered as first-class page
+components in this issue: pipeline stages, job tables, stage-duration/success-rate metrics,
+flood return-period map features/tiles, flood-alert segment lists, and full lineage graph
+visualization. The adapter composes pipeline status, queue depth, flood summary/ranking,
+layer valid-times, forecast series, timeline, and lineage status; richer monitoring tables,
+metrics charts, flood map rendering, and lineage graph UI remain downstream page/component
+work and must not be silently represented with fake values.
 
 ### D4: Shared map primitives, not one-off map implementations
 

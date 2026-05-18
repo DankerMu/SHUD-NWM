@@ -436,6 +436,67 @@ describe('M11 overview data contracts', () => {
     })
   })
 
+  it('uses all relevant runs for overview compare availability', () => {
+    const bothSources = normalizeOverviewSummary({
+      query: { ...query, source: 'compare' },
+      latestRun: run,
+      runs: [
+        run,
+        {
+          ...run,
+          run_id: 'fcst_ifs_2026051800_yangtze_shud_v12',
+          scenario_id: 'forecast_ifs_deterministic',
+          source_id: 'IFS',
+        },
+      ],
+    })
+    const missingIfs = normalizeOverviewSummary({
+      query: { ...query, source: 'compare' },
+      latestRun: run,
+      runs: [run],
+    })
+
+    expect(bothSources.sourceSelection).toMatchObject({
+      resolvedSource: 'GFS+IFS',
+      comparisonAvailable: true,
+      unavailableReason: null,
+    })
+    expect(missingIfs.sourceSelection).toMatchObject({
+      resolvedSource: 'Unknown',
+      comparisonAvailable: false,
+      unavailableReason: 'Comparison requires both GFS and IFS series.',
+    })
+  })
+
+  it('computes basin version bbox without array flattening or spread-sized allocations', () => {
+    const coordinates: number[][][] = [[]]
+    for (let index = 0; index < 20_000; index += 1) {
+      coordinates[0].push([100 + index * 0.0001, 30 - index * 0.0001])
+    }
+
+    const [normalized] = normalizeOverviewBasins({
+      basins: [basin],
+      versionsByBasinId: {
+        yangtze: [
+          {
+            ...basinVersion,
+            geom: {
+              type: 'MultiPolygon',
+              coordinates: [coordinates],
+            },
+          },
+        ],
+      },
+    })
+
+    expect(normalized.bbox).toEqual({
+      minLon: 100,
+      minLat: 28.0001,
+      maxLon: 101.9999,
+      maxLat: 30,
+    })
+  })
+
   it('returns measurable aggregation endpoint decisions for all rule branches', () => {
     expect(
       decideAggregationEndpoint({ initialRequestCount: 8, createsPerBasinNPlusOne: false, missingRequiredFields: [] }),
@@ -455,4 +516,3 @@ describe('M11 overview data contracts', () => {
     ).toMatchObject({ needsAggregationEndpoint: true, reason: 'missing-required-field' })
   })
 })
-

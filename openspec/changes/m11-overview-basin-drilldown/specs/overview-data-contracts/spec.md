@@ -52,3 +52,13 @@ The system SHALL distinguish current data, stale data, unavailable data, and par
 - **WHEN** a required field or endpoint is unavailable
 - **THEN** the view model MUST expose an unavailable reason or quality note
 - **AND** UI components MUST show a scoped empty/disabled/error state instead of fabricating values
+
+#### Scenario: Compare flood surfaces need aggregation
+- **WHEN** an overview or basin detail query requests `source=compare`
+- **THEN** warning summaries, rankings, selected-segment timelines, and lineage MUST NOT be populated from a single run
+- **AND** until a GFS+IFS aggregation/composition endpoint exists, those surfaces MUST expose a scoped unavailable or aggregation-needed state while source availability may still reflect the run set
+
+#### Scenario: URL segment is not in filtered rows
+- **WHEN** a basin detail URL supplies `segmentId`
+- **THEN** selected-segment API identities MUST resolve from a matching filtered row or the selected basin-version feature collection
+- **AND** the resolver MUST NOT fall back to the first filtered row for a supplied but unresolvable segment ID

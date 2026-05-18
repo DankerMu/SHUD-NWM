@@ -72,8 +72,37 @@ type CacheEntry<T> = {
   value?: T
 }
 
+type OverviewRequestPlan = {
+  baseRequestCount: number
+  layerValidTimeRequestCount: number
+  versionRequestCount: number
+  pipelineRequestCount: number
+  initialRequestCount: number
+  createsPerBasinNPlusOne: boolean
+  missingRequiredFields: string[]
+  shouldFetchVersions: boolean
+}
+
+type ResolvedSegmentIdentifiers = {
+  requestedId: string
+  riverSegmentId: string
+  segmentId: string
+  detailEndpointSegmentId: string
+  forecastSegmentId: string
+  timelineSegmentId: string
+  lineageSegmentId: string
+  feature: ApiRiverFeature | null
+  row: BasinSegmentRow | null
+}
+
+const COMPARE_FLOOD_SUMMARY_UNAVAILABLE = '对比模式洪水摘要需要 GFS+IFS 聚合端点'
+const COMPARE_FLOOD_RANKING_UNAVAILABLE = '对比模式洪水排名需要 GFS+IFS 聚合端点'
+const COMPARE_FLOOD_TIMELINE_UNAVAILABLE = '对比模式洪水时间线需要 GFS+IFS 聚合端点'
+const COMPARE_LINEAGE_UNAVAILABLE = '对比模式河段追溯需要 GFS+IFS 聚合端点'
+
 const cache = new Map<string, CacheEntry<unknown>>()
 const CACHE_TTL_MS = 60_000
+const OVERVIEW_INITIAL_REQUEST_THRESHOLD = 8
 const overviewLoads = new Map<string, Promise<OverviewDataSnapshot>>()
 const basinLoads = new Map<string, Promise<BasinDataSnapshot>>()
 let overviewRequestNonce = 0
@@ -127,9 +156,13 @@ async function getApi<T>(path: string, options?: unknown, fallback = '请求失�
   return unwrapApiData<T>(data, fallback)
 }
 
+function safeM11ErrorMessage(label: string, fallback = '暂不可用') {
+  return `${label}: ${fallback}`
+}
+
 function settledValue<T>(result: PromiseSettledResult<T>, errors: string[], label: string): T | null {
   if (result.status === 'fulfilled') return result.value
-  errors.push(`${label}: ${getApiErrorMessage(result.reason, 'unavailable')}`)
+  errors.push(safeM11ErrorMessage(label))
   return null
 }
 
@@ -142,6 +175,10 @@ function latestPublishedRun(runs: ApiHydroRunPage | null): ApiHydroRun | null {
   })[0] ?? null
 }
 
+function shouldUseSingleRunFloodSurfaces(query: M11QueryState) {
+  return query.source !== 'compare'
+}
+
 function sourceForApi(source: M11QueryState['source']) {
   if (source === 'ifs') return 'IFS'
   if (source === 'best') return 'best_available'
@@ -151,6 +188,30 @@ function sourceForApi(source: M11QueryState['source']) {
 
 function layerIdsForOverview(query: M11QueryState) {
   return [...new Set([query.layer, 'flood-return-period'])]
+}
+
+function pipelineRequestEligible(query: M11QueryState) {
+  return Boolean(query.cycle && query.source !== 'compare')
+}
+
+function buildOverviewRequestPlan(query: M11QueryState, basinCount: number, hasLatestRun: boolean): OverviewRequestPlan {
+  const layerValidTimeRequestCount = layerIdsForOverview(query).length
+  const pipelineRequestCount = pipelineRequestEligible(query) ? 1 : 0
+  const baseRequestCount = 5 + (hasLatestRun ? 2 : 0)
+  const initialWithoutVersions = baseRequestCount + pipelineRequestCount + layerValidTimeRequestCount
+  const createsPerBasinNPlusOne = basinCount > 1
+  const versionRequestCount = basinCount === 1 ? 1 : 0
+  const missingRequiredFields = versionRequestCount === basinCount ? [] : ['basin_versions', 'basin_bbox']
+  return {
+    baseRequestCount,
+    layerValidTimeRequestCount,
+    versionRequestCount,
+    pipelineRequestCount,
+    initialRequestCount: initialWithoutVersions + versionRequestCount,
+    createsPerBasinNPlusOne,
+    missingRequiredFields,
+    shouldFetchVersions: versionRequestCount === basinCount,
+  }
 }
 
 function scenariosForQuery(source: M11QueryState['source']) {
@@ -389,28 +450,46 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
     const load = (async () => {
       const partialErrors: string[] = []
-      const [basinsResult, modelsResult, runsResult, layersResult, queueResult] = await Promise.allSettled([
+      const [basinsResult, modelsResult, runsResult, layersResult, queueResult, pipelineResult] = await Promise.allSettled([
         fetchBasins(),
         fetchModels(),
         fetchRuns(query),
         fetchLayers(),
         fetchQueueDepth(),
+        fetchPipelineStatus(query),
       ])
       const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
       const models = settledValue(modelsResult, partialErrors, 'models')?.items ?? []
       const runs = settledValue(runsResult, partialErrors, 'runs')
       const latestRun = latestPublishedRun(runs)
+      const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
       const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const queue = settledValue(queueResult, partialErrors, 'queue')
+      const pipeline = settledValue(pipelineResult, partialErrors, 'pipeline')
+      const requestPlan = buildOverviewRequestPlan(query, basins.length, Boolean(latestRun && useSingleRunFloodSurfaces))
 
-      const [summaryResult, rankingResult, ...validTimeResults] = await Promise.allSettled([
-        latestRun ? fetchFloodSummary(latestRun.run_id, query.validTime) : Promise.resolve(null),
-        latestRun ? fetchFloodRanking(latestRun.run_id, query) : Promise.resolve(null),
+      if (!useSingleRunFloodSurfaces) {
+        partialErrors.push(`flood summary: ${COMPARE_FLOOD_SUMMARY_UNAVAILABLE}`)
+        partialErrors.push(`flood ranking: ${COMPARE_FLOOD_RANKING_UNAVAILABLE}`)
+      }
+
+      const [summaryResult, rankingResult, ...versionAndValidTimeResults] = await Promise.allSettled([
+        latestRun && useSingleRunFloodSurfaces ? fetchFloodSummary(latestRun.run_id, query.validTime) : Promise.resolve(null),
+        latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, query) : Promise.resolve(null),
+        ...(requestPlan.shouldFetchVersions ? basins.map((basin) => fetchBasinVersions(basin.basin_id)) : []),
         ...layerIdsForOverview(query).map((layerId) => fetchLayerValidTimes(layerId)),
       ])
 
       const floodSummary = settledValue(summaryResult, partialErrors, 'flood summary')
       const ranking = settledValue(rankingResult, partialErrors, 'flood ranking')
+      const versionsByBasinId: Record<string, ApiBasinVersion[]> = {}
+      const validTimeResults = versionAndValidTimeResults.slice(requestPlan.versionRequestCount)
+      if (requestPlan.shouldFetchVersions) {
+        basins.forEach((basin, index) => {
+          versionsByBasinId[basin.basin_id] =
+            settledValue(versionAndValidTimeResults[index] as PromiseSettledResult<ApiBasinVersion[]>, partialErrors, 'basin versions') ?? []
+        })
+      }
       const validTimesByLayerId: Record<string, string[]> = {}
       layerIdsForOverview(query).forEach((layerId, index) => {
         validTimesByLayerId[layerId] = settledValue(validTimeResults[index], partialErrors, `layer ${layerId} valid times`) ?? []
@@ -418,7 +497,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
       const overviewBasins = normalizeOverviewBasins({
         basins,
-        versionsByBasinId: {},
+        versionsByBasinId,
         models: models as ApiModelInstance[],
         runs: runs?.items ?? [],
         rankingItems: ranking?.items ?? [],
@@ -428,17 +507,14 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         basins: overviewBasins,
         floodSummary,
         ranking,
-        pipeline: null,
+        pipeline,
         queue,
-        latestRun,
+        latestRun: useSingleRunFloodSurfaces ? latestRun : null,
+        runs: runs?.items ?? [],
         partialErrors,
       })
       const layerStates = normalizeLayerStates({ query, layers, validTimesByLayerId })
-      const aggregationDecision = decideAggregationEndpoint({
-        initialRequestCount: 8,
-        createsPerBasinNPlusOne: false,
-        missingRequiredFields: [],
-      })
+      const aggregationDecision = decideAggregationEndpoint(requestPlan)
       const snapshot: OverviewDataSnapshot = { basins: overviewBasins, summary, layers: layerStates, aggregationDecision }
       if (requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey) {
         set({ overview: snapshot, loading: false, error: partialErrors[0] ?? null })
@@ -452,7 +528,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       return await load
     } catch (error) {
       if (requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey) {
-        const message = getApiErrorMessage(error, '加载总览数据失败')
+        const message = '加载总览数据失败'
         const fallback: OverviewDataSnapshot = {
           basins: [],
           summary: createEmptyOverviewSummary(query),
@@ -490,7 +566,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
       const basin = basins.find((item) => item.basin_id === basinId) ?? null
       const versions = settledValue(versionsResult, partialErrors, 'basin versions') ?? []
-      const latestRun = latestPublishedRun(settledValue(runsResult, partialErrors, 'runs'))
+      const runPage = settledValue(runsResult, partialErrors, 'runs')
+      const latestRun = latestPublishedRun(runPage)
+      const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
       const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const selectedVersion =
         versions.find((version) => version.basin_version_id === query.basinVersionId) ??
@@ -501,13 +579,16 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const [modelsResult, segmentsResult, rankingResult, ...validTimeResults] = await Promise.allSettled([
         selectedVersion ? fetchModels(selectedVersion.basin_version_id) : Promise.resolve(null),
         selectedVersion ? fetchRiverSegments(selectedVersion.basin_version_id) : Promise.resolve(null),
-        latestRun ? fetchFloodRanking(latestRun.run_id, query, basinId) : Promise.resolve(null),
+        latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, query, basinId) : Promise.resolve(null),
         ...layerIdsForOverview(query).map((layerId) => fetchLayerValidTimes(layerId)),
       ])
 
       const models = settledValue(modelsResult, partialErrors, 'models')?.items ?? []
       const segments = settledValue(segmentsResult, partialErrors, 'river segments')
       const ranking = settledValue(rankingResult, partialErrors, 'flood ranking')
+      if (!useSingleRunFloodSurfaces) {
+        partialErrors.push(`flood ranking: ${COMPARE_FLOOD_RANKING_UNAVAILABLE}`)
+      }
       const validTimesByLayerId: Record<string, string[]> = {}
       layerIdsForOverview(query).forEach((layerId, index) => {
         validTimesByLayerId[layerId] = settledValue(validTimeResults[index], partialErrors, `layer ${layerId} valid times`) ?? []
@@ -520,33 +601,40 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         models: models as ApiModelInstance[],
         segments,
         rankingItems: ranking?.items ?? [],
-        latestRun,
+        latestRun: useSingleRunFloodSurfaces ? latestRun : null,
+        runs: runPage?.items ?? [],
         partialErrors,
       })
       const rows = normalizeBasinSegmentRows({ query, featureCollection: segments, rankingItems: ranking?.items ?? [] })
-      const selectedSegmentId = query.segmentId ?? rows[0]?.riverSegmentId ?? null
+      const selectedIdentifiers = resolveSelectedSegmentIdentifiers(query.segmentId, rows, segments)
       let selectedSegment: SelectedSegmentDetail | null = null
 
-      if (selectedVersion && selectedSegmentId) {
-        const selectedFeature = findFeature(segments, selectedSegmentId)
+      if (selectedVersion && selectedIdentifiers) {
+        if (!useSingleRunFloodSurfaces) {
+          partialErrors.push(`flood timeline: ${COMPARE_FLOOD_TIMELINE_UNAVAILABLE}`)
+          partialErrors.push(`lineage: ${COMPARE_LINEAGE_UNAVAILABLE}`)
+        }
         const selectedRanking = ranking?.items.find(
-          (item) => item.river_segment_id === selectedSegmentId || item.segment_id === selectedSegmentId,
+          (item) =>
+            item.river_segment_id === selectedIdentifiers.riverSegmentId ||
+            item.segment_id === selectedIdentifiers.segmentId,
         )
         const [segmentResult, forecastResult, timelineResult] = await Promise.allSettled([
-          fetchRiverSegment(selectedVersion.basin_version_id, selectedSegmentId),
-          fetchForecast(selectedVersion.basin_version_id, selectedSegmentId, query),
-          latestRun ? fetchFloodTimeline(latestRun.run_id, selectedSegmentId) : Promise.resolve(null),
+          fetchRiverSegment(selectedVersion.basin_version_id, selectedIdentifiers.detailEndpointSegmentId),
+          fetchForecast(selectedVersion.basin_version_id, selectedIdentifiers.forecastSegmentId, query),
+          latestRun && useSingleRunFloodSurfaces ? fetchFloodTimeline(latestRun.run_id, selectedIdentifiers.timelineSegmentId) : Promise.resolve(null),
         ])
         const segment = settledValue(segmentResult, partialErrors, 'river segment detail')
         const forecast = settledValue(forecastResult, partialErrors, 'forecast series')
         const timeline = settledValue(timelineResult, partialErrors, 'flood timeline')
         let lineage: ApiLineageResponse | null = null
         let lineageError: string | null = null
-        if (latestRun) {
+        const lineageUnavailableReason = useSingleRunFloodSurfaces ? null : COMPARE_LINEAGE_UNAVAILABLE
+        if (latestRun && useSingleRunFloodSurfaces) {
           try {
-            lineage = await fetchLineage(latestRun.run_id, selectedSegmentId, query)
+            lineage = await fetchLineage(latestRun.run_id, selectedIdentifiers.lineageSegmentId, query)
           } catch (error) {
-            lineageError = getApiErrorMessage(error, '河段追溯暂不可用')
+            lineageError = '河段追溯暂不可用'
             partialErrors.push(`lineage: ${lineageError}`)
           }
         }
@@ -554,14 +642,15 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
           query,
           basin,
           basinVersionId: selectedVersion.basin_version_id,
-          segmentId: selectedSegmentId,
+          segmentId: selectedIdentifiers.requestedId,
           segment,
-          feature: selectedFeature,
+          feature: selectedIdentifiers.feature,
           model: (models as ApiModelInstance[])[0] ?? null,
           forecast,
           floodTimeline: timeline,
           lineage,
           lineageError,
+          lineageUnavailableReason,
           floodAlert: selectedRanking ?? null,
         })
       }
@@ -580,7 +669,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       return await load
     } catch (error) {
       if (requestNonce === basinRequestNonce && activeBasinRequestKey === requestKey) {
-        const message = getApiErrorMessage(error, '加载流域数据失败')
+        const message = '加载流域数据失败'
         const fallback: BasinDataSnapshot = {
           detail: createEmptyBasinDetail(basinId, query),
           segments: [],
@@ -602,4 +691,34 @@ function findFeature(collection: ApiRiverFeatureCollection | null, segmentId: st
       (feature) => feature.properties.river_segment_id === segmentId || feature.properties.segment_id === segmentId,
     ) ?? null
   )
+}
+
+function resolveSelectedSegmentIdentifiers(
+  querySegmentId: string | null,
+  rows: BasinSegmentRow[],
+  collection: ApiRiverFeatureCollection | null,
+): ResolvedSegmentIdentifiers | null {
+  const row = querySegmentId
+    ? rows.find((item) => item.segmentId === querySegmentId || item.riverSegmentId === querySegmentId) ?? null
+    : rows[0] ?? null
+  const requestedId = querySegmentId ?? row?.riverSegmentId ?? null
+  if (!requestedId) return null
+
+  const feature = findFeature(collection, requestedId) ?? (!querySegmentId && row ? findFeature(collection, row.riverSegmentId) : null)
+  if (querySegmentId && !row && !feature) return null
+
+  const riverSegmentId = row?.riverSegmentId ?? feature?.properties.river_segment_id ?? requestedId
+  const segmentId = row?.segmentId ?? feature?.properties.segment_id ?? requestedId
+
+  return {
+    requestedId,
+    riverSegmentId,
+    segmentId,
+    detailEndpointSegmentId: riverSegmentId,
+    forecastSegmentId: riverSegmentId,
+    timelineSegmentId: riverSegmentId,
+    lineageSegmentId: riverSegmentId,
+    feature,
+    row,
+  }
 }

@@ -66,10 +66,21 @@ Non-goals for #160:
 
 - [ ] 2.1 Create overview/basin view-model types for `OverviewBasin`, `OverviewSummary`, `LayerState`, `BasinDetail`, `BasinSegmentRow`, `SelectedSegmentDetail`, and source/scenario selection state.
 - [ ] 2.2 Implement adapters/stores that compose existing APIs for basins, basin versions, models, river segments, flood alerts, forecast series, `/api/v1/layers`, `/api/v1/layers/{layer_id}/valid-times`, pipeline status/stages, jobs, queue depth, metrics, flood return-period map data, and lineage.
+  - #161 closure scope: page-facing M11 adapters compose basins, bounded basin versions,
+    models, river segments, flood summary/ranking/timeline, forecast series, layers,
+    layer valid-times, pipeline status, queue depth, and lineage status. Pipeline stages,
+    jobs, metrics, flood return-period map features/tiles, flood-alert segment-list UI,
+    and full lineage graph rendering are typed downstream surfaces or existing
+    monitoring/flood-alert route surfaces, not first-class overview/basin page widgets in
+    this issue; they must remain unavailable/placeholder-backed rather than fabricated.
 - [ ] 2.3 Normalize IDs, `basin_version_id`, `river_segment_id`, warning levels, quality flags, units, timestamps, null fields, unavailable reasons, source/scenario provenance, valid-time metadata, and freshness metadata in adapters rather than leaf components.
 - [ ] 2.4 Add caching or request de-duplication for shared overview resources so route changes, source changes, layer changes, and filter changes do not trigger unnecessary repeated calls.
 - [ ] 2.5 Add unit tests for adapter normalization, partial failures, unavailable fields, freshness metadata, source/scenario provenance, layer valid-times, and query-driven request parameters.
 - [ ] 2.6 Add a measurable aggregation-endpoint decision rule: only add read-only endpoint(s) when existing composition requires more than 8 initial overview requests, creates per-basin N+1 calls for required fields, or cannot provide a required field from current APIs; if added, update `openapi/nhms.v1.yaml`, regenerate types, run `check:api-types`, and add backend/frontend tests in the same issue.
+  - #161 closure invariant: overview request counts are computed from the actual plan,
+    including pipeline eligibility and each distinct layer valid-time request. Real
+    basin-version/bbox data is fetched only when bounded; otherwise the view model reports
+    aggregation-needed and leaves required composite fields unavailable.
 
 ### Issue #161 Evidence Matrix
 
