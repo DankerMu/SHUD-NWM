@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { ReactNode } from 'react'
 import { BrowserRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -17,6 +18,66 @@ import {
 } from '@/pages/m11/M11Controls'
 import { OverviewPage } from '@/pages/OverviewPage'
 import { useOverviewDataStore } from '@/stores/overviewData'
+
+const mapSources: Array<Record<string, unknown>> = []
+const mapLayers: Array<Record<string, unknown>> = []
+
+vi.mock('react-map-gl/maplibre', () => ({
+  default: ({
+    children,
+    mapStyle,
+    interactiveLayerIds,
+    onMouseMove,
+    onMouseLeave,
+    onClick,
+  }: {
+    children: ReactNode
+    mapStyle: unknown
+    interactiveLayerIds?: string[]
+    onMouseMove?: (event: unknown) => void
+    onMouseLeave?: (event: unknown) => void
+    onClick?: (event: unknown) => void
+  }) => (
+    <div
+      data-testid="mock-maplibre-map"
+      data-map-style={JSON.stringify(mapStyle)}
+      data-interactive-layer-ids={(interactiveLayerIds ?? []).join(',')}
+      onMouseMove={() =>
+        onMouseMove?.({
+          target: { getCanvas: () => ({ style: {} }) },
+          features: [],
+          point: { x: 0, y: 0 },
+        })
+      }
+      onMouseLeave={() =>
+        onMouseLeave?.({
+          target: { getCanvas: () => ({ style: {} }) },
+          features: [],
+          point: { x: 0, y: 0 },
+        })
+      }
+      onClick={() =>
+        onClick?.({
+          target: { getCanvas: () => ({ style: {} }) },
+          features: [],
+          point: { x: 0, y: 0 },
+        })
+      }
+    >
+      {children}
+    </div>
+  ),
+  Source: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => {
+    mapSources.push(props)
+    return <div data-testid="mock-map-source">{children}</div>
+  },
+  Layer: (props: Record<string, unknown>) => {
+    mapLayers.push(props)
+    return <div data-testid="mock-map-layer" />
+  },
+  NavigationControl: () => <div data-testid="mock-navigation-control" />,
+  ScaleControl: () => <div data-testid="mock-scale-control" />,
+}))
 
 const state: M11QueryState = {
   ...defaultM11QueryState,
@@ -92,6 +153,8 @@ const sourceSelection: SourceScenarioSelectionState = {
 
 describe('M11 visual foundation shell', () => {
   beforeEach(() => {
+    mapSources.length = 0
+    mapLayers.length = 0
     useOverviewDataStore.setState({
       ...useOverviewDataStore.getInitialState(),
       loadOverview: vi.fn().mockResolvedValue(undefined),
@@ -129,17 +192,44 @@ describe('M11 visual foundation shell', () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
 
-    render(<M11MapSurface state={state} layers={layers} onQueryChange={onQueryChange} />)
+    const { rerender } = render(<M11MapSurface state={state} layers={layers} onQueryChange={onQueryChange} />)
 
     const surface = screen.getByTestId('m11-map-surface')
     expect(surface).toHaveAttribute('data-basemap', 'vector')
-    expect(surface).toHaveAttribute('data-active-overlays', expect.stringContaining('discharge'))
+    expect(surface).toHaveAttribute('data-registered-overlays', 'discharge')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-discharge-line')
+    expect(mapSources.at(-1)).toMatchObject({
+      id: 'm11-discharge-source',
+      type: 'vector',
+      tiles: [expect.stringContaining('/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf')],
+    })
+    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-discharge-line', source: 'm11-discharge-source' })
 
     await user.click(screen.getByRole('button', { name: '地形底图' }))
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'terrain' })
 
+    mapSources.length = 0
+    mapLayers.length = 0
+    rerender(<M11MapSurface state={{ ...state, basemap: 'terrain' }} layers={layers} onQueryChange={onQueryChange} />)
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'terrain')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge')
+    expect(mapSources.at(-1)).toMatchObject({ id: 'm11-discharge-source', type: 'vector' })
+    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-discharge-line' })
+
     await user.click(screen.getByRole('button', { name: '卫星底图' }))
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
+  })
+
+  it('does not advertise or register unavailable selected overlays', () => {
+    render(<M11MapSurface state={{ ...state, layer: 'water-level' }} layers={layers} />)
+
+    const surface = screen.getByTestId('m11-map-surface')
+    expect(surface).toHaveAttribute('data-registered-overlays', '')
+    expect(surface).not.toHaveAttribute('data-active-overlays')
+    expect(screen.getByTestId('m11-map-unavailable')).toHaveTextContent('Layer has no valid times.')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
   })
 
   it('renders grouped layers and marks meteorology/base placeholders unavailable without fake data', async () => {

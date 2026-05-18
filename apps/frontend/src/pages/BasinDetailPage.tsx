@@ -14,7 +14,7 @@ import {
   SourceScenarioControls,
   resolveM11ValidTimeCorrection,
 } from '@/pages/m11/M11Controls'
-import { useOverviewDataStore } from '@/stores/overviewData'
+import { basinSnapshotMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 
 export function BasinDetailPage() {
   const { basinId = 'unknown' } = useParams()
@@ -27,17 +27,19 @@ export function BasinDetailPage() {
   const error = useOverviewDataStore((store) => store.basinError)
   const loadBasinDetail = useOverviewDataStore((store) => store.loadBasinDetail)
   const needsQueryReplacement = needsM11QueryReplacement(location.search)
-  const layers = basinData?.layers ?? []
-  const sourceSelection = basinData?.selectedSegment?.sourceSelection ?? basinData?.detail.sourceSelection ?? null
+  const basinMatchesQuery = basinSnapshotMatchesQuery(basinData, basinId, state)
+  const currentBasinData = basinMatchesQuery ? basinData : null
+  const layers = currentBasinData?.layers ?? []
+  const sourceSelection = currentBasinData?.selectedSegment?.sourceSelection ?? currentBasinData?.detail.sourceSelection ?? null
   const derivedTimeline = useMemo(() => {
-    const points = basinData?.selectedSegment?.trendPoints ?? []
+    const points = currentBasinData?.selectedSegment?.trendPoints ?? []
     return points.length > 0
       ? {
           validTimes: points.map((point) => point.validTime),
           label: 'selected segment forecast payload',
         }
       : null
-  }, [basinData?.selectedSegment?.trendPoints])
+  }, [currentBasinData?.selectedSegment?.trendPoints])
 
   const handleQueryChange = useCallback(
     (patch: M11QueryPatch) => {
@@ -58,15 +60,15 @@ export function BasinDetailPage() {
   }, [basinId, loadBasinDetail, needsQueryReplacement, state])
 
   useEffect(() => {
-    if (needsQueryReplacement || loading) return
+    if (needsQueryReplacement || loading || !basinMatchesQuery) return
     const correctedValidTime = resolveM11ValidTimeCorrection(state, layers, derivedTimeline)
     if (correctedValidTime === undefined) return
     handleQueryChange({ validTime: correctedValidTime })
-  }, [derivedTimeline, handleQueryChange, layers, loading, needsQueryReplacement, state])
+  }, [basinMatchesQuery, derivedTimeline, handleQueryChange, layers, loading, needsQueryReplacement, state])
 
-  const detail = basinData?.detail
-  const selectedSegment = basinData?.selectedSegment
-  const invalidSegmentRequested = Boolean(state.segmentId && basinData && !loading && !selectedSegment)
+  const detail = currentBasinData?.detail
+  const selectedSegment = currentBasinData?.selectedSegment
+  const invalidSegmentRequested = Boolean(state.segmentId && currentBasinData && !loading && !selectedSegment)
 
   return (
     <M11Layout

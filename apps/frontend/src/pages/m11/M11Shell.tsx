@@ -7,6 +7,7 @@ import type { M11QueryPatch, M11QueryState } from '@/lib/m11/queryState'
 import { serializeM11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 import { type M11TimelineDerivedTimes, M11MapSurface, M11Timeline } from '@/pages/m11/M11Controls'
+import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
 
 interface M11LayoutProps {
   title: string
@@ -20,6 +21,8 @@ interface M11LayoutProps {
   layers?: LayerState[]
   sourceSelection?: SourceScenarioSelectionState | null
   derivedTimeline?: M11TimelineDerivedTimes | null
+  onMapOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
+  onMapOverlayClick?: (interaction: M11MapOverlayInteraction) => void
   onQueryChange?: (patch: M11QueryPatch) => void
   children?: ReactNode
 }
@@ -36,6 +39,8 @@ export function M11Layout({
   layers = [],
   sourceSelection = null,
   derivedTimeline = null,
+  onMapOverlayHover,
+  onMapOverlayClick,
   onQueryChange,
   children,
 }: M11LayoutProps) {
@@ -57,7 +62,13 @@ export function M11Layout({
       </aside>
 
       <section className="relative min-h-[30rem] overflow-hidden bg-[#d7e7ef] xl:min-h-0" aria-label={mapLabel}>
-        <M11MapSurface state={state} layers={layers} onQueryChange={onQueryChange} />
+        <M11MapSurface
+          state={state}
+          layers={layers}
+          onQueryChange={onQueryChange}
+          onOverlayHover={onMapOverlayHover}
+          onOverlayClick={onMapOverlayClick}
+        />
         <div className="absolute left-8 top-8 z-[100] rounded-md bg-white/95 p-4 shadow-lg">
           <div className="flex items-center gap-2 text-base font-semibold text-neutral-900">
             <MapPinned className="h-5 w-5 text-primary-600" aria-hidden="true" />

@@ -9,7 +9,7 @@ import {
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
 import { LayerGroupControls, LayerLegendPanel, SourceScenarioControls, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
-import { useOverviewDataStore } from '@/stores/overviewData'
+import { overviewSnapshotMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 
 export function OverviewPage() {
   const location = useLocation()
@@ -21,7 +21,9 @@ export function OverviewPage() {
   const error = useOverviewDataStore((store) => store.error)
   const loadOverview = useOverviewDataStore((store) => store.loadOverview)
   const needsQueryReplacement = needsM11QueryReplacement(location.search)
-  const layers = overview?.layers ?? []
+  const overviewMatchesQuery = overviewSnapshotMatchesQuery(overview, state)
+  const currentOverview = overviewMatchesQuery ? overview : null
+  const layers = currentOverview?.layers ?? []
 
   const handleQueryChange = useCallback(
     (patch: M11QueryPatch) => {
@@ -42,14 +44,14 @@ export function OverviewPage() {
   }, [loadOverview, needsQueryReplacement, state])
 
   useEffect(() => {
-    if (needsQueryReplacement || loading || layers.length === 0) return
+    if (needsQueryReplacement || loading || !overviewMatchesQuery || layers.length === 0) return
     const correctedValidTime = resolveM11ValidTimeCorrection(state, layers)
     if (correctedValidTime === undefined) return
     handleQueryChange({ validTime: correctedValidTime })
-  }, [handleQueryChange, layers, loading, needsQueryReplacement, state])
+  }, [handleQueryChange, layers, loading, needsQueryReplacement, overviewMatchesQuery, state])
 
-  const basins = overview?.basins ?? []
-  const summary = overview?.summary
+  const basins = currentOverview?.basins ?? []
+  const summary = currentOverview?.summary
   const sourceSelection = summary?.sourceSelection ?? null
   const firstBasin = basins[0]
   const emptyBasinReason =
@@ -57,8 +59,8 @@ export function OverviewPage() {
       ? error ??
         (summary?.totalBasins === 0
           ? '暂无可用流域数据'
-          : overview?.aggregationDecision.needsAggregationEndpoint
-            ? overview.aggregationDecision.evidence
+          : currentOverview?.aggregationDecision.needsAggregationEndpoint
+            ? currentOverview.aggregationDecision.evidence
             : '流域清单暂不可用')
       : null
   const basinSearch = firstBasin

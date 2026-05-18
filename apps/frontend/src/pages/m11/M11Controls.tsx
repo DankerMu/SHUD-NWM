@@ -13,6 +13,13 @@ import {
 } from 'lucide-react'
 
 import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
+import {
+  M11MapLibreSurface,
+  m11MapStyleUrls,
+  type M11MapCameraFit,
+  type M11MapCameraFlyTo,
+  type M11MapOverlayInteraction,
+} from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
 import type { LayerState, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryPatch, M11QueryState, M11Source } from '@/lib/m11/queryState'
@@ -32,10 +39,17 @@ interface SharedControlProps {
   onQueryChange?: QueryChangeHandler
 }
 
+interface M11MapSurfaceProps extends SharedControlProps {
+  fitTo?: M11MapCameraFit | null
+  flyTo?: M11MapCameraFlyTo | null
+  onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
+  onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
+}
+
 const basemapOptions: Array<{ value: M11Basemap; label: string; icon: typeof MapIcon; styleUrl: string }> = [
-  { value: 'terrain', label: '地形', icon: Trees, styleUrl: 'm11://basemaps/terrain' },
-  { value: 'satellite', label: '卫星', icon: Satellite, styleUrl: 'm11://basemaps/satellite' },
-  { value: 'vector', label: '矢量', icon: MapIcon, styleUrl: 'm11://basemaps/vector' },
+  { value: 'terrain', label: '地形', icon: Trees, styleUrl: m11MapStyleUrls.terrain },
+  { value: 'satellite', label: '卫星', icon: Satellite, styleUrl: m11MapStyleUrls.satellite },
+  { value: 'vector', label: '矢量', icon: MapIcon, styleUrl: m11MapStyleUrls.vector },
 ]
 
 const hydrologyLayers: Array<{ value: M11Layer; label: string; description: string }> = [
@@ -94,23 +108,25 @@ const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
   ],
 }
 
-export function M11MapSurface({ state, layers = [], onQueryChange }: SharedControlProps) {
-  const activeLayerIds = useMemo(
-    () => layers.filter((layer) => layer.available || layer.layerId === state.layer).map((layer) => String(layer.layerId)),
-    [layers, state.layer],
-  )
-  const selectedBasemap = basemapOptions.find((option) => option.value === state.basemap) ?? basemapOptions[2]
-
+export function M11MapSurface({
+  state,
+  layers = [],
+  onQueryChange,
+  fitTo,
+  flyTo,
+  onOverlayHover,
+  onOverlayClick,
+}: M11MapSurfaceProps) {
   return (
-    <div
-      className="absolute inset-0"
-      data-testid="m11-map-surface"
-      data-basemap={state.basemap}
-      data-basemap-style={selectedBasemap.styleUrl}
-      data-active-overlays={activeLayerIds.join(',')}
-    >
-      <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(21,101,192,0.14)_0,rgba(79,195,247,0.18)_42%,rgba(76,175,80,0.13)_100%)]" />
-      <div className="absolute inset-5 rounded-md border border-white/70 bg-white/20 shadow-inner" />
+    <>
+      <M11MapLibreSurface
+        state={state}
+        layers={layers}
+        fitTo={fitTo}
+        flyTo={flyTo}
+        onOverlayHover={onOverlayHover}
+        onOverlayClick={onOverlayClick}
+      />
       <div className="absolute right-5 top-5 z-[100] flex rounded-md border border-neutral-300 bg-white/95 p-1 shadow-md">
         {basemapOptions.map((option) => {
           const Icon = option.icon
@@ -133,7 +149,7 @@ export function M11MapSurface({ state, layers = [], onQueryChange }: SharedContr
           )
         })}
       </div>
-    </div>
+    </>
   )
 }
 
