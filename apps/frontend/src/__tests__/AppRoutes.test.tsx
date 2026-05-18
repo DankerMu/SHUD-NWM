@@ -4,9 +4,11 @@ import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
+import { client } from '@/api/client'
 import { contextHandoff } from '@/pages/OverviewPage'
 import { useAuthStore } from '@/stores/auth'
 import { useFloodAlertStore } from '@/stores/floodAlert'
+import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
@@ -18,8 +20,18 @@ function geoJsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
 }
 
+function success<T>(data: T) {
+  return { status: 'success', data }
+}
+
 vi.mock('@/components/map/MapView', () => ({
   MapView: () => <div aria-label="河网地图">mock map</div>,
+}))
+
+vi.mock('@/api/client', () => ({
+  client: {
+    GET: vi.fn(),
+  },
 }))
 
 vi.mock('react-map-gl/maplibre', () => ({
@@ -81,8 +93,22 @@ vi.mock('react-map-gl/maplibre', () => ({
   ScaleControl: () => <div />,
 }))
 
+type MockForecastPanelProps = {
+  segment: ForecastSegmentInfo
+  loading: boolean
+  error: string | null
+}
+
 vi.mock('@/components/forecast/ForecastPanel', () => ({
-  ForecastPanel: () => <aside>mock forecast panel</aside>,
+  ForecastPanel: ({ segment, loading, error }: MockForecastPanelProps) => (
+    <aside>
+      mock forecast panel
+      <div>{segment.segmentId}</div>
+      <div>{segment.basinVersionId}</div>
+      <div>{loading ? 'forecast loading' : 'forecast idle'}</div>
+      {error ? <div>{error}</div> : null}
+    </aside>
+  ),
 }))
 
 vi.mock('@/components/flood/FloodAlertMap', () => ({
@@ -299,7 +325,14 @@ function overviewSnapshotWithBasins(layers: LayerState[], queryKey = '', dataKey
   }
 }
 
-function basinSnapshot(basinId: string, layers: LayerState[], queryKey = '', dataKey = queryKey, currentQ: number | null = 12) {
+function basinSnapshot(
+  basinId: string,
+  layers: LayerState[],
+  queryKey = '',
+  dataKey = queryKey,
+  currentQ: number | null = 12,
+  comparisonAvailable = true,
+) {
   return {
     requestScope: {
       kind: 'basin-detail' as const,
@@ -362,15 +395,15 @@ function basinSnapshot(basinId: string, layers: LayerState[], queryKey = '', dat
           warningLevel: 'watch' as const,
           qualityFlag: 'ok' as const,
           qualityNote: null,
-          sourceSelection: { ...m11SourceSelection, comparisonAvailable: true },
+          sourceSelection: { ...m11SourceSelection, comparisonAvailable },
           trendPoints: [
             { validTime: '2026-05-18T00:00:00.000Z', value: 10, source: 'GFS' as const, scenarioId: 'forecast_gfs_deterministic', role: 'analysis', isAnalysis: true },
             { validTime: '2026-05-18T06:00:00.000Z', value: currentQ, source: 'GFS' as const, scenarioId: 'forecast_gfs_deterministic', role: 'future_7_days', isAnalysis: false },
           ],
-          comparisonAvailable: true,
+          comparisonAvailable,
           lineageStatus: 'available' as const,
           lineageUnavailableReason: null,
-          handoffUrl: '/forecast',
+          handoffUrl: '/forecast?segmentId=seg-009&basinVersionId=bv-001',
           freshness: m11LayerFreshness,
           unavailableReason: null,
         },
@@ -386,6 +419,7 @@ const basinDefaultScopeKey = 'source=gfs&basinVersionId=bv-001&segmentId=seg-009
 const basinValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009'
 
 beforeEach(() => {
+  vi.clearAllMocks()
   m11FitBoundsCalls.length = 0
   m11FlyToCalls.length = 0
   overviewAsync.mockResolvedValue(undefined)
@@ -410,6 +444,13 @@ beforeEach(() => {
     fetchSummary: noopAsync,
     fetchRanking: noopAsync,
   })
+  useForecastStore.setState(
+    {
+      ...useForecastStore.getInitialState(),
+    },
+    true,
+  )
+  vi.mocked(client.GET).mockResolvedValue({ data: success([]), error: undefined } as never)
   useMonitoringStore.setState({
     source: 'GFS',
     cycleTime: '2026-05-09T00:00:00Z',
@@ -996,6 +1037,53 @@ describe('App route state', () => {
     expect(screen.getByRole('link', { name: /水文预报/ })).toHaveClass('border-accent')
   })
 
+  it('hydrates forecast segment selection and loads forecast data from direct handoff query params', async () => {
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        segment_id: 'seg-009',
+        issue_time: '2026-05-18T00:00:00Z',
+        unit: 'm3/s',
+        series: [],
+        frequency_thresholds: null,
+      }),
+      error: undefined,
+    } as never)
+    window.history.pushState({}, '', '/forecast?segmentId=seg-009&basinVersionId=bv-001')
+
+    render(<App />)
+
+    expect(await screen.findByText('mock forecast panel')).toBeInTheDocument()
+    expect(screen.getByText('seg-009')).toBeInTheDocument()
+    expect(screen.getByText('bv-001')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(client.GET).toHaveBeenCalledWith(
+        '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
+        {
+          params: {
+            path: {
+              basin_version_id: 'bv-001',
+              segment_id: 'seg-009',
+            },
+            query: {
+              issue_time: 'latest',
+              variables: 'q_down',
+              scenarios: 'GFS',
+              include_analysis: true,
+            },
+          },
+        },
+      ),
+    )
+    expect(client.GET).toHaveBeenCalledTimes(1)
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        selectedSegment: { segmentId: 'seg-009', basinVersionId: 'bv-001' },
+        forecastData: { segmentId: 'seg-009' },
+        loading: false,
+      }),
+    )
+  })
+
   it('routes basin deep links and restores normalized query state once', async () => {
     window.history.pushState(
       {},
@@ -1144,6 +1232,42 @@ describe('App route state', () => {
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'terrain')
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap-style', 'm11://basemaps/terrain')
     expect(loadBasinDetail).toHaveBeenCalledTimes(initialLoadCalls)
+  })
+
+  it('renders selected basin segment forecast handoff controls and disables unavailable comparison', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey, 12, false),
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '查看详情' })).toHaveAttribute(
+      'href',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001',
+    )
+    expect(screen.getByRole('button', { name: '对比预报' })).toBeDisabled()
+    expect(screen.queryByRole('link', { name: '对比预报' })).not.toBeInTheDocument()
+  })
+
+  it('enables selected basin segment comparison handoff when comparison data is available', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey, 12, true),
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '对比预报' })).toHaveAttribute(
+      'href',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001',
+    )
   })
 
   it('does not correct basin valid time from a stale basin snapshot', async () => {

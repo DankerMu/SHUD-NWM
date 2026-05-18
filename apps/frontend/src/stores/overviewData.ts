@@ -884,6 +884,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         fetchRuns(query, basinId),
         fetchLayers(),
       ])
+      const basinLookupAvailable = basinsResult.status === 'fulfilled'
       const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
       const basin = basins.find((item) => item.basin_id === basinId) ?? null
       const versions = settledValue(versionsResult, partialErrors, 'basin versions') ?? []
@@ -946,6 +947,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const detail = normalizeBasinDetail({
         query,
         basin,
+        basinLookupAvailable,
         versions,
         models: models as ApiModelInstance[],
         segments,

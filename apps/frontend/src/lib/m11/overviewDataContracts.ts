@@ -528,6 +528,7 @@ export function normalizeLayerStates(input: {
 export function normalizeBasinDetail(input: {
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'basinVersionId'>
   basin: ApiBasin | null
+  basinLookupAvailable?: boolean
   versions: ApiBasinVersion[]
   models?: ApiModelInstance[]
   segments?: ApiRiverFeatureCollection | null
@@ -567,7 +568,7 @@ export function normalizeBasinDetail(input: {
       unavailableReason: input.latestRun ? null : 'No latest run is available for this basin/source.',
     }),
     sourceSelection,
-    unavailableReason: !input.basin
+    unavailableReason: !input.basin && input.basinLookupAvailable !== false
       ? 'Basin was not found.'
       : versions.length === 0
         ? 'No published basin version is available.'

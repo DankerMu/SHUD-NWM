@@ -791,6 +791,105 @@ describe('useOverviewDataStore', () => {
     })
   })
 
+  it('does not mark basin detail not-found when the basin list lookup fails', async () => {
+    const calls: string[] = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      calls.push(path)
+
+      if (path === '/api/v1/basins') return { data: undefined, error: { error: { message: 'basins unavailable' } } } as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success(featureCollection) as never
+      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return success({
+          river_segment_id: 'seg-123',
+          river_network_version_id: 'yangtze_rivnet_v12',
+          segment_order: 1,
+          downstream_segment_id: null,
+          length_m: 1000,
+          geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+          properties_json: {},
+          created_at: '2026-05-01T00:00:00Z',
+        }) as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        return success({
+          river_segment_id: 'seg-123',
+          issue_time: '2026-05-18T00:00:00Z',
+          variable: 'q_down',
+          unit: 'm3/s',
+          frequency_thresholds: null,
+          segments: [
+            {
+              scenario: 'forecast_gfs_deterministic',
+              source: 'GFS',
+              segment_role: 'future_7_days',
+              data: [{ valid_time: '2026-05-18T06:00:00Z', value: 123 }],
+            },
+          ],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/timeline') {
+        return success({
+          run_id: 'run-gfs-1',
+          segment_id: 'seg-123',
+          river_segment_id: 'seg-123',
+          timesteps: [],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }) as never
+      }
+      if (path === '/api/v1/lineage/river-point') return success({ trace: [], nodes: [], edges: [] }) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', query)
+
+    expect(calls).toContain('/api/v1/basins')
+    expect(snapshot.detail.basinId).toBe('')
+    expect(snapshot.detail.displayName).toBe('')
+    expect(snapshot.detail.selectedBasinVersionId).toBe('yangtze_v2026_01')
+    expect(snapshot.detail.unavailableReason).toBeNull()
+    expect(snapshot.detail.partialErrors).toEqual(expect.arrayContaining(['basins: 暂不可用']))
+    expect(snapshot.selectedSegment?.riverSegmentId).toBe('seg-123')
+    expect(useOverviewDataStore.getState().basinError).toBe('basins: 暂不可用')
+  })
+
+  it('marks basin detail not-found when the basin list succeeds without the requested id', async () => {
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+
+      if (path === '/api/v1/basins') return success([]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([]) as never
+      if (path === '/api/v1/runs') return success({ items: [], total: 0, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('not-a-real-basin', {
+      ...defaultM11QueryState,
+      segmentId: null,
+      basinVersionId: null,
+    })
+
+    expect(snapshot.detail).toMatchObject({
+      basinId: '',
+      displayName: '',
+      selectedBasinVersionId: null,
+      unavailableReason: 'Basin was not found.',
+    })
+    expect(snapshot.selectedSegment).toBeNull()
+  })
+
   it('resolves default best basin detail forecast requests to a concrete GFS or IFS scenario', async () => {
     const bestQuery = { ...query, source: 'best' as const, cycle: null }
     const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []

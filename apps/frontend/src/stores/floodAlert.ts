@@ -389,7 +389,21 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
     } catch (error) {
       if (requestId !== latestRunRequestId) return
       const message = getApiErrorMessage(error, '获取最新预警 Run 失败')
-      set({ loading: false, error: message, empty: false })
+      set({
+        latestRun: null,
+        selectedRunId: null,
+        validTimes: [],
+        selectedValidTime: null,
+        loading: false,
+        empty: false,
+        error: message,
+        summaryData: null,
+        rankingData: null,
+        timelineData: null,
+        summaryLoading: false,
+        rankingLoading: false,
+        timelineLoading: false,
+      })
       throw error
     }
   },

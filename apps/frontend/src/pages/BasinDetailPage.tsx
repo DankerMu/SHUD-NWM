@@ -144,9 +144,37 @@ export function BasinDetailPage() {
                   <p className="mt-1 text-xs text-neutral-700">当前流域版本中没有匹配的河段数据。</p>
                 ) : null}
                 {selectedSegment ? (
-                  <p className="mt-1 text-xs text-neutral-700">
-                    {selectedSegment.currentQ ?? '-'} {selectedSegment.qUnit} / {selectedSegment.warningLevel}
-                  </p>
+                  <>
+                    <p className="mt-1 text-xs text-neutral-700">
+                      {selectedSegment.currentQ ?? '-'} {selectedSegment.qUnit} / {selectedSegment.warningLevel}
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Link
+                        className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600"
+                        to={selectedSegment.handoffUrl}
+                      >
+                        查看详情
+                      </Link>
+                      {selectedSegment.comparisonAvailable ? (
+                        <Link
+                          className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600"
+                          to={selectedSegment.handoffUrl}
+                        >
+                          对比预报
+                        </Link>
+                      ) : (
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-400"
+                          disabled
+                          aria-disabled="true"
+                          title="对比数据不可用"
+                        >
+                          对比预报
+                        </button>
+                      )}
+                    </div>
+                  </>
                 ) : null}
               </div>
               <div className="rounded-md border border-neutral-300 p-3">

@@ -374,6 +374,62 @@ describe('useFloodAlertStore', () => {
     })
   })
 
+  it('clears stale run-scoped payloads and loading flags when an explicit handoff lookup rejects', async () => {
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-1',
+      latestRun,
+      selectedValidTime: '2026-05-12T03:00:00.000Z',
+      validTimes: ['2026-05-12T00:00:00.000Z', '2026-05-12T03:00:00.000Z'],
+      summaryData: {
+        runId: 'run-1',
+        levels: [{ level: 'warning', count: 2, color: '#f59e0b' }],
+        totalSegments: 4,
+        usableCurves: 3,
+        unavailableCount: 1,
+      },
+      rankingData: {
+        items: [{ rank: 1, riverSegmentId: 'old-seg', segmentId: 'old-seg', returnPeriod: 20, warningLevel: 'warning' }],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-1',
+        segmentId: 'old-seg',
+        riverSegmentId: 'old-seg',
+        timesteps: [{ validTime: '2026-05-12T03:00:00.000Z', returnPeriod: 20, warningLevel: 'warning' }],
+      },
+      summaryLoading: true,
+      rankingLoading: true,
+      timelineLoading: true,
+    })
+    vi.mocked(client.GET).mockRejectedValue(new Error('lookup unavailable'))
+
+    await expect(
+      useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+        source: 'ifs',
+        cycleTime: '2026-05-13T00:00:00.000Z',
+        validTime: '2026-05-13T03:00:00.000Z',
+      }),
+    ).rejects.toThrow('lookup unavailable')
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: null,
+      latestRun: null,
+      selectedValidTime: null,
+      validTimes: [],
+      summaryData: null,
+      rankingData: null,
+      timelineData: null,
+      loading: false,
+      summaryLoading: false,
+      rankingLoading: false,
+      timelineLoading: false,
+      empty: false,
+      error: 'lookup unavailable',
+    })
+  })
+
   it('preserves run-scoped payloads when the resolved run is unchanged', async () => {
     const summaryData = {
       runId: 'run-1',
@@ -687,5 +743,54 @@ describe('useFloodAlertStore', () => {
       selectedValidTime: '2026-05-13T03:00:00.000Z',
       loading: false,
     })
+  })
+
+  it('ignores an older source/cycle lookup rejection after a newer lookup owns the state', async () => {
+    const older = deferred<unknown>()
+    const newer = deferred<unknown>()
+    vi.mocked(client.GET).mockReturnValueOnce(older.promise as never).mockReturnValueOnce(newer.promise as never)
+
+    const olderRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'gfs',
+      cycleTime: '2026-05-12T00:00:00.000Z',
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+    const newerRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'ifs',
+      cycleTime: '2026-05-13T00:00:00.000Z',
+      validTime: '2026-05-13T03:00:00.000Z',
+    })
+
+    newer.resolve({
+      data: success({
+        items: [
+          {
+            ...latestRun,
+            run_id: 'run-ifs',
+            source_id: 'ifs',
+            cycle_time: '2026-05-13T00:00:00.000Z',
+            start_time: '2026-05-13T00:00:00.000Z',
+            end_time: '2026-05-13T03:00:00.000Z',
+          },
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    })
+    await newerRequest
+
+    older.reject(new Error('old lookup failed'))
+    await olderRequest
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: 'run-ifs',
+      latestRun: expect.objectContaining({ run_id: 'run-ifs' }),
+      selectedValidTime: '2026-05-13T03:00:00.000Z',
+      loading: false,
+      error: null,
+    })
+    expect(useFloodAlertStore.getState().validTimes).toContain('2026-05-13T03:00:00.000Z')
   })
 })
