@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 import { normalizeLayerStates, type LayerState, type OverviewBasin, type SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
-import { buildBasinFeatureCollection } from '@/components/map/M11MapLibreSurface'
+import { buildBasinFeatureCollection, buildSelectedSegmentFeatureCollection } from '@/components/map/M11MapLibreSurface'
 import {
   LayerGroupControls,
   LayerLegendPanel,
@@ -640,6 +640,23 @@ describe('M11 visual foundation shell', () => {
     expect(mapLayers).toHaveLength(0)
   })
 
+  it('omits malformed selected segment geometry from MapLibre sources while showing selected unavailable state', () => {
+    render(
+      <M11MapSurface
+        state={state}
+        layers={layers}
+        selectedSegmentId="seg-bad"
+        selectedSegmentGeometry={{ type: 'LineString', coordinates: [[100, 30]] }}
+      />,
+    )
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-bad')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'unavailable')
+    expect(screen.getByTestId('m11-selected-segment-map-unavailable')).toHaveTextContent('少于两个坐标点')
+    expect(mapSources).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'm11-selected-segment-source' })]))
+    expect(mapLayers.map((layer) => layer.id)).not.toContain('m11-selected-segment-line')
+  })
+
   it('omits over-byte basin geometry from MapLibre feature collections', () => {
     const coordinates = Array.from({ length: 50_000 }, (_, index) => [
       100.1234567890123 + index / 100_000,
@@ -656,6 +673,16 @@ describe('M11 visual foundation shell', () => {
     )
 
     expect(featureCollection.features).toHaveLength(0)
+  })
+
+  it('omits oversized selected segment geometry from MapLibre feature collections', () => {
+    const featureCollection = buildSelectedSegmentFeatureCollection('seg-large', {
+      type: 'LineString',
+      coordinates: Array.from({ length: 10_001 }, (_, index) => [100 + index / 100_000, 30]),
+    })
+
+    expect(featureCollection.features).toHaveLength(0)
+    expect(featureCollection.unavailableReason).toContain('渲染预算')
   })
 
   it('renders grouped layers and marks meteorology/base placeholders unavailable without fake data', async () => {

@@ -45,6 +45,7 @@ export interface FetchForecastOptions {
   issueTime?: string | null
   source?: M11Source | null
   useSelectedScenarios?: boolean
+  ignoreActiveRequestContext?: boolean
 }
 
 export interface ForecastRequestContext {
@@ -360,7 +361,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
     const segment = get().selectedSegment
     if (!segment) return
 
-    const activeRequestContext = get().activeRequestContext
+    const activeRequestContext = options?.ignoreActiveRequestContext ? null : get().activeRequestContext
     const includeAnalysis = options?.includeAnalysis ?? get().includeAnalysis
     const source = options?.useSelectedScenarios ? null : (options?.source ?? activeRequestContext?.source)
     const selectedScenarios = selectedScenariosForSource(source, get().selectedScenarios)

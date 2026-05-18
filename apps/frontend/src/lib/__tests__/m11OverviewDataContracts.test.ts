@@ -6,7 +6,9 @@ import {
   decideAggregationEndpoint,
   filterBasinSegmentRows,
   getM11BasinGeometryBudgetStatus,
+  getM11SelectedSegmentGeometryBudgetStatus,
   m11BasinGeometryBudget,
+  m11SelectedSegmentGeometryBudget,
   normalizeBasinDetail,
   normalizeBasinSegmentRows,
   normalizeLayerStates,
@@ -633,6 +635,90 @@ describe('M11 overview data contracts', () => {
       comparisonAvailable: true,
     })
     expect(detail.trendPoints.map((point) => point.source)).toEqual(['GFS', 'GFS', 'IFS'])
+  })
+
+  it('sanitizes malformed and oversized selected segment LineString geometry before detail storage', () => {
+    const malformed = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'LineString',
+      coordinates: [[100, 30]],
+    })
+    const tooManyCoordinates = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'LineString',
+      coordinates: Array.from({ length: m11SelectedSegmentGeometryBudget.maxCoordinates + 1 }, (_, index) => [
+        100 + index / 100_000,
+        30,
+      ]),
+    })
+    const tooManyDimensions = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'LineString',
+      coordinates: [
+        [100, 30],
+        [101, 31, 1, 2],
+      ],
+    })
+
+    expect(malformed).toMatchObject({
+      ok: false,
+      reason: 'Selected segment geometry requires at least two coordinates.',
+      sanitizedGeometry: null,
+    })
+    expect(tooManyCoordinates).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('exceeds client rendering budget'),
+      sanitizedGeometry: null,
+    })
+    expect(tooManyDimensions).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('coordinate dimensions exceed'),
+      sanitizedGeometry: null,
+    })
+  })
+
+  it('keeps selected segment detail usable while omitting invalid selected segment geometry', () => {
+    const detail = normalizeSelectedSegmentDetail({
+      query,
+      basin,
+      basinVersionId: 'yangtze_v2026_01',
+      segmentId: 'yangtze_rivnet_v12_riv_000123',
+      segment: {
+        ...segment,
+        geom: { type: 'LineString', coordinates: [[Number.NaN, 30], [101, 31]] },
+      },
+      feature: featureCollection.features[0],
+      model,
+      floodAlert: rankingItem,
+    })
+
+    expect(detail).toMatchObject({
+      riverSegmentId: 'yangtze_rivnet_v12_riv_000123',
+      displayName: 'Yichang mainstem',
+      currentQ: 5242,
+      geometry: null,
+      unavailableReason: 'Selected segment geometry is malformed.',
+    })
+  })
+
+  it('sanitizes basin segment row geometry from river feature collections', () => {
+    const rows = normalizeBasinSegmentRows({
+      query: { ...query, warningLevel: null, q: null },
+      featureCollection: {
+        ...featureCollection,
+        features: [
+          {
+            ...featureCollection.features[0],
+            geometry: { type: 'LineString', coordinates: [[100, 30], ['101' as unknown as number, 31]] },
+          },
+        ],
+      },
+      rankingItems: [rankingItem],
+    })
+
+    expect(rows[0]).toMatchObject({
+      riverSegmentId: 'yangtze_rivnet_v12_riv_000123',
+      hasGeometry: false,
+      geometry: null,
+      unavailableReason: 'Selected segment geometry is malformed.',
+    })
   })
 
   it('exposes unavailable source/scenario and failed lineage instead of fabricating values', () => {

@@ -19,7 +19,12 @@ import {
   fetchFloodReturnPeriodFeatureCollection,
   type FloodReturnPeriodFeatureCollection,
 } from '@/lib/floodReturnPeriodGeoJson'
-import { getM11BasinGeometryBudgetStatus, type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
+import {
+  getM11BasinGeometryBudgetStatus,
+  getM11SelectedSegmentGeometryBudgetStatus,
+  type LayerState,
+  type OverviewBasin,
+} from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryState } from '@/lib/m11/queryState'
 
 export interface M11MapOverlayInteraction {
@@ -311,7 +316,7 @@ export function M11MapLibreSurface({
           role="status"
           data-testid="m11-selected-segment-map-unavailable"
         >
-          选中河段缺少可渲染几何，地图不会绘制河段高亮。
+          {selectedSegmentFeatureCollection.unavailableReason}
         </div>
       ) : null}
 
@@ -339,6 +344,7 @@ interface SelectedSegmentFeature {
 interface SelectedSegmentFeatureCollection {
   type: 'FeatureCollection'
   features: SelectedSegmentFeature[]
+  unavailableReason: string | null
 }
 
 export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerState[]): M11RegisteredOverlay | null {
@@ -448,23 +454,38 @@ function M11SelectedSegmentPrimitive({ collection }: { collection: SelectedSegme
   )
 }
 
-function buildSelectedSegmentFeatureCollection(
+export function buildSelectedSegmentFeatureCollection(
   selectedSegmentId: string | null | undefined,
   geometry: components['schemas']['GeoJsonLineString'] | null | undefined,
 ): SelectedSegmentFeatureCollection {
+  const geometryStatus = selectedSegmentId ? getM11SelectedSegmentGeometryBudgetStatus(geometry) : null
   return {
     type: 'FeatureCollection',
     features:
-      selectedSegmentId && geometry
+      selectedSegmentId && geometryStatus?.sanitizedGeometry
         ? [
             {
               type: 'Feature',
-              geometry,
+              geometry: geometryStatus.sanitizedGeometry,
               properties: { segment_id: selectedSegmentId },
             },
           ]
         : [],
+    unavailableReason:
+      selectedSegmentId && !geometryStatus?.sanitizedGeometry
+        ? selectedSegmentUnavailableReason(geometryStatus?.reason)
+        : null,
   }
+}
+
+function selectedSegmentUnavailableReason(reason: string | null | undefined) {
+  if (!reason) return '选中河段缺少可渲染几何，地图不会绘制河段高亮。'
+  if (reason.includes('serialized-size')) return '选中河段几何超过客户端序列化预算，地图不会绘制河段高亮。'
+  if (reason.includes('rendering budget') || reason.includes('coordinate dimensions')) {
+    return '选中河段几何超过客户端渲染预算，地图不会绘制河段高亮。'
+  }
+  if (reason.includes('at least two')) return '选中河段几何少于两个坐标点，地图不会绘制河段高亮。'
+  return '选中河段几何格式无效，地图不会绘制河段高亮。'
 }
 
 export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): BasinFeatureCollection {
