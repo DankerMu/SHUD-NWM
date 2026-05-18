@@ -99,6 +99,7 @@ type ResolvedSegmentIdentifiers = {
 type BasinVersionRunFetchResult = {
   page: ApiHydroRunPage | null
   reachedCap: boolean
+  failed: boolean
 }
 
 type RiverSegmentFetchResult = {
@@ -392,7 +393,7 @@ async function fetchRunsForBasinVersion(
   basinVersionId: string | null | undefined,
   initialPage: ApiHydroRunPage | null,
 ): Promise<BasinVersionRunFetchResult> {
-  if (!basinVersionId || !initialPage) return { page: initialPage, reachedCap: false }
+  if (!basinVersionId || !initialPage) return { page: initialPage, reachedCap: false, failed: false }
 
   const initialItems = initialPage.items
   const items = initialItems.filter((run) => run.basin_version_id === basinVersionId)
@@ -402,7 +403,7 @@ async function fetchRunsForBasinVersion(
     limit: items.length,
     offset: initialPage.offset ?? 0,
   }
-  if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false }
+  if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
 
   const firstOffset = initialPage.offset ?? 0
   const firstLimit = initialPage.limit || initialItems.length || 20
@@ -412,7 +413,12 @@ async function fetchRunsForBasinVersion(
   let reachedCap = false
 
   while (offset < total && extraPages < RUN_LOOKUP_MAX_EXTRA_PAGES && items.length < RUN_LOOKUP_MAX_RETAINED_ITEMS) {
-    const nextPage = await fetchRunsPage(query, basinId, RUN_LOOKUP_PAGE_LIMIT, offset)
+    let nextPage: ApiHydroRunPage
+    try {
+      nextPage = await fetchRunsPage(query, basinId, RUN_LOOKUP_PAGE_LIMIT, offset)
+    } catch {
+      return { page, reachedCap: false, failed: true }
+    }
     extraPages += 1
     const remaining = RUN_LOOKUP_MAX_RETAINED_ITEMS - items.length
     items.push(...nextPage.items.filter((run) => run.basin_version_id === basinVersionId).slice(0, remaining))
@@ -423,7 +429,7 @@ async function fetchRunsForBasinVersion(
       limit: items.length,
       offset: firstOffset,
     }
-    if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false }
+    if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
 
     const fetched = nextPage.items.length || nextPage.limit || RUN_LOOKUP_PAGE_LIMIT
     offset += fetched
@@ -431,7 +437,7 @@ async function fetchRunsForBasinVersion(
   }
 
   reachedCap = offset < total && (extraPages >= RUN_LOOKUP_MAX_EXTRA_PAGES || items.length >= RUN_LOOKUP_MAX_RETAINED_ITEMS)
-  return { page, reachedCap }
+  return { page, reachedCap, failed: false }
 }
 
 async function fetchFloodSummary(runId: string, validTime: string | null) {
@@ -538,8 +544,10 @@ async function fetchRiverSegments(basinVersionId: string, segmentId: string | nu
   let total = firstPage.total ?? firstPage.feature_total ?? features.length
   let offset = (firstPage.offset ?? 0) + (firstPage.limit || firstPage.features.length || RIVER_SEGMENT_PAGE_LIMIT)
   let pages = 1
+  const shouldFindRequestedSegment = Boolean(segmentId)
 
   while (
+    shouldFindRequestedSegment &&
     offset < total &&
     pages < RIVER_SEGMENT_MAX_PAGES &&
     features.length < RIVER_SEGMENT_MAX_ITEMS &&
@@ -565,6 +573,7 @@ async function fetchRiverSegments(basinVersionId: string, segmentId: string | nu
   }
 
   const reachedCap =
+    shouldFindRequestedSegment &&
     offset < total &&
     !containsSegment(collection, segmentId) &&
     (pages >= RIVER_SEGMENT_MAX_PAGES || features.length >= RIVER_SEGMENT_MAX_ITEMS)
@@ -807,6 +816,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         partialErrors.push(
           `runs: Stopped same-version run lookup after ${RUN_LOOKUP_MAX_EXTRA_PAGES} extra pages or ${RUN_LOOKUP_MAX_RETAINED_ITEMS} retained runs.`,
         )
+      }
+      if (versionRunsResult.failed && selectedVersion && !latestRun) {
+        partialErrors.push('runs: Same-version run lookup failed before resolving the selected basin version run.')
       }
 
       const [modelsResult, segmentsResult, rankingResult, ...validTimeResults] = await Promise.allSettled([
