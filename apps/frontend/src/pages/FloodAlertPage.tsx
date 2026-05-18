@@ -39,6 +39,7 @@ export function FloodAlertPage() {
   const fetchSummary = useFloodAlertStore((state) => state.fetchSummary)
   const fetchRanking = useFloodAlertStore((state) => state.fetchRanking)
   const setSelectedAlertLevel = useFloodAlertStore((state) => state.setSelectedAlertLevel)
+  const assignSelectedAlertLevel = useFloodAlertStore((state) => state.assignSelectedAlertLevel)
   const setSelectedValidTime = useFloodAlertStore((state) => state.setSelectedValidTime)
   const setTopLimit = useFloodAlertStore((state) => state.setTopLimit)
   const setBasinId = useFloodAlertStore((state) => state.setBasinId)
@@ -48,8 +49,8 @@ export function FloodAlertPage() {
 
   useEffect(() => {
     const routeWarningLevel = normalizeRouteAlertLevel(routeState.warningLevel)
-    if (isAlertLevel(routeWarningLevel) && routeWarningLevel !== useFloodAlertStore.getState().selectedAlertLevel) {
-      setSelectedAlertLevel(routeWarningLevel)
+    if (routeWarningLevel !== useFloodAlertStore.getState().selectedAlertLevel) {
+      assignSelectedAlertLevel(routeWarningLevel)
     }
     void fetchLatestFrequencyDoneRun({
       source: routeState.source === 'gfs' || routeState.source === 'ifs' ? routeState.source : null,
@@ -62,7 +63,7 @@ export function FloodAlertPage() {
         variant: 'destructive',
       })
     })
-  }, [fetchLatestFrequencyDoneRun, routeState.cycle, routeState.source, routeState.validTime, routeState.warningLevel, setSelectedAlertLevel, toast])
+  }, [assignSelectedAlertLevel, fetchLatestFrequencyDoneRun, routeState.cycle, routeState.source, routeState.validTime, routeState.warningLevel, toast])
 
   const refreshSnapshots = useCallback(
     async (validTime = selectedValidTime, limit = topLimit) => {

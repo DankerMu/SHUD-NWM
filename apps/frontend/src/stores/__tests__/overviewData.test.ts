@@ -356,6 +356,7 @@ describe('useOverviewDataStore', () => {
       requestedSource: 'best',
       resolvedSource: 'IFS',
       scenarioIds: ['forecast_ifs_deterministic'],
+      cycleTime: '2026-05-18T00:00:00Z',
     })
     expect(snapshot.summary.freshness.runId).toBe('run-ifs-1')
     expect(snapshot.summary.warningSegmentCount).toBe(0)

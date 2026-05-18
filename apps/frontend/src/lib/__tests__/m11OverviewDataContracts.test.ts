@@ -249,6 +249,12 @@ describe('M11 overview data contracts', () => {
       runId: run.run_id,
       source: 'GFS',
     })
+    expect(summary.sourceSelection).toMatchObject({
+      requestedSource: 'best',
+      resolvedSource: 'GFS',
+      cycleTime: '2026-05-18T00:00:00Z',
+      validTime: '2026-05-18T06:00:00Z',
+    })
     expect(summary.qualityNotes).toContain('2 curves unavailable')
 
     vi.useRealTimers()

@@ -403,6 +403,7 @@ beforeEach(() => {
     loading: false,
     summaryLoading: false,
     rankingLoading: false,
+    timelineLoading: false,
     error: null,
     empty: false,
     fetchLatestFrequencyDoneRun: noopAsync,
@@ -728,6 +729,47 @@ describe('App route state', () => {
     ).toMatchObject({
       href: '/flood-alerts?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z',
     })
+  })
+
+  it('emits concrete IFS cycle handoffs from a best overview latest run', async () => {
+    useOverviewDataStore.setState({
+      overview: {
+        ...overviewSnapshot([], '', ''),
+        summary: {
+          ...m11Summary(),
+          sourceSelection: {
+            ...m11SourceSelection,
+            requestedSource: 'best',
+            resolvedSource: 'IFS',
+            scenarioIds: ['forecast_ifs_deterministic'],
+            cycleTime: '2026-05-19T00:00:00.000Z',
+            validTime: null,
+            provenanceLabel: 'Best Available (IFS) / cycle 2026-05-19T00:00:00.000Z / current valid time',
+          },
+          freshness: {
+            ...m11LayerFreshness,
+            runId: 'run-ifs-latest',
+            source: 'IFS',
+            cycleTime: '2026-05-19T00:00:00.000Z',
+            validTime: null,
+          },
+        },
+      },
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=best')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute(
+      'href',
+      '/monitoring?source=ifs&cycle=2026-05-19T00%3A00%3A00.000Z',
+    )
+    expect(screen.getByRole('link', { name: /洪水预警摘要/ })).toHaveAttribute(
+      'href',
+      '/flood-alerts?source=ifs&cycle=2026-05-19T00%3A00%3A00.000Z',
+    )
   })
 
   it('omits concrete destination source context for compare summary links', async () => {
@@ -1378,6 +1420,47 @@ describe('App route state', () => {
       cycleTime: null,
       validTime: null,
     })
+  })
+
+  it('clears selected flood warning level when the route omits warningLevel', async () => {
+    const user = userEvent.setup()
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-flood-1',
+      latestRun: {
+        run_id: 'run-flood-1',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'basin-v1',
+        source_id: 'gfs',
+        cycle_time: '2026-05-12T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-12T00:00:00Z',
+        end_time: '2026-05-12T03:00:00Z',
+        created_at: '2026-05-12T00:00:00Z',
+        updated_at: '2026-05-12T04:00:00Z',
+      },
+      summaryData: {
+        runId: 'run-flood-1',
+        levels: [{ level: 'high_risk', count: 1, color: '#f97316' }],
+        totalSegments: 4,
+        usableCurves: 3,
+        unavailableCount: 1,
+      },
+      rankingData: { items: [], total: 0, limit: 20, offset: 0 },
+      fetchLatestFrequencyDoneRun,
+    })
+    window.history.pushState({}, '', '/flood-alerts?warningLevel=major')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    await waitFor(() => expect(useFloodAlertStore.getState().selectedAlertLevel).toBe('high_risk'))
+    await user.click(screen.getByRole('link', { name: /洪水预警/ }))
+    await waitFor(() => expect(window.location.pathname).toBe('/flood-alerts'))
+    await waitFor(() => expect(window.location.search).toBe(''))
+    await waitFor(() => expect(useFloodAlertStore.getState().selectedAlertLevel).toBeNull())
   })
 
   it('hydrates flood-alert requests from a resolved concrete IFS summary handoff', async () => {

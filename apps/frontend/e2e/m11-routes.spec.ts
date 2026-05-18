@@ -353,8 +353,14 @@ test.describe('M11 navigation and route shells', () => {
     await page.goto('/overview?source=best')
 
     await expect(page.getByRole('heading', { name: '全国总览' })).toBeVisible()
-    await expect(page.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute('href', /\/monitoring\?source=ifs/)
-    await expect(page.getByRole('link', { name: /洪水预警摘要/ })).toHaveAttribute('href', /\/flood-alerts\?source=ifs/)
+    await expect(page.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute(
+      'href',
+      '/monitoring?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z',
+    )
+    await expect(page.getByRole('link', { name: /洪水预警摘要/ })).toHaveAttribute(
+      'href',
+      '/flood-alerts?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z',
+    )
 
     await page.goto('/overview?source=compare&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z')
     await expect(page.getByText('GFS+IFS 对比暂不支持跨页保真，已省略具体源上下文').first()).toBeVisible()

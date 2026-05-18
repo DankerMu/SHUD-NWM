@@ -110,6 +110,7 @@ interface FloodAlertState {
   setSelectedRunId: (runId: string | null) => void
   setAlertThreshold: (threshold: AlertThreshold | null) => void
   setSelectedAlertLevel: (level: AlertLevel | null) => void
+  assignSelectedAlertLevel: (level: AlertLevel | null) => void
   setSelectedValidTime: (validTime: string | null) => void
   setTopLimit: (limit: 10 | 20 | 50) => void
   setBasinId: (basinId: string) => void
@@ -332,6 +333,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   setAlertThreshold: (threshold) => set({ alertThreshold: threshold }),
   setSelectedAlertLevel: (level) =>
     set((state) => ({ selectedAlertLevel: state.selectedAlertLevel === level ? null : level })),
+  assignSelectedAlertLevel: (level) => set({ selectedAlertLevel: level }),
   setSelectedValidTime: (validTime) => set({ selectedValidTime: validTime }),
   setTopLimit: (limit) => set({ topLimit: limit }),
   setBasinId: (basinId) => set({ basinId }),
@@ -473,7 +475,14 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       })
       if (!isCurrentRequest()) return
       const timeline = normalizeTimeline(payload)
-      if (timeline.segmentId !== segmentId && timeline.riverSegmentId !== segmentId) return
+      if (timeline.segmentId !== segmentId && timeline.riverSegmentId !== segmentId) {
+        set({
+          timelineData: null,
+          timelineLoading: false,
+          error: `河段预警详情响应与请求河段不匹配：请求 ${segmentId}，返回 ${timeline.segmentId || timeline.riverSegmentId || 'unknown'}。`,
+        })
+        return
+      }
       set((state) => ({
         timelineData: timeline,
         validTimes: mergeTimelineValidTimes(state.validTimes, timeline),

@@ -589,6 +589,37 @@ describe('useFloodAlertStore', () => {
     expect(useFloodAlertStore.getState().timelineLoading).toBe(false)
   })
 
+  it('clears loading and reports a scoped error for a current mismatched timeline segment response', async () => {
+    useFloodAlertStore.setState({
+      validTimes: ['2026-05-12T00:00:00.000Z'],
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        floodResponse({
+          run_id: 'run-1',
+          segment_id: 'seg-other',
+          river_segment_id: 'seg-other',
+          timesteps: [{ valid_time: '2026-05-12T03:00:00.000Z', return_period: 50, warning_level: 'severe', q_value: 222 }],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }),
+      ),
+    )
+
+    await useFloodAlertStore.getState().fetchTimeline('seg-requested')
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      timelineData: null,
+      timelineLoading: false,
+    })
+    expect(useFloodAlertStore.getState().error).toContain('响应与请求河段不匹配')
+    expect(useFloodAlertStore.getState().validTimes).toEqual(['2026-05-12T00:00:00.000Z'])
+    expect(useFloodAlertStore.getState().validTimes).not.toContain('2026-05-12T03:00:00.000Z')
+  })
+
   it('ignores an older source/cycle lookup response after a newer lookup owns the state', async () => {
     const older = deferred<unknown>()
     const newer = deferred<unknown>()

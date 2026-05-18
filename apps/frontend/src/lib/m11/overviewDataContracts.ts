@@ -428,7 +428,11 @@ export function normalizeOverviewSummary(input: {
   partialErrors?: string[]
 }): OverviewSummary {
   const availableSources = sourcesFromRuns(input.runs ?? (input.latestRun ? [input.latestRun] : []))
-  const sourceSelection = createSourceScenarioSelection(input.query, availableSources)
+  const selectionQuery =
+    input.query.source === 'best'
+      ? { ...input.query, cycle: input.latestRun?.cycle_time ?? input.pipeline?.cycle_time ?? input.query.cycle }
+      : input.query
+  const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
   const levels = input.floodSummary?.levels ?? []
   const warningSegmentCount = levels
     .filter((level) => isSuperWarningLevel(normalizeWarningLevel(level.level)))
