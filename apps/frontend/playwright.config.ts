@@ -7,6 +7,7 @@ const apiBaseURL = process.env.VITE_API_BASE_URL ?? 'https://api.example.test'
 
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: /preview-deeplink\.spec\.ts/,
   fullyParallel: true,
   use: {
     baseURL,

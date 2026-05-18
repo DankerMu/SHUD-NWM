@@ -39,15 +39,15 @@ export function AppShell({ children }: AppShellProps) {
   return (
     <ToastProvider>
       <div className="min-h-screen bg-background text-foreground">
-        <header className="sticky top-0 z-20 border-b border-border bg-panel/95 backdrop-blur">
-          <div className="mx-auto flex min-h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+        <header className="sticky top-0 z-20 border-b border-primary-800 bg-primary-900 text-white shadow-sm">
+          <div className="flex h-14 items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
             <div className="flex items-center gap-6">
-              <div className="text-base font-semibold text-foreground">NHMS</div>
+              <div className="text-base font-semibold text-white">NHMS</div>
               <NavBar />
             </div>
             {isRoleOverrideEnabled ? (
               <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
-                <SelectTrigger className="w-36" aria-label="Role">
+                <SelectTrigger className="w-36 border-white/30 bg-white/10 text-white" aria-label="Role">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent align="end">
@@ -61,7 +61,7 @@ export function AppShell({ children }: AppShellProps) {
             ) : null}
           </div>
         </header>
-        <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</main>
+        <main className="w-full px-4 py-4 sm:px-6 lg:px-8">{children}</main>
       </div>
       {toasts.map((toast) => (
         <Toast

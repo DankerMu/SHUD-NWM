@@ -189,7 +189,7 @@ async function gotoForecastPage(page: Page) {
     return url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments' && response.status() === 200
   })
 
-  await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await page.goto('/forecast', { waitUntil: 'domcontentloaded' })
   await riverSegmentsLoaded
 }
 

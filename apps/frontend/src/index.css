@@ -6,6 +6,22 @@
   --color-foreground: var(--text, #1f2937);
   --color-muted: var(--muted, #64748b);
   --color-border: var(--line, #d7dee8);
+  --color-primary-900: #0a1929;
+  --color-primary-800: #0d2744;
+  --color-primary-700: #0f3460;
+  --color-primary-600: #1565c0;
+  --color-primary-500: #1e88e5;
+  --color-primary-100: #e3f2fd;
+  --color-primary-50: #f5f9ff;
+  --color-neutral-900: #1a1a2e;
+  --color-neutral-700: #4a4a6a;
+  --color-neutral-500: #8e8ea0;
+  --color-neutral-300: #d0d0dd;
+  --color-neutral-100: #f0f0f5;
+  --color-neutral-50: #fafafa;
+  --color-success: #4caf50;
+  --color-warning: #ff9800;
+  --color-info: #2196f3;
   --color-river: var(--river, #0f8fbf);
   --color-river-strong: var(--river-strong, #ef7d22);
   --color-accent: var(--accent, #2266cc);
@@ -24,6 +40,26 @@
   --river-strong: #ef7d22;
   --accent: #2266cc;
   --danger: #b42318;
+  /*
+    M11 maps the 06B GIS design tokens into CSS/Tailwind:
+    56px nav, 280px left panel, 320-360px right panel, 64px timeline,
+    4px spacing base, 4px/8px radii, and shared warning/status colors.
+  */
+  --m11-nav-height: 56px;
+  --m11-left-panel-width: 280px;
+  --m11-right-panel-width: 340px;
+  --m11-right-panel-min-width: 320px;
+  --m11-right-panel-max-width: 360px;
+  --m11-timeline-height: 64px;
+  --m11-radius-sm: 4px;
+  --m11-radius-md: 8px;
+  --m11-warning-normal: #4fc3f7;
+  --m11-warning-elevated: #81c784;
+  --m11-warning-watch: #ffd54f;
+  --m11-warning-warning: #ffb74d;
+  --m11-warning-major: #ff8a65;
+  --m11-warning-severe: #e57373;
+  --m11-warning-extreme: #ab47bc;
   color: var(--text);
   background: var(--bg);
   font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Arial', sans-serif;
