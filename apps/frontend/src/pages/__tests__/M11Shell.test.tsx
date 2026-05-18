@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { BrowserRouter } from 'react-router-dom'
@@ -232,6 +232,14 @@ describe('M11 visual foundation shell', () => {
     mapLayers.length = 0
     fitBoundsCalls.length = 0
     flyToCalls.length = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers(),
+        text: vi.fn().mockResolvedValue(JSON.stringify({ type: 'FeatureCollection', features: [] })),
+      }),
+    )
     useOverviewDataStore.setState({
       ...useOverviewDataStore.getInitialState(),
       loadOverview: vi.fn().mockResolvedValue(undefined),
@@ -241,6 +249,7 @@ describe('M11 visual foundation shell', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    vi.unstubAllGlobals()
   })
 
   it('exposes mapped layout tokens for nav, panels, timeline, and warning colors', () => {
@@ -372,22 +381,28 @@ describe('M11 visual foundation shell', () => {
     expect(screen.queryByText('已由图层 API 注册')).not.toBeInTheDocument()
   })
 
-  it('registers flood return period geojson and keeps it through basemap switches using selected URL valid time', async () => {
+  it('registers validated flood return period geojson and keeps it through basemap switches using selected URL valid time', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
     const floodState = { ...state, layer: 'flood-return-period' as const, validTime: '2026-05-18T06:00:00.000Z' }
 
     const { rerender } = render(<M11MapSurface state={floodState} layers={layers} onQueryChange={onQueryChange} />)
 
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-flood-return-period-line')
     expect(mapSources.at(-1)).toMatchObject({
       id: 'm11-flood-return-period-source',
       type: 'geojson',
-      data: expect.stringContaining('/api/v1/tiles/flood-return-period?'),
+      data: { type: 'FeatureCollection', features: [] },
     })
-    expect(String(mapSources.at(-1)?.data)).toContain('valid_time=2026-05-18T06%3A00%3A00.000Z')
-    expect(String(mapSources.at(-1)?.data)).not.toContain('valid_time=2026-05-18T12%3A00%3A00.000Z')
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('valid_time=2026-05-18T06%3A00%3A00.000Z'),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url)).join('\n')).not.toContain(
+      'valid_time=2026-05-18T12%3A00%3A00.000Z',
+    )
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line', source: 'm11-flood-return-period-source' })
 
     await user.click(screen.getByRole('button', { name: '地形底图' }))
@@ -396,12 +411,40 @@ describe('M11 visual foundation shell', () => {
     mapSources.length = 0
     mapLayers.length = 0
     rerender(<M11MapSurface state={{ ...floodState, basemap: 'terrain' }} layers={layers} onQueryChange={onQueryChange} />)
-    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(mapSources.at(-1)).toMatchObject({ id: 'm11-flood-return-period-source', type: 'geojson' })
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line' })
   })
 
-  it('threads camera and overlay callbacks into the MapLibre primitive', () => {
+  it('rejects oversized M11 flood return period payloads before registering a MapLibre source', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers(),
+        text: vi.fn().mockResolvedValue(
+          JSON.stringify({
+            type: 'FeatureCollection',
+            features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
+          }),
+        ),
+      }),
+    )
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+      />,
+    )
+
+    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('超过客户端要素预算')
+    expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('threads camera and overlay callbacks into the MapLibre primitive', async () => {
     const onOverlayHover = vi.fn()
     const onOverlayClick = vi.fn()
 
@@ -419,6 +462,7 @@ describe('M11 visual foundation shell', () => {
     expect(fitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 24, duration: 450 }]])
     expect(flyToCalls).toEqual([{ center: [102, 32], zoom: 7, duration: 450 }])
 
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     fireEvent.mouseMove(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayHover).toHaveBeenCalledWith(null)
     expect(onOverlayHover).not.toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
@@ -432,7 +476,7 @@ describe('M11 visual foundation shell', () => {
     expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
   })
 
-  it('dispatches the matched basin feature when overlay features are returned first', () => {
+  it('dispatches the matched basin feature when overlay features are returned first', async () => {
     const onOverlayClick = vi.fn()
 
     render(
@@ -444,6 +488,7 @@ describe('M11 visual foundation shell', () => {
       />,
     )
 
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     fireEvent.contextMenu(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayClick).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -500,6 +545,7 @@ describe('M11 visual foundation shell', () => {
       />,
     )
 
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     fireEvent.focus(screen.getByTestId('mock-maplibre-map'))
     expect(screen.getByTestId('m11-map-source-error')).toHaveTextContent('mock source failed')
     await user.click(screen.getByRole('button', { name: '卫星底图' }))

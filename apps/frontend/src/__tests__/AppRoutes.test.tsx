@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
 import { contextHandoff } from '@/pages/OverviewPage'
@@ -425,6 +425,10 @@ beforeEach(() => {
   })
 })
 
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
 describe('App route state', () => {
   it('routes / to the national overview shell and marks navigation active', async () => {
     window.history.pushState({}, '', '/')
@@ -557,6 +561,12 @@ describe('App route state', () => {
   })
 
   it('threads overview basin bbox and map handlers through the route surface', async () => {
+    const tileFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers(),
+      text: vi.fn().mockResolvedValue(JSON.stringify({ type: 'FeatureCollection', features: [] })),
+    })
+    vi.stubGlobal('fetch', tileFetch)
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(
         m11Layers,
@@ -571,11 +581,10 @@ describe('App route state', () => {
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 36, duration: 450 }]]))
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
-    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute(
-      'data-source-data',
-      expect.stringContaining('valid_time=2026-05-18T06%3A00%3A00.000Z'),
-    )
+    expect(tileFetch.mock.calls.map(([url]) => String(url)).join('\n')).toContain('valid_time=2026-05-18T06%3A00%3A00.000Z')
+    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute('data-source-data', '[object Object]')
 
     await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
     await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))
