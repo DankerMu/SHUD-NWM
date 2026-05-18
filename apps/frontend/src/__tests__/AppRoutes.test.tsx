@@ -1579,6 +1579,58 @@ describe('App route state', () => {
     expect(screen.queryByRole('link', { name: '对比预报' })).not.toBeInTheDocument()
   })
 
+  it('renders selected basin segment handoffs with the resolved concrete best source and cycle', async () => {
+    const resolvedCycle = '2026-05-18T00:00:00.000Z'
+    const bestBasinQueryKey = `cycle=${encodeURIComponent(resolvedCycle)}&basinVersionId=bv-001&segmentId=seg-009`
+    const bestBasinDataKey = `cycle=${encodeURIComponent(resolvedCycle)}&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009`
+    const ifsSelectedSegment = {
+      ...basinSnapshot('basin-demo', m11Layers).selectedSegment!,
+      sourceSelection: {
+        ...m11SourceSelection,
+        requestedSource: 'best' as const,
+        resolvedSource: 'IFS' as const,
+        scenarioIds: ['forecast_ifs_deterministic'],
+        cycleTime: resolvedCycle,
+        comparisonAvailable: true,
+      },
+      trendPoints: [
+        {
+          validTime: '2026-05-18T06:00:00.000Z',
+          value: 456,
+          source: 'IFS' as const,
+          scenarioId: 'forecast_ifs_deterministic',
+          role: 'future_7_days',
+          isAnalysis: false,
+        },
+      ],
+      handoffUrl:
+        '/forecast?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
+    }
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...basinSnapshot('basin-demo', m11Layers, bestBasinQueryKey, bestBasinDataKey),
+        selectedSegment: ifsSelectedSegment,
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=best&cycle=2026-05-18T00:00:00Z&basinVersionId=bv-001&segmentId=seg-009',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    for (const linkName of ['查看详情', '对比预报']) {
+      const href = screen.getByRole('link', { name: linkName }).getAttribute('href')
+      expect(href).toContain('/forecast?source=ifs&')
+      expect(href).toContain('cycle=2026-05-18T00%3A00%3A00.000Z')
+      expect(href).not.toContain('source=best')
+    }
+  })
+
   it('enables selected basin segment comparison handoff when comparison data is available', async () => {
     useOverviewDataStore.setState({
       basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey, 12, true),

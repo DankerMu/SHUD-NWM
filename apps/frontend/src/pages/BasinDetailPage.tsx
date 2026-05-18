@@ -13,7 +13,6 @@ import {
 import { M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
   defaultM11QueryState,
-  m11QueryHref,
   type M11QueryPatch,
   type M11QueryWarningLevel,
   needsM11QueryReplacement,
@@ -121,12 +120,6 @@ export function BasinDetailPage() {
   const selectedSegment = currentBasinData?.selectedSegment
   const invalidSegmentRequested = Boolean(state.segmentId && currentBasinData && !loading && !basinNotFoundReason && !selectedSegment)
   const selectedSegmentId = selectedSegment?.riverSegmentId ?? null
-  const selectedSegmentHandoffUrl = selectedSegment
-    ? m11QueryHref('/forecast', state, {
-        basinVersionId: selectedSegment.basinVersionId,
-        segmentId: selectedSegment.riverSegmentId,
-      })
-    : null
   const mapFitTo = useMemo(
     () => bboxToMapFit(detail?.bbox ?? (detail && !basinNotFoundReason ? BASIN_FALLBACK_EXTENT : null)),
     [basinNotFoundReason, detail],
@@ -198,14 +191,14 @@ export function BasinDetailPage() {
                     <div className="mt-3 flex flex-wrap gap-2">
                       <Link
                         className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600"
-                        to={selectedSegmentHandoffUrl ?? selectedSegment.handoffUrl}
+                        to={selectedSegment.handoffUrl}
                       >
                         查看详情
                       </Link>
                       {selectedSegment.comparisonAvailable ? (
                         <Link
                           className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600"
-                          to={selectedSegmentHandoffUrl ?? selectedSegment.handoffUrl}
+                          to={selectedSegment.handoffUrl}
                         >
                           对比预报
                         </Link>
