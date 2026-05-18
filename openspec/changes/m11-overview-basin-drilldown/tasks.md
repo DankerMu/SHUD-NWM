@@ -156,6 +156,72 @@ Non-goals for #161:
 - [ ] 3.7 Ensure layer/source switching replaces the active valid-time list, corrects invalid stale valid times, disables playback when no valid times exist, and updates map/data requests with the selected valid time.
 - [ ] 3.8 Add unit/component tests for basemap switching, layer availability, source/scenario behavior, legend selection, valid-times API use, timeline drag/boundaries/playback, and stale valid-time correction.
 
+### Issue #162 Evidence Matrix
+
+Selected risk packs:
+
+- Public API / CLI / script entry -> reusable map/control components consumed by `/overview`
+  and `/basins/:basinId`, URL query updates for `source`, `layer`, `basemap`, and
+  `validTime`.
+- Schema / columns / units / field names -> layer ids, valid-time arrays, source/scenario
+  provenance labels, warning/return-period legend bins, and disabled reasons.
+- Geospatial / CRS / shapefile sidecars -> MapLibre source/layer registration and basemap
+  restoration without fabricating unavailable basin/river/meteorology data.
+- Time series / forcing / temporal boundaries -> valid-time selection, stale valid-time
+  correction, native-resolution ticks, playback boundaries, and Analysis/Forecast divider.
+- Resource limits / large input / discovery -> no unbounded animation timers, playback loops,
+  or repeated valid-time refreshes when controls change.
+- Legacy compatibility / examples -> existing forecast, flood alert, monitoring, and M11
+  route tests keep passing.
+- Error handling / rollback / partial outputs -> unavailable layers, missing valid times,
+  unsupported source/layer combinations, and basemap/source switch failures show scoped disabled
+  states rather than fake rendered data.
+- Release / packaging / dependency compatibility -> no new mapping/timeline dependency unless
+  justified; frontend build/test path remains stable.
+- Documentation / migration notes -> component contracts and documented playback end behavior
+  are discoverable in code/OpenSpec or tests.
+
+Required test inputs and expected outputs:
+
+- Basemap input `terrain`, `satellite`, and `vector` -> the shared map surface exposes the
+  selected basemap state, updates the URL query, and preserves active overlay/layer state after
+  switching.
+- Layer controls with hydrology, meteorology, and base groups -> implemented hydrology/base
+  layers render toggles; precipitation, temperature, station, and DEM placeholders are disabled
+  or marked unavailable and do not claim rendered data.
+- Source input `gfs`, `ifs`, `compare`, and `best` -> controls update shareable query state,
+  propagate to page data reload hooks, show comparison availability/provenance, and never emit
+  unsupported backend `best_available` or `forecast_best_available` values.
+- Active layer valid times `["2026-05-18T00:00:00Z", "2026-05-18T06:00:00Z"]` with stale
+  `validTime=2026-05-17T00:00:00Z` -> timeline selects the documented fallback valid time and
+  updates map/data request state without rendering stale time.
+- Empty valid-time list -> timeline shows an empty/disabled state and disables previous, next,
+  drag, and playback actions.
+- Payload-derived detail times from forecast/timeline payloads -> timeline labels the source as
+  derived and uses only those exact times when no layer valid-time contract applies.
+- Timeline playback at first and last ticks -> previous/next respect boundaries and play either
+  pauses/stops/loops according to the documented behavior without selecting invalid times.
+- Active layer `discharge`, `flood-return-period`, and `warning-level` -> legend displays units,
+  bins, and colors consistent with `06B` and flood alert warning semantics.
+
+Verification commands for #162:
+
+- `cd apps/frontend && corepack pnpm test`
+- `cd apps/frontend && corepack pnpm build`
+- `cd apps/frontend && corepack pnpm test:e2e`
+- `cd apps/frontend && corepack pnpm run test:e2e:preview`
+- `openspec validate m11-overview-basin-drilldown --strict --no-interactive`
+- If OpenAPI/backend changes are added: `cd apps/frontend && corepack pnpm check:api-types`,
+  `uv run ruff check .`, and focused `uv run pytest -q` for affected API tests.
+
+Non-goals for #162:
+
+- No production MVT pipeline, new backend aggregation endpoints, full national overview basin
+  popup workflow, basin segment list UX, selected segment detail panel, or visual screenshot
+  evidence refresh unless needed to keep controls testable.
+- No fabricated meteorology/DEM/station data; unavailable controls must remain disabled or
+  explicitly unavailable.
+
 ## 4. National overview page
 
 - [ ] 4.1 Build `OverviewPage` with effect-image-1 map-first layout: 56px top nav, left basin/layer panel, central national map, right summary panel, and 64px bottom timeline; support the documented 1920/1440/1280 viewport behaviors.
