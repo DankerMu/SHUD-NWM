@@ -4,6 +4,7 @@ import type { components } from '@/api/types'
 import {
   createSourceScenarioSelection,
   decideAggregationEndpoint,
+  filterBasinSegmentRows,
   getM11BasinGeometryBudgetStatus,
   m11BasinGeometryBudget,
   normalizeBasinDetail,
@@ -379,7 +380,7 @@ describe('M11 overview data contracts', () => {
     })
   })
 
-  it('normalizes basin detail and segment rows with query-driven filters and unavailable rows', () => {
+  it('normalizes basin detail and segment rows with local filters and unavailable rows', () => {
     const detail = normalizeBasinDetail({
       query,
       basin,
@@ -389,11 +390,14 @@ describe('M11 overview data contracts', () => {
       rankingItems: [rankingItem],
       latestRun: run,
     })
-    const rows = normalizeBasinSegmentRows({
-      query: { ...query, warningLevel: 'orange', q: 'Yichang' },
-      featureCollection,
-      rankingItems: [rankingItem],
-    })
+    const rows = filterBasinSegmentRows(
+      normalizeBasinSegmentRows({
+        query: { ...query, warningLevel: 'orange', q: 'Yichang' },
+        featureCollection,
+        rankingItems: [rankingItem],
+      }),
+      { warningLevel: 'orange', q: 'Yichang' },
+    )
     const allRows = normalizeBasinSegmentRows({
       query: { ...query, warningLevel: null, q: null },
       featureCollection,
@@ -432,26 +436,27 @@ describe('M11 overview data contracts', () => {
     ['severe', 'severe'],
     ['extreme', 'extreme'],
   ] as const)('filters %s warning query values with normalized row semantics', (warningLevel, expectedLevel) => {
-    const rows = normalizeBasinSegmentRows({
-      query: { ...query, warningLevel, q: null },
-      featureCollection: {
-        ...featureCollection,
-        features: [
-          featureCollection.features[0],
-          {
-            ...featureCollection.features[1],
-            properties: {
-              ...featureCollection.features[1].properties,
-              segment_id: `seg-${expectedLevel}`,
-              river_segment_id: `river-${expectedLevel}`,
+    const rows = filterBasinSegmentRows(
+      normalizeBasinSegmentRows({
+        query: { ...query, warningLevel, q: null },
+        featureCollection: {
+          ...featureCollection,
+          features: [
+            featureCollection.features[0],
+            {
+              ...featureCollection.features[1],
+              properties: {
+                ...featureCollection.features[1].properties,
+                segment_id: `seg-${expectedLevel}`,
+                river_segment_id: `river-${expectedLevel}`,
+              },
             },
-          },
-        ],
-      },
-      rankingItems: [
-        { ...rankingItem, warning_level: expectedLevel === 'high_risk' ? 'major' : expectedLevel },
-      ],
-    })
+          ],
+        },
+        rankingItems: [{ ...rankingItem, warning_level: expectedLevel === 'high_risk' ? 'major' : expectedLevel }],
+      }),
+      { warningLevel, q: null },
+    )
 
     expect(rows.map((row) => row.warningLevel)).toEqual([expectedLevel])
   })
@@ -704,6 +709,8 @@ describe('M11 overview data contracts', () => {
       runId: 'fcst_ifs_2026051800_yangtze_shud_v12',
       source: 'IFS',
     })
+    expect(detail.handoffUrl).toContain('/forecast?source=ifs&')
+    expect(detail.handoffUrl).not.toContain('source=best')
   })
 
   it('uses all relevant runs for overview compare availability', () => {

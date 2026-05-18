@@ -7,6 +7,7 @@ import {
   createEmptyBasinDetail,
   createEmptyOverviewSummary,
   decideAggregationEndpoint,
+  filterBasinSegmentRows,
   normalizeBasinDetail,
   normalizeBasinSegmentRows,
   normalizeLayerStates,
@@ -180,6 +181,10 @@ function requestScopeDataKey(query: M11QueryState) {
   return serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap })
 }
 
+function basinRequestIdentityQuery(query: M11QueryState): M11QueryState {
+  return { ...query, warningLevel: null, q: null }
+}
+
 function overviewRequestScope(query: M11QueryState): M11OverviewRequestScope {
   return {
     kind: 'overview',
@@ -220,7 +225,7 @@ export function basinSnapshotMatchesQuery(
 ) {
   return snapshot?.requestScope?.kind === 'basin-detail' &&
     snapshot.requestScope.basinId === basinId &&
-    snapshot.requestScope.dataKey === requestScopeDataKey(query)
+    snapshot.requestScope.dataKey === requestScopeDataKey(basinRequestIdentityQuery(query))
 }
 
 export function basinSnapshotMetadataMatchesQuery(
@@ -230,7 +235,7 @@ export function basinSnapshotMetadataMatchesQuery(
 ) {
   return snapshot?.requestScope?.kind === 'basin-detail' &&
     snapshot.requestScope.basinId === basinId &&
-    snapshot.requestScope.queryKey === requestScopeQueryKey(query)
+    snapshot.requestScope.queryKey === requestScopeQueryKey(basinRequestIdentityQuery(query))
 }
 
 function deleteCacheEntry(key: string) {
@@ -868,7 +873,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
     }
   },
   loadBasinDetail: async (basinId, query) => {
-    const requestKey = cacheKey('basin-detail', { basinId, query })
+    const requestQuery = basinRequestIdentityQuery(query)
+    const requestKey = cacheKey('basin-detail', { basinId, query: requestQuery })
     const existingLoad = basinLoads.get(requestKey)
     if (existingLoad && activeBasinRequestKey === requestKey) return existingLoad
 
@@ -881,7 +887,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const [basinsResult, versionsResult, runsResult, layersResult] = await Promise.allSettled([
         fetchBasins(),
         fetchBasinVersions(basinId),
-        fetchRuns(query, basinId),
+        fetchRuns(requestQuery, basinId),
         fetchLayers(),
       ])
       const basinLookupAvailable = basinsResult.status === 'fulfilled'
@@ -895,13 +901,13 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         versions.find((version) => version.active_flag) ??
         versions[0] ??
         null
-      const versionRunsResult = await fetchRunsForBasinVersion(query, basinId, selectedVersion?.basin_version_id, runPage)
+      const versionRunsResult = await fetchRunsForBasinVersion(requestQuery, basinId, selectedVersion?.basin_version_id, runPage)
       const versionCompleteRunPage = versionRunsResult.page
-      const latestRun = latestPublishedRunForBasinVersion(versionCompleteRunPage, selectedVersion?.basin_version_id, query)
-      const concreteSurfaceQuery = concreteQueryForSurfaces(query, latestRun)
-      const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
+      const latestRun = latestPublishedRunForBasinVersion(versionCompleteRunPage, selectedVersion?.basin_version_id, requestQuery)
+      const concreteSurfaceQuery = concreteQueryForSurfaces(requestQuery, latestRun)
+      const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(requestQuery)
       const canFetchConcreteSurface =
-        query.source === 'compare' ? true : Boolean(latestRun && hasResolvedSurfaceSource(query, latestRun))
+        requestQuery.source === 'compare' ? true : Boolean(latestRun && hasResolvedSurfaceSource(requestQuery, latestRun))
       const sameVersionRankingUnavailableReason =
         selectedVersion && useSingleRunFloodSurfaces && !latestRun
           ? 'No same-version concrete run is available for this basin/source.'
@@ -919,7 +925,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         selectedVersion ? fetchModels(selectedVersion.basin_version_id) : Promise.resolve(null),
         selectedVersion ? fetchRiverSegments(selectedVersion.basin_version_id, query.segmentId) : Promise.resolve(null),
         latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery, basinId) : Promise.resolve(null),
-        ...layerIdsForOverview(query).map((layerId) => fetchLayerValidTimes(layerId)),
+        ...layerIdsForOverview(requestQuery).map((layerId) => fetchLayerValidTimes(layerId)),
       ])
 
       const models = settledValue(modelsResult, partialErrors, 'models')?.items ?? []
@@ -940,7 +946,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         ? (ranking?.items ?? []).filter((item) => item.basin_version_id === selectedVersion.basin_version_id)
         : []
       const validTimesByLayerId: Record<string, string[]> = {}
-      layerIdsForOverview(query).forEach((layerId, index) => {
+      layerIdsForOverview(requestQuery).forEach((layerId, index) => {
         validTimesByLayerId[layerId] = settledValue(validTimeResults[index], partialErrors, `layer ${layerId} valid times`) ?? []
       })
 
@@ -954,7 +960,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         rankingItems: sameVersionRankingItems,
         latestRun: useSingleRunFloodSurfaces ? latestRun : null,
         runs: runsForSourceSelection(
-          query,
+          requestQuery,
           selectedVersion
             ? (versionCompleteRunPage?.items ?? []).filter((run) => run.basin_version_id === selectedVersion.basin_version_id)
             : [],
@@ -963,7 +969,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         partialErrors,
       })
       const rows = normalizeBasinSegmentRows({ query: concreteSurfaceQuery, featureCollection: segments, rankingItems: sameVersionRankingItems })
-      const selectedIdentifiers = resolveSelectedSegmentIdentifiers(query.segmentId, rows, segments)
+      const selectedIdentifiers = resolveSelectedSegmentIdentifiers(query.segmentId, filterBasinSegmentRows(rows, query), segments)
       let selectedSegment: SelectedSegmentDetail | null = null
 
       if (selectedVersion && selectedIdentifiers) {
@@ -1026,7 +1032,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         resolvedRun: useSingleRunFloodSurfaces ? latestRun : null,
       })
       const snapshot: BasinDataSnapshot = {
-        requestScope: basinRequestScope(basinId, query),
+        requestScope: basinRequestScope(basinId, requestQuery),
         detail,
         segments: rows,
         selectedSegment,
@@ -1046,7 +1052,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       if (requestNonce === basinRequestNonce && activeBasinRequestKey === requestKey) {
         const message = '加载流域数据失败'
         const fallback: BasinDataSnapshot = {
-          requestScope: basinRequestScope(basinId, query),
+          requestScope: basinRequestScope(basinId, requestQuery),
           detail: createEmptyBasinDetail(basinId, query),
           segments: [],
           selectedSegment: null,

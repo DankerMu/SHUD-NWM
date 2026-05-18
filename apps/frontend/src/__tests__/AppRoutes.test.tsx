@@ -27,13 +27,23 @@ function success<T>(data: T) {
 vi.mock('@/components/map/MapView', () => ({
   MapView: ({
     onBasinContextLoaded,
+    onSegmentSelect,
   }: {
     onBasinContextLoaded?: (context: { basinId: string; basinVersionId: string } | null) => void
+    onSegmentSelect?: (segment: ForecastSegmentInfo) => void
   }) => {
     useEffect(() => {
       onBasinContextLoaded?.({ basinId: 'basin-demo', basinVersionId: 'bv-001' })
     }, [onBasinContextLoaded])
-    return <div aria-label="河网地图">mock map</div>
+    return (
+      <button
+        type="button"
+        aria-label="河网地图"
+        onClick={() => onSegmentSelect?.({ segmentId: 'seg-010', basinVersionId: 'bv-001' })}
+      >
+        mock map
+      </button>
+    )
   },
 }))
 
@@ -107,15 +117,19 @@ type MockForecastPanelProps = {
   loading: boolean
   error: string | null
   contextNote?: string | null
+  onRetry?: () => void
 }
 
 vi.mock('@/components/forecast/ForecastPanel', () => ({
-  ForecastPanel: ({ segment, loading, error, contextNote }: MockForecastPanelProps) => (
+  ForecastPanel: ({ segment, loading, error, contextNote, onRetry }: MockForecastPanelProps) => (
     <aside>
       mock forecast panel
       <div>{segment.segmentId}</div>
       <div>{segment.basinVersionId}</div>
       <div>{loading ? 'forecast loading' : 'forecast idle'}</div>
+      <button type="button" onClick={onRetry}>
+        mock retry forecast
+      </button>
       {contextNote ? <div>{contextNote}</div> : null}
       {error ? <div>{error}</div> : null}
     </aside>
@@ -1152,6 +1166,62 @@ describe('App route state', () => {
     )
   })
 
+  it.each([
+    ['ifs', 'IFS', ['IFS']],
+    ['compare', 'GFS,IFS', ['GFS', 'IFS']],
+  ] as const)('keeps %s forecast route context across retry and map selection', async (source, scenarios, selectedScenarios) => {
+    const user = userEvent.setup()
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const options = args[1] as { params?: { path?: Record<string, unknown>; query?: Record<string, unknown> } }
+      return {
+        data: success({
+          segment_id: options.params?.path?.segment_id ?? 'seg-009',
+          issue_time: '2026-05-18T00:00:00Z',
+          unit: 'm3/s',
+          series: [],
+          frequency_thresholds: null,
+        }),
+        error: undefined,
+      } as never
+    })
+    window.history.pushState(
+      {},
+      '',
+      `/forecast?segmentId=seg-009&basinVersionId=bv-001&source=${source}&cycle=2026-05-18T00:00:00Z`,
+    )
+
+    render(<App />)
+
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        selectedScenarios,
+        forecastData: { segmentId: 'seg-009' },
+      }),
+    )
+    await user.click(screen.getByRole('button', { name: 'mock retry forecast' }))
+    await user.click(screen.getByRole('button', { name: '河网地图' }))
+
+    await waitFor(() => expect(useForecastStore.getState().selectedSegment?.segmentId).toBe('seg-010'))
+    const forecastCalls = vi.mocked(client.GET).mock.calls.filter(([path]) =>
+      String(path).endsWith('/forecast-series'),
+    )
+    expect(forecastCalls).toHaveLength(3)
+    expect(
+      forecastCalls.map(([, options]) => {
+        const params = (options as { params?: { path?: Record<string, unknown>; query?: Record<string, unknown> } }).params
+        return {
+          segmentId: params?.path?.segment_id,
+          issueTime: params?.query?.issue_time,
+          scenarios: params?.query?.scenarios,
+        }
+      }),
+    ).toEqual([
+      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+      { segmentId: 'seg-010', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+    ])
+  })
+
   it('routes basin deep links and restores normalized query state once', async () => {
     window.history.pushState(
       {},
@@ -1187,15 +1257,15 @@ describe('App route state', () => {
         ...basinSnapshot(
           'basin-demo',
           m11Layers,
-          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange&q=main',
-          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basemap=satellite&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange&q=main',
+          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
+          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
           456,
           true,
         ),
         requestScope: {
           kind: 'basin-detail',
-          queryKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange&q=main',
-          dataKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange&q=main',
+          queryKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
+          dataKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
           basinId: 'basin-demo',
           source: 'ifs',
           layer: 'flood-return-period',
@@ -1204,8 +1274,8 @@ describe('App route state', () => {
           basemap: 'satellite',
           basinVersionId: 'bv-001',
           segmentId: 'seg-009',
-          warningLevel: 'orange',
-          q: 'main',
+          warningLevel: null,
+          q: null,
         },
       },
       basinLoading: false,
@@ -1231,8 +1301,8 @@ describe('App route state', () => {
           validTime: '2026-05-18T06:00:00.000Z',
           layer: 'flood-return-period',
           basemap: 'vector',
-          warningLevel: 'orange',
-          q: 'main',
+          warningLevel: null,
+          q: null,
           basinVersionId: 'bv-001',
           segmentId: 'seg-009',
         }),
@@ -1412,14 +1482,19 @@ describe('App route state', () => {
     expect(screen.getByText('North Branch 001')).toBeInTheDocument()
     expect(screen.getByText('Main Stem 009')).toBeInTheDocument()
 
+    fireEvent.change(screen.getByPlaceholderText('搜索河段名称或 ID'), { target: { value: 'main' } })
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('main')
+    expect(screen.queryByText('North Branch 001')).not.toBeInTheDocument()
+    expect(screen.getByText('Main Stem 009')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('预警筛选'), { target: { value: 'orange' } })
+    expect(new URLSearchParams(window.location.search).get('warningLevel')).toBe('orange')
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByPlaceholderText('搜索河段名称或 ID'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('预警筛选'), { target: { value: '' } })
     await user.click(screen.getByText('North Branch 001').closest('button') as HTMLButtonElement)
     expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-001')
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
-
-    fireEvent.change(screen.getByPlaceholderText('搜索河段名称或 ID'), { target: { value: 'main' } })
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('main')
-    fireEvent.change(screen.getByLabelText('预警筛选'), { target: { value: 'orange' } })
-    expect(new URLSearchParams(window.location.search).get('warningLevel')).toBe('orange')
   })
 
   it.each([
@@ -1439,9 +1514,9 @@ describe('App route state', () => {
         ),
         requestScope: {
           ...basinSnapshot('basin-demo', m11Layers).requestScope,
-          queryKey: `source=gfs&basinVersionId=bv-001&segmentId=seg-009&warningLevel=${warningLevel}`,
-          dataKey: `source=gfs&basinVersionId=bv-001&segmentId=seg-009&warningLevel=${warningLevel}`,
-          warningLevel,
+          queryKey: 'source=gfs&basinVersionId=bv-001&segmentId=seg-009',
+          dataKey: 'source=gfs&basinVersionId=bv-001&segmentId=seg-009',
+          warningLevel: null,
         },
       },
       basinLoading: false,

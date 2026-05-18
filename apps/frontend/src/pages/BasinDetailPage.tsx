@@ -3,7 +3,13 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ListFilter, Search } from 'lucide-react'
 
 import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
-import type { BasinDetail, BasinSegmentRow, M11Bbox, M11WarningLevel } from '@/lib/m11/overviewDataContracts'
+import {
+  filterBasinSegmentRows,
+  type BasinDetail,
+  type BasinSegmentRow,
+  type M11Bbox,
+  type M11WarningLevel,
+} from '@/lib/m11/overviewDataContracts'
 import { M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
   defaultM11QueryState,
@@ -53,10 +59,10 @@ export function BasinDetailPage() {
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
       segmentId: state.segmentId,
-      warningLevel: state.warningLevel,
-      q: state.q,
+      warningLevel: null,
+      q: null,
     }),
-    [state.basinVersionId, state.cycle, state.layer, state.q, state.segmentId, state.source, state.validTime, state.warningLevel],
+    [state.basinVersionId, state.cycle, state.layer, state.segmentId, state.source, state.validTime],
   )
   const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
   const basinData = useOverviewDataStore((store) => store.basinDetail)
@@ -106,6 +112,10 @@ export function BasinDetailPage() {
   }, [basinMetadataMatchesQuery, derivedTimeline, handleQueryChange, loading, metadataLayers, needsQueryReplacement, state])
 
   const detail = currentBasinData?.detail
+  const filteredSegments = useMemo(
+    () => filterBasinSegmentRows(currentBasinData?.segments ?? [], state),
+    [currentBasinData?.segments, state],
+  )
   const basinNotFoundReason = !loading && detail?.unavailableReason === BASIN_NOT_FOUND_REASON ? detail.unavailableReason : null
   const basinDisplayName = detail?.displayName || basinId
   const selectedSegment = currentBasinData?.selectedSegment
@@ -150,7 +160,7 @@ export function BasinDetailPage() {
           <SegmentDiscoveryPanel
             basinName={basinDisplayName}
             basinVersionId={detail?.selectedBasinVersionId ?? state.basinVersionId}
-            rows={currentBasinData?.segments ?? []}
+            rows={filteredSegments}
             selectedSegmentId={selectedSegmentId}
             query={state.q}
             warningLevel={state.warningLevel}

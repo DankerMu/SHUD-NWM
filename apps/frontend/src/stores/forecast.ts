@@ -44,6 +44,12 @@ export interface FetchForecastOptions {
   includeAnalysis?: boolean
   issueTime?: string | null
   source?: M11Source | null
+  useSelectedScenarios?: boolean
+}
+
+export interface ForecastRequestContext {
+  issueTime?: string | null
+  source?: M11Source | null
 }
 
 interface ForecastState {
@@ -53,9 +59,11 @@ interface ForecastState {
   error: string | null
   includeAnalysis: boolean
   selectedScenarios: string[]
+  activeRequestContext: ForecastRequestContext | null
   requestNonce: number
   selectSegment: (segment: ForecastSegmentInfo) => void
   toggleScenario: (scenario: string) => void
+  setRequestContext: (context: ForecastRequestContext | null) => void
   fetchForecast: (options?: FetchForecastOptions) => Promise<void>
   clearSelection: () => void
   setLoading: (loading: boolean) => void
@@ -280,6 +288,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
   error: null,
   includeAnalysis: true,
   selectedScenarios: ['GFS'],
+  activeRequestContext: null,
   requestNonce: 0,
   selectSegment: (segment) =>
     set({
@@ -296,24 +305,38 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
         return { selectedScenarios: state.selectedScenarios }
       }
 
+      const selectedScenarios = isSelected
+        ? state.selectedScenarios.filter((selected) => selected !== normalizedScenario)
+        : [...state.selectedScenarios, normalizedScenario]
+
       return {
-        selectedScenarios: isSelected
-          ? state.selectedScenarios.filter((selected) => selected !== normalizedScenario)
-          : [...state.selectedScenarios, normalizedScenario],
+        selectedScenarios,
+        activeRequestContext: state.activeRequestContext ? { ...state.activeRequestContext, source: null } : null,
+      }
+    }),
+  setRequestContext: (context) =>
+    set((state) => {
+      const selectedScenarios = selectedScenariosForSource(context?.source, state.selectedScenarios)
+      return {
+        activeRequestContext: context,
+        selectedScenarios,
       }
     }),
   fetchForecast: async (options) => {
     const segment = get().selectedSegment
     if (!segment) return
 
+    const activeRequestContext = get().activeRequestContext
     const includeAnalysis = options?.includeAnalysis ?? get().includeAnalysis
-    const selectedScenarios = selectedScenariosForSource(options?.source, get().selectedScenarios)
+    const source = options?.useSelectedScenarios ? null : (options?.source ?? activeRequestContext?.source)
+    const selectedScenarios = selectedScenariosForSource(source, get().selectedScenarios)
+    const issueTime = options?.issueTime ?? activeRequestContext?.issueTime
     const requestedSegmentId = segment.segmentId
     const requestNonce = get().requestNonce + 1
     set({ loading: true, error: null, forecastData: null, includeAnalysis, requestNonce })
 
     try {
-      const payload = await fetchForecastSeries(segment, includeAnalysis, selectedScenarios, { issueTime: options?.issueTime })
+      const payload = await fetchForecastSeries(segment, includeAnalysis, selectedScenarios, { issueTime })
       const state = get()
       if (state.requestNonce !== requestNonce || state.selectedSegment?.segmentId !== requestedSegmentId) return
 

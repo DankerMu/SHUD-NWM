@@ -74,10 +74,12 @@ async function mockOverviewApis(
     invalidBasin?: boolean
     missingBbox?: boolean
     noSegments?: boolean
+    calls?: Array<{ path: string; query: Record<string, string> }>
   } = {},
 ) {
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
+    options.calls?.push({ path: url.pathname, query: Object.fromEntries(url.searchParams.entries()) })
 
     if (url.pathname === '/api/v1/basins') {
       if (options.invalidBasin) return fulfill(route, [])
@@ -544,6 +546,27 @@ test.describe('M11 navigation and route shells', () => {
     await expect(page).toHaveURL(/q=north/)
     await page.getByLabel('预警筛选').selectOption('')
     await expect(page).not.toHaveURL(/warningLevel=orange/)
+  })
+
+  test('keeps basin search and warning filters local to URL/list state', async ({ page }) => {
+    const calls: Array<{ path: string; query: Record<string, string> }> = []
+    await mockOverviewApis(page, { calls })
+
+    await page.goto('/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+    await expect(page.getByRole('heading', { name: '流域分析' })).toBeVisible()
+    await expect(page.getByText('North Branch 001')).toBeVisible()
+    await expect(page.getByText('Main Stem 009')).toBeVisible()
+    const initialSegmentLoads = calls.filter((call) => call.path === '/api/v1/basin-versions/bv-001/river-segments').length
+
+    await page.getByPlaceholder('搜索河段名称或 ID').fill('north')
+    await expect(page).toHaveURL(/q=north/)
+    await expect(page.getByText('North Branch 001')).toBeVisible()
+    await expect(page.getByText('Main Stem 009')).toHaveCount(0)
+    await page.getByLabel('预警筛选').selectOption('orange')
+    await expect(page).toHaveURL(/warningLevel=orange/)
+    await expect(page.getByText('没有匹配的河段')).toBeVisible()
+
+    expect(calls.filter((call) => call.path === '/api/v1/basin-versions/bv-001/river-segments')).toHaveLength(initialSegmentLoads)
   })
 
   test('drops stale overview segment identity when drilling into a different basin version', async ({ page }) => {

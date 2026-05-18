@@ -612,9 +612,15 @@ export function normalizeBasinSegmentRows(input: {
     alertById.set(versionedSegmentKey(item.basin_version_id, item.segment_id), rankingLike)
   })
 
-  const rows = features.map((feature) => segmentRowFromFeature(feature, alertById, input.query))
-  const normalizedFilter = normalizeWarningLevel(input.query.warningLevel)
-  const search = input.query.q?.toLowerCase() ?? null
+  return features.map((feature) => segmentRowFromFeature(feature, alertById, input.query))
+}
+
+export function filterBasinSegmentRows(
+  rows: BasinSegmentRow[],
+  query: Pick<M11QueryState, 'warningLevel' | 'q'>,
+): BasinSegmentRow[] {
+  const normalizedFilter = normalizeWarningLevel(query.warningLevel)
+  const search = query.q?.toLowerCase() ?? null
 
   return rows.filter((row) => {
     if (normalizedFilter && row.warningLevel !== normalizedFilter) return false
@@ -652,6 +658,10 @@ export function normalizeSelectedSegmentDetail(input: {
       ? { ...input.query, cycle: input.resolvedRun?.cycle_time ?? input.resolvedQuery?.cycle ?? input.query.cycle }
       : input.resolvedQuery ?? input.query
   const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
+  const handoffSource =
+    input.query.source === 'best' && (sourceSelection.resolvedSource === 'GFS' || sourceSelection.resolvedSource === 'IFS')
+      ? (sourceSelection.resolvedSource.toLowerCase() as M11Source)
+      : input.query.source
   const currentPoint = pickCurrentTrendPoint(forecastSeries, input.query.validTime, sourceSelection)
   const alert = input.floodAlert
   const timelinePeak = input.floodTimeline?.peak ?? null
@@ -693,7 +703,7 @@ export function normalizeSelectedSegmentDetail(input: {
           normalizeString(input.lineageUnavailableReason) ??
           'Lineage is unavailable for this segment/time.',
     handoffUrl: m11QueryHref('/forecast', {
-      source: input.query.source,
+      source: handoffSource,
       cycle: selectionQuery.cycle,
       validTime: input.query.validTime ?? currentPoint?.validTime ?? null,
       layer: input.query.layer,

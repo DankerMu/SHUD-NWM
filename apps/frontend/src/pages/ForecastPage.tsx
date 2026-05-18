@@ -18,6 +18,7 @@ export function ForecastPage() {
   const selectSegment = useForecastStore((state) => state.selectSegment)
   const fetchForecast = useForecastStore((state) => state.fetchForecast)
   const clearSelection = useForecastStore((state) => state.clearSelection)
+  const setRequestContext = useForecastStore((state) => state.setRequestContext)
   const toast = useToast((state) => state.toast)
   const lastRouteHandoffKey = useRef<string | null>(null)
   const [basinContext, setBasinContext] = useState<ForecastBasinContext | null>(null)
@@ -29,18 +30,23 @@ export function ForecastPage() {
       basinVersionId: routeState.basinVersionId,
     }
   }, [routeState])
+  const routeRequestContext = useMemo(
+    () => ({
+      source: routeState.source === 'best' ? null : routeState.source,
+      issueTime: routeState.cycle,
+    }),
+    [routeState.cycle, routeState.source],
+  )
   const routeHandoffKey = routeSegment
-    ? `${routeSegment.basinVersionId}::${routeSegment.segmentId}::${routeState.source}::${routeState.cycle ?? 'latest'}`
+    ? `${routeSegment.basinVersionId}::${routeSegment.segmentId}::${routeRequestContext.source ?? 'selected'}::${routeState.cycle ?? 'latest'}`
     : null
 
   const loadSegmentForecast = useCallback(
-    async (segment: ForecastSegmentInfo, forecastContext: typeof routeState | null = null) => {
+    async (segment: ForecastSegmentInfo) => {
       selectSegment(segment)
       try {
         await fetchForecast({
           includeAnalysis: true,
-          issueTime: forecastContext?.cycle ?? undefined,
-          source: forecastContext?.source ?? undefined,
         })
       } catch (error) {
         toast({
@@ -54,6 +60,10 @@ export function ForecastPage() {
   )
 
   useEffect(() => {
+    setRequestContext(routeRequestContext)
+  }, [routeRequestContext, setRequestContext])
+
+  useEffect(() => {
     if (!routeSegment || !routeHandoffKey) {
       lastRouteHandoffKey.current = null
       return
@@ -62,21 +72,20 @@ export function ForecastPage() {
     if (
       selectedSegment?.segmentId === routeSegment.segmentId &&
       selectedSegment.basinVersionId === routeSegment.basinVersionId &&
-      (loading || forecastData?.segmentId === routeSegment.segmentId)
+      loading
     ) {
       lastRouteHandoffKey.current = routeHandoffKey
       return
     }
 
     lastRouteHandoffKey.current = routeHandoffKey
-    void loadSegmentForecast(routeSegment, routeState)
+    void loadSegmentForecast(routeSegment)
   }, [
     forecastData?.segmentId,
     loadSegmentForecast,
     loading,
     routeHandoffKey,
     routeSegment,
-    routeState,
     selectedSegment?.basinVersionId,
     selectedSegment?.segmentId,
   ])
