@@ -71,6 +71,69 @@ Non-goals for #160:
 - [ ] 2.5 Add unit tests for adapter normalization, partial failures, unavailable fields, freshness metadata, source/scenario provenance, layer valid-times, and query-driven request parameters.
 - [ ] 2.6 Add a measurable aggregation-endpoint decision rule: only add read-only endpoint(s) when existing composition requires more than 8 initial overview requests, creates per-basin N+1 calls for required fields, or cannot provide a required field from current APIs; if added, update `openapi/nhms.v1.yaml`, regenerate types, run `check:api-types`, and add backend/frontend tests in the same issue.
 
+### Issue #161 Evidence Matrix
+
+Selected risk packs:
+
+- Public API / CLI / script entry -> typed view models consumed by overview/basin shell pages
+  or exported for later page issues.
+- Schema / columns / units / field names -> adapter tests for snake_case API fields, camelCase
+  view models, units, nullable values, and warning levels.
+- Geospatial / CRS / shapefile sidecars -> bbox/geometry availability and missing-geometry
+  states are normalized without fabricating coordinates.
+- Time series / forcing / temporal boundaries -> source/cycle/validTime/layer valid-time and
+  forecast point tests.
+- Resource limits / large input / discovery -> request de-duplication/caching and aggregation
+  endpoint decision rule tests.
+- Legacy compatibility / examples -> existing forecast, flood alert, monitoring, and M11 route
+  tests keep passing.
+- Error handling / rollback / partial outputs -> partial endpoint failure and unavailable
+  field tests.
+- Release / packaging / dependency compatibility -> frontend test/build commands and no
+  unvetted dependency.
+- Documentation / migration notes -> endpoint decision rule and non-goals documented here.
+
+Required test inputs and expected outputs:
+
+- Basin list payload with nested hierarchy, bbox, area, null latest forecast, and multiple
+  basin versions -> `OverviewBasin[]` preserves `basinId`, `basinVersionId`, display name,
+  bbox/fallback extent, hierarchy, warning counts, and unavailable latest-forecast reason.
+- Model and basin-version payloads with active/inactive models -> overview/basin adapters expose
+  active model/version counts without hiding `basin_version_id`.
+- Flood summary/ranking payloads with mixed warning levels, null Q, missing unit, and quality
+  note -> `OverviewSummary` and `BasinSegmentRow` normalize warning level, `m3/s` fallback,
+  quality state, and freshness metadata.
+- `/api/v1/layers` plus `/api/v1/layers/{layer_id}/valid-times` payloads with empty and non-empty
+  valid-time arrays -> `LayerState` marks available/unavailable, current valid time, source, and
+  disabled reason.
+- Forecast series payload with GFS, IFS, analysis, empty points, and explicit `cycle_time` ->
+  `SelectedSegmentDetail` exposes source/scenario provenance, trend points, current value, and
+  comparison availability without fabricating missing series.
+- Lineage success and failure/unavailable cases -> selected segment detail exposes lineage status
+  or unavailable reason instead of throwing in leaf UI.
+- Partial failure where one optional endpoint rejects -> adapter returns partial view model with
+  scoped error/unavailable state; required identity fields remain stable.
+- Repeated identical overview load requests -> shared resource calls are de-duplicated or cached
+  according to the chosen implementation.
+- Aggregation endpoint decision inputs: `initialRequestCount <= 8`, `initialRequestCount > 8`,
+  per-basin N+1 true, and missing required field true -> helper returns reuse-existing or
+  aggregation-needed with reason.
+
+Verification commands for #161:
+
+- `cd apps/frontend && corepack pnpm test`
+- `cd apps/frontend && corepack pnpm build`
+- `cd apps/frontend && corepack pnpm test:e2e`
+- `cd apps/frontend && corepack pnpm run test:e2e:preview`
+- `openspec validate m11-overview-basin-drilldown --strict --no-interactive`
+- If OpenAPI/backend changes are added: `cd apps/frontend && corepack pnpm check:api-types`,
+  `uv run ruff check .`, and focused `uv run pytest -q` for affected API tests.
+
+Non-goals for #161:
+
+- No full map layer controls, national overview UI beyond consuming initial view models, basin
+  segment list UI, selected segment panel UI, or refreshed visual screenshot evidence.
+
 ## 3. Shared map, source, layer, legend, and timeline controls
 
 - [ ] 3.1 Extract or extend shared MapLibre primitives for source/layer registration, hover/click callbacks, overlays, fit/fly-to behavior, and restoration of active layers after basemap switches.

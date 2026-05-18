@@ -1,11 +1,20 @@
 import { render, screen } from '@testing-library/react'
 import { BrowserRouter } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 import { OverviewPage } from '@/pages/OverviewPage'
+import { useOverviewDataStore } from '@/stores/overviewData'
 
 describe('M11 visual foundation shell', () => {
+  beforeEach(() => {
+    useOverviewDataStore.setState({
+      ...useOverviewDataStore.getInitialState(),
+      loadOverview: vi.fn().mockResolvedValue(undefined),
+      loadBasinDetail: vi.fn().mockResolvedValue(undefined),
+    })
+  })
+
   it('exposes mapped layout tokens for nav, panels, timeline, and warning colors', () => {
     window.history.pushState({}, '', '/overview?warningLevel=major')
 

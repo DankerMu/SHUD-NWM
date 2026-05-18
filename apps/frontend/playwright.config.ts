@@ -4,11 +4,13 @@ const e2ePort = Number(process.env.PLAYWRIGHT_DEV_PORT ?? 5174)
 const externalBaseURL = process.env.PLAYWRIGHT_TEST_BASE_URL
 const baseURL = externalBaseURL ?? `http://127.0.0.1:${e2ePort}`
 const apiBaseURL = process.env.VITE_API_BASE_URL ?? 'https://api.example.test'
+const workers = process.env.PLAYWRIGHT_WORKERS ? Number(process.env.PLAYWRIGHT_WORKERS) : 2
 
 export default defineConfig({
   testDir: './e2e',
   testIgnore: /preview-deeplink\.spec\.ts/,
   fullyParallel: true,
+  workers,
   use: {
     baseURL,
     trace: 'on-first-retry',

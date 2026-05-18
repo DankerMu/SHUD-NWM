@@ -3,23 +3,36 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import { BasinLink, LayerList, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import { needsM11QueryReplacement, parseM11QueryState, serializeM11QueryState } from '@/lib/m11/queryState'
+import { useOverviewDataStore } from '@/stores/overviewData'
 
 export function OverviewPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const state = useMemo(() => parseM11QueryState(location.search), [location.search])
   const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
+  const overview = useOverviewDataStore((store) => store.overview)
+  const loading = useOverviewDataStore((store) => store.loading)
+  const error = useOverviewDataStore((store) => store.error)
+  const loadOverview = useOverviewDataStore((store) => store.loadOverview)
+  const needsQueryReplacement = needsM11QueryReplacement(location.search)
 
   useEffect(() => {
-    if (!needsM11QueryReplacement(location.search)) return
+    if (!needsQueryReplacement) return
     navigate({ pathname: location.pathname, search: normalizedSearch ? `?${normalizedSearch}` : '' }, { replace: true })
-  }, [location.pathname, location.search, navigate, normalizedSearch])
+  }, [location.pathname, navigate, needsQueryReplacement, normalizedSearch])
+
+  useEffect(() => {
+    if (needsQueryReplacement) return
+    void loadOverview(state).catch(() => undefined)
+  }, [loadOverview, needsQueryReplacement, state])
 
   const basinSearch = serializeM11QueryState({
     ...state,
-    basinVersionId: state.basinVersionId ?? 'bv-demo',
+    basinVersionId: state.basinVersionId ?? overview?.basins[0]?.selectedBasinVersionId ?? 'bv-demo',
     segmentId: state.segmentId,
   })
+  const basins = overview?.basins ?? []
+  const summary = overview?.summary
 
   return (
     <M11Layout
@@ -33,25 +46,35 @@ export function OverviewPage() {
         <>
           <div className="space-y-2">
             <div className="text-sm font-semibold text-neutral-900">流域管理</div>
-            {['长江流域', '黄河流域', '珠江流域', '松辽流域'].map((basin) => (
-              <label key={basin} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-neutral-700">
+            {(basins.length > 0 ? basins : ['长江流域', '黄河流域', '珠江流域', '松辽流域']).map((basin) => (
+              <label
+                key={typeof basin === 'string' ? basin : basin.basinId}
+                className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-neutral-700"
+              >
                 <input type="checkbox" defaultChecked className="h-4 w-4" />
-                {basin}
+                {typeof basin === 'string' ? basin : basin.displayName}
               </label>
             ))}
           </div>
           <LayerList activeLayer={state.layer} />
-          <BasinLink to={`/basins/basin-demo${basinSearch ? `?${basinSearch}` : ''}`}>进入示例流域分析</BasinLink>
+          <BasinLink to={`/basins/${basins[0]?.basinId ?? 'basin-demo'}${basinSearch ? `?${basinSearch}` : ''}`}>
+            进入示例流域分析
+          </BasinLink>
         </>
       }
       right={
         <>
           <div className="grid grid-cols-2 gap-3">
-            <SummaryMetric value="23" label="今日完成周期" />
-            <SummaryMetric value="7" label="当前运行中" />
-            <SummaryMetric value="18" label="超警河段" tone="warning" />
-            <SummaryMetric value="08:00" label="最新更新时间" />
+            <SummaryMetric value={formatMetric(summary?.completedCyclesToday, '23')} label="今日完成周期" />
+            <SummaryMetric value={formatMetric(summary?.runningJobs, '7')} label="当前运行中" />
+            <SummaryMetric value={formatMetric(summary?.warningSegmentCount, '18')} label="超警河段" tone="warning" />
+            <SummaryMetric value={formatTime(summary?.latestUpdate) ?? '08:00'} label="最新更新时间" />
           </div>
+          {loading || error ? (
+            <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
+              {loading ? '总览数据加载中' : error}
+            </div>
+          ) : null}
           <div className="space-y-2">
             <Link className="block rounded border border-neutral-300 p-3 hover:bg-primary-50" to="/monitoring">
               产品监控摘要
@@ -76,4 +99,15 @@ function SummaryMetric({ value, label, tone = 'default' }: { value: string; labe
       <div className="mt-1 text-xs text-neutral-700">{label}</div>
     </div>
   )
+}
+
+function formatMetric(value: number | null | undefined, fallback: string) {
+  return value === null || value === undefined ? fallback : String(value)
+}
+
+function formatTime(value: string | null | undefined) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`
 }

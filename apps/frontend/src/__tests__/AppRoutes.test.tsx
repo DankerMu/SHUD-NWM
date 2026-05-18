@@ -5,6 +5,7 @@ import App from '@/App'
 import { useAuthStore } from '@/stores/auth'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useMonitoringStore } from '@/stores/monitoring'
+import { useOverviewDataStore } from '@/stores/overviewData'
 
 vi.mock('@/components/map/MapView', () => ({
   MapView: () => <div aria-label="河网地图">mock map</div>,
@@ -19,8 +20,10 @@ vi.mock('@/components/flood/FloodAlertMap', () => ({
 }))
 
 const noopAsync = vi.fn().mockResolvedValue(undefined)
+const overviewAsync = vi.fn().mockResolvedValue(undefined)
 
 beforeEach(() => {
+  overviewAsync.mockResolvedValue(undefined)
   useAuthStore.setState({ role: 'viewer' })
   useFloodAlertStore.setState({
     selectedRunId: null,
@@ -56,6 +59,16 @@ beforeEach(() => {
     error: null,
     fetchAll: noopAsync,
     fetchJobs: noopAsync,
+  })
+  useOverviewDataStore.setState({
+    overview: null,
+    basinDetail: null,
+    loading: false,
+    basinLoading: false,
+    error: null,
+    basinError: null,
+    loadOverview: overviewAsync,
+    loadBasinDetail: overviewAsync,
   })
 })
 
