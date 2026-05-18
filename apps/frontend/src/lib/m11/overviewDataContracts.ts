@@ -427,7 +427,7 @@ export function normalizeOverviewSummary(input: {
   return {
     completedCyclesToday,
     runningJobs,
-    warningSegmentCount: warningSegmentCount || null,
+    warningSegmentCount: input.floodSummary ? warningSegmentCount : null,
     latestUpdate,
     totalBasins: input.basins?.length ?? 0,
     totalSegments: input.floodSummary?.total_segments ?? null,

@@ -251,6 +251,27 @@ describe('M11 overview data contracts', () => {
     vi.useRealTimers()
   })
 
+  it('preserves zero warning count for a successful flood summary with no super-warning segments', () => {
+    const summary = normalizeOverviewSummary({
+      query,
+      floodSummary: {
+        run_id: run.run_id,
+        total_segments: 7,
+        usable_curves: 7,
+        unavailable_count: 0,
+        quality_note: null,
+        levels: [
+          { level: 'normal', count: 4, color: '#808080' },
+          { level: 'watch', count: 3, color: '#FFD700' },
+        ],
+      },
+      latestRun: run,
+    })
+
+    expect(summary.warningSegmentCount).toBe(0)
+    expect(summary.totalSegments).toBe(7)
+  })
+
   it('normalizes layer valid-times from the API and marks unavailable layers without synthetic times', () => {
     const layers = normalizeLayerStates({
       query: { ...query, validTime: '2026-05-18T03:00:00Z' },
@@ -282,6 +303,37 @@ describe('M11 overview data contracts', () => {
       validTimes: [],
       validTimeSource: 'none',
       disabledReason: 'Layer is not registered by the API.',
+    })
+  })
+
+  it('derives best layer freshness from a resolved concrete run', () => {
+    const layers = normalizeLayerStates({
+      query: { ...query, source: 'ifs', cycle: null },
+      layers: [
+        {
+          layer_id: 'flood-return-period',
+          layer_name: 'Flood return period',
+          layer_type: 'hydrology',
+          variables: ['return_period'],
+          metadata: null,
+        },
+      ],
+      validTimesByLayerId: {
+        'flood-return-period': ['2026-05-18T06:00:00Z'],
+      },
+      resolvedRun: {
+        ...run,
+        run_id: 'fcst_ifs_2026051800_yangtze_shud_v12',
+        scenario_id: 'forecast_ifs_deterministic',
+        source_id: 'IFS',
+      },
+    })
+
+    expect(layers.find((layer) => layer.layerId === 'flood-return-period')?.freshness).toMatchObject({
+      runId: 'fcst_ifs_2026051800_yangtze_shud_v12',
+      source: 'IFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      validTime: '2026-05-18T06:00:00.000Z',
     })
   })
 
