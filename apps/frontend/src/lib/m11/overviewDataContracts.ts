@@ -450,6 +450,7 @@ export function normalizeLayerStates(input: {
   layers: ApiLayer[]
   validTimesByLayerId: Record<string, string[] | undefined>
   derivedValidTimes?: Record<string, string[] | undefined>
+  resolvedRun?: ApiHydroRun | null
 }): LayerState[] {
   const apiLayersById = new Map(input.layers.map((layer) => [layer.layer_id, layer]))
   const requiredLayers: M11Layer[] = ['discharge', 'water-level', 'flood-return-period', 'warning-level']
@@ -463,6 +464,8 @@ export function normalizeLayerStates(input: {
     const currentValidTime = pickCurrentValidTime(validTimes, input.query.validTime)
     const isKnownRequired = (requiredLayers as string[]).includes(layerId)
     const available = Boolean(apiLayer) && validTimes.length > 0
+    const availableSources = input.resolvedRun ? sourcesFromRuns([input.resolvedRun]) : []
+    const sourceSelection = createSourceScenarioSelection(input.query, availableSources)
 
     return {
       layerId,
@@ -480,9 +483,10 @@ export function normalizeLayerStates(input: {
             ? 'Layer has no valid times.'
             : null,
       freshness: createFreshnessMetadata({
-        cycleTime: input.query.cycle,
+        cycleTime: input.resolvedRun?.cycle_time ?? input.query.cycle,
         validTime: currentValidTime,
-        source: createSourceScenarioSelection(input.query).resolvedSource,
+        runId: input.resolvedRun?.run_id ?? null,
+        source: sourceSelection.resolvedSource,
         unavailableReason: currentValidTime ? null : 'No valid-time metadata is available.',
       }),
       legend: layerLegend(layerId),
@@ -597,10 +601,21 @@ export function normalizeSelectedSegmentDetail(input: {
   lineageError?: string | null
   lineageUnavailableReason?: string | null
   floodAlert?: ApiFloodAlertRankingItem | null
+  resolvedRun?: ApiHydroRun | null
+  resolvedQuery?: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'> | null
 }): SelectedSegmentDetail {
   const forecastSeries = normalizeForecastSeries(input.forecast)
-  const availableSources = [...new Set(forecastSeries.map((point) => point.source).filter(Boolean))] as M11ResolvedSource[]
-  const sourceSelection = createSourceScenarioSelection(input.query, availableSources)
+  const availableSources = [
+    ...new Set([
+      ...forecastSeries.map((point) => point.source).filter(Boolean),
+      ...sourcesFromRuns(input.resolvedRun ? [input.resolvedRun] : []),
+    ]),
+  ] as M11ResolvedSource[]
+  const selectionQuery =
+    input.query.source === 'best'
+      ? { ...input.query, cycle: input.resolvedRun?.cycle_time ?? input.resolvedQuery?.cycle ?? input.query.cycle }
+      : input.resolvedQuery ?? input.query
+  const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
   const currentPoint = pickCurrentTrendPoint(forecastSeries, input.query.validTime, sourceSelection)
   const alert = input.floodAlert
   const timelinePeak = input.floodTimeline?.peak ?? null
@@ -642,10 +657,10 @@ export function normalizeSelectedSegmentDetail(input: {
           'Lineage is unavailable for this segment/time.',
     handoffUrl: `/forecast?segmentId=${encodeURIComponent(riverSegmentId)}&basinVersionId=${encodeURIComponent(input.basinVersionId)}`,
     freshness: createFreshnessMetadata({
-      updatedAt: input.forecast && 'issue_time' in input.forecast ? input.forecast.issue_time : null,
-      cycleTime: input.query.cycle,
+      updatedAt: input.forecast && 'issue_time' in input.forecast ? input.forecast.issue_time : input.resolvedRun?.updated_at ?? null,
+      cycleTime: input.resolvedRun?.cycle_time ?? selectionQuery.cycle,
       validTime: input.query.validTime ?? currentPoint?.validTime ?? null,
-      runId: input.floodTimeline?.run_id ?? null,
+      runId: input.floodTimeline?.run_id ?? input.resolvedRun?.run_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: forecastSeries.length > 0 || alert ? null : 'No forecast or flood-alert values are available.',
     }),

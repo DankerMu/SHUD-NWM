@@ -163,6 +163,17 @@ const featureCollection: ApiRiverFeatureCollection = {
   ],
 }
 
+const segment: ApiRiverSegment = {
+  river_segment_id: 'yangtze_rivnet_v12_riv_000123',
+  river_network_version_id: 'yangtze_rivnet_v12',
+  segment_order: 12,
+  downstream_segment_id: null,
+  length_m: 452700,
+  geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+  properties_json: {},
+  created_at: '2026-05-01T00:00:00Z',
+}
+
 describe('M11 overview data contracts', () => {
   it('normalizes overview basins with explicit IDs, bbox, versions, warnings, and unavailable fields', () => {
     const basins = normalizeOverviewBasins({
@@ -353,16 +364,6 @@ describe('M11 overview data contracts', () => {
   })
 
   it('normalizes selected segment detail with forecast provenance, trend points, and lineage status', () => {
-    const segment: ApiRiverSegment = {
-      river_segment_id: 'yangtze_rivnet_v12_riv_000123',
-      river_network_version_id: 'yangtze_rivnet_v12',
-      segment_order: 12,
-      downstream_segment_id: null,
-      length_m: 452700,
-      geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
-      properties_json: {},
-      created_at: '2026-05-01T00:00:00Z',
-    }
     const forecast: ApiForecastPayload = {
       river_segment_id: 'yangtze_rivnet_v12_riv_000123',
       issue_time: '2026-05-18T00:00:00Z',
@@ -467,6 +468,58 @@ describe('M11 overview data contracts', () => {
       lineageStatus: 'failed',
       lineageUnavailableReason: 'lineage backend unavailable',
       unavailableReason: 'Segment geometry/detail is unavailable.',
+    })
+  })
+
+  it('derives best selected-segment provenance from the resolved run when forecast series is empty', () => {
+    const detail = normalizeSelectedSegmentDetail({
+      query: { ...query, source: 'best', cycle: null },
+      basin,
+      basinVersionId: 'yangtze_v2026_01',
+      segmentId: 'yangtze_rivnet_v12_riv_000123',
+      segment,
+      feature: featureCollection.features[0],
+      model,
+      forecast: {
+        river_segment_id: 'yangtze_rivnet_v12_riv_000123',
+        issue_time: '2026-05-18T00:00:00Z',
+        variable: 'q_down',
+        unit: 'm3/s',
+        frequency_thresholds: null,
+        segments: [],
+      },
+      floodTimeline: {
+        run_id: 'fcst_ifs_2026051800_yangtze_shud_v12',
+        segment_id: 'seg-123',
+        river_segment_id: 'yangtze_rivnet_v12_riv_000123',
+        timesteps: [],
+        timeline: [],
+        peak: { valid_time: '2026-05-18T06:00:00Z', return_period: 20, warning_level: 'warning', q_value: 5242 },
+        frequency_thresholds: null,
+        quality_note: null,
+      },
+      floodAlert: rankingItem,
+      resolvedRun: {
+        ...run,
+        run_id: 'fcst_ifs_2026051800_yangtze_shud_v12',
+        scenario_id: 'forecast_ifs_deterministic',
+        source_id: 'IFS',
+      },
+      resolvedQuery: { ...query, source: 'ifs', cycle: null },
+    })
+
+    expect(detail.trendPoints).toEqual([])
+    expect(detail.currentQ).toBe(5242)
+    expect(detail.sourceSelection).toMatchObject({
+      requestedSource: 'best',
+      resolvedSource: 'IFS',
+      scenarioIds: ['forecast_ifs_deterministic'],
+      cycleTime: '2026-05-18T00:00:00Z',
+      unavailableReason: null,
+    })
+    expect(detail.freshness).toMatchObject({
+      runId: 'fcst_ifs_2026051800_yangtze_shud_v12',
+      source: 'IFS',
     })
   })
 

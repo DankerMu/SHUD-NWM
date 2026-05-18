@@ -342,10 +342,10 @@ async function fetchModels(basinVersionId?: string) {
   )
 }
 
-async function fetchRuns(query: M11QueryState, basinId?: string) {
+async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, limit: number, offset: number) {
   const source = sourceForApi(query.source)
   return cached(
-    cacheKey('/api/v1/runs', { basinId, source, cycleTime: query.cycle ?? 'latest', status: 'frequency_done' }),
+    cacheKey('/api/v1/runs', { basinId, source, cycleTime: query.cycle ?? 'latest', status: 'frequency_done', limit, offset }),
     () =>
       getApi<ApiHydroRunPage>(
         '/api/v1/runs',
@@ -356,14 +356,56 @@ async function fetchRuns(query: M11QueryState, basinId?: string) {
               source,
               cycle_time: query.cycle ?? undefined,
               status: 'frequency_done',
-              limit: 20,
-              offset: 0,
+              limit,
+              offset,
             },
           },
         },
         '获取运行列表失败',
       ),
   )
+}
+
+async function fetchRuns(query: M11QueryState, basinId?: string) {
+  return fetchRunsPage(query, basinId, 20, 0)
+}
+
+async function fetchRunsForBasinVersion(
+  query: M11QueryState,
+  basinId: string,
+  basinVersionId: string | null | undefined,
+  initialPage: ApiHydroRunPage | null,
+): Promise<ApiHydroRunPage | null> {
+  if (!basinVersionId || !initialPage) return initialPage
+
+  const items = [...initialPage.items]
+  let page: ApiHydroRunPage = { ...initialPage, items }
+  if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return page
+
+  const firstOffset = initialPage.offset ?? 0
+  const firstLimit = initialPage.limit || items.length || 20
+  let offset = firstOffset + firstLimit
+  let total = initialPage.total ?? items.length
+  const pageLimit = 200
+
+  while (offset < total) {
+    const nextPage = await fetchRunsPage(query, basinId, pageLimit, offset)
+    items.push(...nextPage.items)
+    total = nextPage.total ?? total
+    page = {
+      items,
+      total,
+      limit: items.length,
+      offset: firstOffset,
+    }
+    if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return page
+
+    const fetched = nextPage.items.length || nextPage.limit || pageLimit
+    offset += fetched
+    if (fetched <= 0) break
+  }
+
+  return page
 }
 
 async function fetchFloodSummary(runId: string, validTime: string | null) {
@@ -670,7 +712,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         versions.find((version) => version.active_flag) ??
         versions[0] ??
         null
-      const latestRun = latestPublishedRunForBasinVersion(runPage, selectedVersion?.basin_version_id, query)
+      const versionCompleteRunPage = await fetchRunsForBasinVersion(query, basinId, selectedVersion?.basin_version_id, runPage)
+      const latestRun = latestPublishedRunForBasinVersion(versionCompleteRunPage, selectedVersion?.basin_version_id, query)
       const concreteSurfaceQuery = concreteQueryForSurfaces(query, latestRun)
       const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
       const canFetchConcreteSurface =
@@ -713,7 +756,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         latestRun: useSingleRunFloodSurfaces ? latestRun : null,
         runs: runsForSourceSelection(
           query,
-          selectedVersion ? (runPage?.items ?? []).filter((run) => run.basin_version_id === selectedVersion.basin_version_id) : [],
+          selectedVersion
+            ? (versionCompleteRunPage?.items ?? []).filter((run) => run.basin_version_id === selectedVersion.basin_version_id)
+            : [],
           latestRun,
         ),
         partialErrors,
@@ -770,10 +815,17 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
           lineageError,
           lineageUnavailableReason,
           floodAlert: selectedRanking ?? null,
+          resolvedRun: useSingleRunFloodSurfaces ? latestRun : null,
+          resolvedQuery: concreteSurfaceQuery,
         })
       }
 
-      const layerStates = normalizeLayerStates({ query, layers, validTimesByLayerId })
+      const layerStates = normalizeLayerStates({
+        query: concreteSurfaceQuery,
+        layers,
+        validTimesByLayerId,
+        resolvedRun: useSingleRunFloodSurfaces ? latestRun : null,
+      })
       const snapshot: BasinDataSnapshot = { detail, segments: rows, selectedSegment, layers: layerStates }
       if (requestNonce === basinRequestNonce && activeBasinRequestKey === requestKey) {
         set({ basinDetail: snapshot, basinLoading: false, basinError: partialErrors[0] ?? null })
