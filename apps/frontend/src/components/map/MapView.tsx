@@ -59,10 +59,16 @@ interface MapViewProps {
   selectedSegmentId?: string | null
   onSegmentSelect: (segment: ForecastSegmentInfo) => void
   onClearSelection: () => void
+  onBasinContextLoaded?: (context: ForecastBasinContext | null) => void
   className?: string
 }
 
 type ModelPage = components['schemas']['ModelInstancePage']
+
+export interface ForecastBasinContext {
+  basinId: string
+  basinVersionId: string
+}
 
 function validateRiverCollection(payload: unknown): RiverFeatureCollection {
   const collection = unwrapApiData<RiverFeatureCollection>(payload, '河网数据加载失败')
@@ -146,23 +152,31 @@ async function loadRiverSegmentPages(
   return merged
 }
 
-async function loadRiverNetwork(): Promise<RiverFeatureCollection> {
+async function loadRiverNetwork(): Promise<{ data: RiverFeatureCollection; basinContext: ForecastBasinContext | null }> {
   const { data, error } = await client.GET('/api/v1/models', {
     params: { query: { active: 'true', limit: 1, offset: 0 } },
   })
   if (error) {
-    if (allowDemoRiverFallback) return demoRivers
+    if (allowDemoRiverFallback) return { data: demoRivers, basinContext: null }
     throw new Error(getApiErrorMessage(error, '模型版本加载失败'))
   }
 
   const models = unwrapApiData<ModelPage>(data, '模型版本加载失败')
   const model = models.items[0]
   if (!model?.basin_version_id || !model.river_network_version_id) {
-    if (allowDemoRiverFallback) return demoRivers
+    if (allowDemoRiverFallback) return { data: demoRivers, basinContext: null }
     throw new Error('未找到活动模型的 basin_version_id 或 river_network_version_id')
   }
 
-  return loadRiverSegmentPages(model.basin_version_id, model.river_network_version_id)
+  const basinContext =
+    model.basin_id && model.basin_version_id
+      ? { basinId: model.basin_id, basinVersionId: model.basin_version_id }
+      : null
+
+  return {
+    data: await loadRiverSegmentPages(model.basin_version_id, model.river_network_version_id),
+    basinContext,
+  }
 }
 
 function loadedRiverFeatureCount(data: RiverFeatureCollection) {
@@ -209,6 +223,7 @@ export function MapView({
   selectedSegmentId,
   onSegmentSelect,
   onClearSelection,
+  onBasinContextLoaded,
   className,
 }: MapViewProps) {
   const toast = useToast((state) => state.toast)
@@ -222,14 +237,16 @@ export function MapView({
     let mounted = true
 
     void loadRiverNetwork()
-      .then((data) => {
+      .then((result) => {
         if (!mounted) return
-        setRiverData(data)
+        setRiverData(result.data)
+        onBasinContextLoaded?.(result.basinContext)
         setRiverError(null)
       })
       .catch((error) => {
         if (!mounted) return
         const message = error instanceof Error ? error.message : '河网数据加载失败'
+        onBasinContextLoaded?.(null)
         setRiverError(message)
         toast({
           title: '河网数据加载失败',
@@ -241,7 +258,7 @@ export function MapView({
     return () => {
       mounted = false
     }
-  }, [toast])
+  }, [onBasinContextLoaded, toast])
 
   const clearHover = useCallback((event?: MapLayerMouseEvent) => {
     setHoveredSegmentId(null)

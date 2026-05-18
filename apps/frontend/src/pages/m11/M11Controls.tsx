@@ -42,6 +42,7 @@ interface SharedControlProps {
 interface M11MapSurfaceProps extends SharedControlProps {
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
+  selectedSegmentId?: string | null
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
@@ -115,6 +116,7 @@ export function M11MapSurface({
   layers = [],
   basins = [],
   visibleBasinIds,
+  selectedSegmentId = null,
   onQueryChange,
   fitTo,
   flyTo,
@@ -128,6 +130,7 @@ export function M11MapSurface({
         layers={layers}
         basins={basins}
         visibleBasinIds={visibleBasinIds}
+        selectedSegmentId={selectedSegmentId}
         fitTo={fitTo}
         flyTo={flyTo}
         onOverlayHover={onOverlayHover}

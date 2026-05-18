@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 
 import { ForecastPanel } from '@/components/forecast/ForecastPanel'
-import { MapView } from '@/components/map/MapView'
+import { MapView, type ForecastBasinContext } from '@/components/map/MapView'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
 import { parseM11QueryState } from '@/lib/m11/queryState'
@@ -20,6 +20,7 @@ export function ForecastPage() {
   const clearSelection = useForecastStore((state) => state.clearSelection)
   const toast = useToast((state) => state.toast)
   const lastRouteHandoffKey = useRef<string | null>(null)
+  const [basinContext, setBasinContext] = useState<ForecastBasinContext | null>(null)
   const routeSegment = useMemo(() => {
     const routeState = parseM11QueryState(location.search)
     if (!routeState.segmentId || !routeState.basinVersionId) return null
@@ -94,6 +95,7 @@ export function ForecastPage() {
           selectedSegmentId={selectedSegment?.segmentId}
           onSegmentSelect={(segment) => void loadSegmentForecast(segment)}
           onClearSelection={clearSelection}
+          onBasinContextLoaded={setBasinContext}
         />
       </section>
 
@@ -110,10 +112,27 @@ export function ForecastPage() {
       ) : (
         <aside className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-panel">
           <div className="grid min-h-72 flex-1 place-items-center p-4 text-center text-sm text-muted">
-            请在地图上选择河段查看预报
+            <div>
+              <p>请在地图上选择河段查看预报</p>
+              <ForecastBasinHandoff context={basinContext} />
+            </div>
           </div>
         </aside>
       )}
     </div>
+  )
+}
+
+function ForecastBasinHandoff({ context }: { context: ForecastBasinContext | null }) {
+  if (!context) return null
+  const params = new URLSearchParams({ basinVersionId: context.basinVersionId })
+
+  return (
+    <Link
+      to={`/basins/${encodeURIComponent(context.basinId)}?${params.toString()}`}
+      className="mt-3 inline-flex h-9 items-center rounded border border-primary-600 px-3 text-sm font-medium text-primary-600 hover:bg-primary-50"
+    >
+      进入流域分析
+    </Link>
   )
 }

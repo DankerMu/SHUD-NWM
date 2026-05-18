@@ -131,6 +131,7 @@ async function mockForecastApi(page: Page) {
         items: [
           {
             model_id: 'model-1',
+            basin_id: 'backend-basin',
             basin_version_id: 'backend-basin-v1',
             river_network_version_id: 'backend-rivnet-v1',
             mesh_version_id: 'mesh-1',
@@ -214,6 +215,7 @@ test.describe('forecast page', () => {
           items: [
             {
               model_id: 'model-1',
+              basin_id: 'backend-basin',
               basin_version_id: 'backend-basin-v1',
               river_network_version_id: 'backend-rivnet-v1',
               mesh_version_id: 'mesh-1',
@@ -255,6 +257,16 @@ test.describe('forecast page', () => {
     await expect(page.getByText('起报时间')).toBeVisible()
   })
 
+  test('offers basin drill-down handoff when active basin context is available', async ({ page }) => {
+    await mockForecastApi(page)
+    await gotoForecastPage(page)
+
+    await expect(page.getByRole('link', { name: '进入流域分析' })).toHaveAttribute(
+      'href',
+      '/basins/backend-basin?basinVersionId=backend-basin-v1',
+    )
+  })
+
   test('renders the forecast chart after a segment click', async ({ page }) => {
     await mockForecastApi(page)
     await gotoForecastPage(page)
@@ -278,6 +290,7 @@ test.describe('forecast page', () => {
           items: [
             {
               model_id: 'model-1',
+              basin_id: 'backend-basin',
               basin_version_id: 'backend-basin-v1',
               river_network_version_id: 'backend-rivnet-v1',
               mesh_version_id: 'mesh-1',
@@ -331,6 +344,7 @@ test.describe('forecast page', () => {
           items: [
             {
               model_id: 'model-1',
+              basin_id: 'backend-basin',
               basin_version_id: 'backend-basin-v1',
               river_network_version_id: 'backend-rivnet-v1',
               mesh_version_id: 'mesh-1',

@@ -42,6 +42,7 @@ interface M11MapLibreSurfaceProps {
   layers: LayerState[]
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
+  selectedSegmentId?: string | null
   className?: string
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
@@ -106,6 +107,7 @@ export function M11MapLibreSurface({
   layers,
   basins = [],
   visibleBasinIds,
+  selectedSegmentId = null,
   className,
   fitTo,
   flyTo,
@@ -245,6 +247,8 @@ export function M11MapLibreSurface({
       {...(renderableOverlay ? { 'data-registered-overlays': renderableOverlay.layerId } : {})}
       data-basin-feature-count={basinFeatureCollection.features.length}
       data-visible-basin-ids={basinFeatureCollection.features.map((feature) => feature.properties.basin_id).join(',')}
+      data-selected-segment-id={selectedSegmentId ?? ''}
+      data-segment-highlight-hook={selectedSegmentId ? 'selected-row' : 'idle'}
     >
       <Map
         ref={mapRef}
