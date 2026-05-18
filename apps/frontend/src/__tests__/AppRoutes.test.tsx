@@ -2096,7 +2096,15 @@ describe('App route state', () => {
         segment_id: 'seg-1',
         issue_time: '2026-05-12T00:00:00Z',
         unit: 'm3/s',
-        series: [],
+        series: [
+          {
+            scenario_id: 'forecast_gfs_deterministic',
+            source: 'GFS',
+            segment_role: 'future_7_days',
+            cycle_time: '2026-05-12T00:00:00.000Z',
+            points: [['2026-05-12T03:00:00Z', 1234]],
+          },
+        ],
         frequency_thresholds: null,
       }),
       error: undefined,
@@ -2163,7 +2171,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/flood-alerts?source=gfs&cycle=2026-05-12T00:00:00Z&validTime=2026-05-12T03:00:00Z',
+      '/flood-alerts',
     )
 
     render(<App />)
@@ -2178,7 +2186,7 @@ describe('App route state', () => {
           params: expect.objectContaining({
             path: { basin_version_id: 'basin-v1', segment_id: 'seg-1' },
             query: expect.objectContaining({
-              issue_time: 'latest',
+              issue_time: '2026-05-12T00:00:00.000Z',
               scenarios: 'GFS',
               include_analysis: true,
             }),
@@ -2189,6 +2197,133 @@ describe('App route state', () => {
     const query = vi.mocked(client.GET).mock.calls.find(([path]) => String(path).endsWith('/forecast-series'))?.[1]?.params
       ?.query as Record<string, unknown>
     expect(query.issue_time).not.toBe('2026-05-18T00:00:00.000Z')
+    expect(query.issue_time).not.toBe('latest')
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        forecastData: {
+          segmentId: 'seg-1',
+          issueTime: '2026-05-12T00:00:00Z',
+          sourceAttribution: 'GFS',
+        },
+        loading: false,
+      }),
+    )
+    expect(screen.getByTestId('mock-echarts-option')).toHaveTextContent('GFS 预报')
+  })
+
+  it('binds flood-alert detail forecast requests to an explicitly routed older flood run cycle', async () => {
+    const user = userEvent.setup()
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    const fetchTimeline = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        segment_id: 'seg-older',
+        issue_time: '2026-05-12T00:00:00Z',
+        unit: 'm3/s',
+        series: [
+          {
+            scenario_id: 'forecast_gfs_deterministic',
+            source: 'GFS',
+            segment_role: 'future_7_days',
+            cycle_time: '2026-05-12T00:00:00.000Z',
+            points: [['2026-05-12T03:00:00Z', 456]],
+          },
+        ],
+        frequency_thresholds: null,
+      }),
+      error: undefined,
+    } as never)
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-older-gfs',
+      latestRun: {
+        run_id: 'run-older-gfs',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'basin-v1',
+        source_id: 'gfs',
+        cycle_time: '2026-05-12T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-12T00:00:00Z',
+        end_time: '2026-05-12T03:00:00Z',
+        created_at: '2026-05-12T00:00:00Z',
+        updated_at: '2026-05-12T04:00:00Z',
+      },
+      validTimes: ['2026-05-12T03:00:00.000Z'],
+      summaryData: {
+        runId: 'run-older-gfs',
+        levels: [{ level: 'warning', count: 1, color: '#f59e0b' }],
+        totalSegments: 1,
+        usableCurves: 1,
+        unavailableCount: 0,
+      },
+      rankingData: {
+        items: [
+          {
+            rank: 1,
+            riverSegmentId: 'seg-older',
+            segmentId: 'seg-older',
+            segmentName: 'Older Flood Segment',
+            basinVersionId: 'basin-v1',
+            qValue: 456,
+            qUnit: 'm3/s',
+            returnPeriod: 10,
+            warningLevel: 'watch',
+            validTime: '2026-05-12T03:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-older-gfs',
+        segmentId: 'seg-older',
+        riverSegmentId: 'seg-older',
+        timesteps: [],
+        peak: null,
+        frequencyThresholds: null,
+        qualityNote: null,
+      },
+      fetchLatestFrequencyDoneRun,
+      fetchTimeline,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/flood-alerts?source=gfs&cycle=2026-05-12T00:00:00Z&validTime=2026-05-12T03:00:00Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    expect(fetchLatestFrequencyDoneRun).toHaveBeenCalledWith({
+      source: 'gfs',
+      cycleTime: '2026-05-12T00:00:00.000Z',
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+    await user.click(screen.getByRole('row', { name: /Older Flood Segment/ }))
+
+    await waitFor(() =>
+      expect(client.GET).toHaveBeenCalledWith(
+        '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
+        expect.objectContaining({
+          params: expect.objectContaining({
+            path: { basin_version_id: 'basin-v1', segment_id: 'seg-older' },
+            query: expect.objectContaining({
+              issue_time: '2026-05-12T00:00:00.000Z',
+              scenarios: 'GFS',
+            }),
+          }),
+        }),
+      ),
+    )
+    await waitFor(() =>
+      expect(useForecastStore.getState()).toMatchObject({
+        forecastData: { segmentId: 'seg-older', sourceAttribution: 'GFS' },
+        loading: false,
+      }),
+    )
   })
 
   it.each([

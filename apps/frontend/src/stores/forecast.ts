@@ -114,6 +114,8 @@ interface ForecastRequestIdentity {
   basinVersionId?: string
   issueTime?: string | null
   scenarios: string
+  contextIssueTimeBound: boolean
+  contextScenariosBound: boolean
 }
 
 function isAnalysisScenario(scenario: string) {
@@ -265,19 +267,34 @@ function isCurrentForecastRequest(state: ForecastState, request: ForecastRequest
     activeForecastRequest.segmentId !== request.segmentId ||
     activeForecastRequest.basinVersionId !== request.basinVersionId ||
     activeForecastRequest.issueTime !== request.issueTime ||
-    activeForecastRequest.scenarios !== request.scenarios
+    activeForecastRequest.scenarios !== request.scenarios ||
+    activeForecastRequest.contextIssueTimeBound !== request.contextIssueTimeBound ||
+    activeForecastRequest.contextScenariosBound !== request.contextScenariosBound
   ) {
     return false
   }
 
-  return (
-    state.requestNonce === request.nonce &&
-    state.selectedSegment?.segmentId === request.segmentId &&
-    state.selectedSegment.basinVersionId === request.basinVersionId &&
-    (!state.activeRequestContext ||
-      (state.activeRequestContext.issueTime === request.issueTime &&
-        selectedScenariosForSource(state.activeRequestContext.source, state.selectedScenarios).join(',') === request.scenarios))
-  )
+  if (
+    state.requestNonce !== request.nonce ||
+    state.selectedSegment?.segmentId !== request.segmentId ||
+    state.selectedSegment.basinVersionId !== request.basinVersionId
+  ) {
+    return false
+  }
+
+  if (request.contextIssueTimeBound || request.contextScenariosBound) {
+    const activeRequestContext = state.activeRequestContext
+    if (!activeRequestContext) return false
+    if (request.contextIssueTimeBound && activeRequestContext.issueTime !== request.issueTime) return false
+    if (
+      request.contextScenariosBound &&
+      selectedScenariosForSource(activeRequestContext.source, state.selectedScenarios).join(',') !== request.scenarios
+    ) {
+      return false
+    }
+  }
+
+  return true
 }
 
 async function fetchForecastSeries(
@@ -366,6 +383,9 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
     const source = options?.useSelectedScenarios ? null : (options?.source ?? activeRequestContext?.source)
     const selectedScenarios = selectedScenariosForSource(source, get().selectedScenarios)
     const issueTime = options?.issueTime ?? activeRequestContext?.issueTime
+    const contextIssueTimeBound = Boolean(activeRequestContext) && options?.issueTime == null
+    const contextScenariosBound =
+      Boolean(activeRequestContext) && !options?.useSelectedScenarios && options?.source == null
     const requestNonce = get().requestNonce + 1
     const request: ForecastRequestIdentity = {
       nonce: requestNonce,
@@ -373,6 +393,8 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       basinVersionId: segment.basinVersionId,
       issueTime,
       scenarios: selectedScenarios.join(','),
+      contextIssueTimeBound,
+      contextScenariosBound,
     }
     set({ loading: true, error: null, forecastData: null, includeAnalysis, requestNonce, activeForecastRequest: request })
 

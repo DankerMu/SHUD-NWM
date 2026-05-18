@@ -160,6 +160,56 @@ describe('forecast comparison UI', () => {
     })
   })
 
+  it('accepts ignored-context forecast responses even when a stale route context remains in the store', async () => {
+    let query: Record<string, unknown> | undefined
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const options = args[1] as { params?: { query?: Record<string, unknown> } }
+      query = options.params?.query
+      return success({
+        segment_id: 'seg-1',
+        issue_time: '2026-05-12T00:00:00Z',
+        unit: 'm3/s',
+        series: [
+          {
+            scenario_id: 'forecast_gfs_deterministic',
+            source: 'GFS',
+            segment_role: 'future_7_days',
+            cycle_time: '2026-05-12T00:00:00.000Z',
+            points: [['2026-05-12T03:00:00Z', 123]],
+          },
+        ],
+        frequency_thresholds: null,
+      }) as never
+    })
+    resetForecastStore({
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1' },
+      selectedScenarios: ['IFS'],
+      activeRequestContext: { source: 'ifs', issueTime: '2026-05-18T00:00:00.000Z' },
+    })
+
+    await useForecastStore.getState().fetchForecast({
+      includeAnalysis: true,
+      ignoreActiveRequestContext: true,
+      source: 'gfs',
+      issueTime: '2026-05-12T00:00:00.000Z',
+    })
+
+    expect(query).toMatchObject({
+      issue_time: '2026-05-12T00:00:00.000Z',
+      scenarios: 'GFS',
+      include_analysis: true,
+    })
+    expect(useForecastStore.getState()).toMatchObject({
+      activeRequestContext: { source: 'ifs', issueTime: '2026-05-18T00:00:00.000Z' },
+      forecastData: {
+        segmentId: 'seg-1',
+        issueTime: '2026-05-12T00:00:00Z',
+        sourceAttribution: 'GFS',
+      },
+      loading: false,
+    })
+  })
+
   it('persists restored source and cycle as the active forecast request context', async () => {
     const queries: Array<Record<string, unknown> | undefined> = []
     vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {

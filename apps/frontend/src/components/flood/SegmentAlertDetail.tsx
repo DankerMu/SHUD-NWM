@@ -21,6 +21,7 @@ interface SegmentAlertDetailProps {
   segment: FloodAlertRankingItem | null
   basinVersionId?: string | null
   forecastSource?: M11Source | null
+  forecastIssueTime?: string | null
   onClose: () => void
 }
 
@@ -142,7 +143,13 @@ function buildTimelineOption(timeline: FloodAlertTimeline | null) {
   }
 }
 
-export function SegmentAlertDetail({ segment, basinVersionId, forecastSource = null, onClose }: SegmentAlertDetailProps) {
+export function SegmentAlertDetail({
+  segment,
+  basinVersionId,
+  forecastSource = null,
+  forecastIssueTime = null,
+  onClose,
+}: SegmentAlertDetailProps) {
   const toast = useToast((state) => state.toast)
   const timeline = useFloodAlertStore((state) => state.timelineData)
   const timelineLoading = useFloodAlertStore((state) => state.timelineLoading)
@@ -173,8 +180,13 @@ export function SegmentAlertDetail({ segment, basinVersionId, forecastSource = n
       name: segment.segmentName ?? undefined,
       basinVersionId,
     })
-    void fetchForecast({ includeAnalysis: true, ignoreActiveRequestContext: true, source: forecastSource }).catch(() => undefined)
-  }, [basinVersionId, fetchForecast, forecastSource, segment, selectForecastSegment])
+    void fetchForecast({
+      includeAnalysis: true,
+      ignoreActiveRequestContext: true,
+      source: forecastSource,
+      issueTime: forecastIssueTime,
+    }).catch(() => undefined)
+  }, [basinVersionId, fetchForecast, forecastIssueTime, forecastSource, segment, selectForecastSegment])
 
   const forecastOption = useMemo(
     () => buildForecastOption(forecastData, timeline, segment?.segmentName || segment?.riverSegmentId),
