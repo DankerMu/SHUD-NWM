@@ -318,7 +318,7 @@ describe('M11 overview data contracts', () => {
     })
   })
 
-  it('marks only flood return period as renderable when layer contracts lack source paths', () => {
+  it('marks hydrology data layers renderable when basin segment rows can provide geometry', () => {
     const layers = normalizeLayerStates({
       query,
       layers: [
@@ -337,14 +337,8 @@ describe('M11 overview data contracts', () => {
     })
 
     expect(layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({ available: true, disabledReason: null })
-    expect(layers.find((layer) => layer.layerId === 'discharge')).toMatchObject({
-      available: false,
-      disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
-    })
-    expect(layers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({
-      available: false,
-      disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
-    })
+    expect(layers.find((layer) => layer.layerId === 'discharge')).toMatchObject({ available: true, disabledReason: null })
+    expect(layers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({ available: true, disabledReason: null })
     expect(layers.find((layer) => layer.layerId === 'river-network')).toMatchObject({
       available: false,
       disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',

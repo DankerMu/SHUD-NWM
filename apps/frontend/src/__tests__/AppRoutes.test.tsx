@@ -82,6 +82,14 @@ vi.mock('react-map-gl/maplibre', () => ({
           onMouseMove={() => onMouseMove?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
           onMouseLeave={() => onMouseLeave?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
           onClick={() => onClick?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+            onClick?.({
+              target: { getCanvas: () => ({ style: {} }) },
+              features: [{ layer: { id: 'm11-basin-river-line' }, properties: { river_segment_id: 'seg-001', segment_id: 'seg-001' } }],
+            })
+          }}
           onDoubleClick={() =>
             onClick?.({
               target: { getCanvas: () => ({ style: {} }) },
@@ -434,8 +442,8 @@ function basinSnapshot(
           riverSegmentId: 'seg-009',
           segmentId: 'seg-009',
           displayName: 'Segment 009',
-          modelId: null,
-          riverNetworkVersionId: null,
+          modelId: 'model-demo',
+          riverNetworkVersionId: 'rn-v1',
           currentQ,
           qUnit: 'm3/s',
           returnPeriod: 2,
@@ -1473,8 +1481,8 @@ describe('App route state', () => {
           riverSegmentId: 'seg-009',
           segmentId: 'seg-009',
           displayName: 'Segment 009',
-          modelId: null,
-          riverNetworkVersionId: null,
+          modelId: 'model-demo',
+          riverNetworkVersionId: 'rn-v1',
           currentQ: 12,
           qUnit: 'm3/s',
           returnPeriod: 2,
@@ -1591,7 +1599,12 @@ describe('App route state', () => {
 
     fireEvent.change(screen.getByPlaceholderText('搜索河段名称或 ID'), { target: { value: '' } })
     fireEvent.change(screen.getByLabelText('预警筛选'), { target: { value: '' } })
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-river-feature-count', '2')
     await user.click(screen.getByText('North Branch 001').closest('button') as HTMLButtonElement)
+    expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-001')
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
+
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
     expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-001')
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
   })
@@ -1674,8 +1687,18 @@ describe('App route state', () => {
       'href',
       '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
     )
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('river_segment_id')
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('basin_version')
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('model-demo')
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('rn-v1')
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('当前 Q')
+    expect(screen.getByText('暂无水位差合同')).toBeInTheDocument()
+    expect(screen.getByLabelText('河段趋势')).toHaveTextContent('当前值')
+    expect(screen.getByLabelText('河段趋势')).toHaveTextContent('上升')
+    expect(screen.getByLabelText('河段趋势')).toHaveTextContent('追溯数据可用')
     expect(screen.getByRole('button', { name: '对比预报' })).toBeDisabled()
     expect(screen.queryByRole('link', { name: '对比预报' })).not.toBeInTheDocument()
+    expect(screen.getByText(/对比预报不可用/)).toBeInTheDocument()
   })
 
   it('renders selected basin segment handoffs with the resolved concrete best source and cycle', async () => {
@@ -1722,15 +1745,15 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
-    for (const linkName of ['查看详情', '对比预报']) {
-      const href = screen.getByRole('link', { name: linkName }).getAttribute('href')
-      expect(href).toContain('/forecast?source=ifs&')
-      expect(href).toContain('cycle=2026-05-18T00%3A00%3A00.000Z')
-      expect(href).not.toContain('source=best')
-    }
+    const href = screen.getByRole('link', { name: '查看详情' }).getAttribute('href')
+    expect(href).toContain('/forecast?source=ifs&')
+    expect(href).toContain('cycle=2026-05-18T00%3A00%3A00.000Z')
+    expect(href).not.toContain('source=best')
+    expect(screen.getByRole('button', { name: '对比预报' })).toBeEnabled()
   })
 
-  it('enables selected basin segment comparison handoff when comparison data is available', async () => {
+  it('enables selected basin segment comparison overlay when comparison data is available', async () => {
+    const user = userEvent.setup()
     useOverviewDataStore.setState({
       basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey, 12, true),
       basinLoading: false,
@@ -1741,10 +1764,9 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '对比预报' })).toHaveAttribute(
-      'href',
-      '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
-    )
+    await user.click(screen.getByRole('button', { name: '对比预报' }))
+    expect(screen.getByRole('button', { name: '对比预报' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText(/GFS \+ IFS 对比已在本面板启用/)).toBeInTheDocument()
   })
 
   it('does not correct basin valid time from a stale basin snapshot', async () => {

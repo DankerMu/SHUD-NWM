@@ -22,7 +22,7 @@ import {
   type M11MapOverlayInteraction,
 } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
-import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import type { BasinSegmentRow, LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryPatch, M11QueryState, M11Source } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
@@ -43,6 +43,7 @@ interface SharedControlProps {
 interface M11MapSurfaceProps extends SharedControlProps {
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
+  basinSegments?: BasinSegmentRow[]
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   fitTo?: M11MapCameraFit | null
@@ -118,6 +119,7 @@ export function M11MapSurface({
   layers = [],
   basins = [],
   visibleBasinIds,
+  basinSegments = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   onQueryChange,
@@ -133,6 +135,7 @@ export function M11MapSurface({
         layers={layers}
         basins={basins}
         visibleBasinIds={visibleBasinIds}
+        basinSegments={basinSegments}
         selectedSegmentId={selectedSegmentId}
         selectedSegmentGeometry={selectedSegmentGeometry}
         fitTo={fitTo}

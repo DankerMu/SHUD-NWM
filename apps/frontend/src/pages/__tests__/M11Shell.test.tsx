@@ -5,9 +5,19 @@ import { BrowserRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
-import { normalizeLayerStates, type LayerState, type OverviewBasin, type SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import {
+  normalizeLayerStates,
+  type BasinSegmentRow,
+  type LayerState,
+  type OverviewBasin,
+  type SourceScenarioSelectionState,
+} from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
-import { buildBasinFeatureCollection, buildSelectedSegmentFeatureCollection } from '@/components/map/M11MapLibreSurface'
+import {
+  buildBasinFeatureCollection,
+  buildBasinRiverFeatureCollection,
+  buildSelectedSegmentFeatureCollection,
+} from '@/components/map/M11MapLibreSurface'
 import {
   LayerGroupControls,
   LayerLegendPanel,
@@ -49,6 +59,14 @@ vi.mock('react-map-gl/maplibre', () => ({
     ) => {
       const canvasStyle: Record<string, string> = {}
       const overlayFeature = { layer: { id: 'm11-flood-return-period-line' }, properties: { segment_id: 'seg-1' } }
+      const riverFeature = {
+        layer: { id: 'm11-basin-river-line' },
+        properties: {
+          segment_id: 'seg-009',
+          river_segment_id: 'seg-009',
+          segment_name: 'Main Stem 009',
+        },
+      }
       const basinFeature = { layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'yangtze' } }
       useImperativeHandle(ref, () => ({
         fitBounds: (...args: unknown[]) => fitBoundsCalls.push(args),
@@ -87,6 +105,13 @@ vi.mock('react-map-gl/maplibre', () => ({
               point: { x: 1, y: 1 },
             })
           }
+          onPointerEnter={() =>
+            onMouseMove?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [riverFeature],
+              point: { x: 3, y: 3 },
+            })
+          }
           onDoubleClick={() =>
             onClick?.({
               target: { getCanvas: () => ({ style: canvasStyle }) },
@@ -94,6 +119,15 @@ vi.mock('react-map-gl/maplibre', () => ({
               point: { x: 1, y: 1 },
             })
           }
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+            onClick?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [riverFeature],
+              point: { x: 3, y: 3 },
+            })
+          }}
           onContextMenu={(event) => {
             event.preventDefault()
             onClick?.({
@@ -215,6 +249,49 @@ const overviewBasins: OverviewBasin[] = [
   },
 ]
 
+const basinSegments: BasinSegmentRow[] = [
+  {
+    riverSegmentId: 'seg-009',
+    segmentId: 'seg-009',
+    displayName: 'Main Stem 009',
+    basinVersionId: 'yangtze_v2026_01',
+    streamOrder: 3,
+    lengthM: 1200,
+    currentQ: 6200,
+    qUnit: 'm3/s',
+    returnPeriod: 12,
+    warningLevel: 'warning',
+    qualityFlag: 'ok',
+    qualityNote: null,
+    source: 'GFS',
+    cycleTime: '2026-05-18T00:00:00.000Z',
+    validTime: '2026-05-18T06:00:00.000Z',
+    hasGeometry: true,
+    geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+    unavailableReason: null,
+  },
+  {
+    riverSegmentId: 'seg-missing-geometry',
+    segmentId: 'seg-missing-geometry',
+    displayName: 'Missing Geometry',
+    basinVersionId: 'yangtze_v2026_01',
+    streamOrder: null,
+    lengthM: null,
+    currentQ: null,
+    qUnit: 'm3/s',
+    returnPeriod: null,
+    warningLevel: 'unavailable',
+    qualityFlag: 'unavailable',
+    qualityNote: null,
+    source: null,
+    cycleTime: null,
+    validTime: null,
+    hasGeometry: false,
+    geometry: null,
+    unavailableReason: 'Selected segment geometry is unavailable.',
+  },
+]
+
 const sourceSelection: SourceScenarioSelectionState = {
   requestedSource: 'best',
   resolvedSource: 'IFS',
@@ -318,7 +395,7 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByLabelText('M11 时间轴')).toBeInTheDocument()
   })
 
-  it('keeps default discharge unregistered while preserving controls and unavailable map status', async () => {
+  it('keeps default discharge unregistered without basin river geometry while preserving controls and unavailable map status', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
 
@@ -343,7 +420,7 @@ describe('M11 visual foundation shell', () => {
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
   })
 
-  it('marks only renderable overview layers available and keeps river network unavailable', () => {
+  it('marks hydrology data layers renderable and keeps river network unavailable', () => {
     const normalizedLayers = normalizeLayerStates({
       query: state,
       layers: [
@@ -375,14 +452,8 @@ describe('M11 visual foundation shell', () => {
     })
 
     expect(normalizedLayers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({ available: true, disabledReason: null })
-    expect(normalizedLayers.find((layer) => layer.layerId === 'discharge')).toMatchObject({
-      available: false,
-      disabledReason: expect.stringContaining('no renderable map source'),
-    })
-    expect(normalizedLayers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({
-      available: false,
-      disabledReason: expect.stringContaining('no renderable map source'),
-    })
+    expect(normalizedLayers.find((layer) => layer.layerId === 'discharge')).toMatchObject({ available: true, disabledReason: null })
+    expect(normalizedLayers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({ available: true, disabledReason: null })
     expect(normalizedLayers.find((layer) => layer.layerId === 'river-network')).toMatchObject({
       available: false,
       disabledReason: expect.stringContaining('no renderable map source'),
@@ -426,6 +497,50 @@ describe('M11 visual foundation shell', () => {
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(mapSources.at(-1)).toMatchObject({ id: 'm11-flood-return-period-source', type: 'geojson' })
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line' })
+  })
+
+  it('renders basin river network from segment rows and colors by active hydrology layer', async () => {
+    const onOverlayHover = vi.fn()
+    const onOverlayClick = vi.fn()
+
+    const { rerender } = render(
+      <M11MapSurface
+        state={state}
+        layers={layers}
+        basinSegments={basinSegments}
+        selectedSegmentId="seg-009"
+        onOverlayHover={onOverlayHover}
+        onOverlayClick={onOverlayClick}
+      />,
+    )
+
+    const surface = screen.getByTestId('m11-map-surface')
+    expect(surface).toHaveAttribute('data-basin-river-feature-count', '1')
+    expect(surface).toHaveAttribute('data-basin-river-skipped-count', '1')
+    expect(screen.queryByTestId('m11-map-unavailable')).not.toBeInTheDocument()
+    expect(screen.getByTestId('m11-basin-river-unavailable')).toHaveTextContent('1 条河段缺少可渲染几何')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-basin-river-line')
+    expect(mapSources.at(-1)).toMatchObject({ id: 'm11-basin-river-source', type: 'geojson' })
+    expect(mapLayers.map((layer) => layer.id)).toEqual(expect.arrayContaining(['m11-basin-river-line', 'm11-basin-river-hover-halo']))
+
+    fireEvent.pointerEnter(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayHover).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-hovered-segment-id', 'seg-009')
+    expect(screen.getByTestId('m11-river-tooltip')).toHaveTextContent('Main Stem 009')
+    expect(screen.getByTestId('m11-river-tooltip')).toHaveTextContent('6,200 m3/s')
+    expect(screen.getByTestId('m11-river-tooltip')).toHaveTextContent('12 年一遇')
+
+    fireEvent.keyDown(screen.getByTestId('mock-maplibre-map'), { key: 'Enter' })
+    expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
+
+    const dischargeCollection = buildBasinRiverFeatureCollection(basinSegments, 'discharge', 'seg-009', null)
+    const returnPeriodCollection = buildBasinRiverFeatureCollection(basinSegments, 'flood-return-period', 'seg-009', null)
+    const warningCollection = buildBasinRiverFeatureCollection(basinSegments, 'warning-level', 'seg-009', null)
+    expect(dischargeCollection.features[0].properties.layer_color).not.toBe(returnPeriodCollection.features[0].properties.layer_color)
+    expect(returnPeriodCollection.features[0].properties.layer_color).toBe(warningCollection.features[0].properties.layer_color)
+
+    rerender(<M11MapSurface state={{ ...state, layer: 'warning-level' }} layers={layers} basinSegments={basinSegments} />)
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-river-feature-count', '1')
   })
 
   it('rejects oversized M11 flood return period payloads before registering a MapLibre source', async () => {

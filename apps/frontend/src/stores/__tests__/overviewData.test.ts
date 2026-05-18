@@ -372,7 +372,7 @@ describe('useOverviewDataStore', () => {
     })
   })
 
-  it('marks registered but unrenderable overview layers unavailable before store hydration retains them', () => {
+  it('marks registered hydrology data layers renderable before store hydration retains them', () => {
     const layers = normalizeLayerStates({
       query,
       layers: [
@@ -394,12 +394,16 @@ describe('useOverviewDataStore', () => {
       available: true,
       disabledReason: null,
     })
-    for (const layerId of ['discharge', 'warning-level', 'river-network']) {
+    for (const layerId of ['discharge', 'warning-level']) {
       expect(layers.find((layer) => layer.layerId === layerId)).toMatchObject({
-        available: false,
-        disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
+        available: true,
+        disabledReason: null,
       })
     }
+    expect(layers.find((layer) => layer.layerId === 'river-network')).toMatchObject({
+      available: false,
+      disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
+    })
   })
 
   it('preserves zero warning count when flood summary succeeds without super-warning levels', async () => {

@@ -540,6 +540,10 @@ test.describe('M11 navigation and route shells', () => {
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'satellite')
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-009')
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-river-feature-count', '2')
+    await expect(page.getByTestId('m11-selected-segment-panel')).toContainText('river_segment_id')
+    await expect(page.getByTestId('m11-selected-segment-panel')).toContainText('当前 Q')
+    await expect(page.getByRole('region', { name: '河段趋势' })).toContainText('当前值')
     await expect(page).toHaveURL(/cycle=2026-05-18T00%3A00%3A00.000Z/)
 
     await page.getByPlaceholder('搜索河段名称或 ID').fill('north')
@@ -555,13 +559,13 @@ test.describe('M11 navigation and route shells', () => {
     await page.goto('/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
     await expect(page.getByRole('heading', { name: '流域分析' })).toBeVisible()
     await expect(page.getByText('North Branch 001')).toBeVisible()
-    await expect(page.getByText('Main Stem 009')).toBeVisible()
+    await expect(page.getByRole('listitem').filter({ hasText: 'Main Stem 009' })).toBeVisible()
     const initialSegmentLoads = calls.filter((call) => call.path === '/api/v1/basin-versions/bv-001/river-segments').length
 
     await page.getByPlaceholder('搜索河段名称或 ID').fill('north')
     await expect(page).toHaveURL(/q=north/)
     await expect(page.getByText('North Branch 001')).toBeVisible()
-    await expect(page.getByText('Main Stem 009')).toHaveCount(0)
+    await expect(page.getByRole('listitem').filter({ hasText: 'Main Stem 009' })).toHaveCount(0)
     await page.getByLabel('预警筛选').selectOption('orange')
     await expect(page).toHaveURL(/warningLevel=orange/)
     await expect(page.getByText('没有匹配的河段')).toBeVisible()
@@ -612,7 +616,8 @@ test.describe('M11 navigation and route shells', () => {
     await expect(page.getByRole('listitem').filter({ hasText: 'North Branch 001' })).toHaveAttribute('aria-current', 'true')
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', 'seg-001')
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
-    await expect(page.getByText('已恢复 seg-001')).toBeVisible()
+    await expect(page.getByTestId('m11-selected-segment-panel')).toContainText('seg-001')
+    await expect(page.getByRole('region', { name: '河段趋势' })).toBeVisible()
   })
 
   test('keeps forecast workflow route reachable', async ({ page }) => {
