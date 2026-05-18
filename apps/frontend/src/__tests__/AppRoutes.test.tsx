@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
@@ -6,6 +7,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
+import type { LayerState } from '@/lib/m11/overviewDataContracts'
 
 vi.mock('@/components/map/MapView', () => ({
   MapView: () => <div aria-label="河网地图">mock map</div>,
@@ -21,6 +23,70 @@ vi.mock('@/components/flood/FloodAlertMap', () => ({
 
 const noopAsync = vi.fn().mockResolvedValue(undefined)
 const overviewAsync = vi.fn().mockResolvedValue(undefined)
+
+const m11LayerFreshness = {
+  updatedAt: null,
+  cycleTime: '2026-05-18T00:00:00.000Z',
+  validTime: '2026-05-18T06:00:00.000Z',
+  runId: 'run-gfs',
+  source: 'GFS' as const,
+  isStale: false,
+  staleAfterHours: 6,
+  unavailableReason: null,
+}
+
+const m11Layers: LayerState[] = [
+  {
+    layerId: 'discharge',
+    displayName: 'River discharge',
+    group: 'hydrology',
+    available: true,
+    validTimes: ['2026-05-18T00:00:00.000Z', '2026-05-18T06:00:00.000Z'],
+    currentValidTime: '2026-05-18T06:00:00.000Z',
+    validTimeSource: 'api',
+    disabledReason: null,
+    freshness: m11LayerFreshness,
+    legend: [{ label: '<500 m3/s', color: '#90CAF9', max: 500 }],
+  },
+  {
+    layerId: 'flood-return-period',
+    displayName: 'Flood return period',
+    group: 'hydrology',
+    available: true,
+    validTimes: ['2026-05-18T06:00:00.000Z'],
+    currentValidTime: '2026-05-18T06:00:00.000Z',
+    validTimeSource: 'api',
+    disabledReason: null,
+    freshness: m11LayerFreshness,
+    legend: [{ label: 'warning', color: '#FF8C00', min: 10, max: 20 }],
+  },
+]
+
+const m11SourceSelection = {
+  requestedSource: 'best' as const,
+  resolvedSource: 'GFS' as const,
+  scenarioIds: ['forecast_gfs_deterministic'],
+  cycleTime: '2026-05-18T00:00:00.000Z',
+  validTime: '2026-05-18T06:00:00.000Z',
+  comparisonAvailable: false,
+  provenanceLabel: 'Best Available (GFS) / cycle 2026-05-18T00:00:00.000Z / valid 2026-05-18T06:00:00.000Z',
+  unavailableReason: null,
+}
+
+function m11Summary() {
+  return {
+    completedCyclesToday: 1,
+    runningJobs: 0,
+    warningSegmentCount: 0,
+    latestUpdate: null,
+    totalBasins: 0,
+    totalSegments: null,
+    sourceSelection: m11SourceSelection,
+    freshness: m11LayerFreshness,
+    qualityNotes: [],
+    partialErrors: [],
+  }
+}
 
 beforeEach(() => {
   overviewAsync.mockResolvedValue(undefined)
@@ -93,6 +159,40 @@ describe('App route state', () => {
     expect(screen.getByText('gfs')).toBeInTheDocument()
     expect(screen.getAllByText('flood-return-period').length).toBeGreaterThan(0)
     expect(screen.getAllByText('terrain').length).toBeGreaterThan(0)
+  })
+
+  it('renders overview shared controls and drives URL/query reload state', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      overview: {
+        basins: [],
+        layers: m11Layers,
+        aggregationDecision: {
+          needsAggregationEndpoint: false,
+          reason: 'reuse-existing',
+          evidence: 'test',
+        },
+        summary: m11Summary(),
+      },
+    })
+    window.history.pushState({}, '', '/overview?source=best&validTime=2026-05-17T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+    expect(screen.getByText('数据源与情景')).toBeInTheDocument()
+    expect(screen.getByText('气象图层')).toBeInTheDocument()
+    expect(screen.getByText('降水格点')).toBeInTheDocument()
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '卫星底图' }))
+    expect(window.location.search).toContain('basemap=satellite')
+    await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ basemap: 'satellite' })))
+
+    await user.click(screen.getByRole('button', { name: /^IFS/ }))
+    expect(window.location.search).toContain('source=ifs')
+    await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ source: 'ifs' })))
   })
 
   it('does not emit fabricated basin or basin-version IDs when overview data is unavailable', async () => {
@@ -254,6 +354,83 @@ describe('App route state', () => {
     )
     expect(normalizedRouteReplacements).toHaveLength(1)
     replaceState.mockRestore()
+  })
+
+  it('renders basin shared controls and drives basin reload query state', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      basinDetail: {
+        detail: {
+          basinId: 'basin-demo',
+          displayName: 'Demo Basin',
+          basinGroup: null,
+          selectedBasinVersionId: 'bv-001',
+          basinVersions: [],
+          bbox: null,
+          segmentCount: 1,
+          warningDistribution: {
+            normal: 0,
+            elevated: 0,
+            watch: 0,
+            warning: 0,
+            high_risk: 0,
+            severe: 0,
+            extreme: 0,
+            unavailable: 0,
+          },
+          activeModelCount: 1,
+          latestRun: m11LayerFreshness,
+          sourceSelection: m11SourceSelection,
+          unavailableReason: null,
+          partialErrors: [],
+        },
+        segments: [],
+        selectedSegment: {
+          basinId: 'basin-demo',
+          basinName: 'Demo Basin',
+          basinVersionId: 'bv-001',
+          riverSegmentId: 'seg-009',
+          segmentId: 'seg-009',
+          displayName: 'Segment 009',
+          modelId: null,
+          riverNetworkVersionId: null,
+          currentQ: 12,
+          qUnit: 'm3/s',
+          returnPeriod: 2,
+          warningLevel: 'watch',
+          qualityFlag: 'ok',
+          qualityNote: null,
+          sourceSelection: { ...m11SourceSelection, comparisonAvailable: true },
+          trendPoints: [
+            { validTime: '2026-05-18T00:00:00.000Z', value: 10, source: 'GFS', scenarioId: 'forecast_gfs_deterministic', role: 'analysis', isAnalysis: true },
+            { validTime: '2026-05-18T06:00:00.000Z', value: 12, source: 'GFS', scenarioId: 'forecast_gfs_deterministic', role: 'future_7_days', isAnalysis: false },
+          ],
+          comparisonAvailable: true,
+          lineageStatus: 'available',
+          lineageUnavailableReason: null,
+          handoffUrl: '/forecast',
+          freshness: m11LayerFreshness,
+          unavailableReason: null,
+        },
+        layers: m11Layers,
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByText('数据源与情景')).toBeInTheDocument()
+    expect(screen.getByText('水文图层')).toBeInTheDocument()
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /洪水重现期/ }))
+    expect(window.location.search).toContain('layer=flood-return-period')
+    await waitFor(() =>
+      expect(overviewAsync).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ layer: 'flood-return-period' })),
+    )
   })
 
   it('renders an unavailable state for invalid basin segment deep links', async () => {

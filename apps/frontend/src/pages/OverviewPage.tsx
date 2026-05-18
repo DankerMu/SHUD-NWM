@@ -1,8 +1,14 @@
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
-import { BasinLink, LayerList, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
-import { needsM11QueryReplacement, parseM11QueryState, serializeM11QueryState } from '@/lib/m11/queryState'
+import { BasinLink, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
+import {
+  type M11QueryPatch,
+  needsM11QueryReplacement,
+  parseM11QueryState,
+  serializeM11QueryState,
+} from '@/lib/m11/queryState'
+import { LayerGroupControls, LayerLegendPanel, SourceScenarioControls, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useOverviewDataStore } from '@/stores/overviewData'
 
 export function OverviewPage() {
@@ -15,6 +21,15 @@ export function OverviewPage() {
   const error = useOverviewDataStore((store) => store.error)
   const loadOverview = useOverviewDataStore((store) => store.loadOverview)
   const needsQueryReplacement = needsM11QueryReplacement(location.search)
+  const layers = overview?.layers ?? []
+
+  const handleQueryChange = useCallback(
+    (patch: M11QueryPatch) => {
+      const nextSearch = serializeM11QueryState({ ...state, ...patch })
+      navigate({ pathname: location.pathname, search: nextSearch ? `?${nextSearch}` : '' })
+    },
+    [location.pathname, navigate, state],
+  )
 
   useEffect(() => {
     if (!needsQueryReplacement) return
@@ -26,8 +41,16 @@ export function OverviewPage() {
     void loadOverview(state).catch(() => undefined)
   }, [loadOverview, needsQueryReplacement, state])
 
+  useEffect(() => {
+    if (needsQueryReplacement || loading || layers.length === 0) return
+    const correctedValidTime = resolveM11ValidTimeCorrection(state, layers)
+    if (correctedValidTime === undefined) return
+    handleQueryChange({ validTime: correctedValidTime })
+  }, [handleQueryChange, layers, loading, needsQueryReplacement, state])
+
   const basins = overview?.basins ?? []
   const summary = overview?.summary
+  const sourceSelection = summary?.sourceSelection ?? null
   const firstBasin = basins[0]
   const emptyBasinReason =
     !loading && basins.length === 0
@@ -52,11 +75,15 @@ export function OverviewPage() {
       title="全国总览"
       subtitle="全国流域、图层和运行态势"
       state={state}
+      layers={layers}
+      sourceSelection={sourceSelection}
+      onQueryChange={handleQueryChange}
       mapLabel="全国总览地图"
       mapTitle="全国水文总览"
       mapMeta="初始地图壳保留全国范围、流域边界、河网和图层占位，不加载未实现的真实适配器。"
       left={
         <>
+          <SourceScenarioControls state={state} sourceSelection={sourceSelection} onQueryChange={handleQueryChange} />
           <div className="space-y-2">
             <div className="text-sm font-semibold text-neutral-900">流域管理</div>
             {basins.length > 0 ? (
@@ -72,7 +99,7 @@ export function OverviewPage() {
               </div>
             )}
           </div>
-          <LayerList activeLayer={state.layer} />
+          <LayerGroupControls state={state} layers={layers} onQueryChange={handleQueryChange} />
           <BasinLink to={basinLinkTarget}>{firstBasin ? '进入流域分析' : '等待可用流域'}</BasinLink>
         </>
       }
@@ -89,6 +116,7 @@ export function OverviewPage() {
               {loading ? '总览数据加载中' : error}
             </div>
           ) : null}
+          <LayerLegendPanel state={state} layers={layers} />
           <div className="space-y-2">
             <Link className="block rounded border border-neutral-300 p-3 hover:bg-primary-50" to="/monitoring">
               产品监控摘要

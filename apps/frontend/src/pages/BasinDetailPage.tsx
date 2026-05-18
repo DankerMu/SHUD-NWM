@@ -1,8 +1,19 @@
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
-import { LayerList, M11Layout, SegmentSearchStub, StateReadout } from '@/pages/m11/M11Shell'
-import { needsM11QueryReplacement, parseM11QueryState, serializeM11QueryState } from '@/lib/m11/queryState'
+import { M11Layout, SegmentSearchStub, StateReadout } from '@/pages/m11/M11Shell'
+import {
+  type M11QueryPatch,
+  needsM11QueryReplacement,
+  parseM11QueryState,
+  serializeM11QueryState,
+} from '@/lib/m11/queryState'
+import {
+  LayerGroupControls,
+  LayerLegendPanel,
+  SourceScenarioControls,
+  resolveM11ValidTimeCorrection,
+} from '@/pages/m11/M11Controls'
 import { useOverviewDataStore } from '@/stores/overviewData'
 
 export function BasinDetailPage() {
@@ -16,6 +27,25 @@ export function BasinDetailPage() {
   const error = useOverviewDataStore((store) => store.basinError)
   const loadBasinDetail = useOverviewDataStore((store) => store.loadBasinDetail)
   const needsQueryReplacement = needsM11QueryReplacement(location.search)
+  const layers = basinData?.layers ?? []
+  const sourceSelection = basinData?.selectedSegment?.sourceSelection ?? basinData?.detail.sourceSelection ?? null
+  const derivedTimeline = useMemo(() => {
+    const points = basinData?.selectedSegment?.trendPoints ?? []
+    return points.length > 0
+      ? {
+          validTimes: points.map((point) => point.validTime),
+          label: 'selected segment forecast payload',
+        }
+      : null
+  }, [basinData?.selectedSegment?.trendPoints])
+
+  const handleQueryChange = useCallback(
+    (patch: M11QueryPatch) => {
+      const nextSearch = serializeM11QueryState({ ...state, ...patch })
+      navigate({ pathname: location.pathname, search: nextSearch ? `?${nextSearch}` : '' })
+    },
+    [location.pathname, navigate, state],
+  )
 
   useEffect(() => {
     if (!needsQueryReplacement) return
@@ -27,6 +57,13 @@ export function BasinDetailPage() {
     void loadBasinDetail(basinId, state).catch(() => undefined)
   }, [basinId, loadBasinDetail, needsQueryReplacement, state])
 
+  useEffect(() => {
+    if (needsQueryReplacement || loading) return
+    const correctedValidTime = resolveM11ValidTimeCorrection(state, layers, derivedTimeline)
+    if (correctedValidTime === undefined) return
+    handleQueryChange({ validTime: correctedValidTime })
+  }, [derivedTimeline, handleQueryChange, layers, loading, needsQueryReplacement, state])
+
   const detail = basinData?.detail
   const selectedSegment = basinData?.selectedSegment
   const invalidSegmentRequested = Boolean(state.segmentId && basinData && !loading && !selectedSegment)
@@ -36,11 +73,16 @@ export function BasinDetailPage() {
       title="流域分析"
       subtitle={`当前流域 ${detail?.displayName ?? basinId}`}
       state={state}
+      layers={layers}
+      sourceSelection={sourceSelection}
+      derivedTimeline={derivedTimeline}
+      onQueryChange={handleQueryChange}
       mapLabel="流域钻取地图"
       mapTitle={`${detail?.displayName ?? basinId} 流域钻取`}
       mapMeta="初始钻取壳恢复 basinVersionId、segmentId、source、cycle、validTime、warningLevel 与搜索条件，后续接入真实河段数据。"
       left={
         <>
+          <SourceScenarioControls state={state} sourceSelection={sourceSelection} onQueryChange={handleQueryChange} />
           <StateReadout state={state} basinId={basinId} />
           {detail ? (
             <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
@@ -49,7 +91,7 @@ export function BasinDetailPage() {
             </div>
           ) : null}
           <SegmentSearchStub query={state.q} />
-          <LayerList activeLayer={state.layer} />
+          <LayerGroupControls state={state} layers={layers} onQueryChange={handleQueryChange} />
         </>
       }
       right={
@@ -76,6 +118,7 @@ export function BasinDetailPage() {
             <div className="text-base font-semibold text-neutral-900">预警状态</div>
             <p className="mt-2 font-mono text-sm text-neutral-700">{state.warningLevel ?? 'all'}</p>
           </div>
+          <LayerLegendPanel state={state} layers={layers} />
           {loading || error ? (
             <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
               {loading ? '流域数据加载中' : error}
@@ -86,7 +129,6 @@ export function BasinDetailPage() {
           </Link>
         </>
       }
-      timelineLabel={`流域 ${basinId} / ${state.source.toUpperCase()}`}
     />
   )
 }
