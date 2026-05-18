@@ -235,15 +235,15 @@ export function createSourceScenarioSelection(
   availableSources: M11ResolvedSource[] = [],
 ): SourceScenarioSelectionState {
   const source = normalizeRequestedSource(query.source)
+  const resolvedSource = resolveSelectedSource(source, availableSources)
   const scenarioIds =
     source === 'compare'
       ? ['forecast_gfs_deterministic', 'forecast_ifs_deterministic']
       : source === 'ifs'
         ? ['forecast_ifs_deterministic']
         : source === 'best'
-          ? ['forecast_best_available']
+          ? scenarioIdsForResolvedSource(resolvedSource)
           : ['forecast_gfs_deterministic']
-  const resolvedSource = resolveSelectedSource(source, availableSources)
   const comparisonAvailable = availableSources.includes('GFS') && availableSources.includes('IFS')
   const unavailableReason =
     source === 'compare' && !comparisonAvailable
@@ -352,6 +352,7 @@ export function decideAggregationEndpoint(input: AggregationEndpointDecisionInpu
 export function normalizeOverviewBasins(input: {
   basins: ApiBasin[]
   versionsByBasinId?: Record<string, ApiBasinVersion[] | undefined>
+  basinVersionUnavailableReason?: string | null
   models?: ApiModelInstance[]
   runs?: ApiHydroRun[]
   rankingItems?: ApiFloodAlertRankingItem[]
@@ -384,7 +385,8 @@ export function normalizeOverviewBasins(input: {
       warningCounts,
       basinVersions: versionOptions,
       selectedBasinVersionId: selectedVersion?.basinVersionId ?? null,
-      unavailableReason: versionOptions.length === 0 ? 'No published basin version is available.' : null,
+      unavailableReason:
+        versionOptions.length === 0 ? input.basinVersionUnavailableReason ?? 'No published basin version is available.' : null,
       qualityNote: versionOptions.some((version) => version.unavailableReason) ? 'One or more basin versions have missing geometry.' : null,
     }
   })
@@ -661,10 +663,18 @@ function resolveSelectedSource(source: M11Source, availableSources: M11ResolvedS
     if (availableSources.includes('Best Available')) return 'Best Available'
     if (availableSources.includes('GFS')) return 'GFS'
     if (availableSources.includes('IFS')) return 'IFS'
-    return availableSources[0] ?? 'Best Available'
+    return availableSources[0] ?? 'Unknown'
   }
   const expected = source.toUpperCase() as M11ResolvedSource
   return availableSources.length === 0 || availableSources.includes(expected) ? expected : 'Unknown'
+}
+
+function scenarioIdsForResolvedSource(source: M11ResolvedSource): string[] {
+  if (source === 'GFS') return ['forecast_gfs_deterministic']
+  if (source === 'IFS') return ['forecast_ifs_deterministic']
+  if (source === 'GFS+IFS') return ['forecast_gfs_deterministic', 'forecast_ifs_deterministic']
+  if (source === 'Best Available') return ['forecast_best_available']
+  return []
 }
 
 function buildProvenanceLabel(source: M11Source, resolved: M11ResolvedSource, cycle: string | null, validTime: string | null) {
