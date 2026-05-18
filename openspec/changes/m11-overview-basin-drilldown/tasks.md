@@ -52,6 +52,7 @@ Verification commands for #160:
 
 - `cd apps/frontend && corepack pnpm test`
 - `cd apps/frontend && corepack pnpm test:e2e`
+- `cd apps/frontend && corepack pnpm run test:e2e:preview`
 - `cd apps/frontend && corepack pnpm build`
 - `openspec validate m11-overview-basin-drilldown --strict --no-interactive`
 
@@ -108,6 +109,6 @@ Non-goals for #160:
 - [ ] 6.4 Implement selected segment detail panel with IDs, basin/model metadata, current Q, optional water-level delta, return-period level, forecast valid time, source, cycle, quality/lineage status, "查看详情" handoff, and "对比预报" availability/overlay behavior.
 - [ ] 6.5 Implement right-side trend sparkline for selected segment with current value and direction when trend points exist.
 - [ ] 6.6 Add `agent-browser` screenshots for overview and basin detail at 1920x1080, 1440x900, and 1280x900 using the global-argument command form `agent-browser --args "--no-sandbox,--disable-dev-shm-usage,--disable-gpu" open <url>`; verify navigation, side panels, map area, timeline, popup/detail panel, controls, and state components do not overlap and match the design spec intent.
-- [ ] 6.7 Run `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm test:e2e`, and `cd apps/frontend && corepack pnpm build`; if OpenAPI changed, also run `cd apps/frontend && corepack pnpm check:api-types`, `uv run ruff check .`, and focused `uv run pytest -q` for affected API tests.
+- [ ] 6.7 Run `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm test:e2e`, `cd apps/frontend && corepack pnpm run test:e2e:preview`, and `cd apps/frontend && corepack pnpm build`; if OpenAPI changed, also run `cd apps/frontend && corepack pnpm check:api-types`, `uv run ruff check .`, and focused `uv run pytest -q` for affected API tests.
 - [ ] 6.8 Add or update frontend developer notes for overview/basin routes, required data contracts, source/scenario behavior, map layer limitations, visual evidence location, and future handoff destinations.
 - [ ] 6.9 Update progress documentation after implementation to record completed M11 scope and deferred follow-ups: full-screen segment detail, meteorology pages, model asset management page, and production MVT.

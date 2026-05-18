@@ -49,5 +49,27 @@ describe('M11 query state helpers', () => {
 
     expect(serializeM11QueryState(state)).toBe('')
   })
-})
 
+  it.each([
+    ['invalid calendar date', '2026-02-30T00:00:00Z'],
+    ['invalid hour', '2026-05-18T24:00:00Z'],
+    ['invalid minute', '2026-05-18T00:60:00Z'],
+    ['invalid second', '2026-05-18T00:00:60Z'],
+    ['timezone-less timestamp', '2026-05-18T00:00:00'],
+    ['date-only value', '2026-05-18'],
+    ['numeric value', '1779062400000'],
+    ['overflow after offset', '2026-12-31T24:00:00+08:00'],
+  ])('rejects %s for forecast instants', (_label, value) => {
+    expect(parseM11QueryState(`cycle=${encodeURIComponent(value)}&validTime=${encodeURIComponent(value)}`)).toMatchObject({
+      cycle: null,
+      validTime: null,
+    })
+  })
+
+  it('normalizes valid explicit-offset RFC3339 instants to UTC', () => {
+    const state = parseM11QueryState('cycle=2026-05-18T08:30:15.25%2B08:00&validTime=2026-05-17T23:45:00-02:30')
+
+    expect(state.cycle).toBe('2026-05-18T00:30:15.250Z')
+    expect(state.validTime).toBe('2026-05-18T02:15:00.000Z')
+  })
+})

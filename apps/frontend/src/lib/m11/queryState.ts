@@ -38,12 +38,64 @@ function isOneOf<T extends readonly string[]>(value: string | null, allowed: T):
   return value !== null && (allowed as readonly string[]).includes(value)
 }
 
+const rfc3339InstantPattern =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/
+
+function parseInteger(value: string) {
+  return Number.parseInt(value, 10)
+}
+
+function offsetMinutes(value: string) {
+  if (value === 'Z') return 0
+  const sign = value[0] === '-' ? -1 : 1
+  const hours = parseInteger(value.slice(1, 3))
+  const minutes = parseInteger(value.slice(4, 6))
+  if (hours > 23 || minutes > 59) return null
+  return sign * (hours * 60 + minutes)
+}
+
+function fractionalMilliseconds(value: string | undefined) {
+  if (!value) return 0
+  return parseInteger(value.slice(1).padEnd(3, '0'))
+}
+
 function normalizeIsoInstant(value: string | null) {
   if (!value) return null
   const trimmed = value.trim()
   if (!trimmed) return null
-  const timestamp = Date.parse(trimmed)
+  const match = rfc3339InstantPattern.exec(trimmed)
+  if (!match) return null
+
+  const [, yearValue, monthValue, dayValue, hourValue, minuteValue, secondValue, fractionValue, zoneValue] = match
+  const year = parseInteger(yearValue)
+  const month = parseInteger(monthValue)
+  const day = parseInteger(dayValue)
+  const hour = parseInteger(hourValue)
+  const minute = parseInteger(minuteValue)
+  const second = parseInteger(secondValue)
+  const millisecond = fractionalMilliseconds(fractionValue)
+  const offset = offsetMinutes(zoneValue)
+
+  if (offset === null) return null
+  if (month < 1 || month > 12) return null
+  if (hour > 23 || minute > 59 || second > 59) return null
+
+  const timestamp = Date.UTC(year, month - 1, day, hour, minute, second, millisecond) - offset * 60_000
   if (!Number.isFinite(timestamp)) return null
+
+  const localDate = new Date(timestamp + offset * 60_000)
+  if (
+    localDate.getUTCFullYear() !== year ||
+    localDate.getUTCMonth() !== month - 1 ||
+    localDate.getUTCDate() !== day ||
+    localDate.getUTCHours() !== hour ||
+    localDate.getUTCMinutes() !== minute ||
+    localDate.getUTCSeconds() !== second ||
+    localDate.getUTCMilliseconds() !== millisecond
+  ) {
+    return null
+  }
+
   return new Date(timestamp).toISOString()
 }
 
@@ -109,4 +161,3 @@ export function needsM11QueryReplacement(search: string) {
   const current = search.startsWith('?') ? search.slice(1) : search
   return normalized !== current
 }
-
