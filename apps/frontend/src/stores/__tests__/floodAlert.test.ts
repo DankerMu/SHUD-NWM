@@ -23,6 +23,23 @@ function success<T>(data: T) {
   return { status: 'success', data }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+function floodResponse<T>(data: T) {
+  return {
+    ok: true,
+    json: async () => success(data),
+  }
+}
+
 describe('useFloodAlertStore', () => {
   const latestRun = {
     run_id: 'run-1',
@@ -227,5 +244,553 @@ describe('useFloodAlertStore', () => {
       validTime: '2026-05-12T03:00:00Z',
     })
     expect(useFloodAlertStore.getState().timelineData?.segmentId).toBe('seg-1')
+  })
+
+  it('hydrates latest flood-alert run and valid time from overview query context', async () => {
+    const siblingRun = {
+      ...latestRun,
+      run_id: 'run-sibling',
+      source_id: 'ifs',
+      cycle_time: '2026-05-11T00:00:00Z',
+      start_time: '2026-05-11T00:00:00Z',
+      end_time: '2026-05-11T03:00:00Z',
+    }
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [siblingRun, { ...latestRun, source_id: 'gfs' }],
+        total: 2,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'ifs',
+      cycleTime: '2026-05-11T00:00:00.000Z',
+      validTime: '2026-05-11T03:00:00.000Z',
+    })
+
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
+      params: { query: { source: 'IFS', cycle_time: '2026-05-11T00:00:00.000Z', status: 'frequency_done', limit: 50 } },
+    })
+    expect(useFloodAlertStore.getState().selectedRunId).toBe('run-sibling')
+    expect(useFloodAlertStore.getState().selectedValidTime).toBe('2026-05-11T03:00:00.000Z')
+  })
+
+  it('does not fall back to an unrelated latest run when explicit overview context is absent', async () => {
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [{ ...latestRun, source_id: 'gfs' }],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'ifs',
+      cycleTime: '2026-05-12T00:00:00.000Z',
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
+      params: { query: { source: 'IFS', cycle_time: '2026-05-12T00:00:00.000Z', status: 'frequency_done', limit: 50 } },
+    })
+    expect(useFloodAlertStore.getState().selectedRunId).toBeNull()
+    expect(useFloodAlertStore.getState().latestRun).toBeNull()
+    expect(useFloodAlertStore.getState().empty).toBe(true)
+    expect(useFloodAlertStore.getState().error).toContain('未找到 IFS 周期 2026-05-12T00:00:00.000Z')
+  })
+
+  it('clears stale run-scoped payloads when an explicit IFS handoff resolves a different run', async () => {
+    const ifsRun = {
+      ...latestRun,
+      run_id: 'run-ifs',
+      source_id: 'ifs',
+      cycle_time: '2026-05-13T00:00:00Z',
+      start_time: '2026-05-13T00:00:00Z',
+      end_time: '2026-05-13T06:00:00Z',
+    }
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-1',
+      summaryData: {
+        runId: 'run-1',
+        levels: [{ level: 'warning', count: 2, color: '#f59e0b' }],
+        totalSegments: 4,
+        usableCurves: 3,
+        unavailableCount: 1,
+      },
+      rankingData: {
+        items: [
+          {
+            rank: 1,
+            riverSegmentId: 'old-seg',
+            segmentId: 'old-seg',
+            segmentName: 'Old Segment',
+            returnPeriod: 20,
+            warningLevel: 'warning',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-1',
+        segmentId: 'old-seg',
+        riverSegmentId: 'old-seg',
+        timesteps: [{ validTime: '2026-05-12T03:00:00Z', returnPeriod: 20, warningLevel: 'warning' }],
+      },
+      summaryLoading: true,
+      rankingLoading: true,
+      timelineLoading: true,
+    })
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [ifsRun],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'ifs',
+      cycleTime: '2026-05-13T00:00:00.000Z',
+      validTime: '2026-05-13T06:00:00.000Z',
+    })
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: 'run-ifs',
+      summaryData: null,
+      rankingData: null,
+      timelineData: null,
+      summaryLoading: false,
+      rankingLoading: false,
+      timelineLoading: false,
+    })
+  })
+
+  it('clears stale run-scoped payloads and loading flags when an explicit handoff lookup rejects', async () => {
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-1',
+      latestRun,
+      selectedValidTime: '2026-05-12T03:00:00.000Z',
+      validTimes: ['2026-05-12T00:00:00.000Z', '2026-05-12T03:00:00.000Z'],
+      summaryData: {
+        runId: 'run-1',
+        levels: [{ level: 'warning', count: 2, color: '#f59e0b' }],
+        totalSegments: 4,
+        usableCurves: 3,
+        unavailableCount: 1,
+      },
+      rankingData: {
+        items: [{ rank: 1, riverSegmentId: 'old-seg', segmentId: 'old-seg', returnPeriod: 20, warningLevel: 'warning' }],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-1',
+        segmentId: 'old-seg',
+        riverSegmentId: 'old-seg',
+        timesteps: [{ validTime: '2026-05-12T03:00:00.000Z', returnPeriod: 20, warningLevel: 'warning' }],
+      },
+      summaryLoading: true,
+      rankingLoading: true,
+      timelineLoading: true,
+    })
+    vi.mocked(client.GET).mockRejectedValue(new Error('lookup unavailable'))
+
+    await expect(
+      useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+        source: 'ifs',
+        cycleTime: '2026-05-13T00:00:00.000Z',
+        validTime: '2026-05-13T03:00:00.000Z',
+      }),
+    ).rejects.toThrow('lookup unavailable')
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: null,
+      latestRun: null,
+      selectedValidTime: null,
+      validTimes: [],
+      summaryData: null,
+      rankingData: null,
+      timelineData: null,
+      loading: false,
+      summaryLoading: false,
+      rankingLoading: false,
+      timelineLoading: false,
+      empty: false,
+      error: 'lookup unavailable',
+    })
+  })
+
+  it('preserves run-scoped payloads when the resolved run is unchanged', async () => {
+    const summaryData = {
+      runId: 'run-1',
+      levels: [{ level: 'warning' as const, count: 2, color: '#f59e0b' }],
+      totalSegments: 4,
+      usableCurves: 3,
+      unavailableCount: 1,
+    }
+    const rankingData = {
+      items: [{ rank: 1, riverSegmentId: 'seg-1', segmentId: 'seg-1', returnPeriod: 20, warningLevel: 'warning' as const }],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    }
+    const timelineData = {
+      runId: 'run-1',
+      segmentId: 'seg-1',
+      riverSegmentId: 'seg-1',
+      timesteps: [{ validTime: '2026-05-12T03:00:00Z', returnPeriod: 20, warningLevel: 'warning' as const }],
+    }
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-1',
+      summaryData,
+      rankingData,
+      timelineData,
+    })
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [latestRun],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun()
+
+    expect(useFloodAlertStore.getState().summaryData).toBe(summaryData)
+    expect(useFloodAlertStore.getState().rankingData).toBe(rankingData)
+    expect(useFloodAlertStore.getState().timelineData).toBe(timelineData)
+  })
+
+  it('ignores an older same-run summary response after a newer valid-time request owns the state', async () => {
+    const older = deferred<ReturnType<typeof floodResponse>>()
+    const newer = deferred<ReturnType<typeof floodResponse>>()
+    vi.stubGlobal('fetch', vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise))
+
+    useFloodAlertStore.getState().setSelectedValidTime('2026-05-12T01:00:00.000Z')
+    const olderRequest = useFloodAlertStore.getState().fetchSummary()
+    expect(useFloodAlertStore.getState().summaryLoading).toBe(true)
+
+    useFloodAlertStore.getState().setSelectedValidTime('2026-05-12T02:00:00.000Z')
+    const newerRequest = useFloodAlertStore.getState().fetchSummary()
+    newer.resolve(
+      floodResponse({
+        run_id: 'run-1',
+        levels: [{ level: 'severe', count: 9, color: '#dc2626' }],
+        total_segments: 9,
+        usable_curves: 8,
+        unavailable_count: 1,
+        quality_note: null,
+      }),
+    )
+    await newerRequest
+
+    expect(useFloodAlertStore.getState().summaryData).toMatchObject({
+      totalSegments: 9,
+      levels: [{ level: 'severe', count: 9 }],
+    })
+    expect(useFloodAlertStore.getState().summaryLoading).toBe(false)
+
+    older.resolve(
+      floodResponse({
+        run_id: 'run-1',
+        levels: [{ level: 'watch', count: 1, color: '#0ea5e9' }],
+        total_segments: 1,
+        usable_curves: 1,
+        unavailable_count: 0,
+        quality_note: null,
+      }),
+    )
+    await olderRequest
+
+    expect(useFloodAlertStore.getState().summaryData).toMatchObject({
+      totalSegments: 9,
+      levels: [{ level: 'severe', count: 9 }],
+    })
+    expect(useFloodAlertStore.getState().summaryLoading).toBe(false)
+  })
+
+  it('ignores an older same-run ranking response after newer filter scope owns the state', async () => {
+    const older = deferred<ReturnType<typeof floodResponse>>()
+    const newer = deferred<ReturnType<typeof floodResponse>>()
+    vi.stubGlobal('fetch', vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise))
+
+    useFloodAlertStore.getState().setSelectedValidTime('2026-05-12T01:00:00.000Z')
+    useFloodAlertStore.getState().setBasinId('basin-old')
+    useFloodAlertStore.getState().setTopLimit(10)
+    const olderRequest = useFloodAlertStore.getState().fetchRanking()
+
+    useFloodAlertStore.getState().setSelectedValidTime('2026-05-12T02:00:00.000Z')
+    useFloodAlertStore.getState().setBasinId('basin-new')
+    useFloodAlertStore.getState().setTopLimit(50)
+    const newerRequest = useFloodAlertStore.getState().fetchRanking()
+    newer.resolve(
+      floodResponse({
+        items: [
+          {
+            rank: 1,
+            river_segment_id: 'seg-new',
+            segment_id: 'seg-new',
+            segment_name: 'New Segment',
+            basin_version_id: 'basin-new',
+            q_value: 222,
+            q_unit: 'm3/s',
+            return_period: 50,
+            warning_level: 'severe',
+            duration: '2h',
+            valid_time: '2026-05-12T02:00:00.000Z',
+          },
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+    )
+    await newerRequest
+
+    expect(useFloodAlertStore.getState().rankingData?.items[0]).toMatchObject({
+      riverSegmentId: 'seg-new',
+      returnPeriod: 50,
+    })
+    expect(useFloodAlertStore.getState().rankingLoading).toBe(false)
+
+    older.resolve(
+      floodResponse({
+        items: [
+          {
+            rank: 1,
+            river_segment_id: 'seg-old',
+            segment_id: 'seg-old',
+            segment_name: 'Old Segment',
+            basin_version_id: 'basin-old',
+            q_value: 111,
+            q_unit: 'm3/s',
+            return_period: 10,
+            warning_level: 'watch',
+            duration: '1h',
+            valid_time: '2026-05-12T01:00:00.000Z',
+          },
+        ],
+        total: 1,
+        limit: 10,
+        offset: 0,
+      }),
+    )
+    await olderRequest
+
+    expect(useFloodAlertStore.getState().rankingData?.items[0]).toMatchObject({
+      riverSegmentId: 'seg-new',
+      returnPeriod: 50,
+    })
+    expect(useFloodAlertStore.getState().rankingLoading).toBe(false)
+  })
+
+  it('ignores an older same-run timeline response after a newer segment request owns the state', async () => {
+    const older = deferred<ReturnType<typeof floodResponse>>()
+    const newer = deferred<ReturnType<typeof floodResponse>>()
+    vi.stubGlobal('fetch', vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise))
+
+    const olderRequest = useFloodAlertStore.getState().fetchTimeline('seg-old')
+    const newerRequest = useFloodAlertStore.getState().fetchTimeline('seg-new')
+    newer.resolve(
+      floodResponse({
+        run_id: 'run-1',
+        segment_id: 'seg-new',
+        river_segment_id: 'seg-new',
+        timesteps: [{ valid_time: '2026-05-12T02:00:00.000Z', return_period: 50, warning_level: 'severe', q_value: 222 }],
+        timeline: [],
+        peak: null,
+        frequency_thresholds: null,
+        quality_note: null,
+      }),
+    )
+    await newerRequest
+
+    expect(useFloodAlertStore.getState().timelineData).toMatchObject({
+      segmentId: 'seg-new',
+      timesteps: [{ validTime: '2026-05-12T02:00:00.000Z' }],
+    })
+    expect(useFloodAlertStore.getState().timelineLoading).toBe(false)
+
+    older.resolve(
+      floodResponse({
+        run_id: 'run-1',
+        segment_id: 'seg-old',
+        river_segment_id: 'seg-old',
+        timesteps: [{ valid_time: '2026-05-12T01:00:00.000Z', return_period: 10, warning_level: 'watch', q_value: 111 }],
+        timeline: [],
+        peak: null,
+        frequency_thresholds: null,
+        quality_note: null,
+      }),
+    )
+    await olderRequest
+
+    expect(useFloodAlertStore.getState().timelineData).toMatchObject({
+      segmentId: 'seg-new',
+      timesteps: [{ validTime: '2026-05-12T02:00:00.000Z' }],
+    })
+    expect(useFloodAlertStore.getState().validTimes).not.toContain('2026-05-12T01:00:00.000Z')
+    expect(useFloodAlertStore.getState().timelineLoading).toBe(false)
+  })
+
+  it('clears loading and reports a scoped error for a current mismatched timeline segment response', async () => {
+    useFloodAlertStore.setState({
+      validTimes: ['2026-05-12T00:00:00.000Z'],
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        floodResponse({
+          run_id: 'run-1',
+          segment_id: 'seg-other',
+          river_segment_id: 'seg-other',
+          timesteps: [{ valid_time: '2026-05-12T03:00:00.000Z', return_period: 50, warning_level: 'severe', q_value: 222 }],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }),
+      ),
+    )
+
+    await useFloodAlertStore.getState().fetchTimeline('seg-requested')
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      timelineData: null,
+      timelineLoading: false,
+    })
+    expect(useFloodAlertStore.getState().error).toContain('响应与请求河段不匹配')
+    expect(useFloodAlertStore.getState().validTimes).toEqual(['2026-05-12T00:00:00.000Z'])
+    expect(useFloodAlertStore.getState().validTimes).not.toContain('2026-05-12T03:00:00.000Z')
+  })
+
+  it('ignores an older source/cycle lookup response after a newer lookup owns the state', async () => {
+    const older = deferred<unknown>()
+    const newer = deferred<unknown>()
+    vi.mocked(client.GET).mockReturnValueOnce(older.promise as never).mockReturnValueOnce(newer.promise as never)
+
+    const olderRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'gfs',
+      cycleTime: '2026-05-12T00:00:00.000Z',
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+    const newerRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'ifs',
+      cycleTime: '2026-05-13T00:00:00.000Z',
+      validTime: '2026-05-13T03:00:00.000Z',
+    })
+
+    newer.resolve({
+      data: success({
+        items: [
+          {
+            ...latestRun,
+            run_id: 'run-ifs',
+            source_id: 'ifs',
+            cycle_time: '2026-05-13T00:00:00.000Z',
+            start_time: '2026-05-13T00:00:00.000Z',
+            end_time: '2026-05-13T03:00:00.000Z',
+          },
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    })
+    await newerRequest
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: 'run-ifs',
+      selectedValidTime: '2026-05-13T03:00:00.000Z',
+      loading: false,
+    })
+
+    older.resolve({
+      data: success({
+        items: [
+          {
+            ...latestRun,
+            run_id: 'run-gfs',
+            source_id: 'gfs',
+            cycle_time: '2026-05-12T00:00:00.000Z',
+            start_time: '2026-05-12T00:00:00.000Z',
+            end_time: '2026-05-12T03:00:00.000Z',
+          },
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    })
+    await olderRequest
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: 'run-ifs',
+      selectedValidTime: '2026-05-13T03:00:00.000Z',
+      loading: false,
+    })
+  })
+
+  it('ignores an older source/cycle lookup rejection after a newer lookup owns the state', async () => {
+    const older = deferred<unknown>()
+    const newer = deferred<unknown>()
+    vi.mocked(client.GET).mockReturnValueOnce(older.promise as never).mockReturnValueOnce(newer.promise as never)
+
+    const olderRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'gfs',
+      cycleTime: '2026-05-12T00:00:00.000Z',
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+    const newerRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'ifs',
+      cycleTime: '2026-05-13T00:00:00.000Z',
+      validTime: '2026-05-13T03:00:00.000Z',
+    })
+
+    newer.resolve({
+      data: success({
+        items: [
+          {
+            ...latestRun,
+            run_id: 'run-ifs',
+            source_id: 'ifs',
+            cycle_time: '2026-05-13T00:00:00.000Z',
+            start_time: '2026-05-13T00:00:00.000Z',
+            end_time: '2026-05-13T03:00:00.000Z',
+          },
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    })
+    await newerRequest
+
+    older.reject(new Error('old lookup failed'))
+    await olderRequest
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: 'run-ifs',
+      latestRun: expect.objectContaining({ run_id: 'run-ifs' }),
+      selectedValidTime: '2026-05-13T03:00:00.000Z',
+      loading: false,
+      error: null,
+    })
+    expect(useFloodAlertStore.getState().validTimes).toContain('2026-05-13T03:00:00.000Z')
   })
 })

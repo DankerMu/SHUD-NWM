@@ -1,12 +1,15 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useLocation } from 'react-router-dom'
 
 import { ForecastPanel } from '@/components/forecast/ForecastPanel'
 import { MapView } from '@/components/map/MapView'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
+import { parseM11QueryState } from '@/lib/m11/queryState'
 import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 
 export function ForecastPage() {
+  const location = useLocation()
   const selectedSegment = useForecastStore((state) => state.selectedSegment)
   const forecastData = useForecastStore((state) => state.forecastData)
   const loading = useForecastStore((state) => state.loading)
@@ -16,6 +19,16 @@ export function ForecastPage() {
   const fetchForecast = useForecastStore((state) => state.fetchForecast)
   const clearSelection = useForecastStore((state) => state.clearSelection)
   const toast = useToast((state) => state.toast)
+  const lastRouteHandoffKey = useRef<string | null>(null)
+  const routeSegment = useMemo(() => {
+    const routeState = parseM11QueryState(location.search)
+    if (!routeState.segmentId || !routeState.basinVersionId) return null
+    return {
+      segmentId: routeState.segmentId,
+      basinVersionId: routeState.basinVersionId,
+    }
+  }, [location.search])
+  const routeHandoffKey = routeSegment ? `${routeSegment.basinVersionId}::${routeSegment.segmentId}` : null
 
   const loadSegmentForecast = useCallback(
     async (segment: ForecastSegmentInfo) => {
@@ -32,6 +45,33 @@ export function ForecastPage() {
     },
     [fetchForecast, selectSegment, toast],
   )
+
+  useEffect(() => {
+    if (!routeSegment || !routeHandoffKey) {
+      lastRouteHandoffKey.current = null
+      return
+    }
+    if (lastRouteHandoffKey.current === routeHandoffKey) return
+    if (
+      selectedSegment?.segmentId === routeSegment.segmentId &&
+      selectedSegment.basinVersionId === routeSegment.basinVersionId &&
+      (loading || forecastData?.segmentId === routeSegment.segmentId)
+    ) {
+      lastRouteHandoffKey.current = routeHandoffKey
+      return
+    }
+
+    lastRouteHandoffKey.current = routeHandoffKey
+    void loadSegmentForecast(routeSegment)
+  }, [
+    forecastData?.segmentId,
+    loadSegmentForecast,
+    loading,
+    routeHandoffKey,
+    routeSegment,
+    selectedSegment?.basinVersionId,
+    selectedSegment?.segmentId,
+  ])
 
   const retryForecast = useCallback(() => {
     void fetchForecast({ includeAnalysis: true }).catch((error) => {

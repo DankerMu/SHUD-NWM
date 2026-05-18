@@ -1,6 +1,8 @@
-import { render, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
+import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
+import { FloodAlertMap } from '@/components/flood/FloodAlertMap'
 import {
   FloodReturnPeriodLayer,
   floodReturnPeriodLayer,
@@ -18,8 +20,28 @@ vi.mock('@/api/base', async (importOriginal) => {
 const sourceProps: unknown[] = []
 const layerProps: unknown[] = []
 
+function geoJsonResponse(body: unknown) {
+  return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+}
+
+function oversizedStreamResponse(maxBytes: number) {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('x'.repeat(maxBytes + 1)))
+        controller.close()
+      },
+    }),
+    { headers: { 'content-type': 'application/json' } },
+  )
+}
+
 vi.mock('react-map-gl/maplibre', () => ({
-  Source: ({ children, ...props }: { children: React.ReactNode }) => {
+  default: forwardRef(({ children }: { children: ReactNode }, ref) => {
+    useImperativeHandle(ref, () => ({ flyTo: vi.fn() }))
+    return <div data-testid="map">{children}</div>
+  }),
+  Source: ({ children, ...props }: { children: ReactNode }) => {
     sourceProps.push(props)
     return <div data-testid="source">{children}</div>
   },
@@ -27,6 +49,8 @@ vi.mock('react-map-gl/maplibre', () => ({
     layerProps.push(props)
     return <div data-testid="layer" />
   },
+  NavigationControl: () => <div data-testid="navigation-control" />,
+  ScaleControl: () => <div data-testid="scale-control" />,
 }))
 
 describe('FloodReturnPeriodLayer', () => {
@@ -43,10 +67,7 @@ describe('FloodReturnPeriodLayer', () => {
   it('routes flood tile fetches through the configured API base', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: vi.fn().mockResolvedValue({ type: 'FeatureCollection', features: [] }),
-      }),
+      vi.fn().mockResolvedValue(geoJsonResponse({ type: 'FeatureCollection', features: [] })),
     )
 
     render(<FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" />)
@@ -61,10 +82,7 @@ describe('FloodReturnPeriodLayer', () => {
   it('configures a geojson source instead of a vector source', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: vi.fn().mockResolvedValue({ type: 'FeatureCollection', features: [] }),
-      }),
+      vi.fn().mockResolvedValue(geoJsonResponse({ type: 'FeatureCollection', features: [] })),
     )
 
     render(<FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" />)
@@ -82,16 +100,89 @@ describe('FloodReturnPeriodLayer', () => {
       vi.fn().mockResolvedValue({
         ok: false,
         status: 409,
-        json: vi.fn().mockResolvedValue({
-          status: 'error',
-          error: { code: 'FREQUENCY_NOT_COMPUTED', message: 'not ready' },
-        }),
+        headers: new Headers(),
+        text: vi.fn().mockResolvedValue(
+          JSON.stringify({
+            status: 'error',
+            error: { code: 'FREQUENCY_NOT_COMPUTED', message: 'not ready' },
+          }),
+        ),
       }),
     )
 
     render(<FloodReturnPeriodLayer runId="run-pending" validTime="2026-05-03T06:00:00Z" />)
 
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+    expect(sourceProps).toHaveLength(0)
+    expect(layerProps).toHaveLength(0)
+  })
+
+  it('rejects malformed FeatureCollections before retaining a MapLibre source', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        geoJsonResponse({
+          type: 'FeatureCollection',
+          features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }],
+        }),
+      ),
+    )
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-malformed"
+        validTime="2026-05-03T06:00:00Z"
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('空坐标几何')))
+    expect(sourceProps).toHaveLength(0)
+    expect(layerProps).toHaveLength(0)
+  })
+
+  it('surfaces scoped unavailable state from the flood-alert map when return-period payloads exceed budget', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        geoJsonResponse({
+          type: 'FeatureCollection',
+          features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
+        }),
+      ),
+    )
+
+    render(
+      <FloodAlertMap
+        runId="run-oversized"
+        validTime="2026-05-03T06:00:00Z"
+        onSegmentSelect={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByTestId('flood-return-period-unavailable')).toHaveTextContent('超过客户端要素预算')
+    expect(sourceProps).toHaveLength(0)
+  })
+
+  it('surfaces scoped unavailable state for oversized no-content-length streams on the flood-alert map', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(oversizedStreamResponse(2_000_000)))
+
+    render(
+      <FloodAlertMap
+        runId="run-stream-oversized"
+        validTime="2026-05-03T06:00:00Z"
+        onSegmentSelect={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByTestId('flood-return-period-unavailable')).toHaveTextContent('超过客户端序列化预算')
     expect(sourceProps).toHaveLength(0)
     expect(layerProps).toHaveLength(0)
   })

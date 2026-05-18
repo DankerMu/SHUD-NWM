@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 
 import { AlertRankingPanel } from '@/components/flood/AlertRankingPanel'
 import { AlertStatsPanel } from '@/components/flood/AlertStatsPanel'
@@ -9,12 +10,16 @@ import { SegmentAlertDetail } from '@/components/flood/SegmentAlertDetail'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
 import { formatDate } from '@/lib/format'
+import { parseM11QueryState } from '@/lib/m11/queryState'
 import type { AlertLevel } from '@/components/flood/alertLevels'
+import { isAlertLevel } from '@/components/flood/alertLevels'
 import type { FloodAlertRankingItem } from '@/stores/floodAlert'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useForecastStore } from '@/stores/forecast'
 
 export function FloodAlertPage() {
+  const location = useLocation()
+  const routeState = useMemo(() => parseM11QueryState(location.search), [location.search])
   const toast = useToast((state) => state.toast)
   const selectedRunId = useFloodAlertStore((state) => state.selectedRunId)
   const latestRun = useFloodAlertStore((state) => state.latestRun)
@@ -34,6 +39,7 @@ export function FloodAlertPage() {
   const fetchSummary = useFloodAlertStore((state) => state.fetchSummary)
   const fetchRanking = useFloodAlertStore((state) => state.fetchRanking)
   const setSelectedAlertLevel = useFloodAlertStore((state) => state.setSelectedAlertLevel)
+  const assignSelectedAlertLevel = useFloodAlertStore((state) => state.assignSelectedAlertLevel)
   const setSelectedValidTime = useFloodAlertStore((state) => state.setSelectedValidTime)
   const setTopLimit = useFloodAlertStore((state) => state.setTopLimit)
   const setBasinId = useFloodAlertStore((state) => state.setBasinId)
@@ -42,14 +48,22 @@ export function FloodAlertPage() {
   const clearForecastSelection = useForecastStore((state) => state.clearSelection)
 
   useEffect(() => {
-    void fetchLatestFrequencyDoneRun().catch((error) => {
+    const routeWarningLevel = normalizeRouteAlertLevel(routeState.warningLevel)
+    if (routeWarningLevel !== useFloodAlertStore.getState().selectedAlertLevel) {
+      assignSelectedAlertLevel(routeWarningLevel)
+    }
+    void fetchLatestFrequencyDoneRun({
+      source: routeState.source === 'gfs' || routeState.source === 'ifs' ? routeState.source : null,
+      cycleTime: routeState.cycle,
+      validTime: routeState.validTime,
+    }).catch((error) => {
       toast({
         title: '预警 Run 加载失败',
         description: getApiErrorMessage(error, '获取最新预警 Run 失败'),
         variant: 'destructive',
       })
     })
-  }, [fetchLatestFrequencyDoneRun, toast])
+  }, [assignSelectedAlertLevel, fetchLatestFrequencyDoneRun, routeState.cycle, routeState.source, routeState.validTime, routeState.warningLevel, toast])
 
   const refreshSnapshots = useCallback(
     async (validTime = selectedValidTime, limit = topLimit) => {
@@ -68,6 +82,12 @@ export function FloodAlertPage() {
       })
     })
   }, [basinId, refreshSnapshots, selectedRunId, toast])
+
+  useEffect(() => {
+    setSelectedSegment(null)
+    clearForecastSelection()
+    setPlaying(false)
+  }, [clearForecastSelection, selectedRunId])
 
   useEffect(() => {
     if (!playing || validTimes.length === 0) return undefined
@@ -123,7 +143,7 @@ export function FloodAlertPage() {
       <div className="grid min-h-[calc(100vh-7rem)] place-items-center rounded-lg border border-border bg-panel p-6 text-center">
         <div>
           <h1 className="text-lg font-semibold text-foreground">暂无洪水预警数据</h1>
-          <p className="mt-2 text-sm text-muted">当前没有已完成 frequency_done 的预报 Run。</p>
+          <p className="mt-2 text-sm text-muted">{error ?? '当前没有已完成 frequency_done 的预报 Run。'}</p>
         </div>
       </div>
     )
@@ -196,4 +216,11 @@ export function FloodAlertPage() {
       </div>
     </div>
   )
+}
+
+function normalizeRouteAlertLevel(value: string | null): AlertLevel | null {
+  if (value === 'orange') return 'warning'
+  if (value === 'red') return 'severe'
+  if (value === 'major') return 'high_risk'
+  return isAlertLevel(value) ? value : null
 }

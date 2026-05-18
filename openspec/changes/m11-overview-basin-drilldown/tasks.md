@@ -232,6 +232,93 @@ Non-goals for #162:
 - [ ] 4.6 Implement overview empty/degraded states for no basin inventory, no published basin version, invalid source/cycle/valid-time data, partial summary failures, unavailable meteorology layers, and map source failure.
 - [ ] 4.7 Add component and Playwright interaction tests for overview default render, basin visibility toggle, layer/source changes, popup drill-down, summary links, and partial data rendering; capture overview visual screenshots at supported viewports with `agent-browser`.
 
+### Issue #163 Evidence Matrix
+
+Selected risk packs:
+
+- Public API / CLI / script entry -> 4.1, 4.4, 4.5, route and popup/link Playwright tests.
+- Schema / columns / units / field names -> 4.2, 4.4, 4.5, component tests using normalized
+  basin/version/model/warning/layer/source fields.
+- Geospatial / CRS / shapefile sidecars -> 4.3, map component tests for national extent,
+  basin boundary/label/river layer availability, and unavailable geometry states.
+- Time series / forcing / temporal boundaries -> 4.1, 4.5, 4.6, tests for layer/source changes,
+  valid-time correction, latest forecast labels, and context query links.
+- Resource limits / large input / discovery -> 4.2, 4.3, 4.7, tests or assertions showing
+  visibility/source/layer changes do not create unbounded timers, request loops, or map layers.
+- Legacy compatibility / examples -> 4.1, 4.5, 4.7, preserved tests for `/forecast`,
+  `/flood-alerts`, `/monitoring`, `/basins/:basinId`, map controls, and adapters.
+- Error handling / rollback / partial outputs -> 4.3, 4.6, partial failure/empty/unavailable
+  component and Playwright coverage.
+- Release / packaging / dependency compatibility -> frontend test/e2e/build commands and no new
+  unvetted runtime dependency.
+- Documentation / migration notes -> PR/developer notes or test fixture names documenting
+  unsupported meteorology/MVT/model-asset handoff limits and screenshot evidence paths.
+
+Required test inputs and expected outputs:
+
+- Route input `/` and `/overview` -> renders the full national overview page, marks 全国总览
+  active, preserves 56px nav, exposes left basin/layer panel, central map, right summaries, and
+  64px timeline without overlap.
+- Viewport inputs `1920x1080`, `1440x900`, and `1280x900` -> overview remains map-first; side
+  panels use documented widths/collapse behavior; no panel, popup, timeline, or map control text
+  overlaps.
+- Basin inventory with hierarchy, bbox/boundary, area, active version/model count, segment count,
+  latest forecast time, and warning counts -> basin tree groups rows, all-select/none-select
+  toggles visibility, map layers reflect visible basins, and popup shows the same normalized
+  fields without fabricated values.
+- Basin inventory empty list -> left panel shows empty basin state; map remains usable for any
+  available non-basin layers; page does not redirect or crash.
+- Basin with no published/active version -> row and popup show version-unavailable state; "进入分析"
+  is disabled or navigates to a basin detail empty state according to the implemented route
+  contract.
+- Map source success for available basin boundary/label/river/risk data -> overview initializes
+  to China extent and renders available layers; toggling basin/layer visibility hides/shows only
+  the intended layer.
+- Map source failure or unavailable geometry -> only the affected layer shows scoped error or
+  unavailable state; other controls, summaries, and map interactions remain usable.
+- Source inputs `gfs`, `ifs`, `compare`, and `best` plus layer/valid-time changes -> overview
+  updates provenance labels, active legend/timeline state, stale valid-time fallback, and URL
+  query without emitting unsupported backend source values.
+- Popup action input "进入分析" on a basin with routeable id -> navigates to
+  `/basins/<encoded-basin-id>` with relevant source/cycle/validTime/layer/basemap context.
+- Popup action input "查看详情" -> links to the existing/placeholder model asset destination or
+  disabled handoff state; it does not claim a full model asset page exists.
+- Right summary click for forecast run status -> navigates to `/monitoring` with available
+  source/cycle context; warning summary click -> navigates to `/flood-alerts` with available
+  source/cycle/warning context.
+- Partial summary failure where flood alert or pipeline data rejects but basin inventory succeeds
+  -> successful sections render and the failed card shows scoped unavailable/error state.
+- Unavailable meteorology/DEM/station layers -> controls remain disabled or explicitly
+  unavailable and do not render fake map data.
+
+Verification commands for #163:
+
+- `cd apps/frontend && corepack pnpm test`
+- `cd apps/frontend && corepack pnpm build`
+- `cd apps/frontend && corepack pnpm test:e2e`
+- `cd apps/frontend && corepack pnpm run test:e2e:preview`
+- `openspec validate m11-overview-basin-drilldown --strict --no-interactive`
+- `git diff --check`
+
+Visual evidence for #163:
+
+- Start the local frontend server using the existing project command selected by the implementer
+  or Playwright preview server.
+- Capture overview screenshots for `/overview` at `1920x1080`, `1440x900`, and `1280x900` with
+  `agent-browser --args "--no-sandbox,--disable-dev-shm-usage,--disable-gpu" open <url>`
+  followed by `agent-browser screenshot <path>`.
+- Store evidence under an issue-scoped path such as `.codex/screenshots/issue-163/` and record
+  any unavailable browser-tool limitation in PR evidence rather than omitting the attempt.
+
+Non-goals for #163:
+
+- No basin detail segment list/search/filter, selected segment detail panel, sparkline, basin
+  river coloring, or forecast-to-basin handoff beyond the popup/summary route links.
+- No production MVT/PBF implementation, new backend aggregation endpoint, full model asset
+  management page, meteorology page, or full-screen forecast detail page.
+- Basin visibility persistence may stay local to the overview page unless a tested
+  `visibleBasins` URL parameter is intentionally added.
+
 ## 5. Basin drill-down shell, segment discovery, and forecast handoff
 
 - [ ] 5.1 Build `BasinDetailPage` route that loads basin identity, active or selected basin version, bbox/fallback extent, warning distribution, latest run metadata, source/scenario state, and basin-scoped segment data.

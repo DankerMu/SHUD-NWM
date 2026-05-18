@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Request, type Route } from '@playwright/test'
 
+const apiBase = 'https://api.example.test'
+
 const run = {
   run_id: 'run-flood-1',
   run_type: 'forecast',
@@ -13,6 +15,18 @@ const run = {
   end_time: '2026-05-12T03:00:00Z',
   created_at: '2026-05-12T00:00:00Z',
   updated_at: '2026-05-12T04:00:00Z',
+}
+
+const ifsRun = {
+  ...run,
+  run_id: 'run-ifs-specific',
+  scenario_id: 'forecast_ifs_deterministic',
+  source_id: 'ifs',
+  cycle_time: '2026-05-13T00:00:00Z',
+  start_time: '2026-05-13T00:00:00Z',
+  end_time: '2026-05-13T06:00:00Z',
+  created_at: '2026-05-13T00:00:00Z',
+  updated_at: '2026-05-13T07:00:00Z',
 }
 
 const summary = {
@@ -148,7 +162,6 @@ async function mockFloodApi(page: Page, onRequest?: (request: Request) => void) 
 
 test.describe('flood alerts page', () => {
   test('loads latest run, summary, ranking, tile, and selected segment timeline through configured API base', async ({ page }) => {
-    const apiBase = 'https://api.example.test'
     const forecastSeriesPath = '/api/v1/basin-versions/basin-v1/river-segments/seg-1/forecast-series'
     const calls: Array<{ origin: string; pathname: string }> = []
     await mockFloodApi(page, (request) => {
@@ -184,5 +197,72 @@ test.describe('flood alerts page', () => {
     ]) {
       expect(calls.some((call) => call.origin === apiBase && call.pathname === path)).toBe(true)
     }
+  })
+
+  test('honors explicit IFS cycle and valid time handoff without latest GFS fallback', async ({ page }) => {
+    const calls: string[] = []
+    await page.route('**/api/v1/**', async (route) => {
+      const url = new URL(route.request().url())
+      calls.push(url.toString())
+
+      if (url.pathname === '/api/v1/runs') {
+        expect(url.searchParams.get('source')).toBe('IFS')
+        expect(url.searchParams.get('cycle_time')).toBe('2026-05-13T00:00:00.000Z')
+        return fulfill(route, { items: [ifsRun], total: 1, limit: 50, offset: 0 })
+      }
+      if (url.pathname === '/api/v1/flood-alerts/summary') {
+        expect(url.searchParams.get('run_id')).toBe('run-ifs-specific')
+        expect(url.searchParams.get('valid_time')).toBe('2026-05-13T06:00:00.000Z')
+        return fulfill(route, { ...summary, run_id: 'run-ifs-specific' })
+      }
+      if (url.pathname === '/api/v1/flood-alerts/ranking') {
+        expect(url.searchParams.get('run_id')).toBe('run-ifs-specific')
+        expect(url.searchParams.get('valid_time')).toBe('2026-05-13T06:00:00.000Z')
+        return fulfill(route, {
+          ...ranking,
+          items: [{ ...ranking.items[0], segment_name: 'IFS Specific Segment', valid_time: '2026-05-13T06:00:00Z' }],
+        })
+      }
+      if (url.pathname === '/api/v1/tiles/flood-return-period') {
+        expect(url.searchParams.get('run_id')).toBe('run-ifs-specific')
+        expect(url.searchParams.get('valid_time')).toBe('2026-05-13T06:00:00.000Z')
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ type: 'FeatureCollection', features: [] }),
+        })
+      }
+
+      throw new Error(`Unhandled mocked API route: ${route.request().method()} ${url.pathname}`)
+    })
+
+    await page.goto('/flood-alerts?source=ifs&cycle=2026-05-13T00:00:00Z&validTime=2026-05-13T06:00:00Z')
+
+    await expect(page.getByText('run-ifs-specific')).toBeVisible()
+    await expect(page.getByRole('row', { name: /IFS Specific Segment/ })).toBeVisible()
+    expect(calls.join('\n')).not.toContain('run-flood-1')
+  })
+
+  test('does not render latest GFS data when explicit IFS cycle is absent', async ({ page }) => {
+    const calls: string[] = []
+    await page.route('**/api/v1/**', async (route) => {
+      const url = new URL(route.request().url())
+      calls.push(url.toString())
+
+      if (url.pathname === '/api/v1/runs') {
+        expect(url.searchParams.get('source')).toBe('IFS')
+        expect(url.searchParams.get('cycle_time')).toBe('2026-05-13T00:00:00.000Z')
+        return fulfill(route, { items: [run], total: 1, limit: 50, offset: 0 })
+      }
+
+      throw new Error(`Unexpected fallback request: ${url.pathname}`)
+    })
+
+    await page.goto('/flood-alerts?source=ifs&cycle=2026-05-13T00:00:00Z&validTime=2026-05-13T06:00:00Z')
+
+    await expect(page.getByText('暂无洪水预警数据')).toBeVisible()
+    await expect(page.getByText(/未找到 IFS 周期/)).toBeVisible()
+    expect(calls.some((url) => url.includes('/api/v1/flood-alerts/summary'))).toBe(false)
+    expect(calls.some((url) => url.includes('run-flood-1'))).toBe(false)
   })
 })

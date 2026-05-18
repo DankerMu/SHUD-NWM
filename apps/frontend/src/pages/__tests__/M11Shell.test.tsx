@@ -1,12 +1,13 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { BrowserRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
-import type { LayerState, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import { normalizeLayerStates, type LayerState, type OverviewBasin, type SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
+import { buildBasinFeatureCollection } from '@/components/map/M11MapLibreSurface'
 import {
   LayerGroupControls,
   LayerLegendPanel,
@@ -34,6 +35,7 @@ vi.mock('react-map-gl/maplibre', () => ({
         onMouseMove,
         onMouseLeave,
         onClick,
+        onError,
       }: {
         children: ReactNode
         mapStyle: unknown
@@ -41,11 +43,13 @@ vi.mock('react-map-gl/maplibre', () => ({
         onMouseMove?: (event: unknown) => void
         onMouseLeave?: (event: unknown) => void
         onClick?: (event: unknown) => void
+        onError?: (event: unknown) => void
       },
       ref,
     ) => {
       const canvasStyle: Record<string, string> = {}
       const overlayFeature = { layer: { id: 'm11-flood-return-period-line' }, properties: { segment_id: 'seg-1' } }
+      const basinFeature = { layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'yangtze' } }
       useImperativeHandle(ref, () => ({
         fitBounds: (...args: unknown[]) => fitBoundsCalls.push(args),
         flyTo: (args: unknown) => flyToCalls.push(args),
@@ -90,6 +94,15 @@ vi.mock('react-map-gl/maplibre', () => ({
               point: { x: 1, y: 1 },
             })
           }
+          onContextMenu={(event) => {
+            event.preventDefault()
+            onClick?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [overlayFeature, basinFeature],
+              point: { x: 2, y: 2 },
+            })
+          }}
+          onFocus={() => onError?.({ error: { message: 'mock source failed' } })}
         >
           {children}
         </div>
@@ -169,6 +182,39 @@ const layers: LayerState[] = [
   },
 ]
 
+const overviewBasins: OverviewBasin[] = [
+  {
+    basinId: 'yangtze',
+    displayName: 'Yangtze Basin',
+    basinGroup: 'major',
+    parentBasinId: null,
+    level: 1,
+    boundary: {
+      type: 'MultiPolygon',
+      coordinates: [[[[100, 30], [101, 30], [101, 31], [100, 31], [100, 30]]]],
+    },
+    bbox: { minLon: 100, minLat: 30, maxLon: 101, maxLat: 31 },
+    areaKm2: 12_000,
+    riverCount: 2,
+    activeModelCount: 1,
+    latestForecastTime: '2026-05-18T00:00:00.000Z',
+    warningCounts: {
+      normal: 0,
+      elevated: 0,
+      watch: 0,
+      warning: 1,
+      high_risk: 0,
+      severe: 0,
+      extreme: 0,
+      unavailable: 0,
+    },
+    basinVersions: [],
+    selectedBasinVersionId: 'yangtze_v2026_01',
+    unavailableReason: null,
+    qualityNote: null,
+  },
+]
+
 const sourceSelection: SourceScenarioSelectionState = {
   requestedSource: 'best',
   resolvedSource: 'IFS',
@@ -180,12 +226,32 @@ const sourceSelection: SourceScenarioSelectionState = {
   unavailableReason: null,
 }
 
+function geoJsonResponse(body: unknown) {
+  return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+}
+
+function oversizedStreamResponse(maxBytes: number) {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('x'.repeat(maxBytes + 1)))
+        controller.close()
+      },
+    }),
+    { headers: { 'content-type': 'application/json' } },
+  )
+}
+
 describe('M11 visual foundation shell', () => {
   beforeEach(() => {
     mapSources.length = 0
     mapLayers.length = 0
     fitBoundsCalls.length = 0
     flyToCalls.length = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => geoJsonResponse({ type: 'FeatureCollection', features: [] })),
+    )
     useOverviewDataStore.setState({
       ...useOverviewDataStore.getInitialState(),
       loadOverview: vi.fn().mockResolvedValue(undefined),
@@ -195,6 +261,7 @@ describe('M11 visual foundation shell', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    vi.unstubAllGlobals()
   })
 
   it('exposes mapped layout tokens for nav, panels, timeline, and warning colors', () => {
@@ -212,10 +279,42 @@ describe('M11 visual foundation shell', () => {
       '--m11-right-panel-width': '340px',
       '--m11-timeline-height': '64px',
     })
+    expect(shell).toHaveAttribute('data-layout', 'map-first-compact')
+    expect(shell.className).toContain('h-[calc(100vh-88px)]')
+    expect(shell.className).toContain('min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]')
+    expect(shell).toHaveAttribute('data-left-panel', 'expanded')
+    expect(shell).toHaveAttribute('data-right-panel', 'expanded')
     expect(m11VisualTokens.navHeight).toBe('56px')
     expect(m11VisualTokens.warningLevels.major).toBe('#FF8A65')
     expect(screen.getByLabelText('M11 左侧面板')).toBeInTheDocument()
     expect(screen.getByLabelText('M11 右侧面板')).toBeInTheDocument()
+    expect(screen.getByLabelText('M11 时间轴')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-timeline')).toHaveAttribute('data-first-viewport-visible', 'true')
+    expect(screen.getByTestId('m11-timeline-region')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '折叠左侧面板' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: '折叠右侧面板' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('collapses side panels while keeping the timeline mounted for 1280 compact layout', async () => {
+    window.history.pushState({}, '', '/overview')
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    const user = userEvent.setup()
+    const shell = screen.getByTestId('m11-shell')
+
+    await user.click(screen.getByRole('button', { name: '折叠左侧面板' }))
+    expect(shell).toHaveAttribute('data-left-panel', 'collapsed')
+    expect(screen.getByRole('button', { name: '展开左侧面板' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByTestId('m11-timeline')).toHaveAttribute('data-first-viewport-visible', 'true')
+
+    await user.click(screen.getByRole('button', { name: '折叠右侧面板' }))
+    expect(shell).toHaveAttribute('data-right-panel', 'collapsed')
+    expect(screen.getByRole('button', { name: '展开右侧面板' })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByLabelText('M11 时间轴')).toBeInTheDocument()
   })
 
@@ -244,22 +343,78 @@ describe('M11 visual foundation shell', () => {
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
   })
 
-  it('registers flood return period geojson and keeps it through basemap switches using selected URL valid time', async () => {
+  it('marks only renderable overview layers available and keeps river network unavailable', () => {
+    const normalizedLayers = normalizeLayerStates({
+      query: state,
+      layers: [
+        { layer_id: 'discharge', layer_name: 'River discharge', layer_type: 'hydrology', variables: ['q_down'], metadata: null },
+        { layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: ['return_period'], metadata: null },
+        { layer_id: 'warning-level', layer_name: 'Warning level', layer_type: 'hydrology', variables: ['warning_level'], metadata: null },
+        { layer_id: 'river-network', layer_name: 'River network', layer_type: 'base', variables: ['geometry'], metadata: null },
+      ],
+      validTimesByLayerId: {
+        discharge: ['2026-05-18T00:00:00Z'],
+        'flood-return-period': ['2026-05-18T00:00:00Z'],
+        'warning-level': ['2026-05-18T00:00:00Z'],
+        'river-network': ['2026-05-18T00:00:00Z'],
+      },
+      resolvedRun: {
+        run_id: 'run-gfs',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'bv-001',
+        source_id: 'gfs',
+        cycle_time: '2026-05-18T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-18T00:00:00Z',
+        end_time: '2026-05-18T03:00:00Z',
+        created_at: '2026-05-18T00:00:00Z',
+        updated_at: '2026-05-18T04:00:00Z',
+      },
+    })
+
+    expect(normalizedLayers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({ available: true, disabledReason: null })
+    expect(normalizedLayers.find((layer) => layer.layerId === 'discharge')).toMatchObject({
+      available: false,
+      disabledReason: expect.stringContaining('no renderable map source'),
+    })
+    expect(normalizedLayers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({
+      available: false,
+      disabledReason: expect.stringContaining('no renderable map source'),
+    })
+    expect(normalizedLayers.find((layer) => layer.layerId === 'river-network')).toMatchObject({
+      available: false,
+      disabledReason: expect.stringContaining('no renderable map source'),
+    })
+
+    render(<LayerGroupControls state={state} layers={normalizedLayers} onQueryChange={vi.fn()} />)
+    expect(screen.getByText('河网')).toBeInTheDocument()
+    expect(screen.queryByText('已由图层 API 注册')).not.toBeInTheDocument()
+  })
+
+  it('registers validated flood return period geojson and keeps it through basemap switches using selected URL valid time', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
     const floodState = { ...state, layer: 'flood-return-period' as const, validTime: '2026-05-18T06:00:00.000Z' }
 
     const { rerender } = render(<M11MapSurface state={floodState} layers={layers} onQueryChange={onQueryChange} />)
 
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-flood-return-period-line')
     expect(mapSources.at(-1)).toMatchObject({
       id: 'm11-flood-return-period-source',
       type: 'geojson',
-      data: expect.stringContaining('/api/v1/tiles/flood-return-period?'),
+      data: { type: 'FeatureCollection', features: [] },
     })
-    expect(String(mapSources.at(-1)?.data)).toContain('valid_time=2026-05-18T06%3A00%3A00.000Z')
-    expect(String(mapSources.at(-1)?.data)).not.toContain('valid_time=2026-05-18T12%3A00%3A00.000Z')
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('valid_time=2026-05-18T06%3A00%3A00.000Z'),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url)).join('\n')).not.toContain(
+      'valid_time=2026-05-18T12%3A00%3A00.000Z',
+    )
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line', source: 'm11-flood-return-period-source' })
 
     await user.click(screen.getByRole('button', { name: '地形底图' }))
@@ -268,12 +423,52 @@ describe('M11 visual foundation shell', () => {
     mapSources.length = 0
     mapLayers.length = 0
     rerender(<M11MapSurface state={{ ...floodState, basemap: 'terrain' }} layers={layers} onQueryChange={onQueryChange} />)
-    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(mapSources.at(-1)).toMatchObject({ id: 'm11-flood-return-period-source', type: 'geojson' })
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line' })
   })
 
-  it('threads camera and overlay callbacks into the MapLibre primitive', () => {
+  it('rejects oversized M11 flood return period payloads before registering a MapLibre source', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        geoJsonResponse({
+          type: 'FeatureCollection',
+          features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
+        }),
+      ),
+    )
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+      />,
+    )
+
+    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('超过客户端要素预算')
+    expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('rejects oversized streamed M11 flood return period payloads without registering a MapLibre source', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(oversizedStreamResponse(2_000_000)))
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+      />,
+    )
+
+    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('超过客户端序列化预算')
+    expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('threads camera and overlay callbacks into the MapLibre primitive', async () => {
     const onOverlayHover = vi.fn()
     const onOverlayClick = vi.fn()
 
@@ -291,6 +486,7 @@ describe('M11 visual foundation shell', () => {
     expect(fitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 24, duration: 450 }]])
     expect(flyToCalls).toEqual([{ center: [102, 32], zoom: 7, duration: 450 }])
 
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     fireEvent.mouseMove(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayHover).toHaveBeenCalledWith(null)
     expect(onOverlayHover).not.toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
@@ -302,6 +498,28 @@ describe('M11 visual foundation shell', () => {
     expect(onOverlayClick).not.toHaveBeenCalled()
     fireEvent.doubleClick(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
+  })
+
+  it('dispatches the matched basin feature when overlay features are returned first', async () => {
+    const onOverlayClick = vi.fn()
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+        basins={overviewBasins}
+        onOverlayClick={onOverlayClick}
+      />,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
+    fireEvent.contextMenu(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayClick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        layerId: 'basin-boundaries',
+        feature: expect.objectContaining({ properties: { basin_id: 'yangtze' } }),
+      }),
+    )
   })
 
   it('does not repeat equal camera fit commands across rerenders', () => {
@@ -336,6 +554,108 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
     expect(mapSources).toHaveLength(0)
     expect(mapLayers).toHaveLength(0)
+  })
+
+  it('shows a scoped map source error while keeping other controls usable', async () => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+
+    render(
+      <M11MapSurface
+        state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
+        layers={layers}
+        basins={overviewBasins}
+        onQueryChange={onQueryChange}
+      />,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
+    fireEvent.focus(screen.getByTestId('mock-maplibre-map'))
+    expect(screen.getByTestId('m11-map-source-error')).toHaveTextContent('mock source failed')
+    await user.click(screen.getByRole('button', { name: '卫星底图' }))
+    expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
+  })
+
+  it('registers visible basin boundaries and labels without claiming hidden basin geometry', () => {
+    const { rerender } = render(<M11MapSurface state={state} layers={layers} basins={overviewBasins} />)
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '1')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'yangtze')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-basin-fill')
+    expect(mapSources.at(-1)).toMatchObject({
+      id: 'm11-basin-boundaries-source',
+      type: 'geojson',
+    })
+    expect(mapLayers.map((layer) => layer.id)).toEqual(
+      expect.arrayContaining(['m11-basin-fill', 'm11-basin-outline', 'm11-basin-label']),
+    )
+
+    mapSources.length = 0
+    mapLayers.length = 0
+    rerender(<M11MapSurface state={state} layers={layers} basins={overviewBasins} visibleBasinIds={[]} />)
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '0')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
+    expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('当前没有可见流域边界')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('does not register oversized basin geometry as a map source', () => {
+    const coordinates: number[][] = []
+    for (let index = 0; index < 50_002; index += 1) {
+      coordinates.push([100 + index * 0.00001, 30])
+    }
+    const oversizedBasins: OverviewBasin[] = [
+      {
+        ...overviewBasins[0],
+        boundary: { type: 'MultiPolygon', coordinates: [[[...coordinates]]] },
+      },
+    ]
+
+    render(<M11MapSurface state={state} layers={layers} basins={oversizedBasins} />)
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '0')
+    expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('渲染预算')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('does not register under-vertex basin geometry with oversized coordinate tails', () => {
+    const tail = Array.from({ length: 32 }, (_, index) => index)
+    const oversizedBasins: OverviewBasin[] = [
+      {
+        ...overviewBasins[0],
+        boundary: {
+          type: 'MultiPolygon',
+          coordinates: [[[[100, 30, ...tail], [101, 30, ...tail], [101, 31, ...tail], [100, 31, ...tail], [100, 30, ...tail]]]],
+        },
+      },
+    ]
+
+    render(<M11MapSurface state={state} layers={layers} basins={oversizedBasins} />)
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '0')
+    expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('渲染预算')
+    expect(mapSources).toHaveLength(0)
+    expect(mapLayers).toHaveLength(0)
+  })
+
+  it('omits over-byte basin geometry from MapLibre feature collections', () => {
+    const coordinates = Array.from({ length: 50_000 }, (_, index) => [
+      100.1234567890123 + index / 100_000,
+      30.1234567890123 + index / 100_000,
+    ])
+    const featureCollection = buildBasinFeatureCollection(
+      [
+        {
+          ...overviewBasins[0],
+          boundary: { type: 'MultiPolygon', coordinates: [[[...coordinates]]] },
+        },
+      ],
+      undefined,
+    )
+
+    expect(featureCollection.features).toHaveLength(0)
   })
 
   it('renders grouped layers and marks meteorology/base placeholders unavailable without fake data', async () => {

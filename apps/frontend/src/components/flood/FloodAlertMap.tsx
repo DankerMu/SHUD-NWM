@@ -105,6 +105,7 @@ export function FloodAlertMap({
   const toast = useToast((state) => state.toast)
   const mapRef = useRef<MapRef | null>(null)
   const [mapError, setMapError] = useState<string | null>(null)
+  const [returnPeriodUnavailableReason, setReturnPeriodUnavailableReason] = useState<string | null>(null)
   const [hoveredSegmentId, setHoveredSegmentId] = useState<string | null>(null)
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
 
@@ -182,8 +183,21 @@ export function FloodAlertMap({
   return (
     <div className={cn('relative h-full min-h-[32rem] overflow-hidden', className)}>
       {mapError ? (
-        <div className="absolute left-3 top-3 z-10 max-w-[min(26rem,calc(100%-1.5rem))] rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger shadow-sm">
+        <div
+          className="absolute left-3 top-3 z-10 max-w-[min(26rem,calc(100%-1.5rem))] rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger shadow-sm"
+          role="status"
+        >
           {mapError}
+        </div>
+      ) : null}
+
+      {returnPeriodUnavailableReason ? (
+        <div
+          className="absolute left-3 top-14 z-10 max-w-[min(26rem,calc(100%-1.5rem))] rounded-md border border-warning/40 bg-panel/95 px-3 py-2 text-sm text-foreground shadow-sm"
+          role="status"
+          data-testid="flood-return-period-unavailable"
+        >
+          {returnPeriodUnavailableReason}
         </div>
       ) : null}
 
@@ -237,6 +251,7 @@ export function FloodAlertMap({
             selectedLevel={selectedLevel}
             hoveredSegmentId={hoveredSegmentId}
             selectedSegmentId={selectedSegmentId}
+            onUnavailableReason={setReturnPeriodUnavailableReason}
           />
         ) : null}
       </Map>

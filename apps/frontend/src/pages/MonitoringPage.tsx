@@ -1,4 +1,5 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 
 import { JobsTable } from '@/components/monitoring/JobsTable'
 import { StageList } from '@/components/monitoring/StageList'
@@ -15,6 +16,7 @@ import { usePolling } from '@/hooks/usePolling'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
 import { formatDate } from '@/lib/format'
+import { parseM11QueryState } from '@/lib/m11/queryState'
 import { useMonitoringStore } from '@/stores/monitoring'
 
 const sourceOptions = ['GFS', 'ERA5', 'IFS']
@@ -26,6 +28,8 @@ function cycleInputValue(cycleTime: string) {
 }
 
 export function MonitoringPage() {
+  const location = useLocation()
+  const routeState = useMemo(() => parseM11QueryState(location.search), [location.search])
   const source = useMonitoringStore((state) => state.source)
   const cycleTime = useMonitoringStore((state) => state.cycleTime)
   const cycle = useMonitoringStore((state) => state.cycle)
@@ -42,6 +46,13 @@ export function MonitoringPage() {
   const { toast } = useToast()
   const [manualRefreshing, setManualRefreshing] = useState(false)
   const [trendRefreshKey, setTrendRefreshKey] = useState(0)
+
+  useEffect(() => {
+    const nextSource = routeState.source === 'ifs' ? 'IFS' : routeState.source === 'gfs' ? 'GFS' : null
+    const nextCycleTime = routeState.cycle
+    if (nextSource && nextSource !== useMonitoringStore.getState().source) setSource(nextSource)
+    if (nextCycleTime && nextCycleTime !== useMonitoringStore.getState().cycleTime) setCycleTime(nextCycleTime)
+  }, [routeState.cycle, routeState.source, setCycleTime, setSource])
 
   const refreshOperationalData = useCallback(async () => {
     await Promise.all([fetchAll(), fetchJobs()])

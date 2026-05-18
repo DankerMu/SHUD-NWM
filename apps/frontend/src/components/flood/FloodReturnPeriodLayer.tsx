@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { Layer, Source, type LayerProps } from 'react-map-gl/maplibre'
 import type { FilterSpecification } from 'maplibre-gl'
 
-import { apiFetch, buildApiUrl } from '@/api/base'
 import {
   FLOOD_TILE_HOVER_LAYER_ID,
   FLOOD_TILE_LAYER_ID,
@@ -11,6 +10,11 @@ import {
   floodTileLayerPaint,
   type AlertLevel,
 } from '@/components/flood/alertLevels'
+import {
+  buildFloodReturnPeriodGeoJsonUrl,
+  fetchFloodReturnPeriodFeatureCollection,
+  type FloodReturnPeriodFeatureCollection,
+} from '@/lib/floodReturnPeriodGeoJson'
 
 interface FloodReturnPeriodLayerProps {
   runId: string
@@ -18,11 +22,7 @@ interface FloodReturnPeriodLayerProps {
   selectedLevel?: AlertLevel | null
   hoveredSegmentId?: string | null
   selectedSegmentId?: string | null
-}
-
-interface GeoJsonFeatureCollection {
-  type: 'FeatureCollection'
-  features: unknown[]
+  onUnavailableReason?: (reason: string | null) => void
 }
 
 function segmentFilter(segmentId?: string | null): FilterSpecification {
@@ -30,12 +30,7 @@ function segmentFilter(segmentId?: string | null): FilterSpecification {
 }
 
 export function floodTileUrl(runId: string, validTime: string) {
-  const params = new URLSearchParams({
-    run_id: runId,
-    duration: '1h',
-    valid_time: validTime,
-  })
-  return buildApiUrl(`/api/v1/tiles/flood-return-period?${params.toString()}`)
+  return buildFloodReturnPeriodGeoJsonUrl(runId, validTime)
 }
 
 export function floodReturnPeriodLayer(selectedLevel?: AlertLevel | null): LayerProps {
@@ -53,30 +48,35 @@ export function FloodReturnPeriodLayer({
   selectedLevel,
   hoveredSegmentId,
   selectedSegmentId,
+  onUnavailableReason,
 }: FloodReturnPeriodLayerProps) {
-  const [data, setData] = useState<GeoJsonFeatureCollection | null>(null)
+  const [data, setData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
     setData(null)
+    onUnavailableReason?.(null)
 
-    apiFetch(floodTileUrl(runId, validTime), { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) return null
-        const payload = (await response.json()) as GeoJsonFeatureCollection
-        return payload.type === 'FeatureCollection' ? payload : null
-      })
-      .then((payload) => {
-        if (!controller.signal.aborted) setData(payload)
+    fetchFloodReturnPeriodFeatureCollection(floodTileUrl(runId, validTime), { signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return
+        if (result.ok) {
+          setData(result.data)
+          onUnavailableReason?.(null)
+        } else {
+          setData(null)
+          onUnavailableReason?.(result.reason)
+        }
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted && !(error instanceof DOMException && error.name === 'AbortError')) {
           setData(null)
+          onUnavailableReason?.('洪水重现期地图数据加载失败，地图暂不显示该叠加层。')
         }
       })
 
     return () => controller.abort()
-  }, [runId, validTime])
+  }, [onUnavailableReason, runId, validTime])
 
   const hoverLayer: LayerProps = {
     id: FLOOD_TILE_HOVER_LAYER_ID,

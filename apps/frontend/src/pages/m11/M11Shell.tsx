@@ -1,13 +1,14 @@
-import type { CSSProperties, ReactNode } from 'react'
+import { useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronRight, Clock, ListFilter, MapPinned, Search } from 'lucide-react'
+import { ChevronRight, Clock, ListFilter, MapPinned, PanelLeftClose, PanelRightClose, Search } from 'lucide-react'
 
-import type { LayerState, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryPatch, M11QueryState } from '@/lib/m11/queryState'
 import { serializeM11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 import { type M11TimelineDerivedTimes, M11MapSurface, M11Timeline } from '@/pages/m11/M11Controls'
 import type { M11MapCameraFit, M11MapCameraFlyTo, M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
+import { cn } from '@/lib/cn'
 
 interface M11LayoutProps {
   title: string
@@ -19,6 +20,8 @@ interface M11LayoutProps {
   mapTitle: string
   mapMeta: string
   layers?: LayerState[]
+  basins?: OverviewBasin[]
+  visibleBasinIds?: string[]
   sourceSelection?: SourceScenarioSelectionState | null
   derivedTimeline?: M11TimelineDerivedTimes | null
   fitTo?: M11MapCameraFit | null
@@ -39,6 +42,8 @@ export function M11Layout({
   mapTitle,
   mapMeta,
   layers = [],
+  basins = [],
+  visibleBasinIds,
   sourceSelection = null,
   derivedTimeline = null,
   fitTo = null,
@@ -49,26 +54,42 @@ export function M11Layout({
   children,
 }: M11LayoutProps) {
   const timelineQuery = serializeM11QueryState(state)
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const [rightCollapsed, setRightCollapsed] = useState(false)
 
   return (
     <div
-      className="grid min-h-[calc(100vh-88px)] gap-0 overflow-hidden rounded-md border border-neutral-300 bg-white shadow-md xl:grid-cols-[var(--m11-left-panel-width)_minmax(0,1fr)_var(--m11-right-panel-width)] xl:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]"
+      className={cn(
+        'grid h-[calc(100vh-88px)] min-h-[42rem] gap-0 overflow-hidden rounded-md border border-neutral-300 bg-white shadow-md min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]',
+        leftCollapsed && rightCollapsed
+          ? 'min-[1200px]:grid-cols-[2.75rem_minmax(0,1fr)_2.75rem]'
+          : leftCollapsed
+            ? 'min-[1200px]:grid-cols-[2.75rem_minmax(0,1fr)_300px] min-[1440px]:grid-cols-[2.75rem_minmax(0,1fr)_var(--m11-right-panel-width)]'
+            : rightCollapsed
+              ? 'min-[1200px]:grid-cols-[260px_minmax(0,1fr)_2.75rem] min-[1440px]:grid-cols-[var(--m11-left-panel-width)_minmax(0,1fr)_2.75rem]'
+              : 'min-[1200px]:grid-cols-[260px_minmax(0,1fr)_300px] min-[1440px]:grid-cols-[var(--m11-left-panel-width)_minmax(0,1fr)_var(--m11-right-panel-width)]',
+      )}
       data-testid="m11-shell"
+      data-layout="map-first-compact"
+      data-left-panel={leftCollapsed ? 'collapsed' : 'expanded'}
+      data-right-panel={rightCollapsed ? 'collapsed' : 'expanded'}
       style={{
         '--m11-left-panel-width': m11VisualTokens.leftPanelWidth,
         '--m11-right-panel-width': m11VisualTokens.rightPanelWidth,
         '--m11-timeline-height': m11VisualTokens.timelineHeight,
       } as CSSProperties}
     >
-      <aside className="min-h-0 border-b border-neutral-300 bg-white xl:border-b-0 xl:border-r" aria-label="M11 左侧面板">
-        <PanelHeader title={title} subtitle={subtitle} />
-        <div className="space-y-5 p-4 text-sm">{left}</div>
+      <aside className="min-h-0 overflow-hidden border-b border-neutral-300 bg-white min-[1200px]:border-b-0 min-[1200px]:border-r" aria-label="M11 左侧面板">
+        <PanelHeader title={title} subtitle={subtitle} collapsed={leftCollapsed} side="left" onToggle={() => setLeftCollapsed((value) => !value)} />
+        <div className={cn('space-y-5 p-4 text-sm', leftCollapsed && 'hidden')}>{left}</div>
       </aside>
 
-      <section className="relative min-h-[30rem] overflow-hidden bg-[#d7e7ef] xl:min-h-0" aria-label={mapLabel}>
+      <section className="relative min-h-[30rem] overflow-hidden bg-[#d7e7ef] min-[1200px]:min-h-0" aria-label={mapLabel}>
         <M11MapSurface
           state={state}
           layers={layers}
+          basins={basins}
+          visibleBasinIds={visibleBasinIds}
           onQueryChange={onQueryChange}
           fitTo={fitTo}
           flyTo={flyTo}
@@ -98,14 +119,14 @@ export function M11Layout({
       </section>
 
       <aside
-        className="min-h-0 border-t border-neutral-300 bg-white xl:border-l xl:border-t-0"
+        className="min-h-0 overflow-hidden border-t border-neutral-300 bg-white min-[1200px]:border-l min-[1200px]:border-t-0"
         aria-label="M11 右侧面板"
       >
-        <PanelHeader title="运行态势" subtitle="摘要与图例" />
-        <div className="space-y-5 p-4 text-sm">{right}</div>
+        <PanelHeader title="运行态势" subtitle="摘要与图例" collapsed={rightCollapsed} side="right" onToggle={() => setRightCollapsed((value) => !value)} />
+        <div className={cn('space-y-5 p-4 text-sm', rightCollapsed && 'hidden')}>{right}</div>
       </aside>
 
-      <div className="relative xl:col-span-3">
+      <div className="relative min-h-0 min-[1200px]:col-span-3" data-testid="m11-timeline-region">
         <M11Timeline
           state={state}
           layers={layers}
@@ -124,11 +145,39 @@ export function M11Layout({
   )
 }
 
-function PanelHeader({ title, subtitle }: { title: string; subtitle: string }) {
+function PanelHeader({
+  title,
+  subtitle,
+  collapsed = false,
+  side,
+  onToggle,
+}: {
+  title: string
+  subtitle: string
+  collapsed?: boolean
+  side?: 'left' | 'right'
+  onToggle?: () => void
+}) {
+  const ToggleIcon = side === 'right' ? PanelRightClose : PanelLeftClose
   return (
     <div className="border-b border-neutral-300 bg-primary-50 px-4 py-3">
-      <h1 className="text-base font-semibold leading-6 text-primary-700">{title}</h1>
-      <p className="mt-0.5 text-xs leading-5 text-neutral-700">{subtitle}</p>
+      <div className={cn('flex items-start justify-between gap-2', collapsed && 'min-[1200px]:justify-center')}>
+        <div className={cn(collapsed && 'min-[1200px]:hidden')}>
+          <h1 className="text-base font-semibold leading-6 text-primary-700">{title}</h1>
+          <p className="mt-0.5 text-xs leading-5 text-neutral-700">{subtitle}</p>
+        </div>
+        {onToggle ? (
+          <button
+            type="button"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-primary-700 hover:bg-primary-100"
+            aria-label={`${collapsed ? '展开' : '折叠'}${side === 'right' ? '右侧' : '左侧'}面板`}
+            aria-expanded={!collapsed}
+            onClick={onToggle}
+          >
+            {collapsed ? <ChevronRight className="h-4 w-4" aria-hidden="true" /> : <ToggleIcon className="h-4 w-4" aria-hidden="true" />}
+          </button>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -152,7 +201,19 @@ export function StateReadout({ state, basinId }: { state: M11QueryState; basinId
   )
 }
 
-export function BasinLink({ to, children }: { to: string; children: ReactNode }) {
+export function BasinLink({ to, children, disabled = false }: { to: string; children: ReactNode; disabled?: boolean }) {
+  if (disabled) {
+    return (
+      <span
+        aria-disabled="true"
+        className="flex h-9 cursor-not-allowed items-center justify-between rounded border border-neutral-300 px-3 text-sm font-medium text-neutral-500"
+      >
+        {children}
+        <ChevronRight className="h-4 w-4" aria-hidden="true" />
+      </span>
+    )
+  }
+
   return (
     <Link
       to={to}

@@ -40,6 +40,25 @@ export interface M11Bbox {
   maxLat: number
 }
 
+export const m11BasinGeometryBudget = {
+  maxPolygons: 256,
+  maxRings: 1024,
+  maxVertices: 50_000,
+  maxCoordinateDimensions: 3,
+  maxSerializedBytes: 1_000_000,
+} as const
+
+export interface M11BasinGeometryBudgetStatus {
+  ok: boolean
+  reason: string | null
+  bbox: M11Bbox | null
+  polygonCount: number
+  ringCount: number
+  vertexCount: number
+  serializedBytes: number
+  sanitizedGeometry: components['schemas']['GeoJsonMultiPolygon'] | null
+}
+
 export interface BasinVersionOption {
   basinVersionId: string
   versionLabel: string
@@ -47,6 +66,7 @@ export interface BasinVersionOption {
   validFrom: string | null
   validTo: string | null
   sourceUri: string | null
+  boundary: components['schemas']['GeoJsonMultiPolygon'] | null
   bbox: M11Bbox | null
   unavailableReason: string | null
 }
@@ -79,6 +99,7 @@ export interface OverviewBasin {
   basinGroup: string | null
   parentBasinId: string | null
   level: number
+  boundary: components['schemas']['GeoJsonMultiPolygon'] | null
   bbox: M11Bbox | null
   areaKm2: number | null
   riverCount: number | null
@@ -130,6 +151,7 @@ export interface BasinDetail {
   basinGroup: string | null
   selectedBasinVersionId: string | null
   basinVersions: BasinVersionOption[]
+  boundary: components['schemas']['GeoJsonMultiPolygon'] | null
   bbox: M11Bbox | null
   segmentCount: number | null
   warningDistribution: Record<M11WarningLevel, number>
@@ -306,6 +328,7 @@ export function createEmptyBasinDetail(
     basinGroup: null,
     selectedBasinVersionId: null,
     basinVersions: [],
+    boundary: null,
     bbox: null,
     segmentCount: null,
     warningDistribution: { ...emptyWarningCounts },
@@ -377,8 +400,9 @@ export function normalizeOverviewBasins(input: {
       basinGroup: normalizeString(basin.basin_group),
       parentBasinId: null,
       level: basin.basin_group ? 2 : 1,
+      boundary: selectedVersion?.boundary ?? null,
       bbox: selectedVersion?.bbox ?? null,
-      areaKm2: null,
+      areaKm2: selectedVersion?.boundary ? polygonAreaKm2(selectedVersion.boundary) : null,
       riverCount: sumNullable(basinModels.map((model) => numberOrNull(model.segment_count))),
       activeModelCount: basinModels.filter((model) => model.active_flag).length,
       latestForecastTime: latestIso(basinRuns.map((run) => run.cycle_time ?? run.updated_at ?? run.created_at)),
@@ -404,7 +428,11 @@ export function normalizeOverviewSummary(input: {
   partialErrors?: string[]
 }): OverviewSummary {
   const availableSources = sourcesFromRuns(input.runs ?? (input.latestRun ? [input.latestRun] : []))
-  const sourceSelection = createSourceScenarioSelection(input.query, availableSources)
+  const selectionQuery =
+    input.query.source === 'best'
+      ? { ...input.query, cycle: input.latestRun?.cycle_time ?? input.pipeline?.cycle_time ?? input.query.cycle }
+      : input.query
+  const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
   const levels = input.floodSummary?.levels ?? []
   const warningSegmentCount = levels
     .filter((level) => isSuperWarningLevel(normalizeWarningLevel(level.level)))
@@ -463,7 +491,8 @@ export function normalizeLayerStates(input: {
     const validTimes = apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes
     const currentValidTime = pickCurrentValidTime(validTimes, input.query.validTime)
     const isKnownRequired = (requiredLayers as string[]).includes(layerId)
-    const available = Boolean(apiLayer) && validTimes.length > 0
+    const renderable = isM11RenderableLayer(layerId)
+    const available = Boolean(apiLayer) && validTimes.length > 0 && renderable
     const availableSources = input.resolvedRun ? sourcesFromRuns([input.resolvedRun]) : []
     const sourceSelection = createSourceScenarioSelection(input.query, availableSources)
 
@@ -477,11 +506,13 @@ export function normalizeLayerStates(input: {
       validTimeSource: apiValidTimes.length > 0 ? 'api' : derivedValidTimes.length > 0 ? 'derived' : 'none',
       disabledReason: available
         ? null
-        : !apiLayer && isKnownRequired
-          ? 'Layer is not registered by the API.'
-          : validTimes.length === 0
-            ? 'Layer has no valid times.'
-            : null,
+        : apiLayer && validTimes.length > 0 && !renderable
+          ? 'Layer is registered but no renderable map source is implemented in this repository.'
+          : !apiLayer && isKnownRequired
+            ? 'Layer is not registered by the API.'
+            : validTimes.length === 0
+              ? 'Layer has no valid times.'
+              : null,
       freshness: createFreshnessMetadata({
         cycleTime: input.resolvedRun?.cycle_time ?? input.query.cycle,
         validTime: currentValidTime,
@@ -497,6 +528,7 @@ export function normalizeLayerStates(input: {
 export function normalizeBasinDetail(input: {
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'basinVersionId'>
   basin: ApiBasin | null
+  basinLookupAvailable?: boolean
   versions: ApiBasinVersion[]
   models?: ApiModelInstance[]
   segments?: ApiRiverFeatureCollection | null
@@ -522,6 +554,7 @@ export function normalizeBasinDetail(input: {
     basinGroup: normalizeString(input.basin?.basin_group),
     selectedBasinVersionId: selectedVersionId,
     basinVersions: versions,
+    boundary: selectedVersion?.boundary ?? null,
     bbox: selectedVersion?.bbox ?? null,
     segmentCount: input.segments?.total ?? input.segments?.features.length ?? null,
     warningDistribution: warningCountsFromRanking(input.rankingItems ?? []),
@@ -535,7 +568,7 @@ export function normalizeBasinDetail(input: {
       unavailableReason: input.latestRun ? null : 'No latest run is available for this basin/source.',
     }),
     sourceSelection,
-    unavailableReason: !input.basin
+    unavailableReason: !input.basin && input.basinLookupAvailable !== false
       ? 'Basin was not found.'
       : versions.length === 0
         ? 'No published basin version is available.'
@@ -787,7 +820,9 @@ function forecastUnit(forecast: ApiForecastPayload | null | undefined): string |
 
 function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption[] {
   return versions.map((version) => {
-    const bbox = bboxFromMultiPolygon(version.geom)
+    const geometryStatus = getM11BasinGeometryBudgetStatus(version.geom)
+    const bbox = geometryStatus.ok ? geometryStatus.bbox : null
+    const boundary = geometryStatus.ok ? geometryStatus.sanitizedGeometry : null
     return {
       basinVersionId: version.basin_version_id,
       versionLabel: version.version_label,
@@ -795,42 +830,190 @@ function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption
       validFrom: normalizeIsoString(version.valid_from),
       validTo: normalizeIsoString(version.valid_to),
       sourceUri: normalizeString(version.source_uri),
+      boundary,
       bbox,
-      unavailableReason: bbox ? null : 'Basin geometry is unavailable.',
+      unavailableReason: geometryStatus.reason ?? (bbox ? null : 'Basin geometry is unavailable.'),
     }
   })
 }
 
-function bboxFromMultiPolygon(geom: components['schemas']['GeoJsonMultiPolygon'] | null | undefined): M11Bbox | null {
-  if (!geom?.coordinates) return null
-  let bbox: M11Bbox | null = null
-  const stack: unknown[] = [geom.coordinates]
-
-  while (stack.length > 0) {
-    const current = stack.pop()
-    if (!Array.isArray(current)) continue
-
-    if (current.length >= 2 && typeof current[0] !== 'object' && typeof current[1] !== 'object') {
-      const lon = numberOrNull(current[0])
-      const lat = numberOrNull(current[1])
-      if (lon === null || lat === null) continue
-      bbox = bbox
-        ? {
-            minLon: Math.min(bbox.minLon, lon),
-            minLat: Math.min(bbox.minLat, lat),
-            maxLon: Math.max(bbox.maxLon, lon),
-            maxLat: Math.max(bbox.maxLat, lat),
-          }
-        : { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat }
-      continue
-    }
-
-    for (let index = current.length - 1; index >= 0; index -= 1) {
-      stack.push(current[index])
-    }
+export function getM11BasinGeometryBudgetStatus(
+  geom: components['schemas']['GeoJsonMultiPolygon'] | null | undefined,
+): M11BasinGeometryBudgetStatus {
+  if (!geom?.coordinates) {
+    return geometryStatus(false, 'Basin geometry is unavailable.', null, 0, 0, 0, 0, null)
+  }
+  if (geom.type !== 'MultiPolygon' || !Array.isArray(geom.coordinates)) {
+    return geometryStatus(false, 'Basin geometry is malformed.', null, 0, 0, 0, serializedByteLength(geom), null)
   }
 
-  return bbox
+  let bbox: M11Bbox | null = null
+  let polygonCount = 0
+  let ringCount = 0
+  let vertexCount = 0
+  const sanitizedCoordinates: number[][][][] = []
+
+  for (const polygon of geom.coordinates as unknown[]) {
+    if (!Array.isArray(polygon)) return geometryMalformed(polygonCount, ringCount, vertexCount)
+    polygonCount += 1
+    if (polygonCount > m11BasinGeometryBudget.maxPolygons) return geometryTooLarge(polygonCount, ringCount, vertexCount)
+    const sanitizedPolygon: number[][][] = []
+
+    for (const ring of polygon) {
+      if (!Array.isArray(ring)) return geometryMalformed(polygonCount, ringCount, vertexCount)
+      ringCount += 1
+      if (ringCount > m11BasinGeometryBudget.maxRings) return geometryTooLarge(polygonCount, ringCount, vertexCount)
+      const sanitizedRing: number[][] = []
+
+      for (const coordinate of ring) {
+        if (!Array.isArray(coordinate) || coordinate.length < 2) return geometryMalformed(polygonCount, ringCount, vertexCount)
+        if (coordinate.length > m11BasinGeometryBudget.maxCoordinateDimensions) {
+          return geometryTooWide(polygonCount, ringCount, vertexCount + 1)
+        }
+        vertexCount += 1
+        if (vertexCount > m11BasinGeometryBudget.maxVertices) return geometryTooLarge(polygonCount, ringCount, vertexCount)
+
+        const lon = numberOrNull(coordinate[0])
+        const lat = numberOrNull(coordinate[1])
+        if (lon === null || lat === null) return geometryMalformed(polygonCount, ringCount, vertexCount)
+        const elevation = coordinate.length >= 3 ? numberOrNull(coordinate[2]) : null
+        if (coordinate.length >= 3 && elevation === null) return geometryMalformed(polygonCount, ringCount, vertexCount)
+        sanitizedRing.push(elevation === null ? [lon, lat] : [lon, lat, elevation])
+        bbox = bbox
+          ? {
+              minLon: Math.min(bbox.minLon, lon),
+              minLat: Math.min(bbox.minLat, lat),
+              maxLon: Math.max(bbox.maxLon, lon),
+              maxLat: Math.max(bbox.maxLat, lat),
+            }
+          : { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat }
+      }
+      if (sanitizedRing.length < 4 || !basinRingIsClosed(sanitizedRing)) {
+        return geometryMalformed(polygonCount, ringCount, vertexCount)
+      }
+      sanitizedPolygon.push(sanitizedRing)
+    }
+    sanitizedCoordinates.push(sanitizedPolygon)
+  }
+
+  if (!bbox) return geometryStatus(false, 'Basin geometry is unavailable.', null, polygonCount, ringCount, vertexCount, 0, null)
+  const sanitizedGeometry = { type: 'MultiPolygon' as const, coordinates: sanitizedCoordinates }
+  const serializedBytes = serializedByteLength(sanitizedGeometry)
+  if (serializedBytes > m11BasinGeometryBudget.maxSerializedBytes) {
+    return geometryTooManyBytes(polygonCount, ringCount, vertexCount, serializedBytes)
+  }
+  return geometryStatus(true, null, bbox, polygonCount, ringCount, vertexCount, serializedBytes, sanitizedGeometry)
+}
+
+function geometryTooLarge(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
+  return geometryStatus(
+    false,
+    `Basin geometry exceeds client rendering budget (${vertexCount}/${m11BasinGeometryBudget.maxVertices} vertices).`,
+    null,
+    polygonCount,
+    ringCount,
+    vertexCount,
+    0,
+    null,
+  )
+}
+
+function geometryTooWide(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
+  return geometryStatus(
+    false,
+    `Basin geometry coordinate dimensions exceed client rendering budget (${m11BasinGeometryBudget.maxCoordinateDimensions}).`,
+    null,
+    polygonCount,
+    ringCount,
+    vertexCount,
+    0,
+    null,
+  )
+}
+
+function geometryTooManyBytes(
+  polygonCount: number,
+  ringCount: number,
+  vertexCount: number,
+  serializedBytes: number,
+): M11BasinGeometryBudgetStatus {
+  return geometryStatus(
+    false,
+    `Basin geometry exceeds client serialized-size budget (${serializedBytes}/${m11BasinGeometryBudget.maxSerializedBytes} bytes).`,
+    null,
+    polygonCount,
+    ringCount,
+    vertexCount,
+    serializedBytes,
+    null,
+  )
+}
+
+function geometryMalformed(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
+  return geometryStatus(false, 'Basin geometry is malformed.', null, polygonCount, ringCount, vertexCount, 0, null)
+}
+
+function basinRingIsClosed(ring: number[][]) {
+  const first = ring[0]
+  const last = ring[ring.length - 1]
+  if (!first || !last || first.length !== last.length) return false
+  return first.every((coordinate, index) => coordinate === last[index])
+}
+
+function geometryStatus(
+  ok: boolean,
+  reason: string | null,
+  bbox: M11Bbox | null,
+  polygonCount: number,
+  ringCount: number,
+  vertexCount: number,
+  serializedBytes: number,
+  sanitizedGeometry: components['schemas']['GeoJsonMultiPolygon'] | null,
+): M11BasinGeometryBudgetStatus {
+  return { ok, reason, bbox, polygonCount, ringCount, vertexCount, serializedBytes, sanitizedGeometry }
+}
+
+function serializedByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length
+}
+
+function isM11RenderableLayer(layerId: string) {
+  return layerId === 'flood-return-period'
+}
+
+function polygonAreaKm2(geom: components['schemas']['GeoJsonMultiPolygon']): number | null {
+  if (!geom.coordinates.length) return null
+  const earthRadiusKm = 6371.0088
+  let area = 0
+
+  geom.coordinates.forEach((polygon) => {
+    polygon.forEach((ring, ringIndex) => {
+      if (ring.length < 4) return
+      const ringArea = Math.abs(sphericalRingArea(ring, earthRadiusKm))
+      area += ringIndex === 0 ? ringArea : -ringArea
+    })
+  })
+
+  return area > 0 ? Math.round(area) : null
+}
+
+function sphericalRingArea(ring: number[][], earthRadiusKm: number): number {
+  let sum = 0
+  for (let index = 0; index < ring.length; index += 1) {
+    const current = ring[index]
+    const next = ring[(index + 1) % ring.length]
+    if (!current || !next || current.length < 2 || next.length < 2) continue
+    const lon1 = degreesToRadians(current[0])
+    const lon2 = degreesToRadians(next[0])
+    const lat1 = degreesToRadians(current[1])
+    const lat2 = degreesToRadians(next[1])
+    sum += (lon2 - lon1) * (2 + Math.sin(lat1) + Math.sin(lat2))
+  }
+  return (sum * earthRadiusKm * earthRadiusKm) / 2
+}
+
+function degreesToRadians(value: number) {
+  return (value * Math.PI) / 180
 }
 
 function warningCountsFromRanking(items: ApiFloodAlertRankingItem[]): Record<M11WarningLevel, number> {

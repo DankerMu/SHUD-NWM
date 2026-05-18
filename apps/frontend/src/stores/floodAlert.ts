@@ -18,6 +18,11 @@ type ApiFloodAlertTimeline = components['schemas']['FloodAlertTimeline']
 type ApiFloodAlertTimelinePoint = components['schemas']['FloodAlertTimelinePoint']
 type ApiFloodFrequencyThresholds = components['schemas']['FloodFrequencyThresholds']
 
+let latestRunRequestId = 0
+let summaryRequestId = 0
+let rankingRequestId = 0
+let timelineRequestId = 0
+
 export interface FloodAlertLevelCount {
   level: AlertLevel
   count: number
@@ -105,10 +110,11 @@ interface FloodAlertState {
   setSelectedRunId: (runId: string | null) => void
   setAlertThreshold: (threshold: AlertThreshold | null) => void
   setSelectedAlertLevel: (level: AlertLevel | null) => void
+  assignSelectedAlertLevel: (level: AlertLevel | null) => void
   setSelectedValidTime: (validTime: string | null) => void
   setTopLimit: (limit: 10 | 20 | 50) => void
   setBasinId: (basinId: string) => void
-  fetchLatestFrequencyDoneRun: () => Promise<void>
+  fetchLatestFrequencyDoneRun: (context?: { source?: string | null; cycleTime?: string | null; validTime?: string | null }) => Promise<void>
   fetchSummary: (options?: { validTime?: string | null }) => Promise<void>
   fetchRanking: (options?: { validTime?: string | null; limit?: 10 | 20 | 50 }) => Promise<void>
   fetchTimeline: (segmentId: string) => Promise<void>
@@ -255,6 +261,43 @@ function sortLatestRuns(runs: ApiHydroRun[]) {
   })
 }
 
+function normalizeIso(value: string | null | undefined) {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
+}
+
+function sourceMatches(run: ApiHydroRun, source: string | null | undefined) {
+  if (!source) return true
+  return run.source_id?.toLowerCase() === source.toLowerCase()
+}
+
+function cycleMatches(run: ApiHydroRun, cycleTime: string | null | undefined) {
+  const normalized = normalizeIso(cycleTime)
+  if (!normalized) return true
+  return normalizeIso(run.cycle_time) === normalized
+}
+
+function sourceForRunsQuery(source: string | null | undefined) {
+  if (!source) return undefined
+  if (source.toLowerCase() === 'ifs') return 'IFS'
+  if (source.toLowerCase() === 'gfs') return 'GFS'
+  return source
+}
+
+function explicitContextMissReason(context: { source?: string | null; cycleTime?: string | null } | undefined) {
+  const source = context?.source ? context.source.toUpperCase() : null
+  const cycleTime = normalizeIso(context?.cycleTime)
+  if (source && cycleTime) return `未找到 ${source} 周期 ${cycleTime} 的已完成洪水预警 Run。`
+  if (source) return `未找到 ${source} 的已完成洪水预警 Run。`
+  if (cycleTime) return `未找到周期 ${cycleTime} 的已完成洪水预警 Run。`
+  return null
+}
+
+function sameNullableValue(left: string | number | null | undefined, right: string | number | null | undefined) {
+  return (left ?? null) === (right ?? null)
+}
+
 export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   selectedRunId: null,
   latestRun: null,
@@ -274,35 +317,93 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   timelineLoading: false,
   error: null,
   empty: false,
-  setSelectedRunId: (runId) => set({ selectedRunId: runId, timelineData: null }),
+  setSelectedRunId: (runId) =>
+    set((state) => {
+      const runChanged = state.selectedRunId !== runId
+      return {
+        selectedRunId: runId,
+        summaryData: runChanged ? null : state.summaryData,
+        rankingData: runChanged ? null : state.rankingData,
+        timelineData: runChanged ? null : state.timelineData,
+        summaryLoading: runChanged ? false : state.summaryLoading,
+        rankingLoading: runChanged ? false : state.rankingLoading,
+        timelineLoading: runChanged ? false : state.timelineLoading,
+      }
+    }),
   setAlertThreshold: (threshold) => set({ alertThreshold: threshold }),
   setSelectedAlertLevel: (level) =>
     set((state) => ({ selectedAlertLevel: state.selectedAlertLevel === level ? null : level })),
+  assignSelectedAlertLevel: (level) => set({ selectedAlertLevel: level }),
   setSelectedValidTime: (validTime) => set({ selectedValidTime: validTime }),
   setTopLimit: (limit) => set({ topLimit: limit }),
   setBasinId: (basinId) => set({ basinId }),
-  fetchLatestFrequencyDoneRun: async () => {
+  fetchLatestFrequencyDoneRun: async (context) => {
+    const requestId = ++latestRunRequestId
     set({ loading: true, error: null, empty: false })
     try {
+      const explicitContext = Boolean(context?.source || context?.cycleTime)
+      const runsQuery: {
+        source?: string
+        cycle_time?: string
+        status: 'frequency_done'
+        limit: number
+      } = {
+        status: 'frequency_done',
+        limit: 50,
+      }
+      const source = sourceForRunsQuery(context?.source)
+      const cycleTime = normalizeIso(context?.cycleTime)
+      if (source) runsQuery.source = source
+      if (cycleTime) runsQuery.cycle_time = cycleTime
       const { data, error } = await client.GET('/api/v1/runs', {
-        params: { query: { status: 'frequency_done', limit: 50 } },
+        params: { query: runsQuery },
       })
       if (error) throw new Error(getApiErrorMessage(error, '获取最新预警 Run 失败'))
       const payload = unwrapApiData<ApiHydroRunPage>(data, '获取最新预警 Run 失败')
       const runs = payload.items
-      const latestRun = sortLatestRuns(runs).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(runs)[0] ?? null
+      const matchingRuns = runs.filter((run) => sourceMatches(run, context?.source) && cycleMatches(run, context?.cycleTime))
+      const candidates = explicitContext ? matchingRuns : runs
+      const previousRunId = get().selectedRunId
+      const latestRun = sortLatestRuns(candidates).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(candidates)[0] ?? null
+      const nextRunId = latestRun?.run_id ?? null
+      const runChanged = previousRunId !== nextRunId
+      const validTimes = buildValidTimes(latestRun)
+      const requestedValidTime = normalizeIso(context?.validTime)
+      const contextMissReason = latestRun ? null : explicitContextMissReason(context)
+      if (requestId !== latestRunRequestId) return
       set({
         latestRun,
-        selectedRunId: latestRun?.run_id ?? null,
-        validTimes: buildValidTimes(latestRun),
-        selectedValidTime: null,
+        selectedRunId: nextRunId,
+        validTimes,
+        selectedValidTime: requestedValidTime && validTimes.includes(requestedValidTime) ? requestedValidTime : null,
         loading: false,
         empty: latestRun === null,
-        error: null,
+        error: contextMissReason,
+        summaryData: latestRun && !runChanged ? get().summaryData : null,
+        rankingData: latestRun && !runChanged ? get().rankingData : null,
+        timelineData: latestRun && !runChanged ? get().timelineData : null,
+        summaryLoading: runChanged ? false : get().summaryLoading,
+        rankingLoading: runChanged ? false : get().rankingLoading,
+        timelineLoading: runChanged ? false : get().timelineLoading,
       })
     } catch (error) {
+      if (requestId !== latestRunRequestId) return
       const message = getApiErrorMessage(error, '获取最新预警 Run 失败')
-      set({ loading: false, error: message, empty: false })
+      set({
+        latestRun: null,
+        selectedRunId: null,
+        validTimes: [],
+        selectedValidTime: null,
+        loading: false,
+        empty: false,
+        error: message,
+        summaryData: null,
+        rankingData: null,
+        timelineData: null,
+        summaryLoading: false,
+        rankingLoading: false,
+        timelineLoading: false,
+      })
       throw error
     }
   },
@@ -311,15 +412,28 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
     if (!runId) return
 
     const validTime = options?.validTime ?? get().selectedValidTime
-    set({ summaryLoading: true, error: null })
+    const alertThreshold = get().alertThreshold
+    const requestId = ++summaryRequestId
+    set({ summaryLoading: true, error: null, summaryData: null })
+    const isCurrentRequest = () => {
+      const state = get()
+      return (
+        requestId === summaryRequestId &&
+        state.selectedRunId === runId &&
+        sameNullableValue(state.selectedValidTime, validTime) &&
+        sameNullableValue(state.alertThreshold, alertThreshold)
+      )
+    }
     try {
       const payload = await fetchJson<ApiFloodAlertSummary>('/api/v1/flood-alerts/summary', {
         run_id: runId,
-        threshold: get().alertThreshold,
+        threshold: alertThreshold,
         valid_time: validTime,
       })
+      if (!isCurrentRequest()) return
       set({ summaryData: normalizeSummary(payload), summaryLoading: false, error: null })
     } catch (error) {
+      if (!isCurrentRequest()) return
       const message = getApiErrorMessage(error, '预警统计加载失败')
       set({ summaryLoading: false, error: message })
       throw error
@@ -331,17 +445,31 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
 
     const validTime = options?.validTime ?? get().selectedValidTime
     const limit = options?.limit ?? get().topLimit
-    set({ rankingLoading: true, error: null })
+    const basinId = get().basinId
+    const requestId = ++rankingRequestId
+    set({ rankingLoading: true, error: null, rankingData: null })
+    const isCurrentRequest = () => {
+      const state = get()
+      return (
+        requestId === rankingRequestId &&
+        state.selectedRunId === runId &&
+        sameNullableValue(state.selectedValidTime, validTime) &&
+        state.basinId === basinId &&
+        state.topLimit === limit
+      )
+    }
     try {
       const payload = await fetchJson<ApiFloodAlertRanking>('/api/v1/flood-alerts/ranking', {
         run_id: runId,
         limit,
         offset: 0,
-        basin_id: get().basinId,
+        basin_id: basinId,
         valid_time: validTime,
       })
+      if (!isCurrentRequest()) return
       set({ rankingData: normalizeRanking(payload, limit), rankingLoading: false, error: null })
     } catch (error) {
+      if (!isCurrentRequest()) return
       const message = getApiErrorMessage(error, '预警排名加载失败')
       set({ rankingLoading: false, error: message })
       throw error
@@ -351,13 +479,24 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
     const runId = get().selectedRunId
     if (!runId) return
 
-    set({ timelineLoading: true, error: null })
+    const requestId = ++timelineRequestId
+    set({ timelineLoading: true, error: null, timelineData: null })
+    const isCurrentRequest = () => requestId === timelineRequestId && get().selectedRunId === runId
     try {
       const payload = await fetchJson<ApiFloodAlertTimeline>('/api/v1/flood-alerts/timeline', {
         run_id: runId,
         segment_id: segmentId,
       })
+      if (!isCurrentRequest()) return
       const timeline = normalizeTimeline(payload)
+      if (timeline.segmentId !== segmentId && timeline.riverSegmentId !== segmentId) {
+        set({
+          timelineData: null,
+          timelineLoading: false,
+          error: `河段预警详情响应与请求河段不匹配：请求 ${segmentId}，返回 ${timeline.segmentId || timeline.riverSegmentId || 'unknown'}。`,
+        })
+        return
+      }
       set((state) => ({
         timelineData: timeline,
         validTimes: mergeTimelineValidTimes(state.validTimes, timeline),
@@ -365,6 +504,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         error: null,
       }))
     } catch (error) {
+      if (!isCurrentRequest()) return
       const message = getApiErrorMessage(error, '河段预警详情加载失败')
       set({ timelineLoading: false, error: message })
       throw error
