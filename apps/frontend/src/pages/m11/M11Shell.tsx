@@ -1,11 +1,13 @@
 import type { CSSProperties, ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronRight, Clock, Layers, ListFilter, MapPinned, Search } from 'lucide-react'
+import { ChevronRight, Clock, ListFilter, MapPinned, Search } from 'lucide-react'
 
-import { cn } from '@/lib/cn'
-import type { M11QueryState } from '@/lib/m11/queryState'
+import type { LayerState, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import type { M11QueryPatch, M11QueryState } from '@/lib/m11/queryState'
 import { serializeM11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
+import { type M11TimelineDerivedTimes, M11MapSurface, M11Timeline } from '@/pages/m11/M11Controls'
+import type { M11MapCameraFit, M11MapCameraFlyTo, M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
 
 interface M11LayoutProps {
   title: string
@@ -16,7 +18,14 @@ interface M11LayoutProps {
   mapLabel: string
   mapTitle: string
   mapMeta: string
-  timelineLabel?: string
+  layers?: LayerState[]
+  sourceSelection?: SourceScenarioSelectionState | null
+  derivedTimeline?: M11TimelineDerivedTimes | null
+  fitTo?: M11MapCameraFit | null
+  flyTo?: M11MapCameraFlyTo | null
+  onMapOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
+  onMapOverlayClick?: (interaction: M11MapOverlayInteraction) => void
+  onQueryChange?: (patch: M11QueryPatch) => void
   children?: ReactNode
 }
 
@@ -29,7 +38,14 @@ export function M11Layout({
   mapLabel,
   mapTitle,
   mapMeta,
-  timelineLabel = 'Analysis / Forecast',
+  layers = [],
+  sourceSelection = null,
+  derivedTimeline = null,
+  fitTo = null,
+  flyTo = null,
+  onMapOverlayHover,
+  onMapOverlayClick,
+  onQueryChange,
   children,
 }: M11LayoutProps) {
   const timelineQuery = serializeM11QueryState(state)
@@ -50,9 +66,16 @@ export function M11Layout({
       </aside>
 
       <section className="relative min-h-[30rem] overflow-hidden bg-[#d7e7ef] xl:min-h-0" aria-label={mapLabel}>
-        <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(21,101,192,0.14)_0,rgba(79,195,247,0.18)_42%,rgba(76,175,80,0.13)_100%)]" />
-        <div className="absolute inset-5 rounded-md border border-white/70 bg-white/20 shadow-inner" />
-        <div className="absolute left-8 top-8 rounded-md bg-white/95 p-4 shadow-lg">
+        <M11MapSurface
+          state={state}
+          layers={layers}
+          onQueryChange={onQueryChange}
+          fitTo={fitTo}
+          flyTo={flyTo}
+          onOverlayHover={onMapOverlayHover}
+          onOverlayClick={onMapOverlayClick}
+        />
+        <div className="absolute left-8 top-8 z-[100] rounded-md bg-white/95 p-4 shadow-lg">
           <div className="flex items-center gap-2 text-base font-semibold text-neutral-900">
             <MapPinned className="h-5 w-5 text-primary-600" aria-hidden="true" />
             {mapTitle}
@@ -82,24 +105,21 @@ export function M11Layout({
         <div className="space-y-5 p-4 text-sm">{right}</div>
       </aside>
 
-      <section
-        className="flex h-16 items-center gap-4 border-t border-neutral-300 bg-white px-4 text-sm xl:col-span-3"
-        aria-label="M11 时间轴"
-      >
-        <Clock className="h-4 w-4 text-primary-600" aria-hidden="true" />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-medium text-neutral-900">{state.validTime ?? '等待图层有效时间'}</span>
-            <span className="text-xs text-neutral-700">{timelineLabel}</span>
-          </div>
-          <div className="mt-2 h-2 rounded-full bg-neutral-100">
-            <div className="h-2 w-1/2 rounded-full bg-primary-600" />
-          </div>
+      <div className="relative xl:col-span-3">
+        <M11Timeline
+          state={state}
+          layers={layers}
+          sourceSelection={sourceSelection}
+          derivedTimes={derivedTimeline}
+          onQueryChange={onQueryChange}
+        />
+        <div className="pointer-events-none absolute right-4 top-1 hidden items-center gap-2 lg:flex">
+          <Clock className="h-3.5 w-3.5 text-primary-600" aria-hidden="true" />
+          <code className="max-w-[24rem] truncate text-xs text-neutral-700">
+            {timelineQuery ? `?${timelineQuery}` : 'default query state'}
+          </code>
         </div>
-        <code className="hidden max-w-[24rem] truncate text-xs text-neutral-700 lg:block">
-          {timelineQuery ? `?${timelineQuery}` : 'default query state'}
-        </code>
-      </section>
+      </div>
     </div>
   )
 }
@@ -129,38 +149,6 @@ export function StateReadout({ state, basinId }: { state: M11QueryState; basinId
         </div>
       ))}
     </dl>
-  )
-}
-
-export function LayerList({ activeLayer }: { activeLayer: string }) {
-  const layers = [
-    ['discharge', '河段径流'],
-    ['water-level', '河段水位'],
-    ['flood-return-period', '洪水重现期'],
-    ['warning-level', '预警等级'],
-  ]
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 text-sm font-semibold text-neutral-900">
-        <Layers className="h-4 w-4 text-primary-600" aria-hidden="true" />
-        水文图层
-      </div>
-      <div className="space-y-1">
-        {layers.map(([value, label]) => (
-          <div
-            key={value}
-            className={cn(
-              'flex items-center justify-between rounded px-2 py-1.5 text-sm',
-              activeLayer === value ? 'bg-primary-100 text-primary-700' : 'text-neutral-700',
-            )}
-          >
-            <span>{label}</span>
-            <span className="h-2.5 w-2.5 rounded-full bg-primary-600" />
-          </div>
-        ))}
-      </div>
-    </div>
   )
 }
 

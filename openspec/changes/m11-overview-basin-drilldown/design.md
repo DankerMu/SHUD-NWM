@@ -305,6 +305,100 @@ Issue #161 non-goals:
 - Backend aggregation endpoints are non-goals unless the decision rule is actually met by
   measured request count, per-basin N+1 behavior, or a missing required field.
 
+## Issue #162 Fixture Slice
+
+Fixture level: expanded. Issue #162 introduces shared MapLibre-facing primitives and
+page-level controls for basemaps, layer groups, source/scenario selection, legends, valid-time
+timeline, and playback. Mandatory expanded triggers are public map/control components consumed
+by multiple M11 routes, time-series valid-time boundaries, geospatial source/layer registration,
+legacy route compatibility, and resource-limit handling for playback/timer behavior.
+
+Repair intensity: high. The work touches shared map/timeline/control behavior that later
+overview, basin detail, segment detail, visual evidence, and Playwright workflows will consume.
+It must keep unavailable layers honest and must not fabricate map data or introduce unbounded
+timers/request refreshes.
+
+Change surface:
+
+- Shared components/helpers under `apps/frontend/src/components/map`,
+  `apps/frontend/src/pages/m11`, `apps/frontend/src/lib/m11`, or a similarly scoped M11 module.
+- Overview and basin detail shell wiring for source, layer, basemap, legend, and timeline
+  controls.
+- Query-state updates for `source`, `layer`, `basemap`, and `validTime`.
+- Unit/component tests for basemap switching, layer grouping, source/scenario controls, legends,
+  valid-time fallback, playback boundaries, and unavailable states.
+- Playwright route coverage may be updated when controls become visible in the M11 shell.
+
+Must preserve:
+
+- Existing `/forecast`, `/flood-alerts`, `/monitoring`, `/`, `/overview`, and
+  `/basins/:basinId` tests and behavior.
+- Existing M11 data adapters remain the source of truth for `LayerState`,
+  source/scenario provenance, and valid-time metadata.
+- Best Available resolves to concrete GFS/IFS context or remains unavailable; frontend control
+  changes must not emit unsupported `best_available` or `forecast_best_available` backend
+  request values.
+- Compare mode must remain explicit: comparison availability is surfaced, and missing compare
+  data is unavailable rather than partially unlabeled.
+- Timeline controls must use valid-time arrays from API or explicit payload-derived arrays; they
+  must not synthesize a fixed hourly sequence.
+- Missing layer data, meteorology data, station data, DEM data, map source failures, and empty
+  valid-time lists produce scoped disabled/empty states.
+- Playback timers are cleaned up and bounded by available valid times; route/control changes do
+  not leave stale timers or stale valid-time selections.
+
+Must add/change for #162:
+
+- Reusable basemap state/control with terrain, satellite, and vector choices.
+- Grouped layer controls for hydrology, meteorology, and base layers with disabled/unavailable
+  placeholders for unimplemented meteorology/station/DEM surfaces.
+- Source/scenario controls for GFS, IFS, GFS + IFS 对比, and Best Available with provenance and
+  query-state updates.
+- Active-layer legend for discharge, flood return period, and warning level using `06B` and
+  flood-alert warning colors.
+- Shared valid-time timeline with current time display, draggable/selectable valid-time control,
+  previous/play/pause/next, speed selection, native-resolution ticks where available,
+  data-source label, Analysis/Forecast divider, empty state, stale-time correction, and
+  documented playback end behavior.
+
+Risk packs considered for #162:
+
+- Public API / CLI / script entry: selected - shared map/source/layer/timeline controls are
+  public operator entrypoints and mutate shareable URL query state.
+- Config / project setup: not selected - no deployment or project configuration changes are
+  expected.
+- File IO / path safety / overwrite: not selected - no filesystem operations beyond normal
+  test artifacts.
+- Schema / columns / units / field names: selected - controls consume layer ids, valid-time
+  arrays, warning/return-period bins, units, and source/scenario labels.
+- Geospatial / CRS / shapefile sidecars: selected - MapLibre source/layer registration,
+  basemap switching, overlay restoration, and missing geospatial data states must be safe.
+- Time series / forcing / temporal boundaries: selected - timeline valid times, stale-time
+  correction, playback boundaries, analysis/forecast divider, and source/cycle propagation are
+  core behavior.
+- Numerical stability / conservation / NaN: not selected - no solver or numeric hydrology
+  computation is changed.
+- Solver runtime / performance / threading: not selected - no SHUD runtime changes.
+- Resource limits / large input / discovery: selected - playback timers, valid-time lists, map
+  layer toggles, and repeated source/layer switches must be bounded and cleaned up.
+- Legacy compatibility / examples: selected - existing forecast/flood/monitoring/M11 route
+  workflows must continue to pass.
+- Error handling / rollback / partial outputs: selected - missing layers, empty valid times,
+  unsupported source/layer combinations, and map source failures must remain scoped and honest.
+- Release / packaging / dependency compatibility: selected - avoid new dependencies unless
+  justified by existing project patterns and covered by build/tests.
+- Documentation / migration notes: selected - playback end behavior, unavailable placeholders,
+  and shared component contracts must be visible in code/OpenSpec/tests.
+
+Issue #162 non-goals:
+
+- Production vector-tile/MVT generation, backend tile endpoint work, full overview basin popup
+  UX, basin segment list UX, selected-segment detail panel, full-screen forecast detail, and
+  refreshed `agent-browser` visual evidence remain in issues #163-#165 unless a minimal hook is
+  needed for shared controls.
+- Implementing real meteorology/temperature/precipitation/station/DEM data contracts is out of
+  scope; controls must show these as unavailable rather than rendering fake layers.
+
 ## Verification Strategy
 
 - `cd apps/frontend && corepack pnpm test`

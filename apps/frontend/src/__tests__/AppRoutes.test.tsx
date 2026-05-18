@@ -1,4 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
@@ -6,9 +8,63 @@ import { useAuthStore } from '@/stores/auth'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
+import type { LayerState } from '@/lib/m11/overviewDataContracts'
+
+const m11FitBoundsCalls: Array<unknown[]> = []
+const m11FlyToCalls: Array<unknown> = []
 
 vi.mock('@/components/map/MapView', () => ({
   MapView: () => <div aria-label="河网地图">mock map</div>,
+}))
+
+vi.mock('react-map-gl/maplibre', () => ({
+  default: forwardRef(
+    (
+      {
+        children,
+        interactiveLayerIds,
+        onMouseMove,
+        onMouseLeave,
+        onClick,
+      }: {
+        children: ReactNode
+        interactiveLayerIds?: string[]
+        onMouseMove?: (event: unknown) => void
+        onMouseLeave?: (event: unknown) => void
+        onClick?: (event: unknown) => void
+      },
+      ref,
+    ) => {
+      useImperativeHandle(ref, () => ({
+        fitBounds: (...args: unknown[]) => m11FitBoundsCalls.push(args),
+        flyTo: (args: unknown) => m11FlyToCalls.push(args),
+      }))
+      return (
+        <div
+          data-testid="mock-m11-maplibre-map"
+          data-interactive-layer-ids={(interactiveLayerIds ?? []).join(',')}
+          onMouseMove={() => onMouseMove?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+          onMouseLeave={() => onMouseLeave?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+          onClick={() => onClick?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+        >
+          {children}
+        </div>
+      )
+    },
+  ),
+  Source: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => (
+    <div
+      data-testid="mock-m11-map-source"
+      data-source-id={String(props.id ?? '')}
+      data-source-type={String(props.type ?? '')}
+      data-source-data={String(props.data ?? '')}
+    >
+      {children}
+    </div>
+  ),
+  Layer: (props: Record<string, unknown>) => <div data-testid="mock-m11-map-layer" data-layer-id={String(props.id ?? '')} />,
+  NavigationControl: () => <div />,
+  ScaleControl: () => <div />,
 }))
 
 vi.mock('@/components/forecast/ForecastPanel', () => ({
@@ -22,7 +78,229 @@ vi.mock('@/components/flood/FloodAlertMap', () => ({
 const noopAsync = vi.fn().mockResolvedValue(undefined)
 const overviewAsync = vi.fn().mockResolvedValue(undefined)
 
+const m11LayerFreshness = {
+  updatedAt: null,
+  cycleTime: '2026-05-18T00:00:00.000Z',
+  validTime: '2026-05-18T06:00:00.000Z',
+  runId: 'run-gfs',
+  source: 'GFS' as const,
+  isStale: false,
+  staleAfterHours: 6,
+  unavailableReason: null,
+}
+
+const m11Layers: LayerState[] = [
+  {
+    layerId: 'discharge',
+    displayName: 'River discharge',
+    group: 'hydrology',
+    available: true,
+    validTimes: ['2026-05-18T00:00:00.000Z', '2026-05-18T06:00:00.000Z'],
+    currentValidTime: '2026-05-18T06:00:00.000Z',
+    validTimeSource: 'api',
+    disabledReason: null,
+    freshness: m11LayerFreshness,
+    legend: [{ label: '<500 m3/s', color: '#90CAF9', max: 500 }],
+  },
+  {
+    layerId: 'flood-return-period',
+    displayName: 'Flood return period',
+    group: 'hydrology',
+    available: true,
+    validTimes: ['2026-05-18T06:00:00.000Z'],
+    currentValidTime: '2026-05-18T06:00:00.000Z',
+    validTimeSource: 'api',
+    disabledReason: null,
+    freshness: m11LayerFreshness,
+    legend: [{ label: 'warning', color: '#FF8C00', min: 10, max: 20 }],
+  },
+]
+
+const staleOverviewLayers: LayerState[] = [
+  {
+    ...m11Layers[0],
+    layerId: 'discharge',
+    currentValidTime: '2026-05-17T00:00:00.000Z',
+    validTimes: ['2026-05-17T00:00:00.000Z'],
+    freshness: {
+      ...m11LayerFreshness,
+      validTime: '2026-05-17T00:00:00.000Z',
+    },
+  },
+]
+
+const m11SourceSelection = {
+  requestedSource: 'best' as const,
+  resolvedSource: 'GFS' as const,
+  scenarioIds: ['forecast_gfs_deterministic'],
+  cycleTime: '2026-05-18T00:00:00.000Z',
+  validTime: '2026-05-18T06:00:00.000Z',
+  comparisonAvailable: false,
+  provenanceLabel: 'Best Available (GFS) / cycle 2026-05-18T00:00:00.000Z / valid 2026-05-18T06:00:00.000Z',
+  unavailableReason: null,
+}
+
+function m11Summary(completedCyclesToday = 1) {
+  return {
+    completedCyclesToday,
+    runningJobs: 0,
+    warningSegmentCount: 0,
+    latestUpdate: null,
+    totalBasins: 0,
+    totalSegments: null,
+    sourceSelection: m11SourceSelection,
+    freshness: m11LayerFreshness,
+    qualityNotes: [],
+    partialErrors: [],
+  }
+}
+
+function overviewSnapshot(layers: LayerState[], queryKey = '', dataKey = queryKey, completedCyclesToday = 1) {
+  return {
+    requestScope: {
+      kind: 'overview' as const,
+      queryKey,
+      dataKey,
+      source: 'gfs' as const,
+      layer: 'discharge' as const,
+      cycle: null,
+      validTime: null,
+      basemap: 'vector' as const,
+      basinVersionId: null,
+      segmentId: null,
+      warningLevel: null,
+      q: null,
+    },
+    basins: [],
+    layers,
+    aggregationDecision: {
+      needsAggregationEndpoint: false,
+      reason: 'reuse-existing' as const,
+      evidence: 'test',
+    },
+    summary: m11Summary(completedCyclesToday),
+  }
+}
+
+function overviewSnapshotWithBasin(layers: LayerState[], queryKey = '', dataKey = queryKey, basinId = 'basin-demo') {
+  return {
+    ...overviewSnapshot(layers, queryKey, dataKey),
+    basins: [
+      {
+        basinId,
+        displayName: 'Demo Basin',
+        basinGroup: null,
+        parentBasinId: null,
+        level: 1,
+        bbox: { minLon: 100, minLat: 30, maxLon: 105, maxLat: 35 },
+        areaKm2: null,
+        riverCount: null,
+        activeModelCount: 1,
+        latestForecastTime: null,
+        warningCounts: {
+          normal: 0,
+          elevated: 0,
+          watch: 0,
+          warning: 0,
+          high_risk: 0,
+          severe: 0,
+          extreme: 0,
+          unavailable: 0,
+        },
+        basinVersions: [],
+        selectedBasinVersionId: 'bv-001',
+        unavailableReason: null,
+        qualityNote: null,
+      },
+    ],
+  }
+}
+
+function basinSnapshot(basinId: string, layers: LayerState[], queryKey = '', dataKey = queryKey, currentQ: number | null = 12) {
+  return {
+    requestScope: {
+      kind: 'basin-detail' as const,
+      queryKey,
+      dataKey,
+      basinId,
+      source: 'gfs' as const,
+      layer: 'discharge' as const,
+      cycle: null,
+      validTime: null,
+      basemap: 'vector' as const,
+      basinVersionId: 'bv-001',
+      segmentId: 'seg-009',
+      warningLevel: null,
+      q: null,
+    },
+    detail: {
+      basinId,
+      displayName: 'Demo Basin',
+      basinGroup: null,
+      selectedBasinVersionId: 'bv-001',
+      basinVersions: [],
+      bbox: { minLon: 101, minLat: 31, maxLon: 104, maxLat: 34 },
+      segmentCount: 1,
+      warningDistribution: {
+        normal: 0,
+        elevated: 0,
+        watch: 0,
+        warning: 0,
+        high_risk: 0,
+        severe: 0,
+        extreme: 0,
+        unavailable: 0,
+      },
+      activeModelCount: 1,
+      latestRun: m11LayerFreshness,
+      sourceSelection: m11SourceSelection,
+      unavailableReason: null,
+      partialErrors: [],
+    },
+    segments: [],
+    selectedSegment: currentQ === null
+      ? null
+      : {
+          basinId,
+          basinName: 'Demo Basin',
+          basinVersionId: 'bv-001',
+          riverSegmentId: 'seg-009',
+          segmentId: 'seg-009',
+          displayName: 'Segment 009',
+          modelId: null,
+          riverNetworkVersionId: null,
+          currentQ,
+          qUnit: 'm3/s',
+          returnPeriod: 2,
+          warningLevel: 'watch' as const,
+          qualityFlag: 'ok' as const,
+          qualityNote: null,
+          sourceSelection: { ...m11SourceSelection, comparisonAvailable: true },
+          trendPoints: [
+            { validTime: '2026-05-18T00:00:00.000Z', value: 10, source: 'GFS' as const, scenarioId: 'forecast_gfs_deterministic', role: 'analysis', isAnalysis: true },
+            { validTime: '2026-05-18T06:00:00.000Z', value: currentQ, source: 'GFS' as const, scenarioId: 'forecast_gfs_deterministic', role: 'future_7_days', isAnalysis: false },
+          ],
+          comparisonAvailable: true,
+          lineageStatus: 'available' as const,
+          lineageUnavailableReason: null,
+          handoffUrl: '/forecast',
+          freshness: m11LayerFreshness,
+          unavailableReason: null,
+        },
+    layers,
+  }
+}
+
+const overviewDefaultScopeKey = 'source=gfs'
+const overviewFloodScopeKey = 'source=gfs&layer=flood-return-period'
+const overviewValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z'
+const overviewFloodValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period'
+const basinDefaultScopeKey = 'source=gfs&basinVersionId=bv-001&segmentId=seg-009'
+const basinValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009'
+
 beforeEach(() => {
+  m11FitBoundsCalls.length = 0
+  m11FlyToCalls.length = 0
   overviewAsync.mockResolvedValue(undefined)
   useAuthStore.setState({ role: 'viewer' })
   useFloodAlertStore.setState({
@@ -95,6 +373,140 @@ describe('App route state', () => {
     expect(screen.getAllByText('terrain').length).toBeGreaterThan(0)
   })
 
+  it('renders overview shared controls and drives URL/query reload state', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      overview: overviewSnapshot(m11Layers, ''),
+    })
+    window.history.pushState({}, '', '/overview?source=best&validTime=2026-05-17T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+    expect(screen.getByText('数据源与情景')).toBeInTheDocument()
+    expect(screen.getByText('气象图层')).toBeInTheDocument()
+    expect(screen.getByText('降水格点')).toBeInTheDocument()
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '卫星底图' }))
+    expect(window.location.search).toContain('basemap=satellite')
+
+    await user.click(screen.getByRole('button', { name: /^IFS/ }))
+    expect(window.location.search).toContain('source=ifs')
+    await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ source: 'ifs' })))
+  })
+
+  it('updates overview basemap URL and map style without reloading overview data', async () => {
+    const user = userEvent.setup()
+    const loadOverview = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      overview: overviewSnapshot(m11Layers, overviewDefaultScopeKey),
+      loading: false,
+      loadOverview,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(loadOverview).toHaveBeenCalled())
+    const initialLoadCalls = loadOverview.mock.calls.length
+
+    await user.click(screen.getByRole('button', { name: '卫星底图' }))
+
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('source')).toBe('gfs')
+    expect(params.get('basemap')).toBe('satellite')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'satellite')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap-style', 'm11://basemaps/satellite')
+    expect(loadOverview).toHaveBeenCalledTimes(initialLoadCalls)
+  })
+
+  it('does not correct overview valid time from a stale source/layer snapshot', async () => {
+    const loadOverview = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      overview: overviewSnapshot(staleOverviewLayers, overviewDefaultScopeKey),
+      loading: false,
+      loadOverview,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-16T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(loadOverview).toHaveBeenCalledWith(expect.objectContaining({ layer: 'flood-return-period' })))
+    expect(window.location.search).toContain('validTime=2026-05-16T00%3A00%3A00.000Z')
+
+    useOverviewDataStore.setState({
+      overview: overviewSnapshot(m11Layers, overviewFloodScopeKey),
+      loading: false,
+    })
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+  })
+
+  it('preserves overview URL valid-time changes that are valid for the active layer', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      overview: overviewSnapshot(m11Layers, overviewDefaultScopeKey, overviewValid06ScopeKey),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+
+    await user.click(screen.getByRole('button', { name: '上一个有效时刻' }))
+
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T00%3A00%3A00.000Z'))
+    expect(window.location.search).not.toContain('validTime=2026-05-18T06%3A00%3A00.000Z')
+  })
+
+  it('hides stale overview summary while a valid-time reload is pending', async () => {
+    useOverviewDataStore.setState({
+      overview: overviewSnapshot(m11Layers, overviewDefaultScopeKey, overviewValid06ScopeKey, 7),
+      loading: true,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T00%3A00%3A00.000Z'))
+    expect(window.location.search).not.toContain('validTime=2026-05-18T06%3A00%3A00.000Z')
+    expect(screen.queryByText('7')).not.toBeInTheDocument()
+    expect(screen.getByText('今日完成周期').parentElement).toHaveTextContent('-')
+    expect(screen.getByText('总览数据加载中')).toBeInTheDocument()
+  })
+
+  it('threads overview basin bbox and map handlers through the route surface', async () => {
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(
+        m11Layers,
+        overviewFloodScopeKey,
+        overviewFloodValid06ScopeKey,
+      ),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 36, duration: 450 }]]))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
+    expect(screen.getByTestId('mock-m11-map-source')).toHaveAttribute(
+      'data-source-data',
+      expect.stringContaining('valid_time=2026-05-18T06%3A00%3A00.000Z'),
+    )
+
+    await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
+    await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))
+    expect(screen.getByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+  })
+
   it('does not emit fabricated basin or basin-version IDs when overview data is unavailable', async () => {
     window.history.pushState({}, '', '/overview')
 
@@ -107,9 +519,50 @@ describe('App route state', () => {
     expect(link).not.toHaveAttribute('href', expect.stringContaining('basin-demo'))
   })
 
+  it('encodes overview drill-down basin ids as one path segment and preserves query serialization', async () => {
+    const reservedBasinId = 'basin/demo?branch#run%25'
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(
+        m11Layers,
+        overviewFloodScopeKey,
+        overviewFloodValid06ScopeKey,
+        reservedBasinId,
+      ),
+      loading: false,
+    })
+    window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
+
+    render(<App />)
+
+    const link = await screen.findByRole('link', { name: '进入流域分析' })
+    const href = link.getAttribute('href') ?? ''
+    const url = new URL(href, window.location.origin)
+
+    expect(url.pathname).toBe(`/basins/${encodeURIComponent(reservedBasinId)}`)
+    expect(url.pathname.split('/')).toHaveLength(3)
+    expect(url.search).toBe(
+      '?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001',
+    )
+    expect(url.hash).toBe('')
+  })
+
   it('does not render static basin labels when overview basin inventory is empty', async () => {
     useOverviewDataStore.setState({
       overview: {
+        requestScope: {
+          kind: 'overview',
+          queryKey: '',
+          dataKey: '',
+          source: 'best',
+          layer: 'discharge',
+          cycle: null,
+          validTime: null,
+          basemap: 'vector',
+          basinVersionId: null,
+          segmentId: null,
+          warningLevel: null,
+          q: null,
+        },
         basins: [],
         layers: [],
         aggregationDecision: {
@@ -164,6 +617,20 @@ describe('App route state', () => {
   it('renders unavailable markers for null overview summary fields and preserves real zero values', async () => {
     useOverviewDataStore.setState({
       overview: {
+        requestScope: {
+          kind: 'overview',
+          queryKey: '',
+          dataKey: '',
+          source: 'best',
+          layer: 'discharge',
+          cycle: null,
+          validTime: null,
+          basemap: 'vector',
+          basinVersionId: null,
+          segmentId: null,
+          warningLevel: null,
+          q: null,
+        },
         basins: [],
         layers: [],
         aggregationDecision: {
@@ -256,9 +723,236 @@ describe('App route state', () => {
     replaceState.mockRestore()
   })
 
+  it('renders basin shared controls and drives basin reload query state', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      basinDetail: {
+        requestScope: {
+          kind: 'basin-detail',
+          queryKey: basinDefaultScopeKey,
+          dataKey: basinDefaultScopeKey,
+          basinId: 'basin-demo',
+          source: 'gfs',
+          layer: 'discharge',
+          cycle: null,
+          validTime: null,
+          basemap: 'vector',
+          basinVersionId: 'bv-001',
+          segmentId: 'seg-009',
+          warningLevel: null,
+          q: null,
+        },
+        detail: {
+          basinId: 'basin-demo',
+          displayName: 'Demo Basin',
+          basinGroup: null,
+          selectedBasinVersionId: 'bv-001',
+          basinVersions: [],
+          bbox: null,
+          segmentCount: 1,
+          warningDistribution: {
+            normal: 0,
+            elevated: 0,
+            watch: 0,
+            warning: 0,
+            high_risk: 0,
+            severe: 0,
+            extreme: 0,
+            unavailable: 0,
+          },
+          activeModelCount: 1,
+          latestRun: m11LayerFreshness,
+          sourceSelection: m11SourceSelection,
+          unavailableReason: null,
+          partialErrors: [],
+        },
+        segments: [],
+        selectedSegment: {
+          basinId: 'basin-demo',
+          basinName: 'Demo Basin',
+          basinVersionId: 'bv-001',
+          riverSegmentId: 'seg-009',
+          segmentId: 'seg-009',
+          displayName: 'Segment 009',
+          modelId: null,
+          riverNetworkVersionId: null,
+          currentQ: 12,
+          qUnit: 'm3/s',
+          returnPeriod: 2,
+          warningLevel: 'watch',
+          qualityFlag: 'ok',
+          qualityNote: null,
+          sourceSelection: { ...m11SourceSelection, comparisonAvailable: true },
+          trendPoints: [
+            { validTime: '2026-05-18T00:00:00.000Z', value: 10, source: 'GFS', scenarioId: 'forecast_gfs_deterministic', role: 'analysis', isAnalysis: true },
+            { validTime: '2026-05-18T06:00:00.000Z', value: 12, source: 'GFS', scenarioId: 'forecast_gfs_deterministic', role: 'future_7_days', isAnalysis: false },
+          ],
+          comparisonAvailable: true,
+          lineageStatus: 'available',
+          lineageUnavailableReason: null,
+          handoffUrl: '/forecast',
+          freshness: m11LayerFreshness,
+          unavailableReason: null,
+        },
+        layers: m11Layers,
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(screen.getByText('数据源与情景')).toBeInTheDocument()
+    expect(screen.getByText('水文图层')).toBeInTheDocument()
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /洪水重现期/ }))
+    expect(window.location.search).toContain('layer=flood-return-period')
+    await waitFor(() =>
+      expect(overviewAsync).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ layer: 'flood-return-period' })),
+    )
+  })
+
+  it('updates basin basemap URL and map style without reloading basin data', async () => {
+    const user = userEvent.setup()
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalled())
+    const initialLoadCalls = loadBasinDetail.mock.calls.length
+
+    await user.click(screen.getByRole('button', { name: '地形底图' }))
+
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('source')).toBe('gfs')
+    expect(params.get('basemap')).toBe('terrain')
+    expect(params.get('basinVersionId')).toBe('bv-001')
+    expect(params.get('segmentId')).toBe('seg-009')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'terrain')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap-style', 'm11://basemaps/terrain')
+    expect(loadBasinDetail).toHaveBeenCalledTimes(initialLoadCalls)
+  })
+
+  it('does not correct basin valid time from a stale basin snapshot', async () => {
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-old', staleOverviewLayers, basinDefaultScopeKey),
+      basinLoading: false,
+      loadBasinDetail,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-16T00:00:00Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ source: 'gfs' })))
+    expect(window.location.search).toContain('validTime=2026-05-16T00%3A00%3A00.000Z')
+
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey),
+      basinLoading: false,
+    })
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+  })
+
+  it('preserves basin URL valid-time changes that are valid for the active layer', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey),
+      basinLoading: false,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
+
+    await user.click(screen.getByRole('button', { name: '上一个有效时刻' }))
+
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T00%3A00%3A00.000Z'))
+    expect(window.location.search).not.toContain('validTime=2026-05-18T06%3A00%3A00.000Z')
+  })
+
+  it('hides stale basin detail while a valid-time reload is pending', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey, 42),
+      basinLoading: true,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-18T00:00:00Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T00%3A00%3A00.000Z'))
+    expect(window.location.search).not.toContain('validTime=2026-05-18T06%3A00%3A00.000Z')
+    expect(screen.queryByText(/42 m3\/s/)).not.toBeInTheDocument()
+    expect(screen.getByText('尚未选择河段')).toBeInTheDocument()
+    expect(screen.getByText('流域数据加载中')).toBeInTheDocument()
+  })
+
+  it('threads basin detail bbox and map handlers through the route surface', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey),
+      basinLoading: false,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[101, 31], [104, 34]], { padding: 36, duration: 450 }]]))
+
+    await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
+    await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))
+    expect(screen.getByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+  })
+
   it('renders an unavailable state for invalid basin segment deep links', async () => {
     useOverviewDataStore.setState({
       basinDetail: {
+        requestScope: {
+          kind: 'basin-detail',
+          queryKey: 'basinVersionId=bv-001&segmentId=missing-seg',
+          dataKey: 'basinVersionId=bv-001&segmentId=missing-seg',
+          basinId: 'basin-demo',
+          source: 'best',
+          layer: 'discharge',
+          cycle: null,
+          validTime: null,
+          basemap: 'vector',
+          basinVersionId: 'bv-001',
+          segmentId: 'missing-seg',
+          warningLevel: null,
+          q: null,
+        },
         detail: {
           basinId: 'basin-demo',
           displayName: 'Demo Basin',

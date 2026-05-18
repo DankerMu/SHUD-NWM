@@ -37,11 +37,35 @@ import {
   type OverviewSummary,
   type SelectedSegmentDetail,
 } from '@/lib/m11/overviewDataContracts'
-import type { M11QueryState } from '@/lib/m11/queryState'
+import { defaultM11QueryState, serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
+
+export interface M11SnapshotRequestScope {
+  queryKey: string
+  dataKey: string
+  source: M11QueryState['source']
+  layer: M11QueryState['layer']
+  cycle: string | null
+  validTime: string | null
+  basemap: M11QueryState['basemap']
+  basinVersionId: string | null
+  segmentId: string | null
+  warningLevel: M11QueryState['warningLevel']
+  q: string | null
+}
+
+export interface M11OverviewRequestScope extends M11SnapshotRequestScope {
+  kind: 'overview'
+}
+
+export interface M11BasinRequestScope extends M11SnapshotRequestScope {
+  kind: 'basin-detail'
+  basinId: string
+}
 
 type ModelInstancePage = components['schemas']['ModelInstancePage']
 
 export interface OverviewDataSnapshot {
+  requestScope: M11OverviewRequestScope
   basins: OverviewBasin[]
   summary: OverviewSummary
   layers: LayerState[]
@@ -49,6 +73,7 @@ export interface OverviewDataSnapshot {
 }
 
 export interface BasinDataSnapshot {
+  requestScope: M11BasinRequestScope
   detail: BasinDetail
   segments: BasinSegmentRow[]
   selectedSegment: SelectedSegmentDetail | null
@@ -145,6 +170,67 @@ export function clearOverviewDataCache() {
 
 function cacheKey(path: string, params?: unknown) {
   return `${path}:${JSON.stringify(params ?? {})}`
+}
+
+function requestScopeQueryKey(query: M11QueryState) {
+  return serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap, validTime: null })
+}
+
+function requestScopeDataKey(query: M11QueryState) {
+  return serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap })
+}
+
+function overviewRequestScope(query: M11QueryState): M11OverviewRequestScope {
+  return {
+    kind: 'overview',
+    queryKey: requestScopeQueryKey(query),
+    dataKey: requestScopeDataKey(query),
+    source: query.source,
+    layer: query.layer,
+    cycle: query.cycle,
+    validTime: query.validTime,
+    basemap: query.basemap,
+    basinVersionId: query.basinVersionId,
+    segmentId: query.segmentId,
+    warningLevel: query.warningLevel,
+    q: query.q,
+  }
+}
+
+function basinRequestScope(basinId: string, query: M11QueryState): M11BasinRequestScope {
+  return {
+    ...overviewRequestScope(query),
+    kind: 'basin-detail',
+    basinId,
+  }
+}
+
+export function overviewSnapshotMatchesQuery(snapshot: OverviewDataSnapshot | null | undefined, query: M11QueryState) {
+  return snapshot?.requestScope?.dataKey === requestScopeDataKey(query)
+}
+
+export function overviewSnapshotMetadataMatchesQuery(snapshot: OverviewDataSnapshot | null | undefined, query: M11QueryState) {
+  return snapshot?.requestScope?.queryKey === requestScopeQueryKey(query)
+}
+
+export function basinSnapshotMatchesQuery(
+  snapshot: BasinDataSnapshot | null | undefined,
+  basinId: string,
+  query: M11QueryState,
+) {
+  return snapshot?.requestScope?.kind === 'basin-detail' &&
+    snapshot.requestScope.basinId === basinId &&
+    snapshot.requestScope.dataKey === requestScopeDataKey(query)
+}
+
+export function basinSnapshotMetadataMatchesQuery(
+  snapshot: BasinDataSnapshot | null | undefined,
+  basinId: string,
+  query: M11QueryState,
+) {
+  return snapshot?.requestScope?.kind === 'basin-detail' &&
+    snapshot.requestScope.basinId === basinId &&
+    snapshot.requestScope.queryKey === requestScopeQueryKey(query)
 }
 
 function deleteCacheEntry(key: string) {
@@ -743,7 +829,13 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         resolvedRun: useSingleRunFloodSurfaces ? latestRun : null,
       })
       const aggregationDecision = decideAggregationEndpoint(requestPlan)
-      const snapshot: OverviewDataSnapshot = { basins: overviewBasins, summary, layers: layerStates, aggregationDecision }
+      const snapshot: OverviewDataSnapshot = {
+        requestScope: overviewRequestScope(query),
+        basins: overviewBasins,
+        summary,
+        layers: layerStates,
+        aggregationDecision,
+      }
       if (requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey) {
         set({ overview: snapshot, loading: false, error: partialErrors[0] ?? null })
       }
@@ -758,6 +850,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       if (requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey) {
         const message = '加载总览数据失败'
         const fallback: OverviewDataSnapshot = {
+          requestScope: overviewRequestScope(query),
           basins: [],
           summary: createEmptyOverviewSummary(query),
           layers: [],
@@ -930,7 +1023,13 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         validTimesByLayerId,
         resolvedRun: useSingleRunFloodSurfaces ? latestRun : null,
       })
-      const snapshot: BasinDataSnapshot = { detail, segments: rows, selectedSegment, layers: layerStates }
+      const snapshot: BasinDataSnapshot = {
+        requestScope: basinRequestScope(basinId, query),
+        detail,
+        segments: rows,
+        selectedSegment,
+        layers: layerStates,
+      }
       if (requestNonce === basinRequestNonce && activeBasinRequestKey === requestKey) {
         set({ basinDetail: snapshot, basinLoading: false, basinError: partialErrors[0] ?? null })
       }
@@ -945,6 +1044,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       if (requestNonce === basinRequestNonce && activeBasinRequestKey === requestKey) {
         const message = '加载流域数据失败'
         const fallback: BasinDataSnapshot = {
+          requestScope: basinRequestScope(basinId, query),
           detail: createEmptyBasinDetail(basinId, query),
           segments: [],
           selectedSegment: null,
