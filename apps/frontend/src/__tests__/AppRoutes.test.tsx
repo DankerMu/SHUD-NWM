@@ -1237,6 +1237,42 @@ describe('App route state', () => {
     expect(screen.getByRole('heading', { name: '流域分析' })).toBeInTheDocument()
   })
 
+  it('renders a scoped not-found state for invalid basin ids with overview recovery', async () => {
+    const invalidBasinSnapshot = basinSnapshot('not-a-real-basin', [], '', '', null)
+    useOverviewDataStore.setState({
+      basinDetail: {
+        ...invalidBasinSnapshot,
+        detail: {
+          ...invalidBasinSnapshot.detail,
+          basinId: '',
+          displayName: '',
+          selectedBasinVersionId: null,
+          segmentCount: null,
+          activeModelCount: 0,
+          unavailableReason: 'Basin was not found.',
+        },
+        segments: [],
+        selectedSegment: null,
+        layers: [],
+      },
+      basinLoading: false,
+      basinError: null,
+    })
+    window.history.pushState({}, '', '/basins/not-a-real-basin')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    const unavailableNotice = screen.getByLabelText('流域不可用')
+    expect(unavailableNotice).toBeInTheDocument()
+    expect(screen.getByText('未找到流域')).toBeInTheDocument()
+    expect(screen.getByText('Basin was not found.')).toBeInTheDocument()
+    expect(within(unavailableNotice).getByText('not-a-real-basin')).toBeInTheDocument()
+    expect(within(unavailableNotice).getByRole('link', { name: '返回全国总览' })).toHaveAttribute('href', '/overview')
+    expect(screen.queryByText('选中河段')).not.toBeInTheDocument()
+    expect(screen.queryByText('预警状态')).not.toBeInTheDocument()
+  })
+
   it('renders an unavailable state for invalid basin segment deep links', async () => {
     useOverviewDataStore.setState({
       basinDetail: {
