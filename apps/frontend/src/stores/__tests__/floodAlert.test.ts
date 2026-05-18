@@ -286,4 +286,117 @@ describe('useFloodAlertStore', () => {
     expect(useFloodAlertStore.getState().empty).toBe(true)
     expect(useFloodAlertStore.getState().error).toContain('未找到 IFS 周期 2026-05-12T00:00:00.000Z')
   })
+
+  it('clears stale run-scoped payloads when an explicit IFS handoff resolves a different run', async () => {
+    const ifsRun = {
+      ...latestRun,
+      run_id: 'run-ifs',
+      source_id: 'ifs',
+      cycle_time: '2026-05-13T00:00:00Z',
+      start_time: '2026-05-13T00:00:00Z',
+      end_time: '2026-05-13T06:00:00Z',
+    }
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-1',
+      summaryData: {
+        runId: 'run-1',
+        levels: [{ level: 'warning', count: 2, color: '#f59e0b' }],
+        totalSegments: 4,
+        usableCurves: 3,
+        unavailableCount: 1,
+      },
+      rankingData: {
+        items: [
+          {
+            rank: 1,
+            riverSegmentId: 'old-seg',
+            segmentId: 'old-seg',
+            segmentName: 'Old Segment',
+            returnPeriod: 20,
+            warningLevel: 'warning',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-1',
+        segmentId: 'old-seg',
+        riverSegmentId: 'old-seg',
+        timesteps: [{ validTime: '2026-05-12T03:00:00Z', returnPeriod: 20, warningLevel: 'warning' }],
+      },
+      summaryLoading: true,
+      rankingLoading: true,
+      timelineLoading: true,
+    })
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [ifsRun],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      source: 'ifs',
+      cycleTime: '2026-05-13T00:00:00.000Z',
+      validTime: '2026-05-13T06:00:00.000Z',
+    })
+
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: 'run-ifs',
+      summaryData: null,
+      rankingData: null,
+      timelineData: null,
+      summaryLoading: false,
+      rankingLoading: false,
+      timelineLoading: false,
+    })
+  })
+
+  it('preserves run-scoped payloads when the resolved run is unchanged', async () => {
+    const summaryData = {
+      runId: 'run-1',
+      levels: [{ level: 'warning' as const, count: 2, color: '#f59e0b' }],
+      totalSegments: 4,
+      usableCurves: 3,
+      unavailableCount: 1,
+    }
+    const rankingData = {
+      items: [{ rank: 1, riverSegmentId: 'seg-1', segmentId: 'seg-1', returnPeriod: 20, warningLevel: 'warning' as const }],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    }
+    const timelineData = {
+      runId: 'run-1',
+      segmentId: 'seg-1',
+      riverSegmentId: 'seg-1',
+      timesteps: [{ validTime: '2026-05-12T03:00:00Z', returnPeriod: 20, warningLevel: 'warning' as const }],
+    }
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-1',
+      summaryData,
+      rankingData,
+      timelineData,
+    })
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [latestRun],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun()
+
+    expect(useFloodAlertStore.getState().summaryData).toBe(summaryData)
+    expect(useFloodAlertStore.getState().rankingData).toBe(rankingData)
+    expect(useFloodAlertStore.getState().timelineData).toBe(timelineData)
+  })
 })

@@ -307,7 +307,19 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
   timelineLoading: false,
   error: null,
   empty: false,
-  setSelectedRunId: (runId) => set({ selectedRunId: runId, timelineData: null }),
+  setSelectedRunId: (runId) =>
+    set((state) => {
+      const runChanged = state.selectedRunId !== runId
+      return {
+        selectedRunId: runId,
+        summaryData: runChanged ? null : state.summaryData,
+        rankingData: runChanged ? null : state.rankingData,
+        timelineData: runChanged ? null : state.timelineData,
+        summaryLoading: runChanged ? false : state.summaryLoading,
+        rankingLoading: runChanged ? false : state.rankingLoading,
+        timelineLoading: runChanged ? false : state.timelineLoading,
+      }
+    }),
   setAlertThreshold: (threshold) => set({ alertThreshold: threshold }),
   setSelectedAlertLevel: (level) =>
     set((state) => ({ selectedAlertLevel: state.selectedAlertLevel === level ? null : level })),
@@ -339,21 +351,27 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const runs = payload.items
       const matchingRuns = runs.filter((run) => sourceMatches(run, context?.source) && cycleMatches(run, context?.cycleTime))
       const candidates = explicitContext ? matchingRuns : runs
+      const previousRunId = get().selectedRunId
       const latestRun = sortLatestRuns(candidates).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(candidates)[0] ?? null
+      const nextRunId = latestRun?.run_id ?? null
+      const runChanged = previousRunId !== nextRunId
       const validTimes = buildValidTimes(latestRun)
       const requestedValidTime = normalizeIso(context?.validTime)
       const contextMissReason = latestRun ? null : explicitContextMissReason(context)
       set({
         latestRun,
-        selectedRunId: latestRun?.run_id ?? null,
+        selectedRunId: nextRunId,
         validTimes,
         selectedValidTime: requestedValidTime && validTimes.includes(requestedValidTime) ? requestedValidTime : null,
         loading: false,
         empty: latestRun === null,
         error: contextMissReason,
-        summaryData: latestRun ? get().summaryData : null,
-        rankingData: latestRun ? get().rankingData : null,
-        timelineData: latestRun ? get().timelineData : null,
+        summaryData: latestRun && !runChanged ? get().summaryData : null,
+        rankingData: latestRun && !runChanged ? get().rankingData : null,
+        timelineData: latestRun && !runChanged ? get().timelineData : null,
+        summaryLoading: runChanged ? false : get().summaryLoading,
+        rankingLoading: runChanged ? false : get().rankingLoading,
+        timelineLoading: runChanged ? false : get().timelineLoading,
       })
     } catch (error) {
       const message = getApiErrorMessage(error, '获取最新预警 Run 失败')
@@ -373,8 +391,10 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         threshold: get().alertThreshold,
         valid_time: validTime,
       })
+      if (get().selectedRunId !== runId) return
       set({ summaryData: normalizeSummary(payload), summaryLoading: false, error: null })
     } catch (error) {
+      if (get().selectedRunId !== runId) return
       const message = getApiErrorMessage(error, '预警统计加载失败')
       set({ summaryLoading: false, error: message })
       throw error
@@ -395,8 +415,10 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         basin_id: get().basinId,
         valid_time: validTime,
       })
+      if (get().selectedRunId !== runId) return
       set({ rankingData: normalizeRanking(payload, limit), rankingLoading: false, error: null })
     } catch (error) {
+      if (get().selectedRunId !== runId) return
       const message = getApiErrorMessage(error, '预警排名加载失败')
       set({ rankingLoading: false, error: message })
       throw error
@@ -412,6 +434,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         run_id: runId,
         segment_id: segmentId,
       })
+      if (get().selectedRunId !== runId) return
       const timeline = normalizeTimeline(payload)
       set((state) => ({
         timelineData: timeline,
@@ -420,6 +443,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
         error: null,
       }))
     } catch (error) {
+      if (get().selectedRunId !== runId) return
       const message = getApiErrorMessage(error, '河段预警详情加载失败')
       set({ timelineLoading: false, error: message })
       throw error

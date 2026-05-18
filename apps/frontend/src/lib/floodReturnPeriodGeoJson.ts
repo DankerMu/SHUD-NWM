@@ -226,6 +226,12 @@ function sanitizeGeometry(
   return { ok: true, geometry: { type: value.type, coordinates: coordinates.coordinates } }
 }
 
+type SanitizedPosition = number[]
+type SanitizedLineString = SanitizedPosition[]
+type SanitizedPolygon = SanitizedLineString[]
+type SanitizedMultiLineString = SanitizedLineString[]
+type SanitizedMultiPolygon = SanitizedPolygon[]
+
 function sanitizeCoordinatesForGeometry(
   geometryType: Exclude<FloodGeometryType, 'GeometryCollection'>,
   value: unknown,
@@ -241,7 +247,39 @@ function sanitizeCoordinatesForGeometry(
     Polygon: 2,
     MultiPolygon: 3,
   }
-  return sanitizeCoordinatesAtDepth(value, depthByGeometryType[geometryType], state, geometryType)
+  const coordinates = sanitizeCoordinatesAtDepth(value, depthByGeometryType[geometryType], state, geometryType)
+  if (!coordinates.ok) return coordinates
+
+  switch (geometryType) {
+    case 'Point':
+      return { ok: true, coordinates: coordinates.coordinates as SanitizedPosition }
+    case 'MultiPoint':
+      return { ok: true, coordinates: coordinates.coordinates as SanitizedPosition[] }
+    case 'LineString': {
+      const line = coordinates.coordinates as SanitizedLineString
+      if (line.length < 2) return malformedGeometry(`${geometryType} 至少需要 2 个坐标点。`)
+      return { ok: true, coordinates: line }
+    }
+    case 'MultiLineString': {
+      const lines = coordinates.coordinates as SanitizedMultiLineString
+      if (lines.some((line) => line.length < 2)) return malformedGeometry(`${geometryType} 的每条线至少需要 2 个坐标点。`)
+      return { ok: true, coordinates: lines }
+    }
+    case 'Polygon': {
+      const polygon = coordinates.coordinates as SanitizedPolygon
+      const ringResult = validatePolygonRings(polygon, geometryType)
+      if (!ringResult.ok) return ringResult
+      return { ok: true, coordinates: polygon }
+    }
+    case 'MultiPolygon': {
+      const polygons = coordinates.coordinates as SanitizedMultiPolygon
+      for (const polygon of polygons) {
+        const ringResult = validatePolygonRings(polygon, geometryType)
+        if (!ringResult.ok) return ringResult
+      }
+      return { ok: true, coordinates: polygons }
+    }
+  }
 }
 
 function sanitizeCoordinatesAtDepth(
@@ -299,6 +337,32 @@ function sanitizeCoordinatesAtDepth(
     nested.push(child.coordinates)
   }
   return { ok: true, coordinates: nested }
+}
+
+function validatePolygonRings(
+  rings: SanitizedPolygon,
+  geometryType: 'Polygon' | 'MultiPolygon',
+): { ok: true } | { ok: false; code: FloodReturnPeriodRejectionCode; reason: string } {
+  for (const ring of rings) {
+    if (ring.length < 4) return malformedGeometry(`${geometryType} 的线性环至少需要 4 个坐标点。`)
+    if (!coordinatesMatch(ring[0], ring[ring.length - 1])) {
+      return malformedGeometry(`${geometryType} 的线性环首尾坐标必须一致。`)
+    }
+  }
+  return { ok: true }
+}
+
+function coordinatesMatch(first: SanitizedPosition | undefined, last: SanitizedPosition | undefined) {
+  if (!first || !last || first.length !== last.length) return false
+  return first.every((coordinate, index) => coordinate === last[index])
+}
+
+function malformedGeometry(reason: string): { ok: false; code: FloodReturnPeriodRejectionCode; reason: string } {
+  return {
+    ok: false,
+    code: 'malformed_geometry',
+    reason: `洪水重现期地图数据包含畸形几何：${reason}地图暂不显示该叠加层。`,
+  }
 }
 
 function isCoordinate(value: unknown[]): value is number[] {

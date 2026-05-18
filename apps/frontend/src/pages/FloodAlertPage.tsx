@@ -83,6 +83,12 @@ export function FloodAlertPage() {
   }, [basinId, refreshSnapshots, selectedRunId, toast])
 
   useEffect(() => {
+    setSelectedSegment(null)
+    clearForecastSelection()
+    setPlaying(false)
+  }, [clearForecastSelection, selectedRunId])
+
+  useEffect(() => {
     if (!playing || validTimes.length === 0) return undefined
     const timer = window.setInterval(() => {
       const currentIndex = selectedValidTime ? validTimes.indexOf(selectedValidTime) : -1

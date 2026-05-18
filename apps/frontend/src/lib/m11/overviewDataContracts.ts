@@ -883,6 +883,9 @@ export function getM11BasinGeometryBudgetStatus(
             }
           : { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat }
       }
+      if (sanitizedRing.length < 4 || !basinRingIsClosed(sanitizedRing)) {
+        return geometryMalformed(polygonCount, ringCount, vertexCount)
+      }
       sanitizedPolygon.push(sanitizedRing)
     }
     sanitizedCoordinates.push(sanitizedPolygon)
@@ -943,6 +946,13 @@ function geometryTooManyBytes(
 
 function geometryMalformed(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
   return geometryStatus(false, 'Basin geometry is malformed.', null, polygonCount, ringCount, vertexCount, 0, null)
+}
+
+function basinRingIsClosed(ring: number[][]) {
+  const first = ring[0]
+  const last = ring[ring.length - 1]
+  if (!first || !last || first.length !== last.length) return false
+  return first.every((coordinate, index) => coordinate === last[index])
 }
 
 function geometryStatus(

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -99,6 +99,14 @@ vi.mock('@/components/charts/StageDurationBar', () => ({
 
 vi.mock('@/components/charts/TrendLine', () => ({
   TrendLine: () => <div>mock trend chart</div>,
+}))
+
+vi.mock('@/components/charts/echartsCore', () => ({
+  echarts: {},
+}))
+
+vi.mock('echarts-for-react/lib/core', () => ({
+  default: ({ option }: { option: unknown }) => <pre data-testid="mock-echarts-option">{JSON.stringify(option)}</pre>,
 }))
 
 const noopAsync = vi.fn().mockResolvedValue(undefined)
@@ -1389,6 +1397,114 @@ describe('App route state', () => {
       cycleTime: '2026-05-18T00:00:00.000Z',
       validTime: '2026-05-18T06:00:00.000Z',
     })
+  })
+
+  it('clears old flood-alert cards, ranking, ticker, timeline, and detail during a new IFS handoff failure', async () => {
+    const oldRun = {
+      run_id: 'run-old-gfs',
+      run_type: 'forecast',
+      scenario_id: 'forecast_gfs_deterministic',
+      model_id: 'model-1',
+      basin_version_id: 'basin-v1',
+      source_id: 'gfs',
+      cycle_time: '2026-05-12T00:00:00Z',
+      status: 'frequency_done',
+      start_time: '2026-05-12T00:00:00Z',
+      end_time: '2026-05-12T03:00:00Z',
+      created_at: '2026-05-12T00:00:00Z',
+      updated_at: '2026-05-12T04:00:00Z',
+    }
+    const ifsRun = {
+      ...oldRun,
+      run_id: 'run-new-ifs',
+      scenario_id: 'forecast_ifs_deterministic',
+      source_id: 'ifs',
+      cycle_time: '2026-05-13T00:00:00Z',
+      start_time: '2026-05-13T00:00:00Z',
+      end_time: '2026-05-13T06:00:00Z',
+    }
+    let resolveHandoff: (() => void) | null = null
+    const handoffStarted = vi.fn()
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-old-gfs',
+      latestRun: oldRun,
+      validTimes: ['2026-05-12T00:00:00.000Z', '2026-05-12T03:00:00.000Z'],
+      selectedValidTime: '2026-05-12T03:00:00.000Z',
+      summaryData: {
+        runId: 'run-old-gfs',
+        levels: [{ level: 'warning', count: 2, color: '#f59e0b' }],
+        totalSegments: 4,
+        usableCurves: 3,
+        unavailableCount: 1,
+      },
+      rankingData: {
+        items: [
+          {
+            rank: 1,
+            riverSegmentId: 'old-seg',
+            segmentId: 'old-seg',
+            segmentName: 'Old Segment',
+            basinVersionId: 'basin-v1',
+            qValue: 1234,
+            qUnit: 'm3/s',
+            returnPeriod: 20,
+            warningLevel: 'warning',
+            validTime: '2026-05-12T03:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-old-gfs',
+        segmentId: 'old-seg',
+        riverSegmentId: 'old-seg',
+        timesteps: [{ validTime: '2026-05-12T03:00:00Z', returnPeriod: 20, warningLevel: 'warning' }],
+      },
+      fetchLatestFrequencyDoneRun: async () => {
+        handoffStarted()
+        await new Promise<void>((resolve) => {
+          resolveHandoff = resolve
+        })
+        useFloodAlertStore.setState({
+          selectedRunId: 'run-new-ifs',
+          latestRun: ifsRun,
+          validTimes: ['2026-05-13T00:00:00.000Z', '2026-05-13T06:00:00.000Z'],
+          selectedValidTime: '2026-05-13T06:00:00.000Z',
+          summaryData: null,
+          rankingData: null,
+          timelineData: null,
+        })
+      },
+      fetchSummary: vi.fn().mockRejectedValue(new Error('summary failed')),
+      fetchRanking: vi.fn().mockRejectedValue(new Error('ranking failed')),
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/flood-alerts?source=ifs&cycle=2026-05-13T00:00:00.000Z&validTime=2026-05-13T06:00:00.000Z',
+    )
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    const oldRow = await screen.findByRole('row', { name: /Old Segment/ })
+    await user.click(oldRow)
+    expect(await screen.findByRole('heading', { name: 'Old Segment' })).toBeInTheDocument()
+    await waitFor(() => expect(handoffStarted).toHaveBeenCalled())
+    await act(async () => {
+      resolveHandoff?.()
+    })
+
+    await waitFor(() => expect(useFloodAlertStore.getState().selectedRunId).toBe('run-new-ifs'))
+    await waitFor(() => expect(screen.getByText(/run-new-ifs/)).toBeInTheDocument())
+    expect(screen.queryByText('Old Segment')).not.toBeInTheDocument()
+    expect(screen.queryByText('2 条')).not.toBeInTheDocument()
+    expect(screen.getByText('等待预警数据')).toBeInTheDocument()
+    expect(screen.getByText('暂无排名数据')).toBeInTheDocument()
+    expect(screen.getByText('当前无超警河段')).toBeInTheDocument()
+    expect(useFloodAlertStore.getState().timelineData).toBeNull()
   })
 
   it('routes /monitoring through allowed RBAC to the monitoring workflow content', async () => {

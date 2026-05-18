@@ -446,6 +446,7 @@ describe('M11 overview data contracts', () => {
       100.1234567890123 + index / 100_000,
       30.1234567890123 + index / 100_000,
     ])
+    coordinates[coordinates.length - 1] = [...coordinates[0]]
     const status = getM11BasinGeometryBudgetStatus({
       type: 'MultiPolygon',
       coordinates: [[[...coordinates]]],
@@ -455,6 +456,20 @@ describe('M11 overview data contracts', () => {
     expect(status.vertexCount).toBe(m11BasinGeometryBudget.maxVertices)
     expect(status.reason).toContain('serialized-size budget')
     expect(status.sanitizedGeometry).toBeNull()
+  })
+
+  it('rejects basin MultiPolygon rings that are too short or unclosed', () => {
+    const shortRingStatus = getM11BasinGeometryBudgetStatus({
+      type: 'MultiPolygon',
+      coordinates: [[[[100, 30], [101, 30], [100, 30]]]],
+    })
+    const unclosedRingStatus = getM11BasinGeometryBudgetStatus({
+      type: 'MultiPolygon',
+      coordinates: [[[[100, 30], [101, 30], [101, 31], [100, 31]]]],
+    })
+
+    expect(shortRingStatus).toMatchObject({ ok: false, reason: 'Basin geometry is malformed.', sanitizedGeometry: null })
+    expect(unclosedRingStatus).toMatchObject({ ok: false, reason: 'Basin geometry is malformed.', sanitizedGeometry: null })
   })
 
   it('matches flood-alert rows by basin version as well as duplicated segment IDs', () => {
@@ -688,6 +703,7 @@ describe('M11 overview data contracts', () => {
     for (let index = 0; index < 20_000; index += 1) {
       coordinates[0].push([100 + index * 0.0001, 30 - index * 0.0001])
     }
+    coordinates[0].push([...coordinates[0][0]])
 
     const [normalized] = normalizeOverviewBasins({
       basins: [basin],
