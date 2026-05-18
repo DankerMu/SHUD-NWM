@@ -29,6 +29,15 @@ export function OverviewPage() {
   const basins = overview?.basins ?? []
   const summary = overview?.summary
   const firstBasin = basins[0]
+  const emptyBasinReason =
+    !loading && basins.length === 0
+      ? error ??
+        (summary?.totalBasins === 0
+          ? '暂无可用流域数据'
+          : overview?.aggregationDecision.needsAggregationEndpoint
+            ? overview.aggregationDecision.evidence
+            : '流域清单暂不可用')
+      : null
   const basinSearch = firstBasin
     ? serializeM11QueryState({
         ...state,
@@ -50,15 +59,18 @@ export function OverviewPage() {
         <>
           <div className="space-y-2">
             <div className="text-sm font-semibold text-neutral-900">流域管理</div>
-            {(basins.length > 0 ? basins : ['长江流域', '黄河流域', '珠江流域', '松辽流域']).map((basin) => (
-              <label
-                key={typeof basin === 'string' ? basin : basin.basinId}
-                className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-neutral-700"
-              >
-                <input type="checkbox" defaultChecked className="h-4 w-4" />
-                {typeof basin === 'string' ? basin : basin.displayName}
-              </label>
-            ))}
+            {basins.length > 0 ? (
+              basins.map((basin) => (
+                <label key={basin.basinId} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-neutral-700">
+                  <input type="checkbox" defaultChecked className="h-4 w-4" />
+                  {basin.displayName}
+                </label>
+              ))
+            ) : (
+              <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
+                {loading ? '流域清单加载中' : emptyBasinReason}
+              </div>
+            )}
           </div>
           <LayerList activeLayer={state.layer} />
           <BasinLink to={basinLinkTarget}>{firstBasin ? '进入流域分析' : '等待可用流域'}</BasinLink>

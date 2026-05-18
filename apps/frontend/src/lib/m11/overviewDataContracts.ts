@@ -31,7 +31,7 @@ export type M11WarningLevel =
   | 'unavailable'
 
 export type M11QualityFlag = 'ok' | 'degraded' | 'unavailable' | 'failed' | 'unknown'
-export type M11ResolvedSource = 'GFS' | 'IFS' | 'GFS+IFS' | 'Best Available' | 'Unknown'
+export type M11ResolvedSource = 'GFS' | 'IFS' | 'GFS+IFS' | 'Unknown'
 
 export interface M11Bbox {
   minLon: number
@@ -551,8 +551,8 @@ export function normalizeBasinSegmentRows(input: {
   const features = input.featureCollection?.features ?? []
   const alertById = new Map<string, ApiFloodAlertRankingItem>()
   ;(input.rankingItems ?? []).forEach((item) => {
-    alertById.set(item.river_segment_id, item)
-    alertById.set(item.segment_id, item)
+    alertById.set(versionedSegmentKey(item.basin_version_id, item.river_segment_id), item)
+    alertById.set(versionedSegmentKey(item.basin_version_id, item.segment_id), item)
   })
   ;(input.floodSegments?.segments ?? []).forEach((item) => {
     const rankingLike: ApiFloodAlertRankingItem = {
@@ -568,8 +568,8 @@ export function normalizeBasinSegmentRows(input: {
       duration: '',
       valid_time: item.valid_time,
     }
-    alertById.set(item.river_segment_id, rankingLike)
-    alertById.set(item.segment_id, rankingLike)
+    alertById.set(versionedSegmentKey(item.basin_version_id, item.river_segment_id), rankingLike)
+    alertById.set(versionedSegmentKey(item.basin_version_id, item.segment_id), rankingLike)
   })
 
   const rows = features.map((feature) => segmentRowFromFeature(feature, alertById, input.query))
@@ -660,7 +660,6 @@ function normalizeRequestedSource(source: M11Source): M11Source {
 function resolveSelectedSource(source: M11Source, availableSources: M11ResolvedSource[]): M11ResolvedSource {
   if (source === 'compare') return availableSources.includes('GFS') && availableSources.includes('IFS') ? 'GFS+IFS' : 'Unknown'
   if (source === 'best') {
-    if (availableSources.includes('Best Available')) return 'Best Available'
     if (availableSources.includes('GFS')) return 'GFS'
     if (availableSources.includes('IFS')) return 'IFS'
     return availableSources[0] ?? 'Unknown'
@@ -673,7 +672,6 @@ function scenarioIdsForResolvedSource(source: M11ResolvedSource): string[] {
   if (source === 'GFS') return ['forecast_gfs_deterministic']
   if (source === 'IFS') return ['forecast_ifs_deterministic']
   if (source === 'GFS+IFS') return ['forecast_gfs_deterministic', 'forecast_ifs_deterministic']
-  if (source === 'Best Available') return ['forecast_best_available']
   return []
 }
 
@@ -870,13 +868,19 @@ function layerLegend(layerId: string): LayerLegendEntry[] {
   return []
 }
 
+function versionedSegmentKey(basinVersionId: string, segmentId: string): string {
+  return `${basinVersionId}::${segmentId}`
+}
+
 function segmentRowFromFeature(
   feature: ApiRiverFeature,
   alertById: Map<string, ApiFloodAlertRankingItem>,
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>,
 ): BasinSegmentRow {
   const props = feature.properties
-  const alert = alertById.get(props.river_segment_id) ?? alertById.get(props.segment_id)
+  const alert =
+    alertById.get(versionedSegmentKey(props.basin_version_id, props.river_segment_id)) ??
+    alertById.get(versionedSegmentKey(props.basin_version_id, props.segment_id))
   const sourceSelection = createSourceScenarioSelection(query, alert ? [sourceFromQuery(query.source)] : [])
   const warningLevel = normalizeWarningLevel(alert?.warning_level) ?? 'unavailable'
   return {
@@ -935,7 +939,6 @@ function normalizeForecastSeries(forecast: ApiForecastPayload | null | undefined
 function sourceFromScenario(scenarioId: string, explicitSource?: string | null): M11ResolvedSource {
   const value = `${explicitSource ?? ''} ${scenarioId}`.toLowerCase()
   if (value.includes('ifs')) return 'IFS'
-  if (value.includes('best')) return 'Best Available'
   if (value.includes('gfs')) return 'GFS'
   return 'Unknown'
 }
@@ -943,7 +946,7 @@ function sourceFromScenario(scenarioId: string, explicitSource?: string | null):
 function sourceFromQuery(source: M11Source): M11ResolvedSource {
   if (source === 'ifs') return 'IFS'
   if (source === 'compare') return 'GFS+IFS'
-  if (source === 'best') return 'Best Available'
+  if (source === 'best') return 'Unknown'
   return 'GFS'
 }
 
@@ -963,7 +966,7 @@ function pickCurrentTrendPoint(
   sourceSelection: SourceScenarioSelectionState,
 ): TrendPoint | null {
   const usable = points.filter((point) => {
-    if (sourceSelection.resolvedSource === 'GFS+IFS' || sourceSelection.resolvedSource === 'Best Available') return true
+    if (sourceSelection.resolvedSource === 'GFS+IFS') return true
     return point.source === sourceSelection.resolvedSource || point.isAnalysis
   })
   if (usable.length === 0) return null

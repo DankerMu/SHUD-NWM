@@ -30,7 +30,6 @@ const runTypeOptions = ['forecast', 'analysis', 'hindcast']
 const scenarioOptions = [
   { value: 'forecast_gfs_deterministic', label: 'GFS' },
   { value: 'forecast_ifs_deterministic', label: 'IFS' },
-  { value: 'best_available', label: 'best_available' },
   { value: 'analysis_true_field', label: 'analysis_true_field' },
 ]
 

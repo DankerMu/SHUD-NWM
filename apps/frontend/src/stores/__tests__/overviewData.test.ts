@@ -795,6 +795,142 @@ describe('useOverviewDataStore', () => {
     })
   })
 
+  it('does not bind newer same-segment run surfaces to an explicitly selected older basin version', async () => {
+    const oldVersion = { ...basinVersion, basin_version_id: 'yangtze_v2025_12', version_label: 'v2025_12', active_flag: false }
+    const newVersion = { ...basinVersion, basin_version_id: 'yangtze_v2026_01', version_label: 'v2026_01', active_flag: true }
+    const oldQuery = { ...query, basinVersionId: oldVersion.basin_version_id, segmentId: 'seg-123', source: 'best' as const, cycle: null }
+    const newRun = {
+      ...ifsRun,
+      run_id: 'run-ifs-new-version',
+      basin_version_id: newVersion.basin_version_id,
+      cycle_time: '2026-05-19T00:00:00Z',
+      updated_at: '2026-05-19T01:00:00Z',
+    }
+    const newRanking = {
+      ...ranking,
+      items: [
+        {
+          ...ranking.items[0],
+          basin_version_id: newVersion.basin_version_id,
+          q_value: 9999,
+          return_period: 100,
+          warning_level: 'severe',
+          valid_time: '2026-05-19T06:00:00Z',
+        },
+      ],
+    }
+    const oldFeatures = {
+      ...featureCollection,
+      features: [
+        {
+          ...featureCollection.features[0],
+          properties: {
+            ...featureCollection.features[0].properties,
+            basin_version_id: oldVersion.basin_version_id,
+          },
+        },
+      ],
+    }
+    const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query, pathParams: options?.params?.path })
+
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([oldVersion, newVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [newRun], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [{ ...model, basin_version_id: oldVersion.basin_version_id }], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success(oldFeatures) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return success({
+          river_segment_id: 'seg-123',
+          river_network_version_id: 'yangtze_rivnet_v12_old',
+          segment_order: 1,
+          downstream_segment_id: null,
+          length_m: 1000,
+          geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+          properties_json: {},
+          created_at: '2026-05-01T00:00:00Z',
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/ranking') return success(newRanking) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        return success({
+          river_segment_id: 'seg-123',
+          issue_time: '2026-05-19T00:00:00Z',
+          variable: 'q_down',
+          unit: 'm3/s',
+          frequency_thresholds: null,
+          segments: [
+            {
+              scenario: 'forecast_ifs_deterministic',
+              source: 'IFS',
+              segment_role: 'future_7_days',
+              data: [{ valid_time: '2026-05-19T06:00:00Z', value: 9999 }],
+            },
+          ],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/timeline') {
+        return success({
+          run_id: 'run-ifs-new-version',
+          segment_id: 'seg-123',
+          river_segment_id: 'seg-123',
+          timesteps: [],
+          timeline: [],
+          peak: { valid_time: '2026-05-19T06:00:00Z', return_period: 100, warning_level: 'severe', q_value: 9999 },
+          frequency_thresholds: null,
+          quality_note: null,
+        }) as never
+      }
+      if (path === '/api/v1/lineage/river-point') return success({ target_type: 'river_point', target_id: 'seg-123', nodes: [], edges: [] }) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', oldQuery)
+
+    expect(snapshot.detail.selectedBasinVersionId).toBe(oldVersion.basin_version_id)
+    expect(snapshot.detail.latestRun.runId).toBeNull()
+    expect(snapshot.detail.sourceSelection).toMatchObject({
+      requestedSource: 'best',
+      resolvedSource: 'Unknown',
+      scenarioIds: [],
+    })
+    expect(snapshot.detail.warningDistribution.severe).toBe(0)
+    expect(snapshot.segments[0]).toMatchObject({
+      basinVersionId: oldVersion.basin_version_id,
+      currentQ: null,
+      warningLevel: 'unavailable',
+      source: 'Unknown',
+    })
+    expect(snapshot.selectedSegment).toMatchObject({
+      basinVersionId: oldVersion.basin_version_id,
+      riverSegmentId: 'seg-123',
+      currentQ: null,
+      returnPeriod: null,
+      warningLevel: 'unavailable',
+      trendPoints: [],
+      lineageStatus: 'unavailable',
+    })
+    expect(snapshot.detail.partialErrors).toEqual(
+      expect.arrayContaining([
+        'flood ranking: No same-version concrete run is available for this basin/source.',
+        'flood timeline: No same-version concrete run is available for this basin/source.',
+        'lineage: No same-version concrete run is available for this basin/source.',
+      ]),
+    )
+    expect(calls).not.toEqual(expect.arrayContaining([expect.objectContaining({ path: '/api/v1/flood-alerts/ranking' })]))
+    expect(calls).not.toEqual(expect.arrayContaining([expect.objectContaining({ path: '/api/v1/flood-alerts/timeline' })]))
+    expect(calls).not.toEqual(expect.arrayContaining([expect.objectContaining({ path: '/api/v1/lineage/river-point' })]))
+    expect(calls).not.toEqual(expect.arrayContaining([expect.objectContaining({ path: expect.stringContaining('forecast-series') })]))
+    expect(JSON.stringify(calls)).not.toContain('best_available')
+    expect(JSON.stringify(calls)).not.toContain('forecast_best_available')
+  })
+
   it('preserves IFS source provenance on basin segment rows', async () => {
     const ifsQuery = { ...query, source: 'ifs' as const }
     const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []

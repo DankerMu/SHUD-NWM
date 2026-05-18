@@ -29,6 +29,7 @@ export function BasinDetailPage() {
 
   const detail = basinData?.detail
   const selectedSegment = basinData?.selectedSegment
+  const invalidSegmentRequested = Boolean(state.segmentId && basinData && !loading && !selectedSegment)
 
   return (
     <M11Layout
@@ -56,10 +57,15 @@ export function BasinDetailPage() {
           <div className="rounded-md border border-neutral-300 p-3">
             <div className="text-base font-semibold text-neutral-900">选中河段</div>
             <p className="mt-2 text-sm text-neutral-700">
-              {selectedSegment?.riverSegmentId ?? state.segmentId
-                ? `已恢复 ${selectedSegment?.riverSegmentId ?? state.segmentId}`
-                : '尚未选择河段'}
+              {selectedSegment
+                ? `已恢复 ${selectedSegment.riverSegmentId}`
+                : invalidSegmentRequested
+                  ? `未找到河段 ${state.segmentId}`
+                  : '尚未选择河段'}
             </p>
+            {invalidSegmentRequested ? (
+              <p className="mt-1 text-xs text-neutral-700">当前流域版本中没有匹配的河段数据。</p>
+            ) : null}
             {selectedSegment ? (
               <p className="mt-1 text-xs text-neutral-700">
                 {selectedSegment.currentQ ?? '-'} {selectedSegment.qUnit} / {selectedSegment.warningLevel}

@@ -207,6 +207,23 @@ function latestPublishedRun(runs: ApiHydroRunPage | null, query?: M11QueryState)
   })[0] ?? null
 }
 
+function latestPublishedRunForBasinVersion(
+  runs: ApiHydroRunPage | null,
+  basinVersionId: string | null | undefined,
+  query?: M11QueryState,
+): ApiHydroRun | null {
+  if (!basinVersionId) return null
+  return latestPublishedRun(
+    {
+      items: (runs?.items ?? []).filter((run) => run.basin_version_id === basinVersionId),
+      total: runs?.total ?? 0,
+      limit: runs?.limit ?? 0,
+      offset: runs?.offset ?? 0,
+    },
+    query,
+  )
+}
+
 function shouldUseSingleRunFloodSurfaces(query: M11QueryState) {
   return query.source !== 'compare'
 }
@@ -647,16 +664,21 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const basin = basins.find((item) => item.basin_id === basinId) ?? null
       const versions = settledValue(versionsResult, partialErrors, 'basin versions') ?? []
       const runPage = settledValue(runsResult, partialErrors, 'runs')
-      const latestRun = latestPublishedRun(runPage, query)
-      const concreteSurfaceQuery = concreteQueryForSurfaces(query, latestRun)
-      const canFetchConcreteSurface = hasResolvedSurfaceSource(query, latestRun)
-      const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
       const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const selectedVersion =
         versions.find((version) => version.basin_version_id === query.basinVersionId) ??
         versions.find((version) => version.active_flag) ??
         versions[0] ??
         null
+      const latestRun = latestPublishedRunForBasinVersion(runPage, selectedVersion?.basin_version_id, query)
+      const concreteSurfaceQuery = concreteQueryForSurfaces(query, latestRun)
+      const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
+      const canFetchConcreteSurface =
+        query.source === 'compare' ? true : Boolean(latestRun && hasResolvedSurfaceSource(query, latestRun))
+      const sameVersionRankingUnavailableReason =
+        selectedVersion && useSingleRunFloodSurfaces && !latestRun
+          ? 'No same-version concrete run is available for this basin/source.'
+          : null
 
       const [modelsResult, segmentsResult, rankingResult, ...validTimeResults] = await Promise.allSettled([
         selectedVersion ? fetchModels(selectedVersion.basin_version_id) : Promise.resolve(null),
@@ -670,7 +692,12 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const ranking = settledValue(rankingResult, partialErrors, 'flood ranking')
       if (!useSingleRunFloodSurfaces) {
         partialErrors.push(`flood ranking: ${COMPARE_FLOOD_RANKING_UNAVAILABLE}`)
+      } else if (sameVersionRankingUnavailableReason) {
+        partialErrors.push(`flood ranking: ${sameVersionRankingUnavailableReason}`)
       }
+      const sameVersionRankingItems = selectedVersion
+        ? (ranking?.items ?? []).filter((item) => item.basin_version_id === selectedVersion.basin_version_id)
+        : []
       const validTimesByLayerId: Record<string, string[]> = {}
       layerIdsForOverview(query).forEach((layerId, index) => {
         validTimesByLayerId[layerId] = settledValue(validTimeResults[index], partialErrors, `layer ${layerId} valid times`) ?? []
@@ -682,12 +709,16 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         versions,
         models: models as ApiModelInstance[],
         segments,
-        rankingItems: ranking?.items ?? [],
+        rankingItems: sameVersionRankingItems,
         latestRun: useSingleRunFloodSurfaces ? latestRun : null,
-        runs: runsForSourceSelection(query, runPage?.items ?? [], latestRun),
+        runs: runsForSourceSelection(
+          query,
+          selectedVersion ? (runPage?.items ?? []).filter((run) => run.basin_version_id === selectedVersion.basin_version_id) : [],
+          latestRun,
+        ),
         partialErrors,
       })
-      const rows = normalizeBasinSegmentRows({ query: concreteSurfaceQuery, featureCollection: segments, rankingItems: ranking?.items ?? [] })
+      const rows = normalizeBasinSegmentRows({ query: concreteSurfaceQuery, featureCollection: segments, rankingItems: sameVersionRankingItems })
       const selectedIdentifiers = resolveSelectedSegmentIdentifiers(query.segmentId, rows, segments)
       let selectedSegment: SelectedSegmentDetail | null = null
 
@@ -695,8 +726,11 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         if (!useSingleRunFloodSurfaces) {
           partialErrors.push(`flood timeline: ${COMPARE_FLOOD_TIMELINE_UNAVAILABLE}`)
           partialErrors.push(`lineage: ${COMPARE_LINEAGE_UNAVAILABLE}`)
+        } else if (!latestRun) {
+          partialErrors.push('flood timeline: No same-version concrete run is available for this basin/source.')
+          partialErrors.push('lineage: No same-version concrete run is available for this basin/source.')
         }
-        const selectedRanking = ranking?.items.find(
+        const selectedRanking = sameVersionRankingItems.find(
           (item) =>
             item.river_segment_id === selectedIdentifiers.riverSegmentId ||
             item.segment_id === selectedIdentifiers.segmentId,

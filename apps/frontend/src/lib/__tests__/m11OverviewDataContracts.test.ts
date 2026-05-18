@@ -318,6 +318,40 @@ describe('M11 overview data contracts', () => {
     })
   })
 
+  it('matches flood-alert rows by basin version as well as duplicated segment IDs', () => {
+    const oldVersionFeatures: ApiRiverFeatureCollection = {
+      ...featureCollection,
+      features: [
+        {
+          ...featureCollection.features[0],
+          properties: {
+            ...featureCollection.features[0].properties,
+            basin_version_id: 'yangtze_v2025_12',
+          },
+        },
+      ],
+    }
+    const newerVersionAlert: ApiFloodAlertRankingItem = {
+      ...rankingItem,
+      basin_version_id: 'yangtze_v2026_01',
+      q_value: 9999,
+      warning_level: 'severe',
+    }
+
+    const rows = normalizeBasinSegmentRows({
+      query: { ...query, warningLevel: null, q: null },
+      featureCollection: oldVersionFeatures,
+      rankingItems: [newerVersionAlert],
+    })
+
+    expect(rows[0]).toMatchObject({
+      basinVersionId: 'yangtze_v2025_12',
+      currentQ: null,
+      warningLevel: 'unavailable',
+      qualityFlag: 'unavailable',
+    })
+  })
+
   it('normalizes selected segment detail with forecast provenance, trend points, and lineage status', () => {
     const segment: ApiRiverSegment = {
       river_segment_id: 'yangtze_rivnet_v12_riv_000123',
