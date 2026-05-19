@@ -815,6 +815,67 @@ def test_publish_tiles_success_registers_layer_metadata(
     assert run_status == "published"
 
 
+def test_publish_tiles_metadata_counts_peak_versioned_segments_without_raw_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine()
+    run_id = "fcst_gfs_2026050100_model_001"
+    _seed_publish_product(engine, cycle_id="GFS_2026050100", run_id=run_id, segment_id="shared_seg")
+    with engine.begin() as connection:
+        duplicate_values = {
+            "run_id": run_id,
+            "scenario_id": "forecast_gfs_deterministic",
+            "basin_version_id": "basin_001",
+            "river_network_version_id": "rnv_001",
+            "model_id": "model_001",
+            "river_segment_id": "shared_seg",
+            "valid_time": "2026-05-01 01:00:00",
+            "duration": "1h",
+            "q_value": 125.0,
+            "return_period": 4.0,
+            "warning_level": "watch",
+            "source_id": "GFS",
+            "cycle_time": "2026-05-01 00:00:00",
+            "max_over_window": 0,
+            "quality_flag": "ok",
+        }
+        connection.execute(
+            text(
+                f"""
+                INSERT INTO flood.return_period_result ({', '.join(duplicate_values)})
+                VALUES ({', '.join(f':{column}' for column in duplicate_values)})
+                """
+            ),
+            duplicate_values,
+        )
+        sibling_values = {
+            **duplicate_values,
+            "basin_version_id": "basin_002",
+            "river_network_version_id": "rnv_002",
+            "q_value": 225.0,
+            "return_period": 12.0,
+            "max_over_window": 1,
+        }
+        connection.execute(
+            text(
+                f"""
+                INSERT INTO flood.return_period_result ({', '.join(sibling_values)})
+                VALUES ({', '.join(f':{column}' for column in sibling_values)})
+                """
+            ),
+            sibling_values,
+        )
+    _set_publish_env(monkeypatch, tmp_path, engine)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "GFS_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["layers"][0]["segment_count"] == 2
+
+
 def test_publish_tiles_missing_product_fails_without_layer_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1284,9 +1345,11 @@ def _publish_engine(*, include_lineage_columns: bool = True) -> Engine:
                     return_period REAL,
                     warning_level TEXT,
                     {flood_lineage_columns}
-                    max_over_window BOOLEAN DEFAULT 0,
+                    max_over_window BOOLEAN NOT NULL DEFAULT 0,
                     quality_flag TEXT NOT NULL DEFAULT 'ok',
-                    PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)
+                    PRIMARY KEY (
+                        run_id, river_network_version_id, river_segment_id, duration, valid_time, max_over_window
+                    )
                 )
                 """
             )

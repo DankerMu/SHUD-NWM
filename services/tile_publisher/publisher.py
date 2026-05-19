@@ -179,10 +179,11 @@ class TilePublisher:
                 f"""
                 SELECT h.run_id, h.scenario_id, h.model_id, h.basin_version_id, h.source_id, h.cycle_time,
                        COUNT(r.river_segment_id) AS result_rows,
-                       COUNT(DISTINCT r.river_segment_id) AS segment_count
+                       COUNT(DISTINCT r.river_network_version_id || '::' || r.river_segment_id) AS segment_count
                 FROM hydro.hydro_run h
                 JOIN flood.return_period_result r ON r.run_id = h.run_id
                 WHERE {' AND '.join(where_clauses)}
+                  AND r.max_over_window = true
                 GROUP BY h.run_id, h.scenario_id, h.model_id, h.basin_version_id, h.source_id, h.cycle_time
                 ORDER BY h.run_id
                 """

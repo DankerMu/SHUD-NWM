@@ -20,6 +20,7 @@ from packages.common.forecast_store import PsycopgForecastStore
 RUN_ID = "fcst_gfs_2026050300_all"
 PUBLISHED_RUN_ID = "fcst_gfs_2026050300_published"
 DUPLICATE_SEGMENT_RUN_ID = "fcst_gfs_2026050300_duplicate_segments"
+TIMESTEP_DUPLICATE_RUN_ID = "fcst_gfs_2026050300_timestep_duplicates"
 VALID_TIME_1 = datetime(2026, 5, 3, 6, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 12, tzinfo=UTC)
 
@@ -264,8 +265,8 @@ def test_timeline_filters_duplicate_segment_ids_by_river_network_version() -> No
 
     assert rnv_v1["river_network_version_id"] == "rnv_v1"
     assert rnv_v2["river_network_version_id"] == "rnv_v2"
-    assert [point["q_value"] for point in rnv_v1["timesteps"]] == [111.0]
-    assert [point["q_value"] for point in rnv_v2["timesteps"]] == [222.0]
+    assert [point["q_value"] for point in rnv_v1["timesteps"]] == [110.0]
+    assert [point["q_value"] for point in rnv_v2["timesteps"]] == [220.0]
     assert rnv_v1["peak"]["warning_level"] == "watch"
     assert rnv_v2["peak"]["warning_level"] == "severe"
 
@@ -407,6 +408,21 @@ def test_flood_tile_duplicate_segment_features_have_network_scoped_identity() ->
     assert feature_ids == {"rnv_v1::dup_seg", "rnv_v2::dup_seg"}
 
 
+def test_flood_tile_reads_timestep_row_when_raw_and_peak_share_one_hour_identity() -> None:
+    with _client() as client:
+        response = client.get(
+            "/api/v1/tiles/flood-return-period"
+            f"?run_id={TIMESTEP_DUPLICATE_RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+        )
+
+    assert response.status_code == 200
+    features = response.json()["features"]
+    assert [feature["properties"]["feature_id"] for feature in features] == ["rnv_v1::seg_001"]
+    assert features[0]["properties"]["value"] == 123.0
+    assert features[0]["properties"]["return_period"] == 6.0
+    assert features[0]["properties"]["warning_level"] == "watch"
+
+
 def test_flood_tile_malformed_bbox_uses_validation_envelope() -> None:
     with _client() as client:
         response = client.get(
@@ -504,18 +520,26 @@ def test_flood_tile_postgis_geometry_budgets_precede_geojson_serialization() -> 
 
     statement = flood_alert_routes._flood_return_period_map_sql(FakeSession(), bbox_filter="")
 
-    assert "JOIN core.river_segment rs" in statement
-    assert "rs.geom IS NOT NULL" in statement
-    assert "ST_NPoints(rs.geom) BETWEEN 2 AND :feature_coordinate_limit" in statement
-    assert "ST_NDims(rs.geom) <= :max_coordinate_dimensions" in statement
-    assert "SUM(ST_NPoints(geom)) OVER" in statement
+    assert "WITH matching_segments AS" in statement
+    assert "LEFT JOIN core.river_segment rs" in statement
+    assert "r.max_over_window = :max_over_window" in statement
+    assert "geometry_exclusions AS" in statement
+    assert "feature_coordinate_overflow_count" in statement
+    assert "dimension_overflow_count" in statement
+    assert "malformed_geometry_count" in statement
+    assert "null_geometry_count" in statement
+    assert "coordinate_count BETWEEN 2 AND :feature_coordinate_limit" in statement
+    assert "coordinate_dimensions <= :max_coordinate_dimensions" in statement
+    assert "SUM(coordinate_count) OVER" in statement
     assert "running_coordinate_count <= :collection_coordinate_limit" in statement
     assert "true AS collection_overflow" in statement
     assert "collection_coordinate_count" in statement
+    assert "'feature_coordinates' AS geometry_limit_type" in statement
+    assert "'coordinate_dimensions' AS geometry_limit_type" in statement
+    assert "'malformed_geometry' AS geometry_limit_type" in statement
+    assert "'null_geometry' AS geometry_limit_type" in statement
     assert "ST_AsGeoJSON(geom)::text AS geom_json" in statement
-    assert statement.index("ST_NPoints(rs.geom) BETWEEN 2 AND :feature_coordinate_limit") < statement.index(
-        "ST_AsGeoJSON(geom)::text AS geom_json"
-    )
+    assert statement.index("geometry_exclusions AS") < statement.index("ST_AsGeoJSON(geom)::text AS geom_json")
     assert statement.index("running_coordinate_count <= :collection_coordinate_limit") < statement.index(
         "ST_AsGeoJSON(geom)::text AS geom_json"
     )
@@ -561,6 +585,7 @@ def test_flood_tile_postgis_collection_overflow_sentinel_returns_413_before_payl
 
         def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRows:
             assert "ST_AsGeoJSON(geom)::text AS geom_json" in str(statement)
+            assert parameters["max_over_window"] is False
             assert parameters["collection_coordinate_limit"] == (
                 flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES
             )
@@ -585,6 +610,78 @@ def test_flood_tile_postgis_collection_overflow_sentinel_returns_413_before_payl
     assert exc.value.details["coordinate_count"] == (
         flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES + 2
     )
+
+
+def test_flood_tile_postgis_feature_geometry_sentinel_returns_413_before_payload_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRows:
+        def mappings(self) -> "FakeRows":
+            return self
+
+        def __iter__(self) -> Iterator[dict[str, Any]]:
+            return iter(
+                [
+                    {
+                        "river_segment_id": None,
+                        "basin_version_id": None,
+                        "river_network_version_id": None,
+                        "return_period": None,
+                        "warning_level": None,
+                        "q_value": None,
+                        "q_unit": None,
+                        "quality_flag": None,
+                        "geom_json": None,
+                        "collection_overflow": False,
+                        "collection_coordinate_count": None,
+                        "geometry_limit_type": "feature_coordinates",
+                        "geometry_feature_count": 1,
+                        "geometry_coordinate_count": (
+                            flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES + 1
+                        ),
+                        "geometry_dimension_count": None,
+                    }
+                ]
+            )
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRows:
+            sql = str(statement)
+            assert "WITH matching_segments AS" in sql
+            assert "feature_coordinate_overflow_count" in sql
+            assert parameters["max_over_window"] is False
+            return FakeRows()
+
+    monkeypatch.setattr(flood_alert_routes, "_require_frequency_ready", lambda _session, _run_id: {})
+
+    with pytest.raises(flood_alert_routes.ApiError) as exc:
+        flood_alert_routes.flood_return_period_map(
+            run_id=RUN_ID,
+            duration="1h",
+            valid_time=VALID_TIME_1,
+            bbox=None,
+            return_period=None,
+            limit=10_000,
+            session=FakeSession(),  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 413
+    assert exc.value.code == "FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED"
+    assert exc.value.details == {
+        "limit_type": "feature_coordinates",
+        "feature_count": 1,
+        "max_coordinates": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES,
+        "coordinate_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES + 1,
+    }
 
 
 def test_flood_tile_legacy_pbf_route_redirects_to_geojson_endpoint() -> None:
@@ -845,6 +942,7 @@ def _seed_data(connection: Any) -> None:
         (RUN_ID, "frequency_done"),
         (PUBLISHED_RUN_ID, "published"),
         (DUPLICATE_SEGMENT_RUN_ID, "frequency_done"),
+        (TIMESTEP_DUPLICATE_RUN_ID, "frequency_done"),
         ("run_oversized_geometry", "frequency_done"),
         ("run_pending", "parsed"),
         ("run_empty", "frequency_done"),
@@ -888,6 +986,30 @@ def _seed_data(connection: Any) -> None:
     _insert_result(connection, "seg_001", "basin_v1", "rnv_v1", VALID_TIME_1, 110.0, 3.0, "elevated", False)
     _insert_result(connection, "seg_002", "basin_v1", "rnv_v1", VALID_TIME_1, 210.0, 4.0, "elevated", False)
     _insert_result(connection, "seg_002", "basin_v1", "rnv_v1", VALID_TIME_2, 260.0, 22.0, "warning", False)
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        123.0,
+        6.0,
+        "watch",
+        False,
+        run_id=TIMESTEP_DUPLICATE_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        987.0,
+        90.0,
+        "severe",
+        True,
+        run_id=TIMESTEP_DUPLICATE_RUN_ID,
+    )
     _insert_result(
         connection,
         "seg_no_curve",
@@ -1024,6 +1146,18 @@ def _seed_data(connection: Any) -> None:
     _insert_result(
         connection,
         "dup_seg",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        110.0,
+        6.0,
+        "watch",
+        False,
+        run_id=DUPLICATE_SEGMENT_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "dup_seg",
         "basin_v2",
         "rnv_v2",
         VALID_TIME_1,
@@ -1031,6 +1165,18 @@ def _seed_data(connection: Any) -> None:
         80.0,
         "severe",
         True,
+        run_id=DUPLICATE_SEGMENT_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "dup_seg",
+        "basin_v2",
+        "rnv_v2",
+        VALID_TIME_1,
+        220.0,
+        70.0,
+        "severe",
+        False,
         run_id=DUPLICATE_SEGMENT_RUN_ID,
     )
     _insert_result(

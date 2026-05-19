@@ -519,6 +519,7 @@ def flood_return_period_map(
             "run_id": run_id,
             "duration": duration,
             "valid_time": valid_time,
+            "max_over_window": False,
             "return_period": return_period,
             "query_limit": limit + 1,
             "feature_coordinate_limit": FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES,
@@ -528,6 +529,25 @@ def flood_return_period_map(
         },
     ).mappings()
     rows = list(rows)
+    geometry_overflow_row = next((row for row in rows if row.get("geometry_limit_type")), None)
+    if geometry_overflow_row is not None:
+        limit_type = str(geometry_overflow_row["geometry_limit_type"])
+        details: dict[str, Any] = {
+            "limit_type": limit_type,
+            "feature_count": int(geometry_overflow_row.get("geometry_feature_count") or 0),
+        }
+        if limit_type == "feature_coordinates":
+            details["max_coordinates"] = FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES
+            details["coordinate_count"] = int(geometry_overflow_row.get("geometry_coordinate_count") or 0)
+        elif limit_type == "coordinate_dimensions":
+            details["max_dimensions"] = FLOOD_RETURN_PERIOD_MAP_MAX_COORDINATE_DIMENSIONS
+            details["coordinate_dimensions"] = int(geometry_overflow_row.get("geometry_dimension_count") or 0)
+        raise ApiError(
+            status_code=413,
+            code="FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED",
+            message="Flood return-period GeoJSON geometry budget exceeded; provide a bbox.",
+            details=details,
+        )
     overflow_row = next((row for row in rows if row.get("collection_overflow")), None)
     if overflow_row is not None:
         raise ApiError(
@@ -800,6 +820,7 @@ def _flood_return_period_map_sql(session: Session, *, bbox_filter: str) -> str:
             WHERE r.run_id = :run_id
               AND r.duration = :duration
               AND r.valid_time = :valid_time
+              AND r.max_over_window = :max_over_window
               AND (:return_period IS NULL OR r.return_period >= :return_period)
               {bbox_filter}
             ORDER BY r.river_network_version_id, r.river_segment_id
@@ -807,27 +828,56 @@ def _flood_return_period_map_sql(session: Session, *, bbox_filter: str) -> str:
             """
 
     return f"""
-            WITH eligible_segments AS (
+            WITH matching_segments AS (
                 SELECT r.river_segment_id, r.basin_version_id, r.river_network_version_id,
                        r.return_period, r.warning_level, r.q_value, r.q_unit, r.quality_flag,
-                       rs.geom
+                       rs.geom,
+                       CASE WHEN rs.geom IS NULL THEN NULL ELSE ST_NPoints(rs.geom) END AS coordinate_count,
+                       CASE WHEN rs.geom IS NULL THEN NULL ELSE ST_NDims(rs.geom) END AS coordinate_dimensions
                 FROM flood.return_period_result r
-                JOIN core.river_segment rs
+                LEFT JOIN core.river_segment rs
                   ON rs.river_segment_id = r.river_segment_id
                  AND rs.river_network_version_id = r.river_network_version_id
                 WHERE r.run_id = :run_id
                   AND r.duration = :duration
                   AND r.valid_time = :valid_time
+                  AND r.max_over_window = :max_over_window
                   AND (:return_period IS NULL OR r.return_period >= :return_period)
-                  AND rs.geom IS NOT NULL
-                  AND ST_NPoints(rs.geom) BETWEEN 2 AND :feature_coordinate_limit
-                  AND ST_NDims(rs.geom) <= :max_coordinate_dimensions
                   {bbox_filter}
+            ),
+            geometry_exclusions AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE geom IS NULL) AS null_geometry_count,
+                    COUNT(*) FILTER (
+                        WHERE geom IS NOT NULL AND coordinate_count > :feature_coordinate_limit
+                    ) AS feature_coordinate_overflow_count,
+                    COALESCE(MAX(coordinate_count) FILTER (
+                        WHERE geom IS NOT NULL AND coordinate_count > :feature_coordinate_limit
+                    ), 0) AS feature_coordinate_count,
+                    COUNT(*) FILTER (
+                        WHERE geom IS NOT NULL AND coordinate_count < 2
+                    ) AS malformed_geometry_count,
+                    COALESCE(MIN(coordinate_count) FILTER (
+                        WHERE geom IS NOT NULL AND coordinate_count < 2
+                    ), 0) AS malformed_coordinate_count,
+                    COUNT(*) FILTER (
+                        WHERE geom IS NOT NULL AND coordinate_dimensions > :max_coordinate_dimensions
+                    ) AS dimension_overflow_count,
+                    COALESCE(MAX(coordinate_dimensions) FILTER (
+                        WHERE geom IS NOT NULL AND coordinate_dimensions > :max_coordinate_dimensions
+                    ), 0) AS dimension_count
+                FROM matching_segments
+            ),
+            eligible_segments AS (
+                SELECT *
+                FROM matching_segments
+                WHERE geom IS NOT NULL
+                  AND coordinate_count BETWEEN 2 AND :feature_coordinate_limit
+                  AND coordinate_dimensions <= :max_coordinate_dimensions
             ),
             budgeted_segments AS (
                 SELECT *,
-                       ST_NPoints(geom) AS coordinate_count,
-                       SUM(ST_NPoints(geom)) OVER (
+                       SUM(coordinate_count) OVER (
                            ORDER BY river_network_version_id, river_segment_id
                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                        ) AS running_coordinate_count
@@ -848,16 +898,81 @@ def _flood_return_period_map_sql(session: Session, *, bbox_filter: str) -> str:
             SELECT river_segment_id, basin_version_id, river_network_version_id, return_period,
                    warning_level, q_value, q_unit, quality_flag, ST_AsGeoJSON(geom)::text AS geom_json,
                    false AS collection_overflow,
-                   (SELECT collection_coordinate_count FROM overflow) AS collection_coordinate_count
+                   (SELECT collection_coordinate_count FROM overflow) AS collection_coordinate_count,
+                   NULL AS geometry_limit_type,
+                   NULL AS geometry_feature_count,
+                   NULL AS geometry_coordinate_count,
+                   NULL AS geometry_dimension_count
             FROM bounded_segments
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM geometry_exclusions
+                WHERE null_geometry_count > 0
+                   OR feature_coordinate_overflow_count > 0
+                   OR malformed_geometry_count > 0
+                   OR dimension_overflow_count > 0
+            )
             UNION ALL
             SELECT NULL AS river_segment_id, NULL AS basin_version_id, NULL AS river_network_version_id,
                    NULL AS return_period, NULL AS warning_level, NULL AS q_value, NULL AS q_unit,
                    NULL AS quality_flag, NULL AS geom_json, true AS collection_overflow,
-                   collection_coordinate_count
+                   collection_coordinate_count, NULL AS geometry_limit_type, NULL AS geometry_feature_count,
+                   NULL AS geometry_coordinate_count, NULL AS geometry_dimension_count
             FROM overflow
             WHERE collection_overflow
-            ORDER BY collection_overflow DESC, river_network_version_id, river_segment_id
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM geometry_exclusions
+                  WHERE null_geometry_count > 0
+                     OR feature_coordinate_overflow_count > 0
+                     OR malformed_geometry_count > 0
+                     OR dimension_overflow_count > 0
+              )
+            UNION ALL
+            SELECT NULL AS river_segment_id, NULL AS basin_version_id, NULL AS river_network_version_id,
+                   NULL AS return_period, NULL AS warning_level, NULL AS q_value, NULL AS q_unit,
+                   NULL AS quality_flag, NULL AS geom_json, false AS collection_overflow,
+                   NULL AS collection_coordinate_count, 'feature_coordinates' AS geometry_limit_type,
+                   feature_coordinate_overflow_count AS geometry_feature_count,
+                   feature_coordinate_count AS geometry_coordinate_count,
+                   NULL AS geometry_dimension_count
+            FROM geometry_exclusions
+            WHERE feature_coordinate_overflow_count > 0
+            UNION ALL
+            SELECT NULL AS river_segment_id, NULL AS basin_version_id, NULL AS river_network_version_id,
+                   NULL AS return_period, NULL AS warning_level, NULL AS q_value, NULL AS q_unit,
+                   NULL AS quality_flag, NULL AS geom_json, false AS collection_overflow,
+                   NULL AS collection_coordinate_count, 'coordinate_dimensions' AS geometry_limit_type,
+                   dimension_overflow_count AS geometry_feature_count,
+                   NULL AS geometry_coordinate_count,
+                   dimension_count AS geometry_dimension_count
+            FROM geometry_exclusions
+            WHERE dimension_overflow_count > 0
+            UNION ALL
+            SELECT NULL AS river_segment_id, NULL AS basin_version_id, NULL AS river_network_version_id,
+                   NULL AS return_period, NULL AS warning_level, NULL AS q_value, NULL AS q_unit,
+                   NULL AS quality_flag, NULL AS geom_json, false AS collection_overflow,
+                   NULL AS collection_coordinate_count, 'malformed_geometry' AS geometry_limit_type,
+                   malformed_geometry_count AS geometry_feature_count,
+                   malformed_coordinate_count AS geometry_coordinate_count,
+                   NULL AS geometry_dimension_count
+            FROM geometry_exclusions
+            WHERE malformed_geometry_count > 0
+            UNION ALL
+            SELECT NULL AS river_segment_id, NULL AS basin_version_id, NULL AS river_network_version_id,
+                   NULL AS return_period, NULL AS warning_level, NULL AS q_value, NULL AS q_unit,
+                   NULL AS quality_flag, NULL AS geom_json, false AS collection_overflow,
+                   NULL AS collection_coordinate_count, 'null_geometry' AS geometry_limit_type,
+                   null_geometry_count AS geometry_feature_count,
+                   NULL AS geometry_coordinate_count,
+                   NULL AS geometry_dimension_count
+            FROM geometry_exclusions
+            WHERE null_geometry_count > 0
+            ORDER BY
+                geometry_limit_type NULLS LAST,
+                collection_overflow DESC,
+                river_network_version_id,
+                river_segment_id
             LIMIT :query_limit
             """
 
