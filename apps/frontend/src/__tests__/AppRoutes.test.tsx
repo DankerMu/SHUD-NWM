@@ -12,6 +12,7 @@ import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
+import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
 
 const m11FitBoundsCalls: Array<unknown[]> = []
 const m11FlyToCalls: Array<unknown> = []
@@ -372,6 +373,29 @@ function overviewSnapshotWithBasins(layers: LayerState[], queryKey = '', dataKey
   }
 }
 
+function overviewSnapshotForQuery(query: M11QueryState) {
+  const queryKey = serializeM11QueryState({ ...query, basemap: 'vector', validTime: null })
+  const dataKey = serializeM11QueryState({ ...query, basemap: 'vector' })
+  const snapshot = overviewSnapshotWithBasin(m11Layers, queryKey, dataKey)
+  return {
+    ...snapshot,
+    requestScope: {
+      ...snapshot.requestScope,
+      queryKey,
+      dataKey,
+      source: query.source,
+      layer: query.layer,
+      cycle: query.cycle,
+      validTime: query.validTime,
+      basinVersionId: query.basinVersionId,
+      riverNetworkVersionId: query.riverNetworkVersionId,
+      segmentId: query.segmentId,
+      warningLevel: query.warningLevel,
+      q: query.q,
+    },
+  }
+}
+
 function basinSnapshot(
   basinId: string,
   layers: LayerState[],
@@ -601,6 +625,44 @@ describe('App route state', () => {
     await user.click(screen.getByRole('button', { name: /^IFS/ }))
     expect(window.location.search).toContain('source=ifs')
     await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ source: 'ifs' })))
+  })
+
+  it('preserves river network version in overview load state and renders the matching snapshot', async () => {
+    const loadOverview = vi.fn().mockImplementation(async (query: M11QueryState) => {
+      const snapshot = overviewSnapshotForQuery(query)
+      useOverviewDataStore.setState({ overview: snapshot, loading: false })
+      return snapshot
+    })
+    useOverviewDataStore.setState({
+      loadOverview,
+      loading: false,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadOverview).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: 'gfs',
+          basinVersionId: 'bv-001',
+          riverNetworkVersionId: 'rn-v1',
+          segmentId: 'seg-009',
+        }),
+      ),
+    )
+    expect(await screen.findByText('Demo Basin')).toBeInTheDocument()
+    expect(screen.queryByText('总览数据加载中')).not.toBeInTheDocument()
+    expect(useOverviewDataStore.getState().overview?.requestScope).toMatchObject({
+      dataKey:
+        'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+      riverNetworkVersionId: 'rn-v1',
+    })
   })
 
   it('updates overview basemap URL and map style without reloading overview data', async () => {
