@@ -18,6 +18,11 @@ export const MODEL_ASSET_RESTRICTED_SOURCE = '受限来源'
 export const MODEL_ASSET_PRODUCT_LIMIT_TEXT = '仅显示前 12 个资产'
 export const MODEL_ASSET_MAP_OVER_BUDGET_TEXT = '空间几何超出预览预算'
 export const MODEL_ASSET_MAP_UNAVAILABLE_TEXT = '暂无空间预览'
+const MODEL_ASSET_DETAIL_IDENTITY_MISMATCH = '模型资产详情与当前选择不匹配'
+const MODEL_ASSET_SANITIZE_MAX_DEPTH = 24
+const MODEL_ASSET_SANITIZE_MAX_NODES = 5000
+const MODEL_ASSET_GEOMETRY_MAX_DEPTH = 48
+const MODEL_ASSET_GEOMETRY_MAX_NODES = 10000
 
 export interface ModelAssetListFilters {
   basinVersionId?: string
@@ -173,33 +178,77 @@ export function displaySanitizedSource(value: unknown): string {
 interface SanitizeOptions {
   path?: string[]
   restrictedFields?: Set<string>
+  depth?: number
+  nodeBudget?: { count: number }
+  seen?: WeakSet<object>
 }
 
 export function sanitizeModelAssetValue(value: unknown, options: SanitizeOptions = {}): unknown {
+  const path = options.path ?? []
+  const depth = options.depth ?? 0
+  const nodeBudget = options.nodeBudget ?? { count: 0 }
+  const restrictedFields = options.restrictedFields
+
+  nodeBudget.count += 1
+  if (depth > MODEL_ASSET_SANITIZE_MAX_DEPTH || nodeBudget.count > MODEL_ASSET_SANITIZE_MAX_NODES) {
+    if (path.length > 0) restrictedFields?.add(path.join('.'))
+    return null
+  }
+
   if (typeof value === 'string') {
     const sanitized = sanitizeModelAssetString(value)
-    if (sanitized === null && value.trim() !== '') options.restrictedFields?.add((options.path ?? []).join('.'))
+    if (sanitized === null && value.trim() !== '' && path.length > 0) restrictedFields?.add(path.join('.'))
     return sanitized
   }
   if (Array.isArray(value)) {
-    return value.map((entry, index) =>
-      sanitizeModelAssetValue(entry, {
-        ...options,
-        path: [...(options.path ?? []), String(index)],
-      }),
-    )
+    const seen = options.seen ?? new WeakSet<object>()
+    if (seen.has(value)) {
+      if (path.length > 0) restrictedFields?.add(path.join('.'))
+      return null
+    }
+    seen.add(value)
+    const sanitized: unknown[] = []
+    for (let index = 0; index < value.length; index += 1) {
+      if (nodeBudget.count >= MODEL_ASSET_SANITIZE_MAX_NODES) {
+        if (path.length > 0) restrictedFields?.add(path.join('.'))
+        break
+      }
+      sanitized.push(
+        sanitizeModelAssetValue(value[index], {
+          ...options,
+          depth: depth + 1,
+          nodeBudget,
+          path: [...path, String(index)],
+          seen,
+        }),
+      )
+    }
+    return sanitized
   }
   if (!isJsonRecord(value)) return value
 
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [
-      key,
-      sanitizeModelAssetValue(entry, {
-        ...options,
-        path: [...(options.path ?? []), key],
-      }),
-    ]),
-  )
+  const seen = options.seen ?? new WeakSet<object>()
+  if (seen.has(value)) {
+    if (path.length > 0) restrictedFields?.add(path.join('.'))
+    return null
+  }
+  seen.add(value)
+
+  const sanitized: JsonRecord = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (nodeBudget.count >= MODEL_ASSET_SANITIZE_MAX_NODES) {
+      if (path.length > 0) restrictedFields?.add(path.join('.'))
+      break
+    }
+    sanitized[key] = sanitizeModelAssetValue(entry, {
+      ...options,
+      depth: depth + 1,
+      nodeBudget,
+      path: [...path, key],
+      seen,
+    })
+  }
+  return sanitized
 }
 
 function normalizeModelAsset(model: ModelAsset): ModelAsset {
@@ -213,7 +262,14 @@ function normalizeModelAsset(model: ModelAsset): ModelAsset {
 }
 
 export function hasRestrictedModelAssetSource(model: ModelAsset | null | undefined, fieldPath: string): boolean {
-  return Boolean(model?.__restrictedSourceFields?.[fieldPath])
+  const restrictedFields = model?.__restrictedSourceFields
+  if (!restrictedFields) return false
+  return Object.keys(restrictedFields).some(
+    (restrictedPath) =>
+      restrictedPath === fieldPath ||
+      restrictedPath.startsWith(`${fieldPath}.`) ||
+      fieldPath.startsWith(`${restrictedPath}.`),
+  )
 }
 
 function hasAnyRestrictedModelAssetSource(model: ModelAsset | null | undefined, fieldPaths: string[]): boolean {
@@ -249,37 +305,205 @@ function getFirstText(record: JsonRecord, keys: string[]): string | null {
   return null
 }
 
-function asRecordArray(value: unknown): JsonRecord[] {
-  return Array.isArray(value) ? value.filter(isJsonRecord) : []
-}
-
-function getExplicitProductEntries(profile: JsonRecord): Array<{ product: JsonRecord; path: string }> {
-  return (['product_assets', 'products', 'assets'] as const).flatMap((key) =>
-    asRecordArray(profile[key]).map((product, index) => ({ product, path: `resource_profile.${key}.${index}` })),
-  )
-}
-
-function countVertices(value: unknown): number {
-  if (!Array.isArray(value)) return 0
-  if (value.length >= 2 && typeof value[0] === 'number' && typeof value[1] === 'number') return 1
-  return value.reduce((sum, entry) => sum + countVertices(entry), 0)
-}
-
-function featureCountForGeometry(value: unknown): number {
-  if (!isJsonRecord(value)) return 0
-  if (value.type === 'FeatureCollection' && Array.isArray(value.features)) return value.features.length
-  if (value.type === 'Feature') return 1
-  if (typeof value.type === 'string' && 'coordinates' in value) return 1
-  return 0
-}
-
-function vertexCountForGeometry(value: unknown): number {
-  if (!isJsonRecord(value)) return 0
-  if (value.type === 'FeatureCollection' && Array.isArray(value.features)) {
-    return value.features.reduce((sum, feature) => sum + vertexCountForGeometry(feature), 0)
+function firstTextInArray(value: unknown): string | null {
+  if (!Array.isArray(value)) return null
+  for (const entry of value) {
+    const text = textValue(entry)
+    if (text) return text
   }
-  if (value.type === 'Feature') return vertexCountForGeometry(value.geometry)
-  return countVertices(value.coordinates)
+  return null
+}
+
+function displayModelAssetSourceValue(
+  model: ModelAsset | null | undefined,
+  value: unknown,
+  restrictedFieldPaths: string[],
+): string {
+  if (hasAnyRestrictedModelAssetSource(model, restrictedFieldPaths)) return MODEL_ASSET_RESTRICTED_SOURCE
+  const rawValue = textValue(value)
+  if (rawValue) return displaySanitizedSource(rawValue)
+  return MODEL_ASSET_UNAVAILABLE
+}
+
+function projectProductEntry(model: ModelAsset, product: JsonRecord, path: string, index: number): ModelAssetProductAsset {
+  const target = getFirstText(product, ['target', 'uri', 'url', 'href', 'path', 'source_uri'])
+  const targetRestricted = ['target', 'uri', 'url', 'href', 'path', 'source_uri'].some((key) =>
+    hasRestrictedModelAssetSource(model, `${path}.${key}`),
+  )
+  const sanitizedTarget = target
+    ? displaySanitizedSource(target)
+    : targetRestricted
+      ? MODEL_ASSET_RESTRICTED_SOURCE
+      : MODEL_ASSET_UNAVAILABLE
+  const id = getFirstText(product, ['id', 'asset_id', 'key', 'name']) ?? `asset-${index + 1}`
+  const label = getFirstText(product, ['label', 'name', 'type', 'kind']) ?? id
+  const checksum = getFirstText(product, ['checksum', 'sha256', 'hash']) ?? MODEL_ASSET_UNAVAILABLE
+  return {
+    id: sanitizeModelAssetString(id) ?? `asset-${index + 1}`,
+    label: sanitizeModelAssetString(label) ?? MODEL_ASSET_RESTRICTED_SOURCE,
+    checksum: sanitizeModelAssetString(checksum) ?? MODEL_ASSET_RESTRICTED_SOURCE,
+    target: sanitizedTarget,
+  }
+}
+
+function buildExplicitProductProjection(model: ModelAsset, profile: JsonRecord): ModelAssetProductProjection | null {
+  const items: ModelAssetProductAsset[] = []
+  let truncated = false
+  let displayIndex = 0
+
+  productKeys: for (const key of ['product_assets', 'products', 'assets'] as const) {
+    const products = profile[key]
+    if (!Array.isArray(products)) continue
+
+    for (let index = 0; index < products.length; index += 1) {
+      if (items.length >= MODEL_ASSET_PRODUCT_DISPLAY_LIMIT) {
+        truncated = true
+        break productKeys
+      }
+
+      const product = products[index]
+      if (!isJsonRecord(product)) continue
+      items.push(projectProductEntry(model, product, `resource_profile.${key}.${index}`, displayIndex))
+      displayIndex += 1
+    }
+  }
+
+  if (items.length === 0) return null
+  return { items, truncated, notice: truncated ? MODEL_ASSET_PRODUCT_LIMIT_TEXT : null }
+}
+
+interface GeometryInspection {
+  valid: boolean
+  overBudget: boolean
+  featureCount: number
+  vertexCount: number
+}
+
+function inspectGeometryCandidate(value: unknown): GeometryInspection {
+  const state = {
+    valid: false,
+    invalid: false,
+    overBudget: false,
+    featureCount: 0,
+    vertexCount: 0,
+    nodes: 0,
+  }
+
+  function tick(depth: number) {
+    state.nodes += 1
+    if (depth > MODEL_ASSET_GEOMETRY_MAX_DEPTH || state.nodes > MODEL_ASSET_GEOMETRY_MAX_NODES) {
+      state.overBudget = true
+      return false
+    }
+    return !state.overBudget
+  }
+
+  function addFeature() {
+    state.featureCount += 1
+    state.valid = true
+    if (state.featureCount > MODEL_ASSET_MAP_FEATURE_LIMIT) state.overBudget = true
+  }
+
+  function addVertex() {
+    state.vertexCount += 1
+    state.valid = true
+    if (state.vertexCount > MODEL_ASSET_MAP_VERTEX_LIMIT) state.overBudget = true
+  }
+
+  function countCoordinateVertices(coordinates: unknown, depth: number): boolean {
+    if (!tick(depth)) return false
+    if (!Array.isArray(coordinates) || coordinates.length === 0) {
+      state.invalid = true
+      return false
+    }
+    if (coordinates.length >= 2 && typeof coordinates[0] === 'number' && typeof coordinates[1] === 'number') {
+      addVertex()
+      return !state.overBudget
+    }
+    let found = false
+    for (const entry of coordinates) {
+      const before = state.vertexCount
+      if (!countCoordinateVertices(entry, depth + 1)) return false
+      found = found || state.vertexCount > before
+      if (state.overBudget) return false
+    }
+    if (!found) state.invalid = true
+    return found
+  }
+
+  function inspectGeometry(valueToInspect: unknown, depth: number, countAsFeature: boolean): boolean {
+    if (!tick(depth)) return false
+
+    if (Array.isArray(valueToInspect)) {
+      if (valueToInspect.length === 0) {
+        state.invalid = true
+        return false
+      }
+      const first = valueToInspect[0]
+      if (isJsonRecord(first) && typeof first.type === 'string') {
+        for (const entry of valueToInspect) {
+          if (!inspectGeometry(entry, depth + 1, true)) return false
+          if (state.overBudget) return false
+        }
+        return true
+      }
+      if (countAsFeature) addFeature()
+      return countCoordinateVertices(valueToInspect, depth + 1)
+    }
+
+    if (!isJsonRecord(valueToInspect) || typeof valueToInspect.type !== 'string') {
+      state.invalid = true
+      return false
+    }
+
+    if (valueToInspect.type === 'FeatureCollection') {
+      if (!Array.isArray(valueToInspect.features) || valueToInspect.features.length === 0) {
+        state.invalid = true
+        return false
+      }
+      for (const feature of valueToInspect.features) {
+        if (!inspectGeometry(feature, depth + 1, true)) return false
+        if (state.overBudget) return false
+      }
+      return true
+    }
+
+    if (valueToInspect.type === 'Feature') {
+      if (!isJsonRecord(valueToInspect.geometry)) {
+        state.invalid = true
+        return false
+      }
+      addFeature()
+      return inspectGeometry(valueToInspect.geometry, depth + 1, false)
+    }
+
+    if (valueToInspect.type === 'GeometryCollection') {
+      if (!Array.isArray(valueToInspect.geometries) || valueToInspect.geometries.length === 0) {
+        state.invalid = true
+        return false
+      }
+      for (const geometry of valueToInspect.geometries) {
+        if (!inspectGeometry(geometry, depth + 1, true)) return false
+        if (state.overBudget) return false
+      }
+      return true
+    }
+
+    if (!Array.isArray(valueToInspect.coordinates)) {
+      state.invalid = true
+      return false
+    }
+    if (countAsFeature) addFeature()
+    return countCoordinateVertices(valueToInspect.coordinates, depth + 1)
+  }
+
+  inspectGeometry(value, 0, true)
+  return {
+    valid: state.valid && !state.invalid,
+    overBudget: state.overBudget,
+    featureCount: state.featureCount,
+    vertexCount: state.vertexCount,
+  }
 }
 
 function candidateGeometry(profile: JsonRecord): unknown | null {
@@ -370,24 +594,30 @@ export function buildModelAssetKpis(model: ModelAsset | null): ModelAssetKpiCard
 export function buildModelAssetDependencyGraph(model: ModelAsset | null): ModelAssetGraph {
   const profile = getResourceProfile(model)
   const lineage = getNestedRecord(profile, 'source_lineage')
-  const rawSource = textValue(lineage.source_uri) ?? textValue(model?.source_uri) ?? textValue(lineage.source_path) ?? textValue(model?.source_path)
-  const sourceValue = rawSource
-    ? displaySanitizedSource(rawSource)
-    : hasAnyRestrictedModelAssetSource(model, [
-        'resource_profile.source_lineage.source_uri',
-        'source_uri',
-        'resource_profile.source_lineage.source_path',
-        'source_path',
-      ])
-      ? MODEL_ASSET_RESTRICTED_SOURCE
-      : MODEL_ASSET_UNAVAILABLE
+  const rawSource =
+    textValue(lineage.source_uri) ??
+    textValue(lineage.source_path) ??
+    textValue(lineage.local_path) ??
+    firstTextInArray(lineage.uris) ??
+    textValue(profile.source_path) ??
+    textValue(model?.source_uri) ??
+    textValue(model?.source_path)
+  const sourceValue = displayModelAssetSourceValue(model, rawSource, [
+    'resource_profile.source_lineage',
+    'resource_profile.source_path',
+    'source_uri',
+    'source_path',
+  ])
+  const packageValue = hasRestrictedModelAssetSource(model, 'model_package_uri')
+    ? MODEL_ASSET_RESTRICTED_SOURCE
+    : displayValue(model?.package_checksum ?? model?.model_package_uri)
   const values: Record<string, { label: string; value: string; missing: boolean }> = {
     model: { label: '模型', value: displayValue(model?.model_id), missing: !textValue(model?.model_id) },
     basin: { label: '流域版本', value: displayValue(model?.basin_version_id), missing: !textValue(model?.basin_version_id) },
     river: { label: '河网版本', value: displayValue(model?.river_network_version_id), missing: !textValue(model?.river_network_version_id) },
     mesh: { label: '网格版本', value: displayValue(model?.mesh_version_id), missing: !textValue(model?.mesh_version_id) },
     calibration: { label: '率定版本', value: displayValue(model?.calibration_version_id), missing: !textValue(model?.calibration_version_id) },
-    package: { label: '模型包', value: displayValue(model?.package_checksum ?? model?.model_package_uri), missing: !textValue(model?.package_checksum ?? model?.model_package_uri) },
+    package: { label: '模型包', value: packageValue, missing: packageValue === MODEL_ASSET_UNAVAILABLE },
     source: { label: '来源', value: sourceValue, missing: sourceValue === MODEL_ASSET_UNAVAILABLE },
   }
   const nodes = Object.entries(values).map(([id, node]) => ({ id, ...node }))
@@ -402,47 +632,29 @@ export function buildModelAssetDependencyGraph(model: ModelAsset | null): ModelA
 export function buildModelAssetProducts(model: ModelAsset | null): ModelAssetProductProjection {
   if (!model) return { items: [], truncated: false, notice: null }
   const profile = getResourceProfile(model)
-  const explicitProducts = getExplicitProductEntries(profile).map(({ product, path }, index) => {
-    const target = getFirstText(product, ['target', 'uri', 'url', 'href', 'path', 'source_uri'])
-    const targetRestricted = ['target', 'uri', 'url', 'href', 'path', 'source_uri'].some((key) =>
-      hasRestrictedModelAssetSource(model, `${path}.${key}`),
-    )
-    const sanitizedTarget = target
-      ? displaySanitizedSource(target)
-      : targetRestricted
-        ? MODEL_ASSET_RESTRICTED_SOURCE
-        : MODEL_ASSET_UNAVAILABLE
-    const id = getFirstText(product, ['id', 'asset_id', 'key', 'name']) ?? `asset-${index + 1}`
-    const label = getFirstText(product, ['label', 'name', 'type', 'kind']) ?? id
-    const checksum = getFirstText(product, ['checksum', 'sha256', 'hash']) ?? MODEL_ASSET_UNAVAILABLE
-    return {
-      id: sanitizeModelAssetString(id) ?? `asset-${index + 1}`,
-      label: sanitizeModelAssetString(label) ?? MODEL_ASSET_RESTRICTED_SOURCE,
-      checksum: sanitizeModelAssetString(checksum) ?? MODEL_ASSET_RESTRICTED_SOURCE,
-      target: sanitizedTarget,
-    }
-  })
+  const explicitProjection = buildExplicitProductProjection(model, profile)
   const fallbackProducts: ModelAssetProductAsset[] = [
     {
       id: 'model-package',
       label: '模型包',
       checksum: displayValue(model.package_checksum),
-      target: model.model_package_uri ? displaySanitizedSource(model.model_package_uri) : MODEL_ASSET_UNAVAILABLE,
+      target: displayModelAssetSourceValue(model, model.model_package_uri, ['model_package_uri']),
     },
     {
       id: 'manifest',
       label: 'Manifest',
       checksum: displayValue(model.source_inventory_checksum),
-      target: model.manifest_uri ? displaySanitizedSource(model.manifest_uri) : MODEL_ASSET_UNAVAILABLE,
+      target: displayModelAssetSourceValue(model, model.manifest_uri, ['manifest_uri']),
     },
     {
       id: 'mesh',
       label: '网格文件',
       checksum: displayValue(model.mesh_checksum),
-      target: model.mesh_uri ? displaySanitizedSource(model.mesh_uri) : MODEL_ASSET_UNAVAILABLE,
+      target: displayModelAssetSourceValue(model, model.mesh_uri, ['mesh_uri']),
     },
   ].filter((product) => product.target !== MODEL_ASSET_UNAVAILABLE || product.checksum !== MODEL_ASSET_UNAVAILABLE)
-  const allProducts = explicitProducts.length > 0 ? explicitProducts : fallbackProducts
+  if (explicitProjection) return explicitProjection
+  const allProducts = fallbackProducts
   const items = allProducts.slice(0, MODEL_ASSET_PRODUCT_DISPLAY_LIMIT)
   const truncated = allProducts.length > MODEL_ASSET_PRODUCT_DISPLAY_LIMIT
   return { items, truncated, notice: truncated ? MODEL_ASSET_PRODUCT_LIMIT_TEXT : null }
@@ -459,27 +671,39 @@ export function buildModelAssetMapProjection(model: ModelAsset | null): ModelAss
       geometry: null,
     }
   }
-  const featureCount = featureCountForGeometry(geometry)
-  const vertexCount = vertexCountForGeometry(geometry)
-  if (featureCount > MODEL_ASSET_MAP_FEATURE_LIMIT || vertexCount > MODEL_ASSET_MAP_VERTEX_LIMIT) {
+  const inspected = inspectGeometryCandidate(geometry)
+  if (inspected.overBudget) {
     return {
       status: 'over-budget',
       text: MODEL_ASSET_MAP_OVER_BUDGET_TEXT,
-      featureCount,
-      vertexCount,
+      featureCount: inspected.featureCount,
+      vertexCount: inspected.vertexCount,
+      geometry: null,
+    }
+  }
+  if (!inspected.valid || inspected.featureCount === 0 || inspected.vertexCount === 0) {
+    return {
+      status: 'missing',
+      text: MODEL_ASSET_MAP_UNAVAILABLE_TEXT,
+      featureCount: inspected.featureCount,
+      vertexCount: inspected.vertexCount,
       geometry: null,
     }
   }
   return {
     status: 'available',
-    text: `${featureCount} 个要素 / ${vertexCount} 个坐标点`,
-    featureCount,
-    vertexCount,
+    text: `${inspected.featureCount} 个要素 / ${inspected.vertexCount} 个坐标点`,
+    featureCount: inspected.featureCount,
+    vertexCount: inspected.vertexCount,
     geometry,
   }
 }
 
-export const useModelAssetsStore = create<ModelAssetsState>((set) => ({
+export const useModelAssetsStore = create<ModelAssetsState>((set) => {
+  let listRequestSeq = 0
+  let detailRequestSeq = 0
+
+  return {
   models: [],
   selectedModel: null,
   total: 0,
@@ -489,10 +713,13 @@ export const useModelAssetsStore = create<ModelAssetsState>((set) => ({
   detailLoading: false,
   error: null,
   fetchModels: async (filters) => {
-    set({ loading: true, error: null })
+    const requestSeq = (listRequestSeq += 1)
+    detailRequestSeq += 1
+    set({ loading: true, selectedModel: null, detailLoading: false, error: null })
 
     try {
       const page = await getModelPage(filters)
+      if (requestSeq !== listRequestSeq) return
       set((state) => ({
         models: page.items.map(normalizeModelAsset),
         total: page.total,
@@ -508,21 +735,30 @@ export const useModelAssetsStore = create<ModelAssetsState>((set) => ({
       }))
     } catch (error) {
       const message = getApiErrorMessage(error, '模型资产列表加载失败')
-      set({ loading: false, error: message })
+      if (requestSeq === listRequestSeq) set({ selectedModel: null, detailLoading: false, loading: false, error: message })
       throw error
     }
   },
   fetchModelDetail: async (modelId) => {
+    const requestSeq = (detailRequestSeq += 1)
     set({ selectedModel: null, detailLoading: true, error: null })
 
     try {
       const model = await getModelDetail(modelId)
+      if (requestSeq !== detailRequestSeq) return
+      if (model.model_id !== modelId) {
+        throw new Error(MODEL_ASSET_DETAIL_IDENTITY_MISMATCH)
+      }
       set({ selectedModel: normalizeModelAsset(model), detailLoading: false, error: null })
     } catch (error) {
       const message = getApiErrorMessage(error, '模型资产详情加载失败')
-      set({ selectedModel: null, detailLoading: false, error: message })
+      if (requestSeq === detailRequestSeq) set({ selectedModel: null, detailLoading: false, error: message })
       throw error
     }
   },
-  clearSelectedModel: () => set({ selectedModel: null, detailLoading: false }),
-}))
+  clearSelectedModel: () => {
+    detailRequestSeq += 1
+    set({ selectedModel: null, detailLoading: false })
+  },
+  }
+})

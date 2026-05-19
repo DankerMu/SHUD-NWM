@@ -46,6 +46,14 @@ function nestedRecord(record: Record<string, unknown>, key: string): Record<stri
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 }
 
+function firstString(value: unknown) {
+  if (!Array.isArray(value)) return null
+  for (const entry of value) {
+    if (typeof entry === 'string' && entry.trim() !== '') return entry
+  }
+  return null
+}
+
 function MetadataRow({ label, value }: { label: string; value: unknown }) {
   return (
     <div className="grid grid-cols-[7rem_1fr] gap-3 border-b border-border/70 py-2 text-sm last:border-0">
@@ -135,12 +143,13 @@ export function ModelAssetsPage() {
     })
   }
 
-  const kpis = useMemo(() => buildModelAssetKpis(selectedModel), [selectedModel])
-  const profile = resourceProfile(selectedModel)
+  const currentSelectedModel = selectedModel?.model_id === selectedModelId ? selectedModel : null
+  const kpis = useMemo(() => buildModelAssetKpis(currentSelectedModel), [currentSelectedModel])
+  const profile = resourceProfile(currentSelectedModel)
   const sourceLineage = nestedRecord(profile, 'source_lineage')
-  const products = useMemo(() => buildModelAssetProducts(selectedModel), [selectedModel])
-  const graph = useMemo(() => buildModelAssetDependencyGraph(selectedModel), [selectedModel])
-  const mapProjection = useMemo(() => buildModelAssetMapProjection(selectedModel), [selectedModel])
+  const products = useMemo(() => buildModelAssetProducts(currentSelectedModel), [currentSelectedModel])
+  const graph = useMemo(() => buildModelAssetDependencyGraph(currentSelectedModel), [currentSelectedModel])
+  const mapProjection = useMemo(() => buildModelAssetMapProjection(currentSelectedModel), [currentSelectedModel])
 
   return (
     <section className="space-y-4" aria-label="模型资产管理">
@@ -247,7 +256,7 @@ export function ModelAssetsPage() {
             <Card>
               <CardContent className="p-8 text-center text-sm text-muted">详情加载中...</CardContent>
             </Card>
-          ) : selectedModel ? (
+          ) : currentSelectedModel ? (
             <>
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {kpis.map((kpi) => (
@@ -269,12 +278,12 @@ export function ModelAssetsPage() {
                   </CardHeader>
                   <CardContent>
                     <dl>
-                      <MetadataRow label="模型 ID" value={selectedModel.model_id} />
-                      <MetadataRow label="模型名称" value={selectedModel.model_name} />
-                      <MetadataRow label="流域 ID" value={selectedModel.basin_id} />
-                      <MetadataRow label="流域名称" value={selectedModel.basin_name} />
-                      <MetadataRow label="SHUD 输入" value={selectedModel.shud_input_name} />
-                      <MetadataRow label="创建时间" value={dateValue(selectedModel.created_at)} />
+                      <MetadataRow label="模型 ID" value={currentSelectedModel.model_id} />
+                      <MetadataRow label="模型名称" value={currentSelectedModel.model_name} />
+                      <MetadataRow label="流域 ID" value={currentSelectedModel.basin_id} />
+                      <MetadataRow label="流域名称" value={currentSelectedModel.basin_name} />
+                      <MetadataRow label="SHUD 输入" value={currentSelectedModel.shud_input_name} />
+                      <MetadataRow label="创建时间" value={dateValue(currentSelectedModel.created_at)} />
                     </dl>
                   </CardContent>
                 </Card>
@@ -285,26 +294,41 @@ export function ModelAssetsPage() {
                   </CardHeader>
                   <CardContent>
                     <dl>
-                      <SourceRow label="模型包" value={selectedModel.model_package_uri} />
-                      <SourceRow label="Manifest" value={selectedModel.manifest_uri} />
-                      <SourceRow label="Mesh URI" value={selectedModel.mesh_uri} />
+                      <SourceRow
+                        label="模型包"
+                        value={currentSelectedModel.model_package_uri}
+                        restricted={hasRestrictedModelAssetSource(currentSelectedModel, 'model_package_uri')}
+                      />
+                      <SourceRow
+                        label="Manifest"
+                        value={currentSelectedModel.manifest_uri}
+                        restricted={hasRestrictedModelAssetSource(currentSelectedModel, 'manifest_uri')}
+                      />
+                      <SourceRow
+                        label="Mesh URI"
+                        value={currentSelectedModel.mesh_uri}
+                        restricted={hasRestrictedModelAssetSource(currentSelectedModel, 'mesh_uri')}
+                      />
                       <SourceRow
                         label="Source URI"
-                        value={selectedModel.source_uri ?? sourceLineage.source_uri}
+                        value={currentSelectedModel.source_uri ?? sourceLineage.source_uri ?? firstString(sourceLineage.uris)}
                         restricted={
-                          hasRestrictedModelAssetSource(selectedModel, 'source_uri') ||
-                          hasRestrictedModelAssetSource(selectedModel, 'resource_profile.source_lineage.source_uri')
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'source_uri') ||
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_lineage.source_uri') ||
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_lineage.uris')
                         }
                       />
                       <SourceRow
                         label="Source Path"
-                        value={selectedModel.source_path ?? sourceLineage.source_path}
+                        value={currentSelectedModel.source_path ?? sourceLineage.source_path ?? sourceLineage.local_path ?? profile.source_path}
                         restricted={
-                          hasRestrictedModelAssetSource(selectedModel, 'source_path') ||
-                          hasRestrictedModelAssetSource(selectedModel, 'resource_profile.source_lineage.source_path')
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'source_path') ||
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_lineage.source_path') ||
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_lineage.local_path') ||
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_path')
                         }
                       />
-                      <MetadataRow label="包校验" value={selectedModel.package_checksum} />
+                      <MetadataRow label="包校验" value={currentSelectedModel.package_checksum} />
                     </dl>
                   </CardContent>
                 </Card>
@@ -321,10 +345,10 @@ export function ModelAssetsPage() {
                   <CardContent className="space-y-4">
                     <div className="grid gap-3 md:grid-cols-4">
                       {[
-                        ['流域', selectedModel.basin_version_id],
-                        ['河网', selectedModel.river_network_version_id],
-                        ['网格', selectedModel.mesh_version_id],
-                        ['率定', selectedModel.calibration_version_id],
+                        ['流域', currentSelectedModel.basin_version_id],
+                        ['河网', currentSelectedModel.river_network_version_id],
+                        ['网格', currentSelectedModel.mesh_version_id],
+                        ['率定', currentSelectedModel.calibration_version_id],
                       ].map(([label, value]) => (
                         <div key={label} className="rounded-md border border-border bg-background p-3">
                           <div className="text-xs text-muted">{label}</div>

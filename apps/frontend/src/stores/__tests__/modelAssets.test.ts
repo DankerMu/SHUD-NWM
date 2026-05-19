@@ -10,6 +10,7 @@ import {
   displaySanitizedSource,
   MODEL_ASSET_MAP_OVER_BUDGET_TEXT,
   MODEL_ASSET_MAP_UNAVAILABLE_TEXT,
+  MODEL_ASSET_PRODUCT_DISPLAY_LIMIT,
   MODEL_ASSET_PRODUCT_LIMIT_TEXT,
   MODEL_ASSET_RESTRICTED_SOURCE,
   MODEL_ASSET_UNAVAILABLE,
@@ -251,10 +252,16 @@ describe('useModelAssetsStore', () => {
       source_path: '/volume/data/nwm/Basins/qhh',
       resolved_source_path: 'C:\\nwm\\Basins\\qhh',
       source_uri: 'file:///volume/data/nwm/Basins/qhh?token=abc#frag',
+      model_package_uri: '/volume/data/nwm/Basins/qhh/package.zip',
+      manifest_uri: 'file:///volume/data/nwm/Basins/qhh/manifest.json',
+      mesh_uri: 'C:\\nwm\\Basins\\qhh\\mesh.sp',
       resource_profile: {
+        source_path: '/volume/data/nwm/Basins/qhh/profile-source',
         source_lineage: {
           source_path: '/volume/data/nwm/Basins/qhh',
+          local_path: '/volume/data/nwm/Basins/qhh/local',
           source_uri: 'file:///volume/data/nwm/Basins/qhh?token=abc#frag',
+          uris: ['file:///volume/data/nwm/Basins/qhh/lineage', 's3://nhms/safe/fallback'],
         },
         product_assets: [
           {
@@ -262,6 +269,12 @@ describe('useModelAssetsStore', () => {
             label: 'Restricted Package',
             checksum: 'sha-restricted',
             uri: '/volume/data/nwm/Basins/qhh/package.zip',
+          },
+          {
+            id: 'restricted-path-product',
+            label: 'Restricted Path Product',
+            checksum: 'sha-restricted-path',
+            path: 'file:///volume/data/nwm/Basins/qhh/product.bin',
           },
         ],
       },
@@ -277,10 +290,16 @@ describe('useModelAssetsStore', () => {
       source_path: null,
       resolved_source_path: null,
       source_uri: null,
+      model_package_uri: null,
+      manifest_uri: null,
+      mesh_uri: null,
       resource_profile: {
+        source_path: null,
         source_lineage: {
           source_path: null,
+          local_path: null,
           source_uri: null,
+          uris: [null, 's3://nhms/safe/fallback'],
         },
       },
     })
@@ -293,9 +312,39 @@ describe('useModelAssetsStore', () => {
       missing: false,
       value: MODEL_ASSET_RESTRICTED_SOURCE,
     })
-    expect(buildModelAssetProducts(normalized).items[0]).toMatchObject({
+    const productProjection = buildModelAssetProducts(normalized)
+    expect(productProjection.items[0]).toMatchObject({
       id: 'restricted-package',
       target: MODEL_ASSET_RESTRICTED_SOURCE,
+    })
+    expect(productProjection.items[1]).toMatchObject({
+      id: 'restricted-path-product',
+      target: MODEL_ASSET_RESTRICTED_SOURCE,
+    })
+  })
+
+  it('marks nested local source aliases as restricted on lineage graph surfaces', async () => {
+    const model = makeBasinsModel({
+      source_path: null,
+      source_uri: null,
+      resource_profile: {
+        source_path: '/volume/data/nwm/Basins/qhh/profile-source',
+        source_lineage: {
+          local_path: '/volume/data/nwm/Basins/qhh/local',
+          uris: ['file:///volume/data/nwm/Basins/qhh/lineage'],
+        },
+      },
+    })
+    vi.mocked(client.GET).mockResolvedValue(success({ items: [model], total: 1, limit: 50, offset: 0 }) as never)
+
+    await useModelAssetsStore.getState().fetchModels()
+
+    const normalized = useModelAssetsStore.getState().models[0]
+    expect(JSON.stringify(normalized)).not.toContain('/volume/data')
+    expect(JSON.stringify(normalized)).not.toContain('file://')
+    expect(buildModelAssetDependencyGraph(normalized).nodes.find((node) => node.id === 'source')).toMatchObject({
+      missing: false,
+      value: MODEL_ASSET_RESTRICTED_SOURCE,
     })
   })
 
@@ -320,12 +369,75 @@ describe('useModelAssetsStore', () => {
     })
   })
 
+  it('ignores out-of-order stale detail responses and keeps the latest requested model selected', async () => {
+    let resolveA: ((value: ReturnType<typeof success<ModelAsset>>) => void) | undefined
+    let resolveB: ((value: ReturnType<typeof success<ModelAsset>>) => void) | undefined
+    vi.mocked(client.GET).mockImplementation((async (_path: string, options?: { params?: { path?: { model_id?: string } } }) => {
+      const modelId = options?.params?.path?.model_id
+      if (modelId === 'model-a') {
+        return await new Promise((resolve) => {
+          resolveA = resolve
+        })
+      }
+      if (modelId === 'model-b') {
+        return await new Promise((resolve) => {
+          resolveB = resolve
+        })
+      }
+      throw new Error(`Unexpected model ${modelId}`)
+    }) as never)
+
+    const requestA = useModelAssetsStore.getState().fetchModelDetail('model-a')
+    const requestB = useModelAssetsStore.getState().fetchModelDetail('model-b')
+
+    resolveB?.(success(makeBasinsModel({ model_id: 'model-b', model_name: 'Model B' })))
+    await requestB
+    expect(useModelAssetsStore.getState().selectedModel?.model_id).toBe('model-b')
+
+    resolveA?.(success(makeBasinsModel({ model_id: 'model-a', model_name: 'Model A' })))
+    await requestA
+    expect(useModelAssetsStore.getState().selectedModel?.model_id).toBe('model-b')
+    expect(useModelAssetsStore.getState().detailLoading).toBe(false)
+  })
+
+  it('rejects a detail response whose body model id does not match the requested model', async () => {
+    vi.mocked(client.GET).mockResolvedValue(success(makeBasinsModel({ model_id: 'model-a', model_name: 'Model A' })) as never)
+
+    await expect(useModelAssetsStore.getState().fetchModelDetail('model-b')).rejects.toThrow(
+      '模型资产详情与当前选择不匹配',
+    )
+
+    expect(useModelAssetsStore.getState()).toMatchObject({
+      selectedModel: null,
+      detailLoading: false,
+      error: '模型资产详情与当前选择不匹配',
+    })
+  })
+
   it('keeps API errors in state for asset-management callers', async () => {
     vi.mocked(client.GET).mockResolvedValue(failure('model registry unavailable') as never)
 
     await expect(useModelAssetsStore.getState().fetchModels()).rejects.toThrow('model registry unavailable')
 
     expect(useModelAssetsStore.getState()).toMatchObject({
+      loading: false,
+      error: 'model registry unavailable',
+    })
+  })
+
+  it('clears stale selected detail when list loading fails', async () => {
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce(success(makeBasinsModel()) as never)
+      .mockResolvedValueOnce(failure('model registry unavailable') as never)
+
+    await useModelAssetsStore.getState().fetchModelDetail(BASINS_MODEL_ID)
+    expect(useModelAssetsStore.getState().selectedModel?.model_id).toBe(BASINS_MODEL_ID)
+
+    await expect(useModelAssetsStore.getState().fetchModels()).rejects.toThrow('model registry unavailable')
+
+    expect(useModelAssetsStore.getState()).toMatchObject({
+      selectedModel: null,
+      detailLoading: false,
       loading: false,
       error: 'model registry unavailable',
     })
@@ -430,6 +542,25 @@ describe('useModelAssetsStore', () => {
     })
   })
 
+  it('does not access product entries beyond the display budget while detecting truncation', () => {
+    const products = Array.from({ length: 10_000 }, (_, index) => ({
+      id: `asset-${index + 1}`,
+      label: `Asset ${index + 1}`,
+      checksum: `sha-${index + 1}`,
+      uri: `s3://nhms/private/${index + 1}`,
+    }))
+    Object.defineProperty(products, MODEL_ASSET_PRODUCT_DISPLAY_LIMIT, {
+      get() {
+        throw new Error('budget sentinel product was accessed')
+      },
+    })
+
+    const projection = buildModelAssetProducts(makeBasinsModel({ resource_profile: { product_assets: products } }))
+
+    expect(projection.items).toHaveLength(12)
+    expect(projection.notice).toBe(MODEL_ASSET_PRODUCT_LIMIT_TEXT)
+  })
+
   it('applies mini map geometry budgets and degraded states', () => {
     expect(buildModelAssetMapProjection(makeBasinsModel({ resource_profile: {} })).text).toBe(MODEL_ASSET_MAP_UNAVAILABLE_TEXT)
 
@@ -452,5 +583,77 @@ describe('useModelAssetsStore', () => {
     expect(buildModelAssetMapProjection(makeBasinsModel({ resource_profile: { geometry: longLine } })).text).toBe(
       MODEL_ASSET_MAP_OVER_BUDGET_TEXT,
     )
+
+    const riverGeometries = Array.from({ length: 51 }, (_, index) => ({
+      type: 'Feature',
+      properties: { id: index },
+      geometry: { type: 'LineString', coordinates: [[100 + index / 1000, 30], [101 + index / 1000, 31]] },
+    }))
+    const riverProjection = buildModelAssetMapProjection(makeBasinsModel({ resource_profile: { river_geometries: riverGeometries } }))
+    expect(riverProjection).toMatchObject({
+      status: 'over-budget',
+      text: MODEL_ASSET_MAP_OVER_BUDGET_TEXT,
+      geometry: null,
+    })
+
+    const geometryCollection = {
+      type: 'GeometryCollection',
+      geometries: [
+        { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+        { type: 'Polygon', coordinates: [[[100, 30], [101, 30], [101, 31], [100, 30]]] },
+      ],
+    }
+    expect(buildModelAssetMapProjection(makeBasinsModel({ resource_profile: { boundary: geometryCollection } }))).toMatchObject({
+      status: 'available',
+      featureCount: 2,
+      vertexCount: 6,
+      geometry: geometryCollection,
+    })
+
+    for (const malformed of [
+      { type: 'FeatureCollection' },
+      { type: 'Feature', geometry: null },
+      { type: 'LineString' },
+      { type: 'LineString', coordinates: [] },
+    ]) {
+      expect(buildModelAssetMapProjection(makeBasinsModel({ resource_profile: { basin_boundary: malformed } }))).toMatchObject({
+        status: 'missing',
+        text: MODEL_ASSET_MAP_UNAVAILABLE_TEXT,
+        geometry: null,
+      })
+    }
+  })
+
+  it('bounds sanitizer recursion and wide resource profiles without leaking local strings', async () => {
+    let deep: Record<string, unknown> = { source_path: '/volume/data/nwm/Basins/deep-secret' }
+    for (let depth = 0; depth < 80; depth += 1) deep = { child: deep }
+    const wide = Object.fromEntries(
+      Array.from({ length: 6000 }, (_, index) => [`path_${index}`, `/volume/data/nwm/Basins/wide-secret-${index}`]),
+    )
+    const model = makeBasinsModel({
+      source_path: null,
+      source_uri: null,
+      resource_profile: {
+        source_lineage: {
+          local_path: '/volume/data/nwm/Basins/root-secret',
+        },
+        deep,
+        wide,
+      },
+    })
+    vi.mocked(client.GET).mockResolvedValue(success({ items: [model], total: 1, limit: 50, offset: 0 }) as never)
+
+    await useModelAssetsStore.getState().fetchModels()
+
+    const normalized = useModelAssetsStore.getState().models[0]
+    const serialized = JSON.stringify(normalized)
+    expect(serialized).not.toContain('/volume/data')
+    expect(serialized).not.toContain('root-secret')
+    expect(serialized).not.toContain('deep-secret')
+    expect(serialized).not.toContain('wide-secret')
+    expect(buildModelAssetDependencyGraph(normalized).nodes.find((node) => node.id === 'source')).toMatchObject({
+      value: MODEL_ASSET_RESTRICTED_SOURCE,
+      missing: false,
+    })
   })
 })

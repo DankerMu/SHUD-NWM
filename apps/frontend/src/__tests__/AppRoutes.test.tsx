@@ -4125,17 +4125,86 @@ describe('App route state', () => {
     expect(screen.queryByText(/#frag/)).not.toBeInTheDocument()
   })
 
+  it('does not render sibling model detail when the URL-selected model detail body has a mismatched id', async () => {
+    useAuthStore.setState({ role: 'model_admin' })
+    const modelA = modelAssetRouteFixture({
+      model_id: 'model-a',
+      model_name: 'Model A Sibling',
+      basin_id: 'basin-a',
+      basin_name: 'Basin A Sibling',
+      basin_version_id: 'a-basin-v1',
+      river_network_version_id: 'a-river-v1',
+      mesh_version_id: 'a-mesh-v1',
+      calibration_version_id: 'a-calib-v1',
+      model_package_uri: 's3://nhms/models/a/package',
+      package_checksum: 'a-pkg-sha',
+      shud_input_name: 'a-input',
+      resource_profile: {
+        area_km2: 123.4,
+        product_assets: [
+          {
+            id: 'a-product',
+            label: 'A Product',
+            checksum: 'a-product-sha',
+            uri: 's3://nhms/models/a/product',
+          },
+        ],
+      },
+    })
+    const modelB = modelAssetRouteFixture({
+      model_id: 'model-b',
+      model_name: 'Model B Selected',
+      basin_id: 'basin-b',
+      basin_name: 'Basin B Selected',
+      basin_version_id: 'b-basin-v1',
+      river_network_version_id: 'b-river-v1',
+      mesh_version_id: 'b-mesh-v1',
+      calibration_version_id: 'b-calib-v1',
+      package_checksum: 'b-pkg-sha',
+      shud_input_name: 'b-input',
+    })
+    const page: ModelAssetPage = { items: [modelB], total: 1, limit: 50, offset: 0 }
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') return { data: success(page), error: undefined } as never
+      if (path === '/api/v1/models/{model_id}') return { data: success(modelA), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', '/system/model-assets?modelId=model-b')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('模型资产详情与当前选择不匹配').length).toBeGreaterThan(0))
+    expect(useModelAssetsStore.getState().selectedModel).toBeNull()
+    expect(screen.getByText('Model B Selected')).toBeInTheDocument()
+    expect(screen.queryByText('Model A Sibling')).not.toBeInTheDocument()
+    expect(screen.queryByText('Basin A Sibling')).not.toBeInTheDocument()
+    expect(screen.queryByText('a-basin-v1')).not.toBeInTheDocument()
+    expect(screen.queryByText('a-river-v1')).not.toBeInTheDocument()
+    expect(screen.queryByText('a-mesh-v1')).not.toBeInTheDocument()
+    expect(screen.queryByText('a-calib-v1')).not.toBeInTheDocument()
+    expect(screen.queryByText('a-pkg-sha')).not.toBeInTheDocument()
+    expect(screen.queryByText('a-product')).not.toBeInTheDocument()
+    expect(screen.queryByText('A Product')).not.toBeInTheDocument()
+  })
+
   it('renders normalized restricted model source fields as restricted without leaking local details', async () => {
     useAuthStore.setState({ role: 'model_admin' })
     const model = modelAssetRouteFixture({
       source_path: '/volume/data/nwm/Basins/qhh',
       resolved_source_path: 'C:\\nwm\\Basins\\qhh',
       source_uri: 'file:///volume/data/nwm/Basins/qhh?token=abc#frag',
+      model_package_uri: '/volume/data/nwm/Basins/qhh/package.zip',
+      manifest_uri: 'file:///volume/data/nwm/Basins/qhh/manifest.json',
+      mesh_uri: 'C:\\nwm\\Basins\\qhh\\mesh.sp',
       resource_profile: {
         area_km2: 87.5,
+        source_path: '/volume/data/nwm/Basins/qhh/profile-source',
         source_lineage: {
           source_uri: 'file:///volume/data/nwm/Basins/qhh?token=abc#frag',
           source_path: '/volume/data/nwm/Basins/qhh',
+          local_path: '/volume/data/nwm/Basins/qhh/local',
+          uris: ['file:///volume/data/nwm/Basins/qhh/lineage'],
         },
         product_assets: [
           {
@@ -4143,6 +4212,12 @@ describe('App route state', () => {
             label: 'Restricted Package',
             checksum: 'pkg-sha',
             uri: '/volume/data/nwm/Basins/qhh/package.zip',
+          },
+          {
+            id: 'restricted-path-product',
+            label: 'Restricted Path Product',
+            checksum: 'path-sha',
+            path: 'file:///volume/data/nwm/Basins/qhh/product.bin',
           },
         ],
       },
@@ -4161,10 +4236,39 @@ describe('App route state', () => {
     await waitFor(() => expect(screen.getAllByText('受限来源').length).toBeGreaterThanOrEqual(3))
     expect(screen.queryByText('/volume/data/nwm/Basins/qhh')).not.toBeInTheDocument()
     expect(screen.queryByText('C:\\nwm\\Basins\\qhh')).not.toBeInTheDocument()
+    expect(screen.queryByText(/profile-source/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/product\.bin/)).not.toBeInTheDocument()
     expect(screen.queryByText(/file:\/\//)).not.toBeInTheDocument()
     expect(screen.queryByText(/user:pass/)).not.toBeInTheDocument()
     expect(screen.queryByText(/token=abc/)).not.toBeInTheDocument()
     expect(screen.queryByText(/#frag/)).not.toBeInTheDocument()
+  })
+
+  it('suppresses stale model detail when /system/model-assets list loading fails', async () => {
+    useAuthStore.setState({ role: 'model_admin' })
+    useModelAssetsStore.setState(
+      {
+        ...useModelAssetsStore.getInitialState(),
+        selectedModel: modelAssetRouteFixture(),
+      },
+      true,
+    )
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') {
+        return { data: undefined, error: { error: { message: 'model registry unavailable' } } } as never
+      }
+      if (path === '/api/v1/models/{model_id}') return { data: success(modelAssetRouteFixture()), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+    render(<App />)
+
+    await waitFor(() => expect(screen.getAllByText('model registry unavailable').length).toBeGreaterThan(0))
+    await waitFor(() => expect(useModelAssetsStore.getState().selectedModel).toBeNull())
+    expect(screen.queryByText('QHH SHUD')).not.toBeInTheDocument()
+    expect(screen.queryByText('qhh-basin-v1')).not.toBeInTheDocument()
+    expect(screen.queryByText('pkg-sha')).not.toBeInTheDocument()
   })
 
   it.each(['viewer', 'operator'] as const)(
