@@ -649,8 +649,8 @@ export function normalizeBasinSegmentRows(input: {
   const features = input.featureCollection?.features ?? []
   const alertById = new Map<string, ApiFloodAlertRankingItem>()
   ;(input.rankingItems ?? []).forEach((item) => {
-    alertById.set(versionedSegmentKey(item.basin_version_id, item.river_segment_id), item)
-    alertById.set(versionedSegmentKey(item.basin_version_id, item.segment_id), item)
+    addAlertLookup(alertById, item.basin_version_id, item.river_network_version_id, item.river_segment_id, item)
+    addAlertLookup(alertById, item.basin_version_id, item.river_network_version_id, item.segment_id, item)
   })
   ;(input.floodSegments?.segments ?? []).forEach((item) => {
     const rankingLike: ApiFloodAlertRankingItem = {
@@ -659,6 +659,7 @@ export function normalizeBasinSegmentRows(input: {
       segment_id: item.segment_id,
       segment_name: item.segment_name,
       basin_version_id: item.basin_version_id,
+      river_network_version_id: item.river_network_version_id,
       q_value: item.q_value,
       q_unit: 'm3/s',
       return_period: item.return_period,
@@ -666,8 +667,8 @@ export function normalizeBasinSegmentRows(input: {
       duration: '',
       valid_time: item.valid_time,
     }
-    alertById.set(versionedSegmentKey(item.basin_version_id, item.river_segment_id), rankingLike)
-    alertById.set(versionedSegmentKey(item.basin_version_id, item.segment_id), rankingLike)
+    addAlertLookup(alertById, item.basin_version_id, item.river_network_version_id, item.river_segment_id, rankingLike)
+    addAlertLookup(alertById, item.basin_version_id, item.river_network_version_id, item.segment_id, rankingLike)
   })
 
   const budgetState = createBasinRiverGeometryBudgetState()
@@ -1269,8 +1270,26 @@ export function m11WarningLevelColor(level: M11WarningLevel) {
   return '#CCCCCC'
 }
 
-function versionedSegmentKey(basinVersionId: string, segmentId: string): string {
-  return `${basinVersionId}::${segmentId}`
+function versionedSegmentKey(basinVersionId: string, riverNetworkVersionId: string, segmentId: string): string {
+  return `${basinVersionId}::${riverNetworkVersionId}::${segmentId}`
+}
+
+function legacyVersionedSegmentKey(basinVersionId: string, segmentId: string): string {
+  return `${basinVersionId}::legacy::${segmentId}`
+}
+
+function addAlertLookup(
+  alertById: Map<string, ApiFloodAlertRankingItem>,
+  basinVersionId: string,
+  riverNetworkVersionId: string | null | undefined,
+  segmentId: string,
+  item: ApiFloodAlertRankingItem,
+) {
+  if (riverNetworkVersionId) {
+    alertById.set(versionedSegmentKey(basinVersionId, riverNetworkVersionId, segmentId), item)
+  } else {
+    alertById.set(legacyVersionedSegmentKey(basinVersionId, segmentId), item)
+  }
 }
 
 interface BasinRiverGeometryBudgetState {
@@ -1326,8 +1345,10 @@ function segmentRowFromFeature(
 ): BasinSegmentRow {
   const props = feature.properties
   const alert =
-    alertById.get(versionedSegmentKey(props.basin_version_id, props.river_segment_id)) ??
-    alertById.get(versionedSegmentKey(props.basin_version_id, props.segment_id))
+    alertById.get(versionedSegmentKey(props.basin_version_id, props.river_network_version_id, props.river_segment_id)) ??
+    alertById.get(versionedSegmentKey(props.basin_version_id, props.river_network_version_id, props.segment_id)) ??
+    alertById.get(legacyVersionedSegmentKey(props.basin_version_id, props.river_segment_id)) ??
+    alertById.get(legacyVersionedSegmentKey(props.basin_version_id, props.segment_id))
   const sourceSelection = createSourceScenarioSelection(query, alert ? [sourceFromQuery(query.source)] : [])
   const warningLevel = normalizeWarningLevel(alert?.warning_level) ?? 'unavailable'
   const geometryStatus = retainBasinRiverGeometryWithinBudget(getM11SelectedSegmentGeometryBudgetStatus(feature.geometry), budgetState)

@@ -152,6 +152,8 @@ const RUN_LOOKUP_MAX_RETAINED_ITEMS = 1_000
 const RIVER_SEGMENT_PAGE_LIMIT = 1_000
 const RIVER_SEGMENT_MAX_PAGES = 10
 const RIVER_SEGMENT_MAX_ITEMS = 10_000
+const READY_RUN_STATUSES = ['frequency_done', 'published'] as const
+type ReadyRunStatus = (typeof READY_RUN_STATUSES)[number]
 
 const cache = new Map<string, CacheEntry<unknown>>()
 const CACHE_TTL_MS = 60_000
@@ -323,6 +325,23 @@ function latestPublishedRun(runs: ApiHydroRunPage | null, query?: M11QueryState)
     const aUpdateTime = Date.parse(a.updated_at ?? a.created_at)
     return (Number.isFinite(bUpdateTime) ? bUpdateTime : 0) - (Number.isFinite(aUpdateTime) ? aUpdateTime : 0)
   })[0] ?? null
+}
+
+function mergeRunPages(pages: ApiHydroRunPage[]): ApiHydroRunPage {
+  const byRunId = new Map<string, ApiHydroRun>()
+  pages.forEach((page) => {
+    page.items.forEach((run) => {
+      byRunId.set(run.run_id, run)
+    })
+  })
+  const limit = Math.max(...pages.map((page) => page.limit ?? page.items.length), 0)
+  const total = Math.max(...pages.map((page) => page.total ?? page.items.length), byRunId.size)
+  return {
+    items: [...byRunId.values()],
+    total,
+    limit,
+    offset: pages[0]?.offset ?? 0,
+  }
 }
 
 function latestPublishedRunForBasinVersion(
@@ -501,10 +520,16 @@ async function fetchModel(modelId: string) {
   )
 }
 
-async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, limit: number, offset: number) {
+async function fetchRunsPageByStatus(
+  query: M11QueryState,
+  basinId: string | undefined,
+  limit: number,
+  offset: number,
+  status: ReadyRunStatus,
+) {
   const source = sourceForApi(query.source)
   return cached(
-    cacheKey('/api/v1/runs', { basinId, source, cycleTime: query.cycle ?? 'latest', status: 'frequency_done', limit, offset }),
+    cacheKey('/api/v1/runs', { basinId, source, cycleTime: query.cycle ?? 'latest', status, limit, offset }),
     () =>
       getApi<ApiHydroRunPage>(
         '/api/v1/runs',
@@ -514,7 +539,7 @@ async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, 
               basin_id: basinId,
               source,
               cycle_time: query.cycle ?? undefined,
-              status: 'frequency_done',
+              status,
               limit,
               offset,
             },
@@ -523,6 +548,11 @@ async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, 
         '获取运行列表失败',
       ),
   )
+}
+
+async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, limit: number, offset: number) {
+  const pages = await Promise.all(READY_RUN_STATUSES.map((status) => fetchRunsPageByStatus(query, basinId, limit, offset, status)))
+  return mergeRunPages(pages)
 }
 
 async function fetchRuns(query: M11QueryState, basinId?: string) {
@@ -816,6 +846,13 @@ async function fetchFloodTimeline(runId: string, segmentId: string, riverNetwork
   )
 }
 
+function rankingMatchesSelectedSegment(item: ApiFloodAlertRanking['items'][number], selected: ResolvedSegmentIdentifiers): boolean {
+  return (
+    item.river_network_version_id === selected.riverNetworkVersionId &&
+    (item.river_segment_id === selected.riverSegmentId || item.segment_id === selected.segmentId)
+  )
+}
+
 async function fetchLineage(runId: string, segmentId: string, query: M11QueryState) {
   return cached(
     cacheKey('/api/v1/lineage/river-point', { runId, segmentId, validTime: query.validTime, variable: 'q_down' }),
@@ -1088,11 +1125,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
           partialErrors.push('flood timeline: No same-version concrete run is available for this basin/source.')
           partialErrors.push('lineage: No same-version concrete run is available for this basin/source.')
         }
-        const selectedRanking = sameVersionRankingItems.find(
-          (item) =>
-            item.river_segment_id === selectedIdentifiers.riverSegmentId ||
-            item.segment_id === selectedIdentifiers.segmentId,
-        )
+        const selectedRanking = sameVersionRankingItems.find((item) => rankingMatchesSelectedSegment(item, selectedIdentifiers))
         const [segmentResult, forecastResult, timelineResult] = await Promise.allSettled([
           fetchRiverSegment(
             selectedVersion.basin_version_id,
