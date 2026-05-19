@@ -2,180 +2,193 @@
 
 最后更新：2026-05-19，测试环境。
 
-用途：作为跨 session 继承的项目真实进度索引，压缩记录“已实现什么、与设计/效果图还有什么差距、还缺什么数据”。项目有实质性进展时必须同步更新本文，保持 200 行以内。
+用途：作为跨 session 继承的项目真实进度索引。本文只保留“当前能做什么、已完成哪些闭环、还剩哪些明确方向”，避免把历史 review 细节继续堆进进度页。
 
-## 当前状态
+## 一句话状态
+
+M11 全国总览与流域钻取 Epic #159 已完成并关闭。#160-#165 全部关闭，最后 PR #171 已合并到 `master`，merge commit 为 `da26dc331453988612ce4d4d5818948309d117ef`。
+
+项目已经具备一套可重复运行的 production-like 证据链：Slurm、对象存储/Basins、气象源/QC、staging E2E、全国规模性能、生产运维安全与 runbook readiness 都有 opt-in validation lane、结构化 evidence、fast regression test 和文档入口。
+
+前端入口已经从旧的单一预报地图推进到 M11 map-first 产品骨架：`/` 和 `/overview` 为全国总览，`/basins/:basinId` 为流域钻取，`/forecast`、`/flood-alerts`、`/monitoring` 保持可访问。
+
+重要边界：默认 fast/production-like lane 不会伪造最终生产就绪。真实 final production readiness 仍需要在目标环境补齐 live backend auth、live alert sink delivery、live rollback execution、accepted live dependency proofs，以及真实外部系统运行证据。
+
+## 已完成里程碑
 
 - Epic #120 已完成并关闭；子 issue #121-#126 全部关闭。
-- 当前 M11 工作：issue #165 / PR #171 正在收敛 `/overview` 与 `/basins/:basinId` basin drill-down；当前修复跟进 Round 5 cross-review，OpenSpec change 为 `openspec/changes/m11-overview-basin-drilldown/`。
-- 最新已合并基线仍包含 PR #132，merge commit `ccc7f9bfaea4b5dfb125bdd5b8a4c36ca1ac1c88`；PR #171 是当前未合并 M11 review 分支。
-- M9 Basins 已完成并关闭：GitHub Epic #133，子 issue #134-#139 全部关闭；PR #144、#145 已合并。
-- M10 生产环境闭环已完成 OpenSpec 设计和 issue 拆分：`openspec/changes/m10-production-closure/`，GitHub Epic #146，子 issue #147-#152 覆盖真实 Slurm+SHUD workload、生产对象存储/Basins copied-data、真实气象源+QC、staging E2E、全国规模/MVT 性能、生产运维安全 runbook。
-- M10 #147 Real Slurm + SHUD workload closure 已新增 opt-in `nhms-production validate-slurm` 证据 lane：默认 fake/deterministic，不依赖真实 Slurm/SHUD/生产密钥；生产 preflight 缺失时写 blocker artifact 到 `artifacts/production-closure/<run_id>/slurm/`。
-- M10 #148 Production object store + Basins copied-data closure 已新增 opt-in `nhms-production validate-object-store` 证据 lane：默认 synthetic copied Basins + local production-like object store，不依赖真实 S3/MinIO/PostGIS/API/SHUD；symlink-only Basins root 会在 package/import 前以稳定 blocker 退出。
-- M10 #149 Live meteorology ingestion + QC closure 已新增 opt-in `nhms-production validate-met` 证据 lane：默认 GFS/IFS/ERA5 deterministic production-like fixture + CLDAS restricted，不依赖外网/真实气象源凭据/S3/PostGIS/API/Slurm/SHUD；写入 raw/canonical/forcing/QC/best-available lineage 证据并强制 run_id 范围、覆盖需 `--force`。
-- M10 #150 Staging E2E forecast/analysis closure 已新增 opt-in `nhms-production validate-e2e` 证据 lane：默认 deterministic/self-contained，不依赖真实 DB/API/Slurm/frontend/对象存储/SHUD；整合 source/canonical/forcing/slurm/parse/frequency/tile/API/frontend stage manifest、本地 `stage_artifacts/` 证据、derived IDs、现有 API contract evidence、frontend lineage evidence、SHUD `.rivqdown` QC blocker、严格 #147/#148/#149 dependency evidence status、redacted environment，并强制 run_id 范围、覆盖需 `--force`。
-- M10 #151 National-scale MVT/performance closure 已新增 opt-in `nhms-production validate-scale` 证据 lane：默认 deterministic large fixture，不依赖真实全国数据/PostGIS/live API/browser/MVT encoder；写入 scale preflight、dataset manifest、versioned thresholds、query p95/plan/hash evidence、GeoJSON/MVT blocker tile evidence、desktop/mobile frontend timing evidence、resource bounds 和 redacted environment，并强制 run_id 范围、覆盖需 `--force`。
-- M10 #152 Production ops/security/runbook closure 已新增 opt-in `nhms-production validate-ops` 证据 lane：默认 deterministic/self-contained，不依赖真实身份提供方、生产凭据、告警 sink、对象存储、Slurm、PostGIS/API/frontend 或 scheduler；写入 ops preflight、config validation、auth/RBAC、audit/redaction、monitoring/alerts、rollback drills、dependency closure、environment 和 summary，默认 `release_blocked` 且 `final_production_readiness_claimed=false`，强制 run_id 范围、覆盖需 `--force`。
-- M11 issue #165 / PR #171 已完成全国总览和流域 drill-down 的阶段性交付：路由、typed data contracts、MapLibre/ECharts/Zustand 集成、selected segment detail、forecast/timeline/lineage handoff、几何预算与 unavailable 状态均已接入；2026-05-19 visual evidence 见 `apps/frontend/e2e/m11-visual-evidence.md` 和本地 `.codex/screenshots/issue-165/`。
-- CI 覆盖 markdown lint、OpenAPI lint、JSON Schema 校验、真实 PostgreSQL/PostGIS/Timescale 集成、后端测试、前端 build/test、bundle size。
-- #126 后本地基线：`uv run pytest -q` -> `586 passed, 3 skipped`；真实 DB integration 为显式 opt-in，GitHub CI 已跑通。
-- 当前有效代码入口：`apps/api`、`apps/frontend`、`services/orchestrator`、`services/slurm_gateway`、`services/tile_publisher`、`workers/*` 下划线包、`infra/sbatch`。
-- 已清理 legacy 占位目录：`apps/web`、hyphenated worker/service 目录、`workers/sbatch_templates`；后续不要在这些路径恢复实现。
+- M9 Basins 已完成并关闭：Epic #133，子 issue #134-#139 全部关闭；PR #144、#145 已合并。
+- M10 Production Closure 已完成并关闭：Epic #146，子 issue #147-#152 全部关闭；PR #154-#158 已合并。
+- M11 Overview + Basin Drilldown 已完成并关闭：Epic #159，子 issue #160-#165 全部关闭；PR #166-#171 已合并。
+- 当前远端主干：`origin/master` @ `da26dc331453988612ce4d4d5818948309d117ef`。
 
-## 后端 / 数据链路已实现
+## M10 生产闭环结果
+
+M10 对应 OpenSpec change：`openspec/changes/m10-production-closure/`。
+
+| Issue | 状态 | 交付能力 |
+|---|---:|---|
+| #147 Real Slurm + SHUD workload closure | 完成 | `nhms-production validate-slurm`，Slurm preflight、sbatch 渲染、fake/real sacct schema、array partial success、retry/cancel、SHUD QC blocker、redacted environment evidence |
+| #148 Production object store + Basins copied-data closure | 完成 | `nhms-production validate-object-store`，synthetic copied Basins、local production-like object store、package publish/checksum verification、registry/API/runtime object URI contract、cleanup/rollback evidence |
+| #149 Live meteorology ingestion + QC closure | 完成 | `nhms-production validate-met`，GFS/IFS/ERA5 deterministic fixture、CLDAS restricted evidence、raw/canonical/forcing/QC/best-available lineage、negative QC blockers |
+| #150 Staging E2E forecast/analysis closure | 完成 | `nhms-production validate-e2e`，source -> canonical -> forcing -> Slurm -> parse -> frequency -> tile -> API/frontend 的 deterministic stage evidence bundle |
+| #151 National-scale MVT/performance closure | 完成 | `nhms-production validate-scale`，large fixture、thresholds、query plan/hash/p95、GeoJSON/MVT blocker、frontend timing、resource bounds |
+| #152 Production ops/security/runbook readiness | 完成 | `nhms-production validate-ops`，preflight、config validation、auth/RBAC matrix、audit/redaction、alerts、rollback drills、dependency closure、summary evidence |
+
+M10 最终 CI 状态：PR #158 最新 head 的 Markdown Lint、OpenAPI Validate、JSON Schema Validate、SQL Migration Dry Run、Unit Tests、Frontend Build 全部通过。最终 cross-review round 27 clean，Phase 7 independent final review clean。
+
+## M11 全国总览与流域钻取结果
+
+M11 对应 OpenSpec change：`openspec/changes/m11-overview-basin-drilldown/`。
+
+| Issue | 状态 | 交付能力 |
+|---|---:|---|
+| #160 M11 route foundation | 完成 | `/overview`、`/forecast`、`/flood-alerts`、`/monitoring` 路由骨架，导航标签，基础 app shell，查询状态基础 |
+| #161 M11 data contracts | 完成 | overview/basin view-model、数据归一化、API 组合、缓存/去重、聚合端点决策规则 |
+| #162 M11 map controls | 完成 | M11 shared MapLibre surface、terrain/satellite/vector 底图、source/scenario 控制、水文/气象/基础图层控制、legend、valid-time timeline |
+| #163 National overview page | 完成 | `/` 和 `/overview` 默认全国总览，左侧流域/图层面板，中央全国地图，右侧运行态势，底部时间轴，流域 popup 和 drill-down handoff |
+| #164 Basin drill-down workflow | 完成 | `/basins/:basinId` 流域分析页，流域身份/版本、河段列表、搜索/预警筛选、行选择、URL 状态恢复、forecast handoff |
+| #165 Basin map delivery | 完成 | 流域河网地图、选中河段高亮、segment detail panel、趋势 sparkline、lineage/forecast handoff、route state 不变量和 PostGIS SQL CI 修复 |
+
+M11 最终 PR #171 CI 状态：Markdown Lint、OpenAPI Validate、JSON Schema Validate、SQL Migration Dry Run、Unit Tests、Frontend Build 全部通过。最后一次本地验证覆盖：`uv run ruff check .`、后端重点测试 `171 passed, 3 skipped`、OpenSpec validate、`git diff --check`、前端单测 `270 passed`、`tsc --noEmit`、`check:api-types`、frontend build、Playwright E2E `34 passed`、preview E2E `3 passed`。
+
+## 当前系统能力
+
+### 后端与数据链路
 
 - FastAPI 后端已实现 forecast、models、pipeline、hindcast、flood alerts、best-available、state snapshots、data-source 等路由。
-- 数据库 migration `000001`-`000014` 已覆盖 schema、enum、core/met/hydro/flood/map/ops 表、索引、pipeline 字段、enum remediation、best-available lineage。
+- 数据库 migration `000001`-`000014` 覆盖 core/met/hydro/flood/map/ops schema、索引、pipeline 字段、best-available lineage 等。
 - OpenAPI 契约位于 `openapi/nhms.v1.yaml`，前端类型由该文件生成。
-- JSON Schema 已覆盖 run manifest、run status、QC result、pipeline job，并有 examples 校验。
-- GFS、ERA5、IFS adapter 已实现并通过 mock/test 覆盖；IFS 多源预报能力已接入。
+- JSON Schema 覆盖 run manifest、run status、QC result、pipeline job，并有 examples 校验。
+- GFS、ERA5、IFS adapter 已实现并有 mock/test 覆盖；IFS 多源预报能力已接入。
 - Canonical conversion、forcing production、SHUD runtime adapter、output parser、state manager、洪水频率拟合、重现期计算、tile publisher 已实现。
-- Orchestrator 支持 forecast/analysis/hindcast 链路、Slurm job array、retry/cancel 一致性、partial success、publish stage、pipeline persistence。
-- Real Slurm gateway 已实现 `sbatch`、`sacct`、`scancel`、`sinfo`、array job、日志读取、模板白名单，并有 fake-binary smoke。
-- #147 Slurm closure lane 已覆盖 redacted preflight、canonical `infra/sbatch` SHUD array rendering、fake/real `sacct` evidence schema、array partial success、retry/cancel evidence、malformed SHUD output/QC blocking evidence和 redacted environment metadata。
-- #148 object-store closure lane 已覆盖 redacted preflight、M9 copied-root migration report、package publish manifest evidence、stored-object checksum reread verification、local registry/API/runtime consumption evidence、failure cleanup/quarantine evidence和 no implicit activation。
-- #149 met closure lane 已覆盖 redacted source preflight/source_config、bounded deterministic GFS raw cycle manifest、IFS/ERA5 configured deterministic 但 actual skipped 的非转换源证据、CLDAS restricted evidence、GFS canonical product lineage、deterministic Basins-backed forcing package、forcing continuity/required-variable/unit/missing/range QC、malformed/non-finite/out-of-range negative QC blocker evidence、best-available lineage、secret redaction、run-scoped idempotency/path safety。
-- #150 E2E closure lane 已覆盖 redacted staging preflight、#147/#148/#149 dependency evidence consumed/skipped/missing/blocked semantics（接受 expected issue/schema + ready summary，且 #147 Slurm submit evidence 可消费 submitted；坏依赖阻断全链并只写 blocked/not_executed stage artifact payload）、完整 stage manifest 与本地 deterministic artifact manifests、derived `model_id/basin_version_id/segment_id/source/cycle_time/job_id/layer_id`、现有 API contract evidence、frontend smoke lineage evidence、missing/malformed/non-finite/missing-required/count/time-axis SHUD output QC blockers、forced rerun stale raw/stage_artifacts 清理、QC 阻断 downstream 时写 blocked/not_executed JSON 且移除 stale tile `.pbf`、downstream publication blocking、secret redaction、run-scoped idempotency/path safety。
-- #151 scale closure lane 已覆盖 redacted national-scale preflight、deterministic large fixture segment/model counts 与 checksum、bbox sizes、CRS/geometry assumptions、versioned threshold artifact、model listing/river bbox/flood alert summary/ranking/timeline/map/forecast/jobs/logs/tile metadata deterministic query plan/hash/p95 evidence、malformed/non-finite timing blocker、GeoJSON compatibility ready semantics、`application/x-protobuf` MVT expectation release blocker、frontend desktop/mobile load/render/timeline/chart/memory evidence、oversized bbox/long time range/object listing bounds、secret redaction、run-scoped idempotency/path safety。
-- #152 ops closure lane 已覆盖 redacted ops preflight、API/orchestrator/Slurm gateway/tile publisher/frontend/database/object store/source adapters/workspace roots config evidence、backend auth/RBAC action matrix（model activation/rerun/cancel/QC override/source config change/tile republish 的 allowed/denied/release-blocked 决策、required roles、stable error codes、no denied/release-blocked mutation）、explicit auth release blockers、audit/redaction evidence、source latency/Slurm backlog/failed basin retry/object-store failure/stale analysis/tile error/API p95 alert dry-run evidence、bad model activation/failed publish-import/failed source cycle/failed Slurm array/bad tile release rollback drills、#147-#151 dependency accepted/skipped/blocked/not_executed closure、final readiness truthful release-blocking、secret redaction、run-scoped idempotency/path safety。
-- 测试环境真实 Slurm 基础 smoke 已通过：集群 `shudhpc`，默认 account `friends`，`CPU`/`GPU` 分区可见；`CPU` 分区 job `5684` 在 `cn04` 完成，`COMPLETED` / `0:0`。后续可复用命令见 `docs/VALIDATION.md`。
-- 真实 DB 集成测试已覆盖从零迁移、幂等迁移、确定性 seed、API/空间查询、worker chain、fake real-Slurm 边界。
+- Orchestrator 支持 forecast/analysis/hindcast 链路、Slurm job array、retry/cancel、partial success、publish stage、pipeline persistence。
+- Real Slurm gateway 支持 `sbatch`、`sacct`、`scancel`、`sinfo`、array job、日志读取、模板白名单，并有 fake-binary smoke。
+- Basins discovery、publish、registry import、runtime/API consumption、frontend asset fixture 已形成完整 M9 资产链路。
 
-## 前端已实现
+### 前端
 
 - 有效前端为 `apps/frontend`：Vite + React + TypeScript + MapLibre + ECharts + Zustand + OpenAPI-generated types。
 - 已实现路由：
-  - `/`、`/overview`：M11 全国总览，含左侧流域/图层控制、中央地图、右侧运行摘要和底部时间轴。
-  - `/basins/:basinId`：M11 流域 drill-down，含流域版本与河段搜索/筛选、按径流/重现期/预警着色的有界河网、河段 hover/click、URL `segmentId` 同步、选中河段详情、趋势 sparkline、lineage/quality/unavailable 状态和 forecast handoff。
-  - `/forecast`：保留水文预报 workflow，并可与 M11 流域页互相传递 basin/version/segment/source/cycle/validTime 上下文。
+  - `/`、`/overview`：M11 全国总览，左侧 basin/source/layer 控制，中央全国地图，右侧运行态势，底部 valid-time timeline。
+  - `/basins/:basinId`：M11 流域钻取，流域身份/版本、河段列表、搜索/预警筛选、按径流/重现期/预警着色的有界河网、河段 hover/click、URL `segmentId` 同步、河段详情、趋势 sparkline、forecast/lineage handoff。
+  - `/forecast`：预报河网地图、河段选择、预报侧栏，并可与 M11 流域页互相传递 basin/version/segment/source/cycle/validTime 上下文。
   - `/flood-alerts`：洪水预警统计、排名、ticker、地图、时间轴、详情。
   - `/monitoring`：流水线监控工作台、阶段、作业表、队列摘要、趋势面板、operator RBAC gate。
+- M11 shared controls 支持 terrain/satellite/vector 底图切换，GFS/IFS/GFS+IFS/Best Available source state，hydrology layer legend，API `valid_times[]` 驱动时间轴，stale valid-time correction。
+- M11 overview/basin 数据层复用 basins、basin versions、models、river segments、forecast series、flood alerts、pipeline、jobs、queue、metrics、layers、lineage 等现有 API，并在前端归一化 freshness、quality、source provenance、partial error 和 unavailable reason。
 - M11 数据合同在 `overviewDataContracts.ts` / `overviewData.ts` 归一化；缺失/超预算几何、compare 聚合缺口、lineage/trend/comparison 不可用均以局部状态呈现，不伪造地图或预报数据。
-- Forecast UI 支持 GFS/IFS scenario 选择、多曲线图、analysis/forecast 区分、来源/周期归因、IFS 144h 可用时效标注。
-- Flood warning UI 使用 API 数据加载，支持预警等级过滤、时间轴播放、排名、河段详情、API-base-aware tile URL。
+- Forecast UI 支持 GFS/IFS scenario、多曲线图、analysis/forecast 区分、来源/周期归因、IFS 144h 可用时效标注。
+- Flood warning UI 支持预警等级过滤、时间轴播放、排名、河段详情、API-base-aware tile URL。
 - Monitoring UI 支持 pipeline status/jobs 轮询、source/cycle 选择、作业筛选/分页、日志弹窗、队列深度、趋势组件。
-- 前端测试覆盖关键组件、API base 行为、route preview、mock API E2E、build、bundle size。
+- 前端测试覆盖 M11 路由/query state、overview 和 basin interaction、map controls、timeline、data contracts、API base 行为、route preview、mock API E2E、build、bundle size。
 
-## 设计 / 效果图缺口
+### Basins 与样例数据
 
-- M11 全国总览与流域 drill-down 已完成阶段性交付；设计文档与效果图仍描述更完整的 GIS 产品。
-- `docs/spec/06_frontend_gis_design.md` 与 `design/ui` 中仍缺或未完整对齐：
-  - 效果图 3：预报曲线详情页，含顶部 KPI、气象代站列表、forcing 图表、多源主图、洪水频率侧栏。
-  - 效果图 5：气象空间栅格展示页。
-  - 效果图 6：气象代站查询页。
-  - 效果图 7：流域/模型资产管理页。
-  - 效果图 8：产品监控布局已有功能雏形，但视觉与交互未完全按 spec 对齐。
-- M11 仍未实现 full-screen segment detail、气象空间/代站页面、完整模型资产管理页和生产 MVT/PBF 河网瓦片；当前 `/basins/:basinId` 使用现有 basin-version river-segment GeoJSON，有界渲染并对缺失几何保持 honest unavailable 状态。
-- 当前 flood warning 页面覆盖核心业务流，但 vector tile contract 仍偏兼容方案，不是真正完整 MVT 生产路径。
-- 当前 monitoring 页面可用且信息密度较高，但仍缺少部分 spec 级运维能力，例如 restart 后真实 Slurm 元数据追溯证明、完整资产 lineage 导航。
-- RBAC 目前主要是前端 gate + dev/test override 约定，不是完整生产身份认证/授权系统。
+- 开发环境通过 `data/Basins -> /volume/data/nwm/Basins` 软链接接入河网/流域等 Basins 数据；这是开发期依赖，不是可迁移 artifact。
+- `data/Basins` 当前可发现 13 个 SHUD 模型目录：`qhh`、`heihe`、`kashigeer`、`weiganhe`、`xinanjiang_upstream`、`hetianhe`、`qinyijiang`、`keliya`、`tailanhe`、`zhaochen/{WEM,HHY,MC,BST}`。
+- Basins package/registry import 已支持 inventory、checksum、runtime/GIS/CALIB evidence、forcing metadata、manifest URI、registry lineage、inactive model activation audit。
+- 真实 Basins smoke 为 opt-in：仅在环境变量和路径满足时运行。
 
-## 数据缺口
+## 设计、效果图与当前实现缺口
 
-- Demo seed 是确定性的长江样例：15 条河段、5 个气象代站、GFS/IFS 预报样本、洪水曲线、run/tile/pipeline 记录、对象存储占位 artifact。
-- 开发环境已通过 `data/Basins -> /volume/data/nwm/Basins` 软链接接入河网/流域等 Basins 数据；这是开发期依赖，不是可迁移 artifact。
-- `data/Basins` 已补入 13 个 SHUD 模型目录：`qhh`、`heihe`、`kashigeer`、`weiganhe`、`xinanjiang_upstream`、`hetianhe`、`qinyijiang`、`keliya`、`tailanhe`、`zhaochen/{WEM,HHY,MC,BST}`。
-- 每个模型基本包含 `input/<model>/` SHUD 运行包：`*.cfg.para`、`*.cfg.ic`、`*.cfg.calib`、`*.sp.mesh`、`*.sp.riv`、`*.sp.rivseg`、`*.sp.att`、`*.para.{soil,geol,lc}`、`*.tsd.{forc,lai,mf,rl}` 和 `gis/{domain,river,seg}.shp`。
-- `CALIB/` 提供约 20 组优选率定参数；`forcing/` 提供 CMFD 历史气象格点 CSV（`tailanhe` 目录名为 `focing`，接入时需清洗或兼容）。
-- 这些数据可把当前 `model_package_uri`、mesh/river network/model registry、SHUD runtime dry/smoke、forcing 文件格式校验从 placeholder 推进到真实资产样例。
-- 后续生产环境迁移必须复制 `/volume/data/nwm/Basins` 的实际数据到目标环境，不能只迁移软链接。
-- 仓库内仍未内置这些真实资产；基于 `LocalObjectStore` 的 Basins 发现、打包、校验和、迁移报告与 registry 导入已实现；真实对象存储闭环和生产迁移脚本仍待后续。
-- 外部真实气象下载通过 adapter/mock 测试覆盖；没有提交可作为生产 fixture 的 live GFS/IFS/ERA5 数据包。
-- CLDAS 仍是权限受限/后续工作；未实现 CLDAS adapter、数据质量检查、best_available 生产路径。
-- Worker-chain smoke 使用本地 `LocalObjectStore`，未覆盖真实 MinIO/S3。
-- Slurm 已完成最小真实集群 smoke，但尚未跑生产级 SHUD workload、job array、大日志回收、失败重试和 accounting 长链路。
-- Slurm #147 生产级 evidence lane 已落地；真实集群 SHUD workload 仍需在具备 copied/package URI、solver/module 和共享 workspace 的主机上按 `docs/VALIDATION.md` opt-in 命令运行并归档真实 `sacct`/日志。
-- 尚缺生产规模性能证据：全国矢量瓦片、大河网、全国 7 天逐小时预报、真实数据库 query plan/压测。
+设计基准主要来自 `docs/spec/06_frontend_gis_design.md`、`docs/spec/06B_frontend_ui_design_spec.md`、`docs/modules/15_frontend_application_design.md`，效果图索引目前落在 `docs/images/roadmap_*.png`。M11 已覆盖效果图 1 和效果图 2 的核心操作路径，但不是完整产品视觉终态。
 
-## M9 Basins 资产发现进展
+| 设计/效果图目标 | 当前实现 | 主要缺口 |
+|---|---|---|
+| 效果图 1：全国总览 | `/`、`/overview` 已实现 map-first shell、左侧流域/图层/source 控制、中央全国 MapLibre surface、右侧运行态势、底部 timeline、basin popup、monitoring/flood handoff | 视觉仍偏工程化组件，未按效果图做最终像素级打磨；一级/二级流域树依赖现有 basin metadata，不保证完整八大流域层级；真实气象/DEM/base overlay 未接入，只显示 unavailable；全国真实边界/河网覆盖取决于 Basins/registry 数据 |
+| 效果图 2：流域详情 / drill-down | `/basins/:basinId` 已实现流域身份、版本、bbox/fallback、河段列表、搜索、预警筛选、地图选择、URL segment state、选中河段 detail、trend sparkline、forecast handoff | 城市/站点标签缺数据合同，当前明确显示暂不可用；河段 hover tooltip 和地图动画效果仍有限；右侧趋势为轻量 sparkline，不是完整 48h/7d 专业分析面板；流域内真实视觉密度依赖河网 geometry 数据质量 |
+| 效果图 3：河段预报曲线全屏详情 | 现有 `/forecast` 可展示选中河段预报曲线，basin detail 的“查看详情”可 handoff 到 forecast query | 还没有独立全屏 segment detail route；缺顶部 KPI 摘要条、河段位置缩略图、气象代站列表、forcing 小图、多源主图交互、Q2/Q5/Q10/Q20/Q50/Q100 阈值线完整叠加、洪水频率曲线侧栏、气象要素详情图组、box zoom/crosshair 等细节 |
+| 效果图 4：洪水预警总览 | `/flood-alerts` 已有统计、ranking、ticker、GeoJSON/return-period map、timeline、segment detail；PostGIS SQL 和 CI dry-run 已修复 | 仍未升级到真正生产 MVT/PBF tile delivery；和 M11 overview/basin 的视觉语言还需统一；点击 ranking 到全屏 segment detail 的目标页仍缺失 |
+| 效果图 5：气象空间栅格 | M11 图层控件中把 precipitation/temperature/station 作为明确 unavailable placeholder，未伪造数据 | 缺气象数据主路由和子 tab；缺 PRCP/TEMP/RH/wind/Rn/Press 栅格图层、色标、透明度/等值线、格点值查询、区域统计、多源差值图、TiTiler/PNG tile 数据路径 |
+| 效果图 6：气象代站查询 | 当前仅在图层控件中声明“站点合同未在 M11 接入” | 缺 station list、流域筛选、站点地图、数据完整度状态、Thiessen/Voronoi、站点 popup、forcing 时序、QC 标识、相邻站点交互 |
+| 效果图 7：流域/模型资产管理 | 后端/Basins 数据链路和 `modelAssets` store/API 测试存在，M11 popup 的“查看详情”可保留 handoff 语义 | 缺系统管理路由和页面；缺流域/模型树、版本详情卡、版本历史时间线、版本关系图、资产产品列表、小地图；NavBar 当前按 M11 约束隐藏“系统管理” |
+| 效果图 8：产品监控 | `/monitoring` 已有 pipeline summary、stage cards、jobs table/filter/pagination、queue、trend、log modal、operator RBAC gate | 与效果图的最终 dashboard 信息层级/视觉密度仍需打磨；当前 local dev role override 不是生产 auth；缺 live alert sink、真实 backend identity provider 证明 |
+| 全局 UI 规范 06B | 已引入 M11 visual tokens、56px nav、左右面板、64px timeline、状态色/预警色、icon buttons、responsive collapse | 仍需做真实截图对照和像素级 visual QA；部分控件仍是 Tailwind 工程样式而非完整 design-token 抽象；缺正式 effect-image visual baseline 自动比对 |
+| 地图与性能 | MapLibre surface 已复用，支持 basemap switch、GeoJSON budget、geometry guards、stale-state 修复 | 真实生产 MVT、全国真实数据压测、PostGIS tile clipping、`application/x-protobuf` 响应路径仍未完成；当前 M11 可用但不是最终全国规模视觉性能终态 |
 
-- 已新增 `nhms-model discover-basins`：支持 `--basins-root`、`NHMS_BASINS_ROOT`，CLI 参数优先，Basins 子命令开发默认 `data/Basins`。
-- 已实现结构化 inventory JSON，包含 root/symlink 元数据、直接与 `zhaochen/*` 嵌套模型、basin slug 与 `input/<shud_input_name>` alias、必需 SHUD/GIS 文件、轻量 checksum、建议 registry IDs、forcing/CALIB 计数、status/quirks 和默认 publish/import eligibility。
-- 已兼容 `forcing/` 与 legacy `focing/`；冲突时优先 `forcing/` 并记录 `BASINS_FORCING_DIR_CONFLICT` warning；缺 `*.tsd.rl` 默认标记 `partial` 且不可默认发布/导入。
-- 已递归忽略 `.DS_Store`、`@eaDir`、`*@SynoEAStream`，并对模型目录、`input/<alias>`、GIS 必需文件、`CALIB/`、`forcing/focing` 和 checksum 路径统一执行 Basins root containment；越界 symlink 使用 `BASINS_SYMLINK_OUTSIDE_ROOT`，不会读取外部文件且 inventory 不可导入。
-- 已将 Basins root 内不可解析后代（例如 symlink loop）收敛为 `BASINS_SYMLINK_UNRESOLVABLE` 阻断 warning；发现流程不会读取/计数/checksum 该路径，inventory 不可导入。
-- `forcing/` 与 `CALIB/` 计数已改为流式文件遍历，避免生产规模目录发现时一次性物化全部文件路径。
-- 已补 synthetic discovery 测试矩阵和 opt-in 真实 `data/Basins` smoke；真实 smoke 仅在 `NHMS_RUN_BASINS_SMOKE=1` 且路径存在时运行，预期 13 个模型。
+## 剩余生产化边界
 
-## M9 Basins 打包与迁移证据进展
+这些不是 M10/M11 fast closure 的缺口，而是真实生产上线前必须在目标环境补齐的 live proof：
 
-- 已新增 `nhms-model publish-basins`：消费 discovery inventory，将 valid/publishable 模型发布到 `OBJECT_STORE_ROOT` + `OBJECT_STORE_PREFIX` 的 `models/<model_id>/<version>/`。
-- 发布 manifest 使用 `basins.package.v1`，记录 source path/resolved path/symlink、inventory checksum、runtime/GIS/CALIB per-file checksum、forcing 元数据、package checksum、`model_package_uri` 与 `manifest_uri`。
-- runtime SHUD input、GIS sidecar 和 selected `CALIB/` 默认写入 `models/<model_id>/<version>/package/`；历史 forcing CSV 默认不复制，只记录 count/header/time coverage/byte count/aggregate checksum。
-- `--copy-forcing` 会显式复制 forcing CSV 到 `models/<model_id>/<version>/forcing/`，并记录 `forcing_payload_uri`、复制文件数、字节数和 checksum 证据。
-- 同一 model/version 重跑未变化 source 返回 `already_done`；同版本 source checksum 变化返回 `BASINS_PACKAGE_CHECKSUM_CONFLICT`，#135 不提供 force overwrite。
-- partial 或不可默认发布模型返回结构化 JSON 错误 `BASINS_MODEL_NOT_PUBLISHABLE`；publish/migration CLI 失败均向 stderr 输出 `error_code`、`message` 和相关上下文。
-- Basins 打包已兼容 `data/Basins` 为软链接根的 inventory：CALIB 文件用解析后的模型根计算相对路径，manifest/object store 仍保留 `CALIB/...` 路径，真实 opt-in smoke 已通过。
-- Basins package manifest 的 `included_files` 已补入 `role=manifest` 自条目；`package_checksum` 稳定覆盖源 package/forcing 证据，manifest 自条目单独记录 manifest 载荷校验和最终对象字节数，避免递归 checksum。
-- Basins package 的 `package_checksum` 已不再包含原始 inventory checksum；`source_inventory_checksum` 仅作为 manifest 证据保留，inventory 格式、无关字段或其它模型记录变更不会触发同版本冲突。
-- Basins package 发布会基于 inventory `resolved_root`、root-relative 字段和模型身份复核 `resolved_source_path`、canonical `input/<shud_input_name>`、`gis/` 与 `forcing|focing`，绝对路径或同根路径篡改会返回 `BASINS_INVENTORY_PATH_MISMATCH` 或 `BASINS_PACKAGE_PATH_UNSAFE`。
-- Basins package 发布新增本地对象存储 `.publish.lock`、写入后对象 size/SHA 校验和流式文件复制；已有未变 manifest 可不加锁返回 `already_done`，并发锁冲突返回 `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`。
-- Basins package 与 migration 输出路径写入失败已收敛为 JSON 错误：`BASINS_PACKAGE_OUTPUT_WRITE_FAILED`、`BASINS_MIGRATION_REPORT_WRITE_FAILED`；不会在 CLI 暴露 traceback。
-- Basins forcing 处理已改为流式遍历和 copy，header/time evidence 只做有上限采样，manifest 记录 sample file/byte/line limits。
-- Basins package 与 migration 文件遍历已统一拒绝源树内 symlink 后代，显式 `input_dir`、`forcing_dir`、`CALIB` 和 required runtime/GIS symlink 也会返回 `BASINS_PACKAGE_PATH_UNSAFE`；Basins discovery root 自身为 symlink 仍兼容。
-- Basins package 对象写后校验已改为从对象路径分块读取计算 size/SHA，不再通过 `LocalObjectStore.checksum()` 整体读取对象；forcing 采样上限按已采样文件数计算，重复 header 不会扩大 time evidence 读取次数。
-- Basins package 发布新增 Phase 6 审查修复：发布前按 canonical SHUD/GIS 必需角色复核 `required_files`，拒绝篡改为 `valid` 的不完整 inventory；本地 `--output` manifest 仅在对象存储 manifest 写入并校验成功后落盘。
-- Basins package Phase 6 集成修复已补齐 stale inventory/source 文件在 planning/checksum 阶段消失或不可读时的结构化 JSON 错误，包含 `model_id`、`version`、源 `path` 与 `manifest_uri`，且不写本地 manifest。
-- 已新增 `nhms-model basins-migration-report`：symlink Basins root 返回 `BASINS_MIGRATION_SYMLINK_TARGET`；真实 copied root 输出 file count、byte count、inventory checksum、source-to-target metadata、`production_ready=true`。
-- #135 Phase 6 follow-up 已补齐：`basins-migration-report` 默认 `source_uri=/volume/data/nwm/Basins` 并按文档命令返回 JSON 错误；`publish-basins` 先校验单段安全 `model_id/version`；canonical runtime 必需文件只接受 `input_dir` 直接子文件，GIS 仍固定为 `gis/<file>`；inventory 非 UTF-8 字节返回 `BASINS_INVENTORY_INVALID` JSON；`required_files` 中 canonical 以外的额外条目返回 `BASINS_REQUIRED_FILES_NON_CANONICAL` 且不写本地 manifest 或额外 package entry。
-- #135 Phase 6 round 7 已补齐：早期 stale required source 错误携带 `manifest_uri`；migration evidence stat/read 失败收敛为 `BASINS_MIGRATION_EVIDENCE_READ_FAILED` JSON；最终 package hash/copy 前会重新执行 symlink/containment 校验并用 no-follow 打开源文件，防止规划后替换为 symlink。
-- #135 Phase 6 round 8 已补齐：migration evidence size/hash 与 forcing CSV header/time 采样复用最终 no-follow 源文件读校验；遍历后替换为 symlink 会返回结构化 JSON，且不写 report 或本地 manifest。
-- #135 Phase 6 round 9 已补齐：相对 `input_dir/gis_dir/forcing_dir` 发布时按 inventory/source canonical 上下文解析，支持相对 Basins root inventory 跨 CWD 发布；最终源文件读取改为从 `source_root` 目录 fd 逐段 no-follow 打开并复核 inode，拒绝 runtime、forcing 与 migration evidence 祖先目录替换为 symlink。
-- #135 Phase 6 round 10 已补齐：runtime required_files 只接受 `<shud_input_name>.<suffix>` canonical 文件名，拒绝同模式额外直系文件；相对 `input_dir/gis_dir/forcing_dir` 只接受 canonical 相对形式，拒绝任意前缀篡改。
-- #135 Phase 6 round 11 已补齐：Basins package 发布对本地对象存储 package、manifest、lock key 执行 root 下逐组件 symlink 拒绝，避免 stale object-store symlink 被写入或校验跟随。
-- #135 Phase 6 round 12 已补齐：本地对象存储 package、manifest、lock 写入/读取/校验改为 anchored no-follow 父目录 fd 流程，拒绝 final write/replace 前对象存储祖先被替换为 symlink；publish 入口按 canonical `basin_slug` 复算 deterministic `model_id`，拒绝重标记与重复 ID inventory。
-- #135 Phase 6 round 13 已补齐：对象写后 size/SHA 校验读取复用 anchored no-follow 对象打开流程，拒绝校验 open 前对象存储祖先被替换为 symlink；canonical model identity 改为绑定 `root_relative_resolved_path/root_relative_path`，拒绝 `basin_slug`、请求 `model_id`、记录 `model_id` 与 `suggested_ids.model_id` 同步重标记但 source path 不变的 inventory。
-- #148 PR #154 follow-up round 5 已补齐：生产对象存储前缀安全检查拒绝 percent-decoded `?token=...` 与 `#x-amz-signature=...` path segment；runtime smoke forcing 写入改到 `runs/<run_id>/input/scratch/runtime-staging/` 并拒绝覆盖既有 scratch object；既有 package manifest 读取增加 16MiB 上限；fast registry/API/runtime evidence 明确标记 live DB/API `not_executed`，只作为本地 object-URI contract smoke。
+- live backend auth / identity provider 行为。
+- live alert sink delivery。
+- live rollback execution。
+- accepted live dependency proofs。
+- 真实 Slurm 生产 workload、长日志回收、accounting、失败重试长链路。
+- 真实对象存储，如 MinIO/S3，而不是 local object store。
+- live GFS/IFS/ERA5 数据下载稳定性与凭据管理。
+- CLDAS adapter、授权数据接入和 best_available 生产路径。
+- 全国规模真实数据、真实 PostGIS query plan/压测、真正 `application/x-protobuf` MVT。
 
-## M9 Basins registry 导入进展
+## 有效代码入口
 
-- 已新增 `nhms-model import-basins-registry`（click 与 argparse 路径）：只消费 discovery inventory 与 package manifest，可读取 inventory/manifest 引用的 `input/<alias>/gis/*` 和 SHUD river/mesh 文件，不会 ad hoc 扫描 `data/Basins`。
-- 新增 Basins GIS/SHUD parser：校验 `domain/river/seg.{shp,shx,dbf,prj}` sidecar，使用 pyshp 解析真实 shapefile；domain 导入为非空 SRID 4490 MultiPolygon WKT，river/seg 导入为 LineString，并从 `.sp.riv`/`.sp.rivseg` 解析 segment count 证据。
-- registry 导入以单模型事务写入 `core.basin`、`core.basin_version`、`core.river_network_version`、`core.river_segment`、`core.mesh_version`、`core.model_instance`；segment count mismatch、sidecar 缺失、checksum/source 冲突均返回结构化 JSON stderr 并回滚。
-- 导入模型默认 `active_flag=false`，不会改变既有 active model；`model_instance.resource_profile` 和 `mesh_version.properties_json` 记录 `manifest_uri`、`package_checksum`、`source_inventory_checksum`、`basin_slug`、`shud_input_name` 与源路径 lineage。
-- 重复未变导入返回 `already_imported` 且不增加行；同 ID/version 下 package/source checksum 或几何证据变化返回 `BASINS_REGISTRY_CHECKSUM_CONFLICT`。
-- #136 round 1 review 已补齐：registry import 绑定 package manifest 与选中 inventory/source 身份、canonical included_files 与 checksum；导入前拒绝 SHUD/GIS 非 canonical 路径、`..`/绝对路径和 input/gis symlink 后代。
-- GIS 解析已严格限制 WGS84/EPSG:4326 或 CGCS2000/EPSG:4490 兼容 PRJ，保留 domain polygon interior rings；river downstream raw ID 会映射为导入后的 segment ID，`0/-1/空/自指` 下游标记写入 null 并保留原始值用于审计。
-- registry import 已加入 GIS feature/point 默认上限、SHUD evidence 流式计数、river segment `execute_values` bounded page size；集成测试补充 `PsycopgModelRegistryStore.list_river_segments` FeatureCollection 合同覆盖，真实 Basins smoke 也执行同查询。
-- #136 PR #142 follow-up 已补齐：registry import 拒绝 canonical `input/<alias>` 与 `gis` 目录级 symlink，SHUD evidence 加 byte/line 上限与 declared-count 早退，manifest source identity 改为必填精确匹配，既有 river segment 幂等改为字段 digest 冲突检测。
-- #136 PR #142 follow-up round 2 已补齐：registry import 使用 inventory 原始字节 SHA-256 对齐 publish-basins 的 `source_inventory_checksum`；PRJ/SHUD/checksum/GIS sidecar 读取改为 no-follow open + fstat/lstat 身份复核，pyshp 使用已安全打开的文件句柄。
-- #136 PR #142 follow-up round 4 已补齐：registry import 要求 package `manifest_uri`；相对 inventory/source/input/gis 路径支持跨 CWD prepare/import；`mesh_version.checksum` 使用 manifest-verified canonical mesh checksum；GIS sidecar 在缓冲前执行 per-file、per-layer、aggregate byte 上限。
-- #136 PR #142 follow-up round 5 已补齐：registry import 将 `input/<alias>` 固化为带 inode 身份的可信根，后续 GIS/SHUD/checksum 读取若根目录被替换会返回 `BASINS_REGISTRY_PATH_UNSAFE`；GIS sidecar 实际读循环执行 per-file/layer/aggregate byte 上限，并把默认内存上限降至 64MiB/128MiB/384MiB。
-- #136 PR #142 final review 修复已补齐：registry import 使用 pyproj 接受 WGS84/CGCS2000 地理坐标与真实 Basins WGS84/CGCS2000 Albers/TM 投影 PRJ，并在写入 SRID 4490 WKT 前重投影到 lon/lat；`.sp.riv` 作为 `river_count` 证据、`.sp.rivseg` 作为 `rivseg_segment_count` 与 `seg.shp` feature count 对齐，多 part polyline 记录按单个 segment 导入。
-- 已新增 fast parser/CLI 测试和 opt-in PostgreSQL/PostGIS integration 测试；真实 Basins import smoke 仅在 `NHMS_RUN_REAL_BASINS_IMPORT=1`、integration DB 配置和 `data/Basins` 存在时运行。
-- #137 已补齐 Basins-backed inactive model 显式激活证据：`PsycopgModelRegistryStore.set_model_active()` 成功变更会在同事务写入 `ops.audit_log`，记录 active 前后状态、model lineage 与 Basins package lineage；重复/缺失失败不写审计，API listing 覆盖 inactive/all/default active 发现路径。
-- #137 PR #143 review 修复已补齐：激活审计写入前清洗 `model_package_uri` 与 Basins lineage `manifest_uri`，移除 userinfo、query、fragment，仅保留稳定 scheme/host/path；fast/integration 测试覆盖敏感 URI 不落审计、重复/缺失不写审计，以及激活后 `active=false` 不再返回该 Basins 模型。
-- #138 已补齐 Basins runtime/API consumption：SHUDRuntime fast smoke 使用本地对象存储 Basins-style `model_package_uri` 直接验证 staging 与 `cfg.para` 生成，不依赖真实 solver 或 `/volume/data/nwm/Basins`；river-segment API smoke 覆盖 Basins paginated GeoJSON FeatureCollection；新增 `GET /api/v1/models/{model_id}` 实现，返回 success envelope 内的 basin/model 名称、basin/model/version IDs、segment count、mesh URI/checksum、package checksum、active flag 和 Basins lineage，缺失模型保持 `MODEL_REGISTRY_NOT_FOUND`。
-- #138 已同步 OpenAPI `ModelInstance` 和前端生成类型，移除 model detail deferred drift allowlist，并增加前端类型 fixture，资产管理页后续可消费真实 Basins-backed metadata 而不是本地 placeholder。
-- #138 PR #144 review 修复已补齐：模型公共投影对 `manifest_uri`、mesh/package URI、URI-valued source lineage 与 `resource_profile` 内嵌 URI 字符串递归执行稳定 URI 清洗，移除 userinfo/query/fragment；新增 nullable `source_path`、`resolved_source_path`、`source_uri`、`source_is_symlink` API/OpenAPI/前端类型契约，DB/internal row 保留原始 lineage。
-- #138 PR #144 follow-up 已补齐：公共模型响应与资产详情现在把 protocol-relative URI 引用也视为 URI-like，清洗 userinfo/query/fragment，同时保留普通 `/volume/...` 本地绝对路径。
-- #139 已补齐前端资产 store 级 fixture：`useModelAssetsStore` 通过生成 OpenAPI client 加载 `GET /api/v1/models` 与 `GET /api/v1/models/{model_id}`，测试验证 Basins-backed `ModelInstance` 列表/详情保留 source lineage、package checksum、active flag、segment count、mesh/checksum 与 `resource_profile`，不需要本地 placeholder 类型补丁。
-- #139 PR #145 修复已补齐：前端资产 store 默认脱敏本地绝对 `source_path/resolved_source_path`（URI-like 公共值保留），详情加载失败会清空 stale `selectedModel`；fixture 覆盖本地路径脱敏、URI-like 保留与失败清空。
-- #139 已更新 `docs/VALIDATION.md`：记录 Basins discovery、publish、registry import、migration report、opt-in real smoke、OpenSpec strict、ruff、后端/API/OpenAPI/前端检查与 API 类型新鲜度命令，并明确 `tailanhe/focing`、`.DS_Store`、`@eaDir`、`*@SynoEAStream`、`input/<alias>` 和生产 copy-not-symlink 要求。
-- #139 PR #145 closeout 证据已记录到 `docs/VALIDATION.md`：2026-05-16 本地通过 OpenSpec strict、`uv run ruff check .`、targeted backend tests（173 passed, 8 skipped）、真实 Basins smoke（80 passed）、前端 API 类型 freshness、资产 fixture tests（53 passed）和 production build。
+- 后端：`apps/api`
+- 前端：`apps/frontend`
+- 编排：`services/orchestrator`
+- Slurm gateway：`services/slurm_gateway`
+- Tile publisher：`services/tile_publisher`
+- Workers：`workers/*`
+- sbatch 模板：`infra/sbatch`
+- 生产闭环 lanes：`services/production_closure/*`
 
-## 已知技术风险 / 注意事项
-
-- 当前仍未完成生产级真实环境闭环：真实 Slurm 生产 workload、真实对象存储、真实气象源凭据、全国规模数据和压测证据仍需专项验证。
-- 若生产要求真实 `application/x-protobuf` MVT，需要把洪水 tile 从当前 GeoJSON 兼容交付升级为 PostGIS tile clipping + MVT 编码，并同步 API/OpenAPI/前端合同。
-- 生产身份认证/授权尚未完成；当前 RBAC 主要是前端 gate + dev/test role override。
-- 历史 OpenSpec proposal/tasks 保留当时路径和任务状态用于审计，不作为当前开发入口；判断完成度以源码、测试、README 和本文为准。
-- 工作区可能存在 `dist/`、`node_modules/`、`__pycache__`、`.codex/` 等生成/本地文件；不要误 stage。历史 legacy 占位目录已删除，若旧文档仍提到它们，按当前有效代码入口为准。
+已清理 legacy 占位目录：`apps/web`、hyphenated worker/service 目录、`workers/sbatch_templates`。后续不要在这些路径恢复实现。
 
 ## 常用验证命令
 
-- 后端快速：`uv run pytest -q`
-- Lint：`uv run ruff check .`
-- OpenSpec 示例：`openspec validate issue-126-real-integration-test-matrix --strict --no-interactive`
-- 真实 DB integration：`NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms uv run pytest -q -m integration`
-- 前端：`cd apps/frontend && corepack pnpm test && corepack pnpm build && corepack pnpm check:bundle`
-- 完整验证说明：`docs/VALIDATION.md`
+```bash
+uv run ruff check .
+uv run pytest -q
+openspec validate m10-production-closure --strict --no-interactive
+openspec validate m11-overview-basin-drilldown --strict --no-interactive
+```
+
+真实 DB integration：
+
+```bash
+NHMS_RUN_INTEGRATION=1 \
+NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms \
+uv run pytest -q -m integration
+```
+
+前端：
+
+```bash
+cd apps/frontend
+corepack pnpm test
+corepack pnpm exec tsc --noEmit
+corepack pnpm run check:api-types
+corepack pnpm build
+corepack pnpm check:bundle
+corepack pnpm exec playwright test
+corepack pnpm run test:e2e:preview
+```
+
+M10 production-like lanes 均为 opt-in，典型形式：
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 \
+uv run nhms-production validate-ops \
+  --evidence-root artifacts/production-closure \
+  --run-id <run_id>
+```
+
+完整验证说明见 `docs/VALIDATION.md`。
 
 ## 下一步优先级
 
-- 先明确下一条主线：生产数据接入、前端效果图对齐、CLDAS 启用、真实 MVT tile、生产 auth/RBAC。
-- 如果做前端对齐，优先补资产管理完整 UI 路由、气象空间展示、气象代站查询，因为这些是缺失路由，不只是样式差距。
-- 如果做数据就绪，Basins-backed runtime/API/frontend consumption 已有合约和 fixture 证据；下一步应转向真实对象存储闭环、生产迁移脚本或全国规模验证。
-- 如果做生产化，优先验证真实 Slurm 生产 workload、真实对象存储、真实气象源凭据与下载稳定性。
-- M10 issue 依赖：#147/#148/#149 可先并行推进；#150 依赖三者最小证据；#151 依赖 #148 和全国数据/大 fixture；#152 可先做但最终验收依赖 #147-#151 证据。
+1. **效果图 3：河段预报曲线全屏详情**：独立 route、顶部 KPI、位置缩略图、气象代站/forcing、主 forecast chart、频率阈值/曲线、气象要素详情、forecast/flood/basin handoff 闭环。
+2. **效果图 5/6：气象数据产品页**：先补数据合同和 API，再做气象栅格空间展示、代站查询、forcing 时序和 QC 状态；继续禁止伪造未接入图层。
+3. **效果图 7：流域/模型资产管理**：把 M9 Basins/modelAssets 能力做成系统管理页面，包含版本树、详情、历史、关系图和资产列表。
+4. **M11 视觉收敛**：基于 06B 和效果图做 overview/basin/flood/monitoring 的截图审查、布局密度、色彩、间距、控件和响应式打磨。
+5. **真实 MVT 与全国规模性能**：从 GeoJSON 兼容路径升级到 PostGIS tile clipping + MVT 编码，并补全国真实数据压测。
+6. **真实生产验证**：在目标环境跑 live auth、alert sink、rollback、真实 Slurm、真实对象存储、真实气象下载。
+7. **CLDAS 接入**：实现 adapter、授权数据质量检查、best_available 生产路径。
+8. **生产身份认证/授权**：把当前 dev/test override 和前端 gate 推进到完整 backend auth/RBAC 系统。
+
+## 注意事项
+
+- 工作区可能存在 `.codex/`、`data/`、`docs/images/`、`node_modules/`、`dist/`、`__pycache__` 等本地或生成文件；不要误 stage。
+- 当前主 worktree 的 `master` 可能落后 `origin/master`；判断 M11 完成度时以 `origin/master` 和已合并 PR #166-#171 为准，不要只看本地 `HEAD`。
+- 历史 OpenSpec proposal/tasks 保留当时路径和任务状态用于审计；判断当前完成度以源码、测试、`docs/VALIDATION.md` 和本文为准。
+- 生产环境迁移不能复用 macOS `.venv` 或 `node_modules`；Linux 目标环境按 `AGENTS.md` 重新 `uv sync` 和 `corepack pnpm install`。
