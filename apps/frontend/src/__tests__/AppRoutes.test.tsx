@@ -515,6 +515,47 @@ const overviewFloodValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A
 const basinDefaultScopeKey = 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'
 const basinValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'
 
+function mockSegmentDetailRouteClient(segmentProperties: Record<string, unknown> = {}) {
+  vi.mocked(client.GET).mockImplementation((async (path: string) => {
+    if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+      return {
+        data: success({
+          river_segment_id: 'seg-009',
+          river_network_version_id: 'rn-v1',
+          length_m: 1200,
+          geom: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+          properties_json: segmentProperties,
+          created_at: '2026-05-18T00:00:00Z',
+        }),
+        error: undefined,
+      }
+    }
+    if (String(path).endsWith('/forecast-series')) {
+      return {
+        data: success({
+          river_segment_id: 'seg-009',
+          issue_time: '2026-05-18T00:00:00Z',
+          variable: 'q_down',
+          unit: 'm3/s',
+          segments: [
+            {
+              scenario: 'forecast_gfs_deterministic',
+              scenario_id: 'forecast_gfs_deterministic',
+              source: 'GFS',
+              cycle_time: '2026-05-18T00:00:00Z',
+              segment_role: 'future_7_days',
+              data: [{ valid_time: '2026-05-18T06:00:00Z', value: 3225 }],
+            },
+          ],
+          frequency_thresholds: { Q2: 100, Q5: 200, Q10: 300, Q20: 400, Q50: 500, Q100: 600 },
+        }),
+        error: undefined,
+      }
+    }
+    return { data: success({ target_type: 'river_segment', target_id: 'seg-009', nodes: [], edges: [] }), error: undefined }
+  }) as never)
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   m11FitBoundsCalls.length = 0
@@ -1850,7 +1891,11 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '查看详情' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: '查看河段详情' })).toHaveAttribute(
+      'href',
+      '/segments/seg-009?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+    )
+    expect(screen.getByRole('link', { name: '查看预报地图' })).toHaveAttribute(
       'href',
       '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
     )
@@ -1916,10 +1961,10 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
-    const href = screen.getByRole('link', { name: '查看详情' }).getAttribute('href')
-    expect(href).toContain('/forecast?source=ifs&')
+    const href = screen.getByRole('link', { name: '查看河段详情' }).getAttribute('href')
+    expect(href).toContain('/segments/seg-009?cycle=')
     expect(href).toContain('cycle=2026-05-18T00%3A00%3A00.000Z')
-    expect(href).not.toContain('source=best')
+    expect(href).not.toContain('source=ifs')
     expect(screen.getByRole('button', { name: '对比预报' })).toBeEnabled()
   })
 
@@ -1941,6 +1986,257 @@ describe('App route state', () => {
     expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('IFS')
     expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('12 m3/s')
     expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('19 m3/s')
+  })
+
+  it('restores /segments route identity and requests only the scoped forecast series', async () => {
+    const calls: Array<{ path: string; segmentId?: string; query?: Record<string, unknown> }> = []
+    vi.mocked(client.GET).mockImplementation((async (path: string, options?: { params?: { path?: Record<string, string>; query?: Record<string, unknown> } }) => {
+      calls.push({ path, segmentId: options?.params?.path?.segment_id, query: options?.params?.query })
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return {
+          data: success({
+            river_segment_id: 'seg-009',
+            river_network_version_id: 'rn-v1',
+            length_m: 1200,
+            geom: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+            properties_json: {},
+            created_at: '2026-05-18T00:00:00Z',
+          }),
+          error: undefined,
+        }
+      }
+      if (String(path).endsWith('/forecast-series')) {
+        return {
+          data: success({
+            river_segment_id: 'seg-009',
+            issue_time: '2026-05-18T00:00:00Z',
+            variable: 'q_down',
+            unit: 'm3/s',
+            segments: [
+              {
+                scenario: 'analysis_true_field',
+                scenario_id: 'analysis_true_field',
+                source: 'ERA5',
+                segment_role: 'past_7_days',
+                data: [{ valid_time: '2026-05-18T00:00:00Z', value: 10 }],
+              },
+              {
+                scenario: 'forecast_gfs_deterministic',
+                scenario_id: 'forecast_gfs_deterministic',
+                source: 'GFS',
+                cycle_time: '2026-05-18T00:00:00Z',
+                segment_role: 'future_7_days',
+                data: [{ valid_time: '2026-05-18T06:00:00Z', value: 3225 }],
+              },
+            ],
+            frequency_thresholds: { Q2: 100, Q5: 200, Q10: 300, Q20: 400, Q50: 500, Q100: 600 },
+          }),
+          error: undefined,
+        }
+      }
+      return { data: success({ target_type: 'river_segment', target_id: 'seg-009', nodes: [], edges: [] }), error: undefined }
+    }) as never)
+    window.history.pushState(
+      {},
+      '',
+      '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText('洪水阈值')).toHaveTextContent('Q100'))
+    const forecastCall = calls.find((call) => String(call.path).endsWith('/forecast-series'))
+    expect(forecastCall).toMatchObject({
+      segmentId: 'seg-009',
+      query: expect.objectContaining({
+        river_network_version_id: 'rn-v1',
+        issue_time: '2026-05-18T00:00:00.000Z',
+        scenarios: 'GFS',
+        include_analysis: true,
+      }),
+    })
+    expect(calls.map((call) => call.segmentId).filter(Boolean)).not.toContain('seg-001')
+    expect(screen.getByLabelText('站点与强迫数据')).toHaveTextContent('现有 lineage API 不能在无 run_id 情况下安全查询')
+    expect(screen.getByLabelText('位置缩略图')).toBeInTheDocument()
+  })
+
+  it('renders station forcing metadata and PRCP/TEMP rows from the segment detail contract', async () => {
+    mockSegmentDetailRouteClient({
+      station_forcing: {
+        station_id: 'S001',
+        source_id: 'CLDAS',
+        station: {
+          station_id: 'S001',
+          basin_version_id: 'bv-001',
+          station_name: 'Demo Station',
+          geom: { type: 'Point', coordinates: [101.25, 31.5] },
+          elevation_m: 345,
+          station_role: 'nearest',
+          active_flag: true,
+          properties_json: {},
+          created_at: '2026-05-18T00:00:00Z',
+        },
+        series: {
+          target_id: 'S001',
+          unit: 'mm/C',
+          variables: {
+            PRCP: [
+              ['2026-05-18T00:00:00Z', 1.5],
+              ['2026-05-18T06:00:00Z', 2.25],
+            ],
+            TEMP: [
+              ['2026-05-18T00:00:00Z', 18],
+              ['2026-05-18T06:00:00Z', 20],
+            ],
+          },
+        },
+      },
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
+    )
+
+    render(<App />)
+
+    const panel = await screen.findByLabelText('站点与强迫数据')
+    await waitFor(() => expect(panel).toHaveTextContent('S001'))
+    expect(panel).toHaveTextContent('Demo Station')
+    expect(panel).toHaveTextContent('101.2500, 31.5000')
+    expect(panel).toHaveTextContent('CLDAS')
+    expect(within(panel).getByLabelText('PRCP chart')).toBeInTheDocument()
+    expect(within(panel).getByLabelText('TEMP chart')).toBeInTheDocument()
+    expect(within(panel).getAllByTestId('station-forcing-series-row')).toHaveLength(2)
+    expect(panel).not.toHaveTextContent('未渲染合成站点')
+  })
+
+  it('renders restricted station forcing reason without synthetic station rows', async () => {
+    mockSegmentDetailRouteClient({
+      station_forcing: {
+        metadata: {
+          restricted_reason: 'CLDAS unavailable in this environment',
+        },
+      },
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
+    )
+
+    render(<App />)
+
+    const panel = await screen.findByLabelText('站点与强迫数据')
+    await waitFor(() => expect(panel).toHaveTextContent('CLDAS unavailable in this environment'))
+    expect(panel).toHaveTextContent('站点或强迫数据受限')
+    expect(within(panel).queryByText('station')).not.toBeInTheDocument()
+    expect(within(panel).queryAllByTestId('station-forcing-series-row')).toHaveLength(0)
+    expect(within(panel).queryByLabelText('PRCP chart')).not.toBeInTheDocument()
+    expect(within(panel).queryByLabelText('TEMP chart')).not.toBeInTheDocument()
+  })
+
+  it('keeps station forcing unavailable copy without synthetic rows when the contract is absent', async () => {
+    mockSegmentDetailRouteClient()
+    window.history.pushState(
+      {},
+      '',
+      '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
+    )
+
+    render(<App />)
+
+    const panel = await screen.findByLabelText('站点与强迫数据')
+    await waitFor(() => expect(panel).toHaveTextContent('站点与强迫数据暂不可用'))
+    expect(panel).toHaveTextContent('现有 lineage API 不能在无 run_id 情况下安全查询')
+    expect(within(panel).queryByText('S001')).not.toBeInTheDocument()
+    expect(within(panel).queryAllByTestId('station-forcing-series-row')).toHaveLength(0)
+    expect(within(panel).queryByLabelText('PRCP chart')).not.toBeInTheDocument()
+    expect(within(panel).queryByLabelText('TEMP chart')).not.toBeInTheDocument()
+  })
+
+  it('does not request forecast series when segment detail lacks river network identity', async () => {
+    window.history.pushState({}, '', '/segments/seg-009?basinVersionId=bv-001')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '缺少 riverNetworkVersionId' })).toBeInTheDocument()
+    expect(vi.mocked(client.GET).mock.calls.some(([path]) => String(path).endsWith('/forecast-series'))).toBe(false)
+  })
+
+  it('renders invalid stale segment state without falling back to a sibling segment forecast', async () => {
+    vi.mocked(client.GET).mockImplementation((async (path: string, options?: { params?: { path?: Record<string, string> } }) => {
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}' && options?.params?.path?.segment_id === 'missing') {
+        return { data: undefined, error: { detail: 'not found' } }
+      }
+      return { data: success({}), error: undefined }
+    }) as never)
+    window.history.pushState({}, '', '/segments/missing?basinVersionId=bv-001&riverNetworkVersionId=rn-v1')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '未找到河段 missing' })).toBeInTheDocument()
+    const forecastCalls = vi.mocked(client.GET).mock.calls.filter(([path]) => String(path).endsWith('/forecast-series'))
+    expect(forecastCalls).toHaveLength(0)
+    expect(vi.mocked(client.GET).mock.calls.map(([, options]) => options?.params?.path?.segment_id).filter(Boolean)).not.toContain('seg-001')
+  })
+
+  it('corrects stale segment validTime while preserving scoped identity', async () => {
+    vi.mocked(client.GET).mockImplementation((async (path: string) => {
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return {
+          data: success({
+            river_segment_id: 'seg-009',
+            river_network_version_id: 'rn-v1',
+            geom: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+            properties_json: {},
+            created_at: '2026-05-18T00:00:00Z',
+          }),
+          error: undefined,
+        }
+      }
+      if (String(path).endsWith('/forecast-series')) {
+        return {
+          data: success({
+            segment_id: 'seg-009',
+            issue_time: '2026-05-18T00:00:00Z',
+            unit: 'm3/s',
+            series: [
+              {
+                scenario_id: 'forecast_gfs_deterministic',
+                source: 'GFS',
+                segment_role: 'future_7_days',
+                cycle_time: '2026-05-18T00:00:00Z',
+                points: [
+                  ['2026-05-18T00:00:00Z', 10],
+                  ['2026-05-18T06:00:00Z', 20],
+                ],
+              },
+            ],
+            frequency_thresholds: null,
+          }),
+          error: undefined,
+        }
+      }
+      return { data: success({ target_type: 'river_segment', target_id: 'seg-009', nodes: [], edges: [] }), error: undefined }
+    }) as never)
+    window.history.pushState(
+      {},
+      '',
+      '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-17T00:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('validTime')).toBe('2026-05-18T00:00:00.000Z'))
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('source')).toBe('gfs')
+    expect(params.get('cycle')).toBe('2026-05-18T00:00:00.000Z')
+    expect(params.get('basinVersionId')).toBe('bv-001')
+    expect(params.get('riverNetworkVersionId')).toBe('rn-v1')
+    expect(params.get('segmentId')).toBe('seg-009')
   })
 
   it('does not correct basin valid time from a stale basin snapshot', async () => {

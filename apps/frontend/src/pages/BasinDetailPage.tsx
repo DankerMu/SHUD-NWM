@@ -16,6 +16,7 @@ import {
 import { M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
   defaultM11QueryState,
+  m11QueryHref,
   type M11QueryPatch,
   type M11QueryWarningLevel,
   needsM11QueryReplacement,
@@ -216,6 +217,7 @@ export function BasinDetailPage() {
                 segment={selectedSegment}
                 requestedSegmentId={state.segmentId}
                 invalidSegmentRequested={invalidSegmentRequested}
+                routeState={state}
               />
               <SelectedSegmentTrendPanel segment={selectedSegment} />
               <div className="rounded-md border border-neutral-300 p-3">
@@ -510,10 +512,12 @@ function SelectedSegmentPanel({
   segment,
   requestedSegmentId,
   invalidSegmentRequested,
+  routeState,
 }: {
   segment: SelectedSegmentDetail | null | undefined
   requestedSegmentId: string | null
   invalidSegmentRequested: boolean
+  routeState: ReturnType<typeof parseM11QueryState>
 }) {
   const [comparisonVisible, setComparisonVisible] = useState(false)
 
@@ -593,8 +597,14 @@ function SelectedSegmentPanel({
       ) : null}
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <Link className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600" to={segment.handoffUrl}>
-          查看详情
+        <Link
+          className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600"
+          to={segmentDetailHref(segment, routeState)}
+        >
+          查看河段详情
+        </Link>
+        <Link className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-700" to={segment.handoffUrl}>
+          查看预报地图
         </Link>
         {segment.comparisonAvailable ? (
           <button
@@ -630,6 +640,21 @@ function SelectedSegmentPanel({
       ) : null}
     </section>
   )
+}
+
+function segmentDetailHref(segment: SelectedSegmentDetail, routeState: ReturnType<typeof parseM11QueryState>) {
+  return m11QueryHref(`/segments/${encodeURIComponent(segment.riverSegmentId)}`, {
+    source: routeState.source,
+    cycle: routeState.cycle ?? segment.sourceSelection.cycleTime,
+    validTime: routeState.validTime ?? segment.freshness.validTime,
+    layer: defaultM11QueryState.layer,
+    basemap: defaultM11QueryState.basemap,
+    basinVersionId: segment.basinVersionId,
+    riverNetworkVersionId: segment.riverNetworkVersionId,
+    segmentId: segment.riverSegmentId,
+    warningLevel: null,
+    q: null,
+  })
 }
 
 function SelectedSegmentComparisonTable({ segment }: { segment: SelectedSegmentDetail }) {

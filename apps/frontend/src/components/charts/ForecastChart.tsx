@@ -6,6 +6,15 @@ import type { ForecastData } from '@/stores/forecast'
 
 const IFS_SIX_DAY_LEAD_HOURS = 144
 const HOUR_MS = 60 * 60 * 1000
+const THRESHOLD_KEYS = ['Q2', 'Q5', 'Q10', 'Q20', 'Q50', 'Q100'] as const
+const THRESHOLD_COLORS: Record<(typeof THRESHOLD_KEYS)[number], string> = {
+  Q2: '#38a169',
+  Q5: '#2b6cb0',
+  Q10: '#d97706',
+  Q20: '#dc2626',
+  Q50: '#9333ea',
+  Q100: '#111827',
+}
 
 interface ForecastChartProps {
   data: ForecastData | null
@@ -84,6 +93,26 @@ function buildMarkLine(data: object[]) {
   }
 }
 
+function thresholdMarkLineData(data: ForecastData | null | undefined) {
+  const thresholds = data?.frequencyThresholds
+  if (!thresholds) return []
+  return THRESHOLD_KEYS.flatMap((key) => {
+    const value = Number(thresholds[key])
+    if (!Number.isFinite(value)) return []
+    return {
+      name: key,
+      yAxis: value,
+      lineStyle: { color: THRESHOLD_COLORS[key], type: 'dashed', width: 1.2 },
+      label: {
+        formatter: `${key} ${value.toFixed(0)}`,
+        color: THRESHOLD_COLORS[key],
+        backgroundColor: '#ffffff',
+        padding: [2, 4],
+      },
+    }
+  })
+}
+
 function isIfsSeries(series: { scenario: string; source?: string }) {
   return `${series.source ?? ''} ${series.scenario}`.toLowerCase().includes('ifs')
 }
@@ -153,6 +182,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
     const issueTimeMs = data?.issueTime ? Date.parse(data.issueTime) : NaN
     const showIssueDivider =
       Number.isFinite(issueTimeMs) && normalizedSeries.some((series) => series.isAnalysis)
+    const thresholds = thresholdMarkLineData(data)
 
     return {
       color: normalizedSeries.map((series) => series.color),
@@ -198,6 +228,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
           ...(index === 0 && showIssueDivider
             ? [issueTimeMarkLineData(issueTimeMs, data?.issueTime ?? 'latest')]
             : []),
+          ...(index === 0 ? thresholds : []),
           ...(series.isIfs && series.sixDayEndpointMs !== null
             ? [ifsSixDayMarkLineData(series.sixDayEndpointMs)]
             : []),

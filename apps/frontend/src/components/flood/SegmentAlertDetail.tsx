@@ -1,5 +1,6 @@
 import { X } from 'lucide-react'
 import { useEffect, useMemo } from 'react'
+import { Link } from 'react-router-dom'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 
 import { echarts } from '@/components/charts/echartsCore'
@@ -7,7 +8,7 @@ import { alertLevelColor, alertLevelLabel } from '@/components/flood/alertLevels
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
-import type { M11Source } from '@/lib/m11/queryState'
+import { m11QueryHref, type M11Source } from '@/lib/m11/queryState'
 import type { ForecastData } from '@/stores/forecast'
 import { useForecastStore } from '@/stores/forecast'
 import type {
@@ -22,6 +23,7 @@ interface SegmentAlertDetailProps {
   basinVersionId?: string | null
   forecastSource?: M11Source | null
   forecastIssueTime?: string | null
+  forecastValidTime?: string | null
   onClose: () => void
 }
 
@@ -148,6 +150,7 @@ export function SegmentAlertDetail({
   basinVersionId,
   forecastSource = null,
   forecastIssueTime = null,
+  forecastValidTime = null,
   onClose,
 }: SegmentAlertDetailProps) {
   const toast = useToast((state) => state.toast)
@@ -160,6 +163,21 @@ export function SegmentAlertDetail({
   const selectForecastSegment = useForecastStore((state) => state.selectSegment)
   const fetchForecast = useForecastStore((state) => state.fetchForecast)
   const forecastScopedUnavailable = Boolean(segment && basinVersionId && !segment.riverNetworkVersionId)
+  const detailHref =
+    segment && basinVersionId && segment.riverNetworkVersionId
+      ? m11QueryHref(`/segments/${encodeURIComponent(segment.riverSegmentId)}`, {
+          source: forecastSource ?? 'best',
+          cycle: forecastIssueTime,
+          validTime: forecastValidTime ?? segment.validTime ?? null,
+          layer: 'flood-return-period',
+          basemap: 'vector',
+          basinVersionId,
+          riverNetworkVersionId: segment.riverNetworkVersionId,
+          segmentId: segment.riverSegmentId,
+          warningLevel: null,
+          q: null,
+        })
+      : null
 
   useEffect(() => {
     if (!segment) return
@@ -217,9 +235,16 @@ export function SegmentAlertDetail({
           </h2>
           <p className="mt-1 text-xs text-muted">{segment.basinName || segment.basinVersionId || basinVersionId}</p>
         </div>
-        <Button type="button" size="icon" variant="ghost" className="size-8 shrink-0" onClick={onClose} aria-label="关闭详情">
-          <X className="size-4" />
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {detailHref ? (
+            <Link className="rounded border border-primary-600 px-2.5 py-1.5 text-xs font-medium text-primary-600" to={detailHref}>
+              查看河段详情
+            </Link>
+          ) : null}
+          <Button type="button" size="icon" variant="ghost" className="size-8" onClick={onClose} aria-label="关闭详情">
+            <X className="size-4" />
+          </Button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">

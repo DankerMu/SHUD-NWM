@@ -111,6 +111,7 @@ export function ForecastPage() {
         <div className="flex h-full min-h-0 flex-col gap-3">
           <div className="rounded-lg border border-border bg-panel px-4 py-3">
             <ForecastBasinHandoff context={basinContext} routeState={routeState} />
+            <ForecastSegmentDetailHandoff segment={selectedSegment} routeState={routeState} />
           </div>
           <ForecastPanel
             segment={selectedSegment}
@@ -134,6 +135,30 @@ export function ForecastPage() {
         </aside>
       )}
     </div>
+  )
+}
+
+function ForecastSegmentDetailHandoff({
+  segment,
+  routeState,
+}: {
+  segment: ForecastSegmentInfo
+  routeState: ReturnType<typeof parseM11QueryState>
+}) {
+  if (!segment.basinVersionId || !segment.riverNetworkVersionId) return null
+  const href = m11QueryHref(`/segments/${encodeURIComponent(segment.segmentId)}`, routeState, {
+    basinVersionId: segment.basinVersionId,
+    riverNetworkVersionId: segment.riverNetworkVersionId,
+    segmentId: segment.segmentId,
+  })
+
+  return (
+    <Link
+      to={href}
+      className="ml-2 mt-3 inline-flex h-9 items-center rounded border border-primary-600 px-3 text-sm font-medium text-primary-600 hover:bg-primary-50"
+    >
+      查看河段详情
+    </Link>
   )
 }
 

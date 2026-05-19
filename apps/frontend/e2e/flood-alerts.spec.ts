@@ -197,6 +197,10 @@ test.describe('flood alerts page', () => {
     await forecastSeriesResponse
 
     await expect(page.getByRole('heading', { name: 'Flood Segment 1' })).toBeVisible()
+    await expect(page.getByRole('link', { name: '查看河段详情' })).toHaveAttribute(
+      'href',
+      /\/segments\/seg-1\?source=gfs&cycle=2026-05-12T00%3A00%3A00.000Z&validTime=2026-05-12T03%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=basin-v1&riverNetworkVersionId=rivnet-v1&segmentId=seg-1/,
+    )
     await expect.poll(() => calls.map((call) => call.pathname)).toContain('/api/v1/flood-alerts/timeline')
     const timelineCall = calls.find((call) => call.pathname === '/api/v1/flood-alerts/timeline')
     const forecastSeriesCall = calls.find((call) => call.pathname === forecastSeriesPath)
