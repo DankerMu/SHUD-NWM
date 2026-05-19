@@ -395,6 +395,13 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BasinVersionId"
         - $ref: "#/components/parameters/SegmentId"
+        - name: river_network_version_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: River network version for the selected/list row; required because river_segment_id is only unique within a river network version.
         - $ref: "#/components/parameters/IssueTime"
         - name: variables
           in: query

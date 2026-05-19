@@ -48,6 +48,7 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
         issue_time: str,
         variables: Sequence[str],
         scenarios: Sequence[str],
@@ -67,7 +68,12 @@ class PsycopgForecastStore:
         run_type_tokens = _run_type_tokens(run_types)
         scenario_filter = _scenario_filter(scenarios)
         with self._transaction() as cursor:
-            self._validate_series_target(cursor, basin_version_id=basin_version_id, segment_id=segment_id)
+            self._validate_series_target(
+                cursor,
+                basin_version_id=basin_version_id,
+                segment_id=segment_id,
+                river_network_version_id=river_network_version_id,
+            )
 
             if "hindcast" in run_type_tokens and not include_analysis:
                 parsed_issue_time = None if issue_time == "latest" else _parse_datetime(issue_time)
@@ -75,6 +81,7 @@ class PsycopgForecastStore:
                     cursor,
                     basin_version_id=basin_version_id,
                     segment_id=segment_id,
+                    river_network_version_id=river_network_version_id,
                     run_types=run_type_tokens,
                 )
                 if selected_issue_time is None:
@@ -83,6 +90,7 @@ class PsycopgForecastStore:
                     cursor,
                     basin_version_id=basin_version_id,
                     segment_id=segment_id,
+                    river_network_version_id=river_network_version_id,
                     run_types=run_type_tokens,
                     end_time=selected_issue_time,
                 )
@@ -101,6 +109,7 @@ class PsycopgForecastStore:
                     cursor,
                     basin_version_id=basin_version_id,
                     segment_id=segment_id,
+                    river_network_version_id=river_network_version_id,
                     scenario_filter=scenario_filter,
                 )
             selected_issue_time = parsed_issue_time or _latest_cycle_time(latest_cycles_by_scenario)
@@ -109,6 +118,7 @@ class PsycopgForecastStore:
                     cursor,
                     basin_version_id=basin_version_id,
                     segment_id=segment_id,
+                    river_network_version_id=river_network_version_id,
                 )
             if selected_issue_time is None:
                 if include_analysis:
@@ -126,6 +136,7 @@ class PsycopgForecastStore:
                     cursor,
                     basin_version_id=basin_version_id,
                     segment_id=segment_id,
+                    river_network_version_id=river_network_version_id,
                     start_time=analysis_start,
                     end_time=analysis_end,
                 )
@@ -133,6 +144,7 @@ class PsycopgForecastStore:
                     cursor,
                     basin_version_id=basin_version_id,
                     segment_id=segment_id,
+                    river_network_version_id=river_network_version_id,
                     issue_time=selected_issue_time,
                     scenario_filter=scenario_filter,
                     cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
@@ -152,6 +164,7 @@ class PsycopgForecastStore:
                 cursor,
                 basin_version_id=basin_version_id,
                 segment_id=segment_id,
+                river_network_version_id=river_network_version_id,
                 issue_time=selected_issue_time,
                 scenario_filter=scenario_filter,
                 cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
@@ -167,6 +180,7 @@ class PsycopgForecastStore:
                 details={
                     "basin_version_id": basin_version_id,
                     "segment_id": segment_id,
+                    "river_network_version_id": river_network_version_id,
                     "issue_time": issue_time,
                 },
             )
@@ -178,7 +192,14 @@ class PsycopgForecastStore:
             frequency_thresholds=thresholds,
         )
 
-    def _validate_series_target(self, cursor: Any, *, basin_version_id: str, segment_id: str) -> None:
+    def _validate_series_target(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        river_network_version_id: str,
+    ) -> None:
         basin = self._fetch_optional(
             cursor,
             "SELECT basin_version_id FROM core.basin_version WHERE basin_version_id = %s",
@@ -204,17 +225,21 @@ class PsycopgForecastStore:
               ON rnv.river_network_version_id = rs.river_network_version_id
             WHERE rnv.basin_version_id = %s
               AND rs.river_segment_id = %s
-            ORDER BY rnv.created_at DESC, rnv.river_network_version_id DESC
+              AND rs.river_network_version_id = %s
             LIMIT 1
             """,
-            (basin_version_id, segment_id),
+            (basin_version_id, segment_id, river_network_version_id),
         )
         if segment is None:
             raise ForecastStoreError(
                 status_code=404,
                 code="SEGMENT_NOT_FOUND",
                 message=f"River segment not found: {segment_id}",
-                details={"basin_version_id": basin_version_id, "segment_id": segment_id},
+                details={
+                    "basin_version_id": basin_version_id,
+                    "segment_id": segment_id,
+                    "river_network_version_id": river_network_version_id,
+                },
             )
 
     def _latest_issue_time(
@@ -223,6 +248,7 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
         scenario_filter: "_ScenarioFilter",
     ) -> datetime | None:
         row = self._fetch_optional(
@@ -233,13 +259,14 @@ class PsycopgForecastStore:
             JOIN hydro.hydro_run h ON h.run_id = rt.run_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
+              AND rt.river_network_version_id = %s
               AND rt.variable = 'q_down'
               AND h.cycle_time IS NOT NULL
               {scenario_filter.sql}
             ORDER BY h.cycle_time DESC
             LIMIT 1
             """,
-            (basin_version_id, segment_id, *scenario_filter.params),
+            (basin_version_id, segment_id, river_network_version_id, *scenario_filter.params),
         )
         return _ensure_utc(row["cycle_time"]) if row is not None else None
 
@@ -249,6 +276,7 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
         scenario_filter: "_ScenarioFilter",
     ) -> dict[str, datetime]:
         rows = self._fetch_all(
@@ -261,6 +289,7 @@ class PsycopgForecastStore:
             JOIN hydro.hydro_run h ON h.run_id = rt.run_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
+              AND rt.river_network_version_id = %s
               AND rt.variable = 'q_down'
               AND h.run_type = 'forecast'
               AND h.cycle_time IS NOT NULL
@@ -268,7 +297,7 @@ class PsycopgForecastStore:
             GROUP BY h.scenario_id
             ORDER BY h.scenario_id
             """,
-            (basin_version_id, segment_id, *scenario_filter.params),
+            (basin_version_id, segment_id, river_network_version_id, *scenario_filter.params),
         )
         return {
             str(row["scenario_id"]): _ensure_utc(row["cycle_time"])
@@ -282,6 +311,7 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
     ) -> datetime | None:
         row = self._fetch_optional(
             cursor,
@@ -291,13 +321,14 @@ class PsycopgForecastStore:
             JOIN hydro.hydro_run h ON h.run_id = rt.run_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
+              AND rt.river_network_version_id = %s
               AND rt.variable = 'q_down'
               AND h.scenario_id = 'analysis_true_field'
               AND h.end_time IS NOT NULL
             ORDER BY h.end_time DESC, h.created_at DESC
             LIMIT 1
             """,
-            (basin_version_id, segment_id),
+            (basin_version_id, segment_id, river_network_version_id),
         )
         return _ensure_utc(row["end_time"]) if row is not None else None
 
@@ -307,6 +338,7 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
         start_time: datetime,
         end_time: datetime,
     ) -> list[dict[str, Any]]:
@@ -325,13 +357,14 @@ class PsycopgForecastStore:
             LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
+              AND rt.river_network_version_id = %s
               AND rt.variable = 'q_down'
               AND h.scenario_id = 'analysis_true_field'
               AND rt.valid_time >= %s
               AND rt.valid_time < %s
             ORDER BY rt.valid_time, h.end_time DESC, h.created_at DESC
             """,
-            (basin_version_id, segment_id, start_time, end_time),
+            (basin_version_id, segment_id, river_network_version_id, start_time, end_time),
         )
 
     def _fetch_forecast_segment_rows(
@@ -340,6 +373,7 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
         issue_time: datetime,
         scenario_filter: "_ScenarioFilter",
         cycle_times_by_scenario: Mapping[str, datetime] | None = None,
@@ -377,6 +411,7 @@ class PsycopgForecastStore:
                 LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
                 WHERE rt.basin_version_id = %s
                   AND rt.river_segment_id = %s
+                  AND rt.river_network_version_id = %s
                   AND rt.variable = 'q_down'
                   AND h.run_type = 'forecast'
                   AND rt.valid_time >= h.cycle_time
@@ -384,7 +419,13 @@ class PsycopgForecastStore:
                   {scenario_filter.sql}
                 ORDER BY h.scenario_id, rt.valid_time
                 """,
-                (*selected_cycle_params, basin_version_id, segment_id, *scenario_filter.params),
+                (
+                    *selected_cycle_params,
+                    basin_version_id,
+                    segment_id,
+                    river_network_version_id,
+                    *scenario_filter.params,
+                ),
             )
 
         forecast_end = end_time or issue_time + timedelta(days=7)
@@ -407,6 +448,7 @@ class PsycopgForecastStore:
             LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
+              AND rt.river_network_version_id = %s
               AND rt.variable = 'q_down'
               AND h.run_type = 'forecast'
               AND h.cycle_time = %s
@@ -415,7 +457,15 @@ class PsycopgForecastStore:
               {scenario_filter.sql}
             ORDER BY h.scenario_id, rt.valid_time
             """,
-            (basin_version_id, segment_id, issue_time, issue_time, forecast_end, *scenario_filter.params),
+            (
+                basin_version_id,
+                segment_id,
+                river_network_version_id,
+                issue_time,
+                issue_time,
+                forecast_end,
+                *scenario_filter.params,
+            ),
         )
 
     def _latest_run_type_valid_time(
@@ -424,6 +474,7 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
         run_types: Sequence[str],
     ) -> datetime | None:
         row = self._fetch_optional(
@@ -434,10 +485,11 @@ class PsycopgForecastStore:
             JOIN hydro.hydro_run h ON h.run_id = rt.run_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
+              AND rt.river_network_version_id = %s
               AND rt.variable = 'q_down'
               AND LOWER(h.run_type) = ANY(%s)
             """,
-            (basin_version_id, segment_id, list(run_types)),
+            (basin_version_id, segment_id, river_network_version_id, list(run_types)),
         )
         return _ensure_utc(row["valid_time"]) if row is not None and row.get("valid_time") is not None else None
 
@@ -447,6 +499,7 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
         run_types: Sequence[str],
         end_time: datetime,
     ) -> list[dict[str, Any]]:
@@ -470,13 +523,14 @@ class PsycopgForecastStore:
             LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
+              AND rt.river_network_version_id = %s
               AND rt.variable = 'q_down'
               AND LOWER(h.run_type) = ANY(%s)
               AND rt.valid_time >= %s
               AND rt.valid_time <= %s
             ORDER BY h.scenario_id, rt.valid_time
             """,
-            (basin_version_id, segment_id, list(run_types), start_time, end_time),
+            (basin_version_id, segment_id, river_network_version_id, list(run_types), start_time, end_time),
         )
 
     def _frequency_thresholds_for_rows(

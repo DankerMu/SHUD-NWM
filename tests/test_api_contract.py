@@ -309,7 +309,7 @@ def test_forecast_series_contract_accepts_include_analysis_query() -> None:
         with TestClient(app) as client:
             response = client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_1/forecast-series",
-                params={"include_analysis": "true", "run_types": "forecast"},
+                params={"river_network_version_id": "network_v1", "include_analysis": "true", "run_types": "forecast"},
             )
     finally:
         app.dependency_overrides.pop(get_forecast_store, None)
@@ -719,6 +719,7 @@ class _ForecastSeriesStore:
     def forecast_series(self, **kwargs: Any) -> dict[str, Any]:
         assert kwargs["include_analysis"] is True
         assert kwargs["run_types"] == ["forecast"]
+        assert kwargs["river_network_version_id"] == "network_v1"
         return {
             "segments": [
                 {

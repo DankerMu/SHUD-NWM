@@ -2517,6 +2517,10 @@ describe('useOverviewDataStore', () => {
       query: { river_network_version_id: 'yangtze_rivnet_selected_run' },
       pathParams: { segment_id: cappedQuery.segmentId },
     })
+    expect(calls.find((call) => call.path.endsWith('/forecast-series'))).toMatchObject({
+      query: { river_network_version_id: 'yangtze_rivnet_selected_run' },
+      pathParams: { segment_id: cappedQuery.segmentId },
+    })
     expect(snapshot.selectedSegment?.riverNetworkVersionId).toBe('yangtze_rivnet_selected_run')
     expect(JSON.stringify(calls)).not.toContain('yangtze_rivnet_sibling')
   })
@@ -2626,6 +2630,10 @@ describe('useOverviewDataStore', () => {
       query: { river_network_version_id: 'yangtze_rivnet_historical' },
     })
     expect(calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')).toMatchObject({
+      query: { river_network_version_id: 'yangtze_rivnet_historical' },
+      pathParams: { segment_id: query.segmentId },
+    })
+    expect(calls.find((call) => call.path.endsWith('/forecast-series'))).toMatchObject({
       query: { river_network_version_id: 'yangtze_rivnet_historical' },
       pathParams: { segment_id: query.segmentId },
     })

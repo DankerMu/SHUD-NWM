@@ -1673,7 +1673,9 @@ export interface operations {
     };
     getRiverSegmentForecastSeries: {
         parameters: {
-            query?: {
+            query: {
+                /** @description River network version for the selected/list row; required because river_segment_id is only unique within a river network version. */
+                river_network_version_id: string;
                 /** @description Use `latest` to resolve to the most recent available issue time, or provide an ISO 8601 datetime. */
                 issue_time?: components["parameters"]["IssueTime"];
                 /** @description Comma-separated hydrological variables. */

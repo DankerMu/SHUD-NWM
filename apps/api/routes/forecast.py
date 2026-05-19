@@ -28,6 +28,14 @@ def get_forecast_series(
     request: Request,
     basin_version_id: str,
     segment_id: str,
+    river_network_version_id: str = Query(
+        ...,
+        min_length=1,
+        description=(
+            "River network version for the selected/list row; required because river_segment_id is only unique "
+            "within a river network version."
+        ),
+    ),
     issue_time: str = Query(default="latest"),
     variables: str = Query(default="q_down"),
     scenarios: str = Query(default="GFS"),
@@ -42,6 +50,7 @@ def get_forecast_series(
         return store.forecast_series(
             basin_version_id=basin_version_id,
             segment_id=segment_id,
+            river_network_version_id=river_network_version_id,
             issue_time=issue_time,
             variables=_split_query_list(variables),
             scenarios=_split_query_list(scenarios),

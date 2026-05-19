@@ -770,13 +770,14 @@ async function fetchRiverSegment(basinVersionId: string, riverNetworkVersionId: 
   )
 }
 
-async function fetchForecast(basinVersionId: string, segmentId: string, query: M11QueryState) {
+async function fetchForecast(basinVersionId: string, riverNetworkVersionId: string, segmentId: string, query: M11QueryState) {
   const scenarios = scenariosForQuery(query.source)
   if (!scenarios) return null
 
   return cached(
     cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series', {
       basinVersionId,
+      riverNetworkVersionId,
       segmentId,
       source: query.source,
       cycle: query.cycle ?? 'latest',
@@ -788,6 +789,7 @@ async function fetchForecast(basinVersionId: string, segmentId: string, query: M
           params: {
             path: { basin_version_id: basinVersionId, segment_id: segmentId },
             query: {
+              river_network_version_id: riverNetworkVersionId,
               issue_time: query.cycle ?? 'latest',
               variables: 'q_down',
               scenarios,
@@ -1096,7 +1098,12 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
             selectedIdentifiers.detailEndpointSegmentId,
           ),
           canFetchConcreteSurface
-            ? fetchForecast(selectedVersion.basin_version_id, selectedIdentifiers.forecastSegmentId, concreteSurfaceQuery)
+            ? fetchForecast(
+                selectedVersion.basin_version_id,
+                selectedIdentifiers.detailEndpointRiverNetworkVersionId,
+                selectedIdentifiers.forecastSegmentId,
+                concreteSurfaceQuery,
+              )
             : Promise.resolve(null),
           latestRun && useSingleRunFloodSurfaces ? fetchFloodTimeline(latestRun.run_id, selectedIdentifiers.timelineSegmentId) : Promise.resolve(null),
         ])
