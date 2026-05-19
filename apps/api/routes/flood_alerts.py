@@ -36,8 +36,13 @@ NO_USABLE_CURVE_NOTE = "No usable frequency curves available"
 NO_SEGMENT_CURVE_NOTE = "No frequency curve available for this segment"
 SEGMENT_LIST_DEFAULT_LIMIT = 100
 SEGMENT_LIST_MAX_LIMIT = 500
+FLOOD_ALERT_TIMELINE_DEFAULT_MAX_POINTS = 168
+FLOOD_ALERT_TIMELINE_MAX_POINTS = 1_000
 FLOOD_RETURN_PERIOD_MAP_DEFAULT_LIMIT = 10_000
 FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT = 10_000
+FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES = 10_000
+FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES = 50_000
+FLOOD_RETURN_PERIOD_MAP_MAX_SERIALIZED_BYTES = 2_000_000
 
 
 class AlertLevelCount(BaseModel):
@@ -366,6 +371,12 @@ def flood_alert_timeline(
             "within a river network version."
         ),
     ),
+    max_points: int = Query(
+        default=FLOOD_ALERT_TIMELINE_DEFAULT_MAX_POINTS,
+        ge=1,
+        le=FLOOD_ALERT_TIMELINE_MAX_POINTS,
+        description="Maximum timeline points to return. Requests whose result set exceeds this budget fail with 413.",
+    ),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     _require_frequency_ready(session, run_id)
@@ -381,6 +392,7 @@ def flood_alert_timeline(
                   AND river_network_version_id = :river_network_version_id
                   AND max_over_window = :max_over_window
                 ORDER BY valid_time
+                LIMIT :query_limit
                 """
             ),
             {
@@ -388,6 +400,7 @@ def flood_alert_timeline(
                 "segment_id": segment_id,
                 "river_network_version_id": river_network_version_id,
                 "max_over_window": False,
+                "query_limit": max_points + 1,
             },
         ).mappings()
     )
@@ -403,10 +416,23 @@ def flood_alert_timeline(
                       AND river_segment_id = :segment_id
                       AND river_network_version_id = :river_network_version_id
                     ORDER BY max_over_window, valid_time
+                    LIMIT :query_limit
                     """
                 ),
-                {"run_id": run_id, "segment_id": segment_id, "river_network_version_id": river_network_version_id},
+                {
+                    "run_id": run_id,
+                    "segment_id": segment_id,
+                    "river_network_version_id": river_network_version_id,
+                    "query_limit": max_points + 1,
+                },
             ).mappings()
+        )
+    if len(rows) > max_points:
+        raise ApiError(
+            status_code=413,
+            code="FLOOD_ALERT_TIMELINE_POINT_LIMIT_EXCEEDED",
+            message="Flood alert timeline point budget exceeded; request a smaller result window.",
+            details={"max_points": max_points},
         )
     timesteps = [
         TimelinePoint(
@@ -531,6 +557,7 @@ def flood_return_period_map(
             for row in rows
         ]
     )
+    _enforce_flood_return_period_geojson_budget(payload)
     return JSONResponse(content=payload.model_dump(), media_type="application/json")
 
 
@@ -781,6 +808,62 @@ def _geojson_geometry(value: Any) -> dict[str, Any] | None:
             parsed = json.loads(stripped)
             return parsed if isinstance(parsed, dict) else None
     return None
+
+
+def _enforce_flood_return_period_geojson_budget(payload: TileFeatureCollection) -> None:
+    total_coordinates = 0
+    for feature in payload.features:
+        coordinate_count = _geojson_coordinate_count(feature.geometry)
+        if coordinate_count > FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES:
+            raise ApiError(
+                status_code=413,
+                code="FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED",
+                message="Flood return-period GeoJSON geometry budget exceeded; provide a bbox.",
+                details={
+                    "limit_type": "feature_coordinates",
+                    "max_coordinates": FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES,
+                    "coordinate_count": coordinate_count,
+                },
+            )
+        total_coordinates += coordinate_count
+        if total_coordinates > FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES:
+            raise ApiError(
+                status_code=413,
+                code="FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED",
+                message="Flood return-period GeoJSON geometry budget exceeded; provide a bbox.",
+                details={
+                    "limit_type": "collection_coordinates",
+                    "max_coordinates": FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES,
+                    "coordinate_count": total_coordinates,
+                },
+            )
+
+    serialized_bytes = len(json.dumps(payload.model_dump(), separators=(",", ":")).encode("utf-8"))
+    if serialized_bytes > FLOOD_RETURN_PERIOD_MAP_MAX_SERIALIZED_BYTES:
+        raise ApiError(
+            status_code=413,
+            code="FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED",
+            message="Flood return-period GeoJSON payload budget exceeded; provide a bbox or lower the result size.",
+            details={
+                "limit_type": "serialized_bytes",
+                "max_bytes": FLOOD_RETURN_PERIOD_MAP_MAX_SERIALIZED_BYTES,
+                "serialized_bytes": serialized_bytes,
+            },
+        )
+
+
+def _geojson_coordinate_count(geometry: dict[str, Any] | None) -> int:
+    if geometry is None:
+        return 0
+    return _coordinate_count(geometry.get("coordinates"))
+
+
+def _coordinate_count(value: Any) -> int:
+    if not isinstance(value, list):
+        return 0
+    if len(value) >= 2 and all(isinstance(item, int | float) for item in value[:2]):
+        return 1
+    return sum(_coordinate_count(item) for item in value)
 
 
 def _segment_name(value: Any) -> str | None:

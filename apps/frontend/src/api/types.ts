@@ -2236,7 +2236,7 @@ export interface operations {
         parameters: {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
-                limit?: components["parameters"]["Limit"];
+                limit?: number;
                 offset?: components["parameters"]["Offset"];
                 basin_id?: string;
                 valid_time?: components["parameters"]["ValidTimeQuery"];
@@ -2301,6 +2301,8 @@ export interface operations {
                 segment_id: components["parameters"]["SegmentIdQuery"];
                 /** @description River network version for the selected segment. */
                 river_network_version_id: string;
+                /** @description Maximum timeline points to return. Requests whose result set exceeds this budget fail with 413. */
+                max_points?: number;
             };
             header?: never;
             path?: never;

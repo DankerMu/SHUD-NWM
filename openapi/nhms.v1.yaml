@@ -1044,7 +1044,14 @@ paths:
       tags: [flood-alerts]
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
-        - $ref: "#/components/parameters/Limit"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 10
         - $ref: "#/components/parameters/Offset"
         - name: basin_id
           in: query
@@ -1130,6 +1137,15 @@ paths:
           schema:
             type: string
             minLength: 1
+        - name: max_points
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 168
+          description: Maximum timeline points to return. Requests whose result set exceeds this budget fail with 413.
       responses:
         "200":
           description: Flood alert timeline

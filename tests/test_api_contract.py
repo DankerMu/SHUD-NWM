@@ -447,6 +447,43 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert "frequency_thresholds?: Record<string, never> | null;" not in generated_types
 
 
+def test_flood_alert_ranking_and_timeline_bounds_are_in_static_contract_and_types() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+
+    ranking_parameters = spec["paths"]["/api/v1/flood-alerts/ranking"]["get"]["parameters"]
+    ranking_limit = next(parameter for parameter in ranking_parameters if parameter.get("name") == "limit")
+    assert ranking_limit["schema"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200,
+        "default": 10,
+    }
+
+    timeline_parameters = spec["paths"]["/api/v1/flood-alerts/timeline"]["get"]["parameters"]
+    timeline_max_points = next(parameter for parameter in timeline_parameters if parameter.get("name") == "max_points")
+    assert timeline_max_points["schema"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000,
+        "default": 168,
+    }
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    ranking_start = generated_types.index("listFloodAlertRanking:")
+    segments_start = generated_types.index("listFloodAlertSegments:")
+    ranking_types = generated_types[ranking_start:segments_start]
+    assert 'limit?: number;' in ranking_types
+    assert 'limit?: components["parameters"]["Limit"];' not in ranking_types
+
+    timeline_start = generated_types.index("getFloodAlertTimeline:")
+    lineage_start = generated_types.index("getRiverPointLineage:")
+    timeline_types = generated_types[timeline_start:lineage_start]
+    assert "max_points?: number;" in timeline_types
+
+
 def test_forecast_response_issue_time_contract_allows_runtime_nulls() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))

@@ -19,6 +19,7 @@ EXPECTED_MIGRATIONS = [
     "000013_enum_remediation.sql",
     "000014_best_available_lineage.sql",
     "000015_flood_return_period_identity_indexes.sql",
+    "000016_river_segment_pagination_indexes.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -171,3 +172,12 @@ def test_flood_return_period_repair_migration_preflights_duplicate_versioned_row
     assert "HAVING COUNT(*) > 1" in repair_schema
     assert "Deduplicate or quarantine duplicate return-period rows before applying migration 000015" in repair_schema
     assert "IF NOT EXISTS" in repair_schema
+
+
+def test_river_segment_pagination_migration_adds_lookup_indexes() -> None:
+    migration = dict(_migration_sql())["000016_river_segment_pagination_indexes.sql"]
+
+    assert "CREATE INDEX IF NOT EXISTS river_segment_network_order_idx" in migration
+    assert "ON core.river_segment (river_network_version_id, segment_order, river_segment_id)" in migration
+    assert "CREATE INDEX IF NOT EXISTS river_network_version_basin_lookup_idx" in migration
+    assert "ON core.river_network_version (basin_version_id, river_network_version_id)" in migration

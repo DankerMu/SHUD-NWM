@@ -138,6 +138,11 @@ def test_non_ready_with_stray_rows_is_rejected_before_data_query() -> None:
 
 def test_ranking_pagination_basin_filter_and_valid_time() -> None:
     with _client() as client:
+        default_response = client.get(f"/api/v1/flood-alerts/ranking?run_id={RUN_ID}")
+        assert default_response.status_code == 200
+        default_data = default_response.json()["data"]
+        assert default_data["limit"] == 10
+
         response = client.get(f"/api/v1/flood-alerts/ranking?run_id={RUN_ID}&limit=2&offset=1")
         assert response.status_code == 200
         data = response.json()["data"]
@@ -155,6 +160,17 @@ def test_ranking_pagination_basin_filter_and_valid_time() -> None:
         assert response.status_code == 200
         valid_time_data = response.json()["data"]
         assert [item["river_segment_id"] for item in valid_time_data["items"]] == ["seg_002", "seg_001"]
+
+
+def test_ranking_limit_above_contract_uses_validation_envelope() -> None:
+    with _client() as client:
+        response = client.get(f"/api/v1/flood-alerts/ranking?run_id={RUN_ID}&limit=201")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert any(detail["field"] == "query.limit" for detail in body["error"]["details"])
 
 
 def test_segments_filters_and_empty_result() -> None:
@@ -216,6 +232,19 @@ def test_timeline_normal_with_peak_and_no_frequency_curve() -> None:
         assert no_curve["frequency_thresholds"] is None
         assert no_curve["quality_note"] == "No frequency curve available for this segment"
         assert no_curve["timesteps"][0]["return_period"] is None
+
+
+def test_timeline_point_budget_overflow_returns_413_and_keeps_network_binding() -> None:
+    with _client() as client:
+        response = client.get(
+            f"/api/v1/flood-alerts/timeline?run_id={RUN_ID}&segment_id=seg_002"
+            "&river_network_version_id=rnv_v1&max_points=1"
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "FLOOD_ALERT_TIMELINE_POINT_LIMIT_EXCEEDED"
+    assert body["error"]["details"] == {"max_points": 1}
 
 
 def test_timeline_filters_duplicate_segment_ids_by_river_network_version() -> None:
@@ -363,6 +392,44 @@ def test_flood_tile_spatial_and_return_period_filters() -> None:
         assert {feature["properties"]["segment_id"] for feature in response.json()["features"]} == {"seg_002"}
 
 
+def test_flood_tile_malformed_bbox_uses_validation_envelope() -> None:
+    with _client() as client:
+        response = client.get(
+            "/api/v1/tiles/flood-return-period",
+            params={
+                "run_id": RUN_ID,
+                "duration": "1h",
+                "valid_time": _iso(VALID_TIME_1),
+                "bbox": "109,29,111",
+            },
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["details"] == {"bbox": "109,29,111"}
+
+
+def test_flood_tile_inverted_bbox_uses_validation_envelope() -> None:
+    with _client() as client:
+        response = client.get(
+            "/api/v1/tiles/flood-return-period",
+            params={
+                "run_id": RUN_ID,
+                "duration": "1h",
+                "valid_time": _iso(VALID_TIME_1),
+                "bbox": "112,29,111,31",
+            },
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["details"] == {"bbox": "112,29,111,31"}
+
+
 def test_flood_tile_feature_budget_overflow_returns_413() -> None:
     with _client() as client:
         response = client.get(
@@ -374,6 +441,19 @@ def test_flood_tile_feature_budget_overflow_returns_413() -> None:
     body = response.json()
     assert body["error"]["code"] == "FLOOD_RETURN_PERIOD_FEATURE_LIMIT_EXCEEDED"
     assert body["error"]["details"] == {"limit": 2}
+
+
+def test_flood_tile_geojson_coordinate_budget_overflow_returns_413_below_feature_cap() -> None:
+    with _client() as client:
+        response = client.get(
+            "/api/v1/tiles/flood-return-period"
+            f"?run_id=run_oversized_geometry&duration=1h&valid_time={_iso(VALID_TIME_1)}&limit=2"
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["limit_type"] == "feature_coordinates"
 
 
 def test_flood_tile_legacy_pbf_route_redirects_to_geojson_endpoint() -> None:
@@ -634,6 +714,7 @@ def _seed_data(connection: Any) -> None:
         (RUN_ID, "frequency_done"),
         (PUBLISHED_RUN_ID, "published"),
         (DUPLICATE_SEGMENT_RUN_ID, "frequency_done"),
+        ("run_oversized_geometry", "frequency_done"),
         ("run_pending", "parsed"),
         ("run_empty", "frequency_done"),
         ("run_stray", "parsed"),
@@ -834,6 +915,7 @@ def _seed_data(connection: Any) -> None:
         run_id="run_empty",
         quality_flag="no_usable_frequency_curve",
     )
+    _insert_oversized_geometry_case(connection)
     connection.execute(
         text(
             """
@@ -850,6 +932,33 @@ def _seed_data(connection: Any) -> None:
             )
             """
         )
+    )
+
+
+def _insert_oversized_geometry_case(connection: Any) -> None:
+    coordinates = ",".join(f"[{110 + index * 0.0001:.4f},{30 + index * 0.0001:.4f}]" for index in range(10_001))
+    connection.execute(
+        text(
+            """
+            INSERT INTO core.river_segment (
+                river_segment_id, river_network_version_id, geom, properties_json
+            )
+            VALUES ('seg_oversized', 'rnv_v1', :geom, '{"name":"Oversized"}')
+            """
+        ),
+        {"geom": f'{{"type":"LineString","coordinates":[{coordinates}]}}'},
+    )
+    _insert_result(
+        connection,
+        "seg_oversized",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        999.0,
+        100.0,
+        "severe",
+        False,
+        run_id="run_oversized_geometry",
     )
 
 

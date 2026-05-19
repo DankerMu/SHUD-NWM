@@ -131,6 +131,8 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "return_period_result_valid_time_ranking_idx",
                 "return_period_result_timeline_idx",
                 "return_period_result_map_idx",
+                "river_segment_network_order_idx",
+                "river_network_version_basin_lookup_idx",
             } <= indexes
 
             constraints = {
@@ -191,6 +193,50 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 ).mappings()
             ]
             assert valid_time_ranking_columns[:4] == ["run_id", "valid_time", "max_over_window", "quality_flag"]
+
+            river_segment_lookup_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT a.attname AS column_name
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        JOIN pg_index ix ON ix.indexrelid = i.oid
+                        JOIN pg_attribute a ON a.attrelid = ix.indrelid
+                          AND a.attnum = ANY(ix.indkey)
+                        WHERE n.nspname = 'core'
+                          AND i.relname = 'river_segment_network_order_idx'
+                        ORDER BY array_position(ix.indkey::int[], a.attnum::int)
+                        """
+                    )
+                ).mappings()
+            ]
+            assert river_segment_lookup_columns == [
+                "river_network_version_id",
+                "segment_order",
+                "river_segment_id",
+            ]
+
+            river_network_lookup_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT a.attname AS column_name
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        JOIN pg_index ix ON ix.indexrelid = i.oid
+                        JOIN pg_attribute a ON a.attrelid = ix.indrelid
+                          AND a.attnum = ANY(ix.indkey)
+                        WHERE n.nspname = 'core'
+                          AND i.relname = 'river_network_version_basin_lookup_idx'
+                        ORDER BY array_position(ix.indkey::int[], a.attnum::int)
+                        """
+                    )
+                ).mappings()
+            ]
+            assert river_network_lookup_columns == ["basin_version_id", "river_network_version_id"]
     finally:
         engine.dispose()
 

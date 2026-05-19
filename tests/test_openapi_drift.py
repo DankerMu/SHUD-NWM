@@ -159,6 +159,36 @@ def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_open
         assert param["schema"]["minLength"] == 1
 
 
+def test_flood_alert_ranking_limit_contract_matches_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/flood-alerts/ranking"
+
+    static_param = _operation_parameter(static_spec, path, "get", "query", "limit")
+    fastapi_param = _operation_parameter(fastapi_spec, path, "get", "query", "limit")
+
+    for param in (static_param, fastapi_param):
+        assert param["schema"]["type"] == "integer"
+        assert param["schema"]["default"] == 10
+        assert param["schema"]["maximum"] == 200
+        assert param["schema"]["minimum"] == 1
+
+
+def test_flood_alert_timeline_max_points_contract_matches_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/flood-alerts/timeline"
+
+    static_param = _operation_parameter(static_spec, path, "get", "query", "max_points")
+    fastapi_param = _operation_parameter(fastapi_spec, path, "get", "query", "max_points")
+
+    for param in (static_param, fastapi_param):
+        assert param["schema"]["type"] == "integer"
+        assert param["schema"]["default"] == 168
+        assert param["schema"]["maximum"] == 1000
+        assert param["schema"]["minimum"] == 1
+
+
 def test_openapi_success_envelope_accepts_array_data_composition() -> None:
     spec = _openapi_spec()
     schema = spec["paths"]["/api/v1/basins"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
