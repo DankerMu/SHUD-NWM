@@ -292,6 +292,40 @@ function sourceForRunsQuery(source: string | null | undefined) {
   return source
 }
 
+async function fetchRunsByStatus(query: {
+  source?: string
+  cycle_time?: string
+  status: 'frequency_done' | 'published'
+  limit: number
+}) {
+  const { data, error } = await client.GET('/api/v1/runs', {
+    params: { query },
+  })
+  if (error) throw new Error(getApiErrorMessage(error, '获取最新预警 Run 失败'))
+  return unwrapApiData<ApiHydroRunPage>(data, '获取最新预警 Run 失败')
+}
+
+async function fetchReadyFloodRuns(baseQuery: {
+  source?: string
+  cycle_time?: string
+  limit: number
+}) {
+  const pages: ApiHydroRunPage[] = []
+  for (const status of ['frequency_done', 'published'] as const) {
+    pages.push(
+      await fetchRunsByStatus({
+        ...baseQuery,
+        status,
+      }),
+    )
+  }
+  const byRunId = new Map<string, ApiHydroRun>()
+  pages.flatMap((page) => page.items).forEach((run) => {
+    byRunId.set(run.run_id, run)
+  })
+  return [...byRunId.values()]
+}
+
 function explicitContextMissReason(context: { source?: string | null; cycleTime?: string | null } | undefined) {
   const source = context?.source ? context.source.toUpperCase() : null
   const cycleTime = normalizeIso(context?.cycleTime)
@@ -352,22 +386,15 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const runsQuery: {
         source?: string
         cycle_time?: string
-        status: 'frequency_done'
         limit: number
       } = {
-        status: 'frequency_done',
         limit: 50,
       }
       const source = sourceForRunsQuery(context?.source)
       const cycleTime = normalizeIso(context?.cycleTime)
       if (source) runsQuery.source = source
       if (cycleTime) runsQuery.cycle_time = cycleTime
-      const { data, error } = await client.GET('/api/v1/runs', {
-        params: { query: runsQuery },
-      })
-      if (error) throw new Error(getApiErrorMessage(error, '获取最新预警 Run 失败'))
-      const payload = unwrapApiData<ApiHydroRunPage>(data, '获取最新预警 Run 失败')
-      const runs = payload.items
+      const runs = await fetchReadyFloodRuns(runsQuery)
       const matchingRuns = runs.filter((run) => sourceMatches(run, context?.source) && cycleMatches(run, context?.cycleTime))
       const candidates = explicitContext ? matchingRuns : runs
       const previousRunId = get().selectedRunId

@@ -187,6 +187,59 @@ def test_upsert_to_return_period_result_updates_existing_row() -> None:
         assert row["warning_level"] == "extreme"
 
 
+def test_upsert_to_return_period_result_preserves_same_segment_in_different_networks() -> None:
+    valid_time = datetime(2026, 5, 1, 1)
+    base_context = {
+        "run_id": "forecast_run",
+        "scenario_id": "scenario_v1",
+        "basin_version_id": "basin_v1",
+        "model_id": "model_v1",
+        "source_id": "GFS",
+        "cycle_time": datetime(2026, 5, 1),
+    }
+    base_result = {"return_period": 20.0, "warning_level": "warning", "quality_flag": "ok"}
+    with _store() as session:
+        return_period._upsert_return_period_result(
+            session,
+            {**base_context, "river_network_version_id": "rnv_v1"},
+            "seg_001",
+            valid_time,
+            "1h",
+            200.0,
+            max_over_window=False,
+            result=base_result,
+        )
+        return_period._upsert_return_period_result(
+            session,
+            {**base_context, "river_network_version_id": "rnv_v2"},
+            "seg_001",
+            valid_time,
+            "1h",
+            300.0,
+            max_over_window=False,
+            result={**base_result, "return_period": 50.0, "warning_level": "severe"},
+        )
+
+        rows = session.execute(
+            text(
+                """
+                SELECT river_network_version_id, q_value, return_period, warning_level
+                FROM flood.return_period_result
+                WHERE run_id = 'forecast_run'
+                  AND river_segment_id = 'seg_001'
+                  AND duration = '1h'
+                  AND valid_time = :valid_time
+                ORDER BY river_network_version_id
+                """
+            ),
+            {"valid_time": valid_time},
+        ).mappings().all()
+
+        assert [row["river_network_version_id"] for row in rows] == ["rnv_v1", "rnv_v2"]
+        assert [row["q_value"] for row in rows] == [200.0, 300.0]
+        assert [row["warning_level"] for row in rows] == ["warning", "severe"]
+
+
 def test_extract_max_forecast_q_returns_peak_time_per_segment() -> None:
     with _store() as session:
         _insert_forecast_run(
@@ -328,7 +381,7 @@ def _create_tables(connection: Any) -> None:
                 cycle_time DATETIME,
                 max_over_window BOOLEAN DEFAULT 0,
                 quality_flag TEXT NOT NULL DEFAULT 'ok',
-                PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+                PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)
             )
             """
         )

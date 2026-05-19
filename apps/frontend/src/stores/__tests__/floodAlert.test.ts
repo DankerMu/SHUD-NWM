@@ -238,6 +238,9 @@ describe('useFloodAlertStore', () => {
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
       params: { query: { status: 'frequency_done', limit: 50 } },
     })
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
+      params: { query: { status: 'published', limit: 50 } },
+    })
     expect(fetchUrls).toEqual([
       `${apiBase}/api/v1/flood-alerts/summary?run_id=run-1&valid_time=2026-05-12T03%3A00%3A00Z`,
       `${apiBase}/api/v1/flood-alerts/ranking?run_id=run-1&limit=20&offset=0&basin_id=basin-a&valid_time=2026-05-12T03%3A00%3A00Z`,
@@ -366,6 +369,9 @@ describe('useFloodAlertStore', () => {
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
       params: { query: { source: 'IFS', cycle_time: '2026-05-11T00:00:00.000Z', status: 'frequency_done', limit: 50 } },
     })
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
+      params: { query: { source: 'IFS', cycle_time: '2026-05-11T00:00:00.000Z', status: 'published', limit: 50 } },
+    })
     expect(useFloodAlertStore.getState().selectedRunId).toBe('run-sibling')
     expect(useFloodAlertStore.getState().selectedValidTime).toBe('2026-05-11T03:00:00.000Z')
   })
@@ -389,6 +395,9 @@ describe('useFloodAlertStore', () => {
 
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
       params: { query: { source: 'IFS', cycle_time: '2026-05-12T00:00:00.000Z', status: 'frequency_done', limit: 50 } },
+    })
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
+      params: { query: { source: 'IFS', cycle_time: '2026-05-12T00:00:00.000Z', status: 'published', limit: 50 } },
     })
     expect(useFloodAlertStore.getState().selectedRunId).toBeNull()
     expect(useFloodAlertStore.getState().latestRun).toBeNull()
@@ -564,6 +573,51 @@ describe('useFloodAlertStore', () => {
     expect(useFloodAlertStore.getState().summaryData).toBe(summaryData)
     expect(useFloodAlertStore.getState().rankingData).toBe(rankingData)
     expect(useFloodAlertStore.getState().timelineData).toBe(timelineData)
+  })
+
+  it('discovers published-only flood alert runs when no frequency_done run is returned', async () => {
+    const publishedRun = {
+      ...latestRun,
+      run_id: 'run-published',
+      status: 'published',
+      cycle_time: '2026-05-13T00:00:00Z',
+      start_time: '2026-05-13T00:00:00Z',
+      end_time: '2026-05-13T03:00:00Z',
+    }
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce({
+        data: success({
+          items: [],
+          total: 0,
+          limit: 50,
+          offset: 0,
+        }),
+        error: undefined,
+      } as never)
+      .mockResolvedValueOnce({
+        data: success({
+          items: [publishedRun],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        }),
+        error: undefined,
+      } as never)
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun()
+
+    expect(client.GET).toHaveBeenNthCalledWith(1, '/api/v1/runs', {
+      params: { query: { status: 'frequency_done', limit: 50 } },
+    })
+    expect(client.GET).toHaveBeenNthCalledWith(2, '/api/v1/runs', {
+      params: { query: { status: 'published', limit: 50 } },
+    })
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: 'run-published',
+      latestRun: expect.objectContaining({ run_id: 'run-published', status: 'published' }),
+      empty: false,
+      error: null,
+    })
   })
 
   it('ignores an older same-run summary response after a newer valid-time request owns the state', async () => {
@@ -803,9 +857,20 @@ describe('useFloodAlertStore', () => {
   })
 
   it('ignores an older source/cycle lookup response after a newer lookup owns the state', async () => {
-    const older = deferred<unknown>()
-    const newer = deferred<unknown>()
-    vi.mocked(client.GET).mockReturnValueOnce(older.promise as never).mockReturnValueOnce(newer.promise as never)
+    const olderFrequencyDone = deferred<unknown>()
+    const olderPublished = deferred<unknown>()
+    const newerFrequencyDone = deferred<unknown>()
+    const newerPublished = deferred<unknown>()
+    const lookupResponses = new Map<string, Promise<unknown>>([
+      ['GFS:frequency_done', olderFrequencyDone.promise],
+      ['GFS:published', olderPublished.promise],
+      ['IFS:frequency_done', newerFrequencyDone.promise],
+      ['IFS:published', newerPublished.promise],
+    ])
+    vi.mocked(client.GET).mockImplementation((_path, options) => {
+      const query = (options as { params: { query: { source: string; status: string } } }).params.query
+      return lookupResponses.get(`${query.source}:${query.status}`) as never
+    })
 
     const olderRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
       source: 'gfs',
@@ -818,7 +883,16 @@ describe('useFloodAlertStore', () => {
       validTime: '2026-05-13T03:00:00.000Z',
     })
 
-    newer.resolve({
+    olderFrequencyDone.resolve({
+      data: success({
+        items: [],
+        total: 0,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    })
+    newerFrequencyDone.resolve({
       data: success({
         items: [
           {
@@ -836,6 +910,15 @@ describe('useFloodAlertStore', () => {
       }),
       error: undefined,
     })
+    newerPublished.resolve({
+      data: success({
+        items: [],
+        total: 0,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    })
     await newerRequest
 
     expect(useFloodAlertStore.getState()).toMatchObject({
@@ -844,7 +927,7 @@ describe('useFloodAlertStore', () => {
       loading: false,
     })
 
-    older.resolve({
+    olderPublished.resolve({
       data: success({
         items: [
           {
@@ -872,9 +955,18 @@ describe('useFloodAlertStore', () => {
   })
 
   it('ignores an older source/cycle lookup rejection after a newer lookup owns the state', async () => {
-    const older = deferred<unknown>()
-    const newer = deferred<unknown>()
-    vi.mocked(client.GET).mockReturnValueOnce(older.promise as never).mockReturnValueOnce(newer.promise as never)
+    const olderFrequencyDone = deferred<unknown>()
+    const newerFrequencyDone = deferred<unknown>()
+    const newerPublished = deferred<unknown>()
+    const lookupResponses = new Map<string, Promise<unknown>>([
+      ['GFS:frequency_done', olderFrequencyDone.promise],
+      ['IFS:frequency_done', newerFrequencyDone.promise],
+      ['IFS:published', newerPublished.promise],
+    ])
+    vi.mocked(client.GET).mockImplementation((_path, options) => {
+      const query = (options as { params: { query: { source: string; status: string } } }).params.query
+      return lookupResponses.get(`${query.source}:${query.status}`) as never
+    })
 
     const olderRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
       source: 'gfs',
@@ -887,7 +979,8 @@ describe('useFloodAlertStore', () => {
       validTime: '2026-05-13T03:00:00.000Z',
     })
 
-    newer.resolve({
+    olderFrequencyDone.reject(new Error('old lookup failed'))
+    newerFrequencyDone.resolve({
       data: success({
         items: [
           {
@@ -905,9 +998,17 @@ describe('useFloodAlertStore', () => {
       }),
       error: undefined,
     })
+    newerPublished.resolve({
+      data: success({
+        items: [],
+        total: 0,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    })
     await newerRequest
 
-    older.reject(new Error('old lookup failed'))
     await olderRequest
 
     expect(useFloodAlertStore.getState()).toMatchObject({

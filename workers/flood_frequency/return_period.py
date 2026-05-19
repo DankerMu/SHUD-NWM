@@ -445,10 +445,9 @@ def _upsert_return_period_result(
                 :max_over_window,
                 :quality_flag
             )
-            ON CONFLICT (run_id, river_segment_id, duration, valid_time) DO UPDATE SET
+            ON CONFLICT (run_id, river_network_version_id, river_segment_id, duration, valid_time) DO UPDATE SET
                 scenario_id = EXCLUDED.scenario_id,
                 basin_version_id = EXCLUDED.basin_version_id,
-                river_network_version_id = EXCLUDED.river_network_version_id,
                 model_id = EXCLUDED.model_id,
                 q_value = EXCLUDED.q_value,
                 q_unit = EXCLUDED.q_unit,

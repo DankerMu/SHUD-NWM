@@ -1286,7 +1286,7 @@ def _publish_engine(*, include_lineage_columns: bool = True) -> Engine:
                     {flood_lineage_columns}
                     max_over_window BOOLEAN DEFAULT 0,
                     quality_flag TEXT NOT NULL DEFAULT 'ok',
-                    PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+                    PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)
                 )
                 """
             )

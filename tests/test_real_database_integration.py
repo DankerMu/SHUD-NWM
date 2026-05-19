@@ -125,6 +125,10 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "river_ts_segment_time_idx",
                 "pipeline_job_slurm_job_idx",
                 "pipeline_job_array_task_idx",
+                "return_period_result_summary_idx",
+                "return_period_result_ranking_idx",
+                "return_period_result_timeline_idx",
+                "return_period_result_map_idx",
             } <= indexes
 
             constraints = {
@@ -142,6 +146,29 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
             assert "river_segment_pkey" in constraints
             assert "return_period_result_pkey" in constraints
             assert "state_snapshot_model_id_valid_time_key" in constraints
+
+            return_period_key_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT kcu.column_name
+                        FROM information_schema.key_column_usage kcu
+                        WHERE kcu.table_schema = 'flood'
+                          AND kcu.table_name = 'return_period_result'
+                          AND kcu.constraint_name = 'return_period_result_pkey'
+                        ORDER BY kcu.ordinal_position
+                        """
+                    )
+                ).mappings()
+            ]
+            assert return_period_key_columns == [
+                "run_id",
+                "river_network_version_id",
+                "river_segment_id",
+                "duration",
+                "valid_time",
+            ]
     finally:
         engine.dispose()
 

@@ -18,6 +18,7 @@ EXPECTED_MIGRATIONS = [
     "000012_pipeline_job_array_task.sql",
     "000013_enum_remediation.sql",
     "000014_best_available_lineage.sql",
+    "000015_flood_return_period_identity_indexes.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -129,3 +130,21 @@ def test_migrations_do_not_reference_future_objects() -> None:
     assert created_schemas == EXPECTED_SCHEMAS
     assert created_tables == EXPECTED_TABLES
     assert created_types == EXPECTED_TYPES
+
+
+def test_flood_return_period_result_has_versioned_identity_and_hot_path_indexes() -> None:
+    migration_sql = dict(_migration_sql())
+    initial_schema = migration_sql["000007_flood.sql"]
+    repair_schema = migration_sql["000015_flood_return_period_identity_indexes.sql"]
+
+    expected_primary_key = "PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)"
+    assert expected_primary_key in initial_schema
+    assert expected_primary_key in repair_schema
+
+    for index_name in (
+        "return_period_result_summary_idx",
+        "return_period_result_ranking_idx",
+        "return_period_result_timeline_idx",
+        "return_period_result_map_idx",
+    ):
+        assert index_name in repair_schema
