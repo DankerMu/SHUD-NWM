@@ -6,6 +6,8 @@ import type { M11QueryState } from '@/lib/m11/queryState'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
 import { filterBasinSegmentRows, m11BasinRiverCollectionBudget, normalizeLayerStates } from '@/lib/m11/overviewDataContracts'
 
+const RIVER_SEGMENT_RETAINED_ITEM_CAP = 10_000
+
 vi.mock('@/api/client', () => ({
   client: {
     GET: vi.fn(),
@@ -2236,6 +2238,50 @@ describe('useOverviewDataStore', () => {
       }
       if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
       if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return success({
+          river_segment_id: 'beyond-cap',
+          river_network_version_id: 'yangtze_rivnet_v12',
+          segment_order: 1,
+          downstream_segment_id: null,
+          length_m: 1000,
+          geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+          properties_json: {},
+          created_at: '2026-05-01T00:00:00Z',
+        }) as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        return success({
+          river_segment_id: 'beyond-cap',
+          issue_time: '2026-05-18T00:00:00Z',
+          variable: 'q_down',
+          unit: 'm3/s',
+          frequency_thresholds: null,
+          segments: [
+            {
+              scenario: 'forecast_gfs_deterministic',
+              source: 'GFS',
+              segment_role: 'future_7_days',
+              data: [{ valid_time: '2026-05-18T06:00:00Z', value: 654 }],
+            },
+          ],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/timeline') {
+        return success({
+          run_id: run.run_id,
+          segment_id: 'beyond-cap',
+          river_segment_id: 'beyond-cap',
+          timesteps: [],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }) as never
+      }
+      if (path === '/api/v1/lineage/river-point') {
+        return success({ target_type: 'river_point', target_id: 'beyond-cap', nodes: [], edges: [] }) as never
+      }
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -2246,12 +2292,129 @@ describe('useOverviewDataStore', () => {
         .filter((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
         .map((call) => call.query?.offset),
     ).toEqual([0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000])
-    expect(snapshot.selectedSegment).toBeNull()
+    expect(snapshot.selectedSegment).toMatchObject({
+      riverSegmentId: 'beyond-cap',
+      currentQ: 654,
+      lineageStatus: 'available',
+    })
     expect(snapshot.detail.segmentCount).toBe(20_000)
     expect(snapshot.detail.partialErrors).toContain(
       'river segments: Stopped segment lookup after 10 pages or 10000 features before the requested segment was found.',
     )
-    expect(calls).not.toEqual(expect.arrayContaining([expect.objectContaining({ path: expect.stringContaining('/{segment_id}') })]))
+    expect(calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')).toBeDefined()
+  })
+
+  it('bounds an oversized first river-segment page and still fetches a selected segment detail directly', async () => {
+    const cappedQuery = { ...query, segmentId: 'first-page-truncated-selected' }
+    const firstPageFeatures = Array.from({ length: RIVER_SEGMENT_RETAINED_ITEM_CAP + 1 }, (_, index) => ({
+      ...featureCollection.features[0],
+      properties: {
+        ...featureCollection.features[0].properties,
+        river_segment_id: `first-page-river-${index}`,
+        segment_id: `first-page-display-${index}`,
+        name: `First Page Segment ${index}`,
+      },
+      geometry: { type: 'LineString', coordinates: [[100, 30], [100.01, 30.01]] },
+    }))
+    const oversizedFirstPage = {
+      ...featureCollection,
+      total: firstPageFeatures.length,
+      feature_total: firstPageFeatures.length,
+      limit: firstPageFeatures.length,
+      offset: 0,
+      features: firstPageFeatures,
+    }
+    const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query, pathParams: options?.params?.path })
+
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success(oversizedFirstPage) as never
+      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return success({
+          river_segment_id: options?.params?.path?.segment_id,
+          river_network_version_id: 'yangtze_rivnet_v12',
+          segment_order: 1,
+          downstream_segment_id: null,
+          length_m: 1000,
+          geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+          properties_json: {},
+          created_at: '2026-05-01T00:00:00Z',
+        }) as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        return success({
+          river_segment_id: options?.params?.path?.segment_id,
+          issue_time: '2026-05-18T00:00:00Z',
+          variable: 'q_down',
+          unit: 'm3/s',
+          frequency_thresholds: null,
+          segments: [
+            {
+              scenario: 'forecast_gfs_deterministic',
+              source: 'GFS',
+              segment_role: 'future_7_days',
+              data: [{ valid_time: '2026-05-18T06:00:00Z', value: 321 }],
+            },
+          ],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/timeline') {
+        return success({
+          run_id: run.run_id,
+          segment_id: options?.params?.query?.segment_id,
+          river_segment_id: options?.params?.query?.segment_id,
+          timesteps: [],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }) as never
+      }
+      if (path === '/api/v1/lineage/river-point') {
+        return success({ target_type: 'river_point', target_id: cappedQuery.segmentId, nodes: [], edges: [] }) as never
+      }
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', cappedQuery)
+
+    expect(
+      calls
+        .filter((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
+        .map((call) => call.query?.offset),
+    ).toEqual([0])
+    expect(snapshot.detail.segmentCount).toBe(firstPageFeatures.length)
+    expect(snapshot.segments).toHaveLength(RIVER_SEGMENT_RETAINED_ITEM_CAP)
+    expect(snapshot.segments.at(-1)?.riverSegmentId).toBe(`first-page-river-${RIVER_SEGMENT_RETAINED_ITEM_CAP - 1}`)
+    expect(snapshot.segments.some((row) => row.riverSegmentId === cappedQuery.segmentId)).toBe(false)
+    expect(snapshot.detail.partialErrors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(`Retained only the first ${RIVER_SEGMENT_RETAINED_ITEM_CAP} features from an oversized river-segment page`),
+        expect.stringContaining('Stopped segment lookup after 10 pages or 10000 features before the requested segment was found.'),
+      ]),
+    )
+    expect(snapshot.selectedSegment).toMatchObject({
+      riverSegmentId: cappedQuery.segmentId,
+      currentQ: 321,
+      lineageStatus: 'available',
+    })
+    expect(
+      calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')?.pathParams,
+    ).toMatchObject({ basin_version_id: 'yangtze_v2026_01', segment_id: cappedQuery.segmentId })
+    expect(calls.find((call) => call.path.endsWith('/forecast-series'))?.pathParams).toMatchObject({
+      basin_version_id: 'yangtze_v2026_01',
+      segment_id: cappedQuery.segmentId,
+    })
   })
 
   it('loads only the first river-segment page for default basin detail without a requested segment', async () => {

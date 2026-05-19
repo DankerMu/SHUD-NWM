@@ -69,6 +69,7 @@ const m11RiverDischargeLegend: LayerLegendEntry[] = [
   { label: '5000-10000 m3/s', color: '#1E88E5', min: 5000, max: 10000 },
   { label: '10000-50000 m3/s', color: '#FF9800', min: 10000, max: 50000 },
   { label: '>50000 m3/s', color: '#F44336', min: 50000 },
+  { label: '无径流数据', color: m11DischargeColor(null) },
 ]
 
 const m11RiverReturnPeriodLegend: LayerLegendEntry[] = [
@@ -79,6 +80,7 @@ const m11RiverReturnPeriodLegend: LayerLegendEntry[] = [
   { label: '高风险 20-50', color: ALERT_LEVEL_META.high_risk.color, min: 20, max: 50 },
   { label: '严重 50-100', color: ALERT_LEVEL_META.severe.color, min: 50, max: 100 },
   { label: '极端 >=100', color: ALERT_LEVEL_META.extreme.color, min: 100 },
+  { label: '无重现期数据', color: m11ReturnPeriodColor(null) },
 ]
 
 const m11RiverWarningLevelLegend: LayerLegendEntry[] = [
@@ -89,6 +91,7 @@ const m11RiverWarningLevelLegend: LayerLegendEntry[] = [
   { label: '高风险', color: ALERT_LEVEL_META.high_risk.color },
   { label: '严重', color: ALERT_LEVEL_META.severe.color },
   { label: '极端', color: ALERT_LEVEL_META.extreme.color },
+  { label: '预警不可用', color: m11WarningLevelColor('unavailable') },
 ]
 
 export interface M11BasinGeometryBudgetStatus {

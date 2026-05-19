@@ -131,6 +131,7 @@ type BasinVersionRunFetchResult = {
 type RiverSegmentFetchResult = {
   collection: ApiRiverFeatureCollection
   reachedCap: boolean
+  truncated: boolean
 }
 
 const COMPARE_FLOOD_SUMMARY_UNAVAILABLE = '对比模式洪水摘要需要 GFS+IFS 聚合端点'
@@ -630,16 +631,26 @@ function containsSegment(collection: ApiRiverFeatureCollection, segmentId: strin
 
 async function fetchRiverSegments(basinVersionId: string, segmentId: string | null): Promise<RiverSegmentFetchResult> {
   const firstPage = await fetchRiverSegmentsPage(basinVersionId, RIVER_SEGMENT_PAGE_LIMIT, 0)
-  const features = [...firstPage.features]
-  let collection: ApiRiverFeatureCollection = { ...firstPage, features }
-  let total = firstPage.total ?? firstPage.feature_total ?? features.length
+  const total = firstPage.total ?? firstPage.feature_total ?? firstPage.features.length
+  const firstPageFeatures = firstPage.features.slice(0, RIVER_SEGMENT_MAX_ITEMS)
+  const truncated = firstPage.features.length > firstPageFeatures.length
+  const features = [...firstPageFeatures]
+  let collection: ApiRiverFeatureCollection = {
+    ...firstPage,
+    features,
+    total,
+    feature_total: firstPage.feature_total ?? total,
+    limit: features.length,
+    offset: 0,
+  }
+  let reportedTotal = total
   let offset = (firstPage.offset ?? 0) + (firstPage.limit || firstPage.features.length || RIVER_SEGMENT_PAGE_LIMIT)
   let pages = 1
   const shouldFindRequestedSegment = Boolean(segmentId)
 
   while (
     shouldFindRequestedSegment &&
-    offset < total &&
+    offset < reportedTotal &&
     pages < RIVER_SEGMENT_MAX_PAGES &&
     features.length < RIVER_SEGMENT_MAX_ITEMS &&
     !containsSegment(collection, segmentId)
@@ -648,12 +659,12 @@ async function fetchRiverSegments(basinVersionId: string, segmentId: string | nu
     pages += 1
     const remaining = RIVER_SEGMENT_MAX_ITEMS - features.length
     features.push(...nextPage.features.slice(0, remaining))
-    total = nextPage.total ?? nextPage.feature_total ?? total
+    reportedTotal = nextPage.total ?? nextPage.feature_total ?? reportedTotal
     collection = {
       ...nextPage,
       features,
-      total,
-      feature_total: nextPage.feature_total ?? total,
+      total: reportedTotal,
+      feature_total: nextPage.feature_total ?? reportedTotal,
       limit: features.length,
       offset: 0,
     }
@@ -665,10 +676,10 @@ async function fetchRiverSegments(basinVersionId: string, segmentId: string | nu
 
   const reachedCap =
     shouldFindRequestedSegment &&
-    offset < total &&
+    (offset < reportedTotal || truncated) &&
     !containsSegment(collection, segmentId) &&
     (pages >= RIVER_SEGMENT_MAX_PAGES || features.length >= RIVER_SEGMENT_MAX_ITEMS)
-  return { collection, reachedCap }
+  return { collection, reachedCap, truncated }
 }
 
 async function fetchRiverSegment(basinVersionId: string, segmentId: string) {
@@ -931,6 +942,11 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const models = settledValue(modelsResult, partialErrors, 'models')?.items ?? []
       const segmentFetch = settledValue(segmentsResult, partialErrors, 'river segments')
       const segments = segmentFetch?.collection ?? null
+      if (segmentFetch?.truncated) {
+        partialErrors.push(
+          `river segments: Retained only the first ${RIVER_SEGMENT_MAX_ITEMS} features from an oversized river-segment page; basin segment rows are partial.`,
+        )
+      }
       if (segmentFetch?.reachedCap) {
         partialErrors.push(
           `river segments: Stopped segment lookup after ${RIVER_SEGMENT_MAX_PAGES} pages or ${RIVER_SEGMENT_MAX_ITEMS} features before the requested segment was found.`,
@@ -969,7 +985,12 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         partialErrors,
       })
       const rows = normalizeBasinSegmentRows({ query: concreteSurfaceQuery, featureCollection: segments, rankingItems: sameVersionRankingItems })
-      const selectedIdentifiers = resolveSelectedSegmentIdentifiers(query.segmentId, filterBasinSegmentRows(rows, query), segments)
+      const selectedIdentifiers = resolveSelectedSegmentIdentifiers(
+        query.segmentId,
+        filterBasinSegmentRows(rows, query),
+        segments,
+        Boolean(segmentFetch?.reachedCap || segmentFetch?.truncated),
+      )
       let selectedSegment: SelectedSegmentDetail | null = null
 
       if (selectedVersion && selectedIdentifiers) {
@@ -1079,6 +1100,7 @@ function resolveSelectedSegmentIdentifiers(
   querySegmentId: string | null,
   rows: BasinSegmentRow[],
   collection: ApiRiverFeatureCollection | null,
+  segmentCollectionPartial = false,
 ): ResolvedSegmentIdentifiers | null {
   const row = querySegmentId
     ? rows.find((item) => item.segmentId === querySegmentId || item.riverSegmentId === querySegmentId) ?? null
@@ -1087,7 +1109,7 @@ function resolveSelectedSegmentIdentifiers(
   if (!requestedId) return null
 
   const feature = findFeature(collection, requestedId) ?? (!querySegmentId && row ? findFeature(collection, row.riverSegmentId) : null)
-  if (querySegmentId && !row && !feature) return null
+  if (querySegmentId && !row && !feature && !segmentCollectionPartial) return null
 
   const riverSegmentId = row?.riverSegmentId ?? feature?.properties.river_segment_id ?? requestedId
   const segmentId = row?.segmentId ?? feature?.properties.segment_id ?? requestedId

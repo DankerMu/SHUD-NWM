@@ -26,6 +26,7 @@ import {
   M11Timeline,
   SourceScenarioControls,
   buildM11TimelineViewModel,
+  m11FallbackLegends,
   resolveM11ValidTimeCorrection,
 } from '@/pages/m11/M11Controls'
 import { OverviewPage } from '@/pages/OverviewPage'
@@ -597,6 +598,7 @@ describe('M11 visual foundation shell', () => {
       { ...basinSegments[0], currentQ: 7_000, returnPeriod: 12, warningLevel: 'warning' },
       { ...basinSegments[0], currentQ: 20_000, returnPeriod: 25, warningLevel: 'high_risk' },
       { ...basinSegments[0], currentQ: 60_000, returnPeriod: 120, warningLevel: 'extreme' },
+      { ...basinSegments[0], currentQ: null, returnPeriod: null, warningLevel: 'unavailable' },
     ].map((row, index) => ({
       ...row,
       riverSegmentId: `legend-river-${index}`,
@@ -606,10 +608,12 @@ describe('M11 visual foundation shell', () => {
 
     for (const layerId of ['discharge', 'flood-return-period', 'warning-level'] as const) {
       const legendColors = normalizedLayers.find((layer) => layer.layerId === layerId)?.legend.map((entry) => entry.color)
+      const fallbackLegendColors = m11FallbackLegends[layerId].map((entry) => entry.color)
       const featureColors = buildBasinRiverFeatureCollection(representativeRows, layerId).features.map(
         (feature) => feature.properties.layer_color,
       )
       expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+      expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
     }
   })
 
