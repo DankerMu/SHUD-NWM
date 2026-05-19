@@ -1643,7 +1643,10 @@ export interface operations {
     };
     getRiverSegment: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description River network version for the selected/list row; required because river_segment_id is only unique within a river network version. */
+                river_network_version_id: string;
+            };
             header?: never;
             path: {
                 basin_version_id: components["parameters"]["BasinVersionId"];

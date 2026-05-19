@@ -113,8 +113,10 @@ type OverviewRequestPlan = {
 type ResolvedSegmentIdentifiers = {
   requestedId: string
   riverSegmentId: string
+  riverNetworkVersionId: string
   segmentId: string
   detailEndpointSegmentId: string
+  detailEndpointRiverNetworkVersionId: string
   forecastSegmentId: string
   timelineSegmentId: string
   lineageSegmentId: string
@@ -682,13 +684,22 @@ async function fetchRiverSegments(basinVersionId: string, segmentId: string | nu
   return { collection, reachedCap, truncated }
 }
 
-async function fetchRiverSegment(basinVersionId: string, segmentId: string) {
+async function fetchRiverSegment(basinVersionId: string, riverNetworkVersionId: string, segmentId: string) {
   return cached(
-    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}', { basinVersionId, segmentId }),
+    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}', {
+      basinVersionId,
+      riverNetworkVersionId,
+      segmentId,
+    }),
     () =>
       getApi<ApiRiverSegment>(
         '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}',
-        { params: { path: { basin_version_id: basinVersionId, segment_id: segmentId } } },
+        {
+          params: {
+            path: { basin_version_id: basinVersionId, segment_id: segmentId },
+            query: { river_network_version_id: riverNetworkVersionId },
+          },
+        },
         '获取河段详情失败',
       ),
   )
@@ -990,6 +1001,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         filterBasinSegmentRows(rows, query),
         segments,
         Boolean(segmentFetch?.reachedCap || segmentFetch?.truncated),
+        (models as ApiModelInstance[])[0]?.river_network_version_id ?? null,
       )
       let selectedSegment: SelectedSegmentDetail | null = null
 
@@ -1007,7 +1019,11 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
             item.segment_id === selectedIdentifiers.segmentId,
         )
         const [segmentResult, forecastResult, timelineResult] = await Promise.allSettled([
-          fetchRiverSegment(selectedVersion.basin_version_id, selectedIdentifiers.detailEndpointSegmentId),
+          fetchRiverSegment(
+            selectedVersion.basin_version_id,
+            selectedIdentifiers.detailEndpointRiverNetworkVersionId,
+            selectedIdentifiers.detailEndpointSegmentId,
+          ),
           canFetchConcreteSurface
             ? fetchForecast(selectedVersion.basin_version_id, selectedIdentifiers.forecastSegmentId, concreteSurfaceQuery)
             : Promise.resolve(null),
@@ -1101,6 +1117,7 @@ function resolveSelectedSegmentIdentifiers(
   rows: BasinSegmentRow[],
   collection: ApiRiverFeatureCollection | null,
   segmentCollectionPartial = false,
+  fallbackRiverNetworkVersionId: string | null = null,
 ): ResolvedSegmentIdentifiers | null {
   const row = querySegmentId
     ? rows.find((item) => item.segmentId === querySegmentId || item.riverSegmentId === querySegmentId) ?? null
@@ -1112,13 +1129,18 @@ function resolveSelectedSegmentIdentifiers(
   if (querySegmentId && !row && !feature && !segmentCollectionPartial) return null
 
   const riverSegmentId = row?.riverSegmentId ?? feature?.properties.river_segment_id ?? requestedId
+  const riverNetworkVersionId =
+    row?.riverNetworkVersionId ?? feature?.properties.river_network_version_id ?? fallbackRiverNetworkVersionId
+  if (!riverNetworkVersionId) return null
   const segmentId = row?.segmentId ?? feature?.properties.segment_id ?? requestedId
 
   return {
     requestedId,
     riverSegmentId,
+    riverNetworkVersionId,
     segmentId,
     detailEndpointSegmentId: riverSegmentId,
+    detailEndpointRiverNetworkVersionId: riverNetworkVersionId,
     forecastSegmentId: riverSegmentId,
     timelineSegmentId: riverSegmentId,
     lineageSegmentId: riverSegmentId,

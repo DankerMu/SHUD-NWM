@@ -271,6 +271,7 @@ def get_river_segment(
     request: Request,
     basin_version_id: str,
     segment_id: str,
+    river_network_version_id: str = Query(..., min_length=1),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
@@ -278,6 +279,7 @@ def get_river_segment(
             request,
             store.get_river_segment(
                 basin_version_id=basin_version_id,
+                river_network_version_id=river_network_version_id,
                 segment_id=segment_id,
             ),
         )

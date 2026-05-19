@@ -218,6 +218,7 @@ export interface BasinDetail {
 
 export interface BasinSegmentRow {
   riverSegmentId: string
+  riverNetworkVersionId: string
   segmentId: string
   displayName: string
   basinVersionId: string
@@ -1323,6 +1324,7 @@ function segmentRowFromFeature(
   const geometryStatus = retainBasinRiverGeometryWithinBudget(getM11SelectedSegmentGeometryBudgetStatus(feature.geometry), budgetState)
   return {
     riverSegmentId: props.river_segment_id,
+    riverNetworkVersionId: props.river_network_version_id,
     segmentId: props.segment_id,
     displayName: normalizeString(props.name) ?? props.river_segment_id,
     basinVersionId: props.basin_version_id,

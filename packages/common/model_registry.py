@@ -29,6 +29,10 @@ class InvalidPayloadError(ModelRegistryError):
     """Raised when a payload is structurally invalid."""
 
 
+SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES = 10_000
+SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS = 3
+
+
 def default_database_url() -> str:
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
@@ -322,31 +326,63 @@ class PsycopgModelRegistryStore:
             "offset": offset,
         }
 
-    def get_river_segment(self, *, basin_version_id: str, segment_id: str) -> dict[str, Any]:
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
         with self._transaction() as cursor:
             row = self._fetch_optional(
                 cursor,
                 """
+                WITH selected AS (
+                    SELECT
+                        rs.river_segment_id,
+                        rs.river_network_version_id,
+                        rs.segment_order,
+                        rs.downstream_segment_id,
+                        rs.length_m,
+                        rs.geom,
+                        rs.properties_json,
+                        rs.created_at,
+                        ST_NPoints(rs.geom) AS coordinate_count,
+                        ST_NDims(rs.geom) AS coordinate_dimensions
+                    FROM core.river_segment rs
+                    JOIN core.river_network_version rnv
+                      ON rnv.river_network_version_id = rs.river_network_version_id
+                    WHERE rnv.basin_version_id = %s
+                      AND rs.river_segment_id = %s
+                      AND rs.river_network_version_id = %s
+                )
                 SELECT
-                    rs.river_segment_id,
-                    rs.river_network_version_id,
-                    rs.segment_order,
-                    rs.downstream_segment_id,
-                    rs.length_m,
-                    ST_AsGeoJSON(rs.geom)::json AS geom,
-                    rs.properties_json,
-                    rs.created_at
-                FROM core.river_segment rs
-                JOIN core.river_network_version rnv
-                  ON rnv.river_network_version_id = rs.river_network_version_id
-                WHERE rnv.basin_version_id = %s
-                  AND rs.river_segment_id = %s
+                    river_segment_id,
+                    river_network_version_id,
+                    segment_order,
+                    downstream_segment_id,
+                    length_m,
+                    ST_AsGeoJSON(geom)::json AS geom,
+                    properties_json,
+                    created_at
+                FROM selected
+                WHERE geom IS NOT NULL
+                  AND coordinate_count BETWEEN 2 AND %s
+                  AND coordinate_dimensions <= %s
                 """,
-                (basin_version_id, segment_id),
+                (
+                    basin_version_id,
+                    segment_id,
+                    river_network_version_id,
+                    SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES,
+                    SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS,
+                ),
             )
         if row is None:
             raise MissingResourceError(
-                f"river_segment_id not found for basin_version_id {basin_version_id}: {segment_id}"
+                "river_segment_id not found with renderable geometry for "
+                f"basin_version_id {basin_version_id}, "
+                f"river_network_version_id {river_network_version_id}: {segment_id}"
             )
         return _river_segment_detail(row)
 

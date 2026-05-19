@@ -270,6 +270,7 @@ const overviewBasins: OverviewBasin[] = [
 const basinSegments: BasinSegmentRow[] = [
   {
     riverSegmentId: 'seg-009',
+    riverNetworkVersionId: 'rn-v1',
     segmentId: 'seg-009',
     displayName: 'Main Stem 009',
     basinVersionId: 'yangtze_v2026_01',
@@ -290,6 +291,7 @@ const basinSegments: BasinSegmentRow[] = [
   },
   {
     riverSegmentId: 'seg-missing-geometry',
+    riverNetworkVersionId: 'rn-v1',
     segmentId: 'seg-missing-geometry',
     displayName: 'Missing Geometry',
     basinVersionId: 'yangtze_v2026_01',

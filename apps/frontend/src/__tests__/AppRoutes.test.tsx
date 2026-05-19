@@ -368,6 +368,7 @@ function basinSnapshot(
   segments = [
     {
       riverSegmentId: 'seg-009',
+      riverNetworkVersionId: 'rn-v1',
       segmentId: 'seg-009',
       displayName: 'Main Stem 009',
       basinVersionId: 'bv-001',
@@ -1538,6 +1539,7 @@ describe('App route state', () => {
         [
           {
             riverSegmentId: 'seg-001',
+            riverNetworkVersionId: 'rn-v1',
             segmentId: 'seg-001',
             displayName: 'North Branch 001',
             basinVersionId: 'bv-001',
@@ -1558,6 +1560,7 @@ describe('App route state', () => {
           },
           {
             riverSegmentId: 'seg-009',
+            riverNetworkVersionId: 'rn-v1',
             segmentId: 'seg-009',
             displayName: 'Main Stem 009',
             basinVersionId: 'bv-001',

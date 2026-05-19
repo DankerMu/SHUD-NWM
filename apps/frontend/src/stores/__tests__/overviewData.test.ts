@@ -1875,6 +1875,7 @@ describe('useOverviewDataStore', () => {
           properties: {
             ...featureCollection.features[0].properties,
             river_segment_id: 'river-seg-123',
+            river_network_version_id: 'yangtze_rivnet_v12_selected',
             segment_id: 'display-seg-123',
           },
         },
@@ -1898,7 +1899,7 @@ describe('useOverviewDataStore', () => {
       if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
         return success({
           river_segment_id: options?.params?.path?.segment_id,
-          river_network_version_id: 'yangtze_rivnet_v12',
+          river_network_version_id: options?.params?.query?.river_network_version_id,
           segment_order: 1,
           downstream_segment_id: null,
           length_m: 1000,
@@ -1945,6 +1946,11 @@ describe('useOverviewDataStore', () => {
       calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')?.pathParams,
     ).toMatchObject({
       segment_id: 'river-seg-123',
+    })
+    expect(
+      calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')?.query,
+    ).toMatchObject({
+      river_network_version_id: 'yangtze_rivnet_v12_selected',
     })
     expect(calls.find((call) => call.path.endsWith('/forecast-series'))?.pathParams).toMatchObject({
       segment_id: 'river-seg-123',

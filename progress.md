@@ -1,13 +1,14 @@
 # 项目进度
 
-最后更新：2026-05-17，测试环境。
+最后更新：2026-05-19，测试环境。
 
 用途：作为跨 session 继承的项目真实进度索引，压缩记录“已实现什么、与设计/效果图还有什么差距、还缺什么数据”。项目有实质性进展时必须同步更新本文，保持 200 行以内。
 
 ## 当前状态
 
 - Epic #120 已完成并关闭；子 issue #121-#126 全部关闭。
-- 最新合并工作：PR #132，merge commit `ccc7f9bfaea4b5dfb125bdd5b8a4c36ca1ac1c88`。
+- 当前 M11 工作：issue #165 / PR #171 正在收敛 `/overview` 与 `/basins/:basinId` basin drill-down；当前修复跟进 Round 5 cross-review，OpenSpec change 为 `openspec/changes/m11-overview-basin-drilldown/`。
+- 最新已合并基线仍包含 PR #132，merge commit `ccc7f9bfaea4b5dfb125bdd5b8a4c36ca1ac1c88`；PR #171 是当前未合并 M11 review 分支。
 - M9 Basins 已完成并关闭：GitHub Epic #133，子 issue #134-#139 全部关闭；PR #144、#145 已合并。
 - M10 生产环境闭环已完成 OpenSpec 设计和 issue 拆分：`openspec/changes/m10-production-closure/`，GitHub Epic #146，子 issue #147-#152 覆盖真实 Slurm+SHUD workload、生产对象存储/Basins copied-data、真实气象源+QC、staging E2E、全国规模/MVT 性能、生产运维安全 runbook。
 - M10 #147 Real Slurm + SHUD workload closure 已新增 opt-in `nhms-production validate-slurm` 证据 lane：默认 fake/deterministic，不依赖真实 Slurm/SHUD/生产密钥；生产 preflight 缺失时写 blocker artifact 到 `artifacts/production-closure/<run_id>/slurm/`。
@@ -16,6 +17,7 @@
 - M10 #150 Staging E2E forecast/analysis closure 已新增 opt-in `nhms-production validate-e2e` 证据 lane：默认 deterministic/self-contained，不依赖真实 DB/API/Slurm/frontend/对象存储/SHUD；整合 source/canonical/forcing/slurm/parse/frequency/tile/API/frontend stage manifest、本地 `stage_artifacts/` 证据、derived IDs、现有 API contract evidence、frontend lineage evidence、SHUD `.rivqdown` QC blocker、严格 #147/#148/#149 dependency evidence status、redacted environment，并强制 run_id 范围、覆盖需 `--force`。
 - M10 #151 National-scale MVT/performance closure 已新增 opt-in `nhms-production validate-scale` 证据 lane：默认 deterministic large fixture，不依赖真实全国数据/PostGIS/live API/browser/MVT encoder；写入 scale preflight、dataset manifest、versioned thresholds、query p95/plan/hash evidence、GeoJSON/MVT blocker tile evidence、desktop/mobile frontend timing evidence、resource bounds 和 redacted environment，并强制 run_id 范围、覆盖需 `--force`。
 - M10 #152 Production ops/security/runbook closure 已新增 opt-in `nhms-production validate-ops` 证据 lane：默认 deterministic/self-contained，不依赖真实身份提供方、生产凭据、告警 sink、对象存储、Slurm、PostGIS/API/frontend 或 scheduler；写入 ops preflight、config validation、auth/RBAC、audit/redaction、monitoring/alerts、rollback drills、dependency closure、environment 和 summary，默认 `release_blocked` 且 `final_production_readiness_claimed=false`，强制 run_id 范围、覆盖需 `--force`。
+- M11 issue #165 / PR #171 已完成全国总览和流域 drill-down 的阶段性交付：路由、typed data contracts、MapLibre/ECharts/Zustand 集成、selected segment detail、forecast/timeline/lineage handoff、几何预算与 unavailable 状态均已接入；2026-05-19 visual evidence 见 `apps/frontend/e2e/m11-visual-evidence.md` 和本地 `.codex/screenshots/issue-165/`。
 - CI 覆盖 markdown lint、OpenAPI lint、JSON Schema 校验、真实 PostgreSQL/PostGIS/Timescale 集成、后端测试、前端 build/test、bundle size。
 - #126 后本地基线：`uv run pytest -q` -> `586 passed, 3 skipped`；真实 DB integration 为显式 opt-in，GitHub CI 已跑通。
 - 当前有效代码入口：`apps/api`、`apps/frontend`、`services/orchestrator`、`services/slurm_gateway`、`services/tile_publisher`、`workers/*` 下划线包、`infra/sbatch`。
