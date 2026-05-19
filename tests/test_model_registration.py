@@ -1386,6 +1386,64 @@ def test_get_river_segment_binds_selected_river_network_version(
     assert detail["segment_order"] == 7
 
 
+def test_list_river_segments_excludes_oversized_collection_geometry_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.statement = ""
+            self.parameters: tuple[Any, ...] | None = None
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.calls += 1
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert self.calls == 1
+            assert "ST_NPoints(rs.geom) BETWEEN 2 AND %s" in self.statement
+            assert "ST_NDims(rs.geom) <= %s" in self.statement
+            assert self.parameters == (10_000, 3, "basin_v01", "rivnet_v01")
+            return {"total": 1, "feature_total": 0}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            assert self.calls == 2
+            assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
+            assert "ST_NPoints(rs.geom) BETWEEN 2 AND %s" in self.statement
+            assert "ST_NDims(rs.geom) <= %s" in self.statement
+            assert self.statement.index("ST_NPoints(rs.geom) BETWEEN 2 AND %s") < self.statement.index(
+                "ST_AsGeoJSON(geom)::json AS geometry"
+            )
+            assert self.parameters == ("basin_v01", "rivnet_v01", 10_000, 3, 100, 0)
+            return []
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    collection = store.list_river_segments(
+        basin_version_id="basin_v01",
+        river_network_version_id="rivnet_v01",
+        limit=100,
+        offset=0,
+    )
+
+    assert collection["total"] == 1
+    assert collection["feature_total"] == 0
+    assert collection["features"] == []
+
+
 def test_get_river_segment_excludes_null_geometry_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

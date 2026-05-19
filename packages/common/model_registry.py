@@ -31,6 +31,8 @@ class InvalidPayloadError(ModelRegistryError):
 
 SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES = 10_000
 SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS = 3
+RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES = SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES
+RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS = SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS
 
 
 def default_database_url() -> str:
@@ -251,37 +253,64 @@ class PsycopgModelRegistryStore:
             cursor.execute(
                 f"""
                 SELECT COUNT(*) AS total,
-                       COUNT(rs.geom) AS feature_total
+                       COUNT(rs.geom) FILTER (
+                           WHERE ST_NPoints(rs.geom) BETWEEN 2 AND %s
+                             AND ST_NDims(rs.geom) <= %s
+                       ) AS feature_total
                 FROM core.river_segment rs
                 JOIN core.river_network_version rnv
                   ON rnv.river_network_version_id = rs.river_network_version_id
                 WHERE {where_clause}
                 """,
-                tuple(params),
+                tuple([
+                    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES,
+                    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS,
+                    *params,
+                ]),
             )
             counts = cursor.fetchone()
             total = int(counts["total"])
             feature_total = int(counts["feature_total"])
             cursor.execute(
                 f"""
+                WITH renderable AS (
+                    SELECT
+                        rs.river_segment_id,
+                        rs.river_network_version_id,
+                        rnv.basin_version_id,
+                        rs.segment_order,
+                        rs.downstream_segment_id,
+                        rs.length_m,
+                        rs.properties_json,
+                        rs.geom
+                    FROM core.river_segment rs
+                    JOIN core.river_network_version rnv
+                      ON rnv.river_network_version_id = rs.river_network_version_id
+                    WHERE {where_clause}
+                      AND rs.geom IS NOT NULL
+                      AND ST_NPoints(rs.geom) BETWEEN 2 AND %s
+                      AND ST_NDims(rs.geom) <= %s
+                )
                 SELECT
-                    rs.river_segment_id,
-                    rs.river_network_version_id,
-                    rnv.basin_version_id,
-                    rs.segment_order,
-                    rs.downstream_segment_id,
-                    rs.length_m,
-                    rs.properties_json,
-                    ST_AsGeoJSON(rs.geom)::json AS geometry
-                FROM core.river_segment rs
-                JOIN core.river_network_version rnv
-                  ON rnv.river_network_version_id = rs.river_network_version_id
-                WHERE {where_clause}
-                  AND rs.geom IS NOT NULL
-                ORDER BY COALESCE(rs.segment_order, 2147483647), rs.river_segment_id
+                    river_segment_id,
+                    river_network_version_id,
+                    basin_version_id,
+                    segment_order,
+                    downstream_segment_id,
+                    length_m,
+                    properties_json,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM renderable
+                ORDER BY COALESCE(segment_order, 2147483647), river_segment_id
                 LIMIT %s OFFSET %s
                 """,
-                tuple([*params, limit, offset]),
+                tuple([
+                    *params,
+                    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES,
+                    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS,
+                    limit,
+                    offset,
+                ]),
             )
             rows = [dict(row) for row in cursor.fetchall()]
 
