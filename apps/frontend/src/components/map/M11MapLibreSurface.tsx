@@ -98,6 +98,8 @@ interface BasinFeatureCollection {
 interface BasinRiverFeatureProperties {
   segment_id: string
   river_segment_id: string
+  basin_version_id: string
+  river_network_version_id: string
   segment_name: string
   q_value: number | null
   q_unit: string
@@ -717,6 +719,8 @@ export function buildBasinRiverFeatureCollection(
       properties: {
         segment_id: row.segmentId,
         river_segment_id: row.riverSegmentId,
+        basin_version_id: row.basinVersionId,
+        river_network_version_id: row.riverNetworkVersionId,
         segment_name: row.displayName,
         q_value: row.currentQ,
         q_unit: row.qUnit,

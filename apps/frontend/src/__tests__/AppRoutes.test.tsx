@@ -87,7 +87,17 @@ vi.mock('react-map-gl/maplibre', () => ({
             event.preventDefault()
             onClick?.({
               target: { getCanvas: () => ({ style: {} }) },
-              features: [{ layer: { id: 'm11-basin-river-line' }, properties: { river_segment_id: 'seg-001', segment_id: 'seg-001' } }],
+              features: [
+                {
+                  layer: { id: 'm11-basin-river-line' },
+                  properties: {
+                    river_segment_id: 'seg-001',
+                    segment_id: 'seg-001',
+                    basin_version_id: 'bv-001',
+                    river_network_version_id: 'rn-v1',
+                  },
+                },
+              ],
             })
           }}
           onDoubleClick={() =>
@@ -1622,6 +1632,83 @@ describe('App route state', () => {
     fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
     expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-001')
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
+  })
+
+  it('replaces stale URL river network identity from clicked basin map features', async () => {
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot(
+        'basin-demo',
+        [],
+        'basinVersionId=bv-001&riverNetworkVersionId=rn-old&segmentId=seg-009',
+        'basinVersionId=bv-001&riverNetworkVersionId=rn-old&segmentId=seg-009',
+        null,
+        true,
+        [
+          {
+            riverSegmentId: 'seg-001',
+            riverNetworkVersionId: 'rn-v1',
+            segmentId: 'seg-001',
+            displayName: 'North Branch 001',
+            basinVersionId: 'bv-001',
+            streamOrder: 1,
+            lengthM: 800,
+            currentQ: 88,
+            qUnit: 'm3/s',
+            returnPeriod: 2,
+            warningLevel: 'watch',
+            qualityFlag: 'ok',
+            qualityNote: null,
+            source: 'GFS',
+            cycleTime: null,
+            validTime: null,
+            hasGeometry: true,
+            geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+            unavailableReason: null,
+          },
+          {
+            riverSegmentId: 'seg-009',
+            riverNetworkVersionId: 'rn-old',
+            segmentId: 'seg-009',
+            displayName: 'Main Stem 009',
+            basinVersionId: 'bv-001',
+            streamOrder: 3,
+            lengthM: 1200,
+            currentQ: 456,
+            qUnit: 'm3/s',
+            returnPeriod: 10,
+            warningLevel: 'warning',
+            qualityFlag: 'ok',
+            qualityNote: null,
+            source: 'GFS',
+            cycleTime: null,
+            validTime: null,
+            hasGeometry: true,
+            geometry: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+            unavailableReason: null,
+          },
+        ],
+      ),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-old&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('segmentId')).toBe('seg-001')
+    expect(params.get('riverNetworkVersionId')).toBe('rn-v1')
+    expect(params.get('basinVersionId')).toBe('bv-001')
+    await waitFor(() =>
+      expect(loadBasinDetail).toHaveBeenCalledWith(
+        'basin-demo',
+        expect.objectContaining({ segmentId: 'seg-001', riverNetworkVersionId: 'rn-v1', basinVersionId: 'bv-001' }),
+      ),
+    )
   })
 
   it.each([

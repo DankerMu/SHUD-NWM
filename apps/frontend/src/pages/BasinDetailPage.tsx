@@ -145,11 +145,23 @@ export function BasinDetailPage() {
       if (interaction.layerId !== 'basin-river-segments') return
       const nextSegmentId =
         mapFeatureStringProperty(interaction.feature, 'river_segment_id') ?? mapFeatureStringProperty(interaction.feature, 'segment_id')
-      if (!nextSegmentId || nextSegmentId === state.segmentId) return
+      if (!nextSegmentId) return
       const nextRiverNetworkVersionId = mapFeatureStringProperty(interaction.feature, 'river_network_version_id')
-      handleQueryChange({ riverNetworkVersionId: nextRiverNetworkVersionId ?? state.riverNetworkVersionId, segmentId: nextSegmentId })
+      const nextBasinVersionId = mapFeatureStringProperty(interaction.feature, 'basin_version_id')
+      if (
+        nextSegmentId === state.segmentId &&
+        (nextRiverNetworkVersionId ?? state.riverNetworkVersionId) === state.riverNetworkVersionId &&
+        (nextBasinVersionId ?? state.basinVersionId) === state.basinVersionId
+      ) {
+        return
+      }
+      handleQueryChange({
+        basinVersionId: nextBasinVersionId ?? state.basinVersionId,
+        riverNetworkVersionId: nextRiverNetworkVersionId ?? state.riverNetworkVersionId,
+        segmentId: nextSegmentId,
+      })
     },
-    [handleQueryChange, state.riverNetworkVersionId, state.segmentId],
+    [handleQueryChange, state.basinVersionId, state.riverNetworkVersionId, state.segmentId],
   )
 
   return (

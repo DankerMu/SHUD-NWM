@@ -2332,6 +2332,8 @@ export interface operations {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
                 segment_id: components["parameters"]["SegmentIdQuery"];
+                /** @description River network version for the selected segment. */
+                river_network_version_id: string;
                 valid_time?: components["parameters"]["ValidTimeQuery"];
                 variable: components["parameters"]["VariableQuery"];
             };

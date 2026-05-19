@@ -902,13 +902,23 @@ function rankingMatchesSelectedSegment(item: ApiFloodAlertRanking['items'][numbe
   )
 }
 
-async function fetchLineage(runId: string, segmentId: string, query: M11QueryState) {
+async function fetchLineage(runId: string, riverNetworkVersionId: string, segmentId: string, query: M11QueryState) {
   return cached(
-    cacheKey('/api/v1/lineage/river-point', { runId, segmentId, validTime: query.validTime, variable: 'q_down' }),
+    cacheKey('/api/v1/lineage/river-point', { runId, riverNetworkVersionId, segmentId, validTime: query.validTime, variable: 'q_down' }),
     () =>
       getApi<ApiLineageResponse>(
         '/api/v1/lineage/river-point',
-        { params: { query: { run_id: runId, segment_id: segmentId, valid_time: query.validTime ?? undefined, variable: 'q_down' } } },
+        {
+          params: {
+            query: {
+              run_id: runId,
+              river_network_version_id: riverNetworkVersionId,
+              segment_id: segmentId,
+              valid_time: query.validTime ?? undefined,
+              variable: 'q_down',
+            },
+          },
+        },
         '获取河段追溯失败',
       ),
   )
@@ -1205,7 +1215,12 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         const lineageUnavailableReason = useSingleRunFloodSurfaces ? null : COMPARE_LINEAGE_UNAVAILABLE
         if (latestRun && useSingleRunFloodSurfaces) {
           try {
-            lineage = await fetchLineage(latestRun.run_id, selectedIdentifiers.lineageSegmentId, query)
+            lineage = await fetchLineage(
+              latestRun.run_id,
+              selectedIdentifiers.riverNetworkVersionId,
+              selectedIdentifiers.lineageSegmentId,
+              query,
+            )
           } catch (error) {
             lineageError = '河段追溯暂不可用'
             partialErrors.push(`lineage: ${lineageError}`)

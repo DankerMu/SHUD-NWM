@@ -1175,6 +1175,13 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
         - $ref: "#/components/parameters/SegmentIdQuery"
+        - name: river_network_version_id
+          in: query
+          required: true
+          description: River network version for the selected segment.
+          schema:
+            type: string
+            minLength: 1
         - $ref: "#/components/parameters/ValidTimeQuery"
         - $ref: "#/components/parameters/VariableQuery"
       responses:

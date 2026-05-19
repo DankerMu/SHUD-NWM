@@ -518,6 +518,20 @@ def test_flood_alert_ranking_and_timeline_bounds_are_in_static_contract_and_type
     timeline_types = generated_types[timeline_start:lineage_start]
     assert "max_points?: number;" in timeline_types
 
+    lineage_parameters = spec["paths"]["/api/v1/lineage/river-point"]["get"]["parameters"]
+    lineage_river_network = next(
+        parameter for parameter in lineage_parameters if parameter.get("name") == "river_network_version_id"
+    )
+    assert lineage_river_network["required"] is True
+    assert lineage_river_network["schema"] == {
+        "type": "string",
+        "minLength": 1,
+    }
+
+    forcing_lineage_start = generated_types.index("getForcingPointLineage:")
+    lineage_types = generated_types[lineage_start:forcing_lineage_start]
+    assert "river_network_version_id: string;" in lineage_types
+
 
 def test_forecast_response_issue_time_contract_allows_runtime_nulls() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"

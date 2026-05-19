@@ -66,6 +66,8 @@ vi.mock('react-map-gl/maplibre', () => ({
         properties: {
           segment_id: 'seg-009',
           river_segment_id: 'seg-009',
+          basin_version_id: 'yangtze_v2026_01',
+          river_network_version_id: 'rn-v1',
           segment_name: 'Main Stem 009',
         },
       }
@@ -566,6 +568,11 @@ describe('M11 visual foundation shell', () => {
     const warningCollection = buildBasinRiverFeatureCollection(basinSegments, 'warning-level')
     expect(dischargeCollection.features[0].properties.layer_color).not.toBe(returnPeriodCollection.features[0].properties.layer_color)
     expect(returnPeriodCollection.features[0].properties.layer_color).toBe(warningCollection.features[0].properties.layer_color)
+    expect(dischargeCollection.features[0].properties).toMatchObject({
+      basin_version_id: 'yangtze_v2026_01',
+      river_network_version_id: 'rn-v1',
+      river_segment_id: 'seg-009',
+    })
     expect(dischargeCollection.features[0].properties).not.toHaveProperty('selected')
     expect(dischargeCollection.features[0].properties).not.toHaveProperty('hovered')
 

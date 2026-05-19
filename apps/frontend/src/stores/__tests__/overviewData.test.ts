@@ -1941,7 +1941,7 @@ describe('useOverviewDataStore', () => {
       query: { run_id: selectedRun.run_id, segment_id: 'seg-123', river_network_version_id: 'rnv_new' },
     })
     expect(calls.find((call) => call.path === '/api/v1/lineage/river-point')).toMatchObject({
-      query: { run_id: selectedRun.run_id, segment_id: 'seg-123' },
+      query: { run_id: selectedRun.run_id, segment_id: 'seg-123', river_network_version_id: 'rnv_new' },
     })
     expect(snapshot.selectedSegment).toMatchObject({
       riverNetworkVersionId: 'rnv_new',
@@ -2477,6 +2477,7 @@ describe('useOverviewDataStore', () => {
     })
     expect(calls.find((call) => call.path === '/api/v1/lineage/river-point')?.query).toMatchObject({
       segment_id: 'river-seg-123',
+      river_network_version_id: 'yangtze_rivnet_v12',
     })
   })
 
