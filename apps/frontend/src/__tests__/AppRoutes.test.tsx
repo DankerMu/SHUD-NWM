@@ -680,6 +680,32 @@ describe('App route state', () => {
     expect(screen.getAllByText('terrain').length).toBeGreaterThan(0)
   })
 
+  it('routes /meteorology grid tab with public navigation', async () => {
+    window.history.pushState({}, '', '/meteorology?tab=grid&source=GFS&variable=PRCP')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '气象数据产品' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /气象数据/ })).toHaveClass('border-accent')
+    const tablist = screen.getByRole('tablist', { name: '气象产品标签' })
+    expect(within(tablist).getByRole('tab', { selected: true, name: /空间栅格/ })).toBeInTheDocument()
+    expect(screen.getByTestId('grid-unavailable')).toHaveTextContent('实时栅格瓦片服务尚未接入')
+  })
+
+  it('routes /meteorology stations tab with station inventory state', async () => {
+    window.history.pushState({}, '', '/meteorology?tab=stations&basin=yangtze&stationId=HMT-Y2-0237')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '气象数据产品' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /气象数据/ })).toHaveClass('border-accent')
+    const tablist = screen.getByRole('tablist', { name: '气象产品标签' })
+    expect(within(tablist).getByRole('tab', { selected: true, name: /气象代站/ })).toBeInTheDocument()
+    expect(screen.getByLabelText('流域', { selector: 'select' })).toHaveValue('yangtze')
+    expect(screen.getByTestId('station-inventory')).toHaveTextContent('HMT-Y2-0236')
+    expect(screen.getByTestId('station-popup')).toHaveTextContent('HMT-Y2-0237')
+  })
+
   it('renders overview shared controls and drives URL/query reload state', async () => {
     const user = userEvent.setup()
     useOverviewDataStore.setState({

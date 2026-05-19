@@ -16,6 +16,9 @@ const BasinDetailPage = lazy(() =>
 const FloodAlertPage = lazy(() =>
   import('./pages/FloodAlertPage').then((module) => ({ default: module.FloodAlertPage })),
 )
+const MeteorologyPage = lazy(() =>
+  import('./pages/meteorology/MeteorologyPage').then((module) => ({ default: module.MeteorologyPage })),
+)
 const SegmentDetailPage = lazy(() =>
   import('./pages/SegmentDetailPage').then((module) => ({ default: module.SegmentDetailPage })),
 )
@@ -32,6 +35,7 @@ export default function App() {
             <Route path="/" element={<OverviewPage />} />
             <Route path="/overview" element={<OverviewPage />} />
             <Route path="/basins/:basinId" element={<BasinDetailPage />} />
+            <Route path="/meteorology" element={<MeteorologyPage />} />
             <Route path="/forecast" element={<ForecastPage />} />
             <Route path="/flood-alerts" element={<FloodAlertPage />} />
             <Route path="/segments/:segmentId" element={<SegmentDetailPage />} />
