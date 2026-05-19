@@ -19,6 +19,8 @@ export const MODEL_ASSET_RESTRICTED_SOURCE = '受限来源'
 export const MODEL_ASSET_PRODUCT_LIMIT_TEXT = '仅显示前 12 个资产'
 export const MODEL_ASSET_MAP_OVER_BUDGET_TEXT = '空间几何超出预览预算'
 export const MODEL_ASSET_MAP_UNAVAILABLE_TEXT = '暂无空间预览'
+const MODEL_ASSET_LIST_LOAD_FAILED = '模型资产列表加载失败'
+const MODEL_ASSET_DETAIL_LOAD_FAILED = '模型资产详情加载失败'
 const MODEL_ASSET_DETAIL_IDENTITY_MISMATCH = '模型资产详情与当前选择不匹配'
 const MODEL_ASSET_SANITIZE_MAX_DEPTH = 24
 const MODEL_ASSET_SANITIZE_MAX_NODES = 5000
@@ -127,8 +129,8 @@ async function getModelPage(filters: ModelAssetListFilters = {}) {
     },
   })
 
-  if (error) throw new Error(getApiErrorMessage(error, '模型资产列表加载失败'))
-  return unwrapApiData<ModelAssetPage>(data, '模型资产列表加载失败')
+  if (error) throw new Error(getApiErrorMessage(error, MODEL_ASSET_LIST_LOAD_FAILED))
+  return unwrapApiData<ModelAssetPage>(data, MODEL_ASSET_LIST_LOAD_FAILED)
 }
 
 async function getModelDetail(modelId: string) {
@@ -136,8 +138,8 @@ async function getModelDetail(modelId: string) {
     params: { path: { model_id: modelId } },
   })
 
-  if (error) throw new Error(getApiErrorMessage(error, '模型资产详情加载失败'))
-  return unwrapApiData<ModelAsset>(data, '模型资产详情加载失败')
+  if (error) throw new Error(getApiErrorMessage(error, MODEL_ASSET_DETAIL_LOAD_FAILED))
+  return unwrapApiData<ModelAsset>(data, MODEL_ASSET_DETAIL_LOAD_FAILED)
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {
@@ -203,6 +205,12 @@ export function sanitizeModelAssetString(value: string): string | null {
 export function displaySanitizedSource(value: unknown): string {
   if (typeof value !== 'string' || value.trim() === '') return MODEL_ASSET_UNAVAILABLE
   return sanitizeModelAssetString(value) ?? MODEL_ASSET_RESTRICTED_SOURCE
+}
+
+function getSafeModelAssetErrorMessage(error: unknown, fallback: string): string {
+  const rawMessage = getApiErrorMessage(error, fallback)
+  if (rawMessage === MODEL_ASSET_DETAIL_IDENTITY_MISMATCH) return rawMessage
+  return fallback
 }
 
 interface SanitizeOptions {
@@ -809,9 +817,9 @@ export const useModelAssetsStore = create<ModelAssetsState>((set) => {
             : null,
       }))
     } catch (error) {
-      const message = getApiErrorMessage(error, '模型资产列表加载失败')
+      const message = getSafeModelAssetErrorMessage(error, MODEL_ASSET_LIST_LOAD_FAILED)
       if (requestSeq === listRequestSeq) set({ selectedModel: null, detailLoading: false, loading: false, error: message })
-      throw error
+      throw new Error(message)
     }
   },
   fetchModelDetail: async (modelId) => {
@@ -826,9 +834,9 @@ export const useModelAssetsStore = create<ModelAssetsState>((set) => {
       }
       set({ selectedModel: normalizeModelAsset(model), detailLoading: false, error: null })
     } catch (error) {
-      const message = getApiErrorMessage(error, '模型资产详情加载失败')
+      const message = getSafeModelAssetErrorMessage(error, MODEL_ASSET_DETAIL_LOAD_FAILED)
       if (requestSeq === detailRequestSeq) set({ selectedModel: null, detailLoading: false, error: message })
-      throw error
+      throw new Error(message)
     }
   },
   clearSelectedModel: () => {

@@ -444,6 +444,24 @@ function modelAssetRouteFixture(overrides: Partial<ModelAsset> = {}): ModelAsset
   }
 }
 
+const unsafeModelAssetError =
+  'failed to inspect /volume/data/nwm/Basins/qhh and C:\\nwm\\Basins\\qhh from file:///volume/data/nwm/Basins/qhh?token=abc#frag via https://user:pass@assets.example.test/pkg?token=abc#frag'
+const unsafeModelAssetErrorTokens = [
+  '/volume/data/nwm/Basins/qhh',
+  'C:\\nwm\\Basins\\qhh',
+  'file://',
+  'user:pass',
+  'token=abc',
+  '#frag',
+] as const
+
+function expectNoUnsafeModelAssetErrorTextInRoute() {
+  const bodyText = document.body.textContent ?? ''
+  for (const token of unsafeModelAssetErrorTokens) {
+    expect(bodyText).not.toContain(token)
+  }
+}
+
 function basinSnapshot(
   basinId: string,
   layers: LayerState[],
@@ -4335,7 +4353,7 @@ describe('App route state', () => {
     )
     vi.mocked(client.GET).mockImplementation(async (path: string) => {
       if (path === '/api/v1/models') {
-        return { data: undefined, error: { error: { message: 'model registry unavailable' } } } as never
+        return { data: undefined, error: { error: { message: unsafeModelAssetError } } } as never
       }
       if (path === '/api/v1/models/{model_id}') return { data: success(modelAssetRouteFixture()), error: undefined } as never
       return { data: success({}), error: undefined } as never
@@ -4344,9 +4362,33 @@ describe('App route state', () => {
 
     render(<App />)
 
-    await waitFor(() => expect(screen.getAllByText('model registry unavailable').length).toBeGreaterThan(0))
+    await waitFor(() => expect(screen.getAllByText('模型资产列表加载失败').length).toBeGreaterThan(0))
     await waitFor(() => expect(useModelAssetsStore.getState().selectedModel).toBeNull())
+    expectNoUnsafeModelAssetErrorTextInRoute()
     expect(screen.queryByText('QHH SHUD')).not.toBeInTheDocument()
+    expect(screen.queryByText('qhh-basin-v1')).not.toBeInTheDocument()
+    expect(screen.queryByText('pkg-sha')).not.toBeInTheDocument()
+  })
+
+  it('renders only a safe generic detail error when /system/model-assets detail loading fails with sensitive source strings', async () => {
+    useAuthStore.setState({ role: 'model_admin' })
+    const model = modelAssetRouteFixture()
+    const page: ModelAssetPage = { items: [model], total: 1, limit: 50, offset: 0 }
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') return { data: success(page), error: undefined } as never
+      if (path === '/api/v1/models/{model_id}') {
+        return { data: undefined, error: { error: { message: unsafeModelAssetError } } } as never
+      }
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('模型资产详情加载失败').length).toBeGreaterThan(0))
+    expectNoUnsafeModelAssetErrorTextInRoute()
+    expect(screen.getByText('QHH SHUD')).toBeInTheDocument()
     expect(screen.queryByText('qhh-basin-v1')).not.toBeInTheDocument()
     expect(screen.queryByText('pkg-sha')).not.toBeInTheDocument()
   })

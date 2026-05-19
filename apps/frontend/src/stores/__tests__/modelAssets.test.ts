@@ -34,6 +34,24 @@ function failure(message: string) {
   return { data: undefined, error: { error: { message } } }
 }
 
+const UNSAFE_MODEL_ASSET_ERROR =
+  'failed to inspect /volume/data/nwm/Basins/qhh and C:\\nwm\\Basins\\qhh from file:///volume/data/nwm/Basins/qhh?token=abc#frag via https://user:pass@assets.example.test/pkg?token=abc#frag'
+const UNSAFE_MODEL_ASSET_ERROR_TOKENS = [
+  '/volume/data/nwm/Basins/qhh',
+  'C:\\nwm\\Basins\\qhh',
+  'file://',
+  'user:pass',
+  'token=abc',
+  '#frag',
+] as const
+
+function expectNoUnsafeModelAssetErrorText(value: string | null) {
+  expect(value).toBeTruthy()
+  for (const token of UNSAFE_MODEL_ASSET_ERROR_TOKENS) {
+    expect(value).not.toContain(token)
+  }
+}
+
 const BASINS_MODEL_ID = 'basins_basin_a_shud'
 const MANIFEST_URI = 's3://nhms/models/basins_basin_a_shud/vbasins/manifest.json'
 const PACKAGE_URI = 's3://nhms/models/basins_basin_a_shud/vbasins/package/'
@@ -444,14 +462,12 @@ describe('useModelAssetsStore', () => {
     await useModelAssetsStore.getState().fetchModelDetail(BASINS_MODEL_ID)
     expect(useModelAssetsStore.getState().selectedModel?.model_id).toBe(BASINS_MODEL_ID)
 
-    await expect(useModelAssetsStore.getState().fetchModelDetail('missing-model')).rejects.toThrow(
-      'model detail unavailable',
-    )
+    await expect(useModelAssetsStore.getState().fetchModelDetail('missing-model')).rejects.toThrow('模型资产详情加载失败')
 
     expect(useModelAssetsStore.getState()).toMatchObject({
       selectedModel: null,
       detailLoading: false,
-      error: 'model detail unavailable',
+      error: '模型资产详情加载失败',
     })
   })
 
@@ -500,14 +516,34 @@ describe('useModelAssetsStore', () => {
     })
   })
 
-  it('keeps API errors in state for asset-management callers', async () => {
+  it('stores only the safe generic list error when API failures include sensitive source strings', async () => {
+    vi.mocked(client.GET).mockResolvedValue(failure(UNSAFE_MODEL_ASSET_ERROR) as never)
+
+    await expect(useModelAssetsStore.getState().fetchModels()).rejects.toThrow('模型资产列表加载失败')
+
+    const error = useModelAssetsStore.getState().error
+    expect(error).toBe('模型资产列表加载失败')
+    expectNoUnsafeModelAssetErrorText(error)
+  })
+
+  it('stores only the safe generic detail error when API failures include sensitive source strings', async () => {
+    vi.mocked(client.GET).mockResolvedValue(failure(UNSAFE_MODEL_ASSET_ERROR) as never)
+
+    await expect(useModelAssetsStore.getState().fetchModelDetail(BASINS_MODEL_ID)).rejects.toThrow('模型资产详情加载失败')
+
+    const error = useModelAssetsStore.getState().error
+    expect(error).toBe('模型资产详情加载失败')
+    expectNoUnsafeModelAssetErrorText(error)
+  })
+
+  it('keeps safe generic API errors in state for asset-management callers', async () => {
     vi.mocked(client.GET).mockResolvedValue(failure('model registry unavailable') as never)
 
-    await expect(useModelAssetsStore.getState().fetchModels()).rejects.toThrow('model registry unavailable')
+    await expect(useModelAssetsStore.getState().fetchModels()).rejects.toThrow('模型资产列表加载失败')
 
     expect(useModelAssetsStore.getState()).toMatchObject({
       loading: false,
-      error: 'model registry unavailable',
+      error: '模型资产列表加载失败',
     })
   })
 
@@ -519,13 +555,13 @@ describe('useModelAssetsStore', () => {
     await useModelAssetsStore.getState().fetchModelDetail(BASINS_MODEL_ID)
     expect(useModelAssetsStore.getState().selectedModel?.model_id).toBe(BASINS_MODEL_ID)
 
-    await expect(useModelAssetsStore.getState().fetchModels()).rejects.toThrow('model registry unavailable')
+    await expect(useModelAssetsStore.getState().fetchModels()).rejects.toThrow('模型资产列表加载失败')
 
     expect(useModelAssetsStore.getState()).toMatchObject({
       selectedModel: null,
       detailLoading: false,
       loading: false,
-      error: 'model registry unavailable',
+      error: '模型资产列表加载失败',
     })
   })
 
