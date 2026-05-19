@@ -114,6 +114,13 @@ export function BasinDetailPage() {
     handleQueryChange({ validTime: correctedValidTime })
   }, [basinMetadataMatchesQuery, derivedTimeline, handleQueryChange, loading, metadataLayers, needsQueryReplacement, state])
 
+  useEffect(() => {
+    if (needsQueryReplacement || loading || !currentBasinData?.selectedSegment?.riverNetworkVersionId) return
+    const resolvedRiverNetworkVersionId = currentBasinData.selectedSegment.riverNetworkVersionId
+    if (state.riverNetworkVersionId === resolvedRiverNetworkVersionId) return
+    handleQueryChange({ riverNetworkVersionId: resolvedRiverNetworkVersionId })
+  }, [currentBasinData?.selectedSegment?.riverNetworkVersionId, handleQueryChange, loading, needsQueryReplacement, state.riverNetworkVersionId])
+
   const detail = currentBasinData?.detail
   const filteredSegments = useMemo(
     () => filterBasinSegmentRows(currentBasinData?.segments ?? [], state),
@@ -139,9 +146,10 @@ export function BasinDetailPage() {
       const nextSegmentId =
         mapFeatureStringProperty(interaction.feature, 'river_segment_id') ?? mapFeatureStringProperty(interaction.feature, 'segment_id')
       if (!nextSegmentId || nextSegmentId === state.segmentId) return
-      handleQueryChange({ segmentId: nextSegmentId })
+      const nextRiverNetworkVersionId = mapFeatureStringProperty(interaction.feature, 'river_network_version_id')
+      handleQueryChange({ riverNetworkVersionId: nextRiverNetworkVersionId ?? state.riverNetworkVersionId, segmentId: nextSegmentId })
     },
-    [handleQueryChange, state.segmentId],
+    [handleQueryChange, state.riverNetworkVersionId, state.segmentId],
   )
 
   return (

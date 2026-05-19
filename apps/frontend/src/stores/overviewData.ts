@@ -131,6 +131,18 @@ type BasinVersionRunFetchResult = {
   failed: boolean
 }
 
+type ReadyRunStatusPages = Partial<Record<ReadyRunStatus, ApiHydroRunPage>>
+
+type ReadyRunPage = ApiHydroRunPage & {
+  readyStatusPages?: ReadyRunStatusPages
+}
+
+type ReadyRunCursor = {
+  status: ReadyRunStatus
+  offset: number
+  total: number
+}
+
 type RiverSegmentFetchResult = {
   collection: ApiRiverFeatureCollection
   reachedCap: boolean
@@ -327,7 +339,7 @@ function latestPublishedRun(runs: ApiHydroRunPage | null, query?: M11QueryState)
   })[0] ?? null
 }
 
-function mergeRunPages(pages: ApiHydroRunPage[]): ApiHydroRunPage {
+function mergeRunPages(pages: ApiHydroRunPage[], statuses: readonly ReadyRunStatus[] = READY_RUN_STATUSES): ReadyRunPage {
   const byRunId = new Map<string, ApiHydroRun>()
   pages.forEach((page) => {
     page.items.forEach((run) => {
@@ -336,11 +348,17 @@ function mergeRunPages(pages: ApiHydroRunPage[]): ApiHydroRunPage {
   })
   const limit = Math.max(...pages.map((page) => page.limit ?? page.items.length), 0)
   const total = Math.max(...pages.map((page) => page.total ?? page.items.length), byRunId.size)
+  const readyStatusPages = statuses.reduce<ReadyRunStatusPages>((acc, status, index) => {
+    const page = pages[index]
+    if (page) acc[status] = page
+    return acc
+  }, {})
   return {
     items: [...byRunId.values()],
     total,
     limit,
     offset: pages[0]?.offset ?? 0,
+    readyStatusPages,
   }
 }
 
@@ -563,52 +581,83 @@ async function fetchRunsForBasinVersion(
   query: M11QueryState,
   basinId: string,
   basinVersionId: string | null | undefined,
-  initialPage: ApiHydroRunPage | null,
+  initialPage: ReadyRunPage | null,
 ): Promise<BasinVersionRunFetchResult> {
   if (!basinVersionId || !initialPage) return { page: initialPage, reachedCap: false, failed: false }
 
-  const initialItems = initialPage.items
-  const items = initialItems.filter((run) => run.basin_version_id === basinVersionId)
+  const initialStatusPages = initialPage.readyStatusPages ?? { frequency_done: initialPage }
+  const byRunId = new Map<string, ApiHydroRun>()
+  const addPageItems = (page: ApiHydroRunPage) => {
+    for (const run of page.items) {
+      if (run.basin_version_id !== basinVersionId) continue
+      if (byRunId.size >= RUN_LOOKUP_MAX_RETAINED_ITEMS && !byRunId.has(run.run_id)) break
+      byRunId.set(run.run_id, run)
+    }
+  }
+  READY_RUN_STATUSES.forEach((status) => {
+    const page = initialStatusPages[status]
+    if (page) addPageItems(page)
+  })
+  const pageFromItems = (offset = initialPage.offset ?? 0): ApiHydroRunPage => ({
+    items: [...byRunId.values()],
+    total: Math.max(...READY_RUN_STATUSES.map((status) => initialStatusPages[status]?.total ?? 0), byRunId.size),
+    limit: byRunId.size,
+    offset,
+  })
+  const cursors: ReadyRunCursor[] = READY_RUN_STATUSES.flatMap((status) => {
+    const page = initialStatusPages[status]
+    if (!page) return []
+    const pageOffset = page.offset ?? 0
+    const fetched = page.limit || page.items.length || 20
+    return [
+      {
+        status,
+        offset: pageOffset + fetched,
+        total: page.total ?? page.items.length,
+      },
+    ]
+  })
   let page: ApiHydroRunPage = {
-    items,
-    total: initialPage.total ?? initialItems.length,
-    limit: items.length,
-    offset: initialPage.offset ?? 0,
+    ...pageFromItems(),
   }
   if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
 
-  const firstOffset = initialPage.offset ?? 0
-  const firstLimit = initialPage.limit || initialItems.length || 20
-  let offset = firstOffset + firstLimit
-  let total = initialPage.total ?? initialItems.length
   let extraPages = 0
   let reachedCap = false
 
-  while (offset < total && extraPages < RUN_LOOKUP_MAX_EXTRA_PAGES && items.length < RUN_LOOKUP_MAX_RETAINED_ITEMS) {
-    let nextPage: ApiHydroRunPage
+  while (
+    cursors.some((cursor) => cursor.offset < cursor.total) &&
+    extraPages < RUN_LOOKUP_MAX_EXTRA_PAGES &&
+    byRunId.size < RUN_LOOKUP_MAX_RETAINED_ITEMS
+  ) {
+    let nextPages: Array<{ cursor: ReadyRunCursor; page: ApiHydroRunPage }>
     try {
-      nextPage = await fetchRunsPage(query, basinId, RUN_LOOKUP_PAGE_LIMIT, offset)
+      nextPages = await Promise.all(
+        cursors
+          .filter((cursor) => cursor.offset < cursor.total)
+          .map(async (cursor) => ({
+            cursor,
+            page: await fetchRunsPageByStatus(query, basinId, RUN_LOOKUP_PAGE_LIMIT, cursor.offset, cursor.status),
+          })),
+      )
     } catch {
       return { page, reachedCap: false, failed: true }
     }
     extraPages += 1
-    const remaining = RUN_LOOKUP_MAX_RETAINED_ITEMS - items.length
-    items.push(...nextPage.items.filter((run) => run.basin_version_id === basinVersionId).slice(0, remaining))
-    total = nextPage.total ?? total
-    page = {
-      items,
-      total,
-      limit: items.length,
-      offset: firstOffset,
-    }
+    nextPages.forEach(({ cursor, page: statusPage }) => {
+      addPageItems(statusPage)
+      cursor.total = statusPage.total ?? cursor.total
+      const fetched = statusPage.limit || statusPage.items.length || RUN_LOOKUP_PAGE_LIMIT
+      cursor.offset += fetched
+    })
+    page = pageFromItems()
     if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
-
-    const fetched = nextPage.items.length || nextPage.limit || RUN_LOOKUP_PAGE_LIMIT
-    offset += fetched
-    if (fetched <= 0) break
+    if (nextPages.every(({ page: statusPage }) => (statusPage.limit || statusPage.items.length || RUN_LOOKUP_PAGE_LIMIT) <= 0)) break
   }
 
-  reachedCap = offset < total && (extraPages >= RUN_LOOKUP_MAX_EXTRA_PAGES || items.length >= RUN_LOOKUP_MAX_RETAINED_ITEMS)
+  reachedCap =
+    cursors.some((cursor) => cursor.offset < cursor.total) &&
+    (extraPages >= RUN_LOOKUP_MAX_EXTRA_PAGES || byRunId.size >= RUN_LOOKUP_MAX_RETAINED_ITEMS)
   return { page, reachedCap, failed: false }
 }
 
@@ -1113,7 +1162,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         filterBasinSegmentRows(rows, query),
         segments,
         Boolean(segmentFetch?.reachedCap || segmentFetch?.truncated),
-        query.riverNetworkVersionId ?? activeRiverNetwork.riverNetworkVersionId,
+        activeRiverNetwork.riverNetworkVersionId,
       )
       let selectedSegment: SelectedSegmentDetail | null = null
 
