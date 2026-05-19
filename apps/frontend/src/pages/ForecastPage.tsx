@@ -33,7 +33,7 @@ export function ForecastPage() {
   }, [routeState])
   const routeRequestContext = useMemo(
     () => ({
-      source: routeState.source === 'best' ? null : routeState.source,
+      source: routeState.source,
       issueTime: routeState.cycle,
     }),
     [routeState.cycle, routeState.source],
@@ -111,6 +111,7 @@ export function ForecastPage() {
         <div className="flex h-full min-h-0 flex-col gap-3">
           <div className="rounded-lg border border-border bg-panel px-4 py-3">
             <ForecastBasinHandoff context={basinContext} routeState={routeState} />
+            <ForecastSegmentDetailHandoff segment={selectedSegment} routeState={routeState} forecastData={scopedForecastDataForSegment(forecastData, selectedSegment)} />
           </div>
           <ForecastPanel
             segment={selectedSegment}
@@ -135,6 +136,76 @@ export function ForecastPage() {
       )}
     </div>
   )
+}
+
+function ForecastSegmentDetailHandoff({
+  segment,
+  routeState,
+  forecastData,
+}: {
+  segment: ForecastSegmentInfo
+  routeState: ReturnType<typeof parseM11QueryState>
+  forecastData: ReturnType<typeof useForecastStore.getState>['forecastData']
+}) {
+  if (!segment.basinVersionId || !segment.riverNetworkVersionId) return null
+  const forecastSource = concreteForecastSource(forecastData) ?? routeState.source
+  const forecastCycle = routeState.cycle ?? forecastData?.cycle ?? forecastData?.issueTime ?? null
+  const forecastValidTime = routeState.validTime ?? firstForecastValidTime(forecastData)
+  const href = m11QueryHref(`/segments/${encodeURIComponent(segment.segmentId)}`, routeState, {
+    source: forecastSource,
+    cycle: forecastCycle,
+    validTime: forecastValidTime,
+    basinVersionId: segment.basinVersionId,
+    riverNetworkVersionId: segment.riverNetworkVersionId,
+    segmentId: segment.segmentId,
+  })
+
+  return (
+    <Link
+      to={href}
+      className="ml-2 mt-3 inline-flex h-9 items-center rounded border border-primary-600 px-3 text-sm font-medium text-primary-600 hover:bg-primary-50"
+    >
+      查看河段详情
+    </Link>
+  )
+}
+
+function scopedForecastDataForSegment(
+  data: ReturnType<typeof useForecastStore.getState>['forecastData'],
+  segment: ForecastSegmentInfo,
+) {
+  if (!data) return null
+  if (data.segmentId !== segment.segmentId) return null
+  if (data.basinVersionId !== segment.basinVersionId) return null
+  if (data.riverNetworkVersionId !== segment.riverNetworkVersionId) return null
+  return data
+}
+
+function concreteForecastSource(data: ReturnType<typeof useForecastStore.getState>['forecastData']) {
+  const sources = [
+    ...new Set(
+      (data?.series ?? [])
+        .filter((series) => !series.isAnalysis)
+        .map((series) => series.source?.toLowerCase())
+        .filter((source): source is 'gfs' | 'ifs' => source === 'gfs' || source === 'ifs'),
+    ),
+  ]
+  if (sources.length === 1) return sources[0]
+  if (sources.length > 1) return 'compare'
+  return data?.source && data.source !== 'best' ? data.source : null
+}
+
+function firstForecastValidTime(data: ReturnType<typeof useForecastStore.getState>['forecastData']) {
+  const points = (data?.series ?? [])
+    .filter((series) => !series.isAnalysis)
+    .flatMap((series) => series.points)
+    .map((point) => {
+      const timestamp = typeof point.time === 'number' ? point.time : Date.parse(point.time)
+      return Number.isFinite(timestamp) && Number.isFinite(point.value) ? new Date(timestamp).toISOString() : null
+    })
+    .filter((value): value is string => Boolean(value))
+  points.sort((left, right) => Date.parse(left) - Date.parse(right))
+  return points[0] ?? null
 }
 
 function ForecastBasinHandoff({ context, routeState }: { context: ForecastBasinContext | null; routeState: ReturnType<typeof parseM11QueryState> }) {

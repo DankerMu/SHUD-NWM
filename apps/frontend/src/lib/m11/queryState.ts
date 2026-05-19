@@ -105,7 +105,7 @@ function normalizeIsoInstant(value: string | null) {
   return new Date(timestamp).toISOString()
 }
 
-function normalizeIdentifier(value: string | null) {
+export function normalizeM11Identifier(value: string | null | undefined) {
   if (!value) return null
   const trimmed = value.trim()
   return /^[A-Za-z0-9._:-]{1,96}$/.test(trimmed) ? trimmed : null
@@ -130,9 +130,9 @@ export function parseM11QueryState(input: string | URLSearchParams): M11QuerySta
     validTime: normalizeIsoInstant(params.get('validTime')),
     layer: isOneOf(layer, layers) ? layer : defaultM11QueryState.layer,
     basemap: isOneOf(basemap, basemaps) ? basemap : defaultM11QueryState.basemap,
-    basinVersionId: normalizeIdentifier(params.get('basinVersionId')),
-    riverNetworkVersionId: normalizeIdentifier(params.get('riverNetworkVersionId')),
-    segmentId: normalizeIdentifier(params.get('segmentId')),
+    basinVersionId: normalizeM11Identifier(params.get('basinVersionId')),
+    riverNetworkVersionId: normalizeM11Identifier(params.get('riverNetworkVersionId')),
+    segmentId: normalizeM11Identifier(params.get('segmentId')),
     warningLevel: isOneOf(warningLevel, warningLevels) ? warningLevel : defaultM11QueryState.warningLevel,
     q: normalizeSearch(params.get('q')),
   }

@@ -3,6 +3,10 @@ import { create } from 'zustand'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
+import {
+  createForecastPointBudgetGuard,
+  type ForecastPointBudgetStatus,
+} from '@/lib/forecastRenderingBudget'
 import type { M11Source } from '@/lib/m11/queryState'
 
 export interface ForecastSegmentInfo {
@@ -32,12 +36,17 @@ export interface ForecastSeries {
 
 export interface ForecastData {
   segmentId: string
+  basinVersionId?: string
+  riverNetworkVersionId?: string
+  source?: M11Source | null
+  cycle?: string | null
   issueTime: string | null
   unit: string
   series: ForecastSeries[]
   sourceAttribution: string
   cycleAttribution: string
   frequencyThresholds?: components['schemas']['RiverSeriesResponse']['frequency_thresholds']
+  pointBudgetStatus?: ForecastPointBudgetStatus
 }
 
 export interface FetchForecastOptions {
@@ -161,12 +170,21 @@ function formatCycleTime(value?: string | null) {
 }
 
 function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastData {
-  const series = (payload.segments ?? []).map((segment): ForecastSeries => {
+  const pointBudgetGuard = createForecastPointBudgetGuard()
+  const sourceSegments = payload.segments ?? []
+  pointBudgetGuard.setSourceSeriesCount(sourceSegments.length)
+  pointBudgetGuard.setSourcePointCount(
+    sourceSegments.reduce((total, segment) => total + (Array.isArray(segment.data) ? segment.data.length : 0), 0),
+  )
+  const series: ForecastSeries[] = []
+  for (const segment of sourceSegments) {
     const scenario = segment.scenario ?? segment.scenario_id ?? ''
     const role = segment.segment_role ?? segment.role
     const source = inferSource(scenario, segment.source_id ?? segment.source)
     const isAnalysis = isAnalysisSegment(scenario, role)
-    return {
+    const retainedPoints = pointBudgetGuard.takeSeries(segment.data)
+    if (retainedPoints === null) break
+    series.push({
       scenario,
       source,
       role,
@@ -178,14 +196,14 @@ function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastDat
         segment.available_lead_hours !== undefined && segment.available_lead_hours !== null
           ? Number(segment.available_lead_hours)
           : null,
-      points: (segment.data ?? [])
+      points: retainedPoints
         .filter((point) => point.value !== undefined && (point.valid_time !== undefined || point.time !== undefined))
         .map((point) => ({
           time: point.valid_time ?? point.time ?? '',
           value: Number(point.value),
         })),
-    }
-  })
+    })
+  }
 
   return {
     segmentId: payload.river_segment_id ?? payload.segment_id ?? '',
@@ -195,15 +213,25 @@ function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastDat
     sourceAttribution: buildSourceAttribution(series),
     cycleAttribution: buildCycleAttribution(series, payload.issue_time ?? null),
     frequencyThresholds: payload.frequency_thresholds,
+    pointBudgetStatus: pointBudgetGuard.status(),
   }
 }
 
 function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastData {
-  const series = ((payload.series ?? []) as RiverSeriesSegment[]).map((segment): ForecastSeries => {
+  const pointBudgetGuard = createForecastPointBudgetGuard()
+  const sourceSegments = (payload.series ?? []) as RiverSeriesSegment[]
+  pointBudgetGuard.setSourceSeriesCount(sourceSegments.length)
+  pointBudgetGuard.setSourcePointCount(
+    sourceSegments.reduce((total, segment) => total + (Array.isArray(segment.points) ? segment.points.length : 0), 0),
+  )
+  const series: ForecastSeries[] = []
+  for (const segment of sourceSegments) {
     const scenario = segment.scenario_id ?? 'forecast_gfs_deterministic'
     const source = inferSource(scenario, segment.source_id ?? segment.source)
     const isAnalysis = isAnalysisSegment(scenario, segment.segment_role)
-    return {
+    const retainedPoints = pointBudgetGuard.takeSeries(segment.points)
+    if (retainedPoints === null) break
+    series.push({
       scenario,
       source,
       role: segment.segment_role,
@@ -215,14 +243,14 @@ function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastDat
         segment.available_lead_hours !== undefined && segment.available_lead_hours !== null
           ? Number(segment.available_lead_hours)
           : null,
-      points: (segment.points ?? [])
+      points: retainedPoints
         .filter((point) => point.length >= 2)
         .map((point) => ({
           time: point[0],
           value: Number(point[1]),
         })),
-    }
-  })
+    })
+  }
 
   return {
     segmentId: payload.segment_id,
@@ -232,6 +260,7 @@ function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastDat
     sourceAttribution: buildSourceAttribution(series),
     cycleAttribution: buildCycleAttribution(series, payload.issue_time ?? null),
     frequencyThresholds: payload.frequency_thresholds,
+    pointBudgetStatus: pointBudgetGuard.status(),
   }
 }
 
@@ -241,6 +270,21 @@ function normalizeForecastPayload(payload: ForecastApiPayload): ForecastData {
   }
 
   return normalizeRiverSeriesResponse(payload as RiverSeriesResponse)
+}
+
+function bindForecastIdentity(data: ForecastData, request: ForecastRequestIdentity, source: M11Source | null | undefined): ForecastData {
+  if (data.segmentId && data.segmentId !== request.segmentId) {
+    throw new Error(`预报曲线响应与请求河段不匹配：请求 ${request.segmentId}，返回 ${data.segmentId}。`)
+  }
+
+  return {
+    ...data,
+    segmentId: request.segmentId,
+    basinVersionId: request.basinVersionId,
+    riverNetworkVersionId: request.riverNetworkVersionId,
+    source: source ?? null,
+    cycle: request.issueTime ?? null,
+  }
 }
 
 function buildSourceAttribution(series: ForecastSeries[]) {
@@ -313,12 +357,20 @@ async function fetchForecastSeries(
     throw new Error('缺少 river_network_version_id，无法请求河段预报')
   }
 
-  const query = {
+  const query: {
+    river_network_version_id: string
+    issue_time: string
+    variables: string
+    scenarios?: string
+    include_analysis: boolean
+  } = {
     river_network_version_id: segment.riverNetworkVersionId,
     issue_time: options.issueTime ?? 'latest',
     variables: 'q_down',
-    scenarios: selectedScenarios.join(','),
     include_analysis: includeAnalysis,
+  }
+  if (selectedScenarios.length > 0) {
+    query.scenarios = selectedScenarios.join(',')
   }
 
   const { data, error } = await client.GET(
@@ -411,8 +463,9 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       const state = get()
       if (!isCurrentForecastRequest(state, request)) return
 
+      const forecastData = bindForecastIdentity(normalizeForecastPayload(payload), request, source)
       set({
-        forecastData: normalizeForecastPayload(payload),
+        forecastData,
         loading: false,
         error: null,
       })
@@ -440,5 +493,6 @@ function selectedScenariosForSource(source: M11Source | null | undefined, select
   if (source === 'ifs') return ['IFS']
   if (source === 'compare') return ['GFS', 'IFS']
   if (source === 'gfs') return ['GFS']
+  if (source === 'best') return []
   return selectedScenarios.length > 0 ? selectedScenarios : ['GFS']
 }

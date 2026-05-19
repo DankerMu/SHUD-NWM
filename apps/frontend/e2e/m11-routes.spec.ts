@@ -292,6 +292,7 @@ async function mockOverviewApis(
         run_id: 'run-overview',
         segment_id: url.searchParams.get('segment_id') ?? 'seg-009',
         river_segment_id: url.searchParams.get('segment_id') ?? 'seg-009',
+        river_network_version_id: 'rn-v1',
         timesteps: [],
         timeline: [],
         peak: { valid_time: '2026-05-18T06:00:00Z', return_period: 20, warning_level: 'warning', q_value: 456 },
@@ -559,6 +560,10 @@ test.describe('M11 navigation and route shells', () => {
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-river-feature-count', '2')
     await expect(page.getByTestId('m11-selected-segment-panel')).toContainText('river_segment_id')
     await expect(page.getByTestId('m11-selected-segment-panel')).toContainText('当前 Q')
+    await expect(page.getByRole('link', { name: '查看河段详情' })).toHaveAttribute(
+      'href',
+      /\/segments\/seg-009.*source=ifs.*cycle=2026-05-18T00%3A00%3A00.000Z.*validTime=2026-05-18T06%3A00%3A00.000Z.*basinVersionId=bv-001.*riverNetworkVersionId=rn-v1.*segmentId=seg-009/,
+    )
     await expect(page.getByRole('region', { name: '河段趋势' })).toContainText('当前值')
     await expect(page).toHaveURL(/cycle=2026-05-18T00%3A00%3A00.000Z/)
 
@@ -634,6 +639,24 @@ test.describe('M11 navigation and route shells', () => {
     await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
     await expect(page.getByTestId('m11-selected-segment-panel')).toContainText('seg-001')
     await expect(page.getByRole('region', { name: '河段趋势' })).toBeVisible()
+  })
+
+  test('renders segment detail route and preserves scoped identity on reload', async ({ page }) => {
+    const calls: Array<{ path: string; query: Record<string, string> }> = []
+    await mockOverviewApis(page, { calls })
+
+    await page.goto(
+      '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
+    )
+
+    await expect(page.getByRole('heading', { name: 'seg-009' })).toBeVisible()
+    await expect(page.getByLabel('位置缩略图')).toBeVisible()
+    await expect(page.getByLabel('站点与强迫数据')).toContainText('站点与强迫数据暂不可用')
+    await expect(page.getByLabel('洪水阈值')).toContainText('Q100')
+    const forecastCall = calls.find((call) => call.path === '/api/v1/basin-versions/bv-001/river-segments/seg-009/forecast-series')
+    expect(forecastCall?.query.river_network_version_id).toBe('rn-v1')
+    expect(forecastCall?.query.issue_time).toBe('2026-05-18T00:00:00.000Z')
+    expect(calls.some((call) => call.path.includes('/seg-001/forecast-series'))).toBe(false)
   })
 
   test('keeps forecast workflow route reachable', async ({ page }) => {

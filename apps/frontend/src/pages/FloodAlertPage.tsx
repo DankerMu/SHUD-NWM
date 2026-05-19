@@ -211,6 +211,7 @@ export function FloodAlertPage() {
             basinVersionId={selectedSegment.basinVersionId ?? latestRun?.basin_version_id}
             forecastSource={sourceFromRun(latestRun?.source_id ?? latestRun?.scenario_id)}
             forecastIssueTime={floodRunForecastIssueTime}
+            forecastValidTime={selectedValidTime ?? selectedSegment.validTime}
             onClose={closeDetail}
           />
         ) : (

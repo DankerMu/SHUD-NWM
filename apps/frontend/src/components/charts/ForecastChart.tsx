@@ -2,10 +2,20 @@ import { useMemo } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 
 import { echarts } from '@/components/charts/echartsCore'
+import { FORECAST_CHART_POINT_BUDGET, forecastPointBudgetMessage } from '@/lib/forecastRenderingBudget'
 import type { ForecastData } from '@/stores/forecast'
 
 const IFS_SIX_DAY_LEAD_HOURS = 144
 const HOUR_MS = 60 * 60 * 1000
+const THRESHOLD_KEYS = ['Q2', 'Q5', 'Q10', 'Q20', 'Q50', 'Q100'] as const
+const THRESHOLD_COLORS: Record<(typeof THRESHOLD_KEYS)[number], string> = {
+  Q2: '#38a169',
+  Q5: '#2b6cb0',
+  Q10: '#d97706',
+  Q20: '#dc2626',
+  Q50: '#9333ea',
+  Q100: '#111827',
+}
 
 interface ForecastChartProps {
   data: ForecastData | null
@@ -84,6 +94,26 @@ function buildMarkLine(data: object[]) {
   }
 }
 
+function thresholdMarkLineData(data: ForecastData | null | undefined) {
+  const thresholds = data?.frequencyThresholds
+  if (!thresholds) return []
+  return THRESHOLD_KEYS.flatMap((key) => {
+    const value = Number(thresholds[key])
+    if (!Number.isFinite(value)) return []
+    return {
+      name: key,
+      yAxis: value,
+      lineStyle: { color: THRESHOLD_COLORS[key], type: 'dashed', width: 1.2 },
+      label: {
+        formatter: `${key} ${value.toFixed(0)}`,
+        color: THRESHOLD_COLORS[key],
+        backgroundColor: '#ffffff',
+        padding: [2, 4],
+      },
+    }
+  })
+}
+
 function isIfsSeries(series: { scenario: string; source?: string }) {
   return `${series.source ?? ''} ${series.scenario}`.toLowerCase().includes('ifs')
 }
@@ -123,13 +153,28 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[], unit?: string) 
 }
 
 export function ForecastChart({ data, segmentName }: ForecastChartProps) {
+  if (data?.pointBudgetStatus?.overBudget) {
+    return (
+      <div className="grid min-h-72 place-items-center rounded-md border border-amber-300 bg-amber-50 p-4 text-center text-sm text-amber-950" role="status">
+        {forecastPointBudgetMessage(data.pointBudgetStatus)}
+      </div>
+    )
+  }
+
+  return <ForecastChartInner data={data} segmentName={segmentName} />
+}
+
+function ForecastChartInner({ data, segmentName }: ForecastChartProps) {
   const normalizedSeries = useMemo(
-    () =>
-      (data?.series ?? [])
+    () => {
+      let retainedPointCount = 0
+      return (data?.series ?? [])
         .map((series) => {
+          const remaining = Math.max(0, FORECAST_CHART_POINT_BUDGET - retainedPointCount)
           const ifs = isIfsSeries(series)
           const endpointMs = ifs ? sixDayEndpointMs(series) : null
           const seriesData = series.points
+            .slice(0, remaining)
             .map((point) => [timestampValue(point.time), point.value])
             .filter(
               ([time, value]) =>
@@ -137,6 +182,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
                 Number.isFinite(value) &&
                 (endpointMs === null || time <= endpointMs),
             )
+          retainedPointCount += seriesData.length
 
           return {
             ...series,
@@ -145,7 +191,8 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
             sixDayEndpointMs: endpointMs,
           }
         })
-        .filter((series) => series.data.length > 0),
+        .filter((series) => series.data.length > 0)
+    },
     [data?.series],
   )
 
@@ -153,6 +200,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
     const issueTimeMs = data?.issueTime ? Date.parse(data.issueTime) : NaN
     const showIssueDivider =
       Number.isFinite(issueTimeMs) && normalizedSeries.some((series) => series.isAnalysis)
+    const thresholds = thresholdMarkLineData(data)
 
     return {
       color: normalizedSeries.map((series) => series.color),
@@ -198,6 +246,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
           ...(index === 0 && showIssueDivider
             ? [issueTimeMarkLineData(issueTimeMs, data?.issueTime ?? 'latest')]
             : []),
+          ...(index === 0 ? thresholds : []),
           ...(series.isIfs && series.sixDayEndpointMs !== null
             ? [ifsSixDayMarkLineData(series.sixDayEndpointMs)]
             : []),

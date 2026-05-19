@@ -4,6 +4,7 @@ import {
   defaultM11QueryState,
   m11QueryHref,
   needsM11QueryReplacement,
+  normalizeM11Identifier,
   parseM11QueryState,
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
@@ -51,6 +52,12 @@ describe('M11 query state helpers', () => {
     }
 
     expect(serializeM11QueryState(state)).toBe('')
+  })
+
+  it('exports the same short identifier allowlist for path and query segment IDs', () => {
+    expect(normalizeM11Identifier('seg-009')).toBe('seg-009')
+    expect(normalizeM11Identifier('bad/id')).toBeNull()
+    expect(normalizeM11Identifier('x'.repeat(97))).toBeNull()
   })
 
   it.each([
