@@ -12,7 +12,13 @@ import {
   getM11SelectedSegmentGeometryBudgetStatus,
   type M11SelectedSegmentGeometryBudgetStatus,
 } from '@/lib/m11/overviewDataContracts'
-import { m11QueryHref, needsM11QueryReplacement, parseM11QueryState, serializeM11QueryState } from '@/lib/m11/queryState'
+import {
+  m11QueryHref,
+  needsM11QueryReplacement,
+  normalizeM11Identifier,
+  parseM11QueryState,
+  serializeM11QueryState,
+} from '@/lib/m11/queryState'
 import { useForecastStore, type ForecastData, type ForecastSegmentInfo } from '@/stores/forecast'
 
 type RiverSegment = components['schemas']['RiverSegment']
@@ -21,6 +27,7 @@ type MetStation = components['schemas']['MetStation']
 type TimeseriesResponse = components['schemas']['TimeseriesResponse']
 
 const THRESHOLD_KEYS = ['Q2', 'Q5', 'Q10', 'Q20', 'Q50', 'Q100'] as const
+const STATION_FORCING_POINT_BUDGET = 10_000
 const SCENARIO_TOGGLES = [
   { key: 'analysis', label: 'Analysis' },
   { key: 'gfs', label: 'GFS' },
@@ -55,6 +62,7 @@ interface StationForcingViewModel {
   status: 'available' | 'restricted' | 'unavailable'
   restrictedReason: string | null
   unavailableReason: string | null
+  overBudgetReason: string | null
   station: {
     id: string
     name: string | null
@@ -219,6 +227,16 @@ function normalizeStationForcingSeries(series: unknown): StationForcingSeriesRow
     .filter((row) => row.points.length > 0)
 }
 
+function stationForcingPointCount(series: unknown) {
+  const payload = recordValue(series) as TimeseriesResponse | null
+  const variables = recordValue(payload?.variables)
+  if (!variables) return 0
+  return (['PRCP', 'TEMP'] as const).reduce((total, variable) => {
+    const rawPoints = variables[variable]
+    return total + (Array.isArray(rawPoints) ? rawPoints.length : 0)
+  }, 0)
+}
+
 function buildStationForcingViewModel(
   segment: RiverSegment | null,
   lineage: LineageResponse | null,
@@ -232,6 +250,7 @@ function buildStationForcingViewModel(
       status: 'restricted',
       restrictedReason,
       unavailableReason: null,
+      overBudgetReason: null,
       station: null,
       series: [],
     }
@@ -239,12 +258,25 @@ function buildStationForcingViewModel(
 
   const station = recordValue(contract?.station) as Partial<MetStation> | null
   const stationId = stringValue(station?.station_id) ?? stringValue(contract?.station_id)
-  const series = normalizeStationForcingSeries(contract?.series ?? contract?.forcing_series)
+  const rawSeries = contract?.series ?? contract?.forcing_series
+  const pointCount = stationForcingPointCount(rawSeries)
+  if (pointCount > STATION_FORCING_POINT_BUDGET) {
+    return {
+      status: 'unavailable',
+      restrictedReason: null,
+      unavailableReason: null,
+      overBudgetReason: `站点强迫序列超出客户端渲染预算（${pointCount}/${STATION_FORCING_POINT_BUDGET} points）。`,
+      station: null,
+      series: [],
+    }
+  }
+  const series = normalizeStationForcingSeries(rawSeries)
   if (!stationId || series.length === 0) {
     return {
       status: 'unavailable',
       restrictedReason: null,
       unavailableReason: lineageError,
+      overBudgetReason: null,
       station: null,
       series: [],
     }
@@ -261,6 +293,7 @@ function buildStationForcingViewModel(
     status: 'available',
     restrictedReason: null,
     unavailableReason: null,
+    overBudgetReason: null,
     station: {
       id: stationId,
       name: stringValue(station?.station_name) ?? stringValue(contract?.station_name) ?? stringValue(contract?.name),
@@ -284,12 +317,33 @@ async function fetchRiverSegment(segment: ForecastSegmentInfo) {
   return unwrapApiData<RiverSegment>(data, '获取河段详情失败')
 }
 
+function assertSegmentDetailIdentity(payload: RiverSegment, scopedSegment: ForecastSegmentInfo) {
+  if (payload.river_network_version_id !== scopedSegment.riverNetworkVersionId) {
+    throw new Error(
+      `河段详情响应与请求河网版本不匹配：请求 ${scopedSegment.riverNetworkVersionId}，返回 ${payload.river_network_version_id || 'unknown'}。`,
+    )
+  }
+
+  const identity = payload as RiverSegment & { segment_id?: unknown }
+  const returnedSegmentIds = [identity.river_segment_id, identity.segment_id]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+  const mismatchedSegmentId = returnedSegmentIds.find((returnedSegmentId) => returnedSegmentId !== scopedSegment.segmentId)
+  if (mismatchedSegmentId) {
+    throw new Error(
+      `河段详情响应与请求河段不匹配：请求 ${scopedSegment.segmentId}，返回 ${mismatchedSegmentId}。`,
+    )
+  }
+}
+
 export function SegmentDetailPage() {
   const { segmentId: pathSegmentId = '' } = useParams()
   const location = useLocation()
   const navigate = useNavigate()
   const routeState = useMemo(() => parseM11QueryState(location.search), [location.search])
-  const canonicalSegmentId = routeState.segmentId ?? pathSegmentId
+  const normalizedPathSegmentId = useMemo(() => normalizeM11Identifier(pathSegmentId), [pathSegmentId])
+  const invalidPathSegment = !normalizedPathSegmentId
+  const pathQueryMismatch = Boolean(normalizedPathSegmentId && routeState.segmentId && routeState.segmentId !== normalizedPathSegmentId)
+  const canonicalSegmentId = normalizedPathSegmentId
   const normalizedSearch = useMemo(() => serializeM11QueryState(routeState), [routeState])
   const forecastData = useForecastStore((state) => state.forecastData)
   const forecastLoading = useForecastStore((state) => state.loading)
@@ -309,13 +363,23 @@ export function SegmentDetailPage() {
   })
 
   const scopedSegment = useMemo<ForecastSegmentInfo | null>(() => {
-    if (!canonicalSegmentId || !routeState.basinVersionId || !routeState.riverNetworkVersionId) return null
+    if (invalidPathSegment || pathQueryMismatch || !canonicalSegmentId || !routeState.basinVersionId || !routeState.riverNetworkVersionId) return null
     return {
       segmentId: canonicalSegmentId,
       basinVersionId: routeState.basinVersionId,
       riverNetworkVersionId: routeState.riverNetworkVersionId,
     }
-  }, [canonicalSegmentId, routeState.basinVersionId, routeState.riverNetworkVersionId])
+  }, [canonicalSegmentId, invalidPathSegment, pathQueryMismatch, routeState.basinVersionId, routeState.riverNetworkVersionId])
+
+  const scopedForecastData = useMemo(() => {
+    if (!scopedSegment || !forecastData) return null
+    if (forecastData.segmentId !== scopedSegment.segmentId) return null
+    if (forecastData.basinVersionId !== scopedSegment.basinVersionId) return null
+    if (forecastData.riverNetworkVersionId !== scopedSegment.riverNetworkVersionId) return null
+    if ((forecastData.source ?? null) !== routeState.source) return null
+    if ((forecastData.cycle ?? null) !== (routeState.cycle ?? null)) return null
+    return forecastData
+  }, [forecastData, routeState.cycle, routeState.source, scopedSegment])
 
   useEffect(() => {
     if (!needsM11QueryReplacement(location.search)) return
@@ -324,7 +388,7 @@ export function SegmentDetailPage() {
 
   useEffect(() => {
     setRequestContext({
-      source: routeState.source === 'best' ? null : routeState.source,
+      source: routeState.source,
       issueTime: routeState.cycle,
     })
   }, [routeState.cycle, routeState.source, setRequestContext])
@@ -343,16 +407,12 @@ export function SegmentDetailPage() {
     void fetchRiverSegment(scopedSegment)
       .then((payload) => {
         if (cancelled) return
-        if (payload.river_network_version_id !== scopedSegment.riverNetworkVersionId) {
-          throw new Error(
-            `河段详情响应与请求河网版本不匹配：请求 ${scopedSegment.riverNetworkVersionId}，返回 ${payload.river_network_version_id || 'unknown'}。`,
-          )
-        }
+        assertSegmentDetailIdentity(payload, scopedSegment)
         setSegment(payload)
         selectSegment(scopedSegment)
         void fetchForecast({
           includeAnalysis: true,
-          source: routeState.source === 'best' ? null : routeState.source,
+          source: routeState.source,
           issueTime: routeState.cycle,
         }).catch(() => undefined)
       })
@@ -377,14 +437,14 @@ export function SegmentDetailPage() {
   }, [segment])
 
   useEffect(() => {
-    if (!forecastData || !routeState.validTime) return
-    const validTimes = [...new Set(allForecastPoints(forecastData).map((point) => new Date(point.timeMs).toISOString()))]
+    if (!scopedForecastData || !routeState.validTime) return
+    const validTimes = [...new Set(allForecastPoints(scopedForecastData).map((point) => new Date(point.timeMs).toISOString()))]
     if (validTimes.length === 0 || validTimes.includes(routeState.validTime)) return
     const corrected = closestValidTime(routeState.validTime, validTimes)
     if (!corrected) return
     const nextSearch = serializeM11QueryState({ ...routeState, validTime: corrected, segmentId: canonicalSegmentId })
     navigate({ pathname: location.pathname, search: nextSearch ? `?${nextSearch}` : '' }, { replace: true })
-  }, [canonicalSegmentId, forecastData, location.pathname, navigate, routeState])
+  }, [canonicalSegmentId, location.pathname, navigate, routeState, scopedForecastData])
 
   const model = useMemo(
     () =>
@@ -394,21 +454,26 @@ export function SegmentDetailPage() {
             scopedSegment.basinVersionId ?? '',
             scopedSegment.riverNetworkVersionId,
             segment,
-            forecastData,
+            scopedForecastData,
             lineage,
             routeState.validTime,
           )
         : null,
-    [forecastData, lineage, routeState.validTime, scopedSegment, segment],
+    [lineage, routeState.validTime, scopedForecastData, scopedSegment, segment],
   )
-  const filteredForecast = useMemo(() => buildScenarioFilteredData(forecastData, visibleScenarios), [forecastData, visibleScenarios])
-  const missingIdentity = !canonicalSegmentId
-    ? '缺少 segmentId'
-    : !routeState.basinVersionId
-      ? '缺少 basinVersionId'
-      : !routeState.riverNetworkVersionId
-        ? '缺少 riverNetworkVersionId'
-        : null
+  const filteredForecast = useMemo(() => buildScenarioFilteredData(scopedForecastData, visibleScenarios), [scopedForecastData, visibleScenarios])
+  const stationForcingViewModel = useMemo(() => buildStationForcingViewModel(segment, lineage, lineageError), [lineage, lineageError, segment])
+  const missingIdentity = invalidPathSegment
+    ? '无效 segmentId'
+    : pathQueryMismatch
+      ? 'segmentId 路径与查询不匹配'
+      : !canonicalSegmentId
+        ? '缺少 segmentId'
+        : !routeState.basinVersionId
+          ? '缺少 basinVersionId'
+          : !routeState.riverNetworkVersionId
+            ? '缺少 riverNetworkVersionId'
+            : null
   const loading = segmentLoading || forecastLoading
   const routeSearch = serializeM11QueryState(routeState)
   const basinHref = routeState.basinVersionId
@@ -477,7 +542,7 @@ export function SegmentDetailPage() {
 
       <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)_320px]">
         <aside className="space-y-4">
-          <StationForcingPanel segment={segment} lineage={lineage} lineageError={lineageError} />
+          <StationForcingPanel viewModel={stationForcingViewModel} />
           <IdentityPanel model={model} search={routeSearch} />
         </aside>
 
@@ -509,15 +574,21 @@ export function SegmentDetailPage() {
                 ))}
               </div>
             </div>
-            <ForecastChart data={filteredForecast} segmentName={canonicalSegmentId} />
+            {forecastData && !scopedForecastData && !forecastLoading ? (
+              <div className="grid min-h-72 place-items-center rounded-md border border-dashed border-border p-4 text-center text-sm text-muted">
+                当前预报响应与路由身份不匹配，已隐藏曲线。
+              </div>
+            ) : (
+              <ForecastChart data={filteredForecast} segmentName={canonicalSegmentId} />
+            )}
           </section>
-          <BottomTimeline data={forecastData} selectedValidTime={routeState.validTime} />
+          <BottomTimeline data={scopedForecastData} selectedValidTime={routeState.validTime} />
         </main>
 
         <aside className="space-y-4">
-          <ThresholdPanel data={forecastData} peakQ={model?.peakQ ?? null} unit={model?.unit ?? 'm3/s'} />
-          <FrequencyPanel data={forecastData} peakQ={model?.peakQ ?? null} />
-          <WeatherPanel />
+          <ThresholdPanel data={scopedForecastData} peakQ={model?.peakQ ?? null} unit={model?.unit ?? 'm3/s'} />
+          <FrequencyPanel data={scopedForecastData} peakQ={model?.peakQ ?? null} />
+          <WeatherPanel forcing={stationForcingViewModel} />
         </aside>
       </div>
     </div>
@@ -616,17 +687,7 @@ function IdentityPanel({ model, search }: { model: SegmentDetailModel | null; se
   )
 }
 
-function StationForcingPanel({
-  segment,
-  lineage,
-  lineageError,
-}: {
-  segment: RiverSegment | null
-  lineage: LineageResponse | null
-  lineageError: string | null
-}) {
-  const viewModel = buildStationForcingViewModel(segment, lineage, lineageError)
-
+function StationForcingPanel({ viewModel }: { viewModel: StationForcingViewModel }) {
   return (
     <section className="rounded-md border border-border bg-panel p-4" aria-label="站点与强迫数据">
       <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
@@ -659,6 +720,10 @@ function StationForcingPanel({
             ))}
           </div>
         </div>
+      ) : viewModel.overBudgetReason ? (
+        <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          {viewModel.overBudgetReason}
+        </div>
       ) : viewModel.unavailableReason ? (
         <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
           站点与强迫数据暂不可用：{viewModel.unavailableReason}
@@ -675,7 +740,7 @@ function StationForcingPanel({
 function ForcingSeriesRow({ row }: { row: StationForcingSeriesRow }) {
   const first = row.points[0]
   const last = row.points.at(-1) ?? first
-  const maxValue = Math.max(...row.points.map((point) => point.value), 1)
+  const maxValue = row.points.reduce((max, point) => Math.max(max, point.value), 1)
   const polyline = row.points
     .map((point, index) => {
       const x = row.points.length === 1 ? 48 : 6 + (index / (row.points.length - 1)) * 84
@@ -747,7 +812,8 @@ function FrequencyPanel({ data, peakQ }: { data: ForecastData | null; peakQ: num
   )
 }
 
-function WeatherPanel() {
+function WeatherPanel({ forcing }: { forcing: StationForcingViewModel }) {
+  const availableVariables = new Set(forcing.status === 'available' ? forcing.series.map((row) => row.variable) : [])
   const variables = [
     { key: 'PRCP', icon: CloudRain },
     { key: 'TEMP', icon: ThermometerSun },
@@ -759,15 +825,18 @@ function WeatherPanel() {
     <section className="rounded-md border border-border bg-panel p-4" aria-label="天气驱动">
       <h2 className="text-base font-semibold text-foreground">天气驱动</h2>
       <div className="mt-3 space-y-2">
-        {variables.map(({ key, icon: Icon }) => (
-          <div key={key} className="flex items-center justify-between gap-3 rounded border border-border px-3 py-2 text-sm">
-            <span className="flex items-center gap-2 text-foreground">
-              <Icon className="size-4 text-muted" />
-              {key}
-            </span>
-            <span className="text-muted">不可用</span>
-          </div>
-        ))}
+        {variables.map(({ key, icon: Icon }) => {
+          const available = key === 'PRCP' || key === 'TEMP' ? availableVariables.has(key) : false
+          return (
+            <div key={key} className="flex items-center justify-between gap-3 rounded border border-border px-3 py-2 text-sm">
+              <span className="flex items-center gap-2 text-foreground">
+                <Icon className="size-4 text-muted" />
+                {key}
+              </span>
+              <span className={available ? 'text-success' : 'text-muted'}>{available ? '可用' : '不可用'}</span>
+            </div>
+          )
+        })}
       </div>
       <p className="mt-3 text-xs text-muted">当前 segment-detail 复用现有水文合同；天气变量合同缺失时只显示部分状态，不补造数值。</p>
     </section>

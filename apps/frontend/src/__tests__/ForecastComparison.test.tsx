@@ -161,6 +161,60 @@ describe('forecast comparison UI', () => {
     })
   })
 
+  it('omits scenarios for source=best so the API can resolve best availability', async () => {
+    let query: Record<string, unknown> | undefined
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const options = args[1] as { params?: { query?: Record<string, unknown> } }
+      query = options.params?.query
+      return success({
+        segment_id: 'seg-1',
+        issue_time: '2026-05-18T00:00:00Z',
+        unit: 'm3/s',
+        series: [],
+        frequency_thresholds: null,
+      }) as never
+    })
+    resetForecastStore({
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
+      selectedScenarios: ['GFS'],
+    })
+
+    await useForecastStore.getState().fetchForecast({
+      source: 'best',
+      issueTime: '2026-05-18T00:00:00.000Z',
+      includeAnalysis: true,
+    })
+
+    expect(query).toMatchObject({
+      issue_time: '2026-05-18T00:00:00.000Z',
+      river_network_version_id: 'rn-1',
+      include_analysis: true,
+    })
+    expect(query).not.toHaveProperty('scenarios')
+  })
+
+  it('rejects forecast responses for sibling segment identities', async () => {
+    vi.mocked(client.GET).mockResolvedValue(
+      success({
+        segment_id: 'seg-sibling',
+        issue_time: '2026-05-18T00:00:00Z',
+        unit: 'm3/s',
+        series: [],
+        frequency_thresholds: null,
+      }) as never,
+    )
+    resetForecastStore({
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
+      selectedScenarios: ['GFS'],
+    })
+
+    await expect(useForecastStore.getState().fetchForecast({ source: 'gfs' })).rejects.toThrow('预报曲线响应与请求河段不匹配')
+    expect(useForecastStore.getState()).toMatchObject({
+      forecastData: null,
+      loading: false,
+    })
+  })
+
   it('accepts ignored-context forecast responses even when a stale route context remains in the store', async () => {
     let query: Record<string, unknown> | undefined
     vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {

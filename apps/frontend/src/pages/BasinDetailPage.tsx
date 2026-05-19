@@ -643,8 +643,12 @@ function SelectedSegmentPanel({
 }
 
 function segmentDetailHref(segment: SelectedSegmentDetail, routeState: ReturnType<typeof parseM11QueryState>) {
+  const resolvedSource =
+    routeState.source === 'best' && (segment.sourceSelection.resolvedSource === 'GFS' || segment.sourceSelection.resolvedSource === 'IFS')
+      ? (segment.sourceSelection.resolvedSource.toLowerCase() as 'gfs' | 'ifs')
+      : routeState.source
   return m11QueryHref(`/segments/${encodeURIComponent(segment.riverSegmentId)}`, {
-    source: routeState.source,
+    source: resolvedSource,
     cycle: routeState.cycle ?? segment.sourceSelection.cycleTime,
     validTime: routeState.validTime ?? segment.freshness.validTime,
     layer: defaultM11QueryState.layer,

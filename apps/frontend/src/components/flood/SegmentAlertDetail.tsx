@@ -145,6 +145,28 @@ function buildTimelineOption(timeline: FloodAlertTimeline | null) {
   }
 }
 
+function matchesScopedForecastData({
+  data,
+  segment,
+  basinVersionId,
+  forecastSource,
+  forecastIssueTime,
+}: {
+  data: ForecastData | null
+  segment: FloodAlertRankingItem | null
+  basinVersionId?: string | null
+  forecastSource?: M11Source | null
+  forecastIssueTime?: string | null
+}) {
+  if (!data || !segment || !basinVersionId || !segment.riverNetworkVersionId) return false
+  if (data.segmentId !== segment.riverSegmentId) return false
+  if (data.basinVersionId !== basinVersionId) return false
+  if (data.riverNetworkVersionId !== segment.riverNetworkVersionId) return false
+  if (forecastSource && (data.source ?? null) !== forecastSource) return false
+  if (forecastIssueTime && (data.cycle ?? null) !== forecastIssueTime) return false
+  return true
+}
+
 export function SegmentAlertDetail({
   segment,
   basinVersionId,
@@ -163,10 +185,19 @@ export function SegmentAlertDetail({
   const selectForecastSegment = useForecastStore((state) => state.selectSegment)
   const fetchForecast = useForecastStore((state) => state.fetchForecast)
   const forecastScopedUnavailable = Boolean(segment && basinVersionId && !segment.riverNetworkVersionId)
+  const scopedForecastData = matchesScopedForecastData({
+    data: forecastData,
+    segment,
+    basinVersionId,
+    forecastSource,
+    forecastIssueTime,
+  })
+    ? forecastData
+    : null
   const detailHref =
     segment && basinVersionId && segment.riverNetworkVersionId
       ? m11QueryHref(`/segments/${encodeURIComponent(segment.riverSegmentId)}`, {
-          source: forecastSource ?? 'best',
+          source: forecastSource ?? 'gfs',
           cycle: forecastIssueTime,
           validTime: forecastValidTime ?? segment.validTime ?? null,
           layer: 'flood-return-period',
@@ -209,8 +240,8 @@ export function SegmentAlertDetail({
   }, [basinVersionId, fetchForecast, forecastIssueTime, forecastSource, segment, selectForecastSegment])
 
   const forecastOption = useMemo(
-    () => buildForecastOption(forecastData, timeline, segment?.segmentName || segment?.riverSegmentId),
-    [forecastData, segment, timeline],
+    () => buildForecastOption(scopedForecastData, timeline, segment?.segmentName || segment?.riverSegmentId),
+    [scopedForecastData, segment, timeline],
   )
   const timelineOption = useMemo(() => buildTimelineOption(timeline), [timeline])
 
@@ -283,8 +314,12 @@ export function SegmentAlertDetail({
           </div>
         ) : null}
 
-        {forecastData ? (
+        {scopedForecastData ? (
           <ReactEChartsCore echarts={echarts} option={forecastOption} notMerge lazyUpdate style={{ height: 300, width: '100%' }} />
+        ) : forecastData && !forecastLoading ? (
+          <div className="grid min-h-48 place-items-center rounded-md border border-dashed border-border p-4 text-center text-sm text-muted">
+            当前预报响应与所选河段身份不匹配，已隐藏曲线。
+          </div>
         ) : (
           <div className="grid min-h-48 place-items-center rounded-md border border-dashed border-border text-sm text-muted">
             暂无预报曲线

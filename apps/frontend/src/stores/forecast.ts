@@ -32,6 +32,10 @@ export interface ForecastSeries {
 
 export interface ForecastData {
   segmentId: string
+  basinVersionId?: string
+  riverNetworkVersionId?: string
+  source?: M11Source | null
+  cycle?: string | null
   issueTime: string | null
   unit: string
   series: ForecastSeries[]
@@ -243,6 +247,21 @@ function normalizeForecastPayload(payload: ForecastApiPayload): ForecastData {
   return normalizeRiverSeriesResponse(payload as RiverSeriesResponse)
 }
 
+function bindForecastIdentity(data: ForecastData, request: ForecastRequestIdentity, source: M11Source | null | undefined): ForecastData {
+  if (data.segmentId && data.segmentId !== request.segmentId) {
+    throw new Error(`预报曲线响应与请求河段不匹配：请求 ${request.segmentId}，返回 ${data.segmentId}。`)
+  }
+
+  return {
+    ...data,
+    segmentId: request.segmentId,
+    basinVersionId: request.basinVersionId,
+    riverNetworkVersionId: request.riverNetworkVersionId,
+    source: source ?? null,
+    cycle: request.issueTime ?? null,
+  }
+}
+
 function buildSourceAttribution(series: ForecastSeries[]) {
   const sources = series
     .filter((segment): segment is ForecastSeries & { source: string } => Boolean(segment.source) && !segment.isAnalysis)
@@ -313,12 +332,20 @@ async function fetchForecastSeries(
     throw new Error('缺少 river_network_version_id，无法请求河段预报')
   }
 
-  const query = {
+  const query: {
+    river_network_version_id: string
+    issue_time: string
+    variables: string
+    scenarios?: string
+    include_analysis: boolean
+  } = {
     river_network_version_id: segment.riverNetworkVersionId,
     issue_time: options.issueTime ?? 'latest',
     variables: 'q_down',
-    scenarios: selectedScenarios.join(','),
     include_analysis: includeAnalysis,
+  }
+  if (selectedScenarios.length > 0) {
+    query.scenarios = selectedScenarios.join(',')
   }
 
   const { data, error } = await client.GET(
@@ -411,8 +438,9 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       const state = get()
       if (!isCurrentForecastRequest(state, request)) return
 
+      const forecastData = bindForecastIdentity(normalizeForecastPayload(payload), request, source)
       set({
-        forecastData: normalizeForecastPayload(payload),
+        forecastData,
         loading: false,
         error: null,
       })
@@ -440,5 +468,6 @@ function selectedScenariosForSource(source: M11Source | null | undefined, select
   if (source === 'ifs') return ['IFS']
   if (source === 'compare') return ['GFS', 'IFS']
   if (source === 'gfs') return ['GFS']
+  if (source === 'best') return []
   return selectedScenarios.length > 0 ? selectedScenarios : ['GFS']
 }
