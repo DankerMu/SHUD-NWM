@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -622,17 +623,86 @@ def test_flood_tile_postgis_geometry_budgets_precede_geojson_serialization() -> 
     assert "coordinate_dimensions <= :max_coordinate_dimensions" in statement
     assert "SUM(coordinate_count) OVER" in statement
     assert "running_coordinate_count <= :collection_coordinate_limit" in statement
-    assert "true AS collection_overflow" in statement
+    assert "true::boolean AS collection_overflow" in statement
     assert "collection_coordinate_count" in statement
-    assert "'feature_coordinates' AS geometry_limit_type" in statement
-    assert "'coordinate_dimensions' AS geometry_limit_type" in statement
-    assert "'malformed_geometry' AS geometry_limit_type" in statement
-    assert "'null_geometry' AS geometry_limit_type" in statement
+    assert "'feature_coordinates'::text AS geometry_limit_type" in statement
+    assert "'coordinate_dimensions'::text AS geometry_limit_type" in statement
+    assert "'malformed_geometry'::text AS geometry_limit_type" in statement
+    assert "'null_geometry'::text AS geometry_limit_type" in statement
     assert "ST_AsGeoJSON(geom)::text AS geom_json" in statement
     assert statement.index("geometry_exclusions AS") < statement.index("ST_AsGeoJSON(geom)::text AS geom_json")
     assert statement.index("running_coordinate_count <= :collection_coordinate_limit") < statement.index(
         "ST_AsGeoJSON(geom)::text AS geom_json"
     )
+
+
+def test_flood_tile_postgis_union_output_columns_are_explicitly_cast() -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+    statement = flood_alert_routes._flood_return_period_map_sql(FakeSession(), bbox_filter="")
+    sql = re.sub(r"\s+", " ", statement)
+
+    assert statement.count("UNION ALL") == 5
+    assert "NULL AS " not in statement
+    assert "'feature_coordinates' AS geometry_limit_type" not in statement
+    assert "'coordinate_dimensions' AS geometry_limit_type" not in statement
+    assert "'malformed_geometry' AS geometry_limit_type" not in statement
+    assert "'null_geometry' AS geometry_limit_type" not in statement
+
+    expected_type_contract = [
+        "river_segment_id::text AS river_segment_id",
+        "basin_version_id::text AS basin_version_id",
+        "river_network_version_id::text AS river_network_version_id",
+        "return_period::double precision AS return_period",
+        "warning_level::text AS warning_level",
+        "q_value::double precision AS q_value",
+        "q_unit::text AS q_unit",
+        "quality_flag::text AS quality_flag",
+        "ST_AsGeoJSON(geom)::text AS geom_json",
+        "false::boolean AS collection_overflow",
+        "(SELECT collection_coordinate_count FROM overflow)::bigint AS collection_coordinate_count",
+        "NULL::text AS geometry_limit_type",
+        "NULL::bigint AS geometry_feature_count",
+        "NULL::bigint AS geometry_coordinate_count",
+        "NULL::integer AS geometry_dimension_count",
+        "true::boolean AS collection_overflow",
+        "collection_coordinate_count::bigint AS collection_coordinate_count",
+        "'feature_coordinates'::text AS geometry_limit_type",
+        "feature_coordinate_overflow_count::bigint AS geometry_feature_count",
+        "feature_coordinate_count::bigint AS geometry_coordinate_count",
+        "'coordinate_dimensions'::text AS geometry_limit_type",
+        "dimension_overflow_count::bigint AS geometry_feature_count",
+        "dimension_count::integer AS geometry_dimension_count",
+        "'malformed_geometry'::text AS geometry_limit_type",
+        "malformed_geometry_count::bigint AS geometry_feature_count",
+        "malformed_coordinate_count::bigint AS geometry_coordinate_count",
+        "'null_geometry'::text AS geometry_limit_type",
+        "null_geometry_count::bigint AS geometry_feature_count",
+    ]
+    for expected in expected_type_contract:
+        assert expected in sql
+
+    sentinel_null_columns = [
+        "NULL::text AS river_segment_id",
+        "NULL::text AS basin_version_id",
+        "NULL::text AS river_network_version_id",
+        "NULL::double precision AS return_period",
+        "NULL::text AS warning_level",
+        "NULL::double precision AS q_value",
+        "NULL::text AS q_unit",
+        "NULL::text AS quality_flag",
+        "NULL::text AS geom_json",
+    ]
+    for expected in sentinel_null_columns:
+        assert sql.count(expected) == 5
 
 
 def test_flood_tile_postgis_collection_overflow_sentinel_returns_413_before_payload_build(
