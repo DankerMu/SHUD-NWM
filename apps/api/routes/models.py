@@ -266,6 +266,27 @@ def list_river_segments(
         raise _handle_registry_error(error) from error
 
 
+@router.get("/basin-versions/{basin_version_id}/river-segments/{segment_id}")
+def get_river_segment(
+    request: Request,
+    basin_version_id: str,
+    segment_id: str,
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            request,
+            store.get_river_segment(
+                basin_version_id=basin_version_id,
+                segment_id=segment_id,
+            ),
+        )
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
 @router.post("/mesh-versions", status_code=status.HTTP_201_CREATED)
 def create_mesh_version(
     payload: MeshVersionCreatePayload,

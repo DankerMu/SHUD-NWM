@@ -134,6 +134,26 @@ class FakeModelRegistryStore:
             "offset": offset,
         }
 
+    def get_river_segment(self, *, basin_version_id: str, segment_id: str) -> dict[str, Any]:
+        if basin_version_id != "basin_v01" or segment_id != "seg_001":
+            raise MissingResourceError(
+                f"river_segment_id not found for basin_version_id {basin_version_id}: {segment_id}"
+            )
+        return {
+            "river_segment_id": "seg_001",
+            "river_network_version_id": "basin_rivnet_v01",
+            "segment_order": 2,
+            "downstream_segment_id": None,
+            "length_m": 1234.5,
+            "geom": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+            "properties_json": {
+                "segment_id": "seg_001",
+                "name": "Segment 001",
+                "stream_order": 2,
+            },
+            "created_at": "2026-05-07T00:00:00Z",
+        }
+
     def create_mesh_version(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload["version_label"] == "":
             raise InvalidPayloadError("version_label must contain at least one alphanumeric character.")
@@ -243,6 +263,29 @@ class BasinsRiverSegmentStore(FakeModelRegistryStore):
             "feature_total": 2,
             "limit": limit,
             "offset": offset,
+        }
+
+    def get_river_segment(self, *, basin_version_id: str, segment_id: str) -> dict[str, Any]:
+        assert basin_version_id == "basins_basin_a_vbasins"
+        if segment_id != "basins_basin_a_shud_seg_1":
+            raise MissingResourceError(
+                f"river_segment_id not found for basin_version_id {basin_version_id}: {segment_id}"
+            )
+        return {
+            "river_segment_id": "basins_basin_a_shud_seg_1",
+            "river_network_version_id": "basins_basin_a_rivnet_vbasins",
+            "segment_order": 1,
+            "downstream_segment_id": "basins_basin_a_shud_seg_2",
+            "length_m": 1234.5,
+            "geom": {"type": "LineString", "coordinates": [[90.0, 25.0], [90.5, 25.5]]},
+            "properties_json": {
+                "segment_id": "basins_basin_a_shud_seg_1",
+                "name": "Basins Segment 1",
+                "stream_order": 1,
+                "basin_slug": "basin-a",
+                "shud_input_name": "alias-a",
+            },
+            "created_at": "2026-05-07T00:00:00Z",
         }
 
 
@@ -360,6 +403,53 @@ async def test_list_river_segments_can_omit_null_geometry_features() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_river_segment_returns_declared_detail_shape(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/basin-versions/basin_v01/river-segments/seg_001")
+
+    assert fake_store is not None
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    payload = body["data"]
+    assert set(payload) == {
+        "river_segment_id",
+        "river_network_version_id",
+        "segment_order",
+        "downstream_segment_id",
+        "length_m",
+        "geom",
+        "properties_json",
+        "created_at",
+    }
+    assert payload["river_segment_id"] == "seg_001"
+    assert payload["river_network_version_id"] == "basin_rivnet_v01"
+    assert payload["segment_order"] == 2
+    assert payload["downstream_segment_id"] is None
+    assert payload["length_m"] == 1234.5
+    assert payload["geom"]["type"] == "LineString"
+    assert payload["properties_json"]["segment_id"] == "seg_001"
+    assert payload["created_at"] == "2026-05-07T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_get_missing_river_segment_uses_not_found_envelope(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/basin-versions/basin_v01/river-segments/missing_seg")
+
+    assert fake_store is not None
+    assert response.status_code == 404
+    _assert_error_envelope(
+        response.json(),
+        code="MODEL_REGISTRY_NOT_FOUND",
+        message_contains="missing_seg",
+        error_type="MissingResourceError",
+    )
+
+
+@pytest.mark.asyncio
 async def test_basins_river_segment_api_returns_paginated_geojson_for_map_rendering() -> None:
     store = BasinsRiverSegmentStore()
     app.dependency_overrides[get_model_registry_store] = lambda: store
@@ -383,6 +473,28 @@ async def test_basins_river_segment_api_returns_paginated_geojson_for_map_render
     assert feature["properties"]["river_network_version_id"] == "basins_basin_a_rivnet_vbasins"
     assert feature["properties"]["basin_slug"] == "basin-a"
     assert feature["properties"]["shud_input_name"] == "alias-a"
+
+
+@pytest.mark.asyncio
+async def test_basins_river_segment_detail_api_returns_backend_geometry() -> None:
+    store = BasinsRiverSegmentStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basins_basin_a_vbasins/river-segments/basins_basin_a_shud_seg_1"
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["river_segment_id"] == "basins_basin_a_shud_seg_1"
+    assert payload["river_network_version_id"] == "basins_basin_a_rivnet_vbasins"
+    assert payload["segment_order"] == 1
+    assert payload["downstream_segment_id"] == "basins_basin_a_shud_seg_2"
+    assert payload["length_m"] == 1234.5
+    assert payload["geom"] == {"type": "LineString", "coordinates": [[90.0, 25.0], [90.5, 25.5]]}
+    assert payload["properties_json"]["basin_slug"] == "basin-a"
+    assert payload["properties_json"]["shud_input_name"] == "alias-a"
 
 
 @pytest.mark.asyncio

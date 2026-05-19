@@ -27,10 +27,6 @@ DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
         "GET",
         "/api/v1/basin-versions/{basin_version_id}/river-network-versions",
     ): "issue-123 future registry read surface; backing read store is out of scope",
-    (
-        "GET",
-        "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}",
-    ): "issue-123 future river segment read surface; backing read store is out of scope",
     ("GET", "/api/v1/met/stations/{station_id}/series"): (
         "issue-123 future station time-series read; data-source migration is out of scope"
     ),

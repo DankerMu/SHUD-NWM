@@ -322,6 +322,34 @@ class PsycopgModelRegistryStore:
             "offset": offset,
         }
 
+    def get_river_segment(self, *, basin_version_id: str, segment_id: str) -> dict[str, Any]:
+        with self._transaction() as cursor:
+            row = self._fetch_optional(
+                cursor,
+                """
+                SELECT
+                    rs.river_segment_id,
+                    rs.river_network_version_id,
+                    rs.segment_order,
+                    rs.downstream_segment_id,
+                    rs.length_m,
+                    ST_AsGeoJSON(rs.geom)::json AS geom,
+                    rs.properties_json,
+                    rs.created_at
+                FROM core.river_segment rs
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_id = rs.river_network_version_id
+                WHERE rnv.basin_version_id = %s
+                  AND rs.river_segment_id = %s
+                """,
+                (basin_version_id, segment_id),
+            )
+        if row is None:
+            raise MissingResourceError(
+                f"river_segment_id not found for basin_version_id {basin_version_id}: {segment_id}"
+            )
+        return _river_segment_detail(row)
+
     def create_mesh_version(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         mesh_version_id = build_versioned_id(
             f"{payload['basin_version_id']}_mesh",
@@ -765,6 +793,16 @@ def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     )
     detail["model_name"] = str(model_name) if model_name is not None else None
     detail["segment_count"] = int(detail["segment_count"]) if detail.get("segment_count") is not None else None
+    return detail
+
+
+def _river_segment_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    detail = dict(row)
+    detail["river_segment_id"] = str(detail["river_segment_id"])
+    detail["river_network_version_id"] = str(detail["river_network_version_id"])
+    detail["segment_order"] = int(detail["segment_order"]) if detail.get("segment_order") is not None else None
+    detail["length_m"] = float(detail["length_m"]) if detail.get("length_m") is not None else None
+    detail["properties_json"] = _json_mapping(detail.get("properties_json"))
     return detail
 
 
