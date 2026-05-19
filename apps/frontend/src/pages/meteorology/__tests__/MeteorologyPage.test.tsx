@@ -12,7 +12,11 @@ import {
   meteorologyBbox,
   projectLonLatToPercent,
 } from '@/lib/meteorology/contracts'
-import { parseMeteorologyQueryState, serializeMeteorologyQueryState } from '@/lib/meteorology/queryState'
+import {
+  needsMeteorologyQueryReplacement,
+  parseMeteorologyQueryState,
+  serializeMeteorologyQueryState,
+} from '@/lib/meteorology/queryState'
 
 vi.mock('echarts-for-react/lib/core', () => ({
   default: ({ option }: { option: unknown }) => <pre data-testid="mock-echarts-option">{JSON.stringify(option)}</pre>,
@@ -42,9 +46,42 @@ describe('meteorology query state', () => {
     expect(state.variable).toBe('TEMP')
     expect(state.source).toBe('GFS')
     expect(state.validTime).toBe('2026-05-18T06:00:00.000Z')
-  expect(state.gridQueryLon).toBeNull()
+    expect(state.gridQueryLon).toBeNull()
     expect(state.opacity).toBe(100)
     expect(serializeMeteorologyQueryState({ ...state, tab: 'stations', search: 'HMT' })).toContain('tab=stations')
+  })
+
+  it('strictly rejects malformed coordinate tokens and cleans them from serialized URLs', () => {
+    const malformed = parseMeteorologyQueryState(
+      'gridQueryLon=114abc&gridQueryLat=112%2C113&areaMinLon=Infinity&areaMinLat=NaN&areaMaxLon=&areaMaxLat=114.',
+    )
+
+    expect(malformed.gridQueryLon).toBeNull()
+    expect(malformed.gridQueryLat).toBeNull()
+    expect(malformed.areaMinLon).toBeNull()
+    expect(malformed.areaMinLat).toBeNull()
+    expect(malformed.areaMaxLon).toBeNull()
+    expect(malformed.areaMaxLat).toBeNull()
+    expect(serializeMeteorologyQueryState(malformed)).toBe('tab=grid')
+    expect(
+      needsMeteorologyQueryReplacement(
+        '?tab=grid&gridQueryLon=114abc&gridQueryLat=112%2C113&areaMinLon=Infinity&areaMinLat=NaN&areaMaxLon=&areaMaxLat=114.',
+      ),
+    ).toBe(true)
+  })
+
+  it('preserves valid finite decimal coordinate tokens', () => {
+    const state = parseMeteorologyQueryState(
+      'gridQueryLon=-114&gridQueryLat=%2B30.625&areaMinLon=.5&areaMinLat=112.0&areaMaxLon=114.0001&areaMaxLat=-0.25',
+    )
+
+    expect(state.gridQueryLon).toBe(-114)
+    expect(state.gridQueryLat).toBe(30.625)
+    expect(state.areaMinLon).toBe(0.5)
+    expect(state.areaMinLat).toBe(112)
+    expect(state.areaMaxLon).toBe(114.0001)
+    expect(state.areaMaxLat).toBe(-0.25)
+    expect(serializeMeteorologyQueryState(state)).toContain('gridQueryLat=30.6250')
   })
 
   it('keeps overlong search evidence reachable while bounding the effective value', () => {

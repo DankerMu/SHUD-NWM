@@ -57,6 +57,7 @@ export const defaultMeteorologyQueryState: MeteorologyQueryState = {
 }
 
 const searchMaxLength = 80
+const finiteDecimalPattern = /^[+-]?(?:\d+|\d+\.\d+|\.\d+)$/
 
 const rfc3339InstantPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 
@@ -155,7 +156,9 @@ function normalizeOpacity(value: string | null) {
 
 function normalizeCoordinate(value: string | null) {
   if (!value) return null
-  const parsed = Number.parseFloat(value)
+  const trimmed = value.trim()
+  if (!finiteDecimalPattern.test(trimmed)) return null
+  const parsed = Number(trimmed)
   return Number.isFinite(parsed) ? parsed : null
 }
 
