@@ -20,6 +20,7 @@ from packages.common.forecast_store import PsycopgForecastStore
 RUN_ID = "fcst_gfs_2026050300_all"
 PUBLISHED_RUN_ID = "fcst_gfs_2026050300_published"
 DUPLICATE_SEGMENT_RUN_ID = "fcst_gfs_2026050300_duplicate_segments"
+DUPLICATE_NETWORK_TIE_RUN_ID = "fcst_gfs_2026050300_duplicate_network_tie"
 TIMESTEP_DUPLICATE_RUN_ID = "fcst_gfs_2026050300_timestep_duplicates"
 VALID_TIME_1 = datetime(2026, 5, 3, 6, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 12, tzinfo=UTC)
@@ -162,6 +163,22 @@ def test_ranking_pagination_basin_filter_and_valid_time() -> None:
         assert response.status_code == 200
         valid_time_data = response.json()["data"]
         assert [item["river_segment_id"] for item in valid_time_data["items"]] == ["seg_002", "seg_001"]
+
+
+def test_ranking_pagination_orders_duplicate_segment_ties_by_network_version() -> None:
+    with _client() as client:
+        pages = [
+            client.get(f"/api/v1/flood-alerts/ranking?run_id={DUPLICATE_NETWORK_TIE_RUN_ID}&limit=1&offset={offset}")
+            for offset in range(2)
+        ]
+
+    assert all(page.status_code == 200 for page in pages)
+    data = [page.json()["data"] for page in pages]
+    assert [page["total"] for page in data] == [2, 2]
+    items = [page["items"][0] for page in data]
+    assert [item["river_segment_id"] for item in items] == ["dup_seg", "dup_seg"]
+    assert [item["river_network_version_id"] for item in items] == ["rnv_v1", "rnv_v2"]
+    assert [item["rank"] for item in items] == [1, 2]
 
 
 def test_ranking_limit_above_contract_uses_validation_envelope() -> None:
@@ -942,6 +959,7 @@ def _seed_data(connection: Any) -> None:
         (RUN_ID, "frequency_done"),
         (PUBLISHED_RUN_ID, "published"),
         (DUPLICATE_SEGMENT_RUN_ID, "frequency_done"),
+        (DUPLICATE_NETWORK_TIE_RUN_ID, "frequency_done"),
         (TIMESTEP_DUPLICATE_RUN_ID, "frequency_done"),
         ("run_oversized_geometry", "frequency_done"),
         ("run_pending", "parsed"),
@@ -1178,6 +1196,30 @@ def _seed_data(connection: Any) -> None:
         "severe",
         False,
         run_id=DUPLICATE_SEGMENT_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "dup_seg",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        500.0,
+        10.0,
+        "watch",
+        True,
+        run_id=DUPLICATE_NETWORK_TIE_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "dup_seg",
+        "basin_v2",
+        "rnv_v2",
+        VALID_TIME_1,
+        500.0,
+        10.0,
+        "watch",
+        True,
+        run_id=DUPLICATE_NETWORK_TIE_RUN_ID,
     )
     _insert_result(
         connection,

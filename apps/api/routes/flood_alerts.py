@@ -248,7 +248,7 @@ def flood_alert_ranking(
               ON rs.river_segment_id = r.river_segment_id
              AND rs.river_network_version_id = r.river_network_version_id
             {where_sql}
-            ORDER BY r.return_period DESC NULLS LAST, r.q_value DESC, r.river_segment_id
+            ORDER BY r.return_period DESC NULLS LAST, r.q_value DESC, r.river_network_version_id, r.river_segment_id
             LIMIT :limit OFFSET :offset
             """
         ).bindparams(bindparam("usable_flags", expanding=True)),
