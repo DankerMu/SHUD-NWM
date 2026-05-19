@@ -29,6 +29,33 @@ class InvalidPayloadError(ModelRegistryError):
     """Raised when a payload is structurally invalid."""
 
 
+SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES = 10_000
+SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS = 3
+RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES = SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES
+RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS = SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS
+RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES = 50_000
+RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES = 1_000_000
+RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES = 250_000
+
+
+class RiverSegmentGeoJsonBudgetError(ModelRegistryError):
+    """Raised when a river segment GeoJSON response exceeds the server serialization budget."""
+
+    def __init__(
+        self,
+        *,
+        limit_type: str,
+        max_bytes: int,
+        serialized_bytes: int,
+        scope: str,
+    ) -> None:
+        super().__init__("River segment GeoJSON payload budget exceeded.")
+        self.limit_type = limit_type
+        self.max_bytes = max_bytes
+        self.serialized_bytes = serialized_bytes
+        self.scope = scope
+
+
 def default_database_url() -> str:
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
@@ -246,38 +273,91 @@ class PsycopgModelRegistryStore:
         with self._transaction() as cursor:
             cursor.execute(
                 f"""
-                SELECT COUNT(*) AS total,
-                       COUNT(rs.geom) AS feature_total
-                FROM core.river_segment rs
-                JOIN core.river_network_version rnv
-                  ON rnv.river_network_version_id = rs.river_network_version_id
-                WHERE {where_clause}
+                WITH matching AS (
+                    SELECT rs.river_segment_id, rs.segment_order, rs.geom
+                    FROM core.river_segment rs
+                    JOIN core.river_network_version rnv
+                      ON rnv.river_network_version_id = rs.river_network_version_id
+                    WHERE {where_clause}
+                ),
+                ordered_renderable AS (
+                    SELECT
+                        river_segment_id,
+                        SUM(ST_NPoints(geom)) OVER (
+                            ORDER BY COALESCE(segment_order, 2147483647), river_segment_id
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS running_coordinate_count
+                    FROM matching
+                    WHERE geom IS NOT NULL
+                      AND ST_NPoints(geom) BETWEEN 2 AND %s
+                      AND ST_NDims(geom) <= %s
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM matching) AS total,
+                    COUNT(*) FILTER (WHERE running_coordinate_count <= %s) AS feature_total
+                FROM ordered_renderable
                 """,
-                tuple(params),
+                tuple([
+                    *params,
+                    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES,
+                    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS,
+                    RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+                ]),
             )
             counts = cursor.fetchone()
             total = int(counts["total"])
             feature_total = int(counts["feature_total"])
             cursor.execute(
                 f"""
+                WITH ordered_renderable AS (
+                    SELECT
+                        rs.river_segment_id,
+                        rs.river_network_version_id,
+                        rnv.basin_version_id,
+                        rs.segment_order,
+                        rs.downstream_segment_id,
+                        rs.length_m,
+                        rs.properties_json,
+                        rs.geom,
+                        ST_NPoints(rs.geom) AS coordinate_count,
+                        SUM(ST_NPoints(rs.geom)) OVER (
+                            ORDER BY COALESCE(rs.segment_order, 2147483647), rs.river_segment_id
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS running_coordinate_count
+                    FROM core.river_segment rs
+                    JOIN core.river_network_version rnv
+                      ON rnv.river_network_version_id = rs.river_network_version_id
+                    WHERE {where_clause}
+                      AND rs.geom IS NOT NULL
+                      AND ST_NPoints(rs.geom) BETWEEN 2 AND %s
+                      AND ST_NDims(rs.geom) <= %s
+                ),
+                renderable AS (
+                    SELECT *
+                    FROM ordered_renderable
+                    WHERE running_coordinate_count <= %s
+                )
                 SELECT
-                    rs.river_segment_id,
-                    rs.river_network_version_id,
-                    rnv.basin_version_id,
-                    rs.segment_order,
-                    rs.downstream_segment_id,
-                    rs.length_m,
-                    rs.properties_json,
-                    ST_AsGeoJSON(rs.geom)::json AS geometry
-                FROM core.river_segment rs
-                JOIN core.river_network_version rnv
-                  ON rnv.river_network_version_id = rs.river_network_version_id
-                WHERE {where_clause}
-                  AND rs.geom IS NOT NULL
-                ORDER BY COALESCE(rs.segment_order, 2147483647), rs.river_segment_id
+                    river_segment_id,
+                    river_network_version_id,
+                    basin_version_id,
+                    segment_order,
+                    downstream_segment_id,
+                    length_m,
+                    properties_json,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM renderable
+                ORDER BY COALESCE(segment_order, 2147483647), river_segment_id
                 LIMIT %s OFFSET %s
                 """,
-                tuple([*params, limit, offset]),
+                tuple([
+                    *params,
+                    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES,
+                    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS,
+                    RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+                    limit,
+                    offset,
+                ]),
             )
             rows = [dict(row) for row in cursor.fetchall()]
 
@@ -313,7 +393,7 @@ class PsycopgModelRegistryStore:
                 }
             )
 
-        return {
+        collection = {
             "type": "FeatureCollection",
             "features": features,
             "total": total,
@@ -321,6 +401,78 @@ class PsycopgModelRegistryStore:
             "limit": limit,
             "offset": offset,
         }
+        _enforce_river_segment_serialized_budget(
+            collection,
+            max_bytes=RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
+            scope="collection",
+        )
+        return collection
+
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        with self._transaction() as cursor:
+            row = self._fetch_optional(
+                cursor,
+                """
+                WITH selected AS (
+                    SELECT
+                        rs.river_segment_id,
+                        rs.river_network_version_id,
+                        rs.segment_order,
+                        rs.downstream_segment_id,
+                        rs.length_m,
+                        rs.geom,
+                        rs.properties_json,
+                        rs.created_at,
+                        ST_NPoints(rs.geom) AS coordinate_count,
+                        ST_NDims(rs.geom) AS coordinate_dimensions
+                    FROM core.river_segment rs
+                    JOIN core.river_network_version rnv
+                      ON rnv.river_network_version_id = rs.river_network_version_id
+                    WHERE rnv.basin_version_id = %s
+                      AND rs.river_segment_id = %s
+                      AND rs.river_network_version_id = %s
+                )
+                SELECT
+                    river_segment_id,
+                    river_network_version_id,
+                    segment_order,
+                    downstream_segment_id,
+                    length_m,
+                    ST_AsGeoJSON(geom)::json AS geom,
+                    properties_json,
+                    created_at
+                FROM selected
+                WHERE geom IS NOT NULL
+                  AND coordinate_count BETWEEN 2 AND %s
+                  AND coordinate_dimensions <= %s
+                """,
+                (
+                    basin_version_id,
+                    segment_id,
+                    river_network_version_id,
+                    SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES,
+                    SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS,
+                ),
+            )
+        if row is None:
+            raise MissingResourceError(
+                "river_segment_id not found with renderable geometry for "
+                f"basin_version_id {basin_version_id}, "
+                f"river_network_version_id {river_network_version_id}: {segment_id}"
+            )
+        detail = _river_segment_detail(row)
+        _enforce_river_segment_serialized_budget(
+            detail,
+            max_bytes=RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
+            scope="detail",
+        )
+        return detail
 
     def create_mesh_version(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         mesh_version_id = build_versioned_id(
@@ -766,6 +918,27 @@ def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     detail["model_name"] = str(model_name) if model_name is not None else None
     detail["segment_count"] = int(detail["segment_count"]) if detail.get("segment_count") is not None else None
     return detail
+
+
+def _river_segment_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    detail = dict(row)
+    detail["river_segment_id"] = str(detail["river_segment_id"])
+    detail["river_network_version_id"] = str(detail["river_network_version_id"])
+    detail["segment_order"] = int(detail["segment_order"]) if detail.get("segment_order") is not None else None
+    detail["length_m"] = float(detail["length_m"]) if detail.get("length_m") is not None else None
+    detail["properties_json"] = _json_mapping(detail.get("properties_json"))
+    return detail
+
+
+def _enforce_river_segment_serialized_budget(payload: Mapping[str, Any], *, max_bytes: int, scope: str) -> None:
+    serialized_bytes = len(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"))
+    if serialized_bytes > max_bytes:
+        raise RiverSegmentGeoJsonBudgetError(
+            limit_type="serialized_bytes",
+            max_bytes=max_bytes,
+            serialized_bytes=serialized_bytes,
+            scope=scope,
+        )
 
 
 def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:

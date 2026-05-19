@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { ListFilter, Search } from 'lucide-react'
+import { Activity, GitBranch, ListFilter, Search, Split, TrendingUp } from 'lucide-react'
 
 import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
 import {
@@ -9,6 +9,9 @@ import {
   type BasinSegmentRow,
   type M11Bbox,
   type M11WarningLevel,
+  type OverviewBasin,
+  type SelectedSegmentDetail,
+  type TrendPoint,
 } from '@/lib/m11/overviewDataContracts'
 import { M11Layout, StateReadout } from '@/pages/m11/M11Shell'
 import {
@@ -57,11 +60,12 @@ export function BasinDetailPage() {
       layer: state.layer,
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
+      riverNetworkVersionId: state.riverNetworkVersionId,
       segmentId: state.segmentId,
       warningLevel: null,
       q: null,
     }),
-    [state.basinVersionId, state.cycle, state.layer, state.segmentId, state.source, state.validTime],
+    [state.basinVersionId, state.cycle, state.layer, state.riverNetworkVersionId, state.segmentId, state.source, state.validTime],
   )
   const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
   const basinData = useOverviewDataStore((store) => store.basinDetail)
@@ -110,6 +114,13 @@ export function BasinDetailPage() {
     handleQueryChange({ validTime: correctedValidTime })
   }, [basinMetadataMatchesQuery, derivedTimeline, handleQueryChange, loading, metadataLayers, needsQueryReplacement, state])
 
+  useEffect(() => {
+    if (needsQueryReplacement || loading || !currentBasinData?.selectedSegment?.riverNetworkVersionId) return
+    const resolvedRiverNetworkVersionId = currentBasinData.selectedSegment.riverNetworkVersionId
+    if (state.riverNetworkVersionId === resolvedRiverNetworkVersionId) return
+    handleQueryChange({ riverNetworkVersionId: resolvedRiverNetworkVersionId })
+  }, [currentBasinData?.selectedSegment?.riverNetworkVersionId, handleQueryChange, loading, needsQueryReplacement, state.riverNetworkVersionId])
+
   const detail = currentBasinData?.detail
   const filteredSegments = useMemo(
     () => filterBasinSegmentRows(currentBasinData?.segments ?? [], state),
@@ -124,8 +135,34 @@ export function BasinDetailPage() {
     () => bboxToMapFit(detail?.bbox ?? (detail && !basinNotFoundReason ? BASIN_FALLBACK_EXTENT : null)),
     [basinNotFoundReason, detail],
   )
+  const basinMapContext = useMemo(() => (detail && !basinNotFoundReason ? [basinDetailToOverviewBasin(detail)] : []), [
+    basinNotFoundReason,
+    detail,
+  ])
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
-  const handleMapOverlayClick = useCallback((_interaction: M11MapOverlayInteraction) => undefined, [])
+  const handleMapOverlayClick = useCallback(
+    (interaction: M11MapOverlayInteraction) => {
+      if (interaction.layerId !== 'basin-river-segments') return
+      const nextSegmentId =
+        mapFeatureStringProperty(interaction.feature, 'river_segment_id') ?? mapFeatureStringProperty(interaction.feature, 'segment_id')
+      if (!nextSegmentId) return
+      const nextRiverNetworkVersionId = mapFeatureStringProperty(interaction.feature, 'river_network_version_id')
+      const nextBasinVersionId = mapFeatureStringProperty(interaction.feature, 'basin_version_id')
+      if (
+        nextSegmentId === state.segmentId &&
+        (nextRiverNetworkVersionId ?? state.riverNetworkVersionId) === state.riverNetworkVersionId &&
+        (nextBasinVersionId ?? state.basinVersionId) === state.basinVersionId
+      ) {
+        return
+      }
+      handleQueryChange({
+        basinVersionId: nextBasinVersionId ?? state.basinVersionId,
+        riverNetworkVersionId: nextRiverNetworkVersionId ?? state.riverNetworkVersionId,
+        segmentId: nextSegmentId,
+      })
+    },
+    [handleQueryChange, state.basinVersionId, state.riverNetworkVersionId, state.segmentId],
+  )
 
   return (
     <M11Layout
@@ -136,6 +173,9 @@ export function BasinDetailPage() {
       sourceSelection={sourceSelection}
       derivedTimeline={derivedTimeline}
       fitTo={mapFitTo}
+      basins={basinMapContext}
+      visibleBasinIds={[basinId]}
+      basinSegments={currentBasinData?.segments ?? []}
       selectedSegmentId={selectedSegmentId}
       selectedSegmentGeometry={selectedSegment?.geometry ?? null}
       onMapOverlayHover={handleMapOverlayHover}
@@ -150,6 +190,7 @@ export function BasinDetailPage() {
           <StateReadout state={state} basinId={basinId} />
           {detail && !basinNotFoundReason ? <BasinIdentityCard detail={detail} /> : null}
           {detail && !basinNotFoundReason && !detail.bbox ? <MissingBboxNotice /> : null}
+          {detail && !basinNotFoundReason ? <MapContextNotice detail={detail} /> : null}
           <SegmentDiscoveryPanel
             basinName={basinDisplayName}
             basinVersionId={detail?.selectedBasinVersionId ?? state.basinVersionId}
@@ -171,52 +212,12 @@ export function BasinDetailPage() {
             <BasinUnavailableNotice basinId={basinId} reason={basinNotFoundReason} />
           ) : (
             <>
-              <div className="rounded-md border border-neutral-300 p-3">
-                <div className="text-base font-semibold text-neutral-900">选中河段</div>
-                <p className="mt-2 text-sm text-neutral-700">
-                  {selectedSegment
-                    ? `已恢复 ${selectedSegment.riverSegmentId}`
-                    : invalidSegmentRequested
-                      ? `未找到河段 ${state.segmentId}`
-                      : '尚未选择河段'}
-                </p>
-                {invalidSegmentRequested ? (
-                  <p className="mt-1 text-xs text-neutral-700">当前流域版本中没有匹配的河段数据。</p>
-                ) : null}
-                {selectedSegment ? (
-                  <>
-                    <p className="mt-1 text-xs text-neutral-700">
-                      {selectedSegment.currentQ ?? '-'} {selectedSegment.qUnit} / {selectedSegment.warningLevel}
-                    </p>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <Link
-                        className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600"
-                        to={selectedSegment.handoffUrl}
-                      >
-                        查看详情
-                      </Link>
-                      {selectedSegment.comparisonAvailable ? (
-                        <Link
-                          className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600"
-                          to={selectedSegment.handoffUrl}
-                        >
-                          对比预报
-                        </Link>
-                      ) : (
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-400"
-                          disabled
-                          aria-disabled="true"
-                          title="对比数据不可用"
-                        >
-                          对比预报
-                        </button>
-                      )}
-                    </div>
-                  </>
-                ) : null}
-              </div>
+              <SelectedSegmentPanel
+                segment={selectedSegment}
+                requestedSegmentId={state.segmentId}
+                invalidSegmentRequested={invalidSegmentRequested}
+              />
+              <SelectedSegmentTrendPanel segment={selectedSegment} />
               <div className="rounded-md border border-neutral-300 p-3">
                 <div className="text-base font-semibold text-neutral-900">预警状态</div>
                 <p className="mt-2 font-mono text-sm text-neutral-700">{state.warningLevel ?? 'all'}</p>
@@ -291,6 +292,42 @@ function MissingBboxNotice() {
   )
 }
 
+function MapContextNotice({ detail }: { detail: BasinDetail }) {
+  const missingBoundary = !detail.boundary
+  return (
+    <section
+      className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs leading-5 text-neutral-700"
+      role="status"
+      aria-label="地图上下文状态"
+    >
+      {missingBoundary ? '当前流域版本缺少边界几何，地图仅按 bbox 定位，不伪造边界。' : '地图已加载当前流域边界上下文。'}
+      <br />
+      城市与站点标签暂不可用：M11 当前没有城市/站点标签合同或数据源。
+    </section>
+  )
+}
+
+function basinDetailToOverviewBasin(detail: BasinDetail): OverviewBasin {
+  return {
+    basinId: detail.basinId,
+    displayName: detail.displayName,
+    basinGroup: detail.basinGroup,
+    parentBasinId: null,
+    level: 0,
+    boundary: detail.boundary,
+    bbox: detail.bbox,
+    areaKm2: null,
+    riverCount: detail.segmentCount,
+    activeModelCount: detail.activeModelCount,
+    latestForecastTime: detail.latestRun.validTime,
+    warningCounts: detail.warningDistribution,
+    basinVersions: detail.basinVersions,
+    selectedBasinVersionId: detail.selectedBasinVersionId,
+    unavailableReason: detail.unavailableReason,
+    qualityNote: detail.partialErrors[0] ?? null,
+  }
+}
+
 function BasinRunMetadata({ detail }: { detail: BasinDetail }) {
   const warningEntries = Object.entries(detail.warningDistribution).filter(([, count]) => count > 0)
   return (
@@ -347,6 +384,14 @@ function SegmentDiscoveryPanel({
   onQueryChange: (patch: M11QueryPatch) => void
 }) {
   const hasPublishedSegments = segmentCount === null ? rows.length > 0 : segmentCount > 0
+  const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+
+  useEffect(() => {
+    if (!selectedSegmentId) return
+    const row = rows.find((item) => item.riverSegmentId === selectedSegmentId || item.segmentId === selectedSegmentId)
+    const element = row ? rowRefs.current[row.riverSegmentId] ?? rowRefs.current[row.segmentId] : null
+    element?.scrollIntoView({ block: 'nearest' })
+  }, [rows, selectedSegmentId])
 
   return (
     <section className="space-y-3 rounded-md border border-neutral-300 p-3" aria-label="河段发现">
@@ -408,9 +453,13 @@ function SegmentDiscoveryPanel({
           {rows.map((row) => (
             <SegmentRowButton
               key={`${row.basinVersionId}:${row.riverSegmentId}:${row.segmentId}`}
+              ref={(element) => {
+                rowRefs.current[row.riverSegmentId] = element
+                rowRefs.current[row.segmentId] = element
+              }}
               row={row}
               selected={row.riverSegmentId === selectedSegmentId || row.segmentId === selectedSegmentId}
-              onSelect={() => onQueryChange({ segmentId: row.riverSegmentId })}
+              onSelect={() => onQueryChange({ riverNetworkVersionId: row.riverNetworkVersionId, segmentId: row.riverSegmentId })}
             />
           ))}
         </div>
@@ -419,12 +468,17 @@ function SegmentDiscoveryPanel({
   )
 }
 
-function SegmentRowButton({ row, selected, onSelect }: { row: BasinSegmentRow; selected: boolean; onSelect: () => void }) {
+const SegmentRowButton = forwardRef<
+  HTMLButtonElement,
+  { row: BasinSegmentRow; selected: boolean; onSelect: () => void }
+>(function SegmentRowButton({ row, selected, onSelect }, ref) {
   return (
     <button
+      ref={ref}
       type="button"
       role="listitem"
       aria-current={selected ? 'true' : undefined}
+      data-testid={selected ? 'm11-selected-segment-row' : undefined}
       className={cn(
         'w-full rounded-md border p-3 text-left transition-colors',
         selected
@@ -450,6 +504,223 @@ function SegmentRowButton({ row, selected, onSelect }: { row: BasinSegmentRow; s
       </div>
     </button>
   )
+})
+
+function SelectedSegmentPanel({
+  segment,
+  requestedSegmentId,
+  invalidSegmentRequested,
+}: {
+  segment: SelectedSegmentDetail | null | undefined
+  requestedSegmentId: string | null
+  invalidSegmentRequested: boolean
+}) {
+  const [comparisonVisible, setComparisonVisible] = useState(false)
+
+  useEffect(() => {
+    setComparisonVisible(false)
+  }, [segment?.riverSegmentId, segment?.sourceSelection.requestedSource, segment?.freshness.validTime])
+
+  if (!segment) {
+    return (
+      <section className="rounded-md border border-neutral-300 p-3" aria-label="选中河段详情">
+        <div className="flex items-center gap-2 text-base font-semibold text-neutral-900">
+          <Activity className="h-4 w-4 text-primary-600" aria-hidden="true" />
+          选中河段
+        </div>
+        <p className="mt-2 text-sm text-neutral-700">
+          {invalidSegmentRequested ? `未找到河段 ${requestedSegmentId}` : '尚未选择河段'}
+        </p>
+        {invalidSegmentRequested ? <p className="mt-1 text-xs text-neutral-700">当前流域版本中没有匹配的河段数据。</p> : null}
+      </section>
+    )
+  }
+
+  return (
+    <section className="rounded-md border border-neutral-300 p-3" aria-label="选中河段详情" data-testid="m11-selected-segment-panel">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-base font-semibold text-neutral-900">{segment.displayName}</div>
+          <div className="mt-0.5 truncate font-mono text-xs text-neutral-600">{segment.riverSegmentId}</div>
+        </div>
+        <span className={cn('shrink-0 rounded px-2 py-0.5 text-xs', warningPillClass(segment.warningLevel))}>
+          {warningLabel(segment.warningLevel)}
+        </span>
+      </div>
+
+      <dl className="mt-3 grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs text-neutral-700">
+        <dt>river_segment_id</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{segment.riverSegmentId}</dd>
+        <dt>segment_id</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{segment.segmentId}</dd>
+        <dt>流域</dt>
+        <dd className="min-w-0 truncate">{segment.basinName ?? segment.basinId ?? '-'}</dd>
+        <dt>basin_version</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{segment.basinVersionId}</dd>
+        <dt>model_id</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{segment.modelId ?? '-'}</dd>
+        <dt>river_network</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{segment.riverNetworkVersionId ?? '-'}</dd>
+        <dt>当前 Q</dt>
+        <dd>
+          {formatMetric(segment.currentQ)} {segment.currentQ === null ? '' : segment.qUnit}
+        </dd>
+        <dt>水位变化</dt>
+        <dd className="text-neutral-500">暂无水位差合同</dd>
+        <dt>重现期</dt>
+        <dd>{segment.returnPeriod === null ? '-' : `${segment.returnPeriod} 年一遇`}</dd>
+        <dt>valid</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{formatDateTime(segment.freshness.validTime) ?? '-'}</dd>
+        <dt>source</dt>
+        <dd className="min-w-0 truncate">{segment.sourceSelection.resolvedSource}</dd>
+        <dt>cycle</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{formatDateTime(segment.freshness.cycleTime) ?? '-'}</dd>
+        <dt>quality</dt>
+        <dd>{qualityLabel(segment.qualityFlag)}{segment.qualityNote ? ` / ${segment.qualityNote}` : ''}</dd>
+        <dt>lineage</dt>
+        <dd>{lineageLabel(segment.lineageStatus, segment.lineageUnavailableReason)}</dd>
+      </dl>
+
+      {segment.sourceSelection.unavailableReason ? (
+        <p className="mt-3 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-950">
+          {segment.sourceSelection.unavailableReason}
+        </p>
+      ) : null}
+      {segment.unavailableReason ? (
+        <p className="mt-3 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-950">
+          {segment.unavailableReason}
+        </p>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Link className="rounded border border-primary-600 px-3 py-1.5 text-xs font-medium text-primary-600" to={segment.handoffUrl}>
+          查看详情
+        </Link>
+        {segment.comparisonAvailable ? (
+          <button
+            type="button"
+            className={cn(
+              'rounded border px-3 py-1.5 text-xs font-medium',
+              comparisonVisible ? 'border-primary-600 bg-primary-50 text-primary-700' : 'border-primary-600 text-primary-600',
+            )}
+            aria-pressed={comparisonVisible}
+            onClick={() => setComparisonVisible((value) => !value)}
+          >
+            对比预报
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-400"
+            disabled
+            aria-disabled="true"
+            title={segment.sourceSelection.unavailableReason ?? '对比数据不可用'}
+          >
+            对比预报
+          </button>
+        )}
+      </div>
+
+      {comparisonVisible ? (
+        <SelectedSegmentComparisonTable segment={segment} />
+      ) : !segment.comparisonAvailable ? (
+        <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700" role="status">
+          对比预报不可用：当前河段缺少可比 GFS/IFS 序列或需要聚合端点。
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function SelectedSegmentComparisonTable({ segment }: { segment: SelectedSegmentDetail }) {
+  const rows = buildComparisonRows(segment.trendPoints, segment.freshness.validTime)
+
+  if (rows.length < 2) {
+    return (
+      <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700" role="status">
+        对比预报不可用：当前河段缺少可比 GFS/IFS 序列或需要聚合端点。
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-3 overflow-hidden rounded border border-primary-200 bg-white text-xs" role="region" aria-label="GFS IFS 对比数据">
+      <table className="w-full border-collapse">
+        <thead className="bg-primary-50 text-primary-800">
+          <tr>
+            <th className="px-2 py-1.5 text-left font-semibold">source</th>
+            <th className="px-2 py-1.5 text-left font-semibold">valid</th>
+            <th className="px-2 py-1.5 text-right font-semibold">Q</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.source} className="border-t border-primary-100">
+              <td className="px-2 py-1.5 font-semibold text-neutral-900">{row.source}</td>
+              <td className="px-2 py-1.5 font-mono text-neutral-700">{formatDateTime(row.validTime) ?? '-'}</td>
+              <td className="px-2 py-1.5 text-right font-mono text-neutral-900">
+                {formatMetric(row.value)} {row.value === null ? '' : segment.qUnit}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function SelectedSegmentTrendPanel({ segment }: { segment: SelectedSegmentDetail | null | undefined }) {
+  const trend = useMemo(() => buildTrendModel(segment?.trendPoints ?? [], segment?.freshness.validTime ?? null), [segment])
+
+  return (
+    <section className="rounded-md border border-neutral-300 p-3" aria-label="河段趋势">
+      <div className="flex items-center gap-2 text-base font-semibold text-neutral-900">
+        <TrendingUp className="h-4 w-4 text-primary-600" aria-hidden="true" />
+        趋势预览
+      </div>
+      {trend.points.length > 0 ? (
+        <>
+          <div className="mt-2 flex items-baseline justify-between gap-3">
+            <div>
+              <div className="text-xs text-neutral-700">当前值</div>
+              <div className="font-mono text-lg font-semibold text-neutral-900">{formatMetric(trend.currentValue)}</div>
+            </div>
+            <div
+              className={cn(
+                'text-xs font-medium',
+                trend.direction === '上升' ? 'text-danger' : trend.direction === '下降' ? 'text-primary-700' : 'text-neutral-700',
+              )}
+            >
+              {trend.direction}
+            </div>
+          </div>
+          <svg className="mt-3 h-20 w-full overflow-visible" viewBox="0 0 240 72" role="img" aria-label="选中河段趋势 sparkline">
+            <polyline points={trend.polyline} fill="none" stroke="#1E88E5" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+            {trend.currentPoint ? <circle cx={trend.currentPoint.x} cy={trend.currentPoint.y} r="4" fill="#F97316" /> : null}
+          </svg>
+          <div className="mt-1 flex items-center justify-between text-[11px] text-neutral-500">
+            <span>{formatDateTime(trend.points[0]?.validTime) ?? '-'}</span>
+            <span>{formatDateTime(trend.points.at(-1)?.validTime) ?? '-'}</span>
+          </div>
+        </>
+      ) : (
+        <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 px-3 py-6 text-center text-sm text-neutral-700" role="status">
+          当前河段暂无可用趋势点。
+        </div>
+      )}
+      {segment?.lineageStatus === 'available' ? (
+        <div className="mt-3 flex items-center gap-2 rounded border border-success/30 bg-success/10 px-3 py-2 text-xs text-success">
+          <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
+          追溯数据可用
+        </div>
+      ) : segment ? (
+        <div className="mt-3 flex items-center gap-2 rounded border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700">
+          <Split className="h-3.5 w-3.5" aria-hidden="true" />
+          {segment.lineageUnavailableReason ?? '追溯数据暂不可用'}
+        </div>
+      ) : null}
+    </section>
+  )
 }
 
 function bboxToMapFit(bbox: M11Bbox | null | undefined) {
@@ -472,6 +743,78 @@ function formatDateTime(value: string | null | undefined) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+}
+
+function buildTrendModel(points: TrendPoint[], selectedValidTime: string | null) {
+  const usable = points
+    .filter((point) => point.value !== null)
+    .sort((a, b) => Date.parse(a.validTime) - Date.parse(b.validTime))
+  const values = usable.map((point) => point.value as number)
+  const min = values.length > 0 ? Math.min(...values) : 0
+  const max = values.length > 0 ? Math.max(...values) : 0
+  const span = max - min || 1
+  const currentPoint =
+    (selectedValidTime ? usable.find((point) => point.validTime === selectedValidTime) : null) ?? usable[usable.length - 1] ?? null
+  const currentIndex = currentPoint ? usable.indexOf(currentPoint) : -1
+  const previousPoint = currentIndex > 0 ? usable[currentIndex - 1] : null
+  const direction =
+    currentPoint && previousPoint
+      ? currentPoint.value === previousPoint.value
+        ? '持平'
+        : (currentPoint.value as number) > (previousPoint.value as number)
+          ? '上升'
+          : '下降'
+      : '趋势不足'
+  const coordinates = usable.map((point, index) => {
+    const x = usable.length === 1 ? 120 : (index / (usable.length - 1)) * 240
+    const y = 60 - ((((point.value as number) - min) / span) * 48)
+    return { point, x, y }
+  })
+  const currentCoordinate = currentPoint ? coordinates.find((entry) => entry.point === currentPoint) ?? null : null
+
+  return {
+    points: usable,
+    currentValue: currentPoint?.value ?? null,
+    direction,
+    polyline: coordinates.map((entry) => `${entry.x},${entry.y}`).join(' '),
+    currentPoint: currentCoordinate,
+  }
+}
+
+function buildComparisonRows(points: TrendPoint[], selectedValidTime: string | null) {
+  const comparableSources = ['GFS', 'IFS'] as const
+  return comparableSources.flatMap((source) => {
+    const sourcePoints = points
+      .filter((point) => point.source === source && point.value !== null)
+      .sort((a, b) => Date.parse(a.validTime) - Date.parse(b.validTime))
+    if (sourcePoints.length === 0) return []
+    const selectedPoint =
+      (selectedValidTime ? sourcePoints.find((point) => point.validTime === selectedValidTime) : null) ??
+      sourcePoints[sourcePoints.length - 1]
+    return selectedPoint ? [{ source, validTime: selectedPoint.validTime, value: selectedPoint.value }] : []
+  })
+}
+
+function qualityLabel(value: string) {
+  const labels: Record<string, string> = {
+    ok: '通过',
+    degraded: '降级',
+    unavailable: '不可用',
+    failed: '失败',
+    unknown: '未知',
+  }
+  return labels[value] ?? value
+}
+
+function lineageLabel(status: SelectedSegmentDetail['lineageStatus'], reason: string | null) {
+  if (status === 'available') return '可用'
+  if (status === 'failed') return `失败${reason ? ` / ${reason}` : ''}`
+  return reason ?? '不可用'
+}
+
+function mapFeatureStringProperty(feature: M11MapOverlayInteraction['feature'], key: string) {
+  const value = feature?.properties?.[key]
+  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
 function warningLabel(level: M11WarningLevel | string) {

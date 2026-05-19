@@ -541,7 +541,7 @@ async def test_m1_forecast_cycle_data_flow_and_api_response(tmp_path: Path) -> N
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_0001/forecast-series"
-                "?issue_time=latest&variables=q_down&scenarios=GFS"
+                "?river_network_version_id=rivnet_v1&issue_time=latest&variables=q_down&scenarios=GFS"
             )
     finally:
         app.dependency_overrides.clear()
@@ -647,7 +647,7 @@ async def test_m2_analysis_warm_start_spliced_curve_and_selection_e2e(tmp_path: 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_0001/forecast-series"
-                "?issue_time=2026-05-01T00:00:00Z&variables=q_down&include_analysis=true"
+                "?river_network_version_id=rivnet_v1&issue_time=2026-05-01T00:00:00Z&variables=q_down&include_analysis=true"
             )
     finally:
         app.dependency_overrides.clear()

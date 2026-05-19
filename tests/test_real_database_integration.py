@@ -9,14 +9,16 @@ from sqlalchemy import text
 from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes import pipeline as pipeline_routes
-from packages.common.migrate import MIGRATIONS_DIR
+from packages.common.migrate import MIGRATIONS_DIR, apply_migration
 from tests.integration_helpers import (
     BASIN_VERSION_ID,
     CYCLE_TIME,
     FORECAST_RUN_ID,
     MODEL_ID,
+    RIVER_NETWORK_VERSION_ID,
     STATE_ID,
     VALID_TIME_1,
+    VALID_TIME_2,
     apply_migrations_from_zero,
     seed_issue_126_data,
     set_integration_env,
@@ -124,6 +126,13 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "river_ts_segment_time_idx",
                 "pipeline_job_slurm_job_idx",
                 "pipeline_job_array_task_idx",
+                "return_period_result_summary_idx",
+                "return_period_result_ranking_idx",
+                "return_period_result_valid_time_ranking_idx",
+                "return_period_result_timeline_idx",
+                "return_period_result_map_idx",
+                "river_segment_network_order_idx",
+                "river_network_version_basin_lookup_idx",
             } <= indexes
 
             constraints = {
@@ -141,6 +150,233 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
             assert "river_segment_pkey" in constraints
             assert "return_period_result_pkey" in constraints
             assert "state_snapshot_model_id_valid_time_key" in constraints
+
+            return_period_key_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT kcu.column_name
+                        FROM information_schema.key_column_usage kcu
+                        WHERE kcu.table_schema = 'flood'
+                          AND kcu.table_name = 'return_period_result'
+                          AND kcu.constraint_name = 'return_period_result_pkey'
+                        ORDER BY kcu.ordinal_position
+                        """
+                    )
+                ).mappings()
+            ]
+            assert return_period_key_columns == [
+                "run_id",
+                "river_network_version_id",
+                "river_segment_id",
+                "duration",
+                "valid_time",
+                "max_over_window",
+            ]
+
+            valid_time_ranking_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT a.attname AS column_name
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        JOIN pg_index ix ON ix.indexrelid = i.oid
+                        JOIN pg_attribute a ON a.attrelid = ix.indrelid
+                          AND a.attnum = ANY(ix.indkey)
+                        WHERE n.nspname = 'flood'
+                          AND i.relname = 'return_period_result_valid_time_ranking_idx'
+                        ORDER BY array_position(ix.indkey::int[], a.attnum::int)
+                        """
+                    )
+                ).mappings()
+            ]
+            assert valid_time_ranking_columns[:4] == ["run_id", "valid_time", "max_over_window", "quality_flag"]
+
+            river_segment_lookup_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT a.attname AS column_name
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        JOIN pg_index ix ON ix.indexrelid = i.oid
+                        JOIN pg_attribute a ON a.attrelid = ix.indrelid
+                          AND a.attnum = ANY(ix.indkey)
+                        WHERE n.nspname = 'core'
+                          AND i.relname = 'river_segment_network_order_idx'
+                        ORDER BY array_position(ix.indkey::int[], a.attnum::int)
+                        """
+                    )
+                ).mappings()
+            ]
+            assert river_segment_lookup_columns == [
+                "river_network_version_id",
+                "segment_order",
+                "river_segment_id",
+            ]
+
+            river_network_lookup_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT a.attname AS column_name
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        JOIN pg_index ix ON ix.indexrelid = i.oid
+                        JOIN pg_attribute a ON a.attrelid = ix.indrelid
+                          AND a.attnum = ANY(ix.indkey)
+                        WHERE n.nspname = 'core'
+                          AND i.relname = 'river_network_version_basin_lookup_idx'
+                        ORDER BY array_position(ix.indkey::int[], a.attnum::int)
+                        """
+                    )
+                ).mappings()
+            ]
+            assert river_network_lookup_columns == ["basin_version_id", "river_network_version_id"]
+    finally:
+        engine.dispose()
+
+
+def test_real_return_period_repair_migration_replaces_old_key_idempotently(
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    migration_files = [
+        MIGRATIONS_DIR / "000015_flood_return_period_identity_indexes.sql",
+        MIGRATIONS_DIR / "000017_return_period_max_over_window_identity.sql",
+    ]
+    engine = sqlalchemy_engine(integration_database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE flood.return_period_result DROP CONSTRAINT return_period_result_pkey"))
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE flood.return_period_result
+                      ADD CONSTRAINT return_period_result_pkey
+                      PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+                    """
+                )
+            )
+
+        import psycopg2
+
+        psycopg_connection = psycopg2.connect(integration_database_url)
+        psycopg_connection.autocommit = True
+        try:
+            for migration_file in migration_files:
+                apply_migration(psycopg_connection, migration_file)
+            for migration_file in migration_files:
+                apply_migration(psycopg_connection, migration_file)
+        finally:
+            psycopg_connection.close()
+
+        with engine.connect() as connection:
+            return_period_key_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT kcu.column_name
+                        FROM information_schema.key_column_usage kcu
+                        WHERE kcu.table_schema = 'flood'
+                          AND kcu.table_name = 'return_period_result'
+                          AND kcu.constraint_name = 'return_period_result_pkey'
+                        ORDER BY kcu.ordinal_position
+                        """
+                    )
+                ).mappings()
+            ]
+        assert return_period_key_columns == [
+            "run_id",
+            "river_network_version_id",
+            "river_segment_id",
+            "duration",
+            "valid_time",
+            "max_over_window",
+        ]
+
+        seed_issue_126_data(integration_database_url)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO core.river_network_version (
+                        river_network_version_id, basin_version_id, version_label, segment_count, source_uri, checksum
+                    )
+                    VALUES ('it126_rnv_v2', :basin_version_id, 'integration-v2', 1, 'object://rivnet-v2', 'checksum-v2')
+                    ON CONFLICT (river_network_version_id) DO NOTHING
+                    """
+                ),
+                {"basin_version_id": BASIN_VERSION_ID},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO core.river_segment (
+                        river_segment_id, river_network_version_id, segment_order, geom, properties_json
+                    )
+                    VALUES (
+                        'it126_seg_inside',
+                        'it126_rnv_v2',
+                        1,
+                        ST_SetSRID(ST_MakeLine(ST_Point(110.1, 30.1), ST_Point(110.2, 30.2)), 4490),
+                        '{}'::jsonb
+                    )
+                    ON CONFLICT (river_segment_id, river_network_version_id) DO NOTHING
+                    """
+                ),
+                {"basin_version_id": BASIN_VERSION_ID},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO flood.return_period_result (
+                        run_id, scenario_id, basin_version_id, river_network_version_id, model_id,
+                        river_segment_id, valid_time, duration, q_value, return_period, warning_level,
+                        source_id, cycle_time, max_over_window, quality_flag
+                    )
+                    VALUES
+                      (
+                        :run_id, 'forecast_gfs_deterministic', :basin_version_id, :rnv_v1, :model_id,
+                        'it126_seg_inside', :valid_time, '24h', 10, 2, 'elevated',
+                        'GFS', :cycle_time, false, 'ok'
+                      ),
+                      (
+                        :run_id, 'forecast_gfs_deterministic', :basin_version_id, 'it126_rnv_v2', :model_id,
+                        'it126_seg_inside', :valid_time, '24h', 20, 5, 'watch',
+                        'GFS', :cycle_time, false, 'ok'
+                      )
+                    """
+                ),
+                {
+                    "run_id": FORECAST_RUN_ID,
+                    "basin_version_id": BASIN_VERSION_ID,
+                    "rnv_v1": RIVER_NETWORK_VERSION_ID,
+                    "model_id": MODEL_ID,
+                    "valid_time": VALID_TIME_2,
+                    "cycle_time": CYCLE_TIME,
+                },
+            )
+            versioned_count = connection.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM flood.return_period_result
+                    WHERE run_id = :run_id
+                      AND river_segment_id = 'it126_seg_inside'
+                      AND duration = '24h'
+                      AND valid_time = :valid_time
+                    """
+                ),
+                {"run_id": FORECAST_RUN_ID, "valid_time": VALID_TIME_2},
+            ).mappings().one()["count"]
+            assert versioned_count == 2
     finally:
         engine.dispose()
 
@@ -163,7 +399,12 @@ def test_real_schema_api_and_postgis_spatial_smoke(
         segments = client.get(f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments")
         forecast = client.get(
             f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments/it126_seg_inside/forecast-series",
-            params={"issue_time": "latest", "variables": "q_down", "scenarios": "GFS"},
+            params={
+                "river_network_version_id": RIVER_NETWORK_VERSION_ID,
+                "issue_time": "latest",
+                "variables": "q_down",
+                "scenarios": "GFS",
+            },
         )
         status = client.get(
             "/api/v1/pipeline/status",
@@ -178,7 +419,11 @@ def test_real_schema_api_and_postgis_spatial_smoke(
         ranking = client.get("/api/v1/flood-alerts/ranking", params={"run_id": FORECAST_RUN_ID})
         timeline = client.get(
             "/api/v1/flood-alerts/timeline",
-            params={"run_id": FORECAST_RUN_ID, "segment_id": "it126_seg_inside"},
+            params={
+                "run_id": FORECAST_RUN_ID,
+                "segment_id": "it126_seg_inside",
+                "river_network_version_id": RIVER_NETWORK_VERSION_ID,
+            },
         )
         flood_map = client.get(
             "/api/v1/tiles/flood-return-period",
@@ -227,6 +472,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     assert jobs.json()["data"]["items"][0]["slurm_job_id"] == "8101"
     assert summary.json()["data"]["total_segments"] == 2
     assert ranking.json()["data"]["items"][0]["river_segment_id"] == "it126_seg_inside"
+    assert ranking.json()["data"]["items"][0]["river_network_version_id"] == RIVER_NETWORK_VERSION_ID
     assert timeline.json()["data"]["peak"]["warning_level"] == "high_risk"
     assert flood_map.json()["type"] == "FeatureCollection"
     assert {feature["properties"]["segment_id"] for feature in flood_map.json()["features"]} == {

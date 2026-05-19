@@ -558,12 +558,12 @@ def _clear_issue_126_rows(connection: Any) -> None:
         cursor.execute("DELETE FROM core.model_instance WHERE model_id = %s", (MODEL_ID,))
         cursor.execute("DELETE FROM core.mesh_version WHERE mesh_version_id = %s", (MESH_VERSION_ID,))
         cursor.execute(
-            "DELETE FROM core.river_segment WHERE river_network_version_id = %s",
-            (RIVER_NETWORK_VERSION_ID,),
+            "DELETE FROM core.river_segment WHERE river_network_version_id LIKE %s",
+            (f"{ISSUE_126_PREFIX}%",),
         )
         cursor.execute(
-            "DELETE FROM core.river_network_version WHERE river_network_version_id = %s",
-            (RIVER_NETWORK_VERSION_ID,),
+            "DELETE FROM core.river_network_version WHERE river_network_version_id LIKE %s",
+            (f"{ISSUE_126_PREFIX}%",),
         )
         cursor.execute("DELETE FROM core.basin_version WHERE basin_version_id = %s", (BASIN_VERSION_ID,))
         cursor.execute("DELETE FROM core.basin WHERE basin_id = %s", (BASIN_ID,))

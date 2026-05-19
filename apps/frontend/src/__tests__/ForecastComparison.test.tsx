@@ -120,13 +120,13 @@ describe('forecast comparison UI', () => {
       }) as never
     })
     resetForecastStore({
-      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1' },
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
       selectedScenarios: ['GFS', 'IFS'],
     })
 
     await useForecastStore.getState().fetchForecast()
 
-    expect(query).toMatchObject({ scenarios: 'GFS,IFS', include_analysis: true })
+    expect(query).toMatchObject({ river_network_version_id: 'rn-1', scenarios: 'GFS,IFS', include_analysis: true })
   })
 
   it('uses route handoff source and cycle options without changing default forecast behavior', async () => {
@@ -143,7 +143,7 @@ describe('forecast comparison UI', () => {
       }) as never
     })
     resetForecastStore({
-      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1' },
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
       selectedScenarios: ['GFS'],
     })
 
@@ -155,6 +155,7 @@ describe('forecast comparison UI', () => {
 
     expect(query).toMatchObject({
       issue_time: '2026-05-18T00:00:00.000Z',
+      river_network_version_id: 'rn-1',
       scenarios: 'IFS',
       include_analysis: true,
     })
@@ -182,7 +183,7 @@ describe('forecast comparison UI', () => {
       }) as never
     })
     resetForecastStore({
-      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1' },
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
       selectedScenarios: ['IFS'],
       activeRequestContext: { source: 'ifs', issueTime: '2026-05-18T00:00:00.000Z' },
     })
@@ -196,6 +197,7 @@ describe('forecast comparison UI', () => {
 
     expect(query).toMatchObject({
       issue_time: '2026-05-12T00:00:00.000Z',
+      river_network_version_id: 'rn-1',
       scenarios: 'GFS',
       include_analysis: true,
     })
@@ -224,7 +226,7 @@ describe('forecast comparison UI', () => {
       }) as never
     })
     resetForecastStore({
-      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1' },
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
       selectedScenarios: ['GFS'],
     })
 
@@ -235,8 +237,16 @@ describe('forecast comparison UI', () => {
 
     expect(useForecastStore.getState().activeRequestContext).toMatchObject({ source: null, issueTime: '2026-05-18T00:00:00.000Z' })
     expect(queries).toEqual([
-      expect.objectContaining({ issue_time: '2026-05-18T00:00:00.000Z', scenarios: 'GFS,IFS' }),
-      expect.objectContaining({ issue_time: '2026-05-18T00:00:00.000Z', scenarios: 'GFS' }),
+      expect.objectContaining({
+        river_network_version_id: 'rn-1',
+        issue_time: '2026-05-18T00:00:00.000Z',
+        scenarios: 'GFS,IFS',
+      }),
+      expect.objectContaining({
+        river_network_version_id: 'rn-1',
+        issue_time: '2026-05-18T00:00:00.000Z',
+        scenarios: 'GFS',
+      }),
     ])
   })
 
@@ -252,7 +262,7 @@ describe('forecast comparison UI', () => {
       }) as never,
     )
     resetForecastStore({
-      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1' },
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
       selectedScenarios: ['GFS'],
     })
 
@@ -262,6 +272,22 @@ describe('forecast comparison UI', () => {
       Q2: 1,
       Q20: 4,
       Q100: 6,
+    })
+  })
+
+  it('fails locally instead of issuing an unscoped forecast request', async () => {
+    resetForecastStore({
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: '' },
+      selectedScenarios: ['GFS'],
+    })
+
+    await expect(useForecastStore.getState().fetchForecast()).rejects.toThrow('缺少 river_network_version_id')
+
+    expect(client.GET).not.toHaveBeenCalled()
+    expect(useForecastStore.getState()).toMatchObject({
+      error: '缺少 river_network_version_id，无法请求河段预报',
+      forecastData: null,
+      loading: false,
     })
   })
 

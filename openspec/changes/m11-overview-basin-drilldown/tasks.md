@@ -411,3 +411,80 @@ Non-goals for #164:
 - [ ] 6.7 Run `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm test:e2e`, `cd apps/frontend && corepack pnpm run test:e2e:preview`, and `cd apps/frontend && corepack pnpm build`; if OpenAPI changed, also run `cd apps/frontend && corepack pnpm check:api-types`, `uv run ruff check .`, and focused `uv run pytest -q` for affected API tests.
 - [ ] 6.8 Add or update frontend developer notes for overview/basin routes, required data contracts, source/scenario behavior, map layer limitations, visual evidence location, and future handoff destinations.
 - [ ] 6.9 Update progress documentation after implementation to record completed M11 scope and deferred follow-ups: full-screen segment detail, meteorology pages, model asset management page, and production MVT.
+
+### Issue #165 Evidence Matrix
+
+Selected risk packs:
+
+- Public API / CLI / script entry -> 6.1, 6.3, 6.4, route/query and click-selection tests for
+  `/basins/:basinId`, overview drill-down, and forecast/flood-alert compatibility.
+- Schema / columns / units / field names -> 6.1, 6.2, 6.4, 6.5, tests for
+  `basin_id`, `basin_version_id`, `river_segment_id`, Q units, water-level deltas,
+  return-period/warning levels, source/cycle labels, lineage/quality status, and handoff URLs.
+- Geospatial / CRS / shapefile sidecars -> 6.1, 6.2, 6.3, map tests for basin boundary,
+  river LineString rendering, selected/hovered segment styling, missing geometry behavior,
+  city/station label availability, and no fabricated geometry.
+- Time series / forcing / temporal boundaries -> 6.3, 6.4, 6.5, selected segment detail tests
+  for source/cycle/validTime restoration, forecast trend points, comparison availability, stale
+  request rejection, and scoped unavailable source/time states.
+- Resource limits / large input / discovery -> 6.1, 6.2, 6.3, selected segment geometry and
+  river-network rendering stay bounded; hover/click does not create unbounded requests, layers,
+  timers, or row scroll loops.
+- Legacy compatibility / examples -> 6.3, 6.7, existing `/`, `/overview`, `/forecast`,
+  `/flood-alerts`, `/monitoring`, and #160-#164 M11 tests continue to pass.
+- Error handling / rollback / partial outputs -> 6.3, 6.4, 6.5, unavailable geometry,
+  unavailable lineage/quality, no trend points, no comparison series, and failed detail payloads
+  show scoped states without clearing usable basin/list/map context.
+- Release / packaging / dependency compatibility -> 6.7, no unvetted runtime dependency; build,
+  test, E2E, preview E2E, and OpenSpec validation pass.
+- Documentation / migration notes -> 6.6, 6.8, 6.9, screenshot paths, map/data limits, route
+  contracts, and deferred follow-ups are recorded.
+
+Required test inputs and expected outputs:
+
+- Basin detail payload with basin bbox/boundary plus multiple river segment LineStrings with Q,
+  return period, and warning levels -> basin map renders boundary, available river network, and
+  colors segments according to the active discharge/return-period/warning layer without
+  fabricating missing geometries.
+- Segment row/map hover for `river_segment_id=seg-009` -> tooltip shows stable segment name/ID,
+  current flow/unit, return period, and warning level when available; hovered segment style is
+  visible and clears on mouse leave.
+- Segment map click for `seg-009` -> URL gains `segmentId=seg-009`, matching list row is
+  selected or scrolled into view, selected map style updates, and the selected segment detail
+  request uses the active `basinVersionId`, `source`, `cycle`, and `validTime`.
+- Selected segment detail with forecast series, lineage success, and quality metadata -> right
+  detail panel shows IDs, basin/model metadata, current Q, optional water-level delta, return
+  period/warning state, forecast valid time, source/cycle, lineage/quality status, "查看详情"
+  handoff, and "对比预报" availability.
+- Selected segment detail where IFS comparison is unavailable or trend points are empty -> panel
+  shows scoped unavailable state and does not claim comparison/trend data exists.
+- Oversized, malformed, or missing river LineString geometry -> map omits the invalid segment
+  geometry or uses the documented unavailable state without freezing the page; existing segment
+  list/detail content remains usable.
+- Source/layer/valid-time change while a segment is selected -> map colors, detail panel, trend
+  sparkline, and comparison state reload or clear against the new context without accepting
+  stale same-segment responses.
+- `agent-browser` screenshot inputs `/overview` and representative `/basins/:basinId` at
+  `1920x1080`, `1440x900`, and `1280x900` -> screenshots show navigation, side panels, map area,
+  timeline, popup/detail panel, controls, and state components without overlap. Evidence path is
+  recorded under an issue-scoped directory such as `.codex/screenshots/issue-165/`.
+
+Verification commands for #165:
+
+- `git diff --check`
+- `openspec validate m11-overview-basin-drilldown --strict --no-interactive`
+- `cd apps/frontend && corepack pnpm test`
+- `cd apps/frontend && corepack pnpm exec tsc --noEmit`
+- `cd apps/frontend && corepack pnpm build`
+- `cd apps/frontend && corepack pnpm test:e2e`
+- `cd apps/frontend && corepack pnpm run test:e2e:preview`
+- If OpenAPI/backend changes are added: `cd apps/frontend && corepack pnpm check:api-types`,
+  `uv run ruff check .`, and focused `uv run pytest -q` for affected API tests.
+
+Non-goals for #165:
+
+- No production MVT/PBF backend pipeline unless required by current adapters and fully covered by
+  OpenAPI/backend/frontend tests.
+- No full-screen forecast detail page, meteorology pages, or full model asset management page;
+  M11 should expose stable handoff links or disabled/unavailable placeholders only.
+- No authentication/authorization redesign, live ingestion change, or backend operations change.

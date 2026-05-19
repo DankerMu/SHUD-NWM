@@ -184,8 +184,15 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
     def _transaction(self) -> Any:
         return _NullTransaction()
 
-    def _validate_series_target(self, cursor: Any, *, basin_version_id: str, segment_id: str) -> None:
-        del cursor, basin_version_id, segment_id
+    def _validate_series_target(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        river_network_version_id: str,
+    ) -> None:
+        del cursor, basin_version_id, segment_id, river_network_version_id
 
     def _per_source_latest_cycles(self, cursor: Any, **_kwargs: Any) -> dict[str, datetime]:
         del cursor
@@ -205,12 +212,13 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
         *,
         basin_version_id: str,
         segment_id: str,
+        river_network_version_id: str,
         issue_time: datetime,
         scenario_filter: Any,
         cycle_times_by_scenario: dict[str, datetime] | None = None,
         end_time: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        del cursor, basin_version_id, segment_id, scenario_filter, end_time
+        del cursor, basin_version_id, segment_id, river_network_version_id, scenario_filter, end_time
         self.forecast_fetches.append(
             {
                 "issue_time": issue_time,
@@ -224,6 +232,40 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
             for row in self.forecast_rows
             if cycle_times_by_scenario.get(str(row["scenario_id"])) == row["cycle_time"]
         ]
+
+
+class SqlCaptureForecastStore(PsycopgForecastStore):
+    def __init__(self, rows_by_statement: list[list[dict[str, Any]]] | None = None) -> None:
+        super().__init__("postgresql://test")
+        self.cursor = SqlCaptureCursor(rows_by_statement or [])
+
+    def _transaction(self) -> Any:
+        return _CursorTransaction(self.cursor)
+
+
+class SqlCaptureCursor:
+    def __init__(self, rows_by_statement: list[list[dict[str, Any]]]) -> None:
+        self.rows_by_statement = rows_by_statement
+        self.executions: list[tuple[str, tuple[Any, ...]]] = []
+
+    def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+        self.executions.append((statement, parameters))
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        if not self.rows_by_statement:
+            return []
+        return self.rows_by_statement.pop(0)
+
+
+class _CursorTransaction:
+    def __init__(self, cursor: SqlCaptureCursor) -> None:
+        self.cursor = cursor
+
+    def __enter__(self) -> SqlCaptureCursor:
+        return self.cursor
+
+    def __exit__(self, *_args: Any) -> bool:
+        return False
 
 
 class _NullTransaction:
@@ -251,8 +293,8 @@ def clear_overrides() -> None:
 @pytest.mark.asyncio
 async def test_forecast_series_returns_timestamp_value_tuples_and_q_down_filter(fake_store: FakeForecastStore) -> None:
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
-        "?issue_time=latest&variables=q_down&scenarios=GFS"
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=latest&variables=q_down&scenarios=GFS"
     )
 
     assert response.status_code == 200
@@ -264,6 +306,7 @@ async def test_forecast_series_returns_timestamp_value_tuples_and_q_down_filter(
     assert all(isinstance(point, list) and len(point) == 2 for point in points)
     assert fake_store.forecast_calls[-1]["variables"] == ["q_down"]
     assert fake_store.forecast_calls[-1]["scenarios"] == ["GFS"]
+    assert fake_store.forecast_calls[-1]["river_network_version_id"] == "rnv_v1"
     assert fake_store.forecast_calls[-1]["include_analysis"] is False
 
 
@@ -271,7 +314,9 @@ async def test_forecast_series_returns_timestamp_value_tuples_and_q_down_filter(
 async def test_forecast_series_allows_null_frequency_thresholds(fake_store: FakeForecastStore) -> None:
     fake_store.response["frequency_thresholds"] = None
 
-    response = await _get("/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series")
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+    )
 
     assert response.status_code == 200
     assert response.json()["frequency_thresholds"] is None
@@ -280,8 +325,8 @@ async def test_forecast_series_allows_null_frequency_thresholds(fake_store: Fake
 @pytest.mark.asyncio
 async def test_forecast_series_include_analysis_true_returns_spliced_segments(fake_store: FakeForecastStore) -> None:
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
-        "?issue_time=latest&variables=q_down&include_analysis=true"
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=latest&variables=q_down&include_analysis=true"
     )
 
     assert response.status_code == 200
@@ -300,8 +345,8 @@ async def test_forecast_series_include_analysis_true_returns_spliced_segments(fa
 @pytest.mark.asyncio
 async def test_forecast_series_include_analysis_false_keeps_m1_response(fake_store: FakeForecastStore) -> None:
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
-        "?issue_time=latest&variables=q_down&include_analysis=false"
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=latest&variables=q_down&include_analysis=false"
     )
 
     assert response.status_code == 200
@@ -315,8 +360,8 @@ async def test_forecast_series_include_analysis_false_keeps_m1_response(fake_sto
 @pytest.mark.asyncio
 async def test_forecast_series_include_analysis_supports_analysis_only(fake_store: FakeForecastStore) -> None:
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/analysis_only/forecast-series"
-        "?issue_time=2026-05-07T00:00:00Z&variables=q_down&include_analysis=true"
+        "/api/v1/basin-versions/basin_v1/river-segments/analysis_only/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=2026-05-07T00:00:00Z&variables=q_down&include_analysis=true"
     )
 
     assert response.status_code == 200
@@ -331,8 +376,8 @@ async def test_forecast_series_multi_source_latest_returns_per_source_metadata()
     app.dependency_overrides[get_forecast_store] = lambda: store
 
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
-        "?issue_time=latest&variables=q_down&scenarios=GFS,IFS"
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=latest&variables=q_down&scenarios=GFS,IFS"
     )
 
     assert response.status_code == 200
@@ -359,8 +404,8 @@ async def test_forecast_series_empty_store_path_returns_null_frequency_threshold
     app.dependency_overrides[get_forecast_store] = lambda: store
 
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
-        "?issue_time=latest&variables=q_down&scenarios=GFS"
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=latest&variables=q_down&scenarios=GFS"
     )
 
     assert response.status_code == 200
@@ -377,8 +422,8 @@ async def test_forecast_series_empty_no_latest_data_response_allows_null_issue_t
     app.dependency_overrides[get_forecast_store] = lambda: store
 
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
-        "?issue_time=latest&variables=q_down&scenarios=GFS"
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=latest&variables=q_down&scenarios=GFS"
     )
 
     assert response.status_code == 200
@@ -396,8 +441,8 @@ async def test_forecast_series_empty_spliced_no_latest_data_response_allows_null
     app.dependency_overrides[get_forecast_store] = lambda: store
 
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
-        "?issue_time=latest&variables=q_down&scenarios=GFS&include_analysis=true"
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=latest&variables=q_down&scenarios=GFS&include_analysis=true"
     )
 
     assert response.status_code == 200
@@ -413,8 +458,8 @@ async def test_forecast_series_include_analysis_multi_source_has_one_analysis_se
     app.dependency_overrides[get_forecast_store] = lambda: store
 
     response = await _get(
-        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
-        "?issue_time=latest&variables=q_down&scenarios=GFS,IFS&include_analysis=true"
+        "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?river_network_version_id=rnv_v1"
+        "&issue_time=latest&variables=q_down&scenarios=GFS,IFS&include_analysis=true"
     )
 
     assert response.status_code == 200
@@ -518,7 +563,9 @@ def test_analysis_window_for_issue_time_uses_open_end_seven_day_range() -> None:
 
 @pytest.mark.asyncio
 async def test_forecast_series_segment_not_found_uses_unified_error(fake_store: FakeForecastStore) -> None:
-    response = await _get("/api/v1/basin-versions/basin_v1/river-segments/missing/forecast-series")
+    response = await _get(
+        "/api/v1/basin-versions/basin_v1/river-segments/missing/forecast-series?river_network_version_id=rnv_v1"
+    )
 
     assert fake_store is not None
     assert response.status_code == 404
@@ -526,6 +573,115 @@ async def test_forecast_series_segment_not_found_uses_unified_error(fake_store: 
     assert data["status"] == "error"
     assert data["request_id"]
     assert data["error"]["code"] == "SEGMENT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_requires_river_network_version_id(fake_store: FakeForecastStore) -> None:
+    response = await _get("/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series")
+
+    assert fake_store is not None
+    assert response.status_code == 422
+    assert fake_store.forecast_calls == []
+
+
+def test_forecast_series_duplicate_segment_filters_forecast_analysis_and_latest_by_selected_network() -> None:
+    issue_time = _dt("2026-05-07T00:00:00Z")
+    selected_rows = [
+        {
+            "scenario_id": "forecast_gfs_deterministic",
+            "model_id": "model_selected",
+            "source_id": "GFS",
+            "cycle_time": issue_time,
+            "run_end_time": issue_time + timedelta(days=7),
+            "lineage_json": {},
+            "river_network_version_id": "rnv_selected",
+            "valid_time": issue_time,
+            "value": 11.0,
+            "unit": "m3/s",
+        }
+    ]
+    store = SqlCaptureForecastStore(
+        [
+            [{"basin_version_id": "basin_v1"}],
+            [{"river_segment_id": "seg_001", "river_network_version_id": "rnv_selected", "properties_json": {}}],
+            [{"scenario_id": "forecast_gfs_deterministic", "cycle_time": issue_time}],
+            [],
+            selected_rows,
+            [],
+        ]
+    )
+
+    response = store.forecast_series(
+        basin_version_id="basin_v1",
+        segment_id="seg_001",
+        river_network_version_id="rnv_selected",
+        issue_time="latest",
+        variables=["q_down"],
+        scenarios=["GFS"],
+        include_analysis=True,
+    )
+
+    assert response["segments"] == [
+        {
+            "scenario": "forecast_gfs_deterministic",
+            "scenario_id": "forecast_gfs_deterministic",
+            "segment_role": "future_7_days",
+            "source": "GFS",
+            "source_id": "GFS",
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "available_lead_hours": 168,
+            "data": [{"valid_time": "2026-05-07T00:00:00Z", "value": 11.0}],
+        }
+    ]
+    assert response["frequency_thresholds"] is None
+    statements = [statement for statement, _parameters in store.cursor.executions]
+    assert statements[1].count("rs.river_network_version_id = %s") == 1
+    assert all(
+        "rt.river_network_version_id = %s" in statement for statement in (statements[2], statements[3], statements[4])
+    )
+    assert all("rnv_selected" in parameters for _statement, parameters in store.cursor.executions[1:5])
+
+
+def test_forecast_series_duplicate_segment_filters_hindcast_latest_and_rows_by_selected_network() -> None:
+    end_time = _dt("1993-01-08T00:00:00Z")
+    store = SqlCaptureForecastStore(
+        [
+            [{"basin_version_id": "basin_v1"}],
+            [{"river_segment_id": "seg_001", "river_network_version_id": "rnv_selected", "properties_json": {}}],
+            [{"valid_time": end_time}],
+            [
+                {
+                    "scenario_id": "hindcast_replay",
+                    "model_id": "model_selected",
+                    "source_id": "ERA5",
+                    "cycle_time": None,
+                    "run_end_time": end_time,
+                    "lineage_json": {},
+                    "river_network_version_id": "rnv_selected",
+                    "valid_time": end_time,
+                    "value": 42.0,
+                    "unit": "m3/s",
+                }
+            ],
+            [],
+        ]
+    )
+
+    response = store.forecast_series(
+        basin_version_id="basin_v1",
+        segment_id="seg_001",
+        river_network_version_id="rnv_selected",
+        issue_time="latest",
+        variables=["q_down"],
+        scenarios=["GFS"],
+        run_types=["hindcast"],
+    )
+
+    assert response["series"][0]["scenario_id"] == "hindcast_replay"
+    statements = [statement for statement, _parameters in store.cursor.executions]
+    assert "rt.river_network_version_id = %s" in statements[2]
+    assert "rt.river_network_version_id = %s" in statements[3]
+    assert all("rnv_selected" in parameters for _statement, parameters in store.cursor.executions[1:4])
 
 
 @pytest.mark.asyncio

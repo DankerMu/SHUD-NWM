@@ -12,6 +12,7 @@ import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
+import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
 
 const m11FitBoundsCalls: Array<unknown[]> = []
 const m11FlyToCalls: Array<unknown> = []
@@ -39,7 +40,7 @@ vi.mock('@/components/map/MapView', () => ({
       <button
         type="button"
         aria-label="河网地图"
-        onClick={() => onSegmentSelect?.({ segmentId: 'seg-010', basinVersionId: 'bv-001' })}
+        onClick={() => onSegmentSelect?.({ segmentId: 'seg-010', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-v1' })}
       >
         mock map
       </button>
@@ -82,11 +83,32 @@ vi.mock('react-map-gl/maplibre', () => ({
           onMouseMove={() => onMouseMove?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
           onMouseLeave={() => onMouseLeave?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
           onClick={() => onClick?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+            onClick?.({
+              target: { getCanvas: () => ({ style: {} }) },
+              features: [
+                {
+                  layer: { id: 'm11-basin-river-line' },
+                  properties: {
+                    river_segment_id: 'seg-001',
+                    segment_id: 'seg-001',
+                    basin_version_id: 'bv-001',
+                    river_network_version_id: 'rn-v1',
+                  },
+                },
+              ],
+            })
+          }}
           onDoubleClick={() =>
             onClick?.({
               target: { getCanvas: () => ({ style: {} }) },
               features: [
-                { layer: { id: 'm11-flood-return-period-line' }, properties: { segment_id: 'overlay-first' } },
+                {
+                  layer: { id: 'm11-flood-return-period-line' },
+                  properties: { segment_id: 'overlay-first', river_network_version_id: 'rn-v1' },
+                },
                 { layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'basin-demo' } },
               ],
             })
@@ -252,6 +274,7 @@ function overviewSnapshot(layers: LayerState[], queryKey = '', dataKey = queryKe
       validTime: null,
       basemap: 'vector' as const,
       basinVersionId: null,
+      riverNetworkVersionId: null,
       segmentId: null,
       warningLevel: null,
       q: null,
@@ -350,6 +373,29 @@ function overviewSnapshotWithBasins(layers: LayerState[], queryKey = '', dataKey
   }
 }
 
+function overviewSnapshotForQuery(query: M11QueryState) {
+  const queryKey = serializeM11QueryState({ ...query, basemap: 'vector', validTime: null })
+  const dataKey = serializeM11QueryState({ ...query, basemap: 'vector' })
+  const snapshot = overviewSnapshotWithBasin(m11Layers, queryKey, dataKey)
+  return {
+    ...snapshot,
+    requestScope: {
+      ...snapshot.requestScope,
+      queryKey,
+      dataKey,
+      source: query.source,
+      layer: query.layer,
+      cycle: query.cycle,
+      validTime: query.validTime,
+      basinVersionId: query.basinVersionId,
+      riverNetworkVersionId: query.riverNetworkVersionId,
+      segmentId: query.segmentId,
+      warningLevel: query.warningLevel,
+      q: query.q,
+    },
+  }
+}
+
 function basinSnapshot(
   basinId: string,
   layers: LayerState[],
@@ -360,6 +406,7 @@ function basinSnapshot(
   segments = [
     {
       riverSegmentId: 'seg-009',
+      riverNetworkVersionId: 'rn-v1',
       segmentId: 'seg-009',
       displayName: 'Main Stem 009',
       basinVersionId: 'bv-001',
@@ -392,6 +439,7 @@ function basinSnapshot(
       validTime: null,
       basemap: 'vector' as const,
       basinVersionId: 'bv-001',
+      riverNetworkVersionId: 'rn-v1',
       segmentId: 'seg-009',
       warningLevel: null,
       q: null,
@@ -434,8 +482,8 @@ function basinSnapshot(
           riverSegmentId: 'seg-009',
           segmentId: 'seg-009',
           displayName: 'Segment 009',
-          modelId: null,
-          riverNetworkVersionId: null,
+          modelId: 'model-demo',
+          riverNetworkVersionId: 'rn-v1',
           currentQ,
           qUnit: 'm3/s',
           returnPeriod: 2,
@@ -446,11 +494,12 @@ function basinSnapshot(
           trendPoints: [
             { validTime: '2026-05-18T00:00:00.000Z', value: 10, source: 'GFS' as const, scenarioId: 'forecast_gfs_deterministic', role: 'analysis', isAnalysis: true },
             { validTime: '2026-05-18T06:00:00.000Z', value: currentQ, source: 'GFS' as const, scenarioId: 'forecast_gfs_deterministic', role: 'future_7_days', isAnalysis: false },
+            { validTime: '2026-05-18T06:00:00.000Z', value: currentQ + 7, source: 'IFS' as const, scenarioId: 'forecast_ifs_deterministic', role: 'future_7_days', isAnalysis: false },
           ],
           comparisonAvailable,
           lineageStatus: 'available' as const,
           lineageUnavailableReason: null,
-          handoffUrl: '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
+          handoffUrl: '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
           geometry: { type: 'LineString' as const, coordinates: [[101, 31], [102, 32]] },
           freshness: m11LayerFreshness,
           unavailableReason: null,
@@ -463,8 +512,8 @@ const overviewDefaultScopeKey = 'source=gfs'
 const overviewFloodScopeKey = 'source=gfs&layer=flood-return-period'
 const overviewValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z'
 const overviewFloodValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period'
-const basinDefaultScopeKey = 'source=gfs&basinVersionId=bv-001&segmentId=seg-009'
-const basinValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009'
+const basinDefaultScopeKey = 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'
+const basinValid06ScopeKey = 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -576,6 +625,44 @@ describe('App route state', () => {
     await user.click(screen.getByRole('button', { name: /^IFS/ }))
     expect(window.location.search).toContain('source=ifs')
     await waitFor(() => expect(overviewAsync).toHaveBeenCalledWith(expect.objectContaining({ source: 'ifs' })))
+  })
+
+  it('preserves river network version in overview load state and renders the matching snapshot', async () => {
+    const loadOverview = vi.fn().mockImplementation(async (query: M11QueryState) => {
+      const snapshot = overviewSnapshotForQuery(query)
+      useOverviewDataStore.setState({ overview: snapshot, loading: false })
+      return snapshot
+    })
+    useOverviewDataStore.setState({
+      loadOverview,
+      loading: false,
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(loadOverview).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: 'gfs',
+          basinVersionId: 'bv-001',
+          riverNetworkVersionId: 'rn-v1',
+          segmentId: 'seg-009',
+        }),
+      ),
+    )
+    expect(await screen.findByText('Demo Basin')).toBeInTheDocument()
+    expect(screen.queryByText('总览数据加载中')).not.toBeInTheDocument()
+    expect(useOverviewDataStore.getState().overview?.requestScope).toMatchObject({
+      dataKey:
+        'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+      riverNetworkVersionId: 'rn-v1',
+    })
   })
 
   it('updates overview basemap URL and map style without reloading overview data', async () => {
@@ -954,6 +1041,7 @@ describe('App route state', () => {
           validTime: null,
           basemap: 'vector',
           basinVersionId: null,
+          riverNetworkVersionId: null,
           segmentId: null,
           warningLevel: null,
           q: null,
@@ -1022,6 +1110,7 @@ describe('App route state', () => {
           validTime: null,
           basemap: 'vector',
           basinVersionId: null,
+          riverNetworkVersionId: null,
           segmentId: null,
           warningLevel: null,
           q: null,
@@ -1098,7 +1187,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/forecast?segmentId=seg-009&basinVersionId=bv-route&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange&q=main',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-route&riverNetworkVersionId=rn-route&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange&q=main',
     )
 
     render(<App />)
@@ -1124,7 +1213,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/forecast?segmentId=seg-009&basinVersionId=bv-001&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange',
     )
 
     render(<App />)
@@ -1134,7 +1223,7 @@ describe('App route state', () => {
     expect(screen.getByText('bv-001')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '进入流域分析' })).toHaveAttribute(
       'href',
-      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange',
+      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=orange',
     )
     expect(screen.getByText(/已保留 validTime=2026-05-18T06:00:00.000Z/)).toBeInTheDocument()
     await waitFor(() =>
@@ -1147,6 +1236,7 @@ describe('App route state', () => {
               segment_id: 'seg-009',
             },
             query: {
+              river_network_version_id: 'rn-v1',
               issue_time: '2026-05-18T00:00:00.000Z',
               variables: 'q_down',
               scenarios: 'IFS',
@@ -1159,7 +1249,7 @@ describe('App route state', () => {
     expect(client.GET).toHaveBeenCalledTimes(1)
     await waitFor(() =>
       expect(useForecastStore.getState()).toMatchObject({
-        selectedSegment: { segmentId: 'seg-009', basinVersionId: 'bv-001' },
+        selectedSegment: { segmentId: 'seg-009', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-v1' },
         forecastData: { segmentId: 'seg-009' },
         loading: false,
       }),
@@ -1187,7 +1277,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      `/forecast?segmentId=seg-009&basinVersionId=bv-001&source=${source}&cycle=2026-05-18T00:00:00Z`,
+      `/forecast?segmentId=seg-009&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&source=${source}&cycle=2026-05-18T00:00:00Z`,
     )
 
     render(<App />)
@@ -1211,14 +1301,15 @@ describe('App route state', () => {
         const params = (options as { params?: { path?: Record<string, unknown>; query?: Record<string, unknown> } }).params
         return {
           segmentId: params?.path?.segment_id,
+          riverNetworkVersionId: params?.query?.river_network_version_id,
           issueTime: params?.query?.issue_time,
           scenarios: params?.query?.scenarios,
         }
       }),
     ).toEqual([
-      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
-      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
-      { segmentId: 'seg-010', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+      { segmentId: 'seg-009', riverNetworkVersionId: 'rn-v1', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+      { segmentId: 'seg-009', riverNetworkVersionId: 'rn-v1', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
+      { segmentId: 'seg-010', riverNetworkVersionId: 'rn-v1', issueTime: '2026-05-18T00:00:00.000Z', scenarios },
     ])
   })
 
@@ -1226,6 +1317,7 @@ describe('App route state', () => {
     let resolveFirstRequest: (() => void) | undefined
     const forecastCalls: Array<{
       segmentId: unknown
+      riverNetworkVersionId: unknown
       issueTime: unknown
       scenarios: unknown
     }> = []
@@ -1234,6 +1326,7 @@ describe('App route state', () => {
       const options = args[1] as { params?: { path?: Record<string, unknown>; query?: Record<string, unknown> } }
       const call = {
         segmentId: options.params?.path?.segment_id,
+        riverNetworkVersionId: options.params?.query?.river_network_version_id,
         issueTime: options.params?.query?.issue_time,
         scenarios: options.params?.query?.scenarios,
       }
@@ -1286,7 +1379,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/forecast?segmentId=seg-009&basinVersionId=bv-001&source=ifs&cycle=2026-05-18T00:00:00Z',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&source=ifs&cycle=2026-05-18T00:00:00Z',
     )
 
     render(<App />)
@@ -1295,7 +1388,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/forecast?segmentId=seg-009&basinVersionId=bv-001&source=gfs&cycle=2026-05-19T00:00:00Z',
+      '/forecast?segmentId=seg-009&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&source=gfs&cycle=2026-05-19T00:00:00Z',
     )
     window.dispatchEvent(new PopStateEvent('popstate'))
 
@@ -1316,8 +1409,8 @@ describe('App route state', () => {
       }),
     )
     expect(forecastCalls).toEqual([
-      { segmentId: 'seg-009', issueTime: '2026-05-18T00:00:00.000Z', scenarios: 'IFS' },
-      { segmentId: 'seg-009', issueTime: '2026-05-19T00:00:00.000Z', scenarios: 'GFS' },
+      { segmentId: 'seg-009', riverNetworkVersionId: 'rn-v1', issueTime: '2026-05-18T00:00:00.000Z', scenarios: 'IFS' },
+      { segmentId: 'seg-009', riverNetworkVersionId: 'rn-v1', issueTime: '2026-05-19T00:00:00.000Z', scenarios: 'GFS' },
     ])
   })
 
@@ -1325,7 +1418,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?basinVersionId=bv-001&segmentId=seg-009&source=best&cycle=2026-05-18T00:00:00.123456Z&validTime=2026-05-18T14:00:00.250001%2B08:00&warningLevel=orange&q=main',
+      '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&source=best&cycle=2026-05-18T00:00:00.123456Z&validTime=2026-05-18T14:00:00.250001%2B08:00&warningLevel=orange&q=main',
     )
     const replaceState = vi.spyOn(window.history, 'replaceState')
 
@@ -1337,12 +1430,12 @@ describe('App route state', () => {
     expect(screen.getAllByText('orange').length).toBeGreaterThan(0)
     await waitFor(() =>
       expect(window.location.search).toBe(
-        '?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange&q=main',
+        '?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=orange&q=main',
       ),
     )
     const normalizedRouteReplacements = replaceState.mock.calls.filter(([, , url]) =>
       String(url).endsWith(
-        '/basins/basin-demo?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&segmentId=seg-009&warningLevel=orange&q=main',
+        '/basins/basin-demo?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=orange&q=main',
       ),
     )
     expect(normalizedRouteReplacements).toHaveLength(1)
@@ -1356,15 +1449,15 @@ describe('App route state', () => {
         ...basinSnapshot(
           'basin-demo',
           m11Layers,
-          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
-          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
+          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+          'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
           456,
           true,
         ),
         requestScope: {
           kind: 'basin-detail',
-          queryKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
-          dataKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&segmentId=seg-009',
+          queryKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+          dataKey: 'source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
           basinId: 'basin-demo',
           source: 'ifs',
           layer: 'flood-return-period',
@@ -1372,6 +1465,7 @@ describe('App route state', () => {
           validTime: '2026-05-18T06:00:00.000Z',
           basemap: 'satellite',
           basinVersionId: 'bv-001',
+          riverNetworkVersionId: 'rn-v1',
           segmentId: 'seg-009',
           warningLevel: null,
           q: null,
@@ -1384,7 +1478,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=flood-return-period&basemap=satellite&warningLevel=orange&q=main&basinVersionId=bv-001&segmentId=seg-009',
+      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=flood-return-period&basemap=satellite&warningLevel=orange&q=main&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
     )
     const replaceState = vi.spyOn(window.history, 'replaceState')
 
@@ -1403,6 +1497,7 @@ describe('App route state', () => {
           warningLevel: null,
           q: null,
           basinVersionId: 'bv-001',
+          riverNetworkVersionId: 'rn-v1',
           segmentId: 'seg-009',
         }),
       ),
@@ -1436,6 +1531,7 @@ describe('App route state', () => {
           validTime: null,
           basemap: 'vector',
           basinVersionId: 'bv-001',
+          riverNetworkVersionId: 'rn-v1',
           segmentId: 'seg-009',
           warningLevel: null,
           q: null,
@@ -1473,8 +1569,8 @@ describe('App route state', () => {
           riverSegmentId: 'seg-009',
           segmentId: 'seg-009',
           displayName: 'Segment 009',
-          modelId: null,
-          riverNetworkVersionId: null,
+          modelId: 'model-demo',
+          riverNetworkVersionId: 'rn-v1',
           currentQ: 12,
           qUnit: 'm3/s',
           returnPeriod: 2,
@@ -1499,7 +1595,7 @@ describe('App route state', () => {
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&segmentId=seg-009')
+    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
     render(<App />)
 
@@ -1523,12 +1619,13 @@ describe('App route state', () => {
         'basin-demo',
         m11Layers,
         'source=gfs&basinVersionId=bv-001',
-        'source=gfs&basinVersionId=bv-001&segmentId=seg-009',
+        'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
         null,
         true,
         [
           {
             riverSegmentId: 'seg-001',
+            riverNetworkVersionId: 'rn-v1',
             segmentId: 'seg-001',
             displayName: 'North Branch 001',
             basinVersionId: 'bv-001',
@@ -1549,6 +1646,7 @@ describe('App route state', () => {
           },
           {
             riverSegmentId: 'seg-009',
+            riverNetworkVersionId: 'rn-v1',
             segmentId: 'seg-009',
             displayName: 'Main Stem 009',
             basinVersionId: 'bv-001',
@@ -1573,7 +1671,7 @@ describe('App route state', () => {
       basinError: null,
       loadBasinDetail,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
     render(<App />)
 
@@ -1591,9 +1689,91 @@ describe('App route state', () => {
 
     fireEvent.change(screen.getByPlaceholderText('搜索河段名称或 ID'), { target: { value: '' } })
     fireEvent.change(screen.getByLabelText('预警筛选'), { target: { value: '' } })
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-river-feature-count', '2')
     await user.click(screen.getByText('North Branch 001').closest('button') as HTMLButtonElement)
     expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-001')
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
+
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
+    expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-001')
+    await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
+  })
+
+  it('replaces stale URL river network identity from clicked basin map features', async () => {
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot(
+        'basin-demo',
+        [],
+        'basinVersionId=bv-001&riverNetworkVersionId=rn-old&segmentId=seg-009',
+        'basinVersionId=bv-001&riverNetworkVersionId=rn-old&segmentId=seg-009',
+        null,
+        true,
+        [
+          {
+            riverSegmentId: 'seg-001',
+            riverNetworkVersionId: 'rn-v1',
+            segmentId: 'seg-001',
+            displayName: 'North Branch 001',
+            basinVersionId: 'bv-001',
+            streamOrder: 1,
+            lengthM: 800,
+            currentQ: 88,
+            qUnit: 'm3/s',
+            returnPeriod: 2,
+            warningLevel: 'watch',
+            qualityFlag: 'ok',
+            qualityNote: null,
+            source: 'GFS',
+            cycleTime: null,
+            validTime: null,
+            hasGeometry: true,
+            geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+            unavailableReason: null,
+          },
+          {
+            riverSegmentId: 'seg-009',
+            riverNetworkVersionId: 'rn-old',
+            segmentId: 'seg-009',
+            displayName: 'Main Stem 009',
+            basinVersionId: 'bv-001',
+            streamOrder: 3,
+            lengthM: 1200,
+            currentQ: 456,
+            qUnit: 'm3/s',
+            returnPeriod: 10,
+            warningLevel: 'warning',
+            qualityFlag: 'ok',
+            qualityNote: null,
+            source: 'GFS',
+            cycleTime: null,
+            validTime: null,
+            hasGeometry: true,
+            geometry: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+            unavailableReason: null,
+          },
+        ],
+      ),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-old&segmentId=seg-009')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
+    const params = new URLSearchParams(window.location.search)
+    expect(params.get('segmentId')).toBe('seg-001')
+    expect(params.get('riverNetworkVersionId')).toBe('rn-v1')
+    expect(params.get('basinVersionId')).toBe('bv-001')
+    await waitFor(() =>
+      expect(loadBasinDetail).toHaveBeenCalledWith(
+        'basin-demo',
+        expect.objectContaining({ segmentId: 'seg-001', riverNetworkVersionId: 'rn-v1', basinVersionId: 'bv-001' }),
+      ),
+    )
   })
 
   it.each([
@@ -1609,18 +1789,18 @@ describe('App route state', () => {
         ...basinSnapshot(
           'basin-demo',
           m11Layers,
-          `source=gfs&basinVersionId=bv-001&segmentId=seg-009&warningLevel=${warningLevel}`,
+          `source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=${warningLevel}`,
         ),
         requestScope: {
           ...basinSnapshot('basin-demo', m11Layers).requestScope,
-          queryKey: 'source=gfs&basinVersionId=bv-001&segmentId=seg-009',
-          dataKey: 'source=gfs&basinVersionId=bv-001&segmentId=seg-009',
+          queryKey: 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+          dataKey: 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
           warningLevel: null,
         },
       },
       basinLoading: false,
     })
-    window.history.pushState({}, '', `/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&warningLevel=${warningLevel}`)
+    window.history.pushState({}, '', `/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=${warningLevel}`)
 
     render(<App />)
 
@@ -1639,7 +1819,7 @@ describe('App route state', () => {
       basinError: null,
       loadBasinDetail,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
     render(<App />)
 
@@ -1665,23 +1845,37 @@ describe('App route state', () => {
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '查看详情' })).toHaveAttribute(
       'href',
-      '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
+      '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
     )
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('river_segment_id')
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('basin_version')
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('model-demo')
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('rn-v1')
+    expect(screen.getByTestId('m11-selected-segment-panel')).toHaveTextContent('当前 Q')
+    expect(screen.getByText('暂无水位差合同')).toBeInTheDocument()
+    expect(screen.getByLabelText('河段趋势')).toHaveTextContent('当前值')
+    expect(screen.getByLabelText('河段趋势')).toHaveTextContent('上升')
+    expect(screen.getByLabelText('河段趋势')).toHaveTextContent('追溯数据可用')
     expect(screen.getByRole('button', { name: '对比预报' })).toBeDisabled()
     expect(screen.queryByRole('link', { name: '对比预报' })).not.toBeInTheDocument()
+    expect(screen.getByText(/对比预报不可用/)).toBeInTheDocument()
+    expect(screen.getByLabelText('地图上下文状态')).toHaveTextContent('地图已加载当前流域边界上下文')
+    expect(screen.getByLabelText('地图上下文状态')).toHaveTextContent('城市与站点标签暂不可用')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '1')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'basin-demo')
   })
 
   it('renders selected basin segment handoffs with the resolved concrete best source and cycle', async () => {
     const resolvedCycle = '2026-05-18T00:00:00.000Z'
-    const bestBasinQueryKey = `cycle=${encodeURIComponent(resolvedCycle)}&basinVersionId=bv-001&segmentId=seg-009`
-    const bestBasinDataKey = `cycle=${encodeURIComponent(resolvedCycle)}&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009`
+    const bestBasinQueryKey = `cycle=${encodeURIComponent(resolvedCycle)}&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009`
+    const bestBasinDataKey = `cycle=${encodeURIComponent(resolvedCycle)}&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009`
     const ifsSelectedSegment = {
       ...basinSnapshot('basin-demo', m11Layers).selectedSegment!,
       sourceSelection: {
@@ -1703,7 +1897,7 @@ describe('App route state', () => {
         },
       ],
       handoffUrl:
-        '/forecast?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
+        '/forecast?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
     }
     useOverviewDataStore.setState({
       basinDetail: {
@@ -1716,35 +1910,37 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=best&cycle=2026-05-18T00:00:00Z&basinVersionId=bv-001&segmentId=seg-009',
+      '/basins/basin-demo?source=best&cycle=2026-05-18T00:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
     )
 
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
-    for (const linkName of ['查看详情', '对比预报']) {
-      const href = screen.getByRole('link', { name: linkName }).getAttribute('href')
-      expect(href).toContain('/forecast?source=ifs&')
-      expect(href).toContain('cycle=2026-05-18T00%3A00%3A00.000Z')
-      expect(href).not.toContain('source=best')
-    }
+    const href = screen.getByRole('link', { name: '查看详情' }).getAttribute('href')
+    expect(href).toContain('/forecast?source=ifs&')
+    expect(href).toContain('cycle=2026-05-18T00%3A00%3A00.000Z')
+    expect(href).not.toContain('source=best')
+    expect(screen.getByRole('button', { name: '对比预报' })).toBeEnabled()
   })
 
-  it('enables selected basin segment comparison handoff when comparison data is available', async () => {
+  it('enables selected basin segment comparison overlay when comparison data is available', async () => {
+    const user = userEvent.setup()
     useOverviewDataStore.setState({
       basinDetail: basinSnapshot('basin-demo', m11Layers, basinDefaultScopeKey, basinValid06ScopeKey, 12, true),
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '对比预报' })).toHaveAttribute(
-      'href',
-      '/forecast?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&segmentId=seg-009',
-    )
+    await user.click(screen.getByRole('button', { name: '对比预报' }))
+    expect(screen.getByRole('button', { name: '对比预报' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('GFS')
+    expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('IFS')
+    expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('12 m3/s')
+    expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('19 m3/s')
   })
 
   it('does not correct basin valid time from a stale basin snapshot', async () => {
@@ -1757,7 +1953,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-16T00:00:00Z',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-16T00:00:00Z',
     )
 
     render(<App />)
@@ -1782,7 +1978,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
     )
 
     render(<App />)
@@ -1804,7 +2000,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-18T00:00:00Z',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T00:00:00Z',
     )
 
     render(<App />)
@@ -1825,7 +2021,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
+      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
     )
 
     render(<App />)
@@ -1850,7 +2046,7 @@ describe('App route state', () => {
       },
       basinLoading: false,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009')
+    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
     render(<App />)
 
@@ -1925,8 +2121,8 @@ describe('App route state', () => {
       basinDetail: {
         requestScope: {
           kind: 'basin-detail',
-          queryKey: 'basinVersionId=bv-001&segmentId=missing-seg',
-          dataKey: 'basinVersionId=bv-001&segmentId=missing-seg',
+          queryKey: 'basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=missing-seg',
+          dataKey: 'basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=missing-seg',
           basinId: 'basin-demo',
           source: 'best',
           layer: 'discharge',
@@ -1934,6 +2130,7 @@ describe('App route state', () => {
           validTime: null,
           basemap: 'vector',
           basinVersionId: 'bv-001',
+          riverNetworkVersionId: 'rn-v1',
           segmentId: 'missing-seg',
           warningLevel: null,
           q: null,
@@ -1988,7 +2185,7 @@ describe('App route state', () => {
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&segmentId=missing-seg')
+    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=missing-seg')
 
     render(<App />)
 
@@ -2027,6 +2224,7 @@ describe('App route state', () => {
         scenario_id: 'forecast_gfs_deterministic',
         model_id: 'model-1',
         basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-v1',
         source_id: 'gfs',
         cycle_time: '2026-05-12T00:00:00Z',
         status: 'frequency_done',
@@ -2051,6 +2249,7 @@ describe('App route state', () => {
             segmentId: 'seg-1',
             segmentName: 'Flood Segment 1',
             basinVersionId: 'basin-v1',
+            riverNetworkVersionId: 'rivnet-v1',
             qValue: 1234,
             qUnit: 'm3/s',
             returnPeriod: 20,
@@ -2121,6 +2320,7 @@ describe('App route state', () => {
         scenario_id: 'forecast_gfs_deterministic',
         model_id: 'model-1',
         basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-v1',
         source_id: 'gfs',
         cycle_time: '2026-05-12T00:00:00Z',
         status: 'frequency_done',
@@ -2145,6 +2345,7 @@ describe('App route state', () => {
             segmentId: 'seg-1',
             segmentName: 'Flood Segment 1',
             basinVersionId: 'basin-v1',
+            riverNetworkVersionId: 'rivnet-v1',
             qValue: 1234,
             qUnit: 'm3/s',
             returnPeriod: 20,
@@ -2160,6 +2361,7 @@ describe('App route state', () => {
         runId: 'run-flood-1',
         segmentId: 'seg-1',
         riverSegmentId: 'seg-1',
+        riverNetworkVersionId: 'rivnet-v1',
         timesteps: [],
         peak: null,
         frequencyThresholds: null,
@@ -2186,6 +2388,7 @@ describe('App route state', () => {
           params: expect.objectContaining({
             path: { basin_version_id: 'basin-v1', segment_id: 'seg-1' },
             query: expect.objectContaining({
+              river_network_version_id: 'rivnet-v1',
               issue_time: '2026-05-12T00:00:00.000Z',
               scenarios: 'GFS',
               include_analysis: true,
@@ -2209,6 +2412,105 @@ describe('App route state', () => {
       }),
     )
     expect(screen.getByTestId('mock-echarts-option')).toHaveTextContent('GFS 预报')
+  })
+
+  it('does not reuse a previous selected segment network when the next segment needs run fallback', async () => {
+    const user = userEvent.setup()
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    const fetchTimeline = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        segment_id: 'seg-1',
+        issue_time: '2026-05-12T00:00:00Z',
+        unit: 'm3/s',
+        series: [],
+        frequency_thresholds: null,
+      }),
+      error: undefined,
+    } as never)
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-flood-1',
+      latestRun: {
+        run_id: 'run-flood-1',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-run',
+        source_id: 'gfs',
+        cycle_time: '2026-05-12T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-12T00:00:00Z',
+        end_time: '2026-05-12T03:00:00Z',
+        created_at: '2026-05-12T00:00:00Z',
+        updated_at: '2026-05-12T04:00:00Z',
+      },
+      rankingData: {
+        items: [
+          {
+            rank: 1,
+            riverSegmentId: 'seg-scoped',
+            segmentId: 'seg-scoped',
+            segmentName: 'Scoped Flood Segment',
+            basinVersionId: 'basin-v1',
+            riverNetworkVersionId: 'rivnet-selected',
+            qValue: 200,
+            qUnit: 'm3/s',
+            returnPeriod: 20,
+            warningLevel: 'warning',
+            validTime: '2026-05-12T03:00:00Z',
+          },
+          {
+            rank: 2,
+            riverSegmentId: 'seg-unscoped',
+            segmentId: 'seg-unscoped',
+            segmentName: 'Run Fallback Segment',
+            basinVersionId: 'basin-v1',
+            qValue: 100,
+            qUnit: 'm3/s',
+            returnPeriod: 5,
+            warningLevel: 'watch',
+            validTime: '2026-05-12T03:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      timelineData: {
+        runId: 'run-flood-1',
+        segmentId: 'seg-unscoped',
+        riverSegmentId: 'seg-unscoped',
+        riverNetworkVersionId: 'rivnet-run',
+        timesteps: [],
+        peak: null,
+        frequencyThresholds: null,
+        qualityNote: null,
+      },
+      fetchLatestFrequencyDoneRun,
+      fetchTimeline,
+    })
+    window.history.pushState({}, '', '/flood-alerts')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    await user.click(screen.getByRole('row', { name: /Scoped Flood Segment/ }))
+    expect(useForecastStore.getState().selectedSegment?.riverNetworkVersionId).toBe('rivnet-selected')
+    await user.click(screen.getByRole('button', { name: '关闭详情' }))
+    await user.click(screen.getByRole('row', { name: /Run Fallback Segment/ }))
+
+    await waitFor(() =>
+      expect(useForecastStore.getState().selectedSegment).toMatchObject({
+        segmentId: 'seg-unscoped',
+        riverNetworkVersionId: 'rivnet-run',
+      }),
+    )
+    const forecastQueries = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => String(path).endsWith('/forecast-series'))
+      .map(([, options]) => options?.params?.query as Record<string, unknown>)
+    expect(forecastQueries.at(-1)).toMatchObject({ river_network_version_id: 'rivnet-run' })
+    expect(forecastQueries.map((query) => query.river_network_version_id)).toEqual(['rivnet-selected', 'rivnet-run'])
   })
 
   it('binds flood-alert detail forecast requests to an explicitly routed older flood run cycle', async () => {
@@ -2241,6 +2543,7 @@ describe('App route state', () => {
         scenario_id: 'forecast_gfs_deterministic',
         model_id: 'model-1',
         basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-v1',
         source_id: 'gfs',
         cycle_time: '2026-05-12T00:00:00Z',
         status: 'frequency_done',
@@ -2265,6 +2568,7 @@ describe('App route state', () => {
             segmentId: 'seg-older',
             segmentName: 'Older Flood Segment',
             basinVersionId: 'basin-v1',
+            riverNetworkVersionId: 'rivnet-v1',
             qValue: 456,
             qUnit: 'm3/s',
             returnPeriod: 10,
@@ -2280,6 +2584,7 @@ describe('App route state', () => {
         runId: 'run-older-gfs',
         segmentId: 'seg-older',
         riverSegmentId: 'seg-older',
+        riverNetworkVersionId: 'rivnet-v1',
         timesteps: [],
         peak: null,
         frequencyThresholds: null,
@@ -2311,6 +2616,7 @@ describe('App route state', () => {
           params: expect.objectContaining({
             path: { basin_version_id: 'basin-v1', segment_id: 'seg-older' },
             query: expect.objectContaining({
+              river_network_version_id: 'rivnet-v1',
               issue_time: '2026-05-12T00:00:00.000Z',
               scenarios: 'GFS',
             }),
@@ -2357,6 +2663,7 @@ describe('App route state', () => {
         scenario_id: 'forecast_gfs_deterministic',
         model_id: 'model-1',
         basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-v1',
         source_id: 'gfs',
         cycle_time: '2026-05-12T00:00:00Z',
         status: 'frequency_done',
@@ -2413,6 +2720,7 @@ describe('App route state', () => {
       scenario_id: 'forecast_gfs_deterministic',
       model_id: 'model-1',
       basin_version_id: 'basin-v1',
+      river_network_version_id: 'rivnet-v1',
       source_id: 'gfs',
       cycle_time: '2026-05-12T00:00:00Z',
       status: 'frequency_done',
@@ -2452,6 +2760,7 @@ describe('App route state', () => {
             segmentId: 'old-seg',
             segmentName: 'Old Segment',
             basinVersionId: 'basin-v1',
+            riverNetworkVersionId: 'rivnet-v1',
             qValue: 1234,
             qUnit: 'm3/s',
             returnPeriod: 20,
@@ -2467,6 +2776,7 @@ describe('App route state', () => {
         runId: 'run-old-gfs',
         segmentId: 'old-seg',
         riverSegmentId: 'old-seg',
+        riverNetworkVersionId: 'rivnet-v1',
         timesteps: [{ validTime: '2026-05-12T03:00:00Z', returnPeriod: 20, warningLevel: 'warning' }],
       },
       fetchLatestFrequencyDoneRun: async () => {

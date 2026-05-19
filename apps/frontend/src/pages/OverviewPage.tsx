@@ -31,11 +31,22 @@ export function OverviewPage() {
       layer: state.layer,
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
+      riverNetworkVersionId: state.riverNetworkVersionId,
       segmentId: state.segmentId,
       warningLevel: state.warningLevel,
       q: state.q,
     }),
-    [state.basinVersionId, state.cycle, state.layer, state.q, state.segmentId, state.source, state.validTime, state.warningLevel],
+    [
+      state.basinVersionId,
+      state.cycle,
+      state.layer,
+      state.q,
+      state.riverNetworkVersionId,
+      state.segmentId,
+      state.source,
+      state.validTime,
+      state.warningLevel,
+    ],
   )
   const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
   const overview = useOverviewDataStore((store) => store.overview)
@@ -488,6 +499,7 @@ function basinAnalysisHref(basin: OverviewBasin, state: ReturnType<typeof parseM
   const segmentId = basinVersionId && basinVersionId === state.basinVersionId ? state.segmentId : null
   return m11QueryHref(`/basins/${encodeURIComponent(basin.basinId)}`, state, {
     basinVersionId,
+    riverNetworkVersionId: basinVersionId && basinVersionId === state.basinVersionId ? state.riverNetworkVersionId : null,
     segmentId,
   })
 }

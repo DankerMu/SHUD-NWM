@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any, Literal
@@ -10,12 +11,15 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from apps.api.errors import ApiError
 from packages.common.model_registry import (
+    RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
+    RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
     DuplicateResourceError,
     InvalidPayloadError,
     InvalidReferenceError,
     MissingResourceError,
     ModelRegistryError,
     PsycopgModelRegistryStore,
+    RiverSegmentGeoJsonBudgetError,
 )
 from workers.model_registry.validator import ModelPackageValidationError, validate_model_package_uri
 
@@ -178,6 +182,22 @@ def _handle_registry_error(error: Exception) -> ApiError:
             message=str(error),
             details={"error_type": error.__class__.__name__},
         )
+    if isinstance(error, RiverSegmentGeoJsonBudgetError):
+        return ApiError(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            code="RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED",
+            message=(
+                "River segment GeoJSON payload budget exceeded; request fewer segments "
+                "or a more specific river network."
+            ),
+            details={
+                "error_type": error.__class__.__name__,
+                "limit_type": error.limit_type,
+                "max_bytes": error.max_bytes,
+                "serialized_bytes": error.serialized_bytes,
+                "scope": error.scope,
+            },
+        )
     if isinstance(error, ModelRegistryError):
         logger.error(
             "Model registry operation failed.",
@@ -241,7 +261,14 @@ def create_river_network(
         raise _handle_registry_error(error) from error
 
 
-@router.get("/basin-versions/{basin_version_id}/river-segments")
+@router.get(
+    "/basin-versions/{basin_version_id}/river-segments",
+    responses={
+        status.HTTP_413_CONTENT_TOO_LARGE: {
+            "description": "River segment GeoJSON payload budget exceeded.",
+        },
+    },
+)
 def list_river_segments(
     request: Request,
     basin_version_id: str,
@@ -251,19 +278,72 @@ def list_river_segments(
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
+        data = store.list_river_segments(
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+            limit=limit,
+            offset=offset,
+        )
+        _enforce_river_segment_response_budget(
+            data,
+            max_bytes=RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
+            scope="collection",
+        )
         return _ok(
             request,
-            store.list_river_segments(
-                basin_version_id=basin_version_id,
-                river_network_version_id=river_network_version_id,
-                limit=limit,
-                offset=offset,
-            ),
+            data,
         )
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
         raise _handle_registry_error(error) from error
+
+
+@router.get(
+    "/basin-versions/{basin_version_id}/river-segments/{segment_id}",
+    responses={
+        status.HTTP_413_CONTENT_TOO_LARGE: {
+            "description": "River segment GeoJSON payload budget exceeded.",
+        },
+    },
+)
+def get_river_segment(
+    request: Request,
+    basin_version_id: str,
+    segment_id: str,
+    river_network_version_id: str = Query(..., min_length=1),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        data = store.get_river_segment(
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+            segment_id=segment_id,
+        )
+        _enforce_river_segment_response_budget(
+            data,
+            max_bytes=RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
+            scope="detail",
+        )
+        return _ok(
+            request,
+            data,
+        )
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
+def _enforce_river_segment_response_budget(payload: dict[str, Any], *, max_bytes: int, scope: str) -> None:
+    serialized_bytes = len(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"))
+    if serialized_bytes > max_bytes:
+        raise RiverSegmentGeoJsonBudgetError(
+            limit_type="serialized_bytes",
+            max_bytes=max_bytes,
+            serialized_bytes=serialized_bytes,
+            scope=scope,
+        )
 
 
 @router.post("/mesh-versions", status_code=status.HTTP_201_CREATED)

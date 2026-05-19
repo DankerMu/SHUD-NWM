@@ -49,6 +49,7 @@ export interface M11SnapshotRequestScope {
   validTime: string | null
   basemap: M11QueryState['basemap']
   basinVersionId: string | null
+  riverNetworkVersionId: string | null
   segmentId: string | null
   warningLevel: M11QueryState['warningLevel']
   q: string | null
@@ -113,8 +114,10 @@ type OverviewRequestPlan = {
 type ResolvedSegmentIdentifiers = {
   requestedId: string
   riverSegmentId: string
+  riverNetworkVersionId: string
   segmentId: string
   detailEndpointSegmentId: string
+  detailEndpointRiverNetworkVersionId: string
   forecastSegmentId: string
   timelineSegmentId: string
   lineageSegmentId: string
@@ -128,9 +131,27 @@ type BasinVersionRunFetchResult = {
   failed: boolean
 }
 
+type ReadyRunStatusPages = Partial<Record<ReadyRunStatus, ApiHydroRunPage>>
+
+type ReadyRunPage = ApiHydroRunPage & {
+  readyStatusPages?: ReadyRunStatusPages
+}
+
+type ReadyRunCursor = {
+  status: ReadyRunStatus
+  offset: number
+  total: number
+}
+
 type RiverSegmentFetchResult = {
   collection: ApiRiverFeatureCollection
   reachedCap: boolean
+  truncated: boolean
+}
+
+type BasinActiveRiverNetwork = {
+  model: ApiModelInstance | null
+  riverNetworkVersionId: string | null
 }
 
 const COMPARE_FLOOD_SUMMARY_UNAVAILABLE = '对比模式洪水摘要需要 GFS+IFS 聚合端点'
@@ -143,6 +164,8 @@ const RUN_LOOKUP_MAX_RETAINED_ITEMS = 1_000
 const RIVER_SEGMENT_PAGE_LIMIT = 1_000
 const RIVER_SEGMENT_MAX_PAGES = 10
 const RIVER_SEGMENT_MAX_ITEMS = 10_000
+const READY_RUN_STATUSES = ['frequency_done', 'published'] as const
+type ReadyRunStatus = (typeof READY_RUN_STATUSES)[number]
 
 const cache = new Map<string, CacheEntry<unknown>>()
 const CACHE_TTL_MS = 60_000
@@ -196,6 +219,7 @@ function overviewRequestScope(query: M11QueryState): M11OverviewRequestScope {
     validTime: query.validTime,
     basemap: query.basemap,
     basinVersionId: query.basinVersionId,
+    riverNetworkVersionId: query.riverNetworkVersionId,
     segmentId: query.segmentId,
     warningLevel: query.warningLevel,
     q: query.q,
@@ -315,6 +339,29 @@ function latestPublishedRun(runs: ApiHydroRunPage | null, query?: M11QueryState)
   })[0] ?? null
 }
 
+function mergeRunPages(pages: ApiHydroRunPage[], statuses: readonly ReadyRunStatus[] = READY_RUN_STATUSES): ReadyRunPage {
+  const byRunId = new Map<string, ApiHydroRun>()
+  pages.forEach((page) => {
+    page.items.forEach((run) => {
+      byRunId.set(run.run_id, run)
+    })
+  })
+  const limit = Math.max(...pages.map((page) => page.limit ?? page.items.length), 0)
+  const total = Math.max(...pages.map((page) => page.total ?? page.items.length), byRunId.size)
+  const readyStatusPages = statuses.reduce<ReadyRunStatusPages>((acc, status, index) => {
+    const page = pages[index]
+    if (page) acc[status] = page
+    return acc
+  }, {})
+  return {
+    items: [...byRunId.values()],
+    total,
+    limit,
+    offset: pages[0]?.offset ?? 0,
+    readyStatusPages,
+  }
+}
+
 function latestPublishedRunForBasinVersion(
   runs: ApiHydroRunPage | null,
   basinVersionId: string | null | undefined,
@@ -358,6 +405,35 @@ function concreteQueryForSurfaces(query: M11QueryState, run: ApiHydroRun | null)
 
 function hasResolvedSurfaceSource(query: M11QueryState, run: ApiHydroRun | null): boolean {
   return query.source !== 'best' || Boolean(concreteSourceFromRun(run))
+}
+
+function resolveActiveRiverNetwork(models: ApiModelInstance[], latestRun: ApiHydroRun | null): BasinActiveRiverNetwork {
+  const runModel = latestRun?.model_id ? models.find((model) => model.model_id === latestRun.model_id) : null
+  const selectedModel = runModel ?? models[0] ?? null
+  return {
+    model: selectedModel,
+    riverNetworkVersionId: selectedModel?.river_network_version_id ?? null,
+  }
+}
+
+async function resolveBasinRiverNetwork(
+  models: ApiModelInstance[],
+  latestRun: ApiHydroRun | null,
+  errors: string[],
+): Promise<BasinActiveRiverNetwork> {
+  const runModel = latestRun?.model_id ? models.find((model) => model.model_id === latestRun.model_id) : null
+  if (runModel || !latestRun?.model_id) return resolveActiveRiverNetwork(models, latestRun)
+
+  try {
+    const exactRunModel = await fetchModel(latestRun.model_id)
+    return {
+      model: exactRunModel,
+      riverNetworkVersionId: exactRunModel.river_network_version_id ?? null,
+    }
+  } catch {
+    errors.push(safeM11ErrorMessage('model detail'))
+    return resolveActiveRiverNetwork(models, latestRun)
+  }
 }
 
 function runsForSourceSelection(query: M11QueryState, runs: ApiHydroRun[], latestRun: ApiHydroRun | null): ApiHydroRun[] {
@@ -440,7 +516,7 @@ async function fetchBasinVersions(basinId: string) {
 
 async function fetchModels(basinVersionId?: string) {
   return cached(
-    cacheKey('/api/v1/models', { basinVersionId: basinVersionId ?? 'all-active' }),
+    cacheKey('/api/v1/models', { basinVersionId: basinVersionId ?? 'all', active: 'true' }),
     () =>
       getApi<ModelInstancePage>(
         '/api/v1/models',
@@ -450,10 +526,28 @@ async function fetchModels(basinVersionId?: string) {
   )
 }
 
-async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, limit: number, offset: number) {
+async function fetchModel(modelId: string) {
+  return cached(
+    cacheKey('/api/v1/models/{model_id}', { modelId }),
+    () =>
+      getApi<ApiModelInstance>(
+        '/api/v1/models/{model_id}',
+        { params: { path: { model_id: modelId } } },
+        '获取模型资产详情失败',
+      ),
+  )
+}
+
+async function fetchRunsPageByStatus(
+  query: M11QueryState,
+  basinId: string | undefined,
+  limit: number,
+  offset: number,
+  status: ReadyRunStatus,
+) {
   const source = sourceForApi(query.source)
   return cached(
-    cacheKey('/api/v1/runs', { basinId, source, cycleTime: query.cycle ?? 'latest', status: 'frequency_done', limit, offset }),
+    cacheKey('/api/v1/runs', { basinId, source, cycleTime: query.cycle ?? 'latest', status, limit, offset }),
     () =>
       getApi<ApiHydroRunPage>(
         '/api/v1/runs',
@@ -463,7 +557,7 @@ async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, 
               basin_id: basinId,
               source,
               cycle_time: query.cycle ?? undefined,
-              status: 'frequency_done',
+              status,
               limit,
               offset,
             },
@@ -474,6 +568,11 @@ async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, 
   )
 }
 
+async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, limit: number, offset: number) {
+  const pages = await Promise.all(READY_RUN_STATUSES.map((status) => fetchRunsPageByStatus(query, basinId, limit, offset, status)))
+  return mergeRunPages(pages)
+}
+
 async function fetchRuns(query: M11QueryState, basinId?: string) {
   return fetchRunsPage(query, basinId, 20, 0)
 }
@@ -482,52 +581,83 @@ async function fetchRunsForBasinVersion(
   query: M11QueryState,
   basinId: string,
   basinVersionId: string | null | undefined,
-  initialPage: ApiHydroRunPage | null,
+  initialPage: ReadyRunPage | null,
 ): Promise<BasinVersionRunFetchResult> {
   if (!basinVersionId || !initialPage) return { page: initialPage, reachedCap: false, failed: false }
 
-  const initialItems = initialPage.items
-  const items = initialItems.filter((run) => run.basin_version_id === basinVersionId)
+  const initialStatusPages = initialPage.readyStatusPages ?? { frequency_done: initialPage }
+  const byRunId = new Map<string, ApiHydroRun>()
+  const addPageItems = (page: ApiHydroRunPage) => {
+    for (const run of page.items) {
+      if (run.basin_version_id !== basinVersionId) continue
+      if (byRunId.size >= RUN_LOOKUP_MAX_RETAINED_ITEMS && !byRunId.has(run.run_id)) break
+      byRunId.set(run.run_id, run)
+    }
+  }
+  READY_RUN_STATUSES.forEach((status) => {
+    const page = initialStatusPages[status]
+    if (page) addPageItems(page)
+  })
+  const pageFromItems = (offset = initialPage.offset ?? 0): ApiHydroRunPage => ({
+    items: [...byRunId.values()],
+    total: Math.max(...READY_RUN_STATUSES.map((status) => initialStatusPages[status]?.total ?? 0), byRunId.size),
+    limit: byRunId.size,
+    offset,
+  })
+  const cursors: ReadyRunCursor[] = READY_RUN_STATUSES.flatMap((status) => {
+    const page = initialStatusPages[status]
+    if (!page) return []
+    const pageOffset = page.offset ?? 0
+    const fetched = page.limit || page.items.length || 20
+    return [
+      {
+        status,
+        offset: pageOffset + fetched,
+        total: page.total ?? page.items.length,
+      },
+    ]
+  })
   let page: ApiHydroRunPage = {
-    items,
-    total: initialPage.total ?? initialItems.length,
-    limit: items.length,
-    offset: initialPage.offset ?? 0,
+    ...pageFromItems(),
   }
   if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
 
-  const firstOffset = initialPage.offset ?? 0
-  const firstLimit = initialPage.limit || initialItems.length || 20
-  let offset = firstOffset + firstLimit
-  let total = initialPage.total ?? initialItems.length
   let extraPages = 0
   let reachedCap = false
 
-  while (offset < total && extraPages < RUN_LOOKUP_MAX_EXTRA_PAGES && items.length < RUN_LOOKUP_MAX_RETAINED_ITEMS) {
-    let nextPage: ApiHydroRunPage
+  while (
+    cursors.some((cursor) => cursor.offset < cursor.total) &&
+    extraPages < RUN_LOOKUP_MAX_EXTRA_PAGES &&
+    byRunId.size < RUN_LOOKUP_MAX_RETAINED_ITEMS
+  ) {
+    let nextPages: Array<{ cursor: ReadyRunCursor; page: ApiHydroRunPage }>
     try {
-      nextPage = await fetchRunsPage(query, basinId, RUN_LOOKUP_PAGE_LIMIT, offset)
+      nextPages = await Promise.all(
+        cursors
+          .filter((cursor) => cursor.offset < cursor.total)
+          .map(async (cursor) => ({
+            cursor,
+            page: await fetchRunsPageByStatus(query, basinId, RUN_LOOKUP_PAGE_LIMIT, cursor.offset, cursor.status),
+          })),
+      )
     } catch {
       return { page, reachedCap: false, failed: true }
     }
     extraPages += 1
-    const remaining = RUN_LOOKUP_MAX_RETAINED_ITEMS - items.length
-    items.push(...nextPage.items.filter((run) => run.basin_version_id === basinVersionId).slice(0, remaining))
-    total = nextPage.total ?? total
-    page = {
-      items,
-      total,
-      limit: items.length,
-      offset: firstOffset,
-    }
+    nextPages.forEach(({ cursor, page: statusPage }) => {
+      addPageItems(statusPage)
+      cursor.total = statusPage.total ?? cursor.total
+      const fetched = statusPage.limit || statusPage.items.length || RUN_LOOKUP_PAGE_LIMIT
+      cursor.offset += fetched
+    })
+    page = pageFromItems()
     if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
-
-    const fetched = nextPage.items.length || nextPage.limit || RUN_LOOKUP_PAGE_LIMIT
-    offset += fetched
-    if (fetched <= 0) break
+    if (nextPages.every(({ page: statusPage }) => (statusPage.limit || statusPage.items.length || RUN_LOOKUP_PAGE_LIMIT) <= 0)) break
   }
 
-  reachedCap = offset < total && (extraPages >= RUN_LOOKUP_MAX_EXTRA_PAGES || items.length >= RUN_LOOKUP_MAX_RETAINED_ITEMS)
+  reachedCap =
+    cursors.some((cursor) => cursor.offset < cursor.total) &&
+    (extraPages >= RUN_LOOKUP_MAX_EXTRA_PAGES || byRunId.size >= RUN_LOOKUP_MAX_RETAINED_ITEMS)
   return { page, reachedCap, failed: false }
 }
 
@@ -607,13 +737,28 @@ async function fetchLayerValidTimes(layerId: string) {
   )
 }
 
-async function fetchRiverSegmentsPage(basinVersionId: string, limit: number, offset: number) {
+async function fetchRiverSegmentsPage(
+  basinVersionId: string,
+  riverNetworkVersionId: string | null,
+  limit: number,
+  offset: number,
+) {
   return cached(
-    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments', { basinVersionId, limit, offset }),
+    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments', {
+      basinVersionId,
+      riverNetworkVersionId: riverNetworkVersionId ?? 'all',
+      limit,
+      offset,
+    }),
     () =>
       getApi<ApiRiverFeatureCollection>(
         '/api/v1/basin-versions/{basin_version_id}/river-segments',
-        { params: { path: { basin_version_id: basinVersionId }, query: { limit, offset } } },
+        {
+          params: {
+            path: { basin_version_id: basinVersionId },
+            query: { river_network_version_id: riverNetworkVersionId ?? undefined, limit, offset },
+          },
+        },
         '获取河段列表失败',
       ),
   )
@@ -628,32 +773,46 @@ function containsSegment(collection: ApiRiverFeatureCollection, segmentId: strin
   )
 }
 
-async function fetchRiverSegments(basinVersionId: string, segmentId: string | null): Promise<RiverSegmentFetchResult> {
-  const firstPage = await fetchRiverSegmentsPage(basinVersionId, RIVER_SEGMENT_PAGE_LIMIT, 0)
-  const features = [...firstPage.features]
-  let collection: ApiRiverFeatureCollection = { ...firstPage, features }
-  let total = firstPage.total ?? firstPage.feature_total ?? features.length
+async function fetchRiverSegments(
+  basinVersionId: string,
+  riverNetworkVersionId: string | null,
+  segmentId: string | null,
+): Promise<RiverSegmentFetchResult> {
+  const firstPage = await fetchRiverSegmentsPage(basinVersionId, riverNetworkVersionId, RIVER_SEGMENT_PAGE_LIMIT, 0)
+  const total = firstPage.total ?? firstPage.feature_total ?? firstPage.features.length
+  const firstPageFeatures = firstPage.features.slice(0, RIVER_SEGMENT_MAX_ITEMS)
+  const truncated = firstPage.features.length > firstPageFeatures.length
+  const features = [...firstPageFeatures]
+  let collection: ApiRiverFeatureCollection = {
+    ...firstPage,
+    features,
+    total,
+    feature_total: firstPage.feature_total ?? total,
+    limit: features.length,
+    offset: 0,
+  }
+  let reportedTotal = total
   let offset = (firstPage.offset ?? 0) + (firstPage.limit || firstPage.features.length || RIVER_SEGMENT_PAGE_LIMIT)
   let pages = 1
   const shouldFindRequestedSegment = Boolean(segmentId)
 
   while (
     shouldFindRequestedSegment &&
-    offset < total &&
+    offset < reportedTotal &&
     pages < RIVER_SEGMENT_MAX_PAGES &&
     features.length < RIVER_SEGMENT_MAX_ITEMS &&
     !containsSegment(collection, segmentId)
   ) {
-    const nextPage = await fetchRiverSegmentsPage(basinVersionId, RIVER_SEGMENT_PAGE_LIMIT, offset)
+    const nextPage = await fetchRiverSegmentsPage(basinVersionId, riverNetworkVersionId, RIVER_SEGMENT_PAGE_LIMIT, offset)
     pages += 1
     const remaining = RIVER_SEGMENT_MAX_ITEMS - features.length
     features.push(...nextPage.features.slice(0, remaining))
-    total = nextPage.total ?? nextPage.feature_total ?? total
+    reportedTotal = nextPage.total ?? nextPage.feature_total ?? reportedTotal
     collection = {
       ...nextPage,
       features,
-      total,
-      feature_total: nextPage.feature_total ?? total,
+      total: reportedTotal,
+      feature_total: nextPage.feature_total ?? reportedTotal,
       limit: features.length,
       offset: 0,
     }
@@ -665,31 +824,41 @@ async function fetchRiverSegments(basinVersionId: string, segmentId: string | nu
 
   const reachedCap =
     shouldFindRequestedSegment &&
-    offset < total &&
+    (offset < reportedTotal || truncated) &&
     !containsSegment(collection, segmentId) &&
     (pages >= RIVER_SEGMENT_MAX_PAGES || features.length >= RIVER_SEGMENT_MAX_ITEMS)
-  return { collection, reachedCap }
+  return { collection, reachedCap, truncated }
 }
 
-async function fetchRiverSegment(basinVersionId: string, segmentId: string) {
+async function fetchRiverSegment(basinVersionId: string, riverNetworkVersionId: string, segmentId: string) {
   return cached(
-    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}', { basinVersionId, segmentId }),
+    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}', {
+      basinVersionId,
+      riverNetworkVersionId,
+      segmentId,
+    }),
     () =>
       getApi<ApiRiverSegment>(
         '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}',
-        { params: { path: { basin_version_id: basinVersionId, segment_id: segmentId } } },
+        {
+          params: {
+            path: { basin_version_id: basinVersionId, segment_id: segmentId },
+            query: { river_network_version_id: riverNetworkVersionId },
+          },
+        },
         '获取河段详情失败',
       ),
   )
 }
 
-async function fetchForecast(basinVersionId: string, segmentId: string, query: M11QueryState) {
+async function fetchForecast(basinVersionId: string, riverNetworkVersionId: string, segmentId: string, query: M11QueryState) {
   const scenarios = scenariosForQuery(query.source)
   if (!scenarios) return null
 
   return cached(
     cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series', {
       basinVersionId,
+      riverNetworkVersionId,
       segmentId,
       source: query.source,
       cycle: query.cycle ?? 'latest',
@@ -701,6 +870,7 @@ async function fetchForecast(basinVersionId: string, segmentId: string, query: M
           params: {
             path: { basin_version_id: basinVersionId, segment_id: segmentId },
             query: {
+              river_network_version_id: riverNetworkVersionId,
               issue_time: query.cycle ?? 'latest',
               variables: 'q_down',
               scenarios,
@@ -713,25 +883,42 @@ async function fetchForecast(basinVersionId: string, segmentId: string, query: M
   )
 }
 
-async function fetchFloodTimeline(runId: string, segmentId: string) {
+async function fetchFloodTimeline(runId: string, segmentId: string, riverNetworkVersionId: string) {
   return cached(
-    cacheKey('/api/v1/flood-alerts/timeline', { runId, segmentId }),
+    cacheKey('/api/v1/flood-alerts/timeline', { runId, segmentId, riverNetworkVersionId }),
     () =>
       getApi<ApiFloodAlertTimeline>(
         '/api/v1/flood-alerts/timeline',
-        { params: { query: { run_id: runId, segment_id: segmentId } } },
+        { params: { query: { run_id: runId, segment_id: segmentId, river_network_version_id: riverNetworkVersionId } } },
         '获取洪水预警时间线失败',
       ),
   )
 }
 
-async function fetchLineage(runId: string, segmentId: string, query: M11QueryState) {
+function rankingMatchesSelectedSegment(item: ApiFloodAlertRanking['items'][number], selected: ResolvedSegmentIdentifiers): boolean {
+  return (
+    item.river_network_version_id === selected.riverNetworkVersionId &&
+    (item.river_segment_id === selected.riverSegmentId || item.segment_id === selected.segmentId)
+  )
+}
+
+async function fetchLineage(runId: string, riverNetworkVersionId: string, segmentId: string, query: M11QueryState) {
   return cached(
-    cacheKey('/api/v1/lineage/river-point', { runId, segmentId, validTime: query.validTime, variable: 'q_down' }),
+    cacheKey('/api/v1/lineage/river-point', { runId, riverNetworkVersionId, segmentId, validTime: query.validTime, variable: 'q_down' }),
     () =>
       getApi<ApiLineageResponse>(
         '/api/v1/lineage/river-point',
-        { params: { query: { run_id: runId, segment_id: segmentId, valid_time: query.validTime ?? undefined, variable: 'q_down' } } },
+        {
+          params: {
+            query: {
+              run_id: runId,
+              river_network_version_id: riverNetworkVersionId,
+              segment_id: segmentId,
+              valid_time: query.validTime ?? undefined,
+              variable: 'q_down',
+            },
+          },
+        },
         '获取河段追溯失败',
       ),
   )
@@ -921,16 +1108,27 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         partialErrors.push('runs: Same-version run lookup failed before resolving the selected basin version run.')
       }
 
-      const [modelsResult, segmentsResult, rankingResult, ...validTimeResults] = await Promise.allSettled([
-        selectedVersion ? fetchModels(selectedVersion.basin_version_id) : Promise.resolve(null),
-        selectedVersion ? fetchRiverSegments(selectedVersion.basin_version_id, query.segmentId) : Promise.resolve(null),
+      let models: ApiModelInstance[] = []
+      if (selectedVersion) {
+        const [modelsResult] = await Promise.allSettled([fetchModels(selectedVersion.basin_version_id)])
+        models = (settledValue(modelsResult, partialErrors, 'models')?.items ?? []) as ApiModelInstance[]
+      }
+      const activeRiverNetwork = await resolveBasinRiverNetwork(models, latestRun, partialErrors)
+      const [segmentsResult, rankingResult, ...validTimeResults] = await Promise.allSettled([
+        selectedVersion
+          ? fetchRiverSegments(selectedVersion.basin_version_id, activeRiverNetwork.riverNetworkVersionId, query.segmentId)
+          : Promise.resolve(null),
         latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery, basinId) : Promise.resolve(null),
         ...layerIdsForOverview(requestQuery).map((layerId) => fetchLayerValidTimes(layerId)),
       ])
 
-      const models = settledValue(modelsResult, partialErrors, 'models')?.items ?? []
       const segmentFetch = settledValue(segmentsResult, partialErrors, 'river segments')
       const segments = segmentFetch?.collection ?? null
+      if (segmentFetch?.truncated) {
+        partialErrors.push(
+          `river segments: Retained only the first ${RIVER_SEGMENT_MAX_ITEMS} features from an oversized river-segment page; basin segment rows are partial.`,
+        )
+      }
       if (segmentFetch?.reachedCap) {
         partialErrors.push(
           `river segments: Stopped segment lookup after ${RIVER_SEGMENT_MAX_PAGES} pages or ${RIVER_SEGMENT_MAX_ITEMS} features before the requested segment was found.`,
@@ -955,7 +1153,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         basin,
         basinLookupAvailable,
         versions,
-        models: models as ApiModelInstance[],
+        models,
         segments,
         rankingItems: sameVersionRankingItems,
         latestRun: useSingleRunFloodSurfaces ? latestRun : null,
@@ -969,7 +1167,13 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         partialErrors,
       })
       const rows = normalizeBasinSegmentRows({ query: concreteSurfaceQuery, featureCollection: segments, rankingItems: sameVersionRankingItems })
-      const selectedIdentifiers = resolveSelectedSegmentIdentifiers(query.segmentId, filterBasinSegmentRows(rows, query), segments)
+      const selectedIdentifiers = resolveSelectedSegmentIdentifiers(
+        query.segmentId,
+        filterBasinSegmentRows(rows, query),
+        segments,
+        Boolean(segmentFetch?.reachedCap || segmentFetch?.truncated),
+        activeRiverNetwork.riverNetworkVersionId,
+      )
       let selectedSegment: SelectedSegmentDetail | null = null
 
       if (selectedVersion && selectedIdentifiers) {
@@ -980,17 +1184,28 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
           partialErrors.push('flood timeline: No same-version concrete run is available for this basin/source.')
           partialErrors.push('lineage: No same-version concrete run is available for this basin/source.')
         }
-        const selectedRanking = sameVersionRankingItems.find(
-          (item) =>
-            item.river_segment_id === selectedIdentifiers.riverSegmentId ||
-            item.segment_id === selectedIdentifiers.segmentId,
-        )
+        const selectedRanking = sameVersionRankingItems.find((item) => rankingMatchesSelectedSegment(item, selectedIdentifiers))
         const [segmentResult, forecastResult, timelineResult] = await Promise.allSettled([
-          fetchRiverSegment(selectedVersion.basin_version_id, selectedIdentifiers.detailEndpointSegmentId),
+          fetchRiverSegment(
+            selectedVersion.basin_version_id,
+            selectedIdentifiers.detailEndpointRiverNetworkVersionId,
+            selectedIdentifiers.detailEndpointSegmentId,
+          ),
           canFetchConcreteSurface
-            ? fetchForecast(selectedVersion.basin_version_id, selectedIdentifiers.forecastSegmentId, concreteSurfaceQuery)
+            ? fetchForecast(
+                selectedVersion.basin_version_id,
+                selectedIdentifiers.detailEndpointRiverNetworkVersionId,
+                selectedIdentifiers.forecastSegmentId,
+                concreteSurfaceQuery,
+              )
             : Promise.resolve(null),
-          latestRun && useSingleRunFloodSurfaces ? fetchFloodTimeline(latestRun.run_id, selectedIdentifiers.timelineSegmentId) : Promise.resolve(null),
+          latestRun && useSingleRunFloodSurfaces
+            ? fetchFloodTimeline(
+                latestRun.run_id,
+                selectedIdentifiers.timelineSegmentId,
+                selectedIdentifiers.riverNetworkVersionId,
+              )
+            : Promise.resolve(null),
         ])
         const segment = settledValue(segmentResult, partialErrors, 'river segment detail')
         const forecast = settledValue(forecastResult, partialErrors, 'forecast series')
@@ -1000,7 +1215,12 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         const lineageUnavailableReason = useSingleRunFloodSurfaces ? null : COMPARE_LINEAGE_UNAVAILABLE
         if (latestRun && useSingleRunFloodSurfaces) {
           try {
-            lineage = await fetchLineage(latestRun.run_id, selectedIdentifiers.lineageSegmentId, query)
+            lineage = await fetchLineage(
+              latestRun.run_id,
+              selectedIdentifiers.riverNetworkVersionId,
+              selectedIdentifiers.lineageSegmentId,
+              query,
+            )
           } catch (error) {
             lineageError = '河段追溯暂不可用'
             partialErrors.push(`lineage: ${lineageError}`)
@@ -1013,7 +1233,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
           segmentId: selectedIdentifiers.requestedId,
           segment,
           feature: selectedIdentifiers.feature,
-          model: (models as ApiModelInstance[])[0] ?? null,
+          model: activeRiverNetwork.model,
           forecast,
           floodTimeline: timeline,
           lineage,
@@ -1079,6 +1299,8 @@ function resolveSelectedSegmentIdentifiers(
   querySegmentId: string | null,
   rows: BasinSegmentRow[],
   collection: ApiRiverFeatureCollection | null,
+  segmentCollectionPartial = false,
+  scopedRiverNetworkVersionId: string | null = null,
 ): ResolvedSegmentIdentifiers | null {
   const row = querySegmentId
     ? rows.find((item) => item.segmentId === querySegmentId || item.riverSegmentId === querySegmentId) ?? null
@@ -1087,16 +1309,21 @@ function resolveSelectedSegmentIdentifiers(
   if (!requestedId) return null
 
   const feature = findFeature(collection, requestedId) ?? (!querySegmentId && row ? findFeature(collection, row.riverSegmentId) : null)
-  if (querySegmentId && !row && !feature) return null
+  if (querySegmentId && !row && !feature && !segmentCollectionPartial) return null
 
   const riverSegmentId = row?.riverSegmentId ?? feature?.properties.river_segment_id ?? requestedId
+  const observedRiverNetworkVersionId = row?.riverNetworkVersionId ?? feature?.properties.river_network_version_id ?? null
+  const riverNetworkVersionId = scopedRiverNetworkVersionId ?? observedRiverNetworkVersionId
+  if (!riverNetworkVersionId) return null
   const segmentId = row?.segmentId ?? feature?.properties.segment_id ?? requestedId
 
   return {
     requestedId,
     riverSegmentId,
+    riverNetworkVersionId,
     segmentId,
     detailEndpointSegmentId: riverSegmentId,
+    detailEndpointRiverNetworkVersionId: riverNetworkVersionId,
     forecastSegmentId: riverSegmentId,
     timelineSegmentId: riverSegmentId,
     lineageSegmentId: riverSegmentId,

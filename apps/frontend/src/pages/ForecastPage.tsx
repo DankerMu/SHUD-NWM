@@ -24,10 +24,11 @@ export function ForecastPage() {
   const [basinContext, setBasinContext] = useState<ForecastBasinContext | null>(null)
   const routeState = useMemo(() => parseM11QueryState(location.search), [location.search])
   const routeSegment = useMemo(() => {
-    if (!routeState.segmentId || !routeState.basinVersionId) return null
+    if (!routeState.segmentId || !routeState.basinVersionId || !routeState.riverNetworkVersionId) return null
     return {
       segmentId: routeState.segmentId,
       basinVersionId: routeState.basinVersionId,
+      riverNetworkVersionId: routeState.riverNetworkVersionId,
     }
   }, [routeState])
   const routeRequestContext = useMemo(
@@ -38,7 +39,7 @@ export function ForecastPage() {
     [routeState.cycle, routeState.source],
   )
   const routeHandoffKey = routeSegment
-    ? `${routeSegment.basinVersionId}::${routeSegment.segmentId}::${routeRequestContext.source ?? 'selected'}::${routeState.cycle ?? 'latest'}`
+    ? `${routeSegment.basinVersionId}::${routeSegment.riverNetworkVersionId}::${routeSegment.segmentId}::${routeRequestContext.source ?? 'selected'}::${routeState.cycle ?? 'latest'}`
     : null
 
   const loadSegmentForecast = useCallback(
@@ -77,6 +78,7 @@ export function ForecastPage() {
     routeHandoffKey,
     routeSegment,
     selectedSegment?.basinVersionId,
+    selectedSegment?.riverNetworkVersionId,
     selectedSegment?.segmentId,
   ])
 
@@ -140,6 +142,7 @@ function ForecastBasinHandoff({ context, routeState }: { context: ForecastBasinC
   const href = m11QueryHref(`/basins/${encodeURIComponent(context.basinId)}`, routeState, {
     basinVersionId: context.basinVersionId,
     segmentId: routeState.basinVersionId === context.basinVersionId ? routeState.segmentId : null,
+    riverNetworkVersionId: routeState.basinVersionId === context.basinVersionId ? routeState.riverNetworkVersionId : null,
   })
 
   return (

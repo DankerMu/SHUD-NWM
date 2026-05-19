@@ -11,12 +11,16 @@ from httpx import ASGITransport, AsyncClient
 from apps.api.main import app
 from apps.api.routes.models import get_model_registry_store
 from packages.common.model_registry import (
+    RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
+    RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+    RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
     DuplicateResourceError,
     InvalidPayloadError,
     InvalidReferenceError,
     MissingResourceError,
     ModelRegistryError,
     PsycopgModelRegistryStore,
+    RiverSegmentGeoJsonBudgetError,
     geometry_to_wkt,
 )
 from workers.model_registry.cli import _argparse_main
@@ -134,6 +138,38 @@ class FakeModelRegistryStore:
             "offset": offset,
         }
 
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        if (
+            basin_version_id != "basin_v01"
+            or river_network_version_id != "basin_rivnet_v01"
+            or segment_id != "seg_001"
+        ):
+            raise MissingResourceError(
+                "river_segment_id not found with renderable geometry for "
+                f"basin_version_id {basin_version_id}, "
+                f"river_network_version_id {river_network_version_id}: {segment_id}"
+            )
+        return {
+            "river_segment_id": "seg_001",
+            "river_network_version_id": "basin_rivnet_v01",
+            "segment_order": 2,
+            "downstream_segment_id": None,
+            "length_m": 1234.5,
+            "geom": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+            "properties_json": {
+                "segment_id": "seg_001",
+                "name": "Segment 001",
+                "stream_order": 2,
+            },
+            "created_at": "2026-05-07T00:00:00Z",
+        }
+
     def create_mesh_version(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload["version_label"] == "":
             raise InvalidPayloadError("version_label must contain at least one alphanumeric character.")
@@ -204,6 +240,140 @@ class NullGeometryModelRegistryStore(FakeModelRegistryStore):
             "offset": offset,
         }
 
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        raise MissingResourceError(
+            "river_segment_id not found with renderable geometry for "
+            f"basin_version_id {basin_version_id}, "
+            f"river_network_version_id {river_network_version_id}: {segment_id}"
+        )
+
+
+class OversizedGeometryModelRegistryStore(FakeModelRegistryStore):
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        raise MissingResourceError(
+            "river_segment_id not found with renderable geometry for "
+            f"basin_version_id {basin_version_id}, "
+            f"river_network_version_id {river_network_version_id}: {segment_id}"
+        )
+
+
+class DuplicateSegmentIdModelRegistryStore(FakeModelRegistryStore):
+    segment_rows: dict[str, dict[str, Any]] = {
+        "rivnet_old": {
+            "river_segment_id": "seg_shared",
+            "river_network_version_id": "rivnet_old",
+            "segment_order": 1,
+            "downstream_segment_id": None,
+            "length_m": 100.0,
+            "geom": {"type": "LineString", "coordinates": [[90.0, 25.0], [90.5, 25.5]]},
+            "properties_json": {"name": "Old sibling network row"},
+            "created_at": "2026-05-07T00:00:00Z",
+        },
+        "rivnet_selected": {
+            "river_segment_id": "seg_shared",
+            "river_network_version_id": "rivnet_selected",
+            "segment_order": 2,
+            "downstream_segment_id": "seg_downstream",
+            "length_m": 200.0,
+            "geom": {"type": "LineString", "coordinates": [[91.0, 26.0], [91.5, 26.5]]},
+            "properties_json": {"name": "Selected sibling network row"},
+            "created_at": "2026-05-08T00:00:00Z",
+        },
+    }
+
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        if basin_version_id != "basin_v01" or segment_id != "seg_shared":
+            raise MissingResourceError(
+                "river_segment_id not found with renderable geometry for "
+                f"basin_version_id {basin_version_id}, "
+                f"river_network_version_id {river_network_version_id}: {segment_id}"
+            )
+        row = self.segment_rows.get(river_network_version_id)
+        if row is None:
+            raise MissingResourceError(
+                "river_segment_id not found with renderable geometry for "
+                f"basin_version_id {basin_version_id}, "
+                f"river_network_version_id {river_network_version_id}: {segment_id}"
+            )
+        return dict(row)
+
+
+class OversizedPropertiesModelRegistryStore(FakeModelRegistryStore):
+    def list_river_segments(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        assert basin_version_id == "basin_v01"
+        assert river_network_version_id == "basin_rivnet_v01"
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "segment_id": "seg_oversized",
+                        "river_segment_id": "seg_oversized",
+                        "basin_version_id": "basin_v01",
+                        "river_network_version_id": "basin_rivnet_v01",
+                        "name": "Oversized",
+                        "stream_order": 1,
+                        "blob": "x" * (RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES + 1),
+                    },
+                    "geometry": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+                }
+            ],
+            "total": 1,
+            "feature_total": 1,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        assert basin_version_id == "basin_v01"
+        assert river_network_version_id == "basin_rivnet_v01"
+        assert segment_id == "seg_oversized"
+        return {
+            "river_segment_id": "seg_oversized",
+            "river_network_version_id": "basin_rivnet_v01",
+            "segment_order": 1,
+            "downstream_segment_id": None,
+            "length_m": 1234.5,
+            "geom": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+            "properties_json": {
+                "name": "Oversized",
+                "blob": "x" * (RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES + 1),
+            },
+            "created_at": "2026-05-07T00:00:00Z",
+        }
+
 
 class BasinsRiverSegmentStore(FakeModelRegistryStore):
     def list_river_segments(
@@ -243,6 +413,37 @@ class BasinsRiverSegmentStore(FakeModelRegistryStore):
             "feature_total": 2,
             "limit": limit,
             "offset": offset,
+        }
+
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        assert basin_version_id == "basins_basin_a_vbasins"
+        if river_network_version_id != "basins_basin_a_rivnet_vbasins" or segment_id != "basins_basin_a_shud_seg_1":
+            raise MissingResourceError(
+                "river_segment_id not found with renderable geometry for "
+                f"basin_version_id {basin_version_id}, "
+                f"river_network_version_id {river_network_version_id}: {segment_id}"
+            )
+        return {
+            "river_segment_id": "basins_basin_a_shud_seg_1",
+            "river_network_version_id": "basins_basin_a_rivnet_vbasins",
+            "segment_order": 1,
+            "downstream_segment_id": "basins_basin_a_shud_seg_2",
+            "length_m": 1234.5,
+            "geom": {"type": "LineString", "coordinates": [[90.0, 25.0], [90.5, 25.5]]},
+            "properties_json": {
+                "segment_id": "basins_basin_a_shud_seg_1",
+                "name": "Basins Segment 1",
+                "stream_order": 1,
+                "basin_slug": "basin-a",
+                "shud_input_name": "alias-a",
+            },
+            "created_at": "2026-05-07T00:00:00Z",
         }
 
 
@@ -360,6 +561,167 @@ async def test_list_river_segments_can_omit_null_geometry_features() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_river_segment_null_geometry_uses_not_found_envelope() -> None:
+    store = NullGeometryModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments/seg_001",
+            params={"river_network_version_id": "basin_rivnet_v01"},
+        )
+
+    assert response.status_code == 404
+    _assert_error_envelope(
+        response.json(),
+        code="MODEL_REGISTRY_NOT_FOUND",
+        message_contains="renderable geometry",
+        error_type="MissingResourceError",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_river_segment_oversized_geometry_uses_not_found_envelope() -> None:
+    store = OversizedGeometryModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments/seg_001",
+            params={"river_network_version_id": "basin_rivnet_v01"},
+        )
+
+    assert response.status_code == 404
+    _assert_error_envelope(
+        response.json(),
+        code="MODEL_REGISTRY_NOT_FOUND",
+        message_contains="renderable geometry",
+        error_type="MissingResourceError",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_river_segment_returns_declared_detail_shape(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments/seg_001",
+            params={"river_network_version_id": "basin_rivnet_v01"},
+        )
+
+    assert fake_store is not None
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    payload = body["data"]
+    assert set(payload) == {
+        "river_segment_id",
+        "river_network_version_id",
+        "segment_order",
+        "downstream_segment_id",
+        "length_m",
+        "geom",
+        "properties_json",
+        "created_at",
+    }
+    assert payload["river_segment_id"] == "seg_001"
+    assert payload["river_network_version_id"] == "basin_rivnet_v01"
+    assert payload["segment_order"] == 2
+    assert payload["downstream_segment_id"] is None
+    assert payload["length_m"] == 1234.5
+    assert payload["geom"]["type"] == "LineString"
+    assert payload["properties_json"]["segment_id"] == "seg_001"
+    assert payload["created_at"] == "2026-05-07T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_get_river_segment_requires_river_network_version_id(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/basin-versions/basin_v01/river-segments/seg_001")
+
+    assert fake_store is not None
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_river_segment_duplicate_ids_return_selected_network_row() -> None:
+    store = DuplicateSegmentIdModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments/seg_shared",
+            params={"river_network_version_id": "rivnet_selected"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["river_segment_id"] == "seg_shared"
+    assert payload["river_network_version_id"] == "rivnet_selected"
+    assert payload["segment_order"] == 2
+    assert payload["geom"]["coordinates"] == [[91.0, 26.0], [91.5, 26.5]]
+    assert payload["properties_json"]["name"] == "Selected sibling network row"
+
+
+@pytest.mark.asyncio
+async def test_river_segment_collection_oversized_properties_return_413_envelope() -> None:
+    store = OversizedPropertiesModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments",
+            params={"river_network_version_id": "basin_rivnet_v01", "limit": 100, "offset": 0},
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["limit_type"] == "serialized_bytes"
+    assert body["error"]["details"]["scope"] == "collection"
+
+
+@pytest.mark.asyncio
+async def test_river_segment_detail_oversized_properties_return_413_envelope() -> None:
+    store = OversizedPropertiesModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments/seg_oversized",
+            params={"river_network_version_id": "basin_rivnet_v01"},
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["limit_type"] == "serialized_bytes"
+    assert body["error"]["details"]["scope"] == "detail"
+
+
+@pytest.mark.asyncio
+async def test_get_missing_river_segment_uses_not_found_envelope(fake_store: FakeModelRegistryStore) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments/missing_seg",
+            params={"river_network_version_id": "basin_rivnet_v01"},
+        )
+
+    assert fake_store is not None
+    assert response.status_code == 404
+    _assert_error_envelope(
+        response.json(),
+        code="MODEL_REGISTRY_NOT_FOUND",
+        message_contains="missing_seg",
+        error_type="MissingResourceError",
+    )
+
+
+@pytest.mark.asyncio
 async def test_basins_river_segment_api_returns_paginated_geojson_for_map_rendering() -> None:
     store = BasinsRiverSegmentStore()
     app.dependency_overrides[get_model_registry_store] = lambda: store
@@ -383,6 +745,29 @@ async def test_basins_river_segment_api_returns_paginated_geojson_for_map_render
     assert feature["properties"]["river_network_version_id"] == "basins_basin_a_rivnet_vbasins"
     assert feature["properties"]["basin_slug"] == "basin-a"
     assert feature["properties"]["shud_input_name"] == "alias-a"
+
+
+@pytest.mark.asyncio
+async def test_basins_river_segment_detail_api_returns_backend_geometry() -> None:
+    store = BasinsRiverSegmentStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basins_basin_a_vbasins/river-segments/basins_basin_a_shud_seg_1",
+            params={"river_network_version_id": "basins_basin_a_rivnet_vbasins"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["river_segment_id"] == "basins_basin_a_shud_seg_1"
+    assert payload["river_network_version_id"] == "basins_basin_a_rivnet_vbasins"
+    assert payload["segment_order"] == 1
+    assert payload["downstream_segment_id"] == "basins_basin_a_shud_seg_2"
+    assert payload["length_m"] == 1234.5
+    assert payload["geom"] == {"type": "LineString", "coordinates": [[90.0, 25.0], [90.5, 25.5]]}
+    assert payload["properties_json"]["basin_slug"] == "basin-a"
+    assert payload["properties_json"]["shud_input_name"] == "alias-a"
 
 
 @pytest.mark.asyncio
@@ -1043,6 +1428,392 @@ def test_get_model_joins_asset_metadata_and_lineage(
     assert "user:pass@" not in public_profile_json
     assert "#frag" not in public_profile_json
     assert "mesh_properties_json" not in detail
+
+
+def test_get_river_segment_binds_selected_river_network_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.parameters: tuple[Any, ...] | None = None
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert self.parameters == (
+                "basin_v01",
+                "seg_001",
+                "rivnet_selected",
+                10_000,
+                3,
+            )
+            assert "rs.river_network_version_id = %s" in self.statement
+            return {
+                "river_segment_id": "seg_001",
+                "river_network_version_id": "rivnet_selected",
+                "segment_order": 7,
+                "downstream_segment_id": "seg_002",
+                "length_m": 42.5,
+                "geom": {"type": "LineString", "coordinates": [[91.0, 26.0], [92.0, 27.0]]},
+                "properties_json": {"name": "Selected sibling network segment"},
+                "created_at": "2026-05-19T00:00:00Z",
+            }
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    detail = store.get_river_segment(
+        basin_version_id="basin_v01",
+        river_network_version_id="rivnet_selected",
+        segment_id="seg_001",
+    )
+
+    assert detail["river_segment_id"] == "seg_001"
+    assert detail["river_network_version_id"] == "rivnet_selected"
+    assert detail["geom"]["coordinates"] == [[91.0, 26.0], [92.0, 27.0]]
+    assert detail["segment_order"] == 7
+
+
+def test_list_river_segments_excludes_oversized_collection_geometry_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.statement = ""
+            self.parameters: tuple[Any, ...] | None = None
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.calls += 1
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert self.calls == 1
+            assert "ST_NPoints(geom) BETWEEN 2 AND %s" in self.statement
+            assert "ST_NDims(geom) <= %s" in self.statement
+            assert "running_coordinate_count <= %s" in self.statement
+            assert self.parameters == (
+                "basin_v01",
+                "rivnet_v01",
+                10_000,
+                3,
+                RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+            )
+            return {"total": 1, "feature_total": 0}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            assert self.calls == 2
+            assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
+            assert "ST_NPoints(rs.geom) BETWEEN 2 AND %s" in self.statement
+            assert "ST_NDims(rs.geom) <= %s" in self.statement
+            assert "running_coordinate_count <= %s" in self.statement
+            assert self.statement.index("ST_NPoints(rs.geom) BETWEEN 2 AND %s") < self.statement.index(
+                "ST_AsGeoJSON(geom)::json AS geometry"
+            )
+            assert self.statement.index("running_coordinate_count <= %s") < self.statement.index(
+                "ST_AsGeoJSON(geom)::json AS geometry"
+            )
+            assert self.parameters == (
+                "basin_v01",
+                "rivnet_v01",
+                10_000,
+                3,
+                RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+                100,
+                0,
+            )
+            return []
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    collection = store.list_river_segments(
+        basin_version_id="basin_v01",
+        river_network_version_id="rivnet_v01",
+        limit=100,
+        offset=0,
+    )
+
+    assert collection["total"] == 1
+    assert collection["feature_total"] == 0
+    assert collection["features"] == []
+
+
+def test_list_river_segments_applies_aggregate_collection_budget_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.statement = ""
+            self.parameters: tuple[Any, ...] | None = None
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.calls += 1
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert self.calls == 1
+            assert "SUM(ST_NPoints(geom)) OVER" in self.statement
+            assert "running_coordinate_count <= %s" in self.statement
+            assert self.parameters == (
+                "basin_v01",
+                "rivnet_v01",
+                10_000,
+                3,
+                RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+            )
+            return {"total": 6, "feature_total": 5}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            assert self.calls == 2
+            assert "SUM(ST_NPoints(rs.geom)) OVER" in self.statement
+            assert "running_coordinate_count <= %s" in self.statement
+            assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
+            assert self.statement.index("running_coordinate_count <= %s") < self.statement.index(
+                "ST_AsGeoJSON(geom)::json AS geometry"
+            )
+            assert self.parameters == (
+                "basin_v01",
+                "rivnet_v01",
+                10_000,
+                3,
+                RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+                100,
+                0,
+            )
+            return [
+                {
+                    "river_segment_id": f"seg_{index:03d}",
+                    "river_network_version_id": "rivnet_v01",
+                    "basin_version_id": "basin_v01",
+                    "segment_order": index,
+                    "downstream_segment_id": None,
+                    "length_m": 1000,
+                    "properties_json": {},
+                    "geometry": {"type": "LineString", "coordinates": [[91.0, 26.0], [92.0, 27.0]]},
+                }
+                for index in range(1, 6)
+            ]
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    collection = store.list_river_segments(
+        basin_version_id="basin_v01",
+        river_network_version_id="rivnet_v01",
+        limit=100,
+        offset=0,
+    )
+
+    assert collection["total"] == 6
+    assert collection["feature_total"] == 5
+    assert len(collection["features"]) == 5
+    assert collection["features"][-1]["properties"]["river_segment_id"] == "seg_005"
+
+
+def test_list_river_segments_rejects_serialized_payload_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.calls += 1
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert self.calls == 1
+            return {"total": 1, "feature_total": 1}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            assert self.calls == 2
+            assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
+            return [
+                {
+                    "river_segment_id": "seg_huge_props",
+                    "river_network_version_id": "rivnet_v01",
+                    "basin_version_id": "basin_v01",
+                    "segment_order": 1,
+                    "downstream_segment_id": None,
+                    "length_m": 1000,
+                    "properties_json": {"name": "Huge", "blob": "x" * RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES},
+                    "geometry": {"type": "LineString", "coordinates": [[91.0, 26.0], [92.0, 27.0]]},
+                }
+            ]
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(RiverSegmentGeoJsonBudgetError) as exc:
+        store.list_river_segments(
+            basin_version_id="basin_v01",
+            river_network_version_id="rivnet_v01",
+            limit=100,
+            offset=0,
+        )
+
+    assert exc.value.limit_type == "serialized_bytes"
+    assert exc.value.scope == "collection"
+    assert exc.value.max_bytes == RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES
+
+
+def test_get_river_segment_excludes_null_geometry_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> None:
+            assert "WHERE geom IS NOT NULL" in self.statement
+            assert self.parameters == ("basin_v01", "seg_null", "rivnet_v01", 10_000, 3)
+            return None
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(MissingResourceError, match="renderable geometry"):
+        store.get_river_segment(
+            basin_version_id="basin_v01",
+            river_network_version_id="rivnet_v01",
+            segment_id="seg_null",
+        )
+
+
+def test_get_river_segment_excludes_oversized_detail_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> None:
+            assert "ST_NPoints(rs.geom) AS coordinate_count" in self.statement
+            assert "coordinate_count BETWEEN 2 AND %s" in self.statement
+            assert "coordinate_dimensions <= %s" in self.statement
+            assert self.parameters == ("basin_v01", "seg_huge", "rivnet_v01", 10_000, 3)
+            return None
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(MissingResourceError, match="renderable geometry"):
+        store.get_river_segment(
+            basin_version_id="basin_v01",
+            river_network_version_id="rivnet_v01",
+            segment_id="seg_huge",
+        )
+
+
+def test_get_river_segment_rejects_serialized_payload_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert "ST_AsGeoJSON(geom)::json AS geom" in self.statement
+            assert self.parameters == ("basin_v01", "seg_huge_props", "rivnet_v01", 10_000, 3)
+            return {
+                "river_segment_id": "seg_huge_props",
+                "river_network_version_id": "rivnet_v01",
+                "segment_order": 1,
+                "downstream_segment_id": None,
+                "length_m": 1000,
+                "geom": {"type": "LineString", "coordinates": [[91.0, 26.0], [92.0, 27.0]]},
+                "properties_json": {"name": "Huge", "blob": "x" * RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES},
+                "created_at": "2026-05-19T00:00:00Z",
+            }
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(RiverSegmentGeoJsonBudgetError) as exc:
+        store.get_river_segment(
+            basin_version_id="basin_v01",
+            river_network_version_id="rivnet_v01",
+            segment_id="seg_huge_props",
+        )
+
+    assert exc.value.limit_type == "serialized_bytes"
+    assert exc.value.scope == "detail"
+    assert exc.value.max_bytes == RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES
 
 
 def test_get_model_uses_sanitized_mesh_lineage_fallbacks(

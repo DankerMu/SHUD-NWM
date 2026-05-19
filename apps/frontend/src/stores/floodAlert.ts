@@ -45,6 +45,7 @@ export interface FloodAlertRankingItem {
   segmentId: string
   segmentName?: string | null
   basinVersionId?: string | null
+  riverNetworkVersionId?: string | null
   basinName?: string | null
   qValue?: number | null
   qUnit?: string | null
@@ -82,6 +83,7 @@ export interface FloodAlertTimeline {
   runId: string
   segmentId: string
   riverSegmentId: string
+  riverNetworkVersionId: string | null
   timesteps: FloodAlertTimelinePoint[]
   peak?: FloodAlertTimelinePoint | null
   frequencyThresholds?: FloodFrequencyThresholds | null
@@ -117,7 +119,7 @@ interface FloodAlertState {
   fetchLatestFrequencyDoneRun: (context?: { source?: string | null; cycleTime?: string | null; validTime?: string | null }) => Promise<void>
   fetchSummary: (options?: { validTime?: string | null }) => Promise<void>
   fetchRanking: (options?: { validTime?: string | null; limit?: 10 | 20 | 50 }) => Promise<void>
-  fetchTimeline: (segmentId: string) => Promise<void>
+  fetchTimeline: (segmentId: string, riverNetworkVersionId?: string | null) => Promise<void>
 }
 
 async function fetchJson<T>(path: string, query: Record<string, string | number | boolean | null | undefined>) {
@@ -174,6 +176,7 @@ function normalizeRankingItem(item: ApiFloodAlertRankingItem, index: number): Fl
     segmentId: item.segment_id || segmentId,
     segmentName: stringOrNull(item.segment_name),
     basinVersionId: stringOrNull(item.basin_version_id),
+    riverNetworkVersionId: stringOrNull(item.river_network_version_id),
     basinName: null,
     qValue: numberOrNull(item.q_value),
     qUnit: stringOrNull(item.q_unit) ?? 'm3/s',
@@ -225,6 +228,7 @@ function normalizeTimeline(payload: ApiFloodAlertTimeline): FloodAlertTimeline {
     runId: payload.run_id,
     segmentId: payload.segment_id,
     riverSegmentId: payload.river_segment_id,
+    riverNetworkVersionId: stringOrNull(payload.river_network_version_id),
     timesteps,
     peak: payload.peak ? normalizeTimelinePoint(payload.peak) : null,
     frequencyThresholds: normalizeFrequencyThresholds(payload.frequency_thresholds),
@@ -288,6 +292,40 @@ function sourceForRunsQuery(source: string | null | undefined) {
   return source
 }
 
+async function fetchRunsByStatus(query: {
+  source?: string
+  cycle_time?: string
+  status: 'frequency_done' | 'published'
+  limit: number
+}) {
+  const { data, error } = await client.GET('/api/v1/runs', {
+    params: { query },
+  })
+  if (error) throw new Error(getApiErrorMessage(error, '获取最新预警 Run 失败'))
+  return unwrapApiData<ApiHydroRunPage>(data, '获取最新预警 Run 失败')
+}
+
+async function fetchReadyFloodRuns(baseQuery: {
+  source?: string
+  cycle_time?: string
+  limit: number
+}) {
+  const pages: ApiHydroRunPage[] = []
+  for (const status of ['frequency_done', 'published'] as const) {
+    pages.push(
+      await fetchRunsByStatus({
+        ...baseQuery,
+        status,
+      }),
+    )
+  }
+  const byRunId = new Map<string, ApiHydroRun>()
+  pages.flatMap((page) => page.items).forEach((run) => {
+    byRunId.set(run.run_id, run)
+  })
+  return [...byRunId.values()]
+}
+
 function explicitContextMissReason(context: { source?: string | null; cycleTime?: string | null } | undefined) {
   const source = context?.source ? context.source.toUpperCase() : null
   const cycleTime = normalizeIso(context?.cycleTime)
@@ -348,22 +386,15 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const runsQuery: {
         source?: string
         cycle_time?: string
-        status: 'frequency_done'
         limit: number
       } = {
-        status: 'frequency_done',
         limit: 50,
       }
       const source = sourceForRunsQuery(context?.source)
       const cycleTime = normalizeIso(context?.cycleTime)
       if (source) runsQuery.source = source
       if (cycleTime) runsQuery.cycle_time = cycleTime
-      const { data, error } = await client.GET('/api/v1/runs', {
-        params: { query: runsQuery },
-      })
-      if (error) throw new Error(getApiErrorMessage(error, '获取最新预警 Run 失败'))
-      const payload = unwrapApiData<ApiHydroRunPage>(data, '获取最新预警 Run 失败')
-      const runs = payload.items
+      const runs = await fetchReadyFloodRuns(runsQuery)
       const matchingRuns = runs.filter((run) => sourceMatches(run, context?.source) && cycleMatches(run, context?.cycleTime))
       const candidates = explicitContext ? matchingRuns : runs
       const previousRunId = get().selectedRunId
@@ -478,9 +509,18 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       throw error
     }
   },
-  fetchTimeline: async (segmentId) => {
+  fetchTimeline: async (segmentId, riverNetworkVersionId) => {
     const runId = get().selectedRunId
     if (!runId) return
+    const scopedRiverNetworkVersionId = riverNetworkVersionId ?? get().latestRun?.river_network_version_id ?? null
+    if (!scopedRiverNetworkVersionId) {
+      set({
+        timelineData: null,
+        timelineLoading: false,
+        error: '缺少 river_network_version_id，无法加载已限定河网版本的预警时间线',
+      })
+      return
+    }
 
     const requestId = ++timelineRequestId
     set({ timelineLoading: true, error: null, timelineData: null })
@@ -489,6 +529,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const payload = await fetchJson<ApiFloodAlertTimeline>('/api/v1/flood-alerts/timeline', {
         run_id: runId,
         segment_id: segmentId,
+        river_network_version_id: scopedRiverNetworkVersionId,
       })
       if (!isCurrentRequest()) return
       const timeline = normalizeTimeline(payload)
@@ -497,6 +538,14 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
           timelineData: null,
           timelineLoading: false,
           error: `河段预警详情响应与请求河段不匹配：请求 ${segmentId}，返回 ${timeline.segmentId || timeline.riverSegmentId || 'unknown'}。`,
+        })
+        return
+      }
+      if (timeline.riverNetworkVersionId !== scopedRiverNetworkVersionId) {
+        set({
+          timelineData: null,
+          timelineLoading: false,
+          error: `河段预警详情响应与请求河网版本不匹配：请求 ${scopedRiverNetworkVersionId}，返回 ${timeline.riverNetworkVersionId || 'unknown'}。`,
         })
         return
       }

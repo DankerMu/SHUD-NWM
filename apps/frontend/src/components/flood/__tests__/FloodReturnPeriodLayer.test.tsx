@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { FloodAlertMap } from '@/components/flood/FloodAlertMap'
 import {
+  FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY,
   FloodReturnPeriodLayer,
   floodReturnPeriodLayer,
   floodTileUrl,
@@ -60,6 +61,7 @@ describe('FloodReturnPeriodLayer', () => {
     expect(url).toContain('https://api.example.test/api/v1/tiles/flood-return-period?')
     expect(url).toContain('run_id=run+1')
     expect(url).toContain('duration=1h')
+    expect(url).toContain('limit=10000')
     expect(url).not.toContain('{z}')
     expect(url).not.toContain('.pbf')
   })
@@ -74,7 +76,7 @@ describe('FloodReturnPeriodLayer', () => {
 
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
     expect(fetch).toHaveBeenCalledWith(
-      'https://api.example.test/api/v1/tiles/flood-return-period?run_id=run-1&duration=1h&valid_time=2026-05-03T06%3A00%3A00Z',
+      'https://api.example.test/api/v1/tiles/flood-return-period?run_id=run-1&duration=1h&valid_time=2026-05-03T06%3A00%3A00Z&limit=10000',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
   })
@@ -90,6 +92,62 @@ describe('FloodReturnPeriodLayer', () => {
     await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'geojson' }))
     expect(sourceProps.at(-1)).not.toHaveProperty('tiles')
     expect(floodReturnPeriodLayer()).not.toHaveProperty('source-layer')
+  })
+
+  it('promotes and filters flood features by river-network scoped feature identity', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        geoJsonResponse({
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: {
+                segment_id: 'dup-seg',
+                river_network_version_id: 'rn-a',
+              },
+              geometry: { type: 'LineString', coordinates: [[110, 30], [111, 31]] },
+            },
+            {
+              type: 'Feature',
+              properties: {
+                segment_id: 'dup-seg',
+                river_network_version_id: 'rn-b',
+              },
+              geometry: { type: 'LineString', coordinates: [[112, 32], [113, 33]] },
+            },
+          ],
+        }),
+      ),
+    )
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-1"
+        validTime="2026-05-03T06:00:00Z"
+        hoveredFeatureId="rn-a::dup-seg"
+        selectedFeatureId="rn-b::dup-seg"
+      />,
+    )
+
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ promoteId: FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY }))
+    expect(sourceProps.at(-1)).toMatchObject({
+      data: {
+        features: [
+          { properties: { feature_id: 'rn-a::dup-seg' } },
+          { properties: { feature_id: 'rn-b::dup-seg' } },
+        ],
+      },
+    })
+    expect(layerProps.at(-2)).toMatchObject({
+      filter: ['==', ['get', FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY], 'rn-a::dup-seg'],
+    })
+    expect(layerProps.at(-1)).toMatchObject({
+      filter: ['==', ['get', FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY], 'rn-b::dup-seg'],
+    })
   })
 
   it('does not render a broken layer when the endpoint is not frequency-ready', async () => {

@@ -316,6 +316,8 @@ paths:
                         $ref: "#/components/schemas/RiverSegmentFeatureCollection"
         "4XX":
           $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
         "5XX":
           $ref: "#/components/responses/Error"
   /api/v1/models/{model_id}/active:
@@ -363,6 +365,13 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BasinVersionId"
         - $ref: "#/components/parameters/SegmentId"
+        - name: river_network_version_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: River network version for the selected/list row; required because river_segment_id is only unique within a river network version.
       responses:
         "200":
           description: River segment detail
@@ -378,6 +387,8 @@ paths:
                         $ref: "#/components/schemas/RiverSegment"
         "4XX":
           $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
         "5XX":
           $ref: "#/components/responses/Error"
   /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series:
@@ -388,6 +399,13 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BasinVersionId"
         - $ref: "#/components/parameters/SegmentId"
+        - name: river_network_version_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: River network version for the selected/list row; required because river_segment_id is only unique within a river network version.
         - $ref: "#/components/parameters/IssueTime"
         - name: variables
           in: query
@@ -698,6 +716,15 @@ paths:
             type: number
             minimum: 0
           description: Optional minimum return period in years.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 10000
+          description: Maximum GeoJSON features to return; requests exceeding this budget fail with 413.
       responses:
         "200":
           description: GeoJSON flood return-period FeatureCollection
@@ -1021,7 +1048,14 @@ paths:
       tags: [flood-alerts]
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
-        - $ref: "#/components/parameters/Limit"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 10
         - $ref: "#/components/parameters/Offset"
         - name: basin_id
           in: query
@@ -1066,6 +1100,15 @@ paths:
             type: string
           description: Comma-separated warning levels.
         - $ref: "#/components/parameters/ValidTimeQuery"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: Flood alert segment list
@@ -1091,6 +1134,22 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
         - $ref: "#/components/parameters/SegmentIdQuery"
+        - name: river_network_version_id
+          in: query
+          required: true
+          description: River network version for the selected segment.
+          schema:
+            type: string
+            minLength: 1
+        - name: max_points
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 168
+          description: Maximum timeline points to return. Requests whose result set exceeds this budget fail with 413.
       responses:
         "200":
           description: Flood alert timeline
@@ -1116,6 +1175,13 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
         - $ref: "#/components/parameters/SegmentIdQuery"
+        - name: river_network_version_id
+          in: query
+          required: true
+          description: River network version for the selected segment.
+          schema:
+            type: string
+            minLength: 1
         - $ref: "#/components/parameters/ValidTimeQuery"
         - $ref: "#/components/parameters/VariableQuery"
       responses:
@@ -1950,6 +2016,7 @@ components:
         - scenario_id
         - model_id
         - basin_version_id
+        - river_network_version_id
         - status
         - start_time
         - end_time
@@ -1966,6 +2033,9 @@ components:
           type: string
         basin_version_id:
           type: string
+        river_network_version_id:
+          type: string
+          nullable: true
         forcing_version_id:
           type: string
           nullable: true
@@ -2673,6 +2743,7 @@ components:
         - segment_id
         - segment_name
         - basin_version_id
+        - river_network_version_id
         - q_value
         - q_unit
         - return_period
@@ -2691,6 +2762,9 @@ components:
           nullable: true
         basin_version_id:
           type: string
+        river_network_version_id:
+          type: string
+          nullable: true
         q_value:
           type: number
         q_unit:
@@ -2731,6 +2805,7 @@ components:
         - segment_id
         - segment_name
         - basin_version_id
+        - river_network_version_id
         - q_value
         - return_period
         - warning_level
@@ -2746,6 +2821,9 @@ components:
           nullable: true
         basin_version_id:
           type: string
+        river_network_version_id:
+          type: string
+          nullable: true
         q_value:
           type: number
         return_period:
@@ -2763,13 +2841,20 @@ components:
           description: "GeoJSON point centroid, or null"
     FloodAlertSegmentList:
       type: object
-      required: [segments, total]
+      required: [segments, total, limit, offset]
       properties:
         segments:
           type: array
           items:
             $ref: "#/components/schemas/FloodAlertSegment"
         total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 500
+        offset:
           type: integer
           minimum: 0
     FloodAlertTimelinePoint:
@@ -2814,13 +2899,15 @@ components:
           additionalProperties: true
     FloodAlertTimeline:
       type: object
-      required: [run_id, segment_id, river_segment_id, timesteps, timeline, peak, frequency_thresholds, quality_note]
+      required: [run_id, segment_id, river_segment_id, river_network_version_id, timesteps, timeline, peak, frequency_thresholds, quality_note]
       properties:
         run_id:
           type: string
         segment_id:
           type: string
         river_segment_id:
+          type: string
+        river_network_version_id:
           type: string
         timesteps:
           type: array
@@ -2872,8 +2959,11 @@ components:
           description: "GeoJSON geometry (LineString, MultiLineString, or Point), or null"
     FloodReturnPeriodFeatureProperties:
       type: object
-      required: [segment_id, value, unit, quality_flag, return_period, warning_level]
+      required: [feature_id, segment_id, value, unit, quality_flag, basin_version_id, river_network_version_id, return_period, warning_level]
       properties:
+        feature_id:
+          type: string
+          description: Composite GeoJSON feature identity in river_network_version_id::segment_id form.
         segment_id:
           type: string
           description: River segment identifier.
@@ -2886,6 +2976,10 @@ components:
         quality_flag:
           type: string
           description: Data quality indicator from flood.return_period_result.
+        basin_version_id:
+          type: string
+        river_network_version_id:
+          type: string
         return_period:
           type: number
           description: Return period in years.

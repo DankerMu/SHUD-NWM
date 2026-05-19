@@ -25,13 +25,20 @@ export interface FloodReturnPeriodGeometry {
 export interface FloodReturnPeriodFeature {
   type: 'Feature'
   id?: string | number
-  properties: Record<string, unknown> | null
+  properties: FloodReturnPeriodFeatureProperties | null
   geometry: FloodReturnPeriodGeometry | null
 }
 
 export interface FloodReturnPeriodFeatureCollection {
   type: 'FeatureCollection'
   features: FloodReturnPeriodFeature[]
+}
+
+export type FloodReturnPeriodFeatureProperties = Record<string, unknown> & {
+  feature_id?: string
+  river_network_version_id?: string
+  segment_id?: string
+  river_segment_id?: string
 }
 
 export type FloodReturnPeriodRejectionCode =
@@ -84,6 +91,7 @@ export function buildFloodReturnPeriodGeoJsonUrl(runId: string, validTime: strin
     run_id: runId,
     duration: '1h',
     valid_time: validTime,
+    limit: String(floodReturnPeriodGeoJsonBudget.maxFeatures),
   })
   return buildApiUrl(`/api/v1/tiles/flood-return-period?${params.toString()}`)
 }
@@ -186,11 +194,33 @@ function sanitizeFeature(
 
   const feature: FloodReturnPeriodFeature = {
     type: 'Feature',
-    properties: isRecord(value.properties) ? { ...value.properties } : null,
+    properties: normalizeFloodReturnPeriodFeatureProperties(value.properties),
     geometry: geometryResult.geometry,
   }
   if (typeof value.id === 'string' || typeof value.id === 'number') feature.id = value.id
   return { ok: true, feature }
+}
+
+export function floodReturnPeriodFeatureId(properties: FloodReturnPeriodFeatureProperties | null | undefined): string | null {
+  if (!properties) return null
+  if (typeof properties.feature_id === 'string' && properties.feature_id) return properties.feature_id
+  const riverNetworkVersionId = typeof properties.river_network_version_id === 'string' ? properties.river_network_version_id : ''
+  const segmentId =
+    typeof properties.segment_id === 'string'
+      ? properties.segment_id
+      : typeof properties.river_segment_id === 'string'
+        ? properties.river_segment_id
+        : ''
+  if (!riverNetworkVersionId || !segmentId) return null
+  return `${riverNetworkVersionId}::${segmentId}`
+}
+
+function normalizeFloodReturnPeriodFeatureProperties(value: unknown): FloodReturnPeriodFeatureProperties | null {
+  if (!isRecord(value)) return null
+  const properties: FloodReturnPeriodFeatureProperties = { ...value }
+  const featureId = floodReturnPeriodFeatureId(properties)
+  if (featureId) properties.feature_id = featureId
+  return properties
 }
 
 function sanitizeGeometry(

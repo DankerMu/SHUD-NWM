@@ -9,6 +9,7 @@ import Map, {
   type MapStyle,
 } from 'react-map-gl/maplibre'
 import type { LayerProps } from 'react-map-gl/maplibre'
+import type { FilterSpecification } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 import type { components } from '@/api/types'
@@ -22,13 +23,17 @@ import {
 import {
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
+  m11BasinRiverCollectionBudget,
+  m11BasinRiverLayerColor,
+  type BasinSegmentRow,
   type LayerState,
+  type M11WarningLevel,
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryState } from '@/lib/m11/queryState'
 
 export interface M11MapOverlayInteraction {
-  layerId: M11Layer | 'basin-boundaries'
+  layerId: M11Layer | 'basin-boundaries' | 'basin-river-segments'
   event: MapLayerMouseEvent
   feature?: NonNullable<MapLayerMouseEvent['features']>[number]
 }
@@ -43,11 +48,14 @@ export interface M11MapCameraFlyTo {
   zoom?: number
 }
 
+export { m11BasinRiverCollectionBudget } from '@/lib/m11/overviewDataContracts'
+
 interface M11MapLibreSurfaceProps {
   state: M11QueryState
   layers: LayerState[]
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
+  basinSegments?: BasinSegmentRow[]
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   className?: string
@@ -87,6 +95,38 @@ interface BasinFeatureCollection {
   features: BasinFeature[]
 }
 
+interface BasinRiverFeatureProperties {
+  segment_id: string
+  river_segment_id: string
+  basin_version_id: string
+  river_network_version_id: string
+  segment_name: string
+  q_value: number | null
+  q_unit: string
+  return_period: number | null
+  warning_level: M11WarningLevel
+  layer_color: string
+}
+
+interface BasinRiverFeature {
+  type: 'Feature'
+  geometry: components['schemas']['GeoJsonLineString']
+  properties: BasinRiverFeatureProperties
+}
+
+interface BasinRiverFeatureCollection {
+  type: 'FeatureCollection'
+  features: BasinRiverFeature[]
+  sourceData: {
+    type: 'FeatureCollection'
+    features: BasinRiverFeature[]
+  }
+  skippedCount: number
+  coordinateCount: number
+  serializedBytes: number
+  unavailableReason: string | null
+}
+
 const CHINA_VIEW_STATE = {
   longitude: 104,
   latitude: 35,
@@ -114,6 +154,7 @@ export function M11MapLibreSurface({
   layers,
   basins = [],
   visibleBasinIds,
+  basinSegments = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   className,
@@ -128,10 +169,15 @@ export function M11MapLibreSurface({
   const [mapSourceError, setMapSourceError] = useState<string | null>(null)
   const [overlayData, setOverlayData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
   const [overlayUnavailableReason, setOverlayUnavailableReason] = useState<string | null>(null)
+  const [hoveredRiverSegmentId, setHoveredRiverSegmentId] = useState<string | null>(null)
   const overlay = useMemo(() => buildM11RegisteredOverlay(state, layers), [layers, state])
   const basinFeatureCollection = useMemo(
     () => buildBasinFeatureCollection(basins, visibleBasinIds),
     [basins, visibleBasinIds],
+  )
+  const basinRiverFeatureCollection = useMemo(
+    () => buildBasinRiverFeatureCollection(basinSegments, state.layer),
+    [basinSegments, state.layer],
   )
   const skippedBasinGeometryCount = useMemo(
     () =>
@@ -153,10 +199,13 @@ export function M11MapLibreSurface({
       : 'unavailable'
     : 'idle'
   const unavailableReason = useMemo(
-    () => overlayUnavailableReason ?? m11SelectedLayerUnavailableReason(state, layers, overlay, overlayData),
-    [layers, overlay, overlayData, overlayUnavailableReason, state],
+    () =>
+      overlayUnavailableReason ??
+      m11SelectedLayerUnavailableReason(state, layers, overlay, overlayData, basinRiverFeatureCollection.features.length > 0),
+    [basinRiverFeatureCollection.features.length, layers, overlay, overlayData, overlayUnavailableReason, state],
   )
   const interactiveLayerIds = [
+    ...(basinRiverFeatureCollection.features.length > 0 ? ['m11-basin-river-line'] : []),
     ...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []),
     ...(renderableOverlay ? [renderableOverlay.layer.id] : []),
   ]
@@ -210,14 +259,24 @@ export function M11MapLibreSurface({
 
   const handleMouseMove = useCallback(
     (event: MapLayerMouseEvent) => {
+      const riverFeature = findEventFeature(event, 'm11-basin-river-line')
+      if (riverFeature) {
+        const riverSegmentId = featureStringProperty(riverFeature, 'river_segment_id') ?? featureStringProperty(riverFeature, 'segment_id')
+        setHoveredRiverSegmentId(riverSegmentId)
+        onOverlayHover?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
+        event.target.getCanvas().style.cursor = 'pointer'
+        return
+      }
       const basinFeature = findEventFeature(event, 'm11-basin-fill')
       if (basinFeature) {
+        setHoveredRiverSegmentId(null)
         onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
         event.target.getCanvas().style.cursor = 'pointer'
         return
       }
       const overlayFeature = renderableOverlay ? findEventFeature(event, renderableOverlay.layer.id) : null
       if (!renderableOverlay || !overlayFeature) {
+        setHoveredRiverSegmentId(null)
         onOverlayHover?.(null)
         event.target.getCanvas().style.cursor = ''
         return
@@ -230,6 +289,7 @@ export function M11MapLibreSurface({
 
   const handleMouseLeave = useCallback(
     (event: MapLayerMouseEvent) => {
+      setHoveredRiverSegmentId(null)
       onOverlayHover?.(null)
       event.target.getCanvas().style.cursor = ''
     },
@@ -238,6 +298,11 @@ export function M11MapLibreSurface({
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
+      const riverFeature = findEventFeature(event, 'm11-basin-river-line')
+      if (riverFeature) {
+        onOverlayClick?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
+        return
+      }
       const basinFeature = findEventFeature(event, 'm11-basin-fill')
       if (basinFeature) {
         onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
@@ -264,9 +329,14 @@ export function M11MapLibreSurface({
       {...(renderableOverlay ? { 'data-registered-overlays': renderableOverlay.layerId } : {})}
       data-basin-feature-count={basinFeatureCollection.features.length}
       data-visible-basin-ids={basinFeatureCollection.features.map((feature) => feature.properties.basin_id).join(',')}
+      data-basin-river-feature-count={basinRiverFeatureCollection.features.length}
+      data-basin-river-skipped-count={basinRiverFeatureCollection.skippedCount}
+      data-basin-river-coordinate-count={basinRiverFeatureCollection.coordinateCount}
+      data-basin-river-serialized-bytes={basinRiverFeatureCollection.serializedBytes}
       data-selected-segment-id={selectedSegmentId ?? ''}
       data-segment-highlight-hook={selectedSegmentMapState}
       data-selected-segment-map-state={selectedSegmentMapState}
+      data-hovered-segment-id={hoveredRiverSegmentId ?? ''}
     >
       <Map
         ref={mapRef}
@@ -282,6 +352,13 @@ export function M11MapLibreSurface({
         <NavigationControl position="top-left" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
         {basinFeatureCollection.features.length > 0 ? <M11BasinPrimitive collection={basinFeatureCollection} /> : null}
+        {basinRiverFeatureCollection.features.length > 0 ? (
+          <M11BasinRiverPrimitive
+            collection={basinRiverFeatureCollection}
+            selectedSegmentId={selectedSegmentId}
+            hoveredSegmentId={hoveredRiverSegmentId}
+          />
+        ) : null}
         {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} /> : null}
         {selectedSegmentFeatureCollection.features.length > 0 ? (
           <M11SelectedSegmentPrimitive collection={selectedSegmentFeatureCollection} />
@@ -308,6 +385,20 @@ export function M11MapLibreSurface({
         >
           {unavailableReason}
         </div>
+      ) : null}
+
+      {basinRiverFeatureCollection.unavailableReason ? (
+        <div
+          className="absolute left-5 top-32 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          role="status"
+          data-testid="m11-basin-river-unavailable"
+        >
+          {basinRiverFeatureCollection.unavailableReason}
+        </div>
+      ) : null}
+
+      {hoveredRiverSegmentId ? (
+        <M11RiverTooltip feature={basinRiverFeatureCollection.features.find((feature) => feature.properties.river_segment_id === hoveredRiverSegmentId || feature.properties.segment_id === hoveredRiverSegmentId) ?? null} />
       ) : null}
 
       {selectedSegmentMapState === 'unavailable' ? (
@@ -379,7 +470,7 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
 
 function M11OverlayPrimitive({ overlay, data }: { overlay: M11RegisteredOverlay; data: FloodReturnPeriodFeatureCollection }) {
   return (
-    <Source id={overlay.sourceId} type="geojson" data={data} promoteId="segment_id">
+    <Source id={overlay.sourceId} type="geojson" data={data} promoteId="feature_id">
       <Layer {...overlay.layer} />
     </Source>
   )
@@ -424,6 +515,99 @@ function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection 
         }}
       />
     </Source>
+  )
+}
+
+function M11BasinRiverPrimitive({
+  collection,
+  selectedSegmentId,
+  hoveredSegmentId,
+}: {
+  collection: BasinRiverFeatureCollection
+  selectedSegmentId?: string | null
+  hoveredSegmentId?: string | null
+}) {
+  return (
+    <Source id="m11-basin-river-source" type="geojson" data={collection.sourceData} promoteId="river_segment_id">
+      <Layer
+        id="m11-basin-river-line"
+        type="line"
+        source="m11-basin-river-source"
+        paint={{
+          'line-color': ['get', 'layer_color'],
+          'line-width': 2.6,
+          'line-opacity': 0.82,
+        }}
+      />
+      <Layer
+        id="m11-basin-river-hover-halo"
+        type="line"
+        source="m11-basin-river-source"
+        filter={segmentFilter(hoveredSegmentId)}
+        paint={{
+          'line-color': '#FFFFFF',
+          'line-width': 8.5,
+          'line-opacity': 0.62,
+        }}
+      />
+      <Layer
+        id="m11-basin-river-selected-halo"
+        type="line"
+        source="m11-basin-river-source"
+        filter={segmentFilter(selectedSegmentId)}
+        paint={{
+          'line-color': '#FFFFFF',
+          'line-width': 9.5,
+          'line-opacity': 0.68,
+        }}
+      />
+      <Layer
+        id="m11-basin-river-hover-line"
+        type="line"
+        source="m11-basin-river-source"
+        filter={segmentFilter(hoveredSegmentId)}
+        paint={{
+          'line-color': ['get', 'layer_color'],
+          'line-width': 4.8,
+          'line-opacity': 0.98,
+        }}
+      />
+      <Layer
+        id="m11-basin-river-selected-line"
+        type="line"
+        source="m11-basin-river-source"
+        filter={segmentFilter(selectedSegmentId)}
+        paint={{
+          'line-color': '#F97316',
+          'line-width': 5.5,
+          'line-opacity': 1,
+        }}
+      />
+    </Source>
+  )
+}
+
+function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
+  if (!feature) return null
+  const props = feature.properties
+  return (
+    <div
+      className="pointer-events-none absolute right-5 top-24 z-[110] w-72 rounded-md border border-neutral-300 bg-white/95 p-3 text-xs text-neutral-700 shadow-lg"
+      role="tooltip"
+      data-testid="m11-river-tooltip"
+    >
+      <div className="truncate text-sm font-semibold text-neutral-900">{props.segment_name || props.river_segment_id}</div>
+      <dl className="mt-2 grid grid-cols-[5rem_minmax(0,1fr)] gap-x-2 gap-y-1">
+        <dt>河段 ID</dt>
+        <dd className="min-w-0 truncate font-mono text-neutral-900">{props.river_segment_id}</dd>
+        <dt>当前流量</dt>
+        <dd>{props.q_value === null ? '无数据' : `${props.q_value.toLocaleString('en-US')} ${props.q_unit}`}</dd>
+        <dt>重现期</dt>
+        <dd>{props.return_period === null ? '无数据' : `${props.return_period} 年一遇`}</dd>
+        <dt>预警</dt>
+        <dd>{warningLabel(props.warning_level)}</dd>
+      </dl>
+    </div>
   )
 }
 
@@ -512,13 +696,118 @@ export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasi
   }
 }
 
+export function buildBasinRiverFeatureCollection(
+  rows: BasinSegmentRow[],
+  layer: M11Layer,
+): BasinRiverFeatureCollection {
+  let skippedCount = 0
+  let coordinateCount = 0
+  let featureSerializedBytes = 0
+  let serializedBytes = serializedByteLength({ type: 'FeatureCollection', features: [] })
+  const features: BasinRiverFeature[] = []
+
+  for (const row of rows) {
+    const geometryStatus = getM11SelectedSegmentGeometryBudgetStatus(row.geometry)
+    if (!geometryStatus.sanitizedGeometry) {
+      skippedCount += 1
+      continue
+    }
+
+    const candidate: BasinRiverFeature = {
+      type: 'Feature',
+      geometry: geometryStatus.sanitizedGeometry,
+      properties: {
+        segment_id: row.segmentId,
+        river_segment_id: row.riverSegmentId,
+        basin_version_id: row.basinVersionId,
+        river_network_version_id: row.riverNetworkVersionId,
+        segment_name: row.displayName,
+        q_value: row.currentQ,
+        q_unit: row.qUnit,
+        return_period: row.returnPeriod,
+        warning_level: row.warningLevel,
+        layer_color: m11BasinRiverLayerColor(row, layer),
+      },
+    }
+    const candidateSerializedBytes = serializedByteLength(candidate)
+    const nextFeatureCount = features.length + 1
+    const nextCoordinateCount = coordinateCount + geometryStatus.coordinateCount
+    const nextSerializedBytes =
+      serializedByteLength({ type: 'FeatureCollection', features: [] }) +
+      featureSerializedBytes +
+      candidateSerializedBytes +
+      Math.max(0, nextFeatureCount - 1)
+
+    if (
+      nextFeatureCount > m11BasinRiverCollectionBudget.maxFeatures ||
+      nextCoordinateCount > m11BasinRiverCollectionBudget.maxCoordinates ||
+      nextSerializedBytes > m11BasinRiverCollectionBudget.maxSerializedBytes
+    ) {
+      skippedCount += 1
+      continue
+    }
+
+    features.push(candidate)
+    coordinateCount = nextCoordinateCount
+    featureSerializedBytes += candidateSerializedBytes
+    serializedBytes = nextSerializedBytes
+  }
+
+  const sourceData = { type: 'FeatureCollection' as const, features }
+
+  return {
+    type: 'FeatureCollection',
+    features,
+    sourceData,
+    skippedCount,
+    coordinateCount,
+    serializedBytes,
+    unavailableReason:
+      rows.length > 0 && features.length === 0
+        ? '当前流域河段几何缺失或整体河网超过客户端渲染预算，地图不会注册过大的河网源。'
+        : skippedCount > 0
+          ? `${skippedCount} 条河段缺少可渲染几何或超出整体河网预算，已从地图河网中省略。`
+          : null,
+  }
+}
+
+function segmentFilter(segmentId?: string | null): FilterSpecification {
+  return [
+    'any',
+    ['==', ['get', 'river_segment_id'], segmentId ?? ''],
+    ['==', ['get', 'segment_id'], segmentId ?? ''],
+  ] as FilterSpecification
+}
+
+function serializedByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length
+}
+
+function warningLabel(level: M11WarningLevel) {
+  const labels: Record<M11WarningLevel, string> = {
+    normal: '正常',
+    elevated: '偏高',
+    watch: '关注',
+    warning: '警戒',
+    high_risk: '高风险',
+    severe: '严重',
+    extreme: '极端',
+    unavailable: '无数据',
+  }
+  return labels[level]
+}
+
 function m11SelectedLayerUnavailableReason(
   state: M11QueryState,
   layers: LayerState[],
   overlay: M11RegisteredOverlay | null,
   overlayData: FloodReturnPeriodFeatureCollection | null,
+  hasBasinRiverNetwork = false,
 ) {
   if (overlay && overlayData) return null
+  if (hasBasinRiverNetwork && (state.layer === 'discharge' || state.layer === 'flood-return-period' || state.layer === 'warning-level')) {
+    return null
+  }
   if (overlay) return '洪水重现期地图数据正在加载或已被客户端预算拦截，地图暂不显示该叠加层。'
   const selectedLayer = layers.find((layer) => layer.layerId === state.layer)
   if (!selectedLayer) return '当前图层尚未由 /api/v1/layers 注册，地图不会渲染该叠加层。'
@@ -548,6 +837,11 @@ function rasterStyle(id: string, tiles: string[], attribution: string): MapStyle
 
 function findEventFeature(event: MapLayerMouseEvent, layerId: string) {
   return event.features?.find((feature) => feature.layer?.id === layerId) ?? null
+}
+
+function featureStringProperty(feature: NonNullable<MapLayerMouseEvent['features']>[number], key: string) {
+  const value = feature.properties?.[key]
+  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
 function mapFitKey(fitTo: M11MapCameraFit) {

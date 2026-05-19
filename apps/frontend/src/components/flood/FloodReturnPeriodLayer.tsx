@@ -16,17 +16,19 @@ import {
   type FloodReturnPeriodFeatureCollection,
 } from '@/lib/floodReturnPeriodGeoJson'
 
+export const FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY = 'feature_id'
+
 interface FloodReturnPeriodLayerProps {
   runId: string
   validTime: string
   selectedLevel?: AlertLevel | null
-  hoveredSegmentId?: string | null
-  selectedSegmentId?: string | null
+  hoveredFeatureId?: string | null
+  selectedFeatureId?: string | null
   onUnavailableReason?: (reason: string | null) => void
 }
 
-function segmentFilter(segmentId?: string | null): FilterSpecification {
-  return ['==', ['get', 'segment_id'], segmentId ?? ''] as FilterSpecification
+function featureFilter(featureId?: string | null): FilterSpecification {
+  return ['==', ['get', FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY], featureId ?? ''] as FilterSpecification
 }
 
 export function floodTileUrl(runId: string, validTime: string) {
@@ -46,8 +48,8 @@ export function FloodReturnPeriodLayer({
   runId,
   validTime,
   selectedLevel,
-  hoveredSegmentId,
-  selectedSegmentId,
+  hoveredFeatureId,
+  selectedFeatureId,
   onUnavailableReason,
 }: FloodReturnPeriodLayerProps) {
   const [data, setData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
@@ -82,7 +84,7 @@ export function FloodReturnPeriodLayer({
     id: FLOOD_TILE_HOVER_LAYER_ID,
     type: 'line',
     source: FLOOD_TILE_SOURCE_ID,
-    filter: segmentFilter(hoveredSegmentId),
+    filter: featureFilter(hoveredFeatureId),
     paint: {
       'line-color': '#111827',
       'line-width': 7,
@@ -94,7 +96,7 @@ export function FloodReturnPeriodLayer({
     id: FLOOD_TILE_SELECTED_LAYER_ID,
     type: 'line',
     source: FLOOD_TILE_SOURCE_ID,
-    filter: segmentFilter(selectedSegmentId),
+    filter: featureFilter(selectedFeatureId),
     paint: {
       'line-color': '#2266cc',
       'line-width': 8,
@@ -109,7 +111,7 @@ export function FloodReturnPeriodLayer({
       id={FLOOD_TILE_SOURCE_ID}
       type="geojson"
       data={data}
-      promoteId="segment_id"
+      promoteId={FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY}
     >
       <Layer {...floodReturnPeriodLayer(selectedLevel)} />
       <Layer {...hoverLayer} />

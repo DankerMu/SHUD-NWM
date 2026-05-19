@@ -406,6 +406,8 @@ def _upsert_return_period_result(
     max_over_window: bool,
     result: dict[str, Any],
 ) -> None:
+    if max_over_window:
+        _delete_prior_peak_result(db_session, context, segment_id, duration)
     db_session.execute(
         text(
             """
@@ -445,10 +447,16 @@ def _upsert_return_period_result(
                 :max_over_window,
                 :quality_flag
             )
-            ON CONFLICT (run_id, river_segment_id, duration, valid_time) DO UPDATE SET
+            ON CONFLICT (
+                run_id,
+                river_network_version_id,
+                river_segment_id,
+                duration,
+                valid_time,
+                max_over_window
+            ) DO UPDATE SET
                 scenario_id = EXCLUDED.scenario_id,
                 basin_version_id = EXCLUDED.basin_version_id,
-                river_network_version_id = EXCLUDED.river_network_version_id,
                 model_id = EXCLUDED.model_id,
                 q_value = EXCLUDED.q_value,
                 q_unit = EXCLUDED.q_unit,
@@ -456,7 +464,6 @@ def _upsert_return_period_result(
                 warning_level = EXCLUDED.warning_level,
                 source_id = EXCLUDED.source_id,
                 cycle_time = EXCLUDED.cycle_time,
-                max_over_window = EXCLUDED.max_over_window,
                 quality_flag = EXCLUDED.quality_flag
             """
         ),
@@ -476,6 +483,32 @@ def _upsert_return_period_result(
             "cycle_time": context.get("cycle_time"),
             "max_over_window": bool(max_over_window),
             "quality_flag": result["quality_flag"],
+        },
+    )
+
+
+def _delete_prior_peak_result(
+    db_session: Session,
+    context: dict[str, Any],
+    segment_id: str,
+    duration: str,
+) -> None:
+    db_session.execute(
+        text(
+            """
+            DELETE FROM flood.return_period_result
+            WHERE run_id = :run_id
+              AND river_network_version_id = :river_network_version_id
+              AND river_segment_id = :river_segment_id
+              AND duration = :duration
+              AND max_over_window = true
+            """
+        ),
+        {
+            "run_id": context["run_id"],
+            "river_network_version_id": context["river_network_version_id"],
+            "river_segment_id": segment_id,
+            "duration": duration,
         },
     )
 

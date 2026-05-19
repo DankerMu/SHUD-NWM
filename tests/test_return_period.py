@@ -107,6 +107,39 @@ def test_timestep_calculation_multiple_timesteps() -> None:
         assert rows[-1]["warning_level"] == "high_risk"
 
 
+def test_one_hour_window_keeps_peak_and_timestep_rows() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(
+            session,
+            segment_values={"seg_001": [260.0, 150.0]},
+            start_time=datetime(2026, 5, 1),
+            end_time=datetime(2026, 5, 1, 1),
+        )
+
+        result = compute_return_periods("forecast_run", session)
+
+        rows = session.execute(
+            text(
+                """
+                SELECT duration, valid_time, max_over_window, q_value, warning_level
+                FROM flood.return_period_result
+                WHERE run_id = 'forecast_run'
+                  AND river_segment_id = 'seg_001'
+                  AND duration = '1h'
+                  AND valid_time = :valid_time
+                ORDER BY max_over_window DESC
+                """
+            ),
+            {"valid_time": datetime(2026, 5, 1)},
+        ).mappings().all()
+        assert result.rows_written == 3
+        assert len(rows) == 2
+        assert [bool(row["max_over_window"]) for row in rows] == [True, False]
+        assert [row["q_value"] for row in rows] == [260.0, 260.0]
+        assert [row["warning_level"] for row in rows] == ["high_risk", "high_risk"]
+
+
 def test_ifs_six_day_window_uses_actual_duration_label() -> None:
     with _store() as session:
         _insert_curve(session, "seg_001")
@@ -185,6 +218,96 @@ def test_upsert_to_return_period_result_updates_existing_row() -> None:
         assert count["count"] == 1
         assert row["q_value"] == 450.0
         assert row["warning_level"] == "extreme"
+
+
+def test_recompute_replaces_peak_when_peak_valid_time_moves() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0, 260.0]})
+        compute_return_periods("forecast_run", session)
+
+        first_peak = _result_row(session, segment_id="seg_001", max_over_window=True)
+        assert str(first_peak["valid_time"]) == "2026-05-01 01:00:00"
+        assert first_peak["q_value"] == 260.0
+
+        session.execute(
+            text(
+                """
+                UPDATE hydro.river_timeseries
+                SET value = CASE
+                    WHEN valid_time = :first_time THEN 360.0
+                    WHEN valid_time = :second_time THEN 120.0
+                    ELSE value
+                END
+                WHERE run_id = 'forecast_run'
+                  AND river_segment_id = 'seg_001'
+                """
+            ),
+            {
+                "first_time": datetime(2026, 5, 1),
+                "second_time": datetime(2026, 5, 1, 1),
+            },
+        )
+        compute_return_periods("forecast_run", session)
+
+        peak_rows = _result_rows(session, max_over_window=True)
+        assert len(peak_rows) == 1
+        assert str(peak_rows[0]["valid_time"]) == "2026-05-01 00:00:00"
+        assert peak_rows[0]["q_value"] == 360.0
+        assert peak_rows[0]["warning_level"] == "severe"
+
+
+def test_upsert_to_return_period_result_preserves_same_segment_in_different_networks() -> None:
+    valid_time = datetime(2026, 5, 1, 1)
+    base_context = {
+        "run_id": "forecast_run",
+        "scenario_id": "scenario_v1",
+        "basin_version_id": "basin_v1",
+        "model_id": "model_v1",
+        "source_id": "GFS",
+        "cycle_time": datetime(2026, 5, 1),
+    }
+    base_result = {"return_period": 20.0, "warning_level": "warning", "quality_flag": "ok"}
+    with _store() as session:
+        return_period._upsert_return_period_result(
+            session,
+            {**base_context, "river_network_version_id": "rnv_v1"},
+            "seg_001",
+            valid_time,
+            "1h",
+            200.0,
+            max_over_window=False,
+            result=base_result,
+        )
+        return_period._upsert_return_period_result(
+            session,
+            {**base_context, "river_network_version_id": "rnv_v2"},
+            "seg_001",
+            valid_time,
+            "1h",
+            300.0,
+            max_over_window=False,
+            result={**base_result, "return_period": 50.0, "warning_level": "severe"},
+        )
+
+        rows = session.execute(
+            text(
+                """
+                SELECT river_network_version_id, q_value, return_period, warning_level
+                FROM flood.return_period_result
+                WHERE run_id = 'forecast_run'
+                  AND river_segment_id = 'seg_001'
+                  AND duration = '1h'
+                  AND valid_time = :valid_time
+                ORDER BY river_network_version_id
+                """
+            ),
+            {"valid_time": valid_time},
+        ).mappings().all()
+
+        assert [row["river_network_version_id"] for row in rows] == ["rnv_v1", "rnv_v2"]
+        assert [row["q_value"] for row in rows] == [200.0, 300.0]
+        assert [row["warning_level"] for row in rows] == ["warning", "severe"]
 
 
 def test_extract_max_forecast_q_returns_peak_time_per_segment() -> None:
@@ -326,9 +449,9 @@ def _create_tables(connection: Any) -> None:
                 warning_level TEXT,
                 source_id TEXT,
                 cycle_time DATETIME,
-                max_over_window BOOLEAN DEFAULT 0,
+                max_over_window BOOLEAN NOT NULL DEFAULT 0,
                 quality_flag TEXT NOT NULL DEFAULT 'ok',
-                PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+                PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time, max_over_window)
             )
             """
         )

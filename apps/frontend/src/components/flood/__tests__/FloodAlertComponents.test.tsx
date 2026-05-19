@@ -33,6 +33,7 @@ const ranking: FloodAlertRanking = {
       segmentId: 'seg-1',
       segmentName: '测试河段',
       basinVersionId: 'basin-v1',
+      riverNetworkVersionId: 'rivnet-v1',
       qValue: 1234.5,
       qUnit: 'm3/s',
       returnPeriod: 66.6,

@@ -66,6 +66,7 @@ def test_runs_contract_uses_success_envelope_and_paginated_data() -> None:
     assert run["run_id"] == "run_frequency_done"
     assert run["run_type"] == "forecast"
     assert run["status"] == "frequency_done"
+    assert run["river_network_version_id"] == "network_v1"
     assert isinstance(run["start_time"], str)
     assert isinstance(run["end_time"], str)
 
@@ -303,13 +304,48 @@ def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
         assert field in model_properties
 
 
+def test_river_segment_geojson_budget_error_contract() -> None:
+    store = _OversizedRiverSegmentStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            collection_response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments",
+                params={"river_network_version_id": "network_v1"},
+            )
+            detail_response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_1",
+                params={"river_network_version_id": "network_v1"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    for response, scope in ((collection_response, "collection"), (detail_response, "detail")):
+        assert response.status_code == 413
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
+        assert body["error"]["details"]["limit_type"] == "serialized_bytes"
+        assert body["error"]["details"]["scope"] == scope
+
+    spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
+    collection_responses = spec["paths"]["/api/v1/basin-versions/{basin_version_id}/river-segments"]["get"][
+        "responses"
+    ]
+    detail_responses = spec["paths"]["/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}"]["get"][
+        "responses"
+    ]
+    assert collection_responses["413"]["$ref"] == "#/components/responses/Error"
+    assert detail_responses["413"]["$ref"] == "#/components/responses/Error"
+
+
 def test_forecast_series_contract_accepts_include_analysis_query() -> None:
     app.dependency_overrides[get_forecast_store] = lambda: _ForecastSeriesStore()
     try:
         with TestClient(app) as client:
             response = client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_1/forecast-series",
-                params={"include_analysis": "true", "run_types": "forecast"},
+                params={"river_network_version_id": "network_v1", "include_analysis": "true", "run_types": "forecast"},
             )
     finally:
         app.dependency_overrides.pop(get_forecast_store, None)
@@ -446,6 +482,57 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert "frequency_thresholds?: Record<string, never> | null;" not in generated_types
 
 
+def test_flood_alert_ranking_and_timeline_bounds_are_in_static_contract_and_types() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+
+    ranking_parameters = spec["paths"]["/api/v1/flood-alerts/ranking"]["get"]["parameters"]
+    ranking_limit = next(parameter for parameter in ranking_parameters if parameter.get("name") == "limit")
+    assert ranking_limit["schema"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200,
+        "default": 10,
+    }
+
+    timeline_parameters = spec["paths"]["/api/v1/flood-alerts/timeline"]["get"]["parameters"]
+    timeline_max_points = next(parameter for parameter in timeline_parameters if parameter.get("name") == "max_points")
+    assert timeline_max_points["schema"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000,
+        "default": 168,
+    }
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    ranking_start = generated_types.index("listFloodAlertRanking:")
+    segments_start = generated_types.index("listFloodAlertSegments:")
+    ranking_types = generated_types[ranking_start:segments_start]
+    assert 'limit?: number;' in ranking_types
+    assert 'limit?: components["parameters"]["Limit"];' not in ranking_types
+
+    timeline_start = generated_types.index("getFloodAlertTimeline:")
+    lineage_start = generated_types.index("getRiverPointLineage:")
+    timeline_types = generated_types[timeline_start:lineage_start]
+    assert "max_points?: number;" in timeline_types
+
+    lineage_parameters = spec["paths"]["/api/v1/lineage/river-point"]["get"]["parameters"]
+    lineage_river_network = next(
+        parameter for parameter in lineage_parameters if parameter.get("name") == "river_network_version_id"
+    )
+    assert lineage_river_network["required"] is True
+    assert lineage_river_network["schema"] == {
+        "type": "string",
+        "minLength": 1,
+    }
+
+    forcing_lineage_start = generated_types.index("getForcingPointLineage:")
+    lineage_types = generated_types[lineage_start:forcing_lineage_start]
+    assert "river_network_version_id: string;" in lineage_types
+
+
 def test_forecast_response_issue_time_contract_allows_runtime_nulls() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
@@ -546,6 +633,7 @@ class _RunStore:
                     "scenario_id": "forecast_gfs_deterministic",
                     "model_id": "model_1",
                     "basin_version_id": "basin_v1",
+                    "river_network_version_id": "network_v1",
                     "forcing_version_id": None,
                     "init_state_id": None,
                     "source_id": "GFS",
@@ -715,10 +803,33 @@ class _ModelRegistryStore:
         raise MissingResourceError(f"model_id not found: {model_id}")
 
 
+class _OversizedRiverSegmentStore(_ModelRegistryStore):
+    def list_river_segments(self, **_kwargs: Any) -> dict[str, Any]:
+        from packages.common.model_registry import RiverSegmentGeoJsonBudgetError
+
+        raise RiverSegmentGeoJsonBudgetError(
+            limit_type="serialized_bytes",
+            max_bytes=100,
+            serialized_bytes=101,
+            scope="collection",
+        )
+
+    def get_river_segment(self, **_kwargs: Any) -> dict[str, Any]:
+        from packages.common.model_registry import RiverSegmentGeoJsonBudgetError
+
+        raise RiverSegmentGeoJsonBudgetError(
+            limit_type="serialized_bytes",
+            max_bytes=100,
+            serialized_bytes=101,
+            scope="detail",
+        )
+
+
 class _ForecastSeriesStore:
     def forecast_series(self, **kwargs: Any) -> dict[str, Any]:
         assert kwargs["include_analysis"] is True
         assert kwargs["run_types"] == ["forecast"]
+        assert kwargs["river_network_version_id"] == "network_v1"
         return {
             "segments": [
                 {

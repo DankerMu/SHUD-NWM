@@ -8,6 +8,7 @@ import {
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
   m11BasinGeometryBudget,
+  m11BasinRiverCollectionBudget,
   m11SelectedSegmentGeometryBudget,
   normalizeBasinDetail,
   normalizeBasinSegmentRows,
@@ -37,6 +38,7 @@ const query: M11QueryState = {
   validTime: '2026-05-18T06:00:00Z',
   layer: 'flood-return-period',
   basinVersionId: 'yangtze_v2026_01',
+  riverNetworkVersionId: 'yangtze_rivnet_v12',
 }
 
 const basin: ApiBasin = {
@@ -100,6 +102,7 @@ const run: ApiHydroRun = {
   scenario_id: 'forecast_gfs_deterministic',
   model_id: 'yangtze_shud_v12',
   basin_version_id: 'yangtze_v2026_01',
+  river_network_version_id: 'yangtze_rivnet_v12',
   forcing_version_id: 'forc_gfs_2026051800_yangtze_shud_v12',
   init_state_id: null,
   source_id: 'GFS',
@@ -318,7 +321,7 @@ describe('M11 overview data contracts', () => {
     })
   })
 
-  it('marks only flood return period as renderable when layer contracts lack source paths', () => {
+  it('marks hydrology data layers renderable when basin segment rows can provide geometry', () => {
     const layers = normalizeLayerStates({
       query,
       layers: [
@@ -337,14 +340,8 @@ describe('M11 overview data contracts', () => {
     })
 
     expect(layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({ available: true, disabledReason: null })
-    expect(layers.find((layer) => layer.layerId === 'discharge')).toMatchObject({
-      available: false,
-      disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
-    })
-    expect(layers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({
-      available: false,
-      disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
-    })
+    expect(layers.find((layer) => layer.layerId === 'discharge')).toMatchObject({ available: true, disabledReason: null })
+    expect(layers.find((layer) => layer.layerId === 'warning-level')).toMatchObject({ available: true, disabledReason: null })
     expect(layers.find((layer) => layer.layerId === 'river-network')).toMatchObject({
       available: false,
       disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
@@ -588,6 +585,7 @@ describe('M11 overview data contracts', () => {
       run_id: run.run_id,
       segment_id: 'seg-123',
       river_segment_id: 'yangtze_rivnet_v12_riv_000123',
+      river_network_version_id: 'yangtze_rivnet_v12',
       timesteps: [],
       timeline: [],
       peak: { valid_time: '2026-05-18T06:00:00Z', return_period: 20, warning_level: 'warning', q_value: 5242 },
@@ -626,7 +624,7 @@ describe('M11 overview data contracts', () => {
       comparisonAvailable: true,
       lineageStatus: 'available',
       handoffUrl:
-        '/forecast?source=compare&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&segmentId=yangtze_rivnet_v12_riv_000123',
+        '/forecast?source=compare&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=yangtze_rivnet_v12_riv_000123',
       geometry: featureCollection.features[0].geometry,
     })
     expect(detail.sourceSelection).toMatchObject({
@@ -635,6 +633,47 @@ describe('M11 overview data contracts', () => {
       comparisonAvailable: true,
     })
     expect(detail.trendPoints.map((point) => point.source)).toEqual(['GFS', 'GFS', 'IFS'])
+  })
+
+  it('uses the fallback current trend point valid time consistently when query validTime is absent', () => {
+    const forecast: ApiForecastPayload = {
+      river_segment_id: 'yangtze_rivnet_v12_riv_000123',
+      issue_time: '2026-05-18T00:00:00Z',
+      variable: 'q_down',
+      unit: 'm3/s',
+      frequency_thresholds: null,
+      segments: [
+        {
+          scenario: 'forecast_gfs_deterministic',
+          scenario_id: 'forecast_gfs_deterministic',
+          source: 'GFS',
+          source_id: 'GFS',
+          cycle_time: '2026-05-18T00:00:00Z',
+          available_lead_hours: 168,
+          segment_role: 'future_7_days',
+          data: [
+            { valid_time: '2026-05-18T06:00:00Z', value: 100 },
+            { valid_time: '2026-05-18T12:00:00Z', value: 120 },
+          ],
+        },
+      ],
+    }
+
+    const detail = normalizeSelectedSegmentDetail({
+      query: { ...query, source: 'gfs', validTime: '2026-05-18T09:00:00Z' },
+      basin,
+      basinVersionId: 'yangtze_v2026_01',
+      segmentId: 'yangtze_rivnet_v12_riv_000123',
+      segment,
+      feature: featureCollection.features[0],
+      model,
+      forecast,
+    })
+
+    expect(detail.currentQ).toBe(120)
+    expect(detail.freshness.validTime).toBe('2026-05-18T12:00:00.000Z')
+    expect(detail.handoffUrl).toContain('validTime=2026-05-18T12%3A00%3A00.000Z')
+    expect(detail.handoffUrl).not.toContain('2026-05-18T09%3A00%3A00')
   })
 
   it('sanitizes malformed and oversized selected segment LineString geometry before detail storage', () => {
@@ -721,6 +760,50 @@ describe('M11 overview data contracts', () => {
     })
   })
 
+  it('applies aggregate basin river geometry budget before row retention while preserving list metadata', () => {
+    const features = Array.from({ length: m11BasinRiverCollectionBudget.maxFeatures + 2 }, (_, index) => ({
+      ...featureCollection.features[0],
+      properties: {
+        ...featureCollection.features[0].properties,
+        segment_id: `seg-budget-${index}`,
+        river_segment_id: `river-budget-${index}`,
+        name: `Budget Segment ${index}`,
+      },
+      geometry: { type: 'LineString' as const, coordinates: [[100, 30], [100.01, 30.01]] },
+    }))
+    const rankingItems = features.map((feature, index): ApiFloodAlertRankingItem => ({
+      ...rankingItem,
+      river_segment_id: feature.properties.river_segment_id,
+      segment_id: feature.properties.segment_id,
+      segment_name: feature.properties.name,
+      q_value: 100 + index,
+      warning_level: index % 2 === 0 ? 'warning' : 'watch',
+    }))
+
+    const rows = normalizeBasinSegmentRows({
+      query: { ...query, warningLevel: null, q: null },
+      featureCollection: { ...featureCollection, total: features.length, feature_total: features.length, features },
+      rankingItems,
+    })
+    const retainedRows = rows.filter((row) => row.geometry)
+    const skippedRow = rows[m11BasinRiverCollectionBudget.maxFeatures]
+
+    expect(rows).toHaveLength(m11BasinRiverCollectionBudget.maxFeatures + 2)
+    expect(retainedRows).toHaveLength(m11BasinRiverCollectionBudget.maxFeatures)
+    expect(skippedRow).toMatchObject({
+      riverSegmentId: `river-budget-${m11BasinRiverCollectionBudget.maxFeatures}`,
+      segmentId: `seg-budget-${m11BasinRiverCollectionBudget.maxFeatures}`,
+      displayName: `Budget Segment ${m11BasinRiverCollectionBudget.maxFeatures}`,
+      currentQ: 100 + m11BasinRiverCollectionBudget.maxFeatures,
+      warningLevel: 'warning',
+      qualityFlag: 'ok',
+      hasGeometry: false,
+      geometry: null,
+    })
+    expect(skippedRow.unavailableReason).toContain('aggregate client rendering budget')
+    expect(filterBasinSegmentRows(rows, { warningLevel: 'watch', q: 'Budget Segment 2001' })).toHaveLength(1)
+  })
+
   it('exposes unavailable source/scenario and failed lineage instead of fabricating values', () => {
     const selection = createSourceScenarioSelection({ source: 'compare', cycle: null, validTime: null }, ['GFS'])
     const detail = normalizeSelectedSegmentDetail({
@@ -766,6 +849,7 @@ describe('M11 overview data contracts', () => {
         run_id: 'fcst_ifs_2026051800_yangtze_shud_v12',
         segment_id: 'seg-123',
         river_segment_id: 'yangtze_rivnet_v12_riv_000123',
+        river_network_version_id: 'yangtze_rivnet_v12',
         timesteps: [],
         timeline: [],
         peak: { valid_time: '2026-05-18T06:00:00Z', return_period: 20, warning_level: 'warning', q_value: 5242 },

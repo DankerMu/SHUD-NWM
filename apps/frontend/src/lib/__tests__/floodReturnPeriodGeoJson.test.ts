@@ -7,7 +7,7 @@ import {
 
 const feature = {
   type: 'Feature',
-  properties: { segment_id: 'seg-1' },
+  properties: { segment_id: 'seg-1', river_network_version_id: 'rn-v1' },
   geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
 }
 
@@ -22,9 +22,23 @@ describe('flood return-period GeoJSON validation', () => {
     if (!result.ok) return
     expect(result.data).toEqual({
       type: 'FeatureCollection',
-      features: [feature],
+      features: [{ ...feature, properties: { ...feature.properties, feature_id: 'rn-v1::seg-1' } }],
     })
     expect(result.coordinateCount).toBe(2)
+  })
+
+  it('preserves composite feature identity for duplicate segment IDs across river networks', () => {
+    const result = validateFloodReturnPeriodFeatureCollection({
+      type: 'FeatureCollection',
+      features: [
+        { ...feature, properties: { segment_id: 'dup-seg', river_network_version_id: 'rn-a' } },
+        { ...feature, properties: { segment_id: 'dup-seg', river_network_version_id: 'rn-b' } },
+      ],
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.data.features.map((item) => item.properties?.feature_id)).toEqual(['rn-a::dup-seg', 'rn-b::dup-seg'])
   })
 
   it('rejects invalid collection shape and feature count breaches', () => {

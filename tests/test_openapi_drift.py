@@ -27,10 +27,6 @@ DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
         "GET",
         "/api/v1/basin-versions/{basin_version_id}/river-network-versions",
     ): "issue-123 future registry read surface; backing read store is out of scope",
-    (
-        "GET",
-        "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}",
-    ): "issue-123 future river segment read surface; backing read store is out of scope",
     ("GET", "/api/v1/met/stations/{station_id}/series"): (
         "issue-123 future station time-series read; data-source migration is out of scope"
     ),
@@ -135,6 +131,90 @@ def test_openapi_issue_time_documents_latest_and_iso_datetime() -> None:
     assert {"type": "string", "format": "date-time"} in issue_time["schema"]["oneOf"]
 
 
+def test_forecast_series_river_network_query_parameter_matches_fastapi_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series"
+
+    static_param = _operation_parameter(static_spec, path, "get", "query", "river_network_version_id")
+    fastapi_param = _operation_parameter(fastapi_spec, path, "get", "query", "river_network_version_id")
+
+    for param in (static_param, fastapi_param):
+        assert param["required"] is True
+        assert param["schema"]["type"] == "string"
+        assert param["schema"]["minLength"] == 1
+
+
+def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/flood-alerts/timeline"
+
+    static_param = _operation_parameter(static_spec, path, "get", "query", "river_network_version_id")
+    fastapi_param = _operation_parameter(fastapi_spec, path, "get", "query", "river_network_version_id")
+
+    for param in (static_param, fastapi_param):
+        assert param["required"] is True
+        assert param["schema"]["type"] == "string"
+        assert param["schema"]["minLength"] == 1
+
+
+def test_flood_alert_ranking_limit_contract_matches_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/flood-alerts/ranking"
+
+    static_param = _operation_parameter(static_spec, path, "get", "query", "limit")
+    fastapi_param = _operation_parameter(fastapi_spec, path, "get", "query", "limit")
+
+    for param in (static_param, fastapi_param):
+        assert param["schema"]["type"] == "integer"
+        assert param["schema"]["default"] == 10
+        assert param["schema"]["maximum"] == 200
+        assert param["schema"]["minimum"] == 1
+
+
+def test_flood_alert_timeline_max_points_contract_matches_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/flood-alerts/timeline"
+
+    static_param = _operation_parameter(static_spec, path, "get", "query", "max_points")
+    fastapi_param = _operation_parameter(fastapi_spec, path, "get", "query", "max_points")
+
+    for param in (static_param, fastapi_param):
+        assert param["schema"]["type"] == "integer"
+        assert param["schema"]["default"] == 168
+        assert param["schema"]["maximum"] == 1000
+        assert param["schema"]["minimum"] == 1
+
+
+def test_flood_return_period_feature_properties_document_stable_identity() -> None:
+    spec = _openapi_spec()
+    schema = spec["components"]["schemas"]["FloodReturnPeriodFeatureProperties"]
+
+    assert {"feature_id", "segment_id", "river_network_version_id"} <= set(schema["required"])
+    assert schema["properties"]["feature_id"]["type"] == "string"
+    assert "river_network_version_id::segment_id" in schema["properties"]["feature_id"]["description"]
+    assert schema["properties"]["segment_id"]["type"] == "string"
+    assert schema["properties"]["river_network_version_id"]["type"] == "string"
+
+
+def test_river_segment_collection_413_contract_matches_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    paths = (
+        "/api/v1/basin-versions/{basin_version_id}/river-segments",
+        "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}",
+    )
+
+    for path in paths:
+        assert static_spec["paths"][path]["get"]["responses"]["413"]["$ref"] == "#/components/responses/Error"
+        assert fastapi_spec["paths"][path]["get"]["responses"]["413"]["description"] == (
+            "River segment GeoJSON payload budget exceeded."
+        )
+
+
 def test_openapi_success_envelope_accepts_array_data_composition() -> None:
     spec = _openapi_spec()
     schema = spec["paths"]["/api/v1/basins"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
@@ -181,6 +261,21 @@ def _resolve_ref(ref: str, spec: dict[str, Any]) -> dict[str, Any]:
     for part in ref.removeprefix("#/").split("/"):
         node = node[part]
     return node
+
+
+def _operation_parameter(
+    spec: dict[str, Any],
+    path: str,
+    method: str,
+    location: str,
+    name: str,
+) -> dict[str, Any]:
+    parameters = spec["paths"][path][method]["parameters"]
+    for param in parameters:
+        resolved = _resolve_ref(param["$ref"], spec) if "$ref" in param else param
+        if resolved.get("in") == location and resolved.get("name") == name:
+            return resolved
+    raise AssertionError(f"{method.upper()} {path} missing {location} parameter {name}")
 
 
 def _matches_schema(value: dict[str, Any], schema: dict[str, Any]) -> bool:

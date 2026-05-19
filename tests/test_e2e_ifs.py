@@ -134,11 +134,11 @@ async def test_ifs_api_multi_source_response_and_single_analysis_segment() -> No
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             forecast_response = await client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_0001/forecast-series"
-                "?issue_time=latest&variables=q_down&scenarios=GFS,IFS"
+                "?river_network_version_id=rivnet_v1&issue_time=latest&variables=q_down&scenarios=GFS,IFS"
             )
             analysis_response = await client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_0001/forecast-series"
-                "?issue_time=latest&variables=q_down&scenarios=GFS,IFS&include_analysis=true"
+                "?river_network_version_id=rivnet_v1&issue_time=latest&variables=q_down&scenarios=GFS,IFS&include_analysis=true"
             )
     finally:
         app.dependency_overrides.clear()

@@ -237,13 +237,18 @@ def test_data_isolation_forecast_series_default_excludes_hindcast() -> None:
     app.dependency_overrides[forecast_routes.get_forecast_store] = lambda: store
     try:
         with TestClient(app) as client:
-            default = client.get("/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series")
+            default = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+                "?river_network_version_id=rnv_v1"
+            )
             denied = client.get(
-                "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?run_types=hindcast",
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+                "?river_network_version_id=rnv_v1&run_types=hindcast",
                 headers={"X-User-Role": "viewer"},
             )
             explicit = client.get(
-                "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series?run_types=hindcast",
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+                "?river_network_version_id=rnv_v1&run_types=hindcast",
                 headers={"X-User-Role": "analyst"},
             )
     finally:
@@ -264,6 +269,7 @@ def test_forecast_series_unsupported_variable_returns_empty_response() -> None:
     response = store.forecast_series(
         basin_version_id="basin_v1",
         segment_id="seg_001",
+        river_network_version_id="rnv_v1",
         issue_time="latest",
         variables=["temperature"],
         scenarios=["GFS"],

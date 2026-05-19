@@ -873,6 +873,7 @@ export interface components {
             scenario_id: string;
             model_id: string;
             basin_version_id: string;
+            river_network_version_id: string | null;
             forcing_version_id?: string | null;
             init_state_id?: string | null;
             source_id?: string | null;
@@ -1178,6 +1179,7 @@ export interface components {
             segment_id: string;
             segment_name: string | null;
             basin_version_id: string;
+            river_network_version_id: string | null;
             q_value: number;
             q_unit: string;
             return_period: number | null;
@@ -1197,6 +1199,7 @@ export interface components {
             segment_id: string;
             segment_name: string | null;
             basin_version_id: string;
+            river_network_version_id: string | null;
             q_value: number;
             return_period: number | null;
             warning_level: string | null;
@@ -1208,6 +1211,8 @@ export interface components {
         FloodAlertSegmentList: {
             segments: components["schemas"]["FloodAlertSegment"][];
             total: number;
+            limit: number;
+            offset: number;
         };
         FloodAlertTimelinePoint: {
             /** Format: date-time */
@@ -1231,6 +1236,7 @@ export interface components {
             run_id: string;
             segment_id: string;
             river_segment_id: string;
+            river_network_version_id: string;
             timesteps: components["schemas"]["FloodAlertTimelinePoint"][];
             timeline: components["schemas"]["FloodAlertTimelinePoint"][];
             /** @description Peak timeline point, or null */
@@ -1253,6 +1259,8 @@ export interface components {
             geometry: Record<string, never> | null;
         };
         FloodReturnPeriodFeatureProperties: {
+            /** @description Composite GeoJSON feature identity in river_network_version_id::segment_id form. */
+            feature_id: string;
             /** @description River segment identifier. */
             segment_id: string;
             /** @description Displayed return-period flow value. */
@@ -1261,6 +1269,8 @@ export interface components {
             unit: string;
             /** @description Data quality indicator from flood.return_period_result. */
             quality_flag: string;
+            basin_version_id: string;
+            river_network_version_id: string;
             /** @description Return period in years. */
             return_period: number;
             /** @description Alert level such as normal, warning, danger, or unavailable. */
@@ -1604,6 +1614,7 @@ export interface operations {
                     };
                 };
             };
+            413: components["responses"]["Error"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -1643,7 +1654,10 @@ export interface operations {
     };
     getRiverSegment: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description River network version for the selected/list row; required because river_segment_id is only unique within a river network version. */
+                river_network_version_id: string;
+            };
             header?: never;
             path: {
                 basin_version_id: components["parameters"]["BasinVersionId"];
@@ -1664,13 +1678,16 @@ export interface operations {
                     };
                 };
             };
+            413: components["responses"]["Error"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
     };
     getRiverSegmentForecastSeries: {
         parameters: {
-            query?: {
+            query: {
+                /** @description River network version for the selected/list row; required because river_segment_id is only unique within a river network version. */
+                river_network_version_id: string;
                 /** @description Use `latest` to resolve to the most recent available issue time, or provide an ISO 8601 datetime. */
                 issue_time?: components["parameters"]["IssueTime"];
                 /** @description Comma-separated hydrological variables. */
@@ -1944,6 +1961,8 @@ export interface operations {
                 bbox?: string;
                 /** @description Optional minimum return period in years. */
                 return_period?: number;
+                /** @description Maximum GeoJSON features to return; requests exceeding this budget fail with 413. */
+                limit?: number;
             };
             header?: never;
             path?: never;
@@ -2221,7 +2240,7 @@ export interface operations {
         parameters: {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
-                limit?: components["parameters"]["Limit"];
+                limit?: number;
                 offset?: components["parameters"]["Offset"];
                 basin_id?: string;
                 valid_time?: components["parameters"]["ValidTimeQuery"];
@@ -2255,6 +2274,8 @@ export interface operations {
                 /** @description Comma-separated warning levels. */
                 warning_level?: string;
                 valid_time?: components["parameters"]["ValidTimeQuery"];
+                limit?: number;
+                offset?: components["parameters"]["Offset"];
             };
             header?: never;
             path?: never;
@@ -2282,6 +2303,10 @@ export interface operations {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
                 segment_id: components["parameters"]["SegmentIdQuery"];
+                /** @description River network version for the selected segment. */
+                river_network_version_id: string;
+                /** @description Maximum timeline points to return. Requests whose result set exceeds this budget fail with 413. */
+                max_points?: number;
             };
             header?: never;
             path?: never;
@@ -2309,6 +2334,8 @@ export interface operations {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
                 segment_id: components["parameters"]["SegmentIdQuery"];
+                /** @description River network version for the selected segment. */
+                river_network_version_id: string;
                 valid_time?: components["parameters"]["ValidTimeQuery"];
                 variable: components["parameters"]["VariableQuery"];
             };

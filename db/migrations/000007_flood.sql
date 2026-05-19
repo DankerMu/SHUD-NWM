@@ -40,6 +40,6 @@ CREATE TABLE IF NOT EXISTS flood.return_period_result (
   max_over_window BOOLEAN DEFAULT false,
   quality_flag TEXT NOT NULL DEFAULT 'ok',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+  PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)
 );
 SELECT create_hypertable('flood.return_period_result', 'valid_time', if_not_exists => TRUE);

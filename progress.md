@@ -1,13 +1,14 @@
 # 项目进度
 
-最后更新：2026-05-17，测试环境。
+最后更新：2026-05-19，测试环境。
 
 用途：作为跨 session 继承的项目真实进度索引，压缩记录“已实现什么、与设计/效果图还有什么差距、还缺什么数据”。项目有实质性进展时必须同步更新本文，保持 200 行以内。
 
 ## 当前状态
 
 - Epic #120 已完成并关闭；子 issue #121-#126 全部关闭。
-- 最新合并工作：PR #132，merge commit `ccc7f9bfaea4b5dfb125bdd5b8a4c36ca1ac1c88`。
+- 当前 M11 工作：issue #165 / PR #171 正在收敛 `/overview` 与 `/basins/:basinId` basin drill-down；当前修复跟进 Round 5 cross-review，OpenSpec change 为 `openspec/changes/m11-overview-basin-drilldown/`。
+- 最新已合并基线仍包含 PR #132，merge commit `ccc7f9bfaea4b5dfb125bdd5b8a4c36ca1ac1c88`；PR #171 是当前未合并 M11 review 分支。
 - M9 Basins 已完成并关闭：GitHub Epic #133，子 issue #134-#139 全部关闭；PR #144、#145 已合并。
 - M10 生产环境闭环已完成 OpenSpec 设计和 issue 拆分：`openspec/changes/m10-production-closure/`，GitHub Epic #146，子 issue #147-#152 覆盖真实 Slurm+SHUD workload、生产对象存储/Basins copied-data、真实气象源+QC、staging E2E、全国规模/MVT 性能、生产运维安全 runbook。
 - M10 #147 Real Slurm + SHUD workload closure 已新增 opt-in `nhms-production validate-slurm` 证据 lane：默认 fake/deterministic，不依赖真实 Slurm/SHUD/生产密钥；生产 preflight 缺失时写 blocker artifact 到 `artifacts/production-closure/<run_id>/slurm/`。
@@ -16,6 +17,7 @@
 - M10 #150 Staging E2E forecast/analysis closure 已新增 opt-in `nhms-production validate-e2e` 证据 lane：默认 deterministic/self-contained，不依赖真实 DB/API/Slurm/frontend/对象存储/SHUD；整合 source/canonical/forcing/slurm/parse/frequency/tile/API/frontend stage manifest、本地 `stage_artifacts/` 证据、derived IDs、现有 API contract evidence、frontend lineage evidence、SHUD `.rivqdown` QC blocker、严格 #147/#148/#149 dependency evidence status、redacted environment，并强制 run_id 范围、覆盖需 `--force`。
 - M10 #151 National-scale MVT/performance closure 已新增 opt-in `nhms-production validate-scale` 证据 lane：默认 deterministic large fixture，不依赖真实全国数据/PostGIS/live API/browser/MVT encoder；写入 scale preflight、dataset manifest、versioned thresholds、query p95/plan/hash evidence、GeoJSON/MVT blocker tile evidence、desktop/mobile frontend timing evidence、resource bounds 和 redacted environment，并强制 run_id 范围、覆盖需 `--force`。
 - M10 #152 Production ops/security/runbook closure 已新增 opt-in `nhms-production validate-ops` 证据 lane：默认 deterministic/self-contained，不依赖真实身份提供方、生产凭据、告警 sink、对象存储、Slurm、PostGIS/API/frontend 或 scheduler；写入 ops preflight、config validation、auth/RBAC、audit/redaction、monitoring/alerts、rollback drills、dependency closure、environment 和 summary，默认 `release_blocked` 且 `final_production_readiness_claimed=false`，强制 run_id 范围、覆盖需 `--force`。
+- M11 issue #165 / PR #171 已完成全国总览和流域 drill-down 的阶段性交付：路由、typed data contracts、MapLibre/ECharts/Zustand 集成、selected segment detail、forecast/timeline/lineage handoff、几何预算与 unavailable 状态均已接入；2026-05-19 visual evidence 见 `apps/frontend/e2e/m11-visual-evidence.md` 和本地 `.codex/screenshots/issue-165/`。
 - CI 覆盖 markdown lint、OpenAPI lint、JSON Schema 校验、真实 PostgreSQL/PostGIS/Timescale 集成、后端测试、前端 build/test、bundle size。
 - #126 后本地基线：`uv run pytest -q` -> `586 passed, 3 skipped`；真实 DB integration 为显式 opt-in，GitHub CI 已跑通。
 - 当前有效代码入口：`apps/api`、`apps/frontend`、`services/orchestrator`、`services/slurm_gateway`、`services/tile_publisher`、`workers/*` 下划线包、`infra/sbatch`。
@@ -44,9 +46,12 @@
 
 - 有效前端为 `apps/frontend`：Vite + React + TypeScript + MapLibre + ECharts + Zustand + OpenAPI-generated types。
 - 已实现路由：
-  - `/`：预报河网地图、河段选择、预报侧栏。
+  - `/`、`/overview`：M11 全国总览，含左侧流域/图层控制、中央地图、右侧运行摘要和底部时间轴。
+  - `/basins/:basinId`：M11 流域 drill-down，含流域版本与河段搜索/筛选、按径流/重现期/预警着色的有界河网、河段 hover/click、URL `segmentId` 同步、选中河段详情、趋势 sparkline、lineage/quality/unavailable 状态和 forecast handoff。
+  - `/forecast`：保留水文预报 workflow，并可与 M11 流域页互相传递 basin/version/segment/source/cycle/validTime 上下文。
   - `/flood-alerts`：洪水预警统计、排名、ticker、地图、时间轴、详情。
   - `/monitoring`：流水线监控工作台、阶段、作业表、队列摘要、趋势面板、operator RBAC gate。
+- M11 数据合同在 `overviewDataContracts.ts` / `overviewData.ts` 归一化；缺失/超预算几何、compare 聚合缺口、lineage/trend/comparison 不可用均以局部状态呈现，不伪造地图或预报数据。
 - Forecast UI 支持 GFS/IFS scenario 选择、多曲线图、analysis/forecast 区分、来源/周期归因、IFS 144h 可用时效标注。
 - Flood warning UI 使用 API 数据加载，支持预警等级过滤、时间轴播放、排名、河段详情、API-base-aware tile URL。
 - Monitoring UI 支持 pipeline status/jobs 轮询、source/cycle 选择、作业筛选/分页、日志弹窗、队列深度、趋势组件。
@@ -54,16 +59,14 @@
 
 ## 设计 / 效果图缺口
 
-- 设计文档与效果图描述的是更完整的 GIS 产品，目前前端只有 3 条主路由。
+- M11 全国总览与流域 drill-down 已完成阶段性交付；设计文档与效果图仍描述更完整的 GIS 产品。
 - `docs/spec/06_frontend_gis_design.md` 与 `design/ui` 中仍缺或未完整对齐：
-  - 效果图 1：全国总览，含左侧总览面板、中央全国地图、右侧指标面板、底部时间轴。
-  - 效果图 2：独立流域详情 drill-down 页面。
   - 效果图 3：预报曲线详情页，含顶部 KPI、气象代站列表、forcing 图表、多源主图、洪水频率侧栏。
   - 效果图 5：气象空间栅格展示页。
   - 效果图 6：气象代站查询页。
   - 效果图 7：流域/模型资产管理页。
   - 效果图 8：产品监控布局已有功能雏形，但视觉与交互未完全按 spec 对齐。
-- 当前 forecast 页面有地图和侧栏，但不是完整全国总览/流域 drill-down 交互模型。
+- M11 仍未实现 full-screen segment detail、气象空间/代站页面、完整模型资产管理页和生产 MVT/PBF 河网瓦片；当前 `/basins/:basinId` 使用现有 basin-version river-segment GeoJSON，有界渲染并对缺失几何保持 honest unavailable 状态。
 - 当前 flood warning 页面覆盖核心业务流，但 vector tile contract 仍偏兼容方案，不是真正完整 MVT 生产路径。
 - 当前 monitoring 页面可用且信息密度较高，但仍缺少部分 spec 级运维能力，例如 restart 后真实 Slurm 元数据追溯证明、完整资产 lineage 导航。
 - RBAC 目前主要是前端 gate + dev/test override 约定，不是完整生产身份认证/授权系统。

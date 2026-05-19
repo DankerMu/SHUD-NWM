@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { ChevronRight, Clock, MapPinned, PanelLeftClose, PanelRightClose } from 'lucide-react'
 
 import type { components } from '@/api/types'
-import type { LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import type { BasinSegmentRow, LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryPatch, M11QueryState } from '@/lib/m11/queryState'
 import { serializeM11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
@@ -23,6 +23,7 @@ interface M11LayoutProps {
   layers?: LayerState[]
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
+  basinSegments?: BasinSegmentRow[]
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   sourceSelection?: SourceScenarioSelectionState | null
@@ -47,6 +48,7 @@ export function M11Layout({
   layers = [],
   basins = [],
   visibleBasinIds,
+  basinSegments = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   sourceSelection = null,
@@ -95,6 +97,7 @@ export function M11Layout({
           layers={layers}
           basins={basins}
           visibleBasinIds={visibleBasinIds}
+          basinSegments={basinSegments}
           selectedSegmentId={selectedSegmentId}
           selectedSegmentGeometry={selectedSegmentGeometry}
           onQueryChange={onQueryChange}
