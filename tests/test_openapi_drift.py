@@ -189,6 +189,17 @@ def test_flood_alert_timeline_max_points_contract_matches_runtime_and_static_ope
         assert param["schema"]["minimum"] == 1
 
 
+def test_flood_return_period_feature_properties_document_stable_identity() -> None:
+    spec = _openapi_spec()
+    schema = spec["components"]["schemas"]["FloodReturnPeriodFeatureProperties"]
+
+    assert {"feature_id", "segment_id", "river_network_version_id"} <= set(schema["required"])
+    assert schema["properties"]["feature_id"]["type"] == "string"
+    assert "river_network_version_id::segment_id" in schema["properties"]["feature_id"]["description"]
+    assert schema["properties"]["segment_id"]["type"] == "string"
+    assert schema["properties"]["river_network_version_id"]["type"] == "string"
+
+
 def test_river_segment_collection_413_contract_matches_runtime_and_static_openapi() -> None:
     static_spec = _openapi_spec()
     fastapi_spec: dict[str, Any] = app.openapi()

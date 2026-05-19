@@ -528,6 +528,18 @@ def flood_return_period_map(
         },
     ).mappings()
     rows = list(rows)
+    overflow_row = next((row for row in rows if row.get("collection_overflow")), None)
+    if overflow_row is not None:
+        raise ApiError(
+            status_code=413,
+            code="FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED",
+            message="Flood return-period GeoJSON geometry budget exceeded; provide a bbox.",
+            details={
+                "limit_type": "collection_coordinates",
+                "max_coordinates": FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES,
+                "coordinate_count": int(overflow_row.get("collection_coordinate_count") or 0),
+            },
+        )
     if len(rows) > limit:
         raise ApiError(
             status_code=413,
@@ -814,11 +826,19 @@ def _flood_return_period_map_sql(session: Session, *, bbox_filter: str) -> str:
             ),
             budgeted_segments AS (
                 SELECT *,
+                       ST_NPoints(geom) AS coordinate_count,
                        SUM(ST_NPoints(geom)) OVER (
                            ORDER BY river_network_version_id, river_segment_id
                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                        ) AS running_coordinate_count
                 FROM eligible_segments
+            ),
+            overflow AS (
+                SELECT
+                    COALESCE(MAX(running_coordinate_count), 0) > :collection_coordinate_limit
+                        AS collection_overflow,
+                    COALESCE(MAX(running_coordinate_count), 0) AS collection_coordinate_count
+                FROM budgeted_segments
             ),
             bounded_segments AS (
                 SELECT *
@@ -826,9 +846,18 @@ def _flood_return_period_map_sql(session: Session, *, bbox_filter: str) -> str:
                 WHERE running_coordinate_count <= :collection_coordinate_limit
             )
             SELECT river_segment_id, basin_version_id, river_network_version_id, return_period,
-                   warning_level, q_value, q_unit, quality_flag, ST_AsGeoJSON(geom)::text AS geom_json
+                   warning_level, q_value, q_unit, quality_flag, ST_AsGeoJSON(geom)::text AS geom_json,
+                   false AS collection_overflow,
+                   (SELECT collection_coordinate_count FROM overflow) AS collection_coordinate_count
             FROM bounded_segments
-            ORDER BY river_network_version_id, river_segment_id
+            UNION ALL
+            SELECT NULL AS river_segment_id, NULL AS basin_version_id, NULL AS river_network_version_id,
+                   NULL AS return_period, NULL AS warning_level, NULL AS q_value, NULL AS q_unit,
+                   NULL AS quality_flag, NULL AS geom_json, true AS collection_overflow,
+                   collection_coordinate_count
+            FROM overflow
+            WHERE collection_overflow
+            ORDER BY collection_overflow DESC, river_network_version_id, river_segment_id
             LIMIT :query_limit
             """
 

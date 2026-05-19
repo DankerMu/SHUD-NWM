@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -509,12 +510,80 @@ def test_flood_tile_postgis_geometry_budgets_precede_geojson_serialization() -> 
     assert "ST_NDims(rs.geom) <= :max_coordinate_dimensions" in statement
     assert "SUM(ST_NPoints(geom)) OVER" in statement
     assert "running_coordinate_count <= :collection_coordinate_limit" in statement
+    assert "true AS collection_overflow" in statement
+    assert "collection_coordinate_count" in statement
     assert "ST_AsGeoJSON(geom)::text AS geom_json" in statement
     assert statement.index("ST_NPoints(rs.geom) BETWEEN 2 AND :feature_coordinate_limit") < statement.index(
         "ST_AsGeoJSON(geom)::text AS geom_json"
     )
     assert statement.index("running_coordinate_count <= :collection_coordinate_limit") < statement.index(
         "ST_AsGeoJSON(geom)::text AS geom_json"
+    )
+
+
+def test_flood_tile_postgis_collection_overflow_sentinel_returns_413_before_payload_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRows:
+        def mappings(self) -> "FakeRows":
+            return self
+
+        def __iter__(self) -> Iterator[dict[str, Any]]:
+            return iter(
+                [
+                    {
+                        "river_segment_id": None,
+                        "basin_version_id": None,
+                        "river_network_version_id": None,
+                        "return_period": None,
+                        "warning_level": None,
+                        "q_value": None,
+                        "q_unit": None,
+                        "quality_flag": None,
+                        "geom_json": None,
+                        "collection_overflow": True,
+                        "collection_coordinate_count": (
+                            flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES + 2
+                        ),
+                    }
+                ]
+            )
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRows:
+            assert "ST_AsGeoJSON(geom)::text AS geom_json" in str(statement)
+            assert parameters["collection_coordinate_limit"] == (
+                flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES
+            )
+            return FakeRows()
+
+    monkeypatch.setattr(flood_alert_routes, "_require_frequency_ready", lambda _session, _run_id: {})
+
+    with pytest.raises(flood_alert_routes.ApiError) as exc:
+        flood_alert_routes.flood_return_period_map(
+            run_id=RUN_ID,
+            duration="1h",
+            valid_time=VALID_TIME_1,
+            bbox=None,
+            return_period=None,
+            limit=10_000,
+            session=FakeSession(),  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 413
+    assert exc.value.code == "FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED"
+    assert exc.value.details["limit_type"] == "collection_coordinates"
+    assert exc.value.details["coordinate_count"] == (
+        flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES + 2
     )
 
 
@@ -696,9 +765,9 @@ def _create_tables(connection: Any) -> None:
                 warning_level TEXT,
                 source_id TEXT,
                 cycle_time DATETIME,
-                max_over_window BOOLEAN DEFAULT 0,
+                max_over_window BOOLEAN NOT NULL DEFAULT 0,
                 quality_flag TEXT NOT NULL DEFAULT 'ok',
-                PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)
+                PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time, max_over_window)
             )
             """
         )

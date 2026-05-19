@@ -107,6 +107,39 @@ def test_timestep_calculation_multiple_timesteps() -> None:
         assert rows[-1]["warning_level"] == "high_risk"
 
 
+def test_one_hour_window_keeps_peak_and_timestep_rows() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(
+            session,
+            segment_values={"seg_001": [260.0, 150.0]},
+            start_time=datetime(2026, 5, 1),
+            end_time=datetime(2026, 5, 1, 1),
+        )
+
+        result = compute_return_periods("forecast_run", session)
+
+        rows = session.execute(
+            text(
+                """
+                SELECT duration, valid_time, max_over_window, q_value, warning_level
+                FROM flood.return_period_result
+                WHERE run_id = 'forecast_run'
+                  AND river_segment_id = 'seg_001'
+                  AND duration = '1h'
+                  AND valid_time = :valid_time
+                ORDER BY max_over_window DESC
+                """
+            ),
+            {"valid_time": datetime(2026, 5, 1)},
+        ).mappings().all()
+        assert result.rows_written == 3
+        assert len(rows) == 2
+        assert [bool(row["max_over_window"]) for row in rows] == [True, False]
+        assert [row["q_value"] for row in rows] == [260.0, 260.0]
+        assert [row["warning_level"] for row in rows] == ["high_risk", "high_risk"]
+
+
 def test_ifs_six_day_window_uses_actual_duration_label() -> None:
     with _store() as session:
         _insert_curve(session, "seg_001")
@@ -379,9 +412,9 @@ def _create_tables(connection: Any) -> None:
                 warning_level TEXT,
                 source_id TEXT,
                 cycle_time DATETIME,
-                max_over_window BOOLEAN DEFAULT 0,
+                max_over_window BOOLEAN NOT NULL DEFAULT 0,
                 quality_flag TEXT NOT NULL DEFAULT 'ok',
-                PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)
+                PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time, max_over_window)
             )
             """
         )

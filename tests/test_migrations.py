@@ -20,6 +20,7 @@ EXPECTED_MIGRATIONS = [
     "000014_best_available_lineage.sql",
     "000015_flood_return_period_identity_indexes.sql",
     "000016_river_segment_pagination_indexes.sql",
+    "000017_return_period_max_over_window_identity.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -137,10 +138,18 @@ def test_flood_return_period_result_has_versioned_identity_and_hot_path_indexes(
     migration_sql = dict(_migration_sql())
     initial_schema = migration_sql["000007_flood.sql"]
     repair_schema = migration_sql["000015_flood_return_period_identity_indexes.sql"]
+    max_over_window_schema = migration_sql["000017_return_period_max_over_window_identity.sql"]
 
-    expected_primary_key = "PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)"
-    assert expected_primary_key in initial_schema
-    assert expected_primary_key in repair_schema
+    expected_versioned_primary_key = (
+        "PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)"
+    )
+    expected_max_over_window_primary_key = (
+        "PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time, max_over_window)"
+    )
+    assert expected_versioned_primary_key in initial_schema
+    assert expected_versioned_primary_key in repair_schema
+    assert expected_max_over_window_primary_key in max_over_window_schema
+    assert "ALTER COLUMN max_over_window SET NOT NULL" in max_over_window_schema
 
     for index_name in (
         "return_period_result_summary_idx",
@@ -172,6 +181,22 @@ def test_flood_return_period_repair_migration_preflights_duplicate_versioned_row
     assert "HAVING COUNT(*) > 1" in repair_schema
     assert "Deduplicate or quarantine duplicate return-period rows before applying migration 000015" in repair_schema
     assert "IF NOT EXISTS" in repair_schema
+
+
+def test_flood_return_period_max_over_window_migration_preflights_duplicate_rows() -> None:
+    migration = dict(_migration_sql())["000017_return_period_max_over_window_identity.sql"]
+
+    preflight_position = migration.index("duplicate max-over-window return-period rows exist")
+    drop_position = migration.index("ALTER TABLE flood.return_period_result DROP CONSTRAINT")
+
+    assert preflight_position < drop_position
+    assert (
+        "GROUP BY run_id, river_network_version_id, river_segment_id, duration, valid_time, max_over_window"
+        in migration
+    )
+    assert "HAVING COUNT(*) > 1" in migration
+    assert "Deduplicate or quarantine duplicate return-period rows before applying migration 000017" in migration
+    assert "IF NOT EXISTS" in migration
 
 
 def test_river_segment_pagination_migration_adds_lookup_indexes() -> None:

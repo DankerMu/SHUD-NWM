@@ -1259,6 +1259,8 @@ export interface components {
             geometry: Record<string, never> | null;
         };
         FloodReturnPeriodFeatureProperties: {
+            /** @description Composite GeoJSON feature identity in river_network_version_id::segment_id form. */
+            feature_id: string;
             /** @description River segment identifier. */
             segment_id: string;
             /** @description Displayed return-period flow value. */

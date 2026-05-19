@@ -172,6 +172,7 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "river_segment_id",
                 "duration",
                 "valid_time",
+                "max_over_window",
             ]
 
             valid_time_ranking_columns = [
@@ -245,7 +246,10 @@ def test_real_return_period_repair_migration_replaces_old_key_idempotently(
     integration_database_url: str,
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    migration_file = MIGRATIONS_DIR / "000015_flood_return_period_identity_indexes.sql"
+    migration_files = [
+        MIGRATIONS_DIR / "000015_flood_return_period_identity_indexes.sql",
+        MIGRATIONS_DIR / "000017_return_period_max_over_window_identity.sql",
+    ]
     engine = sqlalchemy_engine(integration_database_url)
     try:
         with engine.begin() as connection:
@@ -265,8 +269,10 @@ def test_real_return_period_repair_migration_replaces_old_key_idempotently(
         psycopg_connection = psycopg2.connect(integration_database_url)
         psycopg_connection.autocommit = True
         try:
-            apply_migration(psycopg_connection, migration_file)
-            apply_migration(psycopg_connection, migration_file)
+            for migration_file in migration_files:
+                apply_migration(psycopg_connection, migration_file)
+            for migration_file in migration_files:
+                apply_migration(psycopg_connection, migration_file)
         finally:
             psycopg_connection.close()
 
@@ -292,6 +298,7 @@ def test_real_return_period_repair_migration_replaces_old_key_idempotently(
             "river_segment_id",
             "duration",
             "valid_time",
+            "max_over_window",
         ]
 
         seed_issue_126_data(integration_database_url)

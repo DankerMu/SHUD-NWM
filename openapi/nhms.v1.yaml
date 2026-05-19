@@ -2959,8 +2959,11 @@ components:
           description: "GeoJSON geometry (LineString, MultiLineString, or Point), or null"
     FloodReturnPeriodFeatureProperties:
       type: object
-      required: [segment_id, value, unit, quality_flag, basin_version_id, river_network_version_id, return_period, warning_level]
+      required: [feature_id, segment_id, value, unit, quality_flag, basin_version_id, river_network_version_id, return_period, warning_level]
       properties:
+        feature_id:
+          type: string
+          description: Composite GeoJSON feature identity in river_network_version_id::segment_id form.
         segment_id:
           type: string
           description: River segment identifier.
