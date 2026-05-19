@@ -394,6 +394,7 @@ test.describe('forecast page', () => {
           segmentId: url.pathname.split('/river-segments/')[1]?.split('/')[0] ?? null,
           issueTime: url.searchParams.get('issue_time'),
           scenarios: url.searchParams.get('scenarios'),
+          riverNetworkVersionId: url.searchParams.get('river_network_version_id'),
         })
         if (forecastQueries.length === 1) {
           return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'temporary forecast failure' }) })
@@ -404,7 +405,7 @@ test.describe('forecast page', () => {
     })
 
     await page.goto(
-      '/forecast?segmentId=backend-seg-7&basinVersionId=backend-basin-v1&source=ifs&cycle=2026-05-18T00:00:00Z',
+      '/forecast?segmentId=backend-seg-7&basinVersionId=backend-basin-v1&riverNetworkVersionId=backend-rivnet-v1&source=ifs&cycle=2026-05-18T00:00:00Z',
       { waitUntil: 'domcontentloaded' },
     )
 
@@ -419,6 +420,9 @@ test.describe('forecast page', () => {
 
     expect(forecastQueries.map(({ issueTime, scenarios }) => ({ issueTime, scenarios }))).toEqual(
       forecastQueries.map(() => ({ issueTime: '2026-05-18T00:00:00.000Z', scenarios: 'IFS' })),
+    )
+    expect(forecastQueries.map(({ riverNetworkVersionId }) => riverNetworkVersionId)).toEqual(
+      forecastQueries.map(() => 'backend-rivnet-v1'),
     )
     expect(forecastQueries.at(-1)?.segmentId).not.toBe('backend-seg-7')
   })

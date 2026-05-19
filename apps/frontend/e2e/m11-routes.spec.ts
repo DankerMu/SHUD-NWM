@@ -120,6 +120,22 @@ async function mockOverviewApis(
         offset: 0,
       })
     }
+    if (url.pathname === '/api/v1/models/model-demo') {
+      return fulfill(route, {
+        model_id: 'model-demo',
+        model_name: 'Demo SHUD',
+        basin_id: 'basin-demo',
+        basin_name: 'Demo Basin',
+        basin_version_id: 'bv-001',
+        river_network_version_id: 'rn-v1',
+        mesh_version_id: 'mesh-v1',
+        calibration_version_id: 'cal-v1',
+        segment_count: 2,
+        active_flag: true,
+        shud_code_version: 'v1',
+        created_at: '2026-05-01T00:00:00Z',
+      })
+    }
     if (url.pathname === '/api/v1/runs') {
       return fulfill(route, {
         items: options.lowRequestPlan
