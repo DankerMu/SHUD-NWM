@@ -348,6 +348,92 @@ describe('useModelAssetsStore', () => {
     })
   })
 
+  it.each([
+    [
+      'top-level URI safe, nested URI restricted',
+      {
+        source_uri: 's3://nhms/safe/top-level',
+        resource_profile: {
+          source_lineage: {
+            source_uri: 'file:///volume/data/nwm/Basins/qhh/restricted-uri',
+          },
+        },
+      },
+    ],
+    [
+      'top-level URI restricted, nested URI safe',
+      {
+        source_uri: 'file:///volume/data/nwm/Basins/qhh/restricted-uri',
+        resource_profile: {
+          source_lineage: {
+            source_uri: 's3://nhms/safe/nested',
+          },
+        },
+      },
+    ],
+  ])('keeps Source URI restricted-source precedence for %s', async (_caseName, overrides) => {
+    vi.mocked(client.GET).mockResolvedValue(success({ items: [makeBasinsModel(overrides)], total: 1, limit: 50, offset: 0 }) as never)
+
+    await useModelAssetsStore.getState().fetchModels()
+
+    const normalized = useModelAssetsStore.getState().models[0]
+    const serialized = JSON.stringify(normalized)
+    expect(serialized).not.toContain('file:///volume/data')
+    expect(buildModelAssetDependencyGraph(normalized).nodes.find((node) => node.id === 'source')).toMatchObject({
+      missing: false,
+      value: MODEL_ASSET_RESTRICTED_SOURCE,
+    })
+  })
+
+  it.each([
+    [
+      'top-level path safe, nested path restricted',
+      {
+        source_path: 's3://nhms/safe/top-level-path',
+        resource_profile: {
+          source_lineage: {
+            source_path: 'file:///volume/data/nwm/Basins/qhh/restricted-path',
+          },
+        },
+      },
+    ],
+    [
+      'top-level path restricted, nested path safe',
+      {
+        source_path: '/volume/data/nwm/Basins/qhh/restricted-path',
+        resource_profile: {
+          source_lineage: {
+            source_path: 's3://nhms/safe/nested-path',
+          },
+        },
+      },
+    ],
+    [
+      'safe lineage path, restricted URI fallback',
+      {
+        source_path: null,
+        resource_profile: {
+          source_lineage: {
+            source_path: 's3://nhms/safe/lineage-path',
+            uris: ['file:///volume/data/nwm/Basins/qhh/restricted-uri-fallback'],
+          },
+        },
+      },
+    ],
+  ])('keeps Source Path restricted-source precedence for %s', async (_caseName, overrides) => {
+    vi.mocked(client.GET).mockResolvedValue(success({ items: [makeBasinsModel(overrides)], total: 1, limit: 50, offset: 0 }) as never)
+
+    await useModelAssetsStore.getState().fetchModels()
+
+    const normalized = useModelAssetsStore.getState().models[0]
+    const serialized = JSON.stringify(normalized)
+    expect(serialized).not.toContain('/volume/data')
+    expect(buildModelAssetDependencyGraph(normalized).nodes.find((node) => node.id === 'source')).toMatchObject({
+      missing: false,
+      value: MODEL_ASSET_RESTRICTED_SOURCE,
+    })
+  })
+
   it('clears stale selected model when the next detail request fails', async () => {
     const detail = makeBasinsModel()
 
@@ -561,6 +647,32 @@ describe('useModelAssetsStore', () => {
     expect(projection.notice).toBe(MODEL_ASSET_PRODUCT_LIMIT_TEXT)
   })
 
+  it.each(['product_assets', 'products', 'assets'] as const)(
+    'bounds inspected %s entries when malformed prefixes precede valid products',
+    (key) => {
+      const products = Array.from({ length: 100_000 }, () => null) as unknown[]
+      products.push({
+        id: 'late-valid-product',
+        label: 'Late Valid Product',
+        checksum: 'late-sha',
+        uri: 's3://nhms/private/late',
+      })
+      Object.defineProperty(products, 101, {
+        get() {
+          throw new Error('product inspection sentinel was accessed')
+        },
+      })
+
+      const projection = buildModelAssetProducts(makeBasinsModel({ resource_profile: { [key]: products } }))
+
+      expect(projection).toMatchObject({
+        items: [],
+        truncated: true,
+        notice: MODEL_ASSET_PRODUCT_LIMIT_TEXT,
+      })
+    },
+  )
+
   it('applies mini map geometry budgets and degraded states', () => {
     expect(buildModelAssetMapProjection(makeBasinsModel({ resource_profile: {} })).text).toBe(MODEL_ASSET_MAP_UNAVAILABLE_TEXT)
 
@@ -623,6 +735,40 @@ describe('useModelAssetsStore', () => {
       })
     }
   })
+
+  it.each(['fetchModels', 'fetchModelDetail'] as const)(
+    'marks raw over-budget geometry loaded through %s as degraded after normalization',
+    async (method) => {
+      const overBudgetGeometry = {
+        type: 'LineString',
+        coordinates: Array.from({ length: 10_000 }, (_, index) => [100 + index / 10_000, 30]),
+      }
+      const model = makeBasinsModel({
+        resource_profile: {
+          geometry: overBudgetGeometry,
+        },
+      })
+      vi.mocked(client.GET).mockResolvedValue(
+        success(method === 'fetchModels' ? { items: [model], total: 1, limit: 50, offset: 0 } : model) as never,
+      )
+
+      if (method === 'fetchModels') {
+        await useModelAssetsStore.getState().fetchModels()
+      } else {
+        await useModelAssetsStore.getState().fetchModelDetail(BASINS_MODEL_ID)
+      }
+
+      const normalized =
+        method === 'fetchModels' ? useModelAssetsStore.getState().models[0] : useModelAssetsStore.getState().selectedModel
+      const projection = buildModelAssetMapProjection(normalized)
+      expect(JSON.stringify(normalized?.resource_profile)).not.toContain('109.9999')
+      expect(projection).toMatchObject({
+        status: 'over-budget',
+        text: MODEL_ASSET_MAP_OVER_BUDGET_TEXT,
+        geometry: null,
+      })
+    },
+  )
 
   it('bounds sanitizer recursion and wide resource profiles without leaking local strings', async () => {
     let deep: Record<string, unknown> = { source_path: '/volume/data/nwm/Basins/deep-secret' }

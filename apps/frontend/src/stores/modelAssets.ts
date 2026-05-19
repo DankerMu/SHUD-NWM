@@ -6,6 +6,7 @@ import type { components } from '@/api/types'
 
 export type ModelAsset = components['schemas']['ModelInstance'] & {
   __restrictedSourceFields?: Record<string, true>
+  __truncatedFields?: Record<string, true>
 }
 export type ModelAssetPage = components['schemas']['ModelInstancePage']
 export type ModelAssetActiveFilter = 'true' | 'false' | 'all'
@@ -21,8 +22,18 @@ export const MODEL_ASSET_MAP_UNAVAILABLE_TEXT = '暂无空间预览'
 const MODEL_ASSET_DETAIL_IDENTITY_MISMATCH = '模型资产详情与当前选择不匹配'
 const MODEL_ASSET_SANITIZE_MAX_DEPTH = 24
 const MODEL_ASSET_SANITIZE_MAX_NODES = 5000
+const MODEL_ASSET_PRODUCT_INSPECTION_LIMIT = 100
 const MODEL_ASSET_GEOMETRY_MAX_DEPTH = 48
 const MODEL_ASSET_GEOMETRY_MAX_NODES = 10000
+const MODEL_ASSET_GEOMETRY_KEYS = [
+  'geometry',
+  'geom',
+  'basin_geometry',
+  'basin_boundary',
+  'boundary',
+  'river_geometry',
+  'river_geometries',
+] as const
 
 export interface ModelAssetListFilters {
   basinVersionId?: string
@@ -153,6 +164,25 @@ function isPublicUriLike(value: string) {
   return /^(?!file:)[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('//')
 }
 
+function fieldPath(path: string[]): string | null {
+  return path.length > 0 ? path.join('.') : null
+}
+
+function isGeometryFieldPath(path: string[]) {
+  const key = path[path.length - 1]
+  return MODEL_ASSET_GEOMETRY_KEYS.some((geometryKey) => geometryKey === key)
+}
+
+function markRestrictedField(path: string[], restrictedFields: Set<string> | undefined) {
+  const pathText = fieldPath(path)
+  if (pathText) restrictedFields?.add(pathText)
+}
+
+function markTruncatedField(path: string[], truncatedFields: Set<string> | undefined) {
+  const pathText = fieldPath(path)
+  if (pathText) truncatedFields?.add(pathText)
+}
+
 export function sanitizeModelAssetString(value: string): string | null {
   if (isLocalOrFileSource(value)) return null
   if (!isPublicUriLike(value)) return value
@@ -178,6 +208,7 @@ export function displaySanitizedSource(value: unknown): string {
 interface SanitizeOptions {
   path?: string[]
   restrictedFields?: Set<string>
+  truncatedFields?: Set<string>
   depth?: number
   nodeBudget?: { count: number }
   seen?: WeakSet<object>
@@ -188,29 +219,37 @@ export function sanitizeModelAssetValue(value: unknown, options: SanitizeOptions
   const depth = options.depth ?? 0
   const nodeBudget = options.nodeBudget ?? { count: 0 }
   const restrictedFields = options.restrictedFields
+  const truncatedFields = options.truncatedFields
 
   nodeBudget.count += 1
   if (depth > MODEL_ASSET_SANITIZE_MAX_DEPTH || nodeBudget.count > MODEL_ASSET_SANITIZE_MAX_NODES) {
-    if (path.length > 0) restrictedFields?.add(path.join('.'))
+    markRestrictedField(path, restrictedFields)
+    markTruncatedField(path, truncatedFields)
     return null
   }
 
   if (typeof value === 'string') {
     const sanitized = sanitizeModelAssetString(value)
-    if (sanitized === null && value.trim() !== '' && path.length > 0) restrictedFields?.add(path.join('.'))
+    if (sanitized === null && value.trim() !== '') markRestrictedField(path, restrictedFields)
     return sanitized
   }
   if (Array.isArray(value)) {
     const seen = options.seen ?? new WeakSet<object>()
     if (seen.has(value)) {
-      if (path.length > 0) restrictedFields?.add(path.join('.'))
+      markRestrictedField(path, restrictedFields)
+      markTruncatedField(path, truncatedFields)
       return null
     }
     seen.add(value)
+    if (isGeometryFieldPath(path)) {
+      const inspected = inspectGeometryCandidate(value)
+      if (inspected.overBudget) markTruncatedField(path, truncatedFields)
+    }
     const sanitized: unknown[] = []
     for (let index = 0; index < value.length; index += 1) {
       if (nodeBudget.count >= MODEL_ASSET_SANITIZE_MAX_NODES) {
-        if (path.length > 0) restrictedFields?.add(path.join('.'))
+        markRestrictedField(path, restrictedFields)
+        markTruncatedField(path, truncatedFields)
         break
       }
       sanitized.push(
@@ -229,15 +268,21 @@ export function sanitizeModelAssetValue(value: unknown, options: SanitizeOptions
 
   const seen = options.seen ?? new WeakSet<object>()
   if (seen.has(value)) {
-    if (path.length > 0) restrictedFields?.add(path.join('.'))
+    markRestrictedField(path, restrictedFields)
+    markTruncatedField(path, truncatedFields)
     return null
   }
   seen.add(value)
+  if (isGeometryFieldPath(path)) {
+    const inspected = inspectGeometryCandidate(value)
+    if (inspected.overBudget) markTruncatedField(path, truncatedFields)
+  }
 
   const sanitized: JsonRecord = {}
   for (const [key, entry] of Object.entries(value)) {
     if (nodeBudget.count >= MODEL_ASSET_SANITIZE_MAX_NODES) {
-      if (path.length > 0) restrictedFields?.add(path.join('.'))
+      markRestrictedField(path, restrictedFields)
+      markTruncatedField(path, truncatedFields)
       break
     }
     sanitized[key] = sanitizeModelAssetValue(entry, {
@@ -253,11 +298,17 @@ export function sanitizeModelAssetValue(value: unknown, options: SanitizeOptions
 
 function normalizeModelAsset(model: ModelAsset): ModelAsset {
   const restrictedFields = new Set<string>()
-  const sanitized = sanitizeModelAssetValue(model, { restrictedFields }) as ModelAsset
-  if (restrictedFields.size === 0) return sanitized
+  const truncatedFields = new Set<string>()
+  const sanitized = sanitizeModelAssetValue(model, { restrictedFields, truncatedFields }) as ModelAsset
+  if (restrictedFields.size === 0 && truncatedFields.size === 0) return sanitized
   return {
     ...sanitized,
-    __restrictedSourceFields: Object.fromEntries(Array.from(restrictedFields).map((field) => [field, true])),
+    ...(restrictedFields.size > 0
+      ? { __restrictedSourceFields: Object.fromEntries(Array.from(restrictedFields).map((field) => [field, true])) }
+      : {}),
+    ...(truncatedFields.size > 0
+      ? { __truncatedFields: Object.fromEntries(Array.from(truncatedFields).map((field) => [field, true])) }
+      : {}),
   }
 }
 
@@ -274,6 +325,17 @@ export function hasRestrictedModelAssetSource(model: ModelAsset | null | undefin
 
 function hasAnyRestrictedModelAssetSource(model: ModelAsset | null | undefined, fieldPaths: string[]): boolean {
   return fieldPaths.some((fieldPath) => hasRestrictedModelAssetSource(model, fieldPath))
+}
+
+function hasTruncatedModelAssetField(model: ModelAsset | null | undefined, fieldPath: string): boolean {
+  const truncatedFields = model?.__truncatedFields
+  if (!truncatedFields) return false
+  return Object.keys(truncatedFields).some(
+    (truncatedPath) =>
+      truncatedPath === fieldPath ||
+      truncatedPath.startsWith(`${fieldPath}.`) ||
+      fieldPath.startsWith(`${truncatedPath}.`),
+  )
 }
 
 function textValue(value: unknown): string | null {
@@ -330,10 +392,10 @@ function projectProductEntry(model: ModelAsset, product: JsonRecord, path: strin
   const targetRestricted = ['target', 'uri', 'url', 'href', 'path', 'source_uri'].some((key) =>
     hasRestrictedModelAssetSource(model, `${path}.${key}`),
   )
-  const sanitizedTarget = target
-    ? displaySanitizedSource(target)
-    : targetRestricted
-      ? MODEL_ASSET_RESTRICTED_SOURCE
+  const sanitizedTarget = targetRestricted
+    ? MODEL_ASSET_RESTRICTED_SOURCE
+    : target
+      ? displaySanitizedSource(target)
       : MODEL_ASSET_UNAVAILABLE
   const id = getFirstText(product, ['id', 'asset_id', 'key', 'name']) ?? `asset-${index + 1}`
   const label = getFirstText(product, ['label', 'name', 'type', 'kind']) ?? id
@@ -349,13 +411,22 @@ function projectProductEntry(model: ModelAsset, product: JsonRecord, path: strin
 function buildExplicitProductProjection(model: ModelAsset, profile: JsonRecord): ModelAssetProductProjection | null {
   const items: ModelAssetProductAsset[] = []
   let truncated = false
+  let hasExplicitProducts = false
   let displayIndex = 0
+  let inspected = 0
 
   productKeys: for (const key of ['product_assets', 'products', 'assets'] as const) {
     const products = profile[key]
     if (!Array.isArray(products)) continue
+    hasExplicitProducts = true
 
     for (let index = 0; index < products.length; index += 1) {
+      if (inspected >= MODEL_ASSET_PRODUCT_INSPECTION_LIMIT) {
+        truncated = true
+        break productKeys
+      }
+      inspected += 1
+
       if (items.length >= MODEL_ASSET_PRODUCT_DISPLAY_LIMIT) {
         truncated = true
         break productKeys
@@ -368,7 +439,7 @@ function buildExplicitProductProjection(model: ModelAsset, profile: JsonRecord):
     }
   }
 
-  if (items.length === 0) return null
+  if (items.length === 0 && !(hasExplicitProducts && truncated)) return null
   return { items, truncated, notice: truncated ? MODEL_ASSET_PRODUCT_LIMIT_TEXT : null }
 }
 
@@ -507,19 +578,14 @@ function inspectGeometryCandidate(value: unknown): GeometryInspection {
 }
 
 function candidateGeometry(profile: JsonRecord): unknown | null {
-  const keys = [
-    'geometry',
-    'geom',
-    'basin_geometry',
-    'basin_boundary',
-    'boundary',
-    'river_geometry',
-    'river_geometries',
-  ]
-  for (const key of keys) {
+  for (const key of MODEL_ASSET_GEOMETRY_KEYS) {
     if (profile[key]) return profile[key]
   }
   return null
+}
+
+function hasTruncatedModelAssetGeometry(model: ModelAsset | null): boolean {
+  return MODEL_ASSET_GEOMETRY_KEYS.some((key) => hasTruncatedModelAssetField(model, `resource_profile.${key}`))
 }
 
 export function buildModelAssetTree(
@@ -662,6 +728,15 @@ export function buildModelAssetProducts(model: ModelAsset | null): ModelAssetPro
 
 export function buildModelAssetMapProjection(model: ModelAsset | null): ModelAssetMapProjection {
   const geometry = candidateGeometry(getResourceProfile(model))
+  if (hasTruncatedModelAssetGeometry(model)) {
+    return {
+      status: 'over-budget',
+      text: MODEL_ASSET_MAP_OVER_BUDGET_TEXT,
+      featureCount: 0,
+      vertexCount: 0,
+      geometry: null,
+    }
+  }
   if (!geometry) {
     return {
       status: 'missing',

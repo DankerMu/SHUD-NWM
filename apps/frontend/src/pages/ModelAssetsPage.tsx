@@ -54,6 +54,21 @@ function firstString(value: unknown) {
   return null
 }
 
+function sourceUriValue(model: ModelAsset, sourceLineage: Record<string, unknown>) {
+  return model.source_uri ?? sourceLineage.source_uri ?? firstString(sourceLineage.uris)
+}
+
+function sourcePathValue(model: ModelAsset, profile: Record<string, unknown>, sourceLineage: Record<string, unknown>) {
+  return (
+    model.source_path ??
+    sourceLineage.source_path ??
+    sourceLineage.local_path ??
+    model.local_path ??
+    profile.source_path ??
+    firstString(sourceLineage.uris)
+  )
+}
+
 function MetadataRow({ label, value }: { label: string; value: unknown }) {
   return (
     <div className="grid grid-cols-[7rem_1fr] gap-3 border-b border-border/70 py-2 text-sm last:border-0">
@@ -64,7 +79,11 @@ function MetadataRow({ label, value }: { label: string; value: unknown }) {
 }
 
 function SourceRow({ label, restricted, value }: { label: string; restricted?: boolean; value: unknown }) {
-  const display = typeof value === 'string' ? displaySanitizedSource(value) : restricted ? MODEL_ASSET_RESTRICTED_SOURCE : MODEL_ASSET_UNAVAILABLE
+  const display = restricted
+    ? MODEL_ASSET_RESTRICTED_SOURCE
+    : typeof value === 'string'
+      ? displaySanitizedSource(value)
+      : MODEL_ASSET_UNAVAILABLE
   return (
     <div className="grid grid-cols-[7rem_1fr] gap-3 border-b border-border/70 py-2 text-sm last:border-0">
       <dt className="text-muted">{label}</dt>
@@ -311,7 +330,7 @@ export function ModelAssetsPage() {
                       />
                       <SourceRow
                         label="Source URI"
-                        value={currentSelectedModel.source_uri ?? sourceLineage.source_uri ?? firstString(sourceLineage.uris)}
+                        value={sourceUriValue(currentSelectedModel, sourceLineage)}
                         restricted={
                           hasRestrictedModelAssetSource(currentSelectedModel, 'source_uri') ||
                           hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_lineage.source_uri') ||
@@ -320,12 +339,14 @@ export function ModelAssetsPage() {
                       />
                       <SourceRow
                         label="Source Path"
-                        value={currentSelectedModel.source_path ?? sourceLineage.source_path ?? sourceLineage.local_path ?? profile.source_path}
+                        value={sourcePathValue(currentSelectedModel, profile, sourceLineage)}
                         restricted={
                           hasRestrictedModelAssetSource(currentSelectedModel, 'source_path') ||
                           hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_lineage.source_path') ||
                           hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_lineage.local_path') ||
-                          hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_path')
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'local_path') ||
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_path') ||
+                          hasRestrictedModelAssetSource(currentSelectedModel, 'resource_profile.source_lineage.uris')
                         }
                       />
                       <MetadataRow label="包校验" value={currentSelectedModel.package_checksum} />

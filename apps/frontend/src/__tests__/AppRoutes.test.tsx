@@ -4244,6 +4244,86 @@ describe('App route state', () => {
     expect(screen.queryByText(/#frag/)).not.toBeInTheDocument()
   })
 
+  it('keeps route source rows restricted when safe source fallbacks are also present', async () => {
+    useAuthStore.setState({ role: 'model_admin' })
+    const model = modelAssetRouteFixture({
+      source_uri: 's3://nhms/safe/top-level-source-uri',
+      source_path: 's3://nhms/safe/top-level-source-path',
+      resource_profile: {
+        area_km2: 87.5,
+        source_path: 's3://nhms/safe/profile-source-path',
+        source_lineage: {
+          source_uri: 'file:///volume/data/nwm/Basins/qhh/restricted-source-uri?token=abc#frag',
+          source_path: 'file:///volume/data/nwm/Basins/qhh/restricted-source-path',
+          local_path: '/volume/data/nwm/Basins/qhh/restricted-local-path',
+          uris: ['s3://nhms/safe/lineage-uri'],
+        },
+        product_assets: [
+          {
+            id: 'safe-product',
+            label: 'Safe Product',
+            checksum: 'safe-sha',
+            uri: 's3://nhms/safe/product',
+          },
+        ],
+        geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+      },
+    })
+    const page: ModelAssetPage = { items: [model], total: 1, limit: 50, offset: 0 }
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') return { data: success(page), error: undefined } as never
+      if (path === '/api/v1/models/{model_id}') return { data: success(model), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('受限来源').length).toBeGreaterThanOrEqual(3))
+    const sourceUriRow = screen.getByText('Source URI').closest('div')
+    const sourcePathRow = screen.getByText('Source Path').closest('div')
+    expect(sourceUriRow).toHaveTextContent('受限来源')
+    expect(sourceUriRow).not.toHaveTextContent('s3://nhms/safe/top-level-source-uri')
+    expect(within(sourceUriRow as HTMLElement).getByText('受限来源')).toHaveAttribute('title', '受限来源')
+    expect(sourcePathRow).toHaveTextContent('受限来源')
+    expect(sourcePathRow).not.toHaveTextContent('s3://nhms/safe/top-level-source-path')
+    expect(within(sourcePathRow as HTMLElement).getByText('受限来源')).toHaveAttribute('title', '受限来源')
+    expect(screen.queryByText(/restricted-source-uri/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/restricted-source-path/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/restricted-local-path/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/token=abc/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/#frag/)).not.toBeInTheDocument()
+  })
+
+  it('renders degraded geometry state for normalized over-budget model asset geometry', async () => {
+    useAuthStore.setState({ role: 'model_admin' })
+    const model = modelAssetRouteFixture({
+      resource_profile: {
+        area_km2: 87.5,
+        source_lineage: {
+          source_uri: 's3://nhms/safe/source',
+        },
+        geometry: {
+          type: 'LineString',
+          coordinates: Array.from({ length: 10_000 }, (_, index) => [100 + index / 10_000, 30]),
+        },
+      },
+    })
+    const page: ModelAssetPage = { items: [model], total: 1, limit: 50, offset: 0 }
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') return { data: success(page), error: undefined } as never
+      if (path === '/api/v1/models/{model_id}') return { data: success(model), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
+    expect(await screen.findByText('空间几何超出预览预算')).toBeInTheDocument()
+  })
+
   it('suppresses stale model detail when /system/model-assets list loading fails', async () => {
     useAuthStore.setState({ role: 'model_admin' })
     useModelAssetsStore.setState(
