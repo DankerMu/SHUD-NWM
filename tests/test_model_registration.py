@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from apps.api.main import app
 from apps.api.routes.models import get_model_registry_store
 from packages.common.model_registry import (
+    RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
     DuplicateResourceError,
     InvalidPayloadError,
     InvalidReferenceError,
@@ -1402,9 +1403,16 @@ def test_list_river_segments_excludes_oversized_collection_geometry_before_seria
 
         def fetchone(self) -> dict[str, Any]:
             assert self.calls == 1
-            assert "ST_NPoints(rs.geom) BETWEEN 2 AND %s" in self.statement
-            assert "ST_NDims(rs.geom) <= %s" in self.statement
-            assert self.parameters == (10_000, 3, "basin_v01", "rivnet_v01")
+            assert "ST_NPoints(geom) BETWEEN 2 AND %s" in self.statement
+            assert "ST_NDims(geom) <= %s" in self.statement
+            assert "running_coordinate_count <= %s" in self.statement
+            assert self.parameters == (
+                "basin_v01",
+                "rivnet_v01",
+                10_000,
+                3,
+                RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+            )
             return {"total": 1, "feature_total": 0}
 
         def fetchall(self) -> list[dict[str, Any]]:
@@ -1412,10 +1420,22 @@ def test_list_river_segments_excludes_oversized_collection_geometry_before_seria
             assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
             assert "ST_NPoints(rs.geom) BETWEEN 2 AND %s" in self.statement
             assert "ST_NDims(rs.geom) <= %s" in self.statement
+            assert "running_coordinate_count <= %s" in self.statement
             assert self.statement.index("ST_NPoints(rs.geom) BETWEEN 2 AND %s") < self.statement.index(
                 "ST_AsGeoJSON(geom)::json AS geometry"
             )
-            assert self.parameters == ("basin_v01", "rivnet_v01", 10_000, 3, 100, 0)
+            assert self.statement.index("running_coordinate_count <= %s") < self.statement.index(
+                "ST_AsGeoJSON(geom)::json AS geometry"
+            )
+            assert self.parameters == (
+                "basin_v01",
+                "rivnet_v01",
+                10_000,
+                3,
+                RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+                100,
+                0,
+            )
             return []
 
     class FakeTransaction:
@@ -1442,6 +1462,91 @@ def test_list_river_segments_excludes_oversized_collection_geometry_before_seria
     assert collection["total"] == 1
     assert collection["feature_total"] == 0
     assert collection["features"] == []
+
+
+def test_list_river_segments_applies_aggregate_collection_budget_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.statement = ""
+            self.parameters: tuple[Any, ...] | None = None
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.calls += 1
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert self.calls == 1
+            assert "SUM(ST_NPoints(geom)) OVER" in self.statement
+            assert "running_coordinate_count <= %s" in self.statement
+            assert self.parameters == (
+                "basin_v01",
+                "rivnet_v01",
+                10_000,
+                3,
+                RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+            )
+            return {"total": 6, "feature_total": 5}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            assert self.calls == 2
+            assert "SUM(ST_NPoints(rs.geom)) OVER" in self.statement
+            assert "running_coordinate_count <= %s" in self.statement
+            assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
+            assert self.statement.index("running_coordinate_count <= %s") < self.statement.index(
+                "ST_AsGeoJSON(geom)::json AS geometry"
+            )
+            assert self.parameters == (
+                "basin_v01",
+                "rivnet_v01",
+                10_000,
+                3,
+                RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+                100,
+                0,
+            )
+            return [
+                {
+                    "river_segment_id": f"seg_{index:03d}",
+                    "river_network_version_id": "rivnet_v01",
+                    "basin_version_id": "basin_v01",
+                    "segment_order": index,
+                    "downstream_segment_id": None,
+                    "length_m": 1000,
+                    "properties_json": {},
+                    "geometry": {"type": "LineString", "coordinates": [[91.0, 26.0], [92.0, 27.0]]},
+                }
+                for index in range(1, 6)
+            ]
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    collection = store.list_river_segments(
+        basin_version_id="basin_v01",
+        river_network_version_id="rivnet_v01",
+        limit=100,
+        offset=0,
+    )
+
+    assert collection["total"] == 6
+    assert collection["feature_total"] == 5
+    assert len(collection["features"]) == 5
+    assert collection["features"][-1]["properties"]["river_segment_id"] == "seg_005"
 
 
 def test_get_river_segment_excludes_null_geometry_detail(

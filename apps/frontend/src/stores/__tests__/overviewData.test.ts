@@ -2521,6 +2521,119 @@ describe('useOverviewDataStore', () => {
     expect(JSON.stringify(calls)).not.toContain('yangtze_rivnet_sibling')
   })
 
+  it('resolves an inactive selected-run model exactly before scoping basin river geometry', async () => {
+    const historicalRun = {
+      ...run,
+      run_id: 'run-gfs-historical',
+      model_id: 'yangtze_shud_historical',
+      cycle_time: '2026-05-17T00:00:00Z',
+      updated_at: '2026-05-17T01:00:00Z',
+    }
+    const activeModel = {
+      ...model,
+      model_id: 'yangtze_shud_active',
+      river_network_version_id: 'yangtze_rivnet_active',
+      active_flag: true,
+      created_at: '2026-05-18T00:00:00Z',
+    }
+    const historicalModel = {
+      ...model,
+      model_id: historicalRun.model_id,
+      river_network_version_id: 'yangtze_rivnet_historical',
+      active_flag: false,
+      created_at: '2026-05-17T00:00:00Z',
+    }
+    const historicalCollection = {
+      ...featureCollection,
+      features: [
+        {
+          ...featureCollection.features[0],
+          properties: {
+            ...featureCollection.features[0].properties,
+            river_network_version_id: historicalModel.river_network_version_id,
+          },
+        },
+      ],
+    }
+    const calls: Array<{ path: string; query?: Record<string, unknown>; pathParams?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query, pathParams: options?.params?.path })
+
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [historicalRun], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [activeModel], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/models/{model_id}') return success(historicalModel) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success(historicalCollection) as never
+      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return success({
+          river_segment_id: options?.params?.path?.segment_id,
+          river_network_version_id: options?.params?.query?.river_network_version_id,
+          segment_order: 1,
+          downstream_segment_id: null,
+          length_m: 1000,
+          geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+          properties_json: {},
+          created_at: '2026-05-01T00:00:00Z',
+        }) as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        return success({
+          river_segment_id: options?.params?.path?.segment_id,
+          issue_time: historicalRun.cycle_time,
+          variable: 'q_down',
+          unit: 'm3/s',
+          frequency_thresholds: null,
+          segments: [],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/timeline') {
+        return success({
+          run_id: historicalRun.run_id,
+          segment_id: options?.params?.query?.segment_id,
+          river_segment_id: options?.params?.query?.segment_id,
+          timesteps: [],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }) as never
+      }
+      if (path === '/api/v1/lineage/river-point') {
+        return success({ target_type: 'river_point', target_id: query.segmentId, nodes: [], edges: [] }) as never
+      }
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', {
+      ...query,
+      cycle: historicalRun.cycle_time,
+    })
+
+    expect(calls.find((call) => call.path === '/api/v1/models')).toMatchObject({
+      query: { basin_version_id: 'yangtze_v2026_01', active: 'true' },
+    })
+    expect(calls.find((call) => call.path === '/api/v1/models/{model_id}')).toMatchObject({
+      pathParams: { model_id: historicalRun.model_id },
+    })
+    expect(calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments')).toMatchObject({
+      query: { river_network_version_id: 'yangtze_rivnet_historical' },
+    })
+    expect(calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')).toMatchObject({
+      query: { river_network_version_id: 'yangtze_rivnet_historical' },
+      pathParams: { segment_id: query.segmentId },
+    })
+    expect(snapshot.selectedSegment?.modelId).toBe(historicalRun.model_id)
+    expect(snapshot.selectedSegment?.riverNetworkVersionId).toBe('yangtze_rivnet_historical')
+    expect(JSON.stringify(calls)).not.toContain('yangtze_rivnet_active')
+  })
+
   it('loads only the first river-segment page for default basin detail without a requested segment', async () => {
     const defaultQuery = { ...query, segmentId: null }
     const largeFirstPage = {

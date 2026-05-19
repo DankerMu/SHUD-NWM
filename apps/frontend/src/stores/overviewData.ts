@@ -377,6 +377,26 @@ function resolveActiveRiverNetwork(models: ApiModelInstance[], latestRun: ApiHyd
   }
 }
 
+async function resolveBasinRiverNetwork(
+  models: ApiModelInstance[],
+  latestRun: ApiHydroRun | null,
+  errors: string[],
+): Promise<BasinActiveRiverNetwork> {
+  const runModel = latestRun?.model_id ? models.find((model) => model.model_id === latestRun.model_id) : null
+  if (runModel || !latestRun?.model_id) return resolveActiveRiverNetwork(models, latestRun)
+
+  try {
+    const exactRunModel = await fetchModel(latestRun.model_id)
+    return {
+      model: exactRunModel,
+      riverNetworkVersionId: exactRunModel.river_network_version_id ?? null,
+    }
+  } catch {
+    errors.push(safeM11ErrorMessage('model detail'))
+    return resolveActiveRiverNetwork(models, latestRun)
+  }
+}
+
 function runsForSourceSelection(query: M11QueryState, runs: ApiHydroRun[], latestRun: ApiHydroRun | null): ApiHydroRun[] {
   return query.source === 'best' ? (latestRun ? [latestRun] : []) : runs
 }
@@ -457,12 +477,24 @@ async function fetchBasinVersions(basinId: string) {
 
 async function fetchModels(basinVersionId?: string) {
   return cached(
-    cacheKey('/api/v1/models', { basinVersionId: basinVersionId ?? 'all-active' }),
+    cacheKey('/api/v1/models', { basinVersionId: basinVersionId ?? 'all', active: 'true' }),
     () =>
       getApi<ModelInstancePage>(
         '/api/v1/models',
         { params: { query: { basin_version_id: basinVersionId, active: 'true', limit: 200, offset: 0 } } },
         '获取模型资产失败',
+      ),
+  )
+}
+
+async function fetchModel(modelId: string) {
+  return cached(
+    cacheKey('/api/v1/models/{model_id}', { modelId }),
+    () =>
+      getApi<ApiModelInstance>(
+        '/api/v1/models/{model_id}',
+        { params: { path: { model_id: modelId } } },
+        '获取模型资产详情失败',
       ),
   )
 }
@@ -981,7 +1013,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         const [modelsResult] = await Promise.allSettled([fetchModels(selectedVersion.basin_version_id)])
         models = (settledValue(modelsResult, partialErrors, 'models')?.items ?? []) as ApiModelInstance[]
       }
-      const activeRiverNetwork = resolveActiveRiverNetwork(models, latestRun)
+      const activeRiverNetwork = await resolveBasinRiverNetwork(models, latestRun, partialErrors)
       const [segmentsResult, rankingResult, ...validTimeResults] = await Promise.allSettled([
         selectedVersion
           ? fetchRiverSegments(selectedVersion.basin_version_id, activeRiverNetwork.riverNetworkVersionId, query.segmentId)

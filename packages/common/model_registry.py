@@ -33,6 +33,7 @@ SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES = 10_000
 SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS = 3
 RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES = SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES
 RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS = SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS
+RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES = 50_000
 
 
 def default_database_url() -> str:
@@ -252,20 +253,35 @@ class PsycopgModelRegistryStore:
         with self._transaction() as cursor:
             cursor.execute(
                 f"""
-                SELECT COUNT(*) AS total,
-                       COUNT(rs.geom) FILTER (
-                           WHERE ST_NPoints(rs.geom) BETWEEN 2 AND %s
-                             AND ST_NDims(rs.geom) <= %s
-                       ) AS feature_total
-                FROM core.river_segment rs
-                JOIN core.river_network_version rnv
-                  ON rnv.river_network_version_id = rs.river_network_version_id
-                WHERE {where_clause}
+                WITH matching AS (
+                    SELECT rs.river_segment_id, rs.segment_order, rs.geom
+                    FROM core.river_segment rs
+                    JOIN core.river_network_version rnv
+                      ON rnv.river_network_version_id = rs.river_network_version_id
+                    WHERE {where_clause}
+                ),
+                ordered_renderable AS (
+                    SELECT
+                        river_segment_id,
+                        SUM(ST_NPoints(geom)) OVER (
+                            ORDER BY COALESCE(segment_order, 2147483647), river_segment_id
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS running_coordinate_count
+                    FROM matching
+                    WHERE geom IS NOT NULL
+                      AND ST_NPoints(geom) BETWEEN 2 AND %s
+                      AND ST_NDims(geom) <= %s
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM matching) AS total,
+                    COUNT(*) FILTER (WHERE running_coordinate_count <= %s) AS feature_total
+                FROM ordered_renderable
                 """,
                 tuple([
+                    *params,
                     RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES,
                     RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS,
-                    *params,
+                    RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
                 ]),
             )
             counts = cursor.fetchone()
@@ -273,7 +289,7 @@ class PsycopgModelRegistryStore:
             feature_total = int(counts["feature_total"])
             cursor.execute(
                 f"""
-                WITH renderable AS (
+                WITH ordered_renderable AS (
                     SELECT
                         rs.river_segment_id,
                         rs.river_network_version_id,
@@ -282,7 +298,12 @@ class PsycopgModelRegistryStore:
                         rs.downstream_segment_id,
                         rs.length_m,
                         rs.properties_json,
-                        rs.geom
+                        rs.geom,
+                        ST_NPoints(rs.geom) AS coordinate_count,
+                        SUM(ST_NPoints(rs.geom)) OVER (
+                            ORDER BY COALESCE(rs.segment_order, 2147483647), rs.river_segment_id
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS running_coordinate_count
                     FROM core.river_segment rs
                     JOIN core.river_network_version rnv
                       ON rnv.river_network_version_id = rs.river_network_version_id
@@ -290,6 +311,11 @@ class PsycopgModelRegistryStore:
                       AND rs.geom IS NOT NULL
                       AND ST_NPoints(rs.geom) BETWEEN 2 AND %s
                       AND ST_NDims(rs.geom) <= %s
+                ),
+                renderable AS (
+                    SELECT *
+                    FROM ordered_renderable
+                    WHERE running_coordinate_count <= %s
                 )
                 SELECT
                     river_segment_id,
@@ -308,6 +334,7 @@ class PsycopgModelRegistryStore:
                     *params,
                     RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES,
                     RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS,
+                    RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
                     limit,
                     offset,
                 ]),
