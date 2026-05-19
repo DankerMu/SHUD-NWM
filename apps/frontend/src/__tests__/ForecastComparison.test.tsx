@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { client } from '@/api/client'
 import { ForecastChart } from '@/components/charts/ForecastChart'
 import { ScenarioSelector } from '@/components/ScenarioSelector'
+import { FORECAST_CHART_POINT_BUDGET } from '@/lib/forecastRenderingBudget'
 import type { ForecastData, ForecastSeries } from '@/stores/forecast'
 import { useForecastStore } from '@/stores/forecast'
 
@@ -71,7 +72,7 @@ function renderedChartOption() {
   return JSON.parse(screen.getByTestId('echarts-option').textContent || '{}') as {
     series: Array<{
       name: string
-      data: Array<[number, number]>
+      data?: Array<[number, number]>
       lineStyle: { color: string; type: string }
       markLine?: { data?: Array<{ name: string; xAxis: number }> }
     }>
@@ -329,6 +330,43 @@ describe('forecast comparison UI', () => {
     })
   })
 
+  it('caps oversized forecast payloads during normalization', async () => {
+    vi.mocked(client.GET).mockResolvedValue(
+      success({
+        segment_id: 'seg-1',
+        issue_time: '2026-05-18T00:00:00Z',
+        unit: 'm3/s',
+        series: [
+          {
+            scenario_id: 'forecast_gfs_deterministic',
+            source: 'GFS',
+            segment_role: 'future_7_days',
+            points: Array.from({ length: FORECAST_CHART_POINT_BUDGET + 5 }, (_, index) => [
+              `2026-05-18T${String(index % 24).padStart(2, '0')}:00:00Z`,
+              index,
+            ]),
+          },
+        ],
+        frequency_thresholds: null,
+      }) as never,
+    )
+    resetForecastStore({
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
+      selectedScenarios: ['GFS'],
+    })
+
+    await useForecastStore.getState().fetchForecast({ source: 'gfs' })
+
+    const forecast = useForecastStore.getState().forecastData
+    expect(forecast?.pointBudgetStatus).toMatchObject({
+      pointBudget: FORECAST_CHART_POINT_BUDGET,
+      sourcePointCount: FORECAST_CHART_POINT_BUDGET + 5,
+      retainedPointCount: FORECAST_CHART_POINT_BUDGET,
+      overBudget: true,
+    })
+    expect(forecast?.series[0]?.points).toHaveLength(FORECAST_CHART_POINT_BUDGET)
+  })
+
   it('fails locally instead of issuing an unscoped forecast request', async () => {
     resetForecastStore({
       selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: '' },
@@ -403,6 +441,51 @@ describe('forecast comparison UI', () => {
     const ifs = renderedChartOption().series.find((series) => series.name === 'IFS 预报')
     expect(ifs?.markLine?.data).toContainEqual(expect.objectContaining({ name: 'IFS 6d', xAxis: endpoint }))
     expect(ifs?.data.at(-1)?.[0]).toBe(endpoint)
+  })
+
+  it('renders an over-budget state instead of passing oversized forecast arrays to ECharts', () => {
+    render(
+      <ForecastChart
+        data={{
+          ...forecastData([
+            forecastSeries({
+              points: Array.from({ length: FORECAST_CHART_POINT_BUDGET }, (_, index) => ({
+                time: `2026-05-18T${String(index % 24).padStart(2, '0')}:00:00Z`,
+                value: index,
+              })),
+            }),
+          ]),
+          pointBudgetStatus: {
+            pointBudget: FORECAST_CHART_POINT_BUDGET,
+            sourcePointCount: FORECAST_CHART_POINT_BUDGET + 1,
+            retainedPointCount: FORECAST_CHART_POINT_BUDGET,
+            overBudget: true,
+          },
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('status')).toHaveTextContent('预报序列超出客户端渲染预算')
+    expect(screen.queryByTestId('echarts-option')).not.toBeInTheDocument()
+  })
+
+  it('defensively caps chart option points at the shared budget', () => {
+    render(
+      <ForecastChart
+        data={forecastData([
+          forecastSeries({
+            points: Array.from({ length: FORECAST_CHART_POINT_BUDGET + 5 }, (_, index) => ({
+              time: `2026-05-18T${String(index % 24).padStart(2, '0')}:00:00Z`,
+              value: index,
+            })),
+          }),
+        ])}
+      />,
+    )
+
+    const option = renderedChartOption()
+    const pointCount = option.series.reduce((total, series) => total + (series.data?.length ?? 0), 0)
+    expect(pointCount).toBeLessThanOrEqual(FORECAST_CHART_POINT_BUDGET)
   })
 
   it('shows unavailable text when IFS is selected but absent from the response', () => {

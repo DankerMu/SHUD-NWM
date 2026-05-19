@@ -8,6 +8,7 @@ import type { components } from '@/api/types'
 import { ForecastChart } from '@/components/charts/ForecastChart'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/cn'
+import { forecastPointBudgetMessage, isForecastPointOverBudget } from '@/lib/forecastRenderingBudget'
 import {
   getM11SelectedSegmentGeometryBudgetStatus,
   type M11SelectedSegmentGeometryBudgetStatus,
@@ -139,7 +140,7 @@ function buildDetailModel(
   lineage: LineageResponse | null,
   validTime: string | null,
 ): SegmentDetailModel {
-  const points = allForecastPoints(forecastData)
+  const points = isForecastPointOverBudget(forecastData?.pointBudgetStatus) ? [] : allForecastPoints(forecastData)
   const selectedMs = validTime ? Date.parse(validTime) : NaN
   const currentPoint =
     (Number.isFinite(selectedMs) ? points.find((point) => point.timeMs === selectedMs) : null) ??
@@ -438,6 +439,7 @@ export function SegmentDetailPage() {
 
   useEffect(() => {
     if (!scopedForecastData || !routeState.validTime) return
+    if (isForecastPointOverBudget(scopedForecastData.pointBudgetStatus)) return
     const validTimes = [...new Set(allForecastPoints(scopedForecastData).map((point) => new Date(point.timeMs).toISOString()))]
     if (validTimes.length === 0 || validTimes.includes(routeState.validTime)) return
     const corrected = closestValidTime(routeState.validTime, validTimes)
@@ -769,6 +771,20 @@ function ForcingSeriesRow({ row }: { row: StationForcingSeriesRow }) {
 }
 
 function ThresholdPanel({ data, peakQ, unit }: { data: ForecastData | null; peakQ: number | null; unit: string }) {
+  if (data?.pointBudgetStatus?.overBudget) {
+    return (
+      <section className="rounded-md border border-border bg-panel p-4" aria-label="洪水阈值">
+        <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+          <Waves className="size-4 text-primary-600" />
+          阈值覆盖
+        </h2>
+        <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          {forecastPointBudgetMessage(data.pointBudgetStatus)}阈值覆盖需要完整峰值，当前不计算超阈状态。
+        </div>
+      </section>
+    )
+  }
+
   return (
     <section className="rounded-md border border-border bg-panel p-4" aria-label="洪水阈值">
       <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
@@ -792,16 +808,40 @@ function ThresholdPanel({ data, peakQ, unit }: { data: ForecastData | null; peak
 }
 
 function FrequencyPanel({ data, peakQ }: { data: ForecastData | null; peakQ: number | null }) {
-  const available = THRESHOLD_KEYS.map((key) => finiteNumber(data?.frequencyThresholds?.[key])).filter((value) => value !== null)
+  if (data?.pointBudgetStatus?.overBudget) {
+    return (
+      <section className="rounded-md border border-border bg-panel p-4" aria-label="频率曲线">
+        <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+          <Activity className="size-4 text-primary-600" />
+          频率上下文
+        </h2>
+        <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          {forecastPointBudgetMessage(data.pointBudgetStatus)}频率峰值标记需要完整预报序列，当前不绘制曲线。
+        </div>
+      </section>
+    )
+  }
+
+  const thresholds = THRESHOLD_KEYS.map((key) => ({
+    key,
+    period: Number(key.slice(1)),
+    value: finiteNumber(data?.frequencyThresholds?.[key]),
+  }))
+  const available = thresholds.filter(
+    (row): row is { key: (typeof THRESHOLD_KEYS)[number]; period: number; value: number } => row.value !== null,
+  )
+  const canRenderCurve = available.length === THRESHOLD_KEYS.length && peakQ !== null && Number.isFinite(peakQ)
   return (
     <section className="rounded-md border border-border bg-panel p-4" aria-label="频率曲线">
       <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
         <Activity className="size-4 text-primary-600" />
         频率上下文
       </h2>
-      {available.length > 0 ? (
-        <div className="mt-3 text-sm text-muted">
-          可用阈值 {available.length}/6；峰值 {formatMetric(peakQ, data?.unit ?? 'm3/s')}。频率曲线参数合同暂不可用，当前仅展示离散 Q 阈值。
+      {canRenderCurve ? (
+        <FrequencyCurve thresholds={available} peakQ={peakQ} unit={data?.unit ?? 'm3/s'} />
+      ) : available.length > 0 ? (
+        <div className="mt-3 rounded border border-dashed border-border p-3 text-sm text-muted">
+          可用阈值 {available.length}/6；峰值 {formatMetric(peakQ, data?.unit ?? 'm3/s')}。阈值或有限峰值不足，暂不绘制频率曲线。
         </div>
       ) : (
         <div className="mt-3 rounded border border-dashed border-border p-3 text-sm text-muted">
@@ -809,6 +849,63 @@ function FrequencyPanel({ data, peakQ }: { data: ForecastData | null; peakQ: num
         </div>
       )}
     </section>
+  )
+}
+
+function FrequencyCurve({
+  thresholds,
+  peakQ,
+  unit,
+}: {
+  thresholds: Array<{ key: (typeof THRESHOLD_KEYS)[number]; period: number; value: number }>
+  peakQ: number
+  unit: string
+}) {
+  const values = thresholds.map((row) => row.value)
+  const minValue = Math.min(...values, peakQ)
+  const maxValue = Math.max(...values, peakQ)
+  const spanValue = maxValue - minValue || 1
+  const maxPeriod = Math.max(...thresholds.map((row) => row.period))
+  const plot = (period: number, value: number) => {
+    const x = 12 + (Math.log(period) / Math.log(maxPeriod)) * 76
+    const y = 82 - ((value - minValue) / spanValue) * 64
+    return { x, y }
+  }
+  const points = thresholds.map((row) => ({ ...row, ...plot(row.period, row.value) }))
+  const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' ')
+  const lower = [...thresholds].reverse().find((row) => row.value <= peakQ) ?? thresholds[0]
+  const upper = thresholds.find((row) => row.value >= peakQ) ?? thresholds.at(-1) ?? lower
+  const interpolatedPeriod =
+    upper.value === lower.value
+      ? lower.period
+      : lower.period + ((peakQ - lower.value) / (upper.value - lower.value)) * (upper.period - lower.period)
+  const boundedPeakPeriod = Math.max(2, Math.min(maxPeriod, interpolatedPeriod))
+  const peak = plot(boundedPeakPeriod, peakQ)
+
+  return (
+    <div className="mt-3 space-y-3" data-testid="frequency-curve">
+      <svg className="h-40 w-full rounded border border-border bg-background" viewBox="0 0 100 100" role="img" aria-label="重现期频率曲线">
+        <line x1="10" y1="84" x2="92" y2="84" stroke="#cbd5e1" strokeWidth="1" />
+        <line x1="10" y1="14" x2="10" y2="84" stroke="#cbd5e1" strokeWidth="1" />
+        <path d={path} fill="none" stroke="#2563eb" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        {points.map((point) => (
+          <g key={point.key}>
+            <circle cx={point.x} cy={point.y} r="2.4" fill="#2563eb" />
+            <text x={point.x} y={Math.max(9, point.y - 5)} textAnchor="middle" className="fill-muted text-[5px]">
+              {point.key}
+            </text>
+          </g>
+        ))}
+        <line x1={peak.x} y1="84" x2={peak.x} y2={peak.y} stroke="#dc2626" strokeDasharray="3 2" strokeWidth="1.4" />
+        <circle cx={peak.x} cy={peak.y} r="3.2" fill="#dc2626" />
+        <text x={Math.min(88, peak.x + 4)} y={Math.max(12, peak.y - 4)} className="fill-danger text-[5px]">
+          当前峰值
+        </text>
+      </svg>
+      <div className="rounded border border-border px-3 py-2 text-xs text-muted">
+        当前峰值 {formatMetric(peakQ, unit)}；估算重现期 T{boundedPeakPeriod.toFixed(1)}。
+      </div>
+    </div>
   )
 }
 
@@ -844,6 +941,14 @@ function WeatherPanel({ forcing }: { forcing: StationForcingViewModel }) {
 }
 
 function BottomTimeline({ data, selectedValidTime }: { data: ForecastData | null; selectedValidTime: string | null }) {
+  if (data?.pointBudgetStatus?.overBudget) {
+    return (
+      <section className="rounded-md border border-border bg-panel p-4 text-sm text-amber-950" aria-label="底部时间线">
+        {forecastPointBudgetMessage(data.pointBudgetStatus)}时间线需要完整有效时刻，当前不绘制。
+      </section>
+    )
+  }
+
   const points = allForecastPoints(data)
   if (points.length === 0) {
     return (

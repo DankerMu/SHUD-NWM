@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 
 import { echarts } from '@/components/charts/echartsCore'
+import { FORECAST_CHART_POINT_BUDGET, forecastPointBudgetMessage } from '@/lib/forecastRenderingBudget'
 import type { ForecastData } from '@/stores/forecast'
 
 const IFS_SIX_DAY_LEAD_HOURS = 144
@@ -152,13 +153,28 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[], unit?: string) 
 }
 
 export function ForecastChart({ data, segmentName }: ForecastChartProps) {
+  if (data?.pointBudgetStatus?.overBudget) {
+    return (
+      <div className="grid min-h-72 place-items-center rounded-md border border-amber-300 bg-amber-50 p-4 text-center text-sm text-amber-950" role="status">
+        {forecastPointBudgetMessage(data.pointBudgetStatus)}
+      </div>
+    )
+  }
+
+  return <ForecastChartInner data={data} segmentName={segmentName} />
+}
+
+function ForecastChartInner({ data, segmentName }: ForecastChartProps) {
   const normalizedSeries = useMemo(
-    () =>
-      (data?.series ?? [])
+    () => {
+      let retainedPointCount = 0
+      return (data?.series ?? [])
         .map((series) => {
+          const remaining = Math.max(0, FORECAST_CHART_POINT_BUDGET - retainedPointCount)
           const ifs = isIfsSeries(series)
           const endpointMs = ifs ? sixDayEndpointMs(series) : null
           const seriesData = series.points
+            .slice(0, remaining)
             .map((point) => [timestampValue(point.time), point.value])
             .filter(
               ([time, value]) =>
@@ -166,6 +182,7 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
                 Number.isFinite(value) &&
                 (endpointMs === null || time <= endpointMs),
             )
+          retainedPointCount += seriesData.length
 
           return {
             ...series,
@@ -174,7 +191,8 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
             sixDayEndpointMs: endpointMs,
           }
         })
-        .filter((series) => series.data.length > 0),
+        .filter((series) => series.data.length > 0)
+    },
     [data?.series],
   )
 

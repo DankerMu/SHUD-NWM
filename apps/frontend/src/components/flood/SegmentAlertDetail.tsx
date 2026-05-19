@@ -8,6 +8,12 @@ import { alertLevelColor, alertLevelLabel } from '@/components/flood/alertLevels
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
+import {
+  FORECAST_CHART_POINT_BUDGET,
+  createForecastPointBudgetGuard,
+  forecastPointBudgetMessage,
+  type ForecastPointBudgetStatus,
+} from '@/lib/forecastRenderingBudget'
 import { m11QueryHref, type M11Source } from '@/lib/m11/queryState'
 import type { ForecastData } from '@/stores/forecast'
 import { useForecastStore } from '@/stores/forecast'
@@ -56,12 +62,31 @@ function chartTime(value: number) {
   return `${day}日 ${hour}Z`
 }
 
+function emptyForecastOption(segmentName?: string | null) {
+  return {
+    color: [],
+    grid: { left: 52, right: 34, top: 48, bottom: 42 },
+    tooltip: { trigger: 'axis', renderMode: 'richText' },
+    legend: { top: 4, left: 0, textStyle: { color: '#64748b' } },
+    xAxis: { type: 'time', axisLabel: { color: '#64748b', formatter: chartTime } },
+    yAxis: { type: 'value', name: 'm³/s', scale: true, axisLabel: { color: '#64748b' } },
+    title: {
+      text: `${segmentName || '河段'} 预报曲线`,
+      left: 0,
+      textStyle: { fontSize: 14, fontWeight: 650, color: '#1f2937' },
+    },
+    series: [],
+  }
+}
+
 function buildForecastOption(data: ForecastData | null, timeline: FloodAlertTimeline | null, segmentName?: string | null) {
+  if (data?.pointBudgetStatus?.overBudget) return emptyForecastOption(segmentName || data.segmentId)
   const thresholds = timeline?.frequencyThresholds
+  const pointBudgetGuard = createForecastPointBudgetGuard()
   const series = (data?.series ?? [])
     .map((item) => ({
       name: item.label,
-      data: item.points
+      data: pointBudgetGuard.take(item.points)
         .map((point) => [timeValue(point.time), point.value])
         .filter(([time, value]) => Number.isFinite(time) && Number.isFinite(value)),
       color: item.color,
@@ -110,8 +135,18 @@ function buildForecastOption(data: ForecastData | null, timeline: FloodAlertTime
   }
 }
 
-function buildTimelineOption(timeline: FloodAlertTimeline | null) {
+function buildTimelineOption(timeline: FloodAlertTimeline | null, pointBudgetStatus: ForecastPointBudgetStatus) {
+  if (pointBudgetStatus.overBudget) {
+    return {
+      grid: { left: 42, right: 18, top: 22, bottom: 36 },
+      xAxis: { type: 'time', axisLabel: { color: '#64748b', formatter: chartTime } },
+      yAxis: { type: 'value', name: 'T', min: 0, axisLabel: { color: '#64748b' } },
+      series: [{ type: 'line', name: '重现期', data: [] }],
+    }
+  }
+
   const data = (timeline?.timesteps ?? [])
+    .slice(0, FORECAST_CHART_POINT_BUDGET)
     .map((point) => [Date.parse(point.validTime), point.returnPeriod ?? 0, point.warningLevel])
     .filter(([time]) => Number.isFinite(time))
 
@@ -243,7 +278,16 @@ export function SegmentAlertDetail({
     () => buildForecastOption(scopedForecastData, timeline, segment?.segmentName || segment?.riverSegmentId),
     [scopedForecastData, segment, timeline],
   )
-  const timelineOption = useMemo(() => buildTimelineOption(timeline), [timeline])
+  const timelinePointBudgetStatus = useMemo(
+    () => ({
+      pointBudget: FORECAST_CHART_POINT_BUDGET,
+      sourcePointCount: timeline?.timesteps.length ?? 0,
+      retainedPointCount: Math.min(timeline?.timesteps.length ?? 0, FORECAST_CHART_POINT_BUDGET),
+      overBudget: (timeline?.timesteps.length ?? 0) > FORECAST_CHART_POINT_BUDGET,
+    }),
+    [timeline],
+  )
+  const timelineOption = useMemo(() => buildTimelineOption(timeline, timelinePointBudgetStatus), [timeline, timelinePointBudgetStatus])
 
   if (!segment) {
     return (
@@ -314,7 +358,11 @@ export function SegmentAlertDetail({
           </div>
         ) : null}
 
-        {scopedForecastData ? (
+        {scopedForecastData?.pointBudgetStatus?.overBudget ? (
+          <div className="grid min-h-48 place-items-center rounded-md border border-amber-300 bg-amber-50 p-4 text-center text-sm text-amber-950" role="status">
+            {forecastPointBudgetMessage(scopedForecastData.pointBudgetStatus)}
+          </div>
+        ) : scopedForecastData ? (
           <ReactEChartsCore echarts={echarts} option={forecastOption} notMerge lazyUpdate style={{ height: 300, width: '100%' }} />
         ) : forecastData && !forecastLoading ? (
           <div className="grid min-h-48 place-items-center rounded-md border border-dashed border-border p-4 text-center text-sm text-muted">
@@ -326,7 +374,11 @@ export function SegmentAlertDetail({
           </div>
         )}
 
-        {timeline?.timesteps.length ? (
+        {timelinePointBudgetStatus.overBudget ? (
+          <div className="grid min-h-40 place-items-center rounded-md border border-amber-300 bg-amber-50 p-4 text-center text-sm text-amber-950" role="status">
+            {forecastPointBudgetMessage(timelinePointBudgetStatus)}
+          </div>
+        ) : timeline?.timesteps.length ? (
           <ReactEChartsCore echarts={echarts} option={timelineOption} notMerge lazyUpdate style={{ height: 220, width: '100%' }} />
         ) : (
           <div className="grid min-h-40 place-items-center rounded-md border border-dashed border-border text-sm text-muted">

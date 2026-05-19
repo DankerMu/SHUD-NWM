@@ -3,6 +3,10 @@ import { create } from 'zustand'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
+import {
+  createForecastPointBudgetGuard,
+  type ForecastPointBudgetStatus,
+} from '@/lib/forecastRenderingBudget'
 import type { M11Source } from '@/lib/m11/queryState'
 
 export interface ForecastSegmentInfo {
@@ -42,6 +46,7 @@ export interface ForecastData {
   sourceAttribution: string
   cycleAttribution: string
   frequencyThresholds?: components['schemas']['RiverSeriesResponse']['frequency_thresholds']
+  pointBudgetStatus?: ForecastPointBudgetStatus
 }
 
 export interface FetchForecastOptions {
@@ -165,6 +170,7 @@ function formatCycleTime(value?: string | null) {
 }
 
 function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastData {
+  const pointBudgetGuard = createForecastPointBudgetGuard()
   const series = (payload.segments ?? []).map((segment): ForecastSeries => {
     const scenario = segment.scenario ?? segment.scenario_id ?? ''
     const role = segment.segment_role ?? segment.role
@@ -182,7 +188,7 @@ function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastDat
         segment.available_lead_hours !== undefined && segment.available_lead_hours !== null
           ? Number(segment.available_lead_hours)
           : null,
-      points: (segment.data ?? [])
+      points: pointBudgetGuard.take(segment.data)
         .filter((point) => point.value !== undefined && (point.valid_time !== undefined || point.time !== undefined))
         .map((point) => ({
           time: point.valid_time ?? point.time ?? '',
@@ -199,10 +205,12 @@ function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastDat
     sourceAttribution: buildSourceAttribution(series),
     cycleAttribution: buildCycleAttribution(series, payload.issue_time ?? null),
     frequencyThresholds: payload.frequency_thresholds,
+    pointBudgetStatus: pointBudgetGuard.status(),
   }
 }
 
 function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastData {
+  const pointBudgetGuard = createForecastPointBudgetGuard()
   const series = ((payload.series ?? []) as RiverSeriesSegment[]).map((segment): ForecastSeries => {
     const scenario = segment.scenario_id ?? 'forecast_gfs_deterministic'
     const source = inferSource(scenario, segment.source_id ?? segment.source)
@@ -219,7 +227,7 @@ function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastDat
         segment.available_lead_hours !== undefined && segment.available_lead_hours !== null
           ? Number(segment.available_lead_hours)
           : null,
-      points: (segment.points ?? [])
+      points: pointBudgetGuard.take(segment.points)
         .filter((point) => point.length >= 2)
         .map((point) => ({
           time: point[0],
@@ -236,6 +244,7 @@ function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastDat
     sourceAttribution: buildSourceAttribution(series),
     cycleAttribution: buildCycleAttribution(series, payload.issue_time ?? null),
     frequencyThresholds: payload.frequency_thresholds,
+    pointBudgetStatus: pointBudgetGuard.status(),
   }
 }
 
