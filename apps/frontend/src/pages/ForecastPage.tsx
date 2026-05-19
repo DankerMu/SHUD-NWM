@@ -201,7 +201,7 @@ function firstForecastValidTime(data: ReturnType<typeof useForecastStore.getStat
     .flatMap((series) => series.points)
     .map((point) => {
       const timestamp = typeof point.time === 'number' ? point.time : Date.parse(point.time)
-      return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
+      return Number.isFinite(timestamp) && Number.isFinite(point.value) ? new Date(timestamp).toISOString() : null
     })
     .filter((value): value is string => Boolean(value))
   points.sort((left, right) => Date.parse(left) - Date.parse(right))

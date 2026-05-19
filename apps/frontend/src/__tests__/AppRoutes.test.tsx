@@ -1385,7 +1385,10 @@ describe('App route state', () => {
             source: 'GFS',
             segment_role: 'future_7_days',
             cycle_time: '2026-05-18T00:00:00Z',
-            data: [{ valid_time: '2026-05-18T06:00:00Z', value: 10 }],
+            data: [
+              { valid_time: '2026-05-18T06:00:00Z', value: Number.POSITIVE_INFINITY },
+              { valid_time: '2026-05-18T12:00:00Z', value: 10 },
+            ],
           },
         ],
         frequency_thresholds: null,
@@ -1400,7 +1403,7 @@ describe('App route state', () => {
     await waitFor(() =>
       expect(screen.getByRole('link', { name: '查看河段详情' })).toHaveAttribute(
         'href',
-        '/segments/seg-010?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-010',
+        '/segments/seg-010?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T12%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-010',
       ),
     )
   })
