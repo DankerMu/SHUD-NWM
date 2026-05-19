@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -260,7 +261,7 @@ def flood_alert_ranking(
             segment_name=_segment_name(row.get("properties_json")),
             basin_version_id=str(row["basin_version_id"]),
             river_network_version_id=_optional_str(row["river_network_version_id"]),
-            q_value=float(row["q_value"]),
+            q_value=_finite_result_float(row["q_value"], field="q_value"),
             q_unit=str(row["q_unit"] or "m3/s"),
             return_period=_optional_float(row["return_period"]),
             warning_level=_optional_str(row["warning_level"]),
@@ -284,6 +285,12 @@ def flood_alert_segments(
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     _require_frequency_ready(session, run_id)
+    if min_return_period is not None:
+        min_return_period = _finite_query_float(
+            min_return_period,
+            field="min_return_period",
+            original=min_return_period,
+        )
     geom_sql, centroid_sql = _geometry_select_sql(session)
     levels = _split_csv(warning_level)
     params: dict[str, Any] = {
@@ -347,7 +354,7 @@ def flood_alert_segments(
             segment_name=_segment_name(row.get("properties_json")),
             basin_version_id=str(row["basin_version_id"]),
             river_network_version_id=_optional_str(row["river_network_version_id"]),
-            q_value=float(row["q_value"]),
+            q_value=_finite_result_float(row["q_value"], field="q_value"),
             return_period=_optional_float(row["return_period"]),
             warning_level=_optional_str(row["warning_level"]),
             valid_time=_format_time(row["valid_time"]),
@@ -437,7 +444,7 @@ def flood_alert_timeline(
     timesteps = [
         TimelinePoint(
             valid_time=_format_time(row["valid_time"]),
-            q_value=float(row["q_value"]),
+            q_value=_finite_result_float(row["q_value"], field="q_value"),
             return_period=_optional_float(row["return_period"]),
             warning_level=_optional_str(row["warning_level"]),
         )
@@ -485,6 +492,8 @@ def flood_return_period_map(
     implementation with PostGIS-specific encoding is added.
     """
     _require_frequency_ready(session, run_id)
+    if return_period is not None:
+        return_period = _finite_query_float(return_period, field="return_period", original=return_period)
     geom_sql, _centroid_sql = _geometry_select_sql(session)
     bounds = _parse_bbox(bbox)
     bbox_filter = ""
@@ -546,7 +555,7 @@ def flood_return_period_map(
                     "segment_id": str(row["river_segment_id"]),
                     "basin_version_id": str(row["basin_version_id"]),
                     "river_network_version_id": str(row["river_network_version_id"]),
-                    "value": float(row["q_value"]),
+                    "value": _finite_result_float(row["q_value"], field="q_value"),
                     "unit": str(row["q_unit"] or "m³/s"),
                     "quality_flag": str(row["quality_flag"]),
                     "return_period": _optional_float(row["return_period"]) or 0.0,
@@ -757,12 +766,12 @@ def _parse_threshold(value: str | float | None) -> float | None:
     if value is None:
         return None
     if isinstance(value, int | float):
-        return float(value)
+        return _finite_query_float(float(value), field="threshold", original=value)
     normalized = value.strip().upper()
     if normalized.startswith("Q"):
         normalized = normalized[1:]
     try:
-        return float(normalized)
+        return _finite_query_float(float(normalized), field="threshold", original=value)
     except ValueError as error:
         raise ApiError(
             status_code=422,
@@ -910,6 +919,13 @@ def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
             message="bbox values must be numeric.",
             details={"bbox": value},
         ) from error
+    if not all(math.isfinite(coordinate) for coordinate in (min_lon, min_lat, max_lon, max_lat)):
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="bbox values must be finite numbers.",
+            details={"bbox": value},
+        )
     if min_lon > max_lon or min_lat > max_lat:
         raise ApiError(
             status_code=422,
@@ -926,7 +942,30 @@ def _bbox_params(bounds: tuple[float, float, float, float]) -> dict[str, float]:
 
 
 def _optional_float(value: Any) -> float | None:
-    return float(value) if value is not None else None
+    return _finite_result_float(value, field="numeric result") if value is not None else None
+
+
+def _finite_query_float(value: Any, *, field: str, original: Any) -> float:
+    numeric = float(value)
+    if math.isfinite(numeric):
+        return numeric
+    raise ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message=f"{field} must be a finite number.",
+        details={field: original},
+    )
+
+
+def _finite_result_float(value: Any, *, field: str) -> float:
+    numeric = float(value)
+    if math.isfinite(numeric):
+        return numeric
+    raise ApiError(
+        status_code=500,
+        code="NON_FINITE_NUMERIC_RESULT",
+        message=f"{field} is not finite.",
+    )
 
 
 def _optional_str(value: Any) -> str | None:

@@ -11,13 +11,16 @@ from httpx import ASGITransport, AsyncClient
 from apps.api.main import app
 from apps.api.routes.models import get_model_registry_store
 from packages.common.model_registry import (
+    RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
     RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
+    RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
     DuplicateResourceError,
     InvalidPayloadError,
     InvalidReferenceError,
     MissingResourceError,
     ModelRegistryError,
     PsycopgModelRegistryStore,
+    RiverSegmentGeoJsonBudgetError,
     geometry_to_wkt,
 )
 from workers.model_registry.cli import _argparse_main
@@ -313,6 +316,65 @@ class DuplicateSegmentIdModelRegistryStore(FakeModelRegistryStore):
         return dict(row)
 
 
+class OversizedPropertiesModelRegistryStore(FakeModelRegistryStore):
+    def list_river_segments(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        assert basin_version_id == "basin_v01"
+        assert river_network_version_id == "basin_rivnet_v01"
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "segment_id": "seg_oversized",
+                        "river_segment_id": "seg_oversized",
+                        "basin_version_id": "basin_v01",
+                        "river_network_version_id": "basin_rivnet_v01",
+                        "name": "Oversized",
+                        "stream_order": 1,
+                        "blob": "x" * (RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES + 1),
+                    },
+                    "geometry": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+                }
+            ],
+            "total": 1,
+            "feature_total": 1,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def get_river_segment(
+        self,
+        *,
+        basin_version_id: str,
+        river_network_version_id: str,
+        segment_id: str,
+    ) -> dict[str, Any]:
+        assert basin_version_id == "basin_v01"
+        assert river_network_version_id == "basin_rivnet_v01"
+        assert segment_id == "seg_oversized"
+        return {
+            "river_segment_id": "seg_oversized",
+            "river_network_version_id": "basin_rivnet_v01",
+            "segment_order": 1,
+            "downstream_segment_id": None,
+            "length_m": 1234.5,
+            "geom": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+            "properties_json": {
+                "name": "Oversized",
+                "blob": "x" * (RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES + 1),
+            },
+            "created_at": "2026-05-07T00:00:00Z",
+        }
+
+
 class BasinsRiverSegmentStore(FakeModelRegistryStore):
     def list_river_segments(
         self,
@@ -600,6 +662,44 @@ async def test_get_river_segment_duplicate_ids_return_selected_network_row() -> 
     assert payload["segment_order"] == 2
     assert payload["geom"]["coordinates"] == [[91.0, 26.0], [91.5, 26.5]]
     assert payload["properties_json"]["name"] == "Selected sibling network row"
+
+
+@pytest.mark.asyncio
+async def test_river_segment_collection_oversized_properties_return_413_envelope() -> None:
+    store = OversizedPropertiesModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments",
+            params={"river_network_version_id": "basin_rivnet_v01", "limit": 100, "offset": 0},
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["limit_type"] == "serialized_bytes"
+    assert body["error"]["details"]["scope"] == "collection"
+
+
+@pytest.mark.asyncio
+async def test_river_segment_detail_oversized_properties_return_413_envelope() -> None:
+    store = OversizedPropertiesModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/basin-versions/basin_v01/river-segments/seg_oversized",
+            params={"river_network_version_id": "basin_rivnet_v01"},
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["limit_type"] == "serialized_bytes"
+    assert body["error"]["details"]["scope"] == "detail"
 
 
 @pytest.mark.asyncio
@@ -1549,6 +1649,65 @@ def test_list_river_segments_applies_aggregate_collection_budget_before_serializ
     assert collection["features"][-1]["properties"]["river_segment_id"] == "seg_005"
 
 
+def test_list_river_segments_rejects_serialized_payload_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.calls += 1
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert self.calls == 1
+            return {"total": 1, "feature_total": 1}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            assert self.calls == 2
+            assert "ST_AsGeoJSON(geom)::json AS geometry" in self.statement
+            return [
+                {
+                    "river_segment_id": "seg_huge_props",
+                    "river_network_version_id": "rivnet_v01",
+                    "basin_version_id": "basin_v01",
+                    "segment_order": 1,
+                    "downstream_segment_id": None,
+                    "length_m": 1000,
+                    "properties_json": {"name": "Huge", "blob": "x" * RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES},
+                    "geometry": {"type": "LineString", "coordinates": [[91.0, 26.0], [92.0, 27.0]]},
+                }
+            ]
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(RiverSegmentGeoJsonBudgetError) as exc:
+        store.list_river_segments(
+            basin_version_id="basin_v01",
+            river_network_version_id="rivnet_v01",
+            limit=100,
+            offset=0,
+        )
+
+    assert exc.value.limit_type == "serialized_bytes"
+    assert exc.value.scope == "collection"
+    assert exc.value.max_bytes == RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES
+
+
 def test_get_river_segment_excludes_null_geometry_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1611,6 +1770,50 @@ def test_get_river_segment_excludes_oversized_detail_geometry(
             river_network_version_id="rivnet_v01",
             segment_id="seg_huge",
         )
+
+
+def test_get_river_segment_rejects_serialized_payload_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            self.statement = statement
+            self.parameters = parameters
+
+        def fetchone(self) -> dict[str, Any]:
+            assert "ST_AsGeoJSON(geom)::json AS geom" in self.statement
+            assert self.parameters == ("basin_v01", "seg_huge_props", "rivnet_v01", 10_000, 3)
+            return {
+                "river_segment_id": "seg_huge_props",
+                "river_network_version_id": "rivnet_v01",
+                "segment_order": 1,
+                "downstream_segment_id": None,
+                "length_m": 1000,
+                "geom": {"type": "LineString", "coordinates": [[91.0, 26.0], [92.0, 27.0]]},
+                "properties_json": {"name": "Huge", "blob": "x" * RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES},
+                "created_at": "2026-05-19T00:00:00Z",
+            }
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(RiverSegmentGeoJsonBudgetError) as exc:
+        store.get_river_segment(
+            basin_version_id="basin_v01",
+            river_network_version_id="rivnet_v01",
+            segment_id="seg_huge_props",
+        )
+
+    assert exc.value.limit_type == "serialized_bytes"
+    assert exc.value.scope == "detail"
+    assert exc.value.max_bytes == RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES
 
 
 def test_get_model_uses_sanitized_mesh_lineage_fallbacks(

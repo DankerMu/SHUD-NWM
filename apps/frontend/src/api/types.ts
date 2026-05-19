@@ -1612,6 +1612,7 @@ export interface operations {
                     };
                 };
             };
+            413: components["responses"]["Error"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -1675,6 +1676,7 @@ export interface operations {
                     };
                 };
             };
+            413: components["responses"]["Error"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };

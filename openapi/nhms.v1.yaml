@@ -316,6 +316,8 @@ paths:
                         $ref: "#/components/schemas/RiverSegmentFeatureCollection"
         "4XX":
           $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
         "5XX":
           $ref: "#/components/responses/Error"
   /api/v1/models/{model_id}/active:
@@ -384,6 +386,8 @@ paths:
                       data:
                         $ref: "#/components/schemas/RiverSegment"
         "4XX":
+          $ref: "#/components/responses/Error"
+        "413":
           $ref: "#/components/responses/Error"
         "5XX":
           $ref: "#/components/responses/Error"

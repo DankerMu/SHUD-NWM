@@ -430,6 +430,26 @@ def test_flood_tile_inverted_bbox_uses_validation_envelope() -> None:
     assert body["error"]["details"] == {"bbox": "112,29,111,31"}
 
 
+def test_flood_tile_non_finite_bbox_uses_validation_envelope() -> None:
+    for bbox in ("NaN,29,111,31", "109,29,Infinity,31", "109,-Infinity,111,31"):
+        with _client() as client:
+            response = client.get(
+                "/api/v1/tiles/flood-return-period",
+                params={
+                    "run_id": RUN_ID,
+                    "duration": "1h",
+                    "valid_time": _iso(VALID_TIME_1),
+                    "bbox": bbox,
+                },
+            )
+
+        assert response.status_code == 422
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert body["error"]["details"] == {"bbox": bbox}
+
+
 def test_flood_tile_feature_budget_overflow_returns_413() -> None:
     with _client() as client:
         response = client.get(

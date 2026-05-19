@@ -34,6 +34,26 @@ SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS = 3
 RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES = SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES
 RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS = SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS
 RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES = 50_000
+RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES = 1_000_000
+RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES = 250_000
+
+
+class RiverSegmentGeoJsonBudgetError(ModelRegistryError):
+    """Raised when a river segment GeoJSON response exceeds the server serialization budget."""
+
+    def __init__(
+        self,
+        *,
+        limit_type: str,
+        max_bytes: int,
+        serialized_bytes: int,
+        scope: str,
+    ) -> None:
+        super().__init__("River segment GeoJSON payload budget exceeded.")
+        self.limit_type = limit_type
+        self.max_bytes = max_bytes
+        self.serialized_bytes = serialized_bytes
+        self.scope = scope
 
 
 def default_database_url() -> str:
@@ -373,7 +393,7 @@ class PsycopgModelRegistryStore:
                 }
             )
 
-        return {
+        collection = {
             "type": "FeatureCollection",
             "features": features,
             "total": total,
@@ -381,6 +401,12 @@ class PsycopgModelRegistryStore:
             "limit": limit,
             "offset": offset,
         }
+        _enforce_river_segment_serialized_budget(
+            collection,
+            max_bytes=RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
+            scope="collection",
+        )
+        return collection
 
     def get_river_segment(
         self,
@@ -440,7 +466,13 @@ class PsycopgModelRegistryStore:
                 f"basin_version_id {basin_version_id}, "
                 f"river_network_version_id {river_network_version_id}: {segment_id}"
             )
-        return _river_segment_detail(row)
+        detail = _river_segment_detail(row)
+        _enforce_river_segment_serialized_budget(
+            detail,
+            max_bytes=RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
+            scope="detail",
+        )
+        return detail
 
     def create_mesh_version(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         mesh_version_id = build_versioned_id(
@@ -896,6 +928,17 @@ def _river_segment_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     detail["length_m"] = float(detail["length_m"]) if detail.get("length_m") is not None else None
     detail["properties_json"] = _json_mapping(detail.get("properties_json"))
     return detail
+
+
+def _enforce_river_segment_serialized_budget(payload: Mapping[str, Any], *, max_bytes: int, scope: str) -> None:
+    serialized_bytes = len(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"))
+    if serialized_bytes > max_bytes:
+        raise RiverSegmentGeoJsonBudgetError(
+            limit_type="serialized_bytes",
+            max_bytes=max_bytes,
+            serialized_bytes=serialized_bytes,
+            scope=scope,
+        )
 
 
 def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:

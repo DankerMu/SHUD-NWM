@@ -8,6 +8,7 @@ const run = {
   scenario_id: 'forecast_gfs_deterministic',
   model_id: 'model-1',
   basin_version_id: 'basin-v1',
+  river_network_version_id: 'rivnet-v1',
   source_id: 'gfs',
   cycle_time: '2026-05-12T00:00:00Z',
   status: 'frequency_done',
@@ -46,6 +47,7 @@ const ranking = {
       segment_id: 'seg-1',
       segment_name: 'Flood Segment 1',
       basin_version_id: 'basin-v1',
+      river_network_version_id: 'rivnet-v1',
       q_value: 1234,
       q_unit: 'm3/s',
       return_period: 20,
@@ -63,6 +65,7 @@ const timeline = {
   run_id: 'run-flood-1',
   segment_id: 'seg-1',
   river_segment_id: 'seg-1',
+  river_network_version_id: 'rivnet-v1',
   timesteps: [
     {
       valid_time: '2026-05-12T03:00:00Z',
@@ -92,6 +95,7 @@ const timeline = {
 
 const forecastPayload = {
   segment_id: 'seg-1',
+  river_network_version_id: 'rivnet-v1',
   issue_time: '2026-05-12T00:00:00Z',
   unit: 'm3/s',
   series: [
@@ -111,6 +115,12 @@ function success<T>(data: T) {
   return { status: 'success', data }
 }
 
+function readyRunsForStatus(status: string | null) {
+  if (status === 'frequency_done') return [run]
+  if (status === 'published') return [{ ...run, run_id: 'run-published-older', status: 'published', cycle_time: '2026-05-11T00:00:00Z' }]
+  throw new Error(`Unexpected run status query: ${status}`)
+}
+
 async function fulfill(route: Route, data: unknown) {
   await route.fulfill({
     status: 200,
@@ -126,8 +136,8 @@ async function mockFloodApi(page: Page, onRequest?: (request: Request) => void) 
     const url = new URL(request.url())
 
     if (url.pathname === '/api/v1/runs') {
-      expect(url.searchParams.get('status')).toBe('frequency_done')
-      return fulfill(route, { items: [run], total: 1, limit: 50, offset: 0 })
+      const items = readyRunsForStatus(url.searchParams.get('status'))
+      return fulfill(route, { items, total: items.length, limit: 50, offset: 0 })
     }
     if (url.pathname === '/api/v1/flood-alerts/summary') {
       expect(url.searchParams.get('run_id')).toBe('run-flood-1')
@@ -149,10 +159,12 @@ async function mockFloodApi(page: Page, onRequest?: (request: Request) => void) 
     if (url.pathname === '/api/v1/flood-alerts/timeline') {
       expect(url.searchParams.get('run_id')).toBe('run-flood-1')
       expect(url.searchParams.get('segment_id')).toBe('seg-1')
+      expect(url.searchParams.get('river_network_version_id')).toBe('rivnet-v1')
       return fulfill(route, timeline)
     }
     if (url.pathname.endsWith('/forecast-series')) {
       expect(url.pathname).toContain('/api/v1/basin-versions/basin-v1/river-segments/seg-1/')
+      expect(url.searchParams.get('river_network_version_id')).toBe('rivnet-v1')
       return fulfill(route, forecastPayload)
     }
 
@@ -163,10 +175,10 @@ async function mockFloodApi(page: Page, onRequest?: (request: Request) => void) 
 test.describe('flood alerts page', () => {
   test('loads latest run, summary, ranking, tile, and selected segment timeline through configured API base', async ({ page }) => {
     const forecastSeriesPath = '/api/v1/basin-versions/basin-v1/river-segments/seg-1/forecast-series'
-    const calls: Array<{ origin: string; pathname: string }> = []
+    const calls: Array<{ origin: string; pathname: string; searchParams: URLSearchParams }> = []
     await mockFloodApi(page, (request) => {
       const url = new URL(request.url())
-      calls.push({ origin: url.origin, pathname: url.pathname })
+      calls.push({ origin: url.origin, pathname: url.pathname, searchParams: url.searchParams })
     })
 
     await page.goto('/flood-alerts')
@@ -186,6 +198,10 @@ test.describe('flood alerts page', () => {
 
     await expect(page.getByRole('heading', { name: 'Flood Segment 1' })).toBeVisible()
     await expect.poll(() => calls.map((call) => call.pathname)).toContain('/api/v1/flood-alerts/timeline')
+    const timelineCall = calls.find((call) => call.pathname === '/api/v1/flood-alerts/timeline')
+    const forecastSeriesCall = calls.find((call) => call.pathname === forecastSeriesPath)
+    expect(timelineCall?.searchParams.get('river_network_version_id')).toBe('rivnet-v1')
+    expect(forecastSeriesCall?.searchParams.get('river_network_version_id')).toBe('rivnet-v1')
 
     for (const path of [
       '/api/v1/runs',
@@ -208,7 +224,10 @@ test.describe('flood alerts page', () => {
       if (url.pathname === '/api/v1/runs') {
         expect(url.searchParams.get('source')).toBe('IFS')
         expect(url.searchParams.get('cycle_time')).toBe('2026-05-13T00:00:00.000Z')
-        return fulfill(route, { items: [ifsRun], total: 1, limit: 50, offset: 0 })
+        const status = url.searchParams.get('status')
+        expect(['frequency_done', 'published']).toContain(status)
+        const items = status === 'frequency_done' ? [ifsRun] : []
+        return fulfill(route, { items, total: items.length, limit: 50, offset: 0 })
       }
       if (url.pathname === '/api/v1/flood-alerts/summary') {
         expect(url.searchParams.get('run_id')).toBe('run-ifs-specific')
@@ -220,7 +239,14 @@ test.describe('flood alerts page', () => {
         expect(url.searchParams.get('valid_time')).toBe('2026-05-13T06:00:00.000Z')
         return fulfill(route, {
           ...ranking,
-          items: [{ ...ranking.items[0], segment_name: 'IFS Specific Segment', valid_time: '2026-05-13T06:00:00Z' }],
+          items: [
+            {
+              ...ranking.items[0],
+              river_network_version_id: 'rivnet-v1',
+              segment_name: 'IFS Specific Segment',
+              valid_time: '2026-05-13T06:00:00Z',
+            },
+          ],
         })
       }
       if (url.pathname === '/api/v1/tiles/flood-return-period') {
@@ -252,7 +278,10 @@ test.describe('flood alerts page', () => {
       if (url.pathname === '/api/v1/runs') {
         expect(url.searchParams.get('source')).toBe('IFS')
         expect(url.searchParams.get('cycle_time')).toBe('2026-05-13T00:00:00.000Z')
-        return fulfill(route, { items: [run], total: 1, limit: 50, offset: 0 })
+        const status = url.searchParams.get('status')
+        expect(['frequency_done', 'published']).toContain(status)
+        const items = status === 'frequency_done' ? [run] : []
+        return fulfill(route, { items, total: items.length, limit: 50, offset: 0 })
       }
 
       throw new Error(`Unexpected fallback request: ${url.pathname}`)

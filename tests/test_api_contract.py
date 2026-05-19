@@ -304,6 +304,41 @@ def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
         assert field in model_properties
 
 
+def test_river_segment_geojson_budget_error_contract() -> None:
+    store = _OversizedRiverSegmentStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            collection_response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments",
+                params={"river_network_version_id": "network_v1"},
+            )
+            detail_response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_1",
+                params={"river_network_version_id": "network_v1"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    for response, scope in ((collection_response, "collection"), (detail_response, "detail")):
+        assert response.status_code == 413
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
+        assert body["error"]["details"]["limit_type"] == "serialized_bytes"
+        assert body["error"]["details"]["scope"] == scope
+
+    spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
+    collection_responses = spec["paths"]["/api/v1/basin-versions/{basin_version_id}/river-segments"]["get"][
+        "responses"
+    ]
+    detail_responses = spec["paths"]["/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}"]["get"][
+        "responses"
+    ]
+    assert collection_responses["413"]["$ref"] == "#/components/responses/Error"
+    assert detail_responses["413"]["$ref"] == "#/components/responses/Error"
+
+
 def test_forecast_series_contract_accepts_include_analysis_query() -> None:
     app.dependency_overrides[get_forecast_store] = lambda: _ForecastSeriesStore()
     try:
@@ -752,6 +787,28 @@ class _ModelRegistryStore:
         from packages.common.model_registry import MissingResourceError
 
         raise MissingResourceError(f"model_id not found: {model_id}")
+
+
+class _OversizedRiverSegmentStore(_ModelRegistryStore):
+    def list_river_segments(self, **_kwargs: Any) -> dict[str, Any]:
+        from packages.common.model_registry import RiverSegmentGeoJsonBudgetError
+
+        raise RiverSegmentGeoJsonBudgetError(
+            limit_type="serialized_bytes",
+            max_bytes=100,
+            serialized_bytes=101,
+            scope="collection",
+        )
+
+    def get_river_segment(self, **_kwargs: Any) -> dict[str, Any]:
+        from packages.common.model_registry import RiverSegmentGeoJsonBudgetError
+
+        raise RiverSegmentGeoJsonBudgetError(
+            limit_type="serialized_bytes",
+            max_bytes=100,
+            serialized_bytes=101,
+            scope="detail",
+        )
 
 
 class _ForecastSeriesStore:

@@ -189,6 +189,21 @@ def test_flood_alert_timeline_max_points_contract_matches_runtime_and_static_ope
         assert param["schema"]["minimum"] == 1
 
 
+def test_river_segment_collection_413_contract_matches_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    paths = (
+        "/api/v1/basin-versions/{basin_version_id}/river-segments",
+        "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}",
+    )
+
+    for path in paths:
+        assert static_spec["paths"][path]["get"]["responses"]["413"]["$ref"] == "#/components/responses/Error"
+        assert fastapi_spec["paths"][path]["get"]["responses"]["413"]["description"] == (
+            "River segment GeoJSON payload budget exceeded."
+        )
+
+
 def test_openapi_success_envelope_accepts_array_data_composition() -> None:
     spec = _openapi_spec()
     schema = spec["paths"]["/api/v1/basins"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
