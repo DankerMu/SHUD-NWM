@@ -83,6 +83,7 @@ export interface FloodAlertTimeline {
   runId: string
   segmentId: string
   riverSegmentId: string
+  riverNetworkVersionId: string | null
   timesteps: FloodAlertTimelinePoint[]
   peak?: FloodAlertTimelinePoint | null
   frequencyThresholds?: FloodFrequencyThresholds | null
@@ -118,7 +119,7 @@ interface FloodAlertState {
   fetchLatestFrequencyDoneRun: (context?: { source?: string | null; cycleTime?: string | null; validTime?: string | null }) => Promise<void>
   fetchSummary: (options?: { validTime?: string | null }) => Promise<void>
   fetchRanking: (options?: { validTime?: string | null; limit?: 10 | 20 | 50 }) => Promise<void>
-  fetchTimeline: (segmentId: string) => Promise<void>
+  fetchTimeline: (segmentId: string, riverNetworkVersionId?: string | null) => Promise<void>
 }
 
 async function fetchJson<T>(path: string, query: Record<string, string | number | boolean | null | undefined>) {
@@ -227,6 +228,7 @@ function normalizeTimeline(payload: ApiFloodAlertTimeline): FloodAlertTimeline {
     runId: payload.run_id,
     segmentId: payload.segment_id,
     riverSegmentId: payload.river_segment_id,
+    riverNetworkVersionId: stringOrNull(payload.river_network_version_id),
     timesteps,
     peak: payload.peak ? normalizeTimelinePoint(payload.peak) : null,
     frequencyThresholds: normalizeFrequencyThresholds(payload.frequency_thresholds),
@@ -480,9 +482,18 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       throw error
     }
   },
-  fetchTimeline: async (segmentId) => {
+  fetchTimeline: async (segmentId, riverNetworkVersionId) => {
     const runId = get().selectedRunId
     if (!runId) return
+    const scopedRiverNetworkVersionId = riverNetworkVersionId ?? get().latestRun?.river_network_version_id ?? null
+    if (!scopedRiverNetworkVersionId) {
+      set({
+        timelineData: null,
+        timelineLoading: false,
+        error: '缺少 river_network_version_id，无法加载已限定河网版本的预警时间线',
+      })
+      return
+    }
 
     const requestId = ++timelineRequestId
     set({ timelineLoading: true, error: null, timelineData: null })
@@ -491,6 +502,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const payload = await fetchJson<ApiFloodAlertTimeline>('/api/v1/flood-alerts/timeline', {
         run_id: runId,
         segment_id: segmentId,
+        river_network_version_id: scopedRiverNetworkVersionId,
       })
       if (!isCurrentRequest()) return
       const timeline = normalizeTimeline(payload)
@@ -499,6 +511,14 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
           timelineData: null,
           timelineLoading: false,
           error: `河段预警详情响应与请求河段不匹配：请求 ${segmentId}，返回 ${timeline.segmentId || timeline.riverSegmentId || 'unknown'}。`,
+        })
+        return
+      }
+      if (timeline.riverNetworkVersionId !== scopedRiverNetworkVersionId) {
+        set({
+          timelineData: null,
+          timelineLoading: false,
+          error: `河段预警详情响应与请求河网版本不匹配：请求 ${scopedRiverNetworkVersionId}，返回 ${timeline.riverNetworkVersionId || 'unknown'}。`,
         })
         return
       }

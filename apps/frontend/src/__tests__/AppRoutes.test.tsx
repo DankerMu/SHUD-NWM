@@ -2209,6 +2209,7 @@ describe('App route state', () => {
         runId: 'run-flood-1',
         segmentId: 'seg-1',
         riverSegmentId: 'seg-1',
+        riverNetworkVersionId: 'rivnet-v1',
         timesteps: [],
         peak: null,
         frequencyThresholds: null,
@@ -2261,7 +2262,7 @@ describe('App route state', () => {
     expect(screen.getByTestId('mock-echarts-option')).toHaveTextContent('GFS 预报')
   })
 
-  it('does not call forecast-series for flood-alert detail when segment network scope is unavailable', async () => {
+  it('does not reuse a previous selected segment network when the next segment needs run fallback', async () => {
     const user = userEvent.setup()
     const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
     const fetchTimeline = vi.fn().mockResolvedValue(undefined)
@@ -2283,6 +2284,7 @@ describe('App route state', () => {
         scenario_id: 'forecast_gfs_deterministic',
         model_id: 'model-1',
         basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-run',
         source_id: 'gfs',
         cycle_time: '2026-05-12T00:00:00Z',
         status: 'frequency_done',
@@ -2295,9 +2297,22 @@ describe('App route state', () => {
         items: [
           {
             rank: 1,
-            riverSegmentId: 'seg-1',
-            segmentId: 'seg-1',
-            segmentName: 'Unscoped Flood Segment',
+            riverSegmentId: 'seg-scoped',
+            segmentId: 'seg-scoped',
+            segmentName: 'Scoped Flood Segment',
+            basinVersionId: 'basin-v1',
+            riverNetworkVersionId: 'rivnet-selected',
+            qValue: 200,
+            qUnit: 'm3/s',
+            returnPeriod: 20,
+            warningLevel: 'warning',
+            validTime: '2026-05-12T03:00:00Z',
+          },
+          {
+            rank: 2,
+            riverSegmentId: 'seg-unscoped',
+            segmentId: 'seg-unscoped',
+            segmentName: 'Run Fallback Segment',
             basinVersionId: 'basin-v1',
             qValue: 100,
             qUnit: 'm3/s',
@@ -2312,8 +2327,9 @@ describe('App route state', () => {
       },
       timelineData: {
         runId: 'run-flood-1',
-        segmentId: 'seg-1',
-        riverSegmentId: 'seg-1',
+        segmentId: 'seg-unscoped',
+        riverSegmentId: 'seg-unscoped',
+        riverNetworkVersionId: 'rivnet-run',
         timesteps: [],
         peak: null,
         frequencyThresholds: null,
@@ -2327,10 +2343,22 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
-    await user.click(screen.getByRole('row', { name: /Unscoped Flood Segment/ }))
+    await user.click(screen.getByRole('row', { name: /Scoped Flood Segment/ }))
+    expect(useForecastStore.getState().selectedSegment?.riverNetworkVersionId).toBe('rivnet-selected')
+    await user.click(screen.getByRole('button', { name: '关闭详情' }))
+    await user.click(screen.getByRole('row', { name: /Run Fallback Segment/ }))
 
-    expect(await screen.findByText(/缺少 river_network_version_id/)).toBeInTheDocument()
-    expect(vi.mocked(client.GET).mock.calls.filter(([path]) => String(path).endsWith('/forecast-series'))).toHaveLength(0)
+    await waitFor(() =>
+      expect(useForecastStore.getState().selectedSegment).toMatchObject({
+        segmentId: 'seg-unscoped',
+        riverNetworkVersionId: 'rivnet-run',
+      }),
+    )
+    const forecastQueries = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => String(path).endsWith('/forecast-series'))
+      .map(([, options]) => options?.params?.query as Record<string, unknown>)
+    expect(forecastQueries.at(-1)).toMatchObject({ river_network_version_id: 'rivnet-run' })
+    expect(forecastQueries.map((query) => query.river_network_version_id)).toEqual(['rivnet-selected', 'rivnet-run'])
   })
 
   it('binds flood-alert detail forecast requests to an explicitly routed older flood run cycle', async () => {
@@ -2404,6 +2432,7 @@ describe('App route state', () => {
         runId: 'run-older-gfs',
         segmentId: 'seg-older',
         riverSegmentId: 'seg-older',
+        riverNetworkVersionId: 'rivnet-v1',
         timesteps: [],
         peak: null,
         frequencyThresholds: null,
@@ -2595,6 +2624,7 @@ describe('App route state', () => {
         runId: 'run-old-gfs',
         segmentId: 'old-seg',
         riverSegmentId: 'old-seg',
+        riverNetworkVersionId: 'rivnet-v1',
         timesteps: [{ validTime: '2026-05-12T03:00:00Z', returnPeriod: 20, warningLevel: 'warning' }],
       },
       fetchLatestFrequencyDoneRun: async () => {

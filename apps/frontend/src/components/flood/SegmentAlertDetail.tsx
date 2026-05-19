@@ -164,7 +164,7 @@ export function SegmentAlertDetail({
   useEffect(() => {
     if (!segment) return
 
-    void fetchTimeline(segment.riverSegmentId).catch((error) => {
+    void fetchTimeline(segment.riverSegmentId, segment.riverNetworkVersionId).catch((error) => {
       toast({
         title: '预警时间线加载失败',
         description: getApiErrorMessage(error, '河段预警详情加载失败'),

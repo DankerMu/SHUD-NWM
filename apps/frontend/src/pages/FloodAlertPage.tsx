@@ -117,11 +117,18 @@ export function FloodAlertPage() {
   }
 
   const selectSegment = (segment: FloodAlertRankingItem) => {
-    setSelectedSegment((current) => ({
-      ...segment,
-      basinVersionId: segment.basinVersionId ?? current?.basinVersionId ?? latestRun?.basin_version_id,
-      riverNetworkVersionId: segment.riverNetworkVersionId ?? current?.riverNetworkVersionId ?? latestRun?.river_network_version_id,
-    }))
+    setSelectedSegment((current) => {
+      const sameSegment =
+        current &&
+        (current.riverSegmentId === segment.riverSegmentId || current.segmentId === segment.segmentId) &&
+        current.riverNetworkVersionId === segment.riverNetworkVersionId
+      return {
+        ...segment,
+        basinVersionId: segment.basinVersionId ?? (sameSegment ? current.basinVersionId : null) ?? latestRun?.basin_version_id,
+        riverNetworkVersionId:
+          segment.riverNetworkVersionId ?? (sameSegment ? current.riverNetworkVersionId : null) ?? latestRun?.river_network_version_id,
+      }
+    })
   }
 
   const closeDetail = () => {

@@ -1105,6 +1105,13 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
         - $ref: "#/components/parameters/SegmentIdQuery"
+        - name: river_network_version_id
+          in: query
+          required: true
+          description: River network version for the selected segment.
+          schema:
+            type: string
+            minLength: 1
       responses:
         "200":
           description: Flood alert timeline
@@ -1964,6 +1971,7 @@ components:
         - scenario_id
         - model_id
         - basin_version_id
+        - river_network_version_id
         - status
         - start_time
         - end_time
@@ -1980,6 +1988,9 @@ components:
           type: string
         basin_version_id:
           type: string
+        river_network_version_id:
+          type: string
+          nullable: true
         forcing_version_id:
           type: string
           nullable: true
@@ -2749,6 +2760,7 @@ components:
         - segment_id
         - segment_name
         - basin_version_id
+        - river_network_version_id
         - q_value
         - return_period
         - warning_level
@@ -2764,6 +2776,9 @@ components:
           nullable: true
         basin_version_id:
           type: string
+        river_network_version_id:
+          type: string
+          nullable: true
         q_value:
           type: number
         return_period:
@@ -2832,13 +2847,15 @@ components:
           additionalProperties: true
     FloodAlertTimeline:
       type: object
-      required: [run_id, segment_id, river_segment_id, timesteps, timeline, peak, frequency_thresholds, quality_note]
+      required: [run_id, segment_id, river_segment_id, river_network_version_id, timesteps, timeline, peak, frequency_thresholds, quality_note]
       properties:
         run_id:
           type: string
         segment_id:
           type: string
         river_segment_id:
+          type: string
+        river_network_version_id:
           type: string
         timesteps:
           type: array

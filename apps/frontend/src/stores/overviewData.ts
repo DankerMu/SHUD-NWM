@@ -804,13 +804,13 @@ async function fetchForecast(basinVersionId: string, riverNetworkVersionId: stri
   )
 }
 
-async function fetchFloodTimeline(runId: string, segmentId: string) {
+async function fetchFloodTimeline(runId: string, segmentId: string, riverNetworkVersionId: string) {
   return cached(
-    cacheKey('/api/v1/flood-alerts/timeline', { runId, segmentId }),
+    cacheKey('/api/v1/flood-alerts/timeline', { runId, segmentId, riverNetworkVersionId }),
     () =>
       getApi<ApiFloodAlertTimeline>(
         '/api/v1/flood-alerts/timeline',
-        { params: { query: { run_id: runId, segment_id: segmentId } } },
+        { params: { query: { run_id: runId, segment_id: segmentId, river_network_version_id: riverNetworkVersionId } } },
         '获取洪水预警时间线失败',
       ),
   )
@@ -1107,7 +1107,13 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
                 concreteSurfaceQuery,
               )
             : Promise.resolve(null),
-          latestRun && useSingleRunFloodSurfaces ? fetchFloodTimeline(latestRun.run_id, selectedIdentifiers.timelineSegmentId) : Promise.resolve(null),
+          latestRun && useSingleRunFloodSurfaces
+            ? fetchFloodTimeline(
+                latestRun.run_id,
+                selectedIdentifiers.timelineSegmentId,
+                selectedIdentifiers.riverNetworkVersionId,
+              )
+            : Promise.resolve(null),
         ])
         const segment = settledValue(segmentResult, partialErrors, 'river segment detail')
         const forecast = settledValue(forecastResult, partialErrors, 'forecast series')

@@ -18,6 +18,7 @@ from packages.common.forecast_store import PsycopgForecastStore
 
 RUN_ID = "fcst_gfs_2026050300_all"
 PUBLISHED_RUN_ID = "fcst_gfs_2026050300_published"
+DUPLICATE_SEGMENT_RUN_ID = "fcst_gfs_2026050300_duplicate_segments"
 VALID_TIME_1 = datetime(2026, 5, 3, 6, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 12, tzinfo=UTC)
 
@@ -85,7 +86,9 @@ def test_published_run_rows_are_readable_through_alert_and_map_endpoints() -> No
         summary = client.get(f"/api/v1/flood-alerts/summary?run_id={PUBLISHED_RUN_ID}")
         ranking = client.get(f"/api/v1/flood-alerts/ranking?run_id={PUBLISHED_RUN_ID}&limit=2")
         segments = client.get(f"/api/v1/flood-alerts/segments?run_id={PUBLISHED_RUN_ID}&min_return_period=20")
-        timeline = client.get(f"/api/v1/flood-alerts/timeline?run_id={PUBLISHED_RUN_ID}&segment_id=seg_002")
+        timeline = client.get(
+            f"/api/v1/flood-alerts/timeline?run_id={PUBLISHED_RUN_ID}&segment_id=seg_002&river_network_version_id=rnv_v1"
+        )
         tile = client.get(
             "/api/v1/tiles/flood-return-period"
             f"?run_id={PUBLISHED_RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
@@ -148,6 +151,7 @@ def test_segments_filters_and_empty_result() -> None:
         data = response.json()["data"]
         assert data["total"] == 2
         assert {segment["river_segment_id"] for segment in data["segments"]} == {"seg_003", "seg_004"}
+        assert {segment["river_network_version_id"] for segment in data["segments"]} == {"rnv_v1", "rnv_v2"}
         assert data["segments"][0]["geom_centroid"]["type"] == "Point"
 
         response = client.get(f"/api/v1/flood-alerts/segments?run_id={RUN_ID}&warning_level=watch,severe")
@@ -163,20 +167,47 @@ def test_segments_filters_and_empty_result() -> None:
 
 def test_timeline_normal_with_peak_and_no_frequency_curve() -> None:
     with _client() as client:
-        response = client.get(f"/api/v1/flood-alerts/timeline?run_id={RUN_ID}&segment_id=seg_002")
+        response = client.get(
+            f"/api/v1/flood-alerts/timeline?run_id={RUN_ID}&segment_id=seg_002&river_network_version_id=rnv_v1"
+        )
         assert response.status_code == 200
         data = response.json()["data"]
+        assert data["river_network_version_id"] == "rnv_v1"
         assert [point["return_period"] for point in data["timesteps"]] == [4.0, 22.0]
         assert data["peak"]["valid_time"] == _iso(VALID_TIME_2)
         assert data["peak"]["warning_level"] == "warning"
         assert data["frequency_thresholds"]["Q20"] == 2900.0
 
-        response = client.get(f"/api/v1/flood-alerts/timeline?run_id={RUN_ID}&segment_id=seg_no_curve")
+        response = client.get(
+            f"/api/v1/flood-alerts/timeline?run_id={RUN_ID}&segment_id=seg_no_curve&river_network_version_id=rnv_v1"
+        )
         assert response.status_code == 200
         no_curve = response.json()["data"]
         assert no_curve["frequency_thresholds"] is None
         assert no_curve["quality_note"] == "No frequency curve available for this segment"
         assert no_curve["timesteps"][0]["return_period"] is None
+
+
+def test_timeline_filters_duplicate_segment_ids_by_river_network_version() -> None:
+    with _client() as client:
+        response = client.get(
+            f"/api/v1/flood-alerts/timeline?run_id={DUPLICATE_SEGMENT_RUN_ID}&segment_id=dup_seg&river_network_version_id=rnv_v1"
+        )
+        assert response.status_code == 200
+        rnv_v1 = response.json()["data"]
+
+        response = client.get(
+            f"/api/v1/flood-alerts/timeline?run_id={DUPLICATE_SEGMENT_RUN_ID}&segment_id=dup_seg&river_network_version_id=rnv_v2"
+        )
+        assert response.status_code == 200
+        rnv_v2 = response.json()["data"]
+
+    assert rnv_v1["river_network_version_id"] == "rnv_v1"
+    assert rnv_v2["river_network_version_id"] == "rnv_v2"
+    assert [point["q_value"] for point in rnv_v1["timesteps"]] == [111.0]
+    assert [point["q_value"] for point in rnv_v2["timesteps"]] == [222.0]
+    assert rnv_v1["peak"]["warning_level"] == "watch"
+    assert rnv_v2["peak"]["warning_level"] == "severe"
 
 
 def test_forecast_series_embeds_frequency_thresholds() -> None:
@@ -482,7 +513,7 @@ def _create_tables(connection: Any) -> None:
                 cycle_time DATETIME,
                 max_over_window BOOLEAN DEFAULT 0,
                 quality_flag TEXT NOT NULL DEFAULT 'ok',
-                PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+                PRIMARY KEY (run_id, river_network_version_id, river_segment_id, duration, valid_time)
             )
             """
         )
@@ -537,6 +568,8 @@ def _seed_data(connection: Any) -> None:
         ("seg_003", "rnv_v1", 112.0, 32.0, "Segment 3"),
         ("seg_004", "rnv_v2", 113.0, 33.0, "Segment 4"),
         ("seg_no_curve", "rnv_v1", 114.0, 34.0, "No Curve"),
+        ("dup_seg", "rnv_v1", 115.0, 35.0, "Duplicate Segment V1"),
+        ("dup_seg", "rnv_v2", 116.0, 36.0, "Duplicate Segment V2"),
     ]:
         connection.execute(
             text(
@@ -557,6 +590,7 @@ def _seed_data(connection: Any) -> None:
     for run_id, status in [
         (RUN_ID, "frequency_done"),
         (PUBLISHED_RUN_ID, "published"),
+        (DUPLICATE_SEGMENT_RUN_ID, "frequency_done"),
         ("run_pending", "parsed"),
         ("run_empty", "frequency_done"),
         ("run_stray", "parsed"),
@@ -719,6 +753,30 @@ def _seed_data(connection: Any) -> None:
         True,
         run_id="run_empty",
         quality_flag="no_usable_frequency_curve",
+    )
+    _insert_result(
+        connection,
+        "dup_seg",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        111.0,
+        7.0,
+        "watch",
+        False,
+        run_id=DUPLICATE_SEGMENT_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "dup_seg",
+        "basin_v2",
+        "rnv_v2",
+        VALID_TIME_1,
+        222.0,
+        80.0,
+        "severe",
+        False,
+        run_id=DUPLICATE_SEGMENT_RUN_ID,
     )
     _insert_result(
         connection,

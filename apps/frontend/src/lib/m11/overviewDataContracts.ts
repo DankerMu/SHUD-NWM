@@ -745,7 +745,11 @@ export function normalizeSelectedSegmentDetail(input: {
       normalizeString(alert?.segment_name) ??
       riverSegmentId,
     modelId: input.model?.model_id ?? null,
-    riverNetworkVersionId: input.segment?.river_network_version_id ?? input.feature?.properties.river_network_version_id ?? null,
+    riverNetworkVersionId:
+      input.segment?.river_network_version_id ??
+      input.feature?.properties.river_network_version_id ??
+      input.floodTimeline?.river_network_version_id ??
+      null,
     currentQ: numberOrNull(alert?.q_value) ?? currentPoint?.value ?? numberOrNull(timelinePeak?.q_value),
     qUnit: normalizeUnit(alert?.q_unit ?? forecastUnit(input.forecast)),
     returnPeriod: numberOrNull(alert?.return_period) ?? numberOrNull(timelinePeak?.return_period),
@@ -769,7 +773,11 @@ export function normalizeSelectedSegmentDetail(input: {
       layer: input.query.layer,
       basemap: input.query.basemap,
       basinVersionId: input.basinVersionId,
-      riverNetworkVersionId: input.segment?.river_network_version_id ?? input.feature?.properties.river_network_version_id ?? null,
+      riverNetworkVersionId:
+        input.segment?.river_network_version_id ??
+        input.feature?.properties.river_network_version_id ??
+        input.floodTimeline?.river_network_version_id ??
+        null,
       segmentId: riverSegmentId,
       warningLevel: input.query.warningLevel,
       q: input.query.q,

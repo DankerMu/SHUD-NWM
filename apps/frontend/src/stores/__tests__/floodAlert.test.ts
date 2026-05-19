@@ -69,6 +69,7 @@ describe('useFloodAlertStore', () => {
       {
         ...useFloodAlertStore.getInitialState(),
         selectedRunId: 'run-1',
+        latestRun,
       },
       true,
     )
@@ -81,6 +82,7 @@ describe('useFloodAlertStore', () => {
             run_id: 'run-1',
             segment_id: 'seg-1',
             river_segment_id: 'seg-1',
+            river_network_version_id: 'rivnet-v1',
             timesteps: [
               {
                 valid_time: '2026-05-12T00:00:00Z',
@@ -116,12 +118,13 @@ describe('useFloodAlertStore', () => {
     await useFloodAlertStore.getState().fetchTimeline('seg-1')
 
     expect(fetch).toHaveBeenCalledWith(
-      `${apiBase}/api/v1/flood-alerts/timeline?run_id=run-1&segment_id=seg-1`,
+      `${apiBase}/api/v1/flood-alerts/timeline?run_id=run-1&segment_id=seg-1&river_network_version_id=rivnet-v1`,
     )
     expect(useFloodAlertStore.getState().timelineData).toMatchObject({
       runId: 'run-1',
       segmentId: 'seg-1',
       riverSegmentId: 'seg-1',
+      riverNetworkVersionId: 'rivnet-v1',
       frequencyThresholds: {
         Q20: 400,
         q20: 400,
@@ -197,6 +200,7 @@ describe('useFloodAlertStore', () => {
         if (parsed.pathname === '/api/v1/flood-alerts/timeline') {
           expect(parsed.searchParams.get('run_id')).toBe('run-1')
           expect(parsed.searchParams.get('segment_id')).toBe('seg-1')
+          expect(parsed.searchParams.get('river_network_version_id')).toBe('rivnet-v1')
           return {
             ok: true,
             json: async () =>
@@ -204,6 +208,7 @@ describe('useFloodAlertStore', () => {
                 run_id: 'run-1',
                 segment_id: 'seg-1',
                 river_segment_id: 'seg-1',
+                river_network_version_id: 'rivnet-v1',
                 timesteps: [
                   {
                     valid_time: '2026-05-12T03:00:00Z',
@@ -236,7 +241,7 @@ describe('useFloodAlertStore', () => {
     expect(fetchUrls).toEqual([
       `${apiBase}/api/v1/flood-alerts/summary?run_id=run-1&valid_time=2026-05-12T03%3A00%3A00Z`,
       `${apiBase}/api/v1/flood-alerts/ranking?run_id=run-1&limit=20&offset=0&basin_id=basin-a&valid_time=2026-05-12T03%3A00%3A00Z`,
-      `${apiBase}/api/v1/flood-alerts/timeline?run_id=run-1&segment_id=seg-1`,
+      `${apiBase}/api/v1/flood-alerts/timeline?run_id=run-1&segment_id=seg-1&river_network_version_id=rivnet-v1`,
     ])
     expect(useFloodAlertStore.getState().latestRun?.run_id).toBe('run-1')
     expect(useFloodAlertStore.getState().summaryData?.totalSegments).toBe(4)
@@ -302,6 +307,7 @@ describe('useFloodAlertStore', () => {
             run_id: 'run-1',
             segment_id: 'seg-orange',
             river_segment_id: 'seg-orange',
+            river_network_version_id: 'rivnet-v1',
             timesteps: [
               { valid_time: '2026-05-12T00:00:00Z', return_period: 20, warning_level: 'orange', q_value: 1 },
             ],
@@ -534,6 +540,7 @@ describe('useFloodAlertStore', () => {
       runId: 'run-1',
       segmentId: 'seg-1',
       riverSegmentId: 'seg-1',
+      riverNetworkVersionId: 'rivnet-v1',
       timesteps: [{ validTime: '2026-05-12T03:00:00Z', returnPeriod: 20, warningLevel: 'warning' as const }],
     }
     useFloodAlertStore.setState({
@@ -694,6 +701,7 @@ describe('useFloodAlertStore', () => {
         run_id: 'run-1',
         segment_id: 'seg-new',
         river_segment_id: 'seg-new',
+        river_network_version_id: 'rivnet-v1',
         timesteps: [{ valid_time: '2026-05-12T02:00:00.000Z', return_period: 50, warning_level: 'severe', q_value: 222 }],
         timeline: [],
         peak: null,
@@ -714,6 +722,7 @@ describe('useFloodAlertStore', () => {
         run_id: 'run-1',
         segment_id: 'seg-old',
         river_segment_id: 'seg-old',
+        river_network_version_id: 'rivnet-v1',
         timesteps: [{ valid_time: '2026-05-12T01:00:00.000Z', return_period: 10, warning_level: 'watch', q_value: 111 }],
         timeline: [],
         peak: null,
@@ -742,6 +751,7 @@ describe('useFloodAlertStore', () => {
           run_id: 'run-1',
           segment_id: 'seg-other',
           river_segment_id: 'seg-other',
+          river_network_version_id: 'rivnet-v1',
           timesteps: [{ valid_time: '2026-05-12T03:00:00.000Z', return_period: 50, warning_level: 'severe', q_value: 222 }],
           timeline: [],
           peak: null,
@@ -760,6 +770,36 @@ describe('useFloodAlertStore', () => {
     expect(useFloodAlertStore.getState().error).toContain('响应与请求河段不匹配')
     expect(useFloodAlertStore.getState().validTimes).toEqual(['2026-05-12T00:00:00.000Z'])
     expect(useFloodAlertStore.getState().validTimes).not.toContain('2026-05-12T03:00:00.000Z')
+  })
+
+  it('clears loading and reports a scoped error for a current mismatched timeline network response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        floodResponse({
+          run_id: 'run-1',
+          segment_id: 'seg-1',
+          river_segment_id: 'seg-1',
+          river_network_version_id: 'rivnet-other',
+          timesteps: [{ valid_time: '2026-05-12T03:00:00.000Z', return_period: 50, warning_level: 'severe', q_value: 222 }],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }),
+      ),
+    )
+
+    await useFloodAlertStore.getState().fetchTimeline('seg-1', 'rivnet-v1')
+
+    expect(fetch).toHaveBeenCalledWith(
+      `${apiBase}/api/v1/flood-alerts/timeline?run_id=run-1&segment_id=seg-1&river_network_version_id=rivnet-v1`,
+    )
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      timelineData: null,
+      timelineLoading: false,
+    })
+    expect(useFloodAlertStore.getState().error).toContain('响应与请求河网版本不匹配')
   })
 
   it('ignores an older source/cycle lookup response after a newer lookup owns the state', async () => {

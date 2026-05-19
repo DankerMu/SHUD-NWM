@@ -597,9 +597,11 @@ class PsycopgForecastStore:
                 """
                 SELECT
                     h.*,
+                    mi.river_network_version_id,
                     bv.basin_id,
                     COALESCE(ds.adapter_name, h.source_id) AS source
                 FROM hydro.hydro_run h
+                LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
                 WHERE h.run_id = %s
@@ -658,9 +660,11 @@ class PsycopgForecastStore:
                 f"""
                 SELECT
                     h.*,
+                    mi.river_network_version_id,
                     bv.basin_id,
                     COALESCE(ds.adapter_name, h.source_id) AS source
                 FROM hydro.hydro_run h
+                LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
                 {where}

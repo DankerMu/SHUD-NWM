@@ -83,6 +83,7 @@ class SegmentAlert(BaseModel):
     segment_id: str
     segment_name: str | None = None
     basin_version_id: str
+    river_network_version_id: str | None = None
     q_value: float
     return_period: float | None = None
     warning_level: str | None = None
@@ -116,6 +117,7 @@ class TimelineResponse(BaseModel):
     run_id: str
     segment_id: str
     river_segment_id: str
+    river_network_version_id: str
     timesteps: list[TimelinePoint]
     timeline: list[TimelinePoint]
     peak: TimelinePoint | None = None
@@ -281,7 +283,8 @@ def flood_alert_segments(
     statement = text(
         f"""
             SELECT r.river_segment_id, r.basin_version_id, r.q_value, r.return_period,
-                   r.warning_level, r.valid_time, rs.properties_json, {centroid_sql} AS geom_centroid,
+                   r.warning_level, r.valid_time, r.river_network_version_id, rs.properties_json,
+                   {centroid_sql} AS geom_centroid,
                    {geom_sql} AS geom_json
             FROM flood.return_period_result r
             LEFT JOIN core.river_segment rs
@@ -307,6 +310,7 @@ def flood_alert_segments(
             segment_id=str(row["river_segment_id"]),
             segment_name=_segment_name(row.get("properties_json")),
             basin_version_id=str(row["basin_version_id"]),
+            river_network_version_id=_optional_str(row["river_network_version_id"]),
             q_value=float(row["q_value"]),
             return_period=_optional_float(row["return_period"]),
             warning_level=_optional_str(row["warning_level"]),
@@ -323,6 +327,14 @@ def flood_alert_timeline(
     request: Request,
     run_id: str = Query(...),
     segment_id: str = Query(...),
+    river_network_version_id: str = Query(
+        ...,
+        min_length=1,
+        description=(
+            "River network version for the selected segment; required because river_segment_id is only unique "
+            "within a river network version."
+        ),
+    ),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     _require_frequency_ready(session, run_id)
@@ -335,11 +347,17 @@ def flood_alert_timeline(
                 FROM flood.return_period_result
                 WHERE run_id = :run_id
                   AND river_segment_id = :segment_id
+                  AND river_network_version_id = :river_network_version_id
                   AND max_over_window = :max_over_window
                 ORDER BY valid_time
                 """
             ),
-            {"run_id": run_id, "segment_id": segment_id, "max_over_window": False},
+            {
+                "run_id": run_id,
+                "segment_id": segment_id,
+                "river_network_version_id": river_network_version_id,
+                "max_over_window": False,
+            },
         ).mappings()
     )
     if not rows:
@@ -352,10 +370,11 @@ def flood_alert_timeline(
                     FROM flood.return_period_result
                     WHERE run_id = :run_id
                       AND river_segment_id = :segment_id
+                      AND river_network_version_id = :river_network_version_id
                     ORDER BY max_over_window, valid_time
                     """
                 ),
-                {"run_id": run_id, "segment_id": segment_id},
+                {"run_id": run_id, "segment_id": segment_id, "river_network_version_id": river_network_version_id},
             ).mappings()
         )
     timesteps = [
@@ -373,6 +392,7 @@ def flood_alert_timeline(
         run_id=run_id,
         segment_id=segment_id,
         river_segment_id=segment_id,
+        river_network_version_id=river_network_version_id,
         timesteps=timesteps,
         timeline=timesteps,
         peak=peak,

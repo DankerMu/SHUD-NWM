@@ -145,6 +145,20 @@ def test_forecast_series_river_network_query_parameter_matches_fastapi_openapi()
         assert param["schema"]["minLength"] == 1
 
 
+def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/flood-alerts/timeline"
+
+    static_param = _operation_parameter(static_spec, path, "get", "query", "river_network_version_id")
+    fastapi_param = _operation_parameter(fastapi_spec, path, "get", "query", "river_network_version_id")
+
+    for param in (static_param, fastapi_param):
+        assert param["required"] is True
+        assert param["schema"]["type"] == "string"
+        assert param["schema"]["minLength"] == 1
+
+
 def test_openapi_success_envelope_accepts_array_data_composition() -> None:
     spec = _openapi_spec()
     schema = spec["paths"]["/api/v1/basins"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]

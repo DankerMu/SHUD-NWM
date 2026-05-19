@@ -88,6 +88,7 @@ const run = {
   scenario_id: 'forecast_gfs_deterministic',
   model_id: 'yangtze_shud_v12',
   basin_version_id: 'yangtze_v2026_01',
+  river_network_version_id: 'yangtze_rivnet_v12',
   forcing_version_id: null,
   init_state_id: null,
   source_id: 'GFS',
@@ -121,6 +122,7 @@ const ranking = {
       segment_id: 'seg-123',
       segment_name: 'Segment 123',
       basin_version_id: 'yangtze_v2026_01',
+      river_network_version_id: 'yangtze_rivnet_v12',
       q_value: 123,
       q_unit: null,
       return_period: 20,
@@ -754,6 +756,7 @@ describe('useOverviewDataStore', () => {
           run_id: 'run-gfs-1',
           segment_id: 'seg-123',
           river_segment_id: 'seg-123',
+          river_network_version_id: options?.params?.query?.river_network_version_id,
           timesteps: [],
           timeline: [],
           peak: null,
@@ -959,6 +962,7 @@ describe('useOverviewDataStore', () => {
           run_id: 'run-gfs-1',
           segment_id: options?.params?.query?.segment_id,
           river_segment_id: options?.params?.query?.segment_id,
+          river_network_version_id: options?.params?.query?.river_network_version_id,
           timesteps: [],
           timeline: [],
           peak: null,
@@ -2525,6 +2529,9 @@ describe('useOverviewDataStore', () => {
       query: { river_network_version_id: 'yangtze_rivnet_selected_run' },
       pathParams: { segment_id: cappedQuery.segmentId },
     })
+    expect(calls.find((call) => call.path === '/api/v1/flood-alerts/timeline')).toMatchObject({
+      query: { river_network_version_id: 'yangtze_rivnet_selected_run' },
+    })
     expect(snapshot.selectedSegment?.riverNetworkVersionId).toBe('yangtze_rivnet_selected_run')
     expect(JSON.stringify(calls)).not.toContain('yangtze_rivnet_sibling')
   })
@@ -2640,6 +2647,9 @@ describe('useOverviewDataStore', () => {
     expect(calls.find((call) => call.path.endsWith('/forecast-series'))).toMatchObject({
       query: { river_network_version_id: 'yangtze_rivnet_historical' },
       pathParams: { segment_id: query.segmentId },
+    })
+    expect(calls.find((call) => call.path === '/api/v1/flood-alerts/timeline')).toMatchObject({
+      query: { river_network_version_id: 'yangtze_rivnet_historical' },
     })
     expect(snapshot.selectedSegment?.modelId).toBe(historicalRun.model_id)
     expect(snapshot.selectedSegment?.riverNetworkVersionId).toBe('yangtze_rivnet_historical')
@@ -2913,6 +2923,7 @@ describe('useOverviewDataStore', () => {
           run_id: 'run-gfs-1',
           segment_id: options?.params?.query?.segment_id,
           river_segment_id: options?.params?.query?.segment_id,
+          river_network_version_id: options?.params?.query?.river_network_version_id,
           timesteps: [],
           timeline: [],
           peak: null,

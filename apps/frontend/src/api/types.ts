@@ -873,6 +873,7 @@ export interface components {
             scenario_id: string;
             model_id: string;
             basin_version_id: string;
+            river_network_version_id: string | null;
             forcing_version_id?: string | null;
             init_state_id?: string | null;
             source_id?: string | null;
@@ -1198,6 +1199,7 @@ export interface components {
             segment_id: string;
             segment_name: string | null;
             basin_version_id: string;
+            river_network_version_id: string | null;
             q_value: number;
             return_period: number | null;
             warning_level: string | null;
@@ -1232,6 +1234,7 @@ export interface components {
             run_id: string;
             segment_id: string;
             river_segment_id: string;
+            river_network_version_id: string;
             timesteps: components["schemas"]["FloodAlertTimelinePoint"][];
             timeline: components["schemas"]["FloodAlertTimelinePoint"][];
             /** @description Peak timeline point, or null */
@@ -2290,6 +2293,8 @@ export interface operations {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
                 segment_id: components["parameters"]["SegmentIdQuery"];
+                /** @description River network version for the selected segment. */
+                river_network_version_id: string;
             };
             header?: never;
             path?: never;

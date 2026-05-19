@@ -66,6 +66,7 @@ def test_runs_contract_uses_success_envelope_and_paginated_data() -> None:
     assert run["run_id"] == "run_frequency_done"
     assert run["run_type"] == "forecast"
     assert run["status"] == "frequency_done"
+    assert run["river_network_version_id"] == "network_v1"
     assert isinstance(run["start_time"], str)
     assert isinstance(run["end_time"], str)
 
@@ -546,6 +547,7 @@ class _RunStore:
                     "scenario_id": "forecast_gfs_deterministic",
                     "model_id": "model_1",
                     "basin_version_id": "basin_v1",
+                    "river_network_version_id": "network_v1",
                     "forcing_version_id": None,
                     "init_state_id": None,
                     "source_id": "GFS",
