@@ -11,6 +11,10 @@ THEN the station tab restores supported state and displays explicit empty or una
 WHEN user selects a station row or marker
 THEN map pans to marker, popup opens, and right panel shows PRCP/TEMP/RH/wind/Press charts where available
 
+#### Scenario: Deep-linked station selection
+WHEN a supported `stationId` exists in the filtered station collection but is outside the default bounded page
+THEN selected popup/detail remains on that station and the UI either includes the selected row or renders an explicit selected-out-of-page state without falling back to another station
+
 #### Scenario: No stations
 WHEN filter returns no stations
 THEN page displays 搜索无结果 or no-station empty state without fake rows

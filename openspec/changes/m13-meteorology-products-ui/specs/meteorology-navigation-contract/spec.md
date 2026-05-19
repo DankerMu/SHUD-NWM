@@ -18,3 +18,7 @@ THEN existing overview, basin, forecast, flood-alert, segment detail, and monito
 #### Scenario: Tab query correction
 WHEN the user opens `/meteorology` with a missing or unsupported tab query value
 THEN the route selects a supported default tab and updates or renders state without crashing
+
+#### Scenario: Query repair evidence
+WHEN the route normalizes unsupported tab, source, opacity, validTime, or other query parameters while another public parameter has validation evidence
+THEN URL replacement preserves explicit validation evidence and keeps effective bounded values visible to the user

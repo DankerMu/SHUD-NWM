@@ -42,16 +42,39 @@ describe('meteorology query state', () => {
     expect(state.variable).toBe('TEMP')
     expect(state.source).toBe('GFS')
     expect(state.validTime).toBe('2026-05-18T06:00:00.000Z')
-    expect(state.gridQueryLon).toBeNull()
+  expect(state.gridQueryLon).toBeNull()
     expect(state.opacity).toBe(100)
     expect(serializeMeteorologyQueryState({ ...state, tab: 'stations', search: 'HMT' })).toContain('tab=stations')
   })
 
   it('keeps overlong search evidence reachable while bounding the effective value', () => {
-    const state = parseMeteorologyQueryState(`tab=stations&search=${'x'.repeat(81)}`)
+    const state = parseMeteorologyQueryState(`tab=bad&opacity=110&validTime=2026-02-30T00:00:00Z&search=${'x'.repeat(81)}`)
+    const serialized = serializeMeteorologyQueryState(state)
+    const roundTrip = parseMeteorologyQueryState(serialized)
 
     expect(state.search).toHaveLength(80)
-    expect(state.searchValidationReason).toContain('超过 80 字符')
+    expect(state.validTime).toBeNull()
+    expect(state.searchValidationLength).toBe(81)
+    expect(state.searchValidationReason).toContain('原始长度 81')
+    expect(serialized).toContain('searchValidationLength=81')
+    expect(roundTrip.search).toHaveLength(80)
+    expect(roundTrip.searchValidationReason).toContain('原始长度 81')
+  })
+
+  it.each([
+    '2026-02-30T00:00:00Z',
+    '2026-05-18T24:00:00Z',
+    '2026-05-18T00:60:00Z',
+    '2026-05-18T00:00:60Z',
+    '2026-05-18T00:00:00',
+    '2026-05-18',
+    '2026-05-18T00:00:00-00:00',
+  ])('rejects invalid public validTime %s', (validTime) => {
+    expect(parseMeteorologyQueryState(`validTime=${encodeURIComponent(validTime)}`).validTime).toBeNull()
+  })
+
+  it('normalizes valid explicit-offset public validTime to UTC', () => {
+    expect(parseMeteorologyQueryState('validTime=2026-05-18T08:30:15.250001%2B08:00').validTime).toBe('2026-05-18T00:30:15.250Z')
   })
 })
 
@@ -130,9 +153,21 @@ describe('meteorology grid contract view model', () => {
       validTime: '2026-05-18T06:00:00.000Z',
       gridQueryLon: 114.35,
       gridQueryLat: 30.62,
+      areaMinLon: null,
+      areaMinLat: null,
+      areaMaxLon: null,
+      areaMaxLat: null,
       compareSource: null,
     })
     expect(clicked.cellPopup?.reason).toContain('不生成替代数值')
+    expect(clicked.cellPopup).toMatchObject({
+      source: 'GFS',
+      cycle: '2026-05-18T00:00:00.000Z',
+      validTime: '2026-05-18T06:00:00.000Z',
+      unit: 'mm/day',
+      nativeTimeResolution: '6h',
+      spatialResolution: '0.25 deg',
+    })
     expect(clicked.cellPopup?.left).toBeCloseTo(projectLonLatToPercent(114.35, 30.62).left)
 
     const outOfBounds = buildMeteorologyGridViewModel({
@@ -141,6 +176,10 @@ describe('meteorology grid contract view model', () => {
       validTime: '2026-05-18T06:00:00.000Z',
       gridQueryLon: 140,
       gridQueryLat: 60,
+      areaMinLon: null,
+      areaMinLat: null,
+      areaMaxLon: null,
+      areaMaxLat: null,
       compareSource: null,
     })
     expect(outOfBounds.cellPopup?.reason).toContain('超出合同 bbox')
@@ -151,9 +190,60 @@ describe('meteorology grid contract view model', () => {
       validTime: null,
       gridQueryLon: 114.35,
       gridQueryLat: 30.62,
+      areaMinLon: null,
+      areaMinLat: null,
+      areaMaxLon: null,
+      areaMaxLat: null,
       compareSource: null,
     })
     expect(restricted.cellPopup?.reason).toContain('CLDAS 数据权限尚未开通')
+  })
+
+  it('renders in-bounds missing area-stat service and validation for bounded area queries', () => {
+    const inBounds = buildMeteorologyGridViewModel({
+      variable: 'PRCP',
+      source: 'GFS',
+      validTime: '2026-05-18T06:00:00.000Z',
+      gridQueryLon: null,
+      gridQueryLat: null,
+      areaMinLon: 112,
+      areaMinLat: 30,
+      areaMaxLon: 114,
+      areaMaxLat: 32,
+      compareSource: null,
+    })
+    expect(inBounds.areaStats.tone).toBe('info')
+    expect(inBounds.areaStats.status).toContain('实时 area-stat 服务尚未接入')
+
+    const overLimit = buildMeteorologyGridViewModel({
+      variable: 'PRCP',
+      source: 'GFS',
+      validTime: '2026-05-18T06:00:00.000Z',
+      gridQueryLon: null,
+      gridQueryLat: null,
+      areaMinLon: 73,
+      areaMinLat: 18,
+      areaMaxLon: 135,
+      areaMaxLat: 53,
+      compareSource: null,
+    })
+    expect(overLimit.areaStats.tone).toBe('warning')
+    expect(overLimit.areaStats.status).toContain('超过合同上限')
+
+    const outOfBounds = buildMeteorologyGridViewModel({
+      variable: 'PRCP',
+      source: 'GFS',
+      validTime: '2026-05-18T06:00:00.000Z',
+      gridQueryLon: null,
+      gridQueryLat: null,
+      areaMinLon: 70,
+      areaMinLat: 10,
+      areaMaxLon: 138,
+      areaMaxLat: 56,
+      compareSource: null,
+    })
+    expect(outOfBounds.areaStats.tone).toBe('warning')
+    expect(outOfBounds.areaStats.status).toContain('超出合同 bbox')
   })
 })
 
@@ -176,6 +266,10 @@ describe('MeteorologyPage grid tab', () => {
     await user.click(await screen.findByTestId('meteorology-grid-map'))
     expect(await screen.findByTestId('grid-cell-popup')).toHaveTextContent('UI 不生成替代数值')
     expect(screen.getByTestId('grid-cell-popup')).toHaveTextContent('PRCP / mm/day')
+    expect(screen.getByTestId('grid-cell-popup')).toHaveTextContent('GFS')
+    expect(screen.getByTestId('grid-cell-popup')).toHaveTextContent('2026-05-18T00:00:00.000Z')
+    expect(screen.getByTestId('grid-cell-popup')).toHaveTextContent('6h')
+    expect(screen.getByTestId('grid-cell-popup')).toHaveTextContent('0.25 deg')
   })
 
   it('renders CLDAS restricted state and clears stale grid popup', async () => {
@@ -191,6 +285,18 @@ describe('MeteorologyPage grid tab', () => {
 
     expect(await screen.findByTestId('comparison-status')).toHaveTextContent('不支持')
     expect(screen.getByTestId('area-stats-status')).toHaveTextContent('请求上限')
+  })
+
+  it('renders area-stat in-bounds unavailable and out-of-bbox validation states from URL', async () => {
+    renderMeteorology('/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z&areaMinLon=112&areaMinLat=30&areaMaxLon=114&areaMaxLat=32')
+
+    expect(await screen.findByTestId('area-stats-status')).toHaveTextContent('实时 area-stat 服务尚未接入')
+  })
+
+  it('keeps overlong search validation visible after URL replacement normalizes other params', async () => {
+    renderMeteorology(`/meteorology?tab=bad&opacity=110&validTime=2026-02-30T00:00:00Z&search=${'x'.repeat(81)}`)
+
+    expect(await screen.findByText(/原始长度 81 超过 80 字符/)).toBeInTheDocument()
   })
 })
 
@@ -225,12 +331,28 @@ describe('MeteorologyPage station tab', () => {
   it('renders reachable station search validation and inventory truncation states', async () => {
     const validationRender = renderMeteorology(`/meteorology?tab=stations&search=${'HMT'.repeat(30)}`)
 
-    expect(await screen.findByText(/超过 80 字符/)).toBeInTheDocument()
+    expect(await screen.findByTestId('meteorology-query-validation')).toHaveTextContent('超过 80 字符')
     expect(screen.getByTestId('station-empty')).toHaveTextContent('搜索无结果')
 
     validationRender.unmount()
     renderMeteorology('/meteorology?tab=stations')
     expect(await screen.findByTestId('station-inventory-truncated')).toHaveTextContent('每页 2 条')
+  })
+
+  it('resolves stationId before pagination and does not replace selected detail', async () => {
+    renderMeteorology('/meteorology?tab=stations&stationId=HMT-HAN-0081')
+
+    expect(await screen.findByTestId('station-popup')).toHaveTextContent('HMT-HAN-0081')
+    expect(screen.getByTestId('forcing-unavailable')).toHaveTextContent('所选时间范围没有可用 forcing series')
+    expect(screen.getByTestId('station-selected-out-of-page')).toHaveTextContent('未回退到其他站点')
+    expect(screen.getByTestId('station-popup')).not.toHaveTextContent('武汉代站')
+  })
+
+  it('keeps requested station visible when basin filter includes it', async () => {
+    renderMeteorology('/meteorology?tab=stations&basin=hanjiang&stationId=HMT-HAN-0081')
+
+    expect(await screen.findByTestId('station-popup')).toHaveTextContent('HMT-HAN-0081')
+    expect(screen.queryByTestId('station-selected-out-of-page')).not.toBeInTheDocument()
   })
 
   it('shows no-station empty state without fake rows', async () => {
@@ -268,6 +390,33 @@ describe('station resource view model', () => {
     expect(model.selectedSeries?.truncated).toBe(false)
     expect(model.selectedSeries?.variables.some((variable) => variable.unavailableReason)).toBe(true)
     expect(meteorologyDependencyDecision).toContain('No dependency change')
+  })
+
+  it('selects a valid requested station from the filtered pre-pagination collection', () => {
+    const model = buildStationInventoryViewModel({
+      basin: null,
+      search: null,
+      searchValidationReason: null,
+      sort: 'latest',
+      stationId: 'HMT-HAN-0081',
+    })
+
+    expect(model.selectedStation?.stationId).toBe('HMT-HAN-0081')
+    expect(model.selectedOutOfPage).toBe(true)
+    expect(model.rows.map((row) => row.stationId)).toContain('HMT-HAN-0081')
+  })
+
+  it('reports excluded requested station without stale fallback detail', () => {
+    const model = buildStationInventoryViewModel({
+      basin: 'hanjiang',
+      search: 'HMT-Y2',
+      searchValidationReason: null,
+      sort: 'latest',
+      stationId: 'HMT-Y2-0236',
+    })
+
+    expect(model.selectedStation).toBeNull()
+    expect(model.selectionValidationReason).toContain('不在当前 basin/search')
   })
 
   it('exposes all required station variables including Rn without synthetic points', () => {

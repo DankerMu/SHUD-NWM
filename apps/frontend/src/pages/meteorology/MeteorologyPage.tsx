@@ -88,6 +88,7 @@ export function MeteorologyPage() {
         </div>
       </div>
 
+      {state.searchValidationReason ? <StatusBox tone="warning" text={state.searchValidationReason} testId="meteorology-query-validation" /> : null}
       {state.tab === 'grid' ? <MeteorologyGridTab state={state} onQueryChange={updateState} /> : <MeteorologyStationsTab state={state} onQueryChange={updateState} />}
     </div>
   )
@@ -115,7 +116,16 @@ function MeteorologyGridTab({ state, onQueryChange }: { state: MeteorologyQueryS
               key={variable}
               type="button"
               className={optionClass(state.variable === variable)}
-            onClick={() => onQueryChange({ variable, validTime: null, gridQueryLon: null, gridQueryLat: null })}
+              onClick={() => onQueryChange({
+                variable,
+                validTime: null,
+                gridQueryLon: null,
+                gridQueryLat: null,
+                areaMinLon: null,
+                areaMinLat: null,
+                areaMaxLon: null,
+                areaMaxLat: null,
+              })}
             >
               <span className="font-medium">{variable}</span>
               <span className="text-xs text-neutral-700">{variableMetadata[variable].unit}</span>
@@ -130,7 +140,17 @@ function MeteorologyGridTab({ state, onQueryChange }: { state: MeteorologyQueryS
               key={source}
               type="button"
               className={optionClass(state.source === source)}
-              onClick={() => onQueryChange({ source, validTime: null, gridQueryLon: null, gridQueryLat: null, compareSource: null })}
+              onClick={() => onQueryChange({
+                source,
+                validTime: null,
+                gridQueryLon: null,
+                gridQueryLat: null,
+                areaMinLon: null,
+                areaMinLat: null,
+                areaMaxLon: null,
+                areaMaxLat: null,
+                compareSource: null,
+              })}
             >
               <span className="font-medium">{source}</span>
               <span className="text-xs text-neutral-700">{source === 'CLDAS' ? 'restricted' : 'metadata contract'}</span>
@@ -201,10 +221,18 @@ function MeteorologyGridTab({ state, onQueryChange }: { state: MeteorologyQueryS
             <dl className="mt-2 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-2 gap-y-1">
               <dt>位置</dt>
               <dd>{model.cellPopup.lon.toFixed(2)}E, {model.cellPopup.lat.toFixed(2)}N</dd>
+              <dt>数据源</dt>
+              <dd>{model.cellPopup.source}</dd>
+              <dt>周期</dt>
+              <dd className="font-mono">{model.cellPopup.cycle ?? 'restricted/unavailable'}</dd>
               <dt>有效时间</dt>
-              <dd className="font-mono">{state.validTime ?? contract.currentValidTime ?? '-'}</dd>
+              <dd className="font-mono">{model.cellPopup.validTime ?? '-'}</dd>
               <dt>变量</dt>
-              <dd>{contract.variable} / {contract.unit}</dd>
+              <dd>{contract.variable} / {model.cellPopup.unit}</dd>
+              <dt>时间分辨率</dt>
+              <dd>{model.cellPopup.nativeTimeResolution}</dd>
+              <dt>空间分辨率</dt>
+              <dd>{model.cellPopup.spatialResolution}</dd>
               <dt>数值</dt>
               <dd>{model.cellPopup.reason}</dd>
             </dl>
@@ -253,7 +281,24 @@ function MeteorologyGridTab({ state, onQueryChange }: { state: MeteorologyQueryS
           ))}
         </select>
         <StatusBox tone={model.comparisonStatus.includes('不支持') || model.comparisonStatus.includes('缺少') ? 'warning' : 'info'} text={model.comparisonStatus} testId="comparison-status" />
-        <StatusBox tone="info" text={model.areaStatsStatus} testId="area-stats-status" />
+        <ControlLabel label="区域统计" />
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            className="rounded border border-neutral-300 px-3 py-2 text-left text-xs text-neutral-700 hover:bg-neutral-50"
+            onClick={() => onQueryChange({ areaMinLon: 112, areaMinLat: 30, areaMaxLon: 114, areaMaxLat: 32 })}
+          >
+            请求合同内区域
+          </button>
+          <button
+            type="button"
+            className="rounded border border-neutral-300 px-3 py-2 text-left text-xs text-neutral-700 hover:bg-neutral-50"
+            onClick={() => onQueryChange({ areaMinLon: 70, areaMinLat: 10, areaMaxLon: 138, areaMaxLat: 56 })}
+          >
+            请求越界区域
+          </button>
+        </div>
+        <StatusBox tone={model.areaStats.tone} text={model.areaStats.status} testId="area-stats-status" />
       </aside>
 
       <GridTimeline state={state} model={model} onQueryChange={onQueryChange} />
@@ -302,10 +347,10 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
   const adjacentIds = new Set(selected?.adjacent.map((item) => item.stationId) ?? [])
 
   useEffect(() => {
-    if (state.stationId && !model.rows.some((row) => row.stationId === state.stationId)) {
+    if (model.selectionValidationReason) {
       onQueryChange({ stationId: null })
     }
-  }, [model.rows, onQueryChange, state.stationId])
+  }, [model.selectionValidationReason, onQueryChange])
 
   return (
     <div className="grid min-h-[calc(100vh-146px)] overflow-hidden rounded-md border border-neutral-300 bg-white shadow-md min-[1180px]:grid-cols-[320px_minmax(0,1fr)_380px]">
@@ -336,7 +381,7 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
           <option value="completeness">完整度</option>
           <option value="station_id">站点 ID</option>
         </select>
-        {model.validationReason ? <StatusBox tone="warning" text={model.validationReason} /> : null}
+        {model.selectionValidationReason ? <StatusBox tone="warning" text={model.selectionValidationReason} testId="station-selection-validation" /> : null}
         {model.emptyReason ? (
           <div className="mt-4 rounded-md border border-dashed border-neutral-300 p-4 text-sm text-neutral-700" data-testid="station-empty">{model.emptyReason}</div>
         ) : (
@@ -356,6 +401,7 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
           </div>
         )}
         {model.truncated ? <StatusBox tone="warning" text={`站点清单超过每页 ${stationInventoryLimits.pageSize} 条，已按合同截断。`} testId="station-inventory-truncated" /> : null}
+        {model.selectedOutOfPage ? <StatusBox tone="info" text={`选中站点 ${selected?.stationId} 不在默认页内，已显式追加显示，未回退到其他站点。`} testId="station-selected-out-of-page" /> : null}
       </aside>
 
       <section className="relative min-h-[32rem] overflow-hidden bg-[#d7e7ef]" aria-label="气象站地图">

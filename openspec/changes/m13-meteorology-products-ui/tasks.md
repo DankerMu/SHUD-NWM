@@ -26,16 +26,16 @@ Implementation note: M13 uses a bundled frontend renderer-neutral fixture contra
 - [x] 4.3 Update `progress.md` with enabled meteorology scope and remaining live-data limitations.
 - [x] 4.4 Capture browser smoke evidence for `/meteorology?tab=grid` and `/meteorology?tab=stations` showing non-overlapping layout and explicit restricted/unavailable states where applicable.
 
-Validation evidence: `openspec validate m13-meteorology-products-ui --strict --no-interactive`, `corepack pnpm exec tsc --noEmit`, `corepack pnpm test -- --runInBand`, `corepack pnpm build`, and `corepack pnpm exec playwright test e2e/meteorology.spec.ts --project=chromium` passed. Focused Playwright coverage visits `/meteorology?tab=grid&source=CLDAS&variable=PRCP` and `/meteorology?tab=stations&basin=yangtze&stationId=HMT-Y2-0237` without backend API dependency, asserting route/nav/tab restore, CLDAS restricted/unavailable state with disabled timeline, station inventory, selected station popup/marker, adjacent stations, and forcing chart rendering.
+Validation evidence: `openspec validate m13-meteorology-products-ui --strict --no-interactive`, `corepack pnpm exec tsc --noEmit`, `corepack pnpm test -- --runInBand`, `corepack pnpm build`, and `corepack pnpm exec playwright test e2e/meteorology.spec.ts --project=chromium` passed. Focused Playwright coverage visits `/meteorology?tab=grid&source=CLDAS&variable=PRCP`, `/meteorology?tab=stations&basin=yangtze&stationId=HMT-Y2-0237`, overlong-search normalization routes, station deep links outside the default page, and bounded area-stat routes without backend API dependency, asserting route/nav/tab restore, preserved validation evidence, CLDAS restricted/unavailable state with disabled timeline, station inventory, selected station popup/marker, adjacent stations, forcing chart rendering, selected-out-of-page handling, grid popup metadata, and area-stat unavailable/validation states.
 
 ## Evidence Matrix
 
 - Public route/nav: visit `/meteorology?tab=grid` and `/meteorology?tab=stations` -> selected tab and relevant state restore from the URL; existing routes still render.
 - Schema/units/source contract: fixture/API response with all six variables and five sources -> UI displays unit, bbox, resolution, cycle, valid time, and restricted reason without generated values.
-- Geospatial contract: station and grid fixtures with lon/lat/bbox -> markers and query popup show contract coordinates and do not show stale popup data after source/station changes.
+- Geospatial contract: station and grid fixtures with lon/lat/bbox -> markers and query popup show contract coordinates/source/cycle/validTime/unit/time resolution/spatial resolution and do not show stale popup data after source/station changes.
 - Time-series contract: empty valid times, stale selected valid time, and partial station series -> timeline disables or resets visibly; charts mark missing/QC intervals.
-- Resource/error contract: failed tile, unsupported comparison, over-limit area stat, missing forcing -> scoped unavailable/error states replace stale tiles/charts.
-- Station resource contract: inventory page/search limit and series time-range/sample limit inputs -> bounded list/chart rendering or explicit empty/truncated/validation state.
+- Resource/error contract: failed tile, unsupported comparison, in-bounds missing area-stat service, over-limit/out-of-bbox area stat, missing forcing -> scoped unavailable/error states replace stale tiles/charts and do not fabricate values.
+- Station resource contract: inventory page/search limit, station deep links outside default page, excluded station filters, and series time-range/sample limit inputs -> bounded list/chart rendering or explicit empty/truncated/validation/selected-out-of-page state.
 - Dependency compatibility: no dependency change -> record existing utilities used; dependency added -> rationale, lockfile diff, and install/type/build/test evidence.
 - Legacy compatibility: M11 meteorology placeholders and segment detail station/forcing behavior remain unchanged unless they link to the new route.
 

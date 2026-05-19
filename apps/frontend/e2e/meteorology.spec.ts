@@ -73,10 +73,40 @@ test.describe('M13 meteorology products', () => {
     await expect(page.getByText(/超过 80 字符/)).toBeVisible()
     await expect(page.getByTestId('station-empty')).toContainText('搜索无结果')
 
+    await page.goto(`/meteorology?tab=bad&opacity=110&validTime=2026-02-30T00:00:00Z&search=${'x'.repeat(81)}`)
+    await expect(page.getByText(/原始长度 81 超过 80 字符/)).toBeVisible()
+    await expect(page).toHaveURL(/searchValidationLength=81/)
+
     await page.goto('/meteorology?tab=stations')
     await expect(page.getByTestId('station-inventory-truncated')).toContainText('每页 2 条')
 
+    await page.goto('/meteorology?tab=stations&stationId=HMT-HAN-0081')
+    await expect(page.getByTestId('station-popup')).toContainText('HMT-HAN-0081')
+    await expect(page.getByTestId('station-selected-out-of-page')).toContainText('未回退到其他站点')
+
+    await page.goto('/meteorology?tab=stations&basin=hanjiang&stationId=HMT-HAN-0081')
+    await expect(page.getByTestId('station-popup')).toContainText('HMT-HAN-0081')
+    await expect(page.getByTestId('station-selected-out-of-page')).toBeHidden()
+
     await page.goto('/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z&gridQueryLon=140&gridQueryLat=60')
     await expect(page.getByTestId('grid-cell-popup')).toContainText('超出合同 bbox')
+
+    await page.goto('/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z&areaMinLon=112&areaMinLat=30&areaMaxLon=114&areaMaxLat=32')
+    await expect(page.getByTestId('area-stats-status')).toContainText('实时 area-stat 服务尚未接入')
+
+    await page.goto('/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z&areaMinLon=70&areaMinLat=10&areaMaxLon=138&areaMaxLat=56')
+    await expect(page.getByTestId('area-stats-status')).toContainText('超出合同 bbox')
+  })
+
+  test('grid popup exposes full contract metadata', async ({ page }) => {
+    await page.goto('/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z&gridQueryLon=114.35&gridQueryLat=30.62')
+
+    const popup = page.getByTestId('grid-cell-popup')
+    await expect(popup).toContainText('GFS')
+    await expect(popup).toContainText('2026-05-18T00:00:00.000Z')
+    await expect(popup).toContainText('2026-05-18T06:00:00.000Z')
+    await expect(popup).toContainText('PRCP / mm/day')
+    await expect(popup).toContainText('6h')
+    await expect(popup).toContainText('0.25 deg')
   })
 })

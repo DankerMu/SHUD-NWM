@@ -16,5 +16,9 @@ WHEN a variable/source has no contract-provided valid times
 THEN metadata marks the product unavailable and the UI disables timeline playback, tile rendering, and query controls for that product
 
 #### Scenario: Bounded area statistics
+WHEN an area-stat query is inside the advertised bbox and max area contract but the live area-stat service is not connected
+THEN the UI renders a scoped unavailable state and does not fabricate a statistic
+
+#### Scenario: Area statistics validation
 WHEN an area-stat query exceeds the advertised bbox, resolution, or max area contract
-THEN the system returns a scoped unavailable or validation state instead of an unbounded raster read or fabricated statistic
+THEN the UI renders a validation state instead of an unbounded raster read or fabricated statistic
