@@ -2372,6 +2372,74 @@ describe('App route state', () => {
     })
   })
 
+  it('keeps segment detail refresh disabled until scoped segment identity is selected', async () => {
+    let resolveSegment: (value: unknown) => void = () => undefined
+    const segmentPromise = new Promise((resolve) => {
+      resolveSegment = resolve
+    })
+    vi.mocked(client.GET).mockImplementation((async (path: string) => {
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return segmentPromise
+      }
+      return {
+        data: success({
+          segment_id: 'seg-old',
+          issue_time: '2026-05-18T00:00:00Z',
+          unit: 'm3/s',
+          series: [],
+          frequency_thresholds: null,
+        }),
+        error: undefined,
+      }
+    }) as never)
+    useForecastStore.setState({
+      selectedSegment: { segmentId: 'seg-old', basinVersionId: 'bv-old', riverNetworkVersionId: 'rn-old' },
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
+    const refresh = screen.getByRole('button', { name: '刷新' })
+    expect(refresh).toBeDisabled()
+    await userEvent.setup().click(refresh)
+    expect(vi.mocked(client.GET).mock.calls.some(([path]) => String(path).endsWith('/forecast-series'))).toBe(false)
+
+    await act(async () => {
+      resolveSegment({
+        data: success({
+          river_segment_id: 'seg-009',
+          river_network_version_id: 'rn-v1',
+          length_m: 1200,
+          geom: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+          properties_json: {},
+          created_at: '2026-05-18T00:00:00Z',
+        }),
+        error: undefined,
+      })
+    })
+
+    await waitFor(() => expect(refresh).toBeEnabled())
+    const forecastCall = vi
+      .mocked(client.GET)
+      .mock.calls.find(([path]) => String(path).endsWith('/forecast-series'))
+    expect(forecastCall?.[1]).toMatchObject({
+      params: {
+        path: {
+          basin_version_id: 'bv-001',
+          segment_id: 'seg-009',
+        },
+        query: {
+          river_network_version_id: 'rn-v1',
+        },
+      },
+    })
+  })
+
   it('refuses mismatched forecast response payloads without rendering sibling forecast panels', async () => {
     vi.mocked(client.GET).mockImplementation((async (path: string) => {
       if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {

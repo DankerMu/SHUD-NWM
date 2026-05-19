@@ -349,6 +349,7 @@ export function SegmentDetailPage() {
   const forecastData = useForecastStore((state) => state.forecastData)
   const forecastLoading = useForecastStore((state) => state.loading)
   const forecastError = useForecastStore((state) => state.error)
+  const selectedForecastSegment = useForecastStore((state) => state.selectedSegment)
   const selectSegment = useForecastStore((state) => state.selectSegment)
   const fetchForecast = useForecastStore((state) => state.fetchForecast)
   const setRequestContext = useForecastStore((state) => state.setRequestContext)
@@ -478,6 +479,11 @@ export function SegmentDetailPage() {
             : null
   const loading = segmentLoading || forecastLoading
   const routeSearch = serializeM11QueryState(routeState)
+  const refreshScoped =
+    Boolean(segment && scopedSegment) &&
+    selectedForecastSegment?.segmentId === scopedSegment?.segmentId &&
+    selectedForecastSegment?.basinVersionId === scopedSegment?.basinVersionId &&
+    selectedForecastSegment?.riverNetworkVersionId === scopedSegment?.riverNetworkVersionId
   const basinHref = routeState.basinVersionId
     ? m11QueryHref(`/forecast`, routeState, {
         basinVersionId: routeState.basinVersionId,
@@ -516,8 +522,16 @@ export function SegmentDetailPage() {
             type="button"
             variant="outline"
             className="h-9 gap-2"
-            onClick={() => scopedSegment && fetchForecast({ includeAnalysis: true, useSelectedScenarios: false }).catch(() => undefined)}
-            disabled={!scopedSegment}
+            onClick={() =>
+              refreshScoped &&
+              fetchForecast({
+                includeAnalysis: true,
+                useSelectedScenarios: false,
+                source: routeState.source,
+                issueTime: routeState.cycle,
+              }).catch(() => undefined)
+            }
+            disabled={!refreshScoped}
           >
             <RefreshCw className="size-4" />
             刷新
