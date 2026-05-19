@@ -631,6 +631,47 @@ describe('M11 overview data contracts', () => {
     expect(detail.trendPoints.map((point) => point.source)).toEqual(['GFS', 'GFS', 'IFS'])
   })
 
+  it('uses the fallback current trend point valid time consistently when query validTime is absent', () => {
+    const forecast: ApiForecastPayload = {
+      river_segment_id: 'yangtze_rivnet_v12_riv_000123',
+      issue_time: '2026-05-18T00:00:00Z',
+      variable: 'q_down',
+      unit: 'm3/s',
+      frequency_thresholds: null,
+      segments: [
+        {
+          scenario: 'forecast_gfs_deterministic',
+          scenario_id: 'forecast_gfs_deterministic',
+          source: 'GFS',
+          source_id: 'GFS',
+          cycle_time: '2026-05-18T00:00:00Z',
+          available_lead_hours: 168,
+          segment_role: 'future_7_days',
+          data: [
+            { valid_time: '2026-05-18T06:00:00Z', value: 100 },
+            { valid_time: '2026-05-18T12:00:00Z', value: 120 },
+          ],
+        },
+      ],
+    }
+
+    const detail = normalizeSelectedSegmentDetail({
+      query: { ...query, source: 'gfs', validTime: '2026-05-18T09:00:00Z' },
+      basin,
+      basinVersionId: 'yangtze_v2026_01',
+      segmentId: 'yangtze_rivnet_v12_riv_000123',
+      segment,
+      feature: featureCollection.features[0],
+      model,
+      forecast,
+    })
+
+    expect(detail.currentQ).toBe(120)
+    expect(detail.freshness.validTime).toBe('2026-05-18T12:00:00.000Z')
+    expect(detail.handoffUrl).toContain('validTime=2026-05-18T12%3A00%3A00.000Z')
+    expect(detail.handoffUrl).not.toContain('2026-05-18T09%3A00%3A00')
+  })
+
   it('sanitizes malformed and oversized selected segment LineString geometry before detail storage', () => {
     const malformed = getM11SelectedSegmentGeometryBudgetStatus({
       type: 'LineString',

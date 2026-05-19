@@ -9,6 +9,7 @@ import {
   type BasinSegmentRow,
   type M11Bbox,
   type M11WarningLevel,
+  type OverviewBasin,
   type SelectedSegmentDetail,
   type TrendPoint,
 } from '@/lib/m11/overviewDataContracts'
@@ -126,6 +127,10 @@ export function BasinDetailPage() {
     () => bboxToMapFit(detail?.bbox ?? (detail && !basinNotFoundReason ? BASIN_FALLBACK_EXTENT : null)),
     [basinNotFoundReason, detail],
   )
+  const basinMapContext = useMemo(() => (detail && !basinNotFoundReason ? [basinDetailToOverviewBasin(detail)] : []), [
+    basinNotFoundReason,
+    detail,
+  ])
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {
@@ -147,6 +152,8 @@ export function BasinDetailPage() {
       sourceSelection={sourceSelection}
       derivedTimeline={derivedTimeline}
       fitTo={mapFitTo}
+      basins={basinMapContext}
+      visibleBasinIds={[basinId]}
       basinSegments={currentBasinData?.segments ?? []}
       selectedSegmentId={selectedSegmentId}
       selectedSegmentGeometry={selectedSegment?.geometry ?? null}
@@ -162,6 +169,7 @@ export function BasinDetailPage() {
           <StateReadout state={state} basinId={basinId} />
           {detail && !basinNotFoundReason ? <BasinIdentityCard detail={detail} /> : null}
           {detail && !basinNotFoundReason && !detail.bbox ? <MissingBboxNotice /> : null}
+          {detail && !basinNotFoundReason ? <MapContextNotice detail={detail} /> : null}
           <SegmentDiscoveryPanel
             basinName={basinDisplayName}
             basinVersionId={detail?.selectedBasinVersionId ?? state.basinVersionId}
@@ -261,6 +269,42 @@ function MissingBboxNotice() {
       当前流域版本缺少 bbox，地图使用中国范围兜底视域（73,18,135,54），河段列表和预报数据继续显示。
     </section>
   )
+}
+
+function MapContextNotice({ detail }: { detail: BasinDetail }) {
+  const missingBoundary = !detail.boundary
+  return (
+    <section
+      className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs leading-5 text-neutral-700"
+      role="status"
+      aria-label="地图上下文状态"
+    >
+      {missingBoundary ? '当前流域版本缺少边界几何，地图仅按 bbox 定位，不伪造边界。' : '地图已加载当前流域边界上下文。'}
+      <br />
+      城市与站点标签暂不可用：M11 当前没有城市/站点标签合同或数据源。
+    </section>
+  )
+}
+
+function basinDetailToOverviewBasin(detail: BasinDetail): OverviewBasin {
+  return {
+    basinId: detail.basinId,
+    displayName: detail.displayName,
+    basinGroup: detail.basinGroup,
+    parentBasinId: null,
+    level: 0,
+    boundary: detail.boundary,
+    bbox: detail.bbox,
+    areaKm2: null,
+    riverCount: detail.segmentCount,
+    activeModelCount: detail.activeModelCount,
+    latestForecastTime: detail.latestRun.validTime,
+    warningCounts: detail.warningDistribution,
+    basinVersions: detail.basinVersions,
+    selectedBasinVersionId: detail.selectedBasinVersionId,
+    unavailableReason: detail.unavailableReason,
+    qualityNote: detail.partialErrors[0] ?? null,
+  }
 }
 
 function BasinRunMetadata({ detail }: { detail: BasinDetail }) {
@@ -557,15 +601,50 @@ function SelectedSegmentPanel({
       </div>
 
       {comparisonVisible ? (
-        <div className="mt-3 rounded border border-primary-200 bg-primary-50 px-3 py-2 text-xs text-primary-800" role="status">
-          GFS + IFS 对比已在本面板启用；完整全屏详情仍通过「查看详情」交接。
-        </div>
+        <SelectedSegmentComparisonTable segment={segment} />
       ) : !segment.comparisonAvailable ? (
         <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700" role="status">
           对比预报不可用：当前河段缺少可比 GFS/IFS 序列或需要聚合端点。
         </div>
       ) : null}
     </section>
+  )
+}
+
+function SelectedSegmentComparisonTable({ segment }: { segment: SelectedSegmentDetail }) {
+  const rows = buildComparisonRows(segment.trendPoints, segment.freshness.validTime)
+
+  if (rows.length < 2) {
+    return (
+      <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-700" role="status">
+        对比预报不可用：当前河段缺少可比 GFS/IFS 序列或需要聚合端点。
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-3 overflow-hidden rounded border border-primary-200 bg-white text-xs" role="region" aria-label="GFS IFS 对比数据">
+      <table className="w-full border-collapse">
+        <thead className="bg-primary-50 text-primary-800">
+          <tr>
+            <th className="px-2 py-1.5 text-left font-semibold">source</th>
+            <th className="px-2 py-1.5 text-left font-semibold">valid</th>
+            <th className="px-2 py-1.5 text-right font-semibold">Q</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.source} className="border-t border-primary-100">
+              <td className="px-2 py-1.5 font-semibold text-neutral-900">{row.source}</td>
+              <td className="px-2 py-1.5 font-mono text-neutral-700">{formatDateTime(row.validTime) ?? '-'}</td>
+              <td className="px-2 py-1.5 text-right font-mono text-neutral-900">
+                {formatMetric(row.value)} {row.value === null ? '' : segment.qUnit}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -679,6 +758,20 @@ function buildTrendModel(points: TrendPoint[], selectedValidTime: string | null)
     polyline: coordinates.map((entry) => `${entry.x},${entry.y}`).join(' '),
     currentPoint: currentCoordinate,
   }
+}
+
+function buildComparisonRows(points: TrendPoint[], selectedValidTime: string | null) {
+  const comparableSources = ['GFS', 'IFS'] as const
+  return comparableSources.flatMap((source) => {
+    const sourcePoints = points
+      .filter((point) => point.source === source && point.value !== null)
+      .sort((a, b) => Date.parse(a.validTime) - Date.parse(b.validTime))
+    if (sourcePoints.length === 0) return []
+    const selectedPoint =
+      (selectedValidTime ? sourcePoints.find((point) => point.validTime === selectedValidTime) : null) ??
+      sourcePoints[sourcePoints.length - 1]
+    return selectedPoint ? [{ source, validTime: selectedPoint.validTime, value: selectedPoint.value }] : []
+  })
 }
 
 function qualityLabel(value: string) {

@@ -677,6 +677,7 @@ export function normalizeSelectedSegmentDetail(input: {
       ? (sourceSelection.resolvedSource.toLowerCase() as M11Source)
       : input.query.source
   const currentPoint = pickCurrentTrendPoint(forecastSeries, input.query.validTime, sourceSelection)
+  const effectiveValidTime = currentPoint?.validTime ?? normalizeIsoString(input.query.validTime)
   const alert = input.floodAlert
   const timelinePeak = input.floodTimeline?.peak ?? null
   const warningLevel = normalizeWarningLevel(alert?.warning_level ?? timelinePeak?.warning_level) ?? 'unavailable'
@@ -719,7 +720,7 @@ export function normalizeSelectedSegmentDetail(input: {
     handoffUrl: m11QueryHref('/forecast', {
       source: handoffSource,
       cycle: selectionQuery.cycle,
-      validTime: input.query.validTime ?? currentPoint?.validTime ?? null,
+      validTime: effectiveValidTime,
       layer: input.query.layer,
       basemap: input.query.basemap,
       basinVersionId: input.basinVersionId,
@@ -731,7 +732,7 @@ export function normalizeSelectedSegmentDetail(input: {
     freshness: createFreshnessMetadata({
       updatedAt: input.forecast && 'issue_time' in input.forecast ? input.forecast.issue_time : input.resolvedRun?.updated_at ?? null,
       cycleTime: input.resolvedRun?.cycle_time ?? selectionQuery.cycle,
-      validTime: input.query.validTime ?? currentPoint?.validTime ?? null,
+      validTime: effectiveValidTime,
       runId: input.floodTimeline?.run_id ?? input.resolvedRun?.run_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: forecastSeries.length > 0 || alert ? null : 'No forecast or flood-alert values are available.',

@@ -454,6 +454,7 @@ function basinSnapshot(
           trendPoints: [
             { validTime: '2026-05-18T00:00:00.000Z', value: 10, source: 'GFS' as const, scenarioId: 'forecast_gfs_deterministic', role: 'analysis', isAnalysis: true },
             { validTime: '2026-05-18T06:00:00.000Z', value: currentQ, source: 'GFS' as const, scenarioId: 'forecast_gfs_deterministic', role: 'future_7_days', isAnalysis: false },
+            { validTime: '2026-05-18T06:00:00.000Z', value: currentQ + 7, source: 'IFS' as const, scenarioId: 'forecast_ifs_deterministic', role: 'future_7_days', isAnalysis: false },
           ],
           comparisonAvailable,
           lineageStatus: 'available' as const,
@@ -1699,6 +1700,10 @@ describe('App route state', () => {
     expect(screen.getByRole('button', { name: '对比预报' })).toBeDisabled()
     expect(screen.queryByRole('link', { name: '对比预报' })).not.toBeInTheDocument()
     expect(screen.getByText(/对比预报不可用/)).toBeInTheDocument()
+    expect(screen.getByLabelText('地图上下文状态')).toHaveTextContent('地图已加载当前流域边界上下文')
+    expect(screen.getByLabelText('地图上下文状态')).toHaveTextContent('城市与站点标签暂不可用')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '1')
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'basin-demo')
   })
 
   it('renders selected basin segment handoffs with the resolved concrete best source and cycle', async () => {
@@ -1766,7 +1771,10 @@ describe('App route state', () => {
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '对比预报' }))
     expect(screen.getByRole('button', { name: '对比预报' })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByText(/GFS \+ IFS 对比已在本面板启用/)).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('GFS')
+    expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('IFS')
+    expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('12 m3/s')
+    expect(screen.getByRole('region', { name: 'GFS IFS 对比数据' })).toHaveTextContent('19 m3/s')
   })
 
   it('does not correct basin valid time from a stale basin snapshot', async () => {

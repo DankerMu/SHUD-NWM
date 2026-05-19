@@ -17,6 +17,7 @@ import {
   buildBasinFeatureCollection,
   buildBasinRiverFeatureCollection,
   buildSelectedSegmentFeatureCollection,
+  m11BasinRiverCollectionBudget,
 } from '@/components/map/M11MapLibreSurface'
 import {
   LayerGroupControls,
@@ -126,6 +127,22 @@ vi.mock('react-map-gl/maplibre', () => ({
               target: { getCanvas: () => ({ style: canvasStyle }) },
               features: [riverFeature],
               point: { x: 3, y: 3 },
+            })
+          }}
+          onPointerOver={() =>
+            onMouseMove?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [basinFeature, riverFeature],
+              point: { x: 4, y: 4 },
+            })
+          }
+          onMouseDown={(event) => {
+            if (event.button !== 1) return
+            event.preventDefault()
+            onClick?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [basinFeature, riverFeature],
+              point: { x: 4, y: 4 },
             })
           }}
           onContextMenu={(event) => {
@@ -521,7 +538,15 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByTestId('m11-basin-river-unavailable')).toHaveTextContent('1 条河段缺少可渲染几何')
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-basin-river-line')
     expect(mapSources.at(-1)).toMatchObject({ id: 'm11-basin-river-source', type: 'geojson' })
-    expect(mapLayers.map((layer) => layer.id)).toEqual(expect.arrayContaining(['m11-basin-river-line', 'm11-basin-river-hover-halo']))
+    expect(mapLayers.map((layer) => layer.id)).toEqual(
+      expect.arrayContaining([
+        'm11-basin-river-line',
+        'm11-basin-river-hover-halo',
+        'm11-basin-river-selected-halo',
+        'm11-basin-river-hover-line',
+        'm11-basin-river-selected-line',
+      ]),
+    )
 
     fireEvent.pointerEnter(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayHover).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
@@ -533,14 +558,86 @@ describe('M11 visual foundation shell', () => {
     fireEvent.keyDown(screen.getByTestId('mock-maplibre-map'), { key: 'Enter' })
     expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
 
-    const dischargeCollection = buildBasinRiverFeatureCollection(basinSegments, 'discharge', 'seg-009', null)
-    const returnPeriodCollection = buildBasinRiverFeatureCollection(basinSegments, 'flood-return-period', 'seg-009', null)
-    const warningCollection = buildBasinRiverFeatureCollection(basinSegments, 'warning-level', 'seg-009', null)
+    const dischargeCollection = buildBasinRiverFeatureCollection(basinSegments, 'discharge')
+    const returnPeriodCollection = buildBasinRiverFeatureCollection(basinSegments, 'flood-return-period')
+    const warningCollection = buildBasinRiverFeatureCollection(basinSegments, 'warning-level')
     expect(dischargeCollection.features[0].properties.layer_color).not.toBe(returnPeriodCollection.features[0].properties.layer_color)
     expect(returnPeriodCollection.features[0].properties.layer_color).toBe(warningCollection.features[0].properties.layer_color)
+    expect(dischargeCollection.features[0].properties).not.toHaveProperty('selected')
+    expect(dischargeCollection.features[0].properties).not.toHaveProperty('hovered')
 
     rerender(<M11MapSurface state={{ ...state, layer: 'warning-level' }} layers={layers} basinSegments={basinSegments} />)
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-river-feature-count', '1')
+  })
+
+  it('prioritizes river interactions when MapLibre returns overlapping basin and river features', () => {
+    const onOverlayHover = vi.fn()
+    const onOverlayClick = vi.fn()
+
+    render(
+      <M11MapSurface
+        state={state}
+        layers={layers}
+        basins={overviewBasins}
+        basinSegments={basinSegments}
+        onOverlayHover={onOverlayHover}
+        onOverlayClick={onOverlayClick}
+      />,
+    )
+
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute(
+      'data-interactive-layer-ids',
+      'm11-basin-river-line,m11-basin-fill',
+    )
+    fireEvent.pointerOver(screen.getByTestId('mock-maplibre-map'))
+    expect(onOverlayHover).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
+    fireEvent.mouseDown(screen.getByTestId('mock-maplibre-map'), { button: 1 })
+    expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'basin-river-segments' }))
+  })
+
+  it('caps aggregate basin river collections before registering a MapLibre source', () => {
+    const manySegments = Array.from({ length: m11BasinRiverCollectionBudget.maxFeatures + 4 }, (_, index): BasinSegmentRow => ({
+      ...basinSegments[0],
+      riverSegmentId: `seg-${String(index).padStart(5, '0')}`,
+      segmentId: `seg-${String(index).padStart(5, '0')}`,
+      displayName: `Segment ${index}`,
+      geometry: { type: 'LineString', coordinates: [[100, 30], [100.01, 30.01]] },
+    }))
+
+    const collection = buildBasinRiverFeatureCollection(manySegments, 'discharge')
+    expect(collection.features).toHaveLength(m11BasinRiverCollectionBudget.maxFeatures)
+    expect(collection.skippedCount).toBe(4)
+    expect(collection.coordinateCount).toBeLessThanOrEqual(m11BasinRiverCollectionBudget.maxCoordinates)
+    expect(collection.serializedBytes).toBeLessThanOrEqual(m11BasinRiverCollectionBudget.maxSerializedBytes)
+    expect(collection.unavailableReason).toContain('整体河网预算')
+
+    render(<M11MapSurface state={state} layers={layers} basinSegments={manySegments} />)
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute(
+      'data-basin-river-feature-count',
+      String(m11BasinRiverCollectionBudget.maxFeatures),
+    )
+    expect(screen.getByTestId('m11-basin-river-unavailable')).toHaveTextContent('整体河网预算')
+  })
+
+  it('keeps bulk basin river source data free of hover and selection state across pointer movement', () => {
+    render(
+      <M11MapSurface
+        state={state}
+        layers={layers}
+        basinSegments={basinSegments}
+        selectedSegmentId="seg-009"
+      />,
+    )
+
+    const initialSourceData = mapSources.find((source) => source.id === 'm11-basin-river-source')?.data
+    expect(JSON.stringify(initialSourceData)).not.toContain('hovered')
+    expect(JSON.stringify(initialSourceData)).not.toContain('selected')
+
+    fireEvent.pointerEnter(screen.getByTestId('mock-maplibre-map'))
+    const hoveredSourceData = mapSources.find((source) => source.id === 'm11-basin-river-source')?.data
+    expect(hoveredSourceData).toEqual(initialSourceData)
+    expect(JSON.stringify(hoveredSourceData)).not.toContain('hovered')
+    expect(JSON.stringify(hoveredSourceData)).not.toContain('selected')
   })
 
   it('rejects oversized M11 flood return period payloads before registering a MapLibre source', async () => {

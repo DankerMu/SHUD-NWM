@@ -9,6 +9,7 @@ import Map, {
   type MapStyle,
 } from 'react-map-gl/maplibre'
 import type { LayerProps } from 'react-map-gl/maplibre'
+import type { FilterSpecification } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 import type { components } from '@/api/types'
@@ -100,8 +101,6 @@ interface BasinRiverFeatureProperties {
   return_period: number | null
   warning_level: M11WarningLevel
   layer_color: string
-  selected: boolean
-  hovered: boolean
 }
 
 interface BasinRiverFeature {
@@ -113,9 +112,21 @@ interface BasinRiverFeature {
 interface BasinRiverFeatureCollection {
   type: 'FeatureCollection'
   features: BasinRiverFeature[]
+  sourceData: {
+    type: 'FeatureCollection'
+    features: BasinRiverFeature[]
+  }
   skippedCount: number
+  coordinateCount: number
+  serializedBytes: number
   unavailableReason: string | null
 }
+
+export const m11BasinRiverCollectionBudget = {
+  maxFeatures: 2_000,
+  maxCoordinates: 50_000,
+  maxSerializedBytes: 1_000_000,
+} as const
 
 const CHINA_VIEW_STATE = {
   longitude: 104,
@@ -166,8 +177,8 @@ export function M11MapLibreSurface({
     [basins, visibleBasinIds],
   )
   const basinRiverFeatureCollection = useMemo(
-    () => buildBasinRiverFeatureCollection(basinSegments, state.layer, selectedSegmentId, hoveredRiverSegmentId),
-    [basinSegments, hoveredRiverSegmentId, selectedSegmentId, state.layer],
+    () => buildBasinRiverFeatureCollection(basinSegments, state.layer),
+    [basinSegments, state.layer],
   )
   const skippedBasinGeometryCount = useMemo(
     () =>
@@ -195,8 +206,8 @@ export function M11MapLibreSurface({
     [basinRiverFeatureCollection.features.length, layers, overlay, overlayData, overlayUnavailableReason, state],
   )
   const interactiveLayerIds = [
-    ...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []),
     ...(basinRiverFeatureCollection.features.length > 0 ? ['m11-basin-river-line'] : []),
+    ...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []),
     ...(renderableOverlay ? [renderableOverlay.layer.id] : []),
   ]
 
@@ -249,18 +260,18 @@ export function M11MapLibreSurface({
 
   const handleMouseMove = useCallback(
     (event: MapLayerMouseEvent) => {
-      const basinFeature = findEventFeature(event, 'm11-basin-fill')
-      if (basinFeature) {
-        setHoveredRiverSegmentId(null)
-        onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
-        event.target.getCanvas().style.cursor = 'pointer'
-        return
-      }
       const riverFeature = findEventFeature(event, 'm11-basin-river-line')
       if (riverFeature) {
         const riverSegmentId = featureStringProperty(riverFeature, 'river_segment_id') ?? featureStringProperty(riverFeature, 'segment_id')
         setHoveredRiverSegmentId(riverSegmentId)
         onOverlayHover?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
+        event.target.getCanvas().style.cursor = 'pointer'
+        return
+      }
+      const basinFeature = findEventFeature(event, 'm11-basin-fill')
+      if (basinFeature) {
+        setHoveredRiverSegmentId(null)
+        onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
         event.target.getCanvas().style.cursor = 'pointer'
         return
       }
@@ -288,14 +299,14 @@ export function M11MapLibreSurface({
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
-      const basinFeature = findEventFeature(event, 'm11-basin-fill')
-      if (basinFeature) {
-        onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
-        return
-      }
       const riverFeature = findEventFeature(event, 'm11-basin-river-line')
       if (riverFeature) {
         onOverlayClick?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
+        return
+      }
+      const basinFeature = findEventFeature(event, 'm11-basin-fill')
+      if (basinFeature) {
+        onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
         return
       }
       const overlayFeature = renderableOverlay ? findEventFeature(event, renderableOverlay.layer.id) : null
@@ -321,6 +332,8 @@ export function M11MapLibreSurface({
       data-visible-basin-ids={basinFeatureCollection.features.map((feature) => feature.properties.basin_id).join(',')}
       data-basin-river-feature-count={basinRiverFeatureCollection.features.length}
       data-basin-river-skipped-count={basinRiverFeatureCollection.skippedCount}
+      data-basin-river-coordinate-count={basinRiverFeatureCollection.coordinateCount}
+      data-basin-river-serialized-bytes={basinRiverFeatureCollection.serializedBytes}
       data-selected-segment-id={selectedSegmentId ?? ''}
       data-segment-highlight-hook={selectedSegmentMapState}
       data-selected-segment-map-state={selectedSegmentMapState}
@@ -340,7 +353,13 @@ export function M11MapLibreSurface({
         <NavigationControl position="top-left" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
         {basinFeatureCollection.features.length > 0 ? <M11BasinPrimitive collection={basinFeatureCollection} /> : null}
-        {basinRiverFeatureCollection.features.length > 0 ? <M11BasinRiverPrimitive collection={basinRiverFeatureCollection} /> : null}
+        {basinRiverFeatureCollection.features.length > 0 ? (
+          <M11BasinRiverPrimitive
+            collection={basinRiverFeatureCollection}
+            selectedSegmentId={selectedSegmentId}
+            hoveredSegmentId={hoveredRiverSegmentId}
+          />
+        ) : null}
         {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} /> : null}
         {selectedSegmentFeatureCollection.features.length > 0 ? (
           <M11SelectedSegmentPrimitive collection={selectedSegmentFeatureCollection} />
@@ -500,27 +519,69 @@ function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection 
   )
 }
 
-function M11BasinRiverPrimitive({ collection }: { collection: BasinRiverFeatureCollection }) {
+function M11BasinRiverPrimitive({
+  collection,
+  selectedSegmentId,
+  hoveredSegmentId,
+}: {
+  collection: BasinRiverFeatureCollection
+  selectedSegmentId?: string | null
+  hoveredSegmentId?: string | null
+}) {
   return (
-    <Source id="m11-basin-river-source" type="geojson" data={collection} promoteId="river_segment_id">
+    <Source id="m11-basin-river-source" type="geojson" data={collection.sourceData} promoteId="river_segment_id">
       <Layer
         id="m11-basin-river-line"
         type="line"
         source="m11-basin-river-source"
         paint={{
           'line-color': ['get', 'layer_color'],
-          'line-width': ['case', ['get', 'selected'], 5.5, ['get', 'hovered'], 4.8, 2.6],
-          'line-opacity': ['case', ['get', 'selected'], 1, ['get', 'hovered'], 0.98, 0.82],
+          'line-width': 2.6,
+          'line-opacity': 0.82,
         }}
       />
       <Layer
         id="m11-basin-river-hover-halo"
         type="line"
         source="m11-basin-river-source"
+        filter={segmentFilter(hoveredSegmentId)}
         paint={{
           'line-color': '#FFFFFF',
-          'line-width': ['case', ['any', ['get', 'selected'], ['get', 'hovered']], 9, 0],
-          'line-opacity': ['case', ['any', ['get', 'selected'], ['get', 'hovered']], 0.65, 0],
+          'line-width': 8.5,
+          'line-opacity': 0.62,
+        }}
+      />
+      <Layer
+        id="m11-basin-river-selected-halo"
+        type="line"
+        source="m11-basin-river-source"
+        filter={segmentFilter(selectedSegmentId)}
+        paint={{
+          'line-color': '#FFFFFF',
+          'line-width': 9.5,
+          'line-opacity': 0.68,
+        }}
+      />
+      <Layer
+        id="m11-basin-river-hover-line"
+        type="line"
+        source="m11-basin-river-source"
+        filter={segmentFilter(hoveredSegmentId)}
+        paint={{
+          'line-color': ['get', 'layer_color'],
+          'line-width': 4.8,
+          'line-opacity': 0.98,
+        }}
+      />
+      <Layer
+        id="m11-basin-river-selected-line"
+        type="line"
+        source="m11-basin-river-source"
+        filter={segmentFilter(selectedSegmentId)}
+        paint={{
+          'line-color': '#F97316',
+          'line-width': 5.5,
+          'line-opacity': 1,
         }}
       />
     </Source>
@@ -639,48 +700,86 @@ export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasi
 export function buildBasinRiverFeatureCollection(
   rows: BasinSegmentRow[],
   layer: M11Layer,
-  selectedSegmentId: string | null | undefined,
-  hoveredSegmentId: string | null | undefined,
 ): BasinRiverFeatureCollection {
   let skippedCount = 0
-  const features = rows.flatMap((row): BasinRiverFeature[] => {
+  let coordinateCount = 0
+  let featureSerializedBytes = 0
+  let serializedBytes = serializedByteLength({ type: 'FeatureCollection', features: [] })
+  const features: BasinRiverFeature[] = []
+
+  for (const row of rows) {
     const geometryStatus = getM11SelectedSegmentGeometryBudgetStatus(row.geometry)
     if (!geometryStatus.sanitizedGeometry) {
       skippedCount += 1
-      return []
+      continue
     }
 
-    return [
-      {
-        type: 'Feature',
-        geometry: geometryStatus.sanitizedGeometry,
-        properties: {
-          segment_id: row.segmentId,
-          river_segment_id: row.riverSegmentId,
-          segment_name: row.displayName,
-          q_value: row.currentQ,
-          q_unit: row.qUnit,
-          return_period: row.returnPeriod,
-          warning_level: row.warningLevel,
-          layer_color: basinRiverLayerColor(row, layer),
-          selected: row.riverSegmentId === selectedSegmentId || row.segmentId === selectedSegmentId,
-          hovered: row.riverSegmentId === hoveredSegmentId || row.segmentId === hoveredSegmentId,
-        },
+    const candidate: BasinRiverFeature = {
+      type: 'Feature',
+      geometry: geometryStatus.sanitizedGeometry,
+      properties: {
+        segment_id: row.segmentId,
+        river_segment_id: row.riverSegmentId,
+        segment_name: row.displayName,
+        q_value: row.currentQ,
+        q_unit: row.qUnit,
+        return_period: row.returnPeriod,
+        warning_level: row.warningLevel,
+        layer_color: basinRiverLayerColor(row, layer),
       },
-    ]
-  })
+    }
+    const candidateSerializedBytes = serializedByteLength(candidate)
+    const nextFeatureCount = features.length + 1
+    const nextCoordinateCount = coordinateCount + geometryStatus.coordinateCount
+    const nextSerializedBytes =
+      serializedByteLength({ type: 'FeatureCollection', features: [] }) +
+      featureSerializedBytes +
+      candidateSerializedBytes +
+      Math.max(0, nextFeatureCount - 1)
+
+    if (
+      nextFeatureCount > m11BasinRiverCollectionBudget.maxFeatures ||
+      nextCoordinateCount > m11BasinRiverCollectionBudget.maxCoordinates ||
+      nextSerializedBytes > m11BasinRiverCollectionBudget.maxSerializedBytes
+    ) {
+      skippedCount += 1
+      continue
+    }
+
+    features.push(candidate)
+    coordinateCount = nextCoordinateCount
+    featureSerializedBytes += candidateSerializedBytes
+    serializedBytes = nextSerializedBytes
+  }
+
+  const sourceData = { type: 'FeatureCollection' as const, features }
 
   return {
     type: 'FeatureCollection',
     features,
+    sourceData,
     skippedCount,
+    coordinateCount,
+    serializedBytes,
     unavailableReason:
       rows.length > 0 && features.length === 0
-        ? '当前流域河段几何缺失或超过客户端渲染预算，地图不会伪造河网。'
+        ? '当前流域河段几何缺失或整体河网超过客户端渲染预算，地图不会注册过大的河网源。'
         : skippedCount > 0
-          ? `${skippedCount} 条河段缺少可渲染几何或超过客户端预算，已从地图河网中省略。`
+          ? `${skippedCount} 条河段缺少可渲染几何或超出整体河网预算，已从地图河网中省略。`
           : null,
   }
+}
+
+function segmentFilter(segmentId?: string | null): FilterSpecification {
+  return [
+    'any',
+    ['==', ['get', 'river_segment_id'], segmentId ?? ''],
+    ['==', ['get', 'segment_id'], segmentId ?? ''],
+  ] as FilterSpecification
+}
+
+function serializedByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length
 }
 
 function basinRiverLayerColor(row: BasinSegmentRow, layer: M11Layer) {
