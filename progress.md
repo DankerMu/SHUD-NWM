@@ -104,7 +104,7 @@ M11 最终 PR #171 CI 状态：Markdown Lint、OpenAPI Validate、JSON Schema Va
 | 效果图 4：洪水预警总览 | `/flood-alerts` 已有统计、ranking、ticker、GeoJSON/return-period map、timeline、segment detail；PostGIS SQL 和 CI dry-run 已修复 | 仍未升级到真正生产 MVT/PBF tile delivery；和 M11 overview/basin 的视觉语言还需统一；点击 ranking 到全屏 segment detail 的目标页仍缺失 |
 | 效果图 5：气象空间栅格 | `/meteorology?tab=grid` 已启用 query-state tab、PRCP/TEMP/RH/wind/Rn/Press 与 GFS/IFS/ERA5/CLDAS/Best Available 合同夹具、严格 validTime 规范化、色标、透明度/等值线/站点叠加控件、格点查询弹窗（lon/lat/source/cycle/validTime/unit/time resolution/spatial resolution）、可请求的区域统计 bbox 状态、多源对比状态、CLDAS restricted 和 tile/query/area-stat unavailable/validation 显式状态；URL normalization 会保留 over-limit 搜索证据；未伪造气象值 | 仍缺真实 TiTiler/PNG/MVT 栅格瓦片服务、真实 grid-cell query/area-stat 返回值、真实 live best_available 栅格差值；当前为前端合同夹具和不可用状态，不代表生产全国栅格发布已完成 |
 | 效果图 6：气象代站查询 | `/meteorology?tab=stations` 已启用 station inventory、流域筛选、搜索、排序、完整度/QC、站点 marker/popup/detail、PRCP/TEMP/RH/wind/Press forcing 图、缺测/QC 区间、相邻站点高亮语义、无结果与 forcing unavailable 状态；deep-linked `stationId` 先在筛选后/分页前集合中解析，默认页外的有效站点会显式追加/标注，不回退成其他站点；筛选排除站点时清理旧详情 | 仍缺后端扩展站点合同中的完整 QC/adjacent/forcing metadata、真实分页大列表、真实 Thiessen/Voronoi、真实长时段 sample limit 服务端校验；当前不伪造未接入站点或 forcing 样本 |
-| 效果图 7：流域/模型资产管理 | 后端/Basins 数据链路和 `modelAssets` store/API 测试存在，M11 popup 的“查看详情”可保留 handoff 语义 | 缺系统管理路由和页面；缺流域/模型树、版本详情卡、版本历史时间线、版本关系图、资产产品列表、小地图；NavBar 当前按 M11 约束隐藏“系统管理” |
+| 效果图 7：流域/模型资产管理 | `/system/model-assets` 已实现只读管理页，按 `model_admin`/`sys_admin` gated；NavBar 仅对允许角色显示“模型资产”；复用 `/api/v1/models` 和 `/api/v1/models/{model_id}`，不新增后端/OpenAPI endpoint。页面包含流域/模型树、搜索、启用/停用筛选、URL `modelId` 恢复、筛选排除后的 stale-detail 清理、六张 KPI 卡、元数据、来源/包 lineage、版本时间线、依赖图、产品资产列表、空间小地图 degraded state；`modelAssets` store/view-model 递归清理本地路径、Windows 绝对路径、`file://`、URI userinfo/query/fragment，并限制产品列表 12 条、空间预览 50 features/2,000 vertices。`version_admin` 未作为运行时角色加入。 | 当前范围明确为 readonly；模型包创建/编辑/删除/发布、active model 切换、真实大规模 MVT/geometry publication 和 mutating audit workflow 仍按 M14 OpenSpec non-goals 后续处理 |
 | 效果图 8：产品监控 | `/monitoring` 已有 pipeline summary、stage cards、jobs table/filter/pagination、queue、trend、log modal、operator RBAC gate | 与效果图的最终 dashboard 信息层级/视觉密度仍需打磨；当前 local dev role override 不是生产 auth；缺 live alert sink、真实 backend identity provider 证明 |
 | 全局 UI 规范 06B | 已引入 M11 visual tokens、56px nav、左右面板、64px timeline、状态色/预警色、icon buttons、responsive collapse | 仍需做真实截图对照和像素级 visual QA；部分控件仍是 Tailwind 工程样式而非完整 design-token 抽象；缺正式 effect-image visual baseline 自动比对 |
 | 地图与性能 | MapLibre surface 已复用，支持 basemap switch、GeoJSON budget、geometry guards、stale-state 修复 | 真实生产 MVT、全国真实数据压测、PostGIS tile clipping、`application/x-protobuf` 响应路径仍未完成；当前 M11 可用但不是最终全国规模视觉性能终态 |
@@ -181,7 +181,7 @@ uv run nhms-production validate-ops \
 
 1. **M12 后续数据合同**：为 `/segments/:segmentId` 补 station/forcing/weather/frequency-curve/run lineage 合同后接入真实 PRCP/TEMP/RH/wind/Press、forcing 小图、完整频率曲线和 lineage；继续禁止伪造未接入数据。
 2. **效果图 5/6：气象数据产品页**：把 M13 前端合同夹具升级为后端 API/OpenAPI 合同和真实 tile/query/area-stat/station-series 数据源；继续禁止伪造未接入图层。
-3. **效果图 7：流域/模型资产管理**：把 M9 Basins/modelAssets 能力做成系统管理页面，包含版本树、详情、历史、关系图和资产列表。
+3. **效果图 7 后续**：在 readonly 页面基础上补截图视觉 QA 和后续经审计的 mutating workflow；创建/编辑/删除/发布、active model switching 仍需单独 OpenSpec/backend auth/audit 设计。
 4. **M11 视觉收敛**：基于 06B 和效果图做 overview/basin/flood/monitoring 的截图审查、布局密度、色彩、间距、控件和响应式打磨。
 5. **真实 MVT 与全国规模性能**：从 GeoJSON 兼容路径升级到 PostGIS tile clipping + MVT 编码，并补全国真实数据压测。
 6. **真实生产验证**：在目标环境跑 live auth、alert sink、rollback、真实 Slurm、真实对象存储、真实气象下载。
