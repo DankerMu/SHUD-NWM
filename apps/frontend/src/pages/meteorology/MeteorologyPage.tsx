@@ -19,8 +19,12 @@ import {
   formatBbox,
   meteorologyGridContractVersion,
   meteorologyStationContractVersion,
+  meteorologyStations,
+  projectLonLatToPercent,
+  projectPercentToLonLat,
   stationInventoryLimits,
   variableMetadata,
+  type MeteorologyStation,
   type MeteorologyStationSeriesVariable,
 } from '@/lib/meteorology/contracts'
 import {
@@ -111,7 +115,7 @@ function MeteorologyGridTab({ state, onQueryChange }: { state: MeteorologyQueryS
               key={variable}
               type="button"
               className={optionClass(state.variable === variable)}
-              onClick={() => onQueryChange({ variable, validTime: null })}
+            onClick={() => onQueryChange({ variable, validTime: null, gridQueryLon: null, gridQueryLat: null })}
             >
               <span className="font-medium">{variable}</span>
               <span className="text-xs text-neutral-700">{variableMetadata[variable].unit}</span>
@@ -126,7 +130,7 @@ function MeteorologyGridTab({ state, onQueryChange }: { state: MeteorologyQueryS
               key={source}
               type="button"
               className={optionClass(state.source === source)}
-              onClick={() => onQueryChange({ source, validTime: null, compareSource: null })}
+              onClick={() => onQueryChange({ source, validTime: null, gridQueryLon: null, gridQueryLat: null, compareSource: null })}
             >
               <span className="font-medium">{source}</span>
               <span className="text-xs text-neutral-700">{source === 'CLDAS' ? 'restricted' : 'metadata contract'}</span>
@@ -150,8 +154,20 @@ function MeteorologyGridTab({ state, onQueryChange }: { state: MeteorologyQueryS
         <ToggleRow label="站点叠加" checked={state.stationOverlay} onChange={(value) => onQueryChange({ stationOverlay: value })} />
       </aside>
 
-      <section className="relative min-h-[32rem] overflow-hidden bg-[#d7e7ef]" aria-label="气象栅格地图">
-        <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(15,52,96,0.08)_1px,transparent_1px),linear-gradient(rgba(15,52,96,0.08)_1px,transparent_1px)] bg-[length:42px_42px]" />
+      <section
+        className="relative min-h-[32rem] overflow-hidden bg-[#d7e7ef]"
+        aria-label="气象栅格地图"
+        data-testid="meteorology-grid-map"
+        onClick={(event) => {
+          if ((event.target as HTMLElement).closest('button,a,input,select')) return
+          const rect = event.currentTarget.getBoundingClientRect()
+          const left = rect.width > 0 ? ((event.clientX - rect.left) / rect.width) * 100 : 50
+          const top = rect.height > 0 ? ((event.clientY - rect.top) / rect.height) * 100 : 50
+          const coordinate = projectPercentToLonLat(left, top, contract.bbox)
+          onQueryChange({ gridQueryLon: coordinate.lon, gridQueryLat: coordinate.lat })
+        }}
+      >
+        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,rgba(15,52,96,0.08)_1px,transparent_1px),linear-gradient(rgba(15,52,96,0.08)_1px,transparent_1px)] bg-[length:42px_42px]" />
         <div className="absolute left-8 top-8 z-10 rounded-md border border-neutral-300 bg-white/95 p-4 shadow-lg">
           <div className="flex items-center gap-2 text-base font-semibold text-neutral-900">
             <CloudRain className="h-5 w-5 text-primary-600" aria-hidden="true" />
@@ -161,11 +177,26 @@ function MeteorologyGridTab({ state, onQueryChange }: { state: MeteorologyQueryS
             {contract.unit} · {formatBbox(contract.bbox)} · {contract.spatialResolution}
           </p>
         </div>
-        {state.stationOverlay ? (
-          <div className="absolute left-[56%] top-[52%] z-10 h-3 w-3 rounded-full border-2 border-white bg-warning shadow" title="HMT-Y2-0236" data-testid="grid-station-overlay" />
-        ) : null}
+        {state.stationOverlay
+          ? meteorologyStations.map((station) => {
+              const position = projectLonLatToPercent(station.lon, station.lat, contract.bbox)
+              return (
+                <div
+                  key={station.stationId}
+                  className="absolute z-10 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-warning shadow"
+                  style={{ left: `${position.left}%`, top: `${position.top}%` }}
+                  title={station.stationId}
+                  data-testid="grid-station-overlay"
+                />
+              )
+            })
+          : null}
         {model.cellPopup ? (
-          <div className="absolute left-[58%] top-[38%] z-10 w-80 rounded-md border border-neutral-300 bg-white/95 p-3 text-xs text-neutral-700 shadow-lg" data-testid="grid-cell-popup">
+          <div
+            className="absolute z-10 w-80 rounded-md border border-neutral-300 bg-white/95 p-3 text-xs text-neutral-700 shadow-lg"
+            style={{ left: `${model.cellPopup.left}%`, top: `${model.cellPopup.top}%`, transform: 'translate(-50%, -100%) translateY(-0.75rem)' }}
+            data-testid="grid-cell-popup"
+          >
             <div className="font-semibold text-neutral-900">格点查询</div>
             <dl className="mt-2 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-2 gap-y-1">
               <dt>位置</dt>
@@ -300,7 +331,7 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
           onChange={(event) => onQueryChange({ search: event.target.value || null, stationId: null })}
         />
         <ControlLabel label="排序" />
-        <select className="h-9 w-full rounded border border-neutral-300 bg-white px-2 text-sm" value={state.sort} onChange={(event) => onQueryChange({ sort: event.target.value })}>
+        <select className="h-9 w-full rounded border border-neutral-300 bg-white px-2 text-sm" value={state.sort} aria-label="排序" onChange={(event) => onQueryChange({ sort: event.target.value })}>
           <option value="latest">最新数据时间</option>
           <option value="completeness">完整度</option>
           <option value="station_id">站点 ID</option>
@@ -309,7 +340,7 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
         {model.emptyReason ? (
           <div className="mt-4 rounded-md border border-dashed border-neutral-300 p-4 text-sm text-neutral-700" data-testid="station-empty">{model.emptyReason}</div>
         ) : (
-          <div className="mt-4 space-y-2" data-testid="station-inventory">
+        <div className="mt-4 space-y-2" data-testid="station-inventory">
             {model.rows.map((station) => (
               <button
                 key={station.stationId}
@@ -324,6 +355,7 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
             ))}
           </div>
         )}
+        {model.truncated ? <StatusBox tone="warning" text={`站点清单超过每页 ${stationInventoryLimits.pageSize} 条，已按合同截断。`} testId="station-inventory-truncated" /> : null}
       </aside>
 
       <section className="relative min-h-[32rem] overflow-hidden bg-[#d7e7ef]" aria-label="气象站地图">
@@ -335,27 +367,25 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
           </div>
           <p className="mt-1 text-sm text-neutral-700">lon/lat 来自站点合同，筛选变化会清理旧 popup。</p>
         </div>
-        {model.rows.map((station, index) => (
-          <button
-            key={station.stationId}
-            type="button"
-            className={cn(
-              'absolute z-10 h-4 w-4 -translate-x-1/2 -translate-y-1/2 cursor-pointer rounded-full border-2 border-white shadow',
-              selected?.stationId === station.stationId ? 'bg-primary-600' : adjacentIds.has(station.stationId) ? 'bg-warning' : 'bg-success',
-            )}
-            style={{ left: `${46 + index * 10}%`, top: `${48 + index * 8}%` }}
-            title={`${station.stationId} ${station.lon}, ${station.lat}`}
-            aria-label={`选择站点 ${station.stationId}`}
-            onClick={() => onQueryChange({ stationId: station.stationId })}
-          />
-        ))}
-        {selected ? (
-          <div className="absolute left-[54%] top-[34%] z-10 w-72 rounded-md border border-neutral-300 bg-white/95 p-3 text-xs text-neutral-700 shadow-lg" data-testid="station-popup">
-            <div className="font-semibold text-neutral-900">{selected.stationName}</div>
-            <div className="font-mono">{selected.stationId}</div>
-            <div>{selected.lon.toFixed(2)}E, {selected.lat.toFixed(2)}N · {selected.basinName}</div>
-          </div>
-        ) : null}
+        {model.rows.map((station) => {
+          const position = projectLonLatToPercent(station.lon, station.lat)
+          return (
+            <button
+              key={station.stationId}
+              type="button"
+              className={cn(
+                'absolute z-10 h-4 w-4 -translate-x-1/2 -translate-y-1/2 cursor-pointer rounded-full border-2 border-white shadow',
+                selected?.stationId === station.stationId ? 'bg-primary-600' : adjacentIds.has(station.stationId) ? 'bg-warning' : 'bg-success',
+              )}
+              style={{ left: `${position.left}%`, top: `${position.top}%` }}
+              title={`${station.stationId} ${station.lon}, ${station.lat}`}
+              aria-label={`选择站点 ${station.stationId}`}
+              data-testid={`station-marker-${station.stationId}`}
+              onClick={() => onQueryChange({ stationId: station.stationId })}
+            />
+          )
+        })}
+        {selected ? <StationPopup station={selected} /> : null}
       </section>
 
       <aside className="min-h-0 overflow-auto border-t border-neutral-300 p-4 min-[1180px]:border-l min-[1180px]:border-t-0">
@@ -382,6 +412,7 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
               ))}
             </div>
             <ControlLabel label="时序与 QC" />
+            {model.selectedSeries?.truncated ? <StatusBox tone="warning" text={`站点时序超过样本上限 ${model.selectedSeries.sampleLimit}，当前显示截断/不可用状态。`} testId="forcing-series-truncated" /> : null}
             <div className="space-y-3" data-testid="forcing-charts">
               {model.selectedSeries?.variables.map((variable) => (
                 <ForcingChart key={variable.variable} variable={variable} />
@@ -398,7 +429,7 @@ function MeteorologyStationsTab({ state, onQueryChange }: { state: MeteorologyQu
 
 function ForcingChart({ variable }: { variable: MeteorologyStationSeriesVariable }) {
   if (variable.unavailableReason || variable.points.length === 0) {
-    return <StatusBox tone="warning" text={`${variable.variable}: ${variable.unavailableReason ?? 'forcing unavailable'}`} testId={`forcing-${variable.variable}-unavailable`} />
+    return <StatusBox tone="warning" text={`${variable.variable} / ${variable.unit}: ${variable.unavailableReason ?? 'forcing unavailable'}`} testId={`forcing-${variable.variable}-unavailable`} />
   }
   const option = {
     color: ['#1565C0'],
@@ -423,6 +454,27 @@ function ForcingChart({ variable }: { variable: MeteorologyStationSeriesVariable
         <span className={variable.qcStatus === 'partial' ? 'text-warning' : 'text-success'}>{Math.round(variable.completeness * 100)}% · {variable.qcStatus}</span>
       </div>
       <ReactEChartsCore echarts={echarts} option={option} notMerge lazyUpdate style={{ height: 150, width: '100%' }} />
+    </div>
+  )
+}
+
+function StationPopup({ station }: { station: MeteorologyStation }) {
+  const position = projectLonLatToPercent(station.lon, station.lat)
+  const left = Math.min(85, Math.max(15, position.left))
+  const top = Math.min(92, Math.max(18, position.top))
+  return (
+    <div
+      className="absolute z-10 w-72 rounded-md border border-neutral-300 bg-white/95 p-3 text-xs text-neutral-700 shadow-lg"
+      style={{
+        left: `${left}%`,
+        top: `${top}%`,
+        transform: 'translate(-50%, -100%) translateY(-0.75rem)',
+      }}
+      data-testid="station-popup"
+    >
+      <div className="font-semibold text-neutral-900">{station.stationName}</div>
+      <div className="font-mono">{station.stationId}</div>
+      <div>{station.lon.toFixed(2)}E, {station.lat.toFixed(2)}N · {station.basinName}</div>
     </div>
   )
 }

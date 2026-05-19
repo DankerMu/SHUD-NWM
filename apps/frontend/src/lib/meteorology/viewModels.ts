@@ -1,7 +1,9 @@
 import {
   getMeteorologyGridContract,
   getMeteorologyStationSeries,
+  isLonLatInMeteorologyBbox,
   meteorologyStations,
+  projectLonLatToPercent,
   stationInventoryLimits,
   type MeteorologyGridContract,
   type MeteorologyStation,
@@ -23,6 +25,8 @@ export interface GridViewModel {
   cellPopup: {
     lon: number
     lat: number
+    left: number
+    top: number
     value: null
     reason: string
   } | null
@@ -37,11 +41,15 @@ export interface StationInventoryViewModel {
   validationReason: string | null
 }
 
-export function buildMeteorologyGridViewModel(state: Pick<MeteorologyQueryState, 'variable' | 'source' | 'validTime' | 'compareSource'>): GridViewModel {
+export function buildMeteorologyGridViewModel(state: Pick<MeteorologyQueryState, 'variable' | 'source' | 'validTime' | 'gridQueryLon' | 'gridQueryLat' | 'compareSource'>): GridViewModel {
   const contract = getMeteorologyGridContract(state.variable, state.source)
   const correctedValidTime = resolveMeteorologyValidTimeCorrection(state.validTime, contract)
   const visibleValidTime = correctedValidTime === undefined ? state.validTime : correctedValidTime
   const canRenderTile = Boolean(contract.tileUrlTemplate && visibleValidTime && !contract.restrictedReason && !contract.unavailableReason)
+  const queryPosition = state.gridQueryLon !== null && state.gridQueryLat !== null
+    ? projectLonLatToPercent(state.gridQueryLon, state.gridQueryLat, contract.bbox)
+    : null
+  const cellPopup = buildGridCellPopup(state, contract, visibleValidTime, queryPosition)
   const timelineDisabledReason =
     contract.restrictedReason ??
     (contract.validTimes.length === 0 ? '该产品没有合同提供的 valid_time，时间轴已禁用。' : null)
@@ -55,14 +63,54 @@ export function buildMeteorologyGridViewModel(state: Pick<MeteorologyQueryState,
     areaStatsStatus: contract.maxAreaKm2 <= 0
       ? '区域统计不可用：合同未开放该源的面积查询。'
       : `区域统计请求上限 ${contract.maxAreaKm2.toLocaleString('en-US')} km2，超过 bbox/resolution 限制时返回 validation 状态。`,
-    cellPopup: visibleValidTime && !contract.restrictedReason
-      ? {
-          lon: 114.35,
-          lat: 30.62,
-          value: null,
-          reason: '格点查询端点尚未返回实测/预报值，UI 不生成替代数值。',
-        }
-      : null,
+    cellPopup,
+  }
+}
+
+function buildGridCellPopup(
+  state: Pick<MeteorologyQueryState, 'gridQueryLon' | 'gridQueryLat'>,
+  contract: MeteorologyGridContract,
+  visibleValidTime: string | null | undefined,
+  queryPosition: ReturnType<typeof projectLonLatToPercent> | null,
+): GridViewModel['cellPopup'] {
+  if (state.gridQueryLon === null || state.gridQueryLat === null || !queryPosition) return null
+  if (!isLonLatInMeteorologyBbox(state.gridQueryLon, state.gridQueryLat, contract.bbox)) {
+    return {
+      lon: state.gridQueryLon,
+      lat: state.gridQueryLat,
+      left: queryPosition.left,
+      top: queryPosition.top,
+      value: null,
+      reason: '格点查询超出合同 bbox，未请求或生成数值。',
+    }
+  }
+  if (contract.restrictedReason) {
+    return {
+      lon: state.gridQueryLon,
+      lat: state.gridQueryLat,
+      left: queryPosition.left,
+      top: queryPosition.top,
+      value: null,
+      reason: contract.restrictedReason,
+    }
+  }
+  if (!visibleValidTime || !contract.queryUrlTemplate) {
+    return {
+      lon: state.gridQueryLon,
+      lat: state.gridQueryLat,
+      left: queryPosition.left,
+      top: queryPosition.top,
+      value: null,
+      reason: '格点查询产品缺少 valid_time 或 query URL，显示 unavailable 状态。',
+    }
+  }
+  return {
+    lon: state.gridQueryLon,
+    lat: state.gridQueryLat,
+    left: queryPosition.left,
+    top: queryPosition.top,
+    value: null,
+    reason: '格点查询端点尚未返回实测/预报值，UI 不生成替代数值。',
   }
 }
 
@@ -87,10 +135,8 @@ function comparisonStatus(
   return `${source} 与 ${compareSource} 在 ${validTime} 具备合同可比性；等待真实差值服务。`
 }
 
-export function buildStationInventoryViewModel(state: Pick<MeteorologyQueryState, 'basin' | 'search' | 'sort' | 'stationId'>): StationInventoryViewModel {
-  const validationReason = state.search && state.search.length > stationInventoryLimits.searchMaxLength
-    ? `搜索词超过 ${stationInventoryLimits.searchMaxLength} 字符，已按合同截断。`
-    : null
+export function buildStationInventoryViewModel(state: Pick<MeteorologyQueryState, 'basin' | 'search' | 'searchValidationReason' | 'sort' | 'stationId'>): StationInventoryViewModel {
+  const validationReason = state.searchValidationReason
   const search = state.search?.toLowerCase() ?? null
   let rows = meteorologyStations.filter((station) => {
     if (state.basin && station.basinId !== state.basin) return false

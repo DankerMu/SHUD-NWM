@@ -57,6 +57,7 @@ export interface MeteorologyStationSeriesVariable {
   variable: MeteorologyVariable
   unit: string
   source: MeteorologySource
+  valueStatus: 'available' | 'unavailable'
   completeness: number
   qcStatus: 'ok' | 'partial' | 'unavailable'
   unavailableReason: string | null
@@ -73,14 +74,58 @@ export interface MeteorologyStationSeries {
   variables: MeteorologyStationSeriesVariable[]
 }
 
+export interface LonLatPercent {
+  left: number
+  top: number
+  clamped: boolean
+}
+
+export interface PercentLonLat {
+  lon: number
+  lat: number
+  clamped: boolean
+}
+
 export const meteorologyGridContractVersion = 'm13.frontend.fixture.v1'
 export const meteorologyStationContractVersion = 'm13.station.fixture.v1'
+
+export function hasMinimumMeteorologyContracts() {
+  return meteorologyGridContractVersion.length > 0 && meteorologyStationContractVersion.length > 0
+}
 
 export const meteorologyBbox: MeteorologyBbox = {
   minLon: 73,
   minLat: 18,
   maxLon: 135,
   maxLat: 53,
+}
+
+export function projectLonLatToPercent(lon: number, lat: number, bbox: MeteorologyBbox = meteorologyBbox): LonLatPercent {
+  const lonRange = bbox.maxLon - bbox.minLon
+  const latRange = bbox.maxLat - bbox.minLat
+  const rawLeft = lonRange === 0 ? 50 : ((lon - bbox.minLon) / lonRange) * 100
+  const rawTop = latRange === 0 ? 50 : ((bbox.maxLat - lat) / latRange) * 100
+  const left = Math.min(100, Math.max(0, rawLeft))
+  const top = Math.min(100, Math.max(0, rawTop))
+  return {
+    left,
+    top,
+    clamped: left !== rawLeft || top !== rawTop,
+  }
+}
+
+export function projectPercentToLonLat(left: number, top: number, bbox: MeteorologyBbox = meteorologyBbox): PercentLonLat {
+  const clampedLeft = Math.min(100, Math.max(0, left))
+  const clampedTop = Math.min(100, Math.max(0, top))
+  return {
+    lon: bbox.minLon + ((bbox.maxLon - bbox.minLon) * clampedLeft) / 100,
+    lat: bbox.maxLat - ((bbox.maxLat - bbox.minLat) * clampedTop) / 100,
+    clamped: clampedLeft !== left || clampedTop !== top,
+  }
+}
+
+export function isLonLatInMeteorologyBbox(lon: number, lat: number, bbox: MeteorologyBbox = meteorologyBbox) {
+  return lon >= bbox.minLon && lon <= bbox.maxLon && lat >= bbox.minLat && lat <= bbox.maxLat
 }
 
 export const variableMetadata: Record<MeteorologyVariable, { label: string; unit: string; legend: MeteorologyGridContract['legend'] }> = {
@@ -261,50 +306,37 @@ export const meteorologyStations: MeteorologyStation[] = [
 ]
 
 export const stationInventoryLimits = {
-  pageSize: 50,
+  pageSize: 2,
   searchMaxLength: 80,
   seriesSampleLimit: 48,
   maxRangeHours: 168,
 }
 
-const baseTimes = ['2026-05-18T00:00:00.000Z', '2026-05-18T06:00:00.000Z', '2026-05-18T12:00:00.000Z']
-
-const sampleValues: Record<MeteorologyVariable, Array<number | null>> = {
-  PRCP: [1.2, null, 7.8],
-  TEMP: [21.4, 23.1, 24.0],
-  RH: [76, 81, null],
-  wind: [3.4, 4.1, 4.8],
-  Rn: [110, 165, 132],
-  Press: [1008, 1006, 1005],
-}
+const requiredStationVariables: MeteorologyVariable[] = ['PRCP', 'TEMP', 'RH', 'wind', 'Rn', 'Press']
+const contractPendingReason = '站点 forcing 数值服务尚未接入；UI 不渲染合同外的模拟数值。'
 
 export function getMeteorologyStationSeries(stationId: string): MeteorologyStationSeries | null {
   const station = meteorologyStations.find((item) => item.stationId === stationId)
   if (!station) return null
   return {
     stationId,
-    from: baseTimes[0],
-    to: baseTimes[baseTimes.length - 1],
+    from: station.latestDataTime ?? '2026-05-18T00:00:00.000Z',
+    to: station.latestDataTime ?? '2026-05-18T00:00:00.000Z',
     sampleLimit: stationInventoryLimits.seriesSampleLimit,
-    truncated: false,
-    variables: (['PRCP', 'TEMP', 'RH', 'wind', 'Press'] satisfies MeteorologyVariable[]).map((variable) => {
-      const available = station.variables.includes(variable) && station.qcStatus !== 'unavailable'
+    truncated: station.qcStatus !== 'unavailable',
+    variables: requiredStationVariables.map((variable) => {
+      const inStationContract = station.variables.includes(variable) && station.qcStatus !== 'unavailable'
       return {
         variable,
         unit: variableMetadata[variable].unit,
         source: station.source,
-        completeness: available ? station.completeness : 0,
-        qcStatus: available && sampleValues[variable].some((value) => value === null) ? 'partial' : available ? 'ok' : 'unavailable',
-        unavailableReason: available ? null : (station.unavailableReason ?? `${variable} forcing series 不在站点合同中。`),
-        points: available
-          ? baseTimes.map((time, index) => ({
-              time,
-              value: sampleValues[variable][index],
-              qc: sampleValues[variable][index] === null ? 'missing' : 'ok',
-            }))
-          : [],
-        missingIntervals: available && sampleValues[variable].some((value) => value === null)
-          ? [{ from: baseTimes[1], to: baseTimes[2], reason: '合同标记缺测区间' }]
+        valueStatus: 'unavailable' as const,
+        completeness: inStationContract ? station.completeness : 0,
+        qcStatus: 'unavailable' as const,
+        unavailableReason: inStationContract ? contractPendingReason : (station.unavailableReason ?? `${variable} forcing series 不在站点合同中。`),
+        points: [],
+        missingIntervals: inStationContract
+          ? [{ from: station.latestDataTime ?? '2026-05-18T00:00:00.000Z', to: station.latestDataTime ?? '2026-05-18T00:00:00.000Z', reason: contractPendingReason }]
           : [],
       }
     }),

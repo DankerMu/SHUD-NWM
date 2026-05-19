@@ -5,7 +5,7 @@
 - [x] 1.4 If backend contracts change, refresh/verify OpenAPI and frontend API types without breaking existing `/api/v1/met/stations`, `/api/v1/met/stations/{station_id}/series`, or `/api/v1/met/best-available` consumers.
 - [x] 1.5 Document dependency decision: prefer existing map/chart/UI utilities; if adding a dependency, name it, justify it, update the lockfile intentionally, and verify install/type/build/test.
 
-Implementation note: M13 uses a frontend renderer-neutral fixture contract and explicit unavailable overlays for live raster tiles/query endpoints. Backend/OpenAPI contracts were not changed, preserving existing `/api/v1/met/stations`, `/api/v1/met/stations/{station_id}/series`, and `/api/v1/met/best-available` consumers. Dependency decision: no new dependency; reused React Router, Tailwind, lucide-react, ECharts, and existing M11 layout/map visual conventions.
+Implementation note: M13 uses a bundled frontend renderer-neutral fixture contract as the minimum contract, so `/meteorology` and its nav item are exposed even when live backend products are unavailable. Live raster/query/station forcing gaps render explicit restricted/unavailable/truncated states. Backend/OpenAPI contracts were not changed, preserving existing `/api/v1/met/stations`, `/api/v1/met/stations/{station_id}/series`, and `/api/v1/met/best-available` consumers. Dependency decision: no new dependency; reused React Router, Tailwind, lucide-react, ECharts, and existing M11 layout/map visual conventions.
 
 ## 2. Grid Product Page
 - [x] 2.1 Implement grid layer metadata loading, timeline ticks, stale valid-time correction, and restricted/missing states.

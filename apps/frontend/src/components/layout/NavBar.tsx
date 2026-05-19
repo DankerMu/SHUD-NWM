@@ -2,6 +2,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { Bell, CloudRain, Gauge, Map, Waves } from 'lucide-react'
 
 import { cn } from '@/lib/cn'
+import { hasMinimumMeteorologyContracts } from '@/lib/meteorology/contracts'
 
 const links = [
   { to: '/overview', label: '全国总览', icon: Map },
@@ -13,10 +14,11 @@ const links = [
 
 export function NavBar() {
   const location = useLocation()
+  const visibleLinks = links.filter((link) => link.to !== '/meteorology' || hasMinimumMeteorologyContracts())
 
   return (
     <nav className="flex items-center gap-1" aria-label="Main navigation">
-      {links.map((link) => {
+      {visibleLinks.map((link) => {
         const Icon = link.icon
         return (
           <NavLink

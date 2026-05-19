@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Meteorology navigation and tabs
-The frontend SHALL expose meteorology navigation only when minimum contracts exist, with spatial grid and station query sub-tabs.
+The frontend SHALL expose meteorology navigation only when minimum contracts exist, with spatial grid and station query sub-tabs. The bundled frontend fixture contracts count as the minimum contract for M13 route exposure; missing live backend products are rendered as restricted/unavailable states within the route.
 
 #### Scenario: Route available
 WHEN metadata contracts are enabled

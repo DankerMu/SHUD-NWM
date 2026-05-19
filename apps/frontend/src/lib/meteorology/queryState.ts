@@ -8,12 +8,15 @@ export interface MeteorologyQueryState {
   variable: MeteorologyVariable
   source: MeteorologySource
   validTime: string | null
+  gridQueryLon: number | null
+  gridQueryLat: number | null
   opacity: number
   contours: boolean
   stationOverlay: boolean
   compareSource: MeteorologySource | null
   basin: string | null
   search: string | null
+  searchValidationReason: string | null
   sort: MeteorologySort
   stationId: string | null
 }
@@ -30,15 +33,20 @@ export const defaultMeteorologyQueryState: MeteorologyQueryState = {
   variable: 'PRCP',
   source: 'Best Available',
   validTime: null,
+  gridQueryLon: null,
+  gridQueryLat: null,
   opacity: 72,
   contours: false,
   stationOverlay: true,
   compareSource: null,
   basin: null,
   search: null,
+  searchValidationReason: null,
   sort: 'latest',
   stationId: null,
 }
+
+const searchMaxLength = 80
 
 const isoInstantPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 
@@ -63,7 +71,13 @@ function normalizeIdentifier(value: string | null) {
 function normalizeSearch(value: string | null) {
   if (!value?.trim()) return null
   const trimmed = value.trim()
-  return trimmed.length <= 80 ? trimmed : trimmed.slice(0, 80)
+  return trimmed.length <= searchMaxLength ? trimmed : trimmed.slice(0, searchMaxLength)
+}
+
+function normalizeSearchValidationReason(value: string | null) {
+  if (!value?.trim()) return null
+  const trimmed = value.trim()
+  return trimmed.length > searchMaxLength ? `搜索词超过 ${searchMaxLength} 字符，已按合同截断。` : null
 }
 
 function normalizeOpacity(value: string | null) {
@@ -71,6 +85,12 @@ function normalizeOpacity(value: string | null) {
   const parsed = Number.parseInt(value, 10)
   if (!Number.isFinite(parsed)) return defaultMeteorologyQueryState.opacity
   return Math.min(100, Math.max(10, parsed))
+}
+
+function normalizeCoordinate(value: string | null) {
+  if (!value) return null
+  const parsed = Number.parseFloat(value)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function parseBoolean(value: string | null, fallback: boolean) {
@@ -92,12 +112,15 @@ export function parseMeteorologyQueryState(input: string | URLSearchParams): Met
     variable: isOneOf(variable, meteorologyVariables) ? variable : defaultMeteorologyQueryState.variable,
     source: isOneOf(source, meteorologySources) ? source : defaultMeteorologyQueryState.source,
     validTime: normalizeInstant(params.get('validTime')),
+    gridQueryLon: normalizeCoordinate(params.get('gridQueryLon')),
+    gridQueryLat: normalizeCoordinate(params.get('gridQueryLat')),
     opacity: normalizeOpacity(params.get('opacity')),
     contours: parseBoolean(params.get('contours'), defaultMeteorologyQueryState.contours),
     stationOverlay: parseBoolean(params.get('stationOverlay'), defaultMeteorologyQueryState.stationOverlay),
     compareSource: isOneOf(compareSource, meteorologySources) ? compareSource : null,
     basin: normalizeIdentifier(params.get('basin')),
     search: normalizeSearch(params.get('search')),
+    searchValidationReason: normalizeSearchValidationReason(params.get('search')),
     sort: isOneOf(sort, meteorologySorts) ? sort : defaultMeteorologyQueryState.sort,
     stationId: normalizeIdentifier(params.get('stationId')),
   }
@@ -109,6 +132,8 @@ export function serializeMeteorologyQueryState(state: MeteorologyQueryState) {
   if (state.variable !== defaultMeteorologyQueryState.variable) params.set('variable', state.variable)
   if (state.source !== defaultMeteorologyQueryState.source) params.set('source', state.source)
   if (state.validTime) params.set('validTime', state.validTime)
+  if (state.gridQueryLon !== null) params.set('gridQueryLon', state.gridQueryLon.toFixed(4))
+  if (state.gridQueryLat !== null) params.set('gridQueryLat', state.gridQueryLat.toFixed(4))
   if (state.opacity !== defaultMeteorologyQueryState.opacity) params.set('opacity', String(state.opacity))
   if (state.contours !== defaultMeteorologyQueryState.contours) params.set('contours', state.contours ? '1' : '0')
   if (state.stationOverlay !== defaultMeteorologyQueryState.stationOverlay) params.set('stationOverlay', state.stationOverlay ? '1' : '0')
@@ -135,5 +160,15 @@ export function mergeMeteorologyQueryState(state: MeteorologyQueryState, patch: 
 export function needsMeteorologyQueryReplacement(search: string) {
   const normalized = serializeMeteorologyQueryState(parseMeteorologyQueryState(search))
   const current = search.startsWith('?') ? search.slice(1) : search
-  return normalized !== current
+  if (normalized === current) return false
+
+  const currentParams = new URLSearchParams(current)
+  const currentSearch = currentParams.get('search')?.trim() ?? null
+  if (currentSearch && currentSearch.length > searchMaxLength) {
+    const comparableNormalized = new URLSearchParams(normalized)
+    comparableNormalized.set('search', currentSearch)
+    return comparableNormalized.toString() !== current
+  }
+
+  return true
 }
