@@ -9,6 +9,7 @@ import { contextHandoff } from '@/pages/OverviewPage'
 import { useAuthStore } from '@/stores/auth'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
+import { useModelAssetsStore, type ModelAsset, type ModelAssetPage } from '@/stores/modelAssets'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
 import { FORECAST_CHART_POINT_BUDGET } from '@/lib/forecastRenderingBudget'
@@ -397,6 +398,52 @@ function overviewSnapshotForQuery(query: M11QueryState) {
   }
 }
 
+function modelAssetRouteFixture(overrides: Partial<ModelAsset> = {}): ModelAsset {
+  return {
+    model_id: 'basins_qhh_shud',
+    model_name: 'QHH SHUD',
+    basin_id: 'basins_qhh',
+    basin_name: 'QHH',
+    basin_version_id: 'qhh-basin-v1',
+    river_network_version_id: 'qhh-river-v1',
+    mesh_version_id: 'qhh-mesh-v1',
+    calibration_version_id: 'qhh-calib-v1',
+    segment_count: 42,
+    mesh_uri: 's3://nhms/models/qhh/mesh',
+    mesh_checksum: 'mesh-sha',
+    shud_code_version: 'shud-1',
+    active_flag: true,
+    model_package_uri: 'https://user:pass@assets.example.test/pkg?token=abc#frag',
+    package_checksum: 'pkg-sha',
+    manifest_uri: 's3://key:secret@nhms/private/manifest?sig=x#frag',
+    source_inventory_checksum: 'inventory-sha',
+    basin_slug: 'qhh',
+    shud_input_name: 'qhh-input',
+    source_path: '/volume/data/nwm/Basins/qhh',
+    resolved_source_path: 'C:\\nwm\\Basins\\qhh',
+    source_uri: 'file:///volume/data/nwm/Basins/qhh',
+    source_is_symlink: false,
+    resource_profile: {
+      area_km2: 87.5,
+      source_lineage: {
+        source_uri: 'https://user:pass@assets.example.test/pkg?token=abc#frag',
+        source_path: '/volume/data/nwm/Basins/qhh',
+      },
+      product_assets: [
+        {
+          id: 'package',
+          label: 'Package',
+          checksum: 'pkg-sha',
+          uri: 's3://key:secret@nhms/private/package?sig=x#frag',
+        },
+      ],
+      geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+    },
+    created_at: '2026-05-14T00:00:00Z',
+    ...overrides,
+  }
+}
+
 function basinSnapshot(
   basinId: string,
   layers: LayerState[],
@@ -624,6 +671,7 @@ beforeEach(() => {
     },
     true,
   )
+  useModelAssetsStore.setState(useModelAssetsStore.getInitialState(), true)
   vi.mocked(client.GET).mockResolvedValue({ data: success([]), error: undefined } as never)
   useMonitoringStore.setState({
     source: 'GFS',
@@ -4042,4 +4090,95 @@ describe('App route state', () => {
     expect(within(screen.getByRole('row', { name: /run-failed/ })).getByText('model-b')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /产品监控/ })).toHaveClass('border-accent')
   })
+
+  it.each(['model_admin', 'sys_admin'] as const)('routes /system/model-assets for %s and restores URL-selected detail', async (role) => {
+    useAuthStore.setState({ role })
+    const model = modelAssetRouteFixture()
+    const page: ModelAssetPage = { items: [model], total: 1, limit: 50, offset: 0 }
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') return { data: success(page), error: undefined } as never
+      if (path === '/api/v1/models/{model_id}') return { data: success(model), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /模型资产/ })).toHaveClass('border-accent')
+    await waitFor(() => expect(screen.getAllByText('qhh-basin-v1').length).toBeGreaterThan(0))
+    expect(screen.getAllByText('https://assets.example.test/pkg').length).toBeGreaterThan(0)
+    expect(screen.getByText('s3://nhms/private/package')).toBeInTheDocument()
+    expect(screen.getAllByTestId('model-asset-kpi-card').map((card) => within(card).getByRole('heading').textContent)).toEqual([
+      '流域版本',
+      '河网版本',
+      '网格版本',
+      '率定版本',
+      'SHUD / 模型',
+      '河段 / 面积',
+    ])
+    expect(screen.queryByText('/volume/data/nwm/Basins/qhh')).not.toBeInTheDocument()
+    expect(screen.queryByText('C:\\nwm\\Basins\\qhh')).not.toBeInTheDocument()
+    expect(screen.queryByText('file:///volume/data/nwm/Basins/qhh')).not.toBeInTheDocument()
+    expect(screen.queryByText(/user:pass/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/token=abc/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/#frag/)).not.toBeInTheDocument()
+  })
+
+  it('renders normalized restricted model source fields as restricted without leaking local details', async () => {
+    useAuthStore.setState({ role: 'model_admin' })
+    const model = modelAssetRouteFixture({
+      source_path: '/volume/data/nwm/Basins/qhh',
+      resolved_source_path: 'C:\\nwm\\Basins\\qhh',
+      source_uri: 'file:///volume/data/nwm/Basins/qhh?token=abc#frag',
+      resource_profile: {
+        area_km2: 87.5,
+        source_lineage: {
+          source_uri: 'file:///volume/data/nwm/Basins/qhh?token=abc#frag',
+          source_path: '/volume/data/nwm/Basins/qhh',
+        },
+        product_assets: [
+          {
+            id: 'restricted-package',
+            label: 'Restricted Package',
+            checksum: 'pkg-sha',
+            uri: '/volume/data/nwm/Basins/qhh/package.zip',
+          },
+        ],
+      },
+    })
+    const page: ModelAssetPage = { items: [model], total: 1, limit: 50, offset: 0 }
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') return { data: success(page), error: undefined } as never
+      if (path === '/api/v1/models/{model_id}') return { data: success(model), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('受限来源').length).toBeGreaterThanOrEqual(3))
+    expect(screen.queryByText('/volume/data/nwm/Basins/qhh')).not.toBeInTheDocument()
+    expect(screen.queryByText('C:\\nwm\\Basins\\qhh')).not.toBeInTheDocument()
+    expect(screen.queryByText(/file:\/\//)).not.toBeInTheDocument()
+    expect(screen.queryByText(/user:pass/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/token=abc/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/#frag/)).not.toBeInTheDocument()
+  })
+
+  it.each(['viewer', 'operator'] as const)(
+    'denies /system/model-assets for %s, hides navigation, and does not fetch detail',
+    async (role) => {
+      useAuthStore.setState({ role })
+      window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+      render(<App />)
+
+      expect(await screen.findByText('权限不足')).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: /模型资产/ })).not.toBeInTheDocument()
+      await waitFor(() => expect(vi.mocked(client.GET).mock.calls.length).toBe(0))
+      expect(vi.mocked(client.GET).mock.calls.some(([path]) => path === '/api/v1/models/{model_id}')).toBe(false)
+    },
+  )
 })

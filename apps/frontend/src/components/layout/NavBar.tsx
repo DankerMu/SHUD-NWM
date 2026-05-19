@@ -1,8 +1,9 @@
 import { NavLink, useLocation } from 'react-router-dom'
-import { Bell, CloudRain, Gauge, Map, Waves } from 'lucide-react'
+import { Bell, CloudRain, Database, Gauge, Map, Waves } from 'lucide-react'
 
 import { cn } from '@/lib/cn'
 import { hasMinimumMeteorologyContracts } from '@/lib/meteorology/contracts'
+import { type AuthRole, useAuthStore } from '@/stores/auth'
 
 const links = [
   { to: '/overview', label: '全国总览', icon: Map },
@@ -10,11 +11,17 @@ const links = [
   { to: '/forecast', label: '水文预报', icon: Waves },
   { to: '/flood-alerts', label: '洪水预警', icon: Bell },
   { to: '/monitoring', label: '产品监控', icon: Gauge },
+  { to: '/system/model-assets', label: '模型资产', icon: Database, roles: ['model_admin', 'sys_admin'] satisfies AuthRole[] },
 ]
 
 export function NavBar() {
   const location = useLocation()
-  const visibleLinks = links.filter((link) => link.to !== '/meteorology' || hasMinimumMeteorologyContracts())
+  const role = useAuthStore((state) => state.role)
+  const visibleLinks = links.filter((link) => {
+    if (link.to === '/meteorology' && !hasMinimumMeteorologyContracts()) return false
+    if ('roles' in link && !link.roles.includes(role)) return false
+    return true
+  })
 
   return (
     <nav className="flex items-center gap-1" aria-label="Main navigation">

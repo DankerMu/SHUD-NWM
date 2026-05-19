@@ -25,6 +25,9 @@ const SegmentDetailPage = lazy(() =>
 const MonitoringPage = lazy(() =>
   import('./pages/MonitoringPage').then((module) => ({ default: module.MonitoringPage })),
 )
+const ModelAssetsPage = lazy(() =>
+  import('./pages/ModelAssetsPage').then((module) => ({ default: module.ModelAssetsPage })),
+)
 
 export default function App() {
   return (
@@ -44,6 +47,14 @@ export default function App() {
               element={
                 <RBACGate roles={['operator', 'model_admin', 'sys_admin']}>
                   <MonitoringPage />
+                </RBACGate>
+              }
+            />
+            <Route
+              path="/system/model-assets"
+              element={
+                <RBACGate roles={['model_admin', 'sys_admin']}>
+                  <ModelAssetsPage />
                 </RBACGate>
               }
             />
