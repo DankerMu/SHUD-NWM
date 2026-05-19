@@ -13,7 +13,6 @@ import {
 } from 'lucide-react'
 
 import type { components } from '@/api/types'
-import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
 import {
   M11MapLibreSurface,
   m11MapStyleUrls,
@@ -22,7 +21,14 @@ import {
   type M11MapOverlayInteraction,
 } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
-import type { BasinSegmentRow, LayerState, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
+import {
+  getM11LayerLegend,
+  m11WarningLevelColor,
+  type BasinSegmentRow,
+  type LayerState,
+  type OverviewBasin,
+  type SourceScenarioSelectionState,
+} from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryPatch, M11QueryState, M11Source } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
@@ -85,33 +91,10 @@ const basePlaceholders = [
 ] as const
 
 const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
-  discharge: [
-    { label: '<500 m3/s', color: '#E3F2FD', max: 500 },
-    { label: '500-1000 m3/s', color: '#90CAF9', min: 500, max: 1000 },
-    { label: '1000-5000 m3/s', color: '#42A5F5', min: 1000, max: 5000 },
-    { label: '5000-10000 m3/s', color: '#1E88E5', min: 5000, max: 10000 },
-    { label: '10000-50000 m3/s', color: '#FF9800', min: 10000, max: 50000 },
-    { label: '>50000 m3/s', color: '#F44336', min: 50000 },
-  ],
+  discharge: getM11LayerLegend('discharge'),
   'water-level': [],
-  'flood-return-period': [
-    { label: '正常 T<2', color: ALERT_LEVEL_META.normal.color, min: 0, max: 2 },
-    { label: '偏高 2-5', color: ALERT_LEVEL_META.elevated.color, min: 2, max: 5 },
-    { label: '关注 5-10', color: ALERT_LEVEL_META.watch.color, min: 5, max: 10 },
-    { label: '警戒 10-20', color: ALERT_LEVEL_META.warning.color, min: 10, max: 20 },
-    { label: '高风险 20-50', color: ALERT_LEVEL_META.high_risk.color, min: 20, max: 50 },
-    { label: '严重 50-100', color: ALERT_LEVEL_META.severe.color, min: 50, max: 100 },
-    { label: '极端 >=100', color: ALERT_LEVEL_META.extreme.color, min: 100 },
-  ],
-  'warning-level': [
-    { label: '正常', color: ALERT_LEVEL_META.normal.color },
-    { label: '偏高', color: ALERT_LEVEL_META.elevated.color },
-    { label: '关注', color: ALERT_LEVEL_META.watch.color },
-    { label: '警戒', color: ALERT_LEVEL_META.warning.color },
-    { label: '高风险', color: ALERT_LEVEL_META.high_risk.color },
-    { label: '严重', color: ALERT_LEVEL_META.severe.color },
-    { label: '极端', color: ALERT_LEVEL_META.extreme.color },
-  ],
+  'flood-return-period': getM11LayerLegend('flood-return-period'),
+  'warning-level': getM11LayerLegend('warning-level'),
 }
 
 export function M11MapSurface({
@@ -568,5 +551,5 @@ export { fallbackLegends as m11FallbackLegends, basemapOptions as m11BasemapOpti
 
 export const m11ControlColorEvidence = {
   warningMajor: m11VisualTokens.warningLevels.major,
-  floodWarning: ALERT_LEVEL_META.warning.color,
+  floodWarning: m11WarningLevelColor('warning'),
 }

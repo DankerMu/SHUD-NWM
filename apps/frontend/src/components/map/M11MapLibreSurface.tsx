@@ -23,13 +23,14 @@ import {
 import {
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
+  m11BasinRiverCollectionBudget,
+  m11BasinRiverLayerColor,
   type BasinSegmentRow,
   type LayerState,
   type M11WarningLevel,
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryState } from '@/lib/m11/queryState'
-import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
 
 export interface M11MapOverlayInteraction {
   layerId: M11Layer | 'basin-boundaries' | 'basin-river-segments'
@@ -46,6 +47,8 @@ export interface M11MapCameraFlyTo {
   center: [number, number]
   zoom?: number
 }
+
+export { m11BasinRiverCollectionBudget } from '@/lib/m11/overviewDataContracts'
 
 interface M11MapLibreSurfaceProps {
   state: M11QueryState
@@ -121,12 +124,6 @@ interface BasinRiverFeatureCollection {
   serializedBytes: number
   unavailableReason: string | null
 }
-
-export const m11BasinRiverCollectionBudget = {
-  maxFeatures: 2_000,
-  maxCoordinates: 50_000,
-  maxSerializedBytes: 1_000_000,
-} as const
 
 const CHINA_VIEW_STATE = {
   longitude: 104,
@@ -725,7 +722,7 @@ export function buildBasinRiverFeatureCollection(
         q_unit: row.qUnit,
         return_period: row.returnPeriod,
         warning_level: row.warningLevel,
-        layer_color: basinRiverLayerColor(row, layer),
+        layer_color: m11BasinRiverLayerColor(row, layer),
       },
     }
     const candidateSerializedBytes = serializedByteLength(candidate)
@@ -780,45 +777,6 @@ function segmentFilter(segmentId?: string | null): FilterSpecification {
 
 function serializedByteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length
-}
-
-function basinRiverLayerColor(row: BasinSegmentRow, layer: M11Layer) {
-  if (layer === 'warning-level') return warningColor(row.warningLevel)
-  if (layer === 'flood-return-period') return returnPeriodColor(row.returnPeriod)
-  if (layer === 'discharge') return dischargeColor(row.currentQ)
-  return '#94A3B8'
-}
-
-function dischargeColor(value: number | null) {
-  if (value === null) return '#CBD5E1'
-  if (value >= 50_000) return '#F44336'
-  if (value >= 10_000) return '#FF9800'
-  if (value >= 5_000) return '#1E88E5'
-  if (value >= 1_000) return '#42A5F5'
-  if (value >= 500) return '#90CAF9'
-  return '#E3F2FD'
-}
-
-function returnPeriodColor(value: number | null) {
-  if (value === null) return '#CCCCCC'
-  if (value >= 100) return ALERT_LEVEL_META.extreme.color
-  if (value >= 50) return ALERT_LEVEL_META.severe.color
-  if (value >= 20) return ALERT_LEVEL_META.high_risk.color
-  if (value >= 10) return ALERT_LEVEL_META.warning.color
-  if (value >= 5) return ALERT_LEVEL_META.watch.color
-  if (value >= 2) return ALERT_LEVEL_META.elevated.color
-  return ALERT_LEVEL_META.normal.color
-}
-
-function warningColor(level: M11WarningLevel) {
-  if (level === 'high_risk') return ALERT_LEVEL_META.high_risk.color
-  if (level === 'severe') return ALERT_LEVEL_META.severe.color
-  if (level === 'extreme') return ALERT_LEVEL_META.extreme.color
-  if (level === 'warning') return ALERT_LEVEL_META.warning.color
-  if (level === 'watch') return ALERT_LEVEL_META.watch.color
-  if (level === 'elevated') return ALERT_LEVEL_META.elevated.color
-  if (level === 'normal') return ALERT_LEVEL_META.normal.color
-  return '#CCCCCC'
 }
 
 function warningLabel(level: M11WarningLevel) {

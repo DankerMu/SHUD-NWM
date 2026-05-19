@@ -8,6 +8,7 @@ import {
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
   m11BasinGeometryBudget,
+  m11BasinRiverCollectionBudget,
   m11SelectedSegmentGeometryBudget,
   normalizeBasinDetail,
   normalizeBasinSegmentRows,
@@ -754,6 +755,50 @@ describe('M11 overview data contracts', () => {
       geometry: null,
       unavailableReason: 'Selected segment geometry is malformed.',
     })
+  })
+
+  it('applies aggregate basin river geometry budget before row retention while preserving list metadata', () => {
+    const features = Array.from({ length: m11BasinRiverCollectionBudget.maxFeatures + 2 }, (_, index) => ({
+      ...featureCollection.features[0],
+      properties: {
+        ...featureCollection.features[0].properties,
+        segment_id: `seg-budget-${index}`,
+        river_segment_id: `river-budget-${index}`,
+        name: `Budget Segment ${index}`,
+      },
+      geometry: { type: 'LineString' as const, coordinates: [[100, 30], [100.01, 30.01]] },
+    }))
+    const rankingItems = features.map((feature, index): ApiFloodAlertRankingItem => ({
+      ...rankingItem,
+      river_segment_id: feature.properties.river_segment_id,
+      segment_id: feature.properties.segment_id,
+      segment_name: feature.properties.name,
+      q_value: 100 + index,
+      warning_level: index % 2 === 0 ? 'warning' : 'watch',
+    }))
+
+    const rows = normalizeBasinSegmentRows({
+      query: { ...query, warningLevel: null, q: null },
+      featureCollection: { ...featureCollection, total: features.length, feature_total: features.length, features },
+      rankingItems,
+    })
+    const retainedRows = rows.filter((row) => row.geometry)
+    const skippedRow = rows[m11BasinRiverCollectionBudget.maxFeatures]
+
+    expect(rows).toHaveLength(m11BasinRiverCollectionBudget.maxFeatures + 2)
+    expect(retainedRows).toHaveLength(m11BasinRiverCollectionBudget.maxFeatures)
+    expect(skippedRow).toMatchObject({
+      riverSegmentId: `river-budget-${m11BasinRiverCollectionBudget.maxFeatures}`,
+      segmentId: `seg-budget-${m11BasinRiverCollectionBudget.maxFeatures}`,
+      displayName: `Budget Segment ${m11BasinRiverCollectionBudget.maxFeatures}`,
+      currentQ: 100 + m11BasinRiverCollectionBudget.maxFeatures,
+      warningLevel: 'warning',
+      qualityFlag: 'ok',
+      hasGeometry: false,
+      geometry: null,
+    })
+    expect(skippedRow.unavailableReason).toContain('aggregate client rendering budget')
+    expect(filterBasinSegmentRows(rows, { warningLevel: 'watch', q: 'Budget Segment 2001' })).toHaveLength(1)
   })
 
   it('exposes unavailable source/scenario and failed lineage instead of fabricating values', () => {

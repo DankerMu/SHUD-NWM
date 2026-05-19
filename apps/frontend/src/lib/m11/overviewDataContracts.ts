@@ -1,4 +1,5 @@
 import type { components } from '@/api/types'
+import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
 import { m11QueryHref } from '@/lib/m11/queryState'
 import type { M11Layer, M11QueryState, M11Source } from '@/lib/m11/queryState'
 
@@ -54,6 +55,41 @@ export const m11SelectedSegmentGeometryBudget = {
   maxCoordinateDimensions: 3,
   maxSerializedBytes: 250_000,
 } as const
+
+export const m11BasinRiverCollectionBudget = {
+  maxFeatures: 2_000,
+  maxCoordinates: 50_000,
+  maxSerializedBytes: 1_000_000,
+} as const
+
+const m11RiverDischargeLegend: LayerLegendEntry[] = [
+  { label: '<500 m3/s', color: '#E3F2FD', max: 500 },
+  { label: '500-1000 m3/s', color: '#90CAF9', min: 500, max: 1000 },
+  { label: '1000-5000 m3/s', color: '#42A5F5', min: 1000, max: 5000 },
+  { label: '5000-10000 m3/s', color: '#1E88E5', min: 5000, max: 10000 },
+  { label: '10000-50000 m3/s', color: '#FF9800', min: 10000, max: 50000 },
+  { label: '>50000 m3/s', color: '#F44336', min: 50000 },
+]
+
+const m11RiverReturnPeriodLegend: LayerLegendEntry[] = [
+  { label: '正常 T<2', color: ALERT_LEVEL_META.normal.color, min: 0, max: 2 },
+  { label: '偏高 2-5', color: ALERT_LEVEL_META.elevated.color, min: 2, max: 5 },
+  { label: '关注 5-10', color: ALERT_LEVEL_META.watch.color, min: 5, max: 10 },
+  { label: '警戒 10-20', color: ALERT_LEVEL_META.warning.color, min: 10, max: 20 },
+  { label: '高风险 20-50', color: ALERT_LEVEL_META.high_risk.color, min: 20, max: 50 },
+  { label: '严重 50-100', color: ALERT_LEVEL_META.severe.color, min: 50, max: 100 },
+  { label: '极端 >=100', color: ALERT_LEVEL_META.extreme.color, min: 100 },
+]
+
+const m11RiverWarningLevelLegend: LayerLegendEntry[] = [
+  { label: '正常', color: ALERT_LEVEL_META.normal.color },
+  { label: '偏高', color: ALERT_LEVEL_META.elevated.color },
+  { label: '关注', color: ALERT_LEVEL_META.watch.color },
+  { label: '警戒', color: ALERT_LEVEL_META.warning.color },
+  { label: '高风险', color: ALERT_LEVEL_META.high_risk.color },
+  { label: '严重', color: ALERT_LEVEL_META.severe.color },
+  { label: '极端', color: ALERT_LEVEL_META.extreme.color },
+]
 
 export interface M11BasinGeometryBudgetStatus {
   ok: boolean
@@ -542,6 +578,10 @@ export function normalizeLayerStates(input: {
   })
 }
 
+export function getM11LayerLegend(layerId: string): LayerLegendEntry[] {
+  return layerLegend(layerId)
+}
+
 export function normalizeBasinDetail(input: {
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'basinVersionId'>
   basin: ApiBasin | null
@@ -626,7 +666,8 @@ export function normalizeBasinSegmentRows(input: {
     alertById.set(versionedSegmentKey(item.basin_version_id, item.segment_id), rankingLike)
   })
 
-  return features.map((feature) => segmentRowFromFeature(feature, alertById, input.query))
+  const budgetState = createBasinRiverGeometryBudgetState()
+  return features.map((feature) => segmentRowFromFeature(feature, alertById, input.query, budgetState))
 }
 
 export function filterBasinSegmentRows(
@@ -1170,33 +1211,105 @@ function layerGroup(layer: ApiLayer | undefined, layerId: string): LayerState['g
 }
 
 function layerLegend(layerId: string): LayerLegendEntry[] {
-  if (layerId === 'warning-level' || layerId === 'flood-return-period') {
-    return [
-      { label: 'normal', color: '#808080', min: 0, max: 2 },
-      { label: 'watch', color: '#FFD700', min: 5, max: 10 },
-      { label: 'warning', color: '#FF8C00', min: 10, max: 20 },
-      { label: 'severe', color: '#DC143C', min: 50, max: 100 },
-      { label: 'extreme', color: '#800080', min: 100, max: null },
-    ]
-  }
-  if (layerId === 'discharge') {
-    return [
-      { label: '<500 m3/s', color: '#90CAF9', max: 500 },
-      { label: '500-5000 m3/s', color: '#1E88E5', min: 500, max: 5000 },
-      { label: '>5000 m3/s', color: '#0D47A1', min: 5000 },
-    ]
-  }
+  if (layerId === 'warning-level') return m11RiverWarningLevelLegend.map((entry) => ({ ...entry }))
+  if (layerId === 'flood-return-period') return m11RiverReturnPeriodLegend.map((entry) => ({ ...entry }))
+  if (layerId === 'discharge') return m11RiverDischargeLegend.map((entry) => ({ ...entry }))
   return []
+}
+
+export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ' | 'returnPeriod' | 'warningLevel'>, layer: M11Layer) {
+  if (layer === 'warning-level') return m11WarningLevelColor(row.warningLevel)
+  if (layer === 'flood-return-period') return m11ReturnPeriodColor(row.returnPeriod)
+  if (layer === 'discharge') return m11DischargeColor(row.currentQ)
+  return '#94A3B8'
+}
+
+export function m11DischargeColor(value: number | null) {
+  if (value === null) return '#CBD5E1'
+  if (value >= 50_000) return '#F44336'
+  if (value >= 10_000) return '#FF9800'
+  if (value >= 5_000) return '#1E88E5'
+  if (value >= 1_000) return '#42A5F5'
+  if (value >= 500) return '#90CAF9'
+  return '#E3F2FD'
+}
+
+export function m11ReturnPeriodColor(value: number | null) {
+  if (value === null) return '#CCCCCC'
+  if (value >= 100) return ALERT_LEVEL_META.extreme.color
+  if (value >= 50) return ALERT_LEVEL_META.severe.color
+  if (value >= 20) return ALERT_LEVEL_META.high_risk.color
+  if (value >= 10) return ALERT_LEVEL_META.warning.color
+  if (value >= 5) return ALERT_LEVEL_META.watch.color
+  if (value >= 2) return ALERT_LEVEL_META.elevated.color
+  return ALERT_LEVEL_META.normal.color
+}
+
+export function m11WarningLevelColor(level: M11WarningLevel) {
+  if (level === 'high_risk') return ALERT_LEVEL_META.high_risk.color
+  if (level === 'severe') return ALERT_LEVEL_META.severe.color
+  if (level === 'extreme') return ALERT_LEVEL_META.extreme.color
+  if (level === 'warning') return ALERT_LEVEL_META.warning.color
+  if (level === 'watch') return ALERT_LEVEL_META.watch.color
+  if (level === 'elevated') return ALERT_LEVEL_META.elevated.color
+  if (level === 'normal') return ALERT_LEVEL_META.normal.color
+  return '#CCCCCC'
 }
 
 function versionedSegmentKey(basinVersionId: string, segmentId: string): string {
   return `${basinVersionId}::${segmentId}`
 }
 
+interface BasinRiverGeometryBudgetState {
+  featureCount: number
+  coordinateCount: number
+  serializedBytes: number
+}
+
+function createBasinRiverGeometryBudgetState(): BasinRiverGeometryBudgetState {
+  return {
+    featureCount: 0,
+    coordinateCount: 0,
+    serializedBytes: serializedByteLength({ type: 'FeatureCollection', features: [] }),
+  }
+}
+
+function retainBasinRiverGeometryWithinBudget(
+  geometryStatus: M11SelectedSegmentGeometryBudgetStatus,
+  state: BasinRiverGeometryBudgetState,
+): M11SelectedSegmentGeometryBudgetStatus {
+  if (!geometryStatus.sanitizedGeometry) return geometryStatus
+
+  const geometryBytes = serializedByteLength(geometryStatus.sanitizedGeometry)
+  const nextFeatureCount = state.featureCount + 1
+  const nextCoordinateCount = state.coordinateCount + geometryStatus.coordinateCount
+  const nextSerializedBytes = state.serializedBytes + geometryBytes + (state.featureCount > 0 ? 1 : 0)
+
+  if (
+    nextFeatureCount > m11BasinRiverCollectionBudget.maxFeatures ||
+    nextCoordinateCount > m11BasinRiverCollectionBudget.maxCoordinates ||
+    nextSerializedBytes > m11BasinRiverCollectionBudget.maxSerializedBytes
+  ) {
+    return selectedSegmentGeometryStatus(
+      false,
+      `Basin river geometry exceeds aggregate client rendering budget (${nextFeatureCount}/${m11BasinRiverCollectionBudget.maxFeatures} features, ${nextCoordinateCount}/${m11BasinRiverCollectionBudget.maxCoordinates} coordinates, ${nextSerializedBytes}/${m11BasinRiverCollectionBudget.maxSerializedBytes} bytes).`,
+      geometryStatus.coordinateCount,
+      geometryStatus.serializedBytes,
+      null,
+    )
+  }
+
+  state.featureCount = nextFeatureCount
+  state.coordinateCount = nextCoordinateCount
+  state.serializedBytes = nextSerializedBytes
+  return geometryStatus
+}
+
 function segmentRowFromFeature(
   feature: ApiRiverFeature,
   alertById: Map<string, ApiFloodAlertRankingItem>,
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>,
+  budgetState: BasinRiverGeometryBudgetState,
 ): BasinSegmentRow {
   const props = feature.properties
   const alert =
@@ -1204,7 +1317,7 @@ function segmentRowFromFeature(
     alertById.get(versionedSegmentKey(props.basin_version_id, props.segment_id))
   const sourceSelection = createSourceScenarioSelection(query, alert ? [sourceFromQuery(query.source)] : [])
   const warningLevel = normalizeWarningLevel(alert?.warning_level) ?? 'unavailable'
-  const geometryStatus = getM11SelectedSegmentGeometryBudgetStatus(feature.geometry)
+  const geometryStatus = retainBasinRiverGeometryWithinBudget(getM11SelectedSegmentGeometryBudgetStatus(feature.geometry), budgetState)
   return {
     riverSegmentId: props.river_segment_id,
     segmentId: props.segment_id,

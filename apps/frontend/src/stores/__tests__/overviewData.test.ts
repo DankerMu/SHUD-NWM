@@ -4,7 +4,7 @@ import { client } from '@/api/client'
 import { clearOverviewDataCache, useOverviewDataStore } from '@/stores/overviewData'
 import type { M11QueryState } from '@/lib/m11/queryState'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
-import { filterBasinSegmentRows, normalizeLayerStates } from '@/lib/m11/overviewDataContracts'
+import { filterBasinSegmentRows, m11BasinRiverCollectionBudget, normalizeLayerStates } from '@/lib/m11/overviewDataContracts'
 
 vi.mock('@/api/client', () => ({
   client: {
@@ -796,6 +796,104 @@ describe('useOverviewDataStore', () => {
       valid_time: '2026-05-18T06:00:00Z',
       variable: 'q_down',
     })
+  })
+
+  it('does not retain basin snapshot row geometry beyond the aggregate river budget', async () => {
+    const features = Array.from({ length: m11BasinRiverCollectionBudget.maxFeatures + 3 }, (_, index) => ({
+      ...featureCollection.features[0],
+      properties: {
+        ...featureCollection.features[0].properties,
+        segment_id: `seg-budget-${index}`,
+        river_segment_id: `seg-budget-${index}`,
+        name: `Budget Segment ${index}`,
+      },
+      geometry: { type: 'LineString', coordinates: [[100, 30], [100.01, 30.01]] },
+    }))
+    const largeFeatureCollection = {
+      ...featureCollection,
+      total: features.length,
+      feature_total: features.length,
+      limit: features.length,
+      features,
+    }
+    const largeRanking = {
+      ...ranking,
+      total: features.length,
+      limit: features.length,
+      items: features.map((feature, index) => ({
+        ...ranking.items[0],
+        rank: index + 1,
+        river_segment_id: feature.properties.river_segment_id,
+        segment_id: feature.properties.segment_id,
+        segment_name: feature.properties.name,
+        q_value: 200 + index,
+      })),
+    }
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success(largeFeatureCollection) as never
+      if (path === '/api/v1/flood-alerts/ranking') return success(largeRanking) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
+        return success({
+          river_segment_id: 'seg-budget-0',
+          river_network_version_id: 'yangtze_rivnet_v12',
+          segment_order: 1,
+          downstream_segment_id: null,
+          length_m: 1000,
+          geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+          properties_json: {},
+          created_at: '2026-05-01T00:00:00Z',
+        }) as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        return success({
+          river_segment_id: 'seg-budget-0',
+          issue_time: '2026-05-18T00:00:00Z',
+          variable: 'q_down',
+          unit: 'm3/s',
+          frequency_thresholds: null,
+          segments: [],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/timeline') {
+        return success({
+          run_id: 'run-gfs-1',
+          segment_id: 'seg-budget-0',
+          river_segment_id: 'seg-budget-0',
+          timesteps: [],
+          timeline: [],
+          peak: null,
+          frequency_thresholds: null,
+          quality_note: null,
+        }) as never
+      }
+      if (path === '/api/v1/lineage/river-point') return success({ target_type: 'river_point', target_id: 'seg-budget-0', nodes: [], edges: [] }) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', { ...query, segmentId: null })
+    const retainedGeometryCount = snapshot.segments.filter((row) => row.geometry).length
+    const skippedRow = snapshot.segments[m11BasinRiverCollectionBudget.maxFeatures]
+
+    expect(snapshot.segments).toHaveLength(m11BasinRiverCollectionBudget.maxFeatures + 3)
+    expect(retainedGeometryCount).toBeLessThanOrEqual(m11BasinRiverCollectionBudget.maxFeatures)
+    expect(skippedRow).toMatchObject({
+      riverSegmentId: `seg-budget-${m11BasinRiverCollectionBudget.maxFeatures}`,
+      displayName: `Budget Segment ${m11BasinRiverCollectionBudget.maxFeatures}`,
+      hasGeometry: false,
+      geometry: null,
+      currentQ: 200 + m11BasinRiverCollectionBudget.maxFeatures,
+    })
+    expect(skippedRow.unavailableReason).toContain('aggregate client rendering budget')
+    expect(filterBasinSegmentRows(snapshot.segments, { warningLevel: null, q: 'Budget Segment 2002' })).toHaveLength(1)
   })
 
   it('treats basin search and warning filters as local list state outside the basin load identity', async () => {

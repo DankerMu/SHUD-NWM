@@ -14,10 +14,10 @@ import {
 } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
 import {
+  m11BasinRiverCollectionBudget,
   buildBasinFeatureCollection,
   buildBasinRiverFeatureCollection,
   buildSelectedSegmentFeatureCollection,
-  m11BasinRiverCollectionBudget,
 } from '@/components/map/M11MapLibreSurface'
 import {
   LayerGroupControls,
@@ -568,6 +568,49 @@ describe('M11 visual foundation shell', () => {
 
     rerender(<M11MapSurface state={{ ...state, layer: 'warning-level' }} layers={layers} basinSegments={basinSegments} />)
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-river-feature-count', '1')
+  })
+
+  it('keeps API-normalized layer legends aligned with basin river feature colors', () => {
+    const normalizedLayers = normalizeLayerStates({
+      query: state,
+      layers: [
+        { layer_id: 'discharge', layer_name: 'Discharge', layer_type: 'hydrology', variables: ['q_down'], metadata: null },
+        {
+          layer_id: 'flood-return-period',
+          layer_name: 'Flood return period',
+          layer_type: 'hydrology',
+          variables: ['return_period'],
+          metadata: null,
+        },
+        { layer_id: 'warning-level', layer_name: 'Warning level', layer_type: 'hydrology', variables: ['warning_level'], metadata: null },
+      ],
+      validTimesByLayerId: {
+        discharge: ['2026-05-18T00:00:00Z'],
+        'flood-return-period': ['2026-05-18T00:00:00Z'],
+        'warning-level': ['2026-05-18T00:00:00Z'],
+      },
+    })
+    const representativeRows: BasinSegmentRow[] = [
+      { ...basinSegments[0], currentQ: 250, returnPeriod: 1, warningLevel: 'normal' },
+      { ...basinSegments[0], currentQ: 750, returnPeriod: 3, warningLevel: 'elevated' },
+      { ...basinSegments[0], currentQ: 2_000, returnPeriod: 7, warningLevel: 'watch' },
+      { ...basinSegments[0], currentQ: 7_000, returnPeriod: 12, warningLevel: 'warning' },
+      { ...basinSegments[0], currentQ: 20_000, returnPeriod: 25, warningLevel: 'high_risk' },
+      { ...basinSegments[0], currentQ: 60_000, returnPeriod: 120, warningLevel: 'extreme' },
+    ].map((row, index) => ({
+      ...row,
+      riverSegmentId: `legend-river-${index}`,
+      segmentId: `legend-seg-${index}`,
+      geometry: { type: 'LineString', coordinates: [[100 + index * 0.01, 30], [100.005 + index * 0.01, 30.005]] },
+    }))
+
+    for (const layerId of ['discharge', 'flood-return-period', 'warning-level'] as const) {
+      const legendColors = normalizedLayers.find((layer) => layer.layerId === layerId)?.legend.map((entry) => entry.color)
+      const featureColors = buildBasinRiverFeatureCollection(representativeRows, layerId).features.map(
+        (feature) => feature.properties.layer_color,
+      )
+      expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+    }
   })
 
   it('prioritizes river interactions when MapLibre returns overlapping basin and river features', () => {
