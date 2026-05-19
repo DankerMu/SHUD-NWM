@@ -178,11 +178,11 @@ export const variableMetadata: Record<MeteorologyVariable, { label: string; unit
   },
   Press: {
     label: '气压',
-    unit: 'hPa',
+    unit: 'Pa',
     legend: [
-      { label: '<980', color: '#B39DDB', max: 980 },
-      { label: '980-1020', color: '#90CAF9', min: 980, max: 1020 },
-      { label: '>1020', color: '#1565C0', min: 1020 },
+      { label: '<98000', color: '#B39DDB', max: 98_000 },
+      { label: '98000-102000', color: '#90CAF9', min: 98_000, max: 102_000 },
+      { label: '>102000', color: '#1565C0', min: 102_000 },
     ],
   },
 }

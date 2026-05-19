@@ -133,6 +133,7 @@ describe('meteorology grid contract view model', () => {
         expect(contract.restrictedReason ?? contract.unavailableReason).toBeTruthy()
       }
     }
+    expect(getMeteorologyGridContract('Press', 'GFS').unit).toBe('Pa')
   })
 
   it('corrects stale valid times and reports unsupported comparisons', () => {
@@ -463,6 +464,7 @@ describe('station resource view model', () => {
     expect(series?.truncated).toBe(true)
     expect(series?.variables.every((variable) => variable.valueStatus === 'unavailable')).toBe(true)
     expect(series?.variables.every((variable) => variable.points.length === 0)).toBe(true)
+    expect(series?.variables.find((variable) => variable.variable === 'Press')?.unit).toBe('Pa')
   })
 
   it('documents that bundled fixture contracts make meteorology navigation available', () => {
