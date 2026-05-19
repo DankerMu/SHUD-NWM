@@ -9,6 +9,11 @@ const evidenceRoot = path.resolve(process.cwd(), '../../.codex/evidence/issue-17
 const screenshotRoot = path.join(evidenceRoot, 'screenshots')
 const manifestPath = path.join(evidenceRoot, 'manifest.json')
 const captureCommand = 'cd apps/frontend && corepack pnpm run test:e2e:m15-visual'
+const deterministicTilePng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/l1b1NwAAAABJRU5ErkJggg==',
+  'base64',
+)
+const mapChromeZIndexThreshold = 200
 const placeholderShaPattern = /^(local-uncommitted|unknown|placeholder|pending|none)$/i
 const commitShaPattern = /^[0-9a-f]{40}$/i
 const commitSha = resolveCommitSha()
@@ -131,6 +136,58 @@ async function fulfill(route: Route, data: unknown) {
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify(success(data)),
+  })
+}
+
+function isLocalRequest(url: URL) {
+  return ['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
+}
+
+function isKnownExternalMapAsset(url: URL, resourceType: string) {
+  const knownHosts = new Set([
+    'a.tile.opentopomap.org',
+    'b.tile.opentopomap.org',
+    'c.tile.opentopomap.org',
+    'tile.openstreetmap.org',
+    'server.arcgisonline.com',
+  ])
+  if (!knownHosts.has(url.hostname)) return false
+  return (
+    resourceType === 'image' ||
+    resourceType === 'stylesheet' ||
+    resourceType === 'font' ||
+    /\.(png|jpe?g|webp|pbf|mvt|json|css)$/i.test(url.pathname) ||
+    url.pathname.includes('/tile/')
+  )
+}
+
+async function installM15NetworkGuard(page: Page) {
+  await page.route('**/*', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+
+    if (isLocalRequest(url)) return route.fallback()
+    if (url.hostname === 'api.example.test' && url.pathname.startsWith('/api/v1/')) return route.fallback()
+
+    if (isKnownExternalMapAsset(url, request.resourceType())) {
+      if (/\.json$/i.test(url.pathname)) {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ version: 8, sources: {}, layers: [] }),
+        })
+      }
+      if (/\.css$/i.test(url.pathname)) {
+        return route.fulfill({ status: 200, contentType: 'text/css', body: '' })
+      }
+      if (/\.(pbf|mvt)$/i.test(url.pathname) || request.resourceType() === 'font') {
+        return route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: Buffer.alloc(0) })
+      }
+      return route.fulfill({ status: 200, contentType: 'image/png', body: deterministicTilePng })
+    }
+
+    await route.abort('blockedbyclient')
+    throw new Error(`Unexpected non-local M15 visual evidence request: ${request.method()} ${request.url()}`)
   })
 }
 
@@ -473,6 +530,30 @@ async function assertNoHorizontalScroll(page: Page) {
   expect(Math.max(scrollState.body, scrollState.html)).toBeLessThanOrEqual(scrollState.viewport + 1)
 }
 
+async function readMapChromeThreshold(page: Page) {
+  await prepareRoute(page, '/overview')
+  await waitForRouteReady(page, 'overview', 'loaded')
+  const observed = await page.evaluate(() => {
+    const selectors = [
+      'header',
+      '.maplibregl-ctrl-top-left',
+      '.maplibregl-ctrl-bottom-left',
+      '[aria-label$="地图"]',
+      '[data-testid="m11-timeline-region"]',
+    ]
+    return selectors.reduce((maxZ, selector) => {
+      return Math.max(
+        maxZ,
+        ...Array.from(document.querySelectorAll(selector)).map((element) => {
+          const zIndex = Number.parseInt(getComputedStyle(element).zIndex, 10)
+          return Number.isFinite(zIndex) ? zIndex : 0
+        }),
+      )
+    }, 0)
+  })
+  return Math.max(observed, mapChromeZIndexThreshold)
+}
+
 async function assertVerticalNonOverlap(page: Page, topSelector: string, bottomSelector: string) {
   const boxes = await page.evaluate(({ topSelector, bottomSelector }) => {
     const top = document.querySelector(topSelector)?.getBoundingClientRect()
@@ -584,6 +665,7 @@ async function assertStateOracle(page: Page, stateLabel: string) {
 }
 
 async function assertSharedTokenBaseline(page: Page) {
+  const mapChromeThreshold = await readMapChromeThreshold(page)
   await prepareRoute(page, '/monitoring')
   const sourceTrigger = page.getByLabel('Source')
   await expect(sourceTrigger).toBeVisible()
@@ -610,7 +692,7 @@ async function assertSharedTokenBaseline(page: Page) {
       shadow: style.boxShadow,
     }
   })
-  expect(selectContentStyles?.zIndex).toBe('50')
+  expect(Number(selectContentStyles?.zIndex)).toBeGreaterThan(mapChromeThreshold)
   expect(selectContentStyles?.radius).toBe('8px')
   expect(selectContentStyles?.shadow).not.toBe('none')
   await page.keyboard.press('Escape')
@@ -627,7 +709,7 @@ async function assertSharedTokenBaseline(page: Page) {
       shadow: style.boxShadow,
     }
   })
-  expect(dialogStyles.zIndex).toBe('50')
+  expect(Number(dialogStyles.zIndex)).toBeGreaterThan(mapChromeThreshold)
   expect(dialogStyles.radius).toBe('8px')
   expect(dialogStyles.gap).toBe('16px')
   expect(dialogStyles.shadow).not.toBe('none')
@@ -640,17 +722,35 @@ async function assertSharedTokenBaseline(page: Page) {
 
   const toastStyles = await page.evaluate(() => {
     const toast = document.createElement('div')
+    const popover = document.createElement('div')
+    const overlay = document.createElement('div')
+    popover.className = 'fixed z-[var(--z-popover)]'
+    overlay.className = 'fixed z-[var(--z-overlay)]'
     toast.className =
       'group pointer-events-auto relative flex w-full items-start justify-between gap-[var(--space-3)] overflow-hidden rounded-[var(--radius-md)] border border-border bg-panel p-[var(--space-4)] pr-[var(--space-8)] text-foreground shadow-[var(--shadow-lg)] transition-all'
+    const toastViewport = document.createElement('div')
+    toastViewport.className = 'fixed z-[var(--z-toast)]'
+    document.body.appendChild(popover)
+    document.body.appendChild(overlay)
+    document.body.appendChild(toastViewport)
     document.body.appendChild(toast)
     const style = getComputedStyle(toast)
     const result = {
+      popoverZIndex: getComputedStyle(popover).zIndex,
+      overlayZIndex: getComputedStyle(overlay).zIndex,
+      toastZIndex: getComputedStyle(toastViewport).zIndex,
       radius: style.borderTopLeftRadius,
       shadow: style.boxShadow,
     }
     toast.remove()
+    toastViewport.remove()
+    overlay.remove()
+    popover.remove()
     return result
   })
+  expect(Number(toastStyles.popoverZIndex)).toBeGreaterThan(mapChromeThreshold)
+  expect(Number(toastStyles.overlayZIndex)).toBeGreaterThan(Number(toastStyles.popoverZIndex))
+  expect(Number(toastStyles.toastZIndex)).toBeGreaterThan(Number(toastStyles.overlayZIndex))
   expect(toastStyles.radius).toBe('8px')
   expect(toastStyles.shadow).not.toBe('none')
 }
@@ -671,6 +771,7 @@ async function captureEvidence(page: Page, route: { name: string; path: string; 
 }
 
 test.beforeEach(async ({ page }) => {
+  await installM15NetworkGuard(page)
   await mockM15Apis(page)
 })
 
@@ -678,6 +779,9 @@ test.afterAll(async () => {
   await mkdir(evidenceRoot, { recursive: true })
   if (!commitShaPattern.test(commitSha) || placeholderShaPattern.test(commitSha)) {
     throw new Error(`M15 manifest SHA must be a real commit; received ${commitSha}.`)
+  }
+  if (process.env.GITHUB_SHA && commitSha !== process.env.GITHUB_SHA) {
+    throw new Error(`M15 manifest SHA must match GITHUB_SHA in CI; received ${commitSha}, expected ${process.env.GITHUB_SHA}.`)
   }
   const observedLoadedMatrix = new Set(
     manifestEntries

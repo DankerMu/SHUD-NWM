@@ -132,3 +132,30 @@ jobs:
         run: cd apps/frontend && pnpm install --frozen-lockfile && pnpm build && pnpm test
       - name: Check frontend bundle size
         run: cd apps/frontend && pnpm check:bundle
+
+  frontend-m15-visual:
+    name: Frontend M15 Visual Evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.11.0 --activate
+      - name: Install frontend dependencies
+        run: cd apps/frontend && CI=true corepack pnpm install --frozen-lockfile
+      - name: Install Playwright browser
+        run: cd apps/frontend && corepack pnpm exec playwright install --with-deps chromium
+      - name: Run M15 visual evidence gate
+        run: cd apps/frontend && corepack pnpm run test:e2e:m15-visual
+      - name: Upload M15 visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-176-m15-visual-evidence
+          path: .codex/evidence/issue-176/**
+          if-no-files-found: ignore

@@ -17,13 +17,14 @@
 - [x] 3.2 Capture 1280x900 collapsed/default-left screenshots for each required route and optional <1280 unsupported-state evidence if implemented.
 - [x] 3.3 Capture or generate state evidence for loading, empty, error, restricted/RBAC-denied, and partial-data states. Expected output: each required state label has canonical `1440x900` screenshot evidence and an automated e2e assertion tied to a deterministic fixture; loaded required route states keep 1920/1440/1280 viewport evidence.
 - [x] 3.4 Store evidence under `.codex/evidence/issue-176/screenshots/` and create `.codex/evidence/issue-176/manifest.json` or documented markdown with route, viewport, fixture mode, real commit SHA, state label, command, and artifact path. Placeholder SHA values are rejected.
-- [x] 3.5 Ensure screenshot/evidence generation is bounded and repeatable: scoped output path, no unbounded artifact discovery, no production credentials, and clear failure output if capture fails.
+- [x] 3.5 Ensure screenshot/evidence generation is bounded and repeatable: scoped output path, no unbounded artifact discovery, no production credentials, deterministic stubs for known external map tile/style/font requests, blocked unexpected non-local network, and clear failure output if capture fails.
 
 ## 4. Governance
 - [x] 4.1 Document visual review checklist, acceptable deltas, no-overlap criteria, and when visual regressions block a PR.
 - [x] 4.2 Document blocking criteria: text overflow, horizontal scroll, panel/timeline overlap, missing accessible names, lost focus states, inconsistent warning colors, fake success data in error/restricted states, missing required screenshot metadata/state labels, and placeholder SHA values.
 - [x] 4.3 Run frontend tests, E2E checks, build, and screenshot capture commands. Minimum expected outputs: `openspec validate m15-frontend-visual-conformance --strict --no-interactive` exits 0; `cd apps/frontend && corepack pnpm test` exits 0; `cd apps/frontend && corepack pnpm build` exits 0; the focused Playwright/e2e screenshot command exits nonzero if required evidence, no-overlap assertions, accessible names, required state labels, real SHA metadata, or shared token assertions are missing.
-- [x] 4.4 Update `progress.md` with visual conformance status, required/extended routes covered, evidence manifest path, real commit SHA, and remaining surfaces.
+- [x] 4.4 Update `progress.md` with visual conformance status, required/extended routes covered, evidence manifest path, real commit SHA, final-head rerun requirement, and remaining surfaces.
+- [x] 4.5 Gate M15 visual evidence in CI with `corepack pnpm run test:e2e:m15-visual` and upload `.codex/evidence/issue-176/**` as a CI artifact without committing screenshots or manifests.
 
 ## Non-Goals and Guardrails
 - [x] 5.1 Do not add backend endpoints, change OpenAPI contracts, or change production data schemas.

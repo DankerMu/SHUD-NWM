@@ -22,3 +22,18 @@ THEN focus rings and active states use shared tokens and remain visible on suppo
 #### Scenario: Shared control roots
 WHEN select, tabs, dialog, toast, button, card, badge, app shell, filters, modals, or toast controls render
 THEN radius, shadow, spacing, control height, focus ring, and overlay z-index use the shared M15 token baseline or a documented compatible override
+
+#### Scenario: Map-first overlay stacking
+WHEN shared select/dropdown popovers, dialogs/overlays, and toast layers render on map-first routes
+THEN their computed z-index values exceed page navigation, map controls, map route popups, and timeline chrome in the order popover < overlay/modal < toast
+
+### Requirement: Deterministic visual evidence
+M15 screenshot evidence SHALL be bounded, repeatable, and independent of live external map tile/style/font hosts.
+
+#### Scenario: External network guard
+WHEN M15 visual evidence runs
+THEN API calls use deterministic fixtures, known external map tile/style/font requests are fulfilled with deterministic neutral stubs, and unexpected non-local requests fail the evidence run
+
+#### Scenario: Frozen head metadata
+WHEN M15 visual evidence runs in CI for a PR
+THEN the manifest SHA is a real commit SHA equal to `GITHUB_SHA`, and PR evidence is regenerated after the final commit/frozen head before closure

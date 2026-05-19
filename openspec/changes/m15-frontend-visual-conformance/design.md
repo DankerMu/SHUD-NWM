@@ -48,7 +48,8 @@ Mandatory expanded triggers:
 - This is visual/test/evidence work only; remove API/data contract changes unless a state fixture is needed for visual tests.
 - Viewport acceptance: 1920x1080 and 1440x900 full layout; 1280x900 collapsible layout with default-left behavior; <1280 may show unsupported prompt if implemented.
 - Screenshot artifacts should live under `.codex/evidence/issue-176/screenshots/` with a manifest under `.codex/evidence/issue-176/manifest.json` or a documented markdown equivalent. Each record must include route, viewport, fixture mode, commit SHA, state label, capture command, and artifact path.
-- Manifest commit SHA must resolve to a real commit from `GITHUB_SHA`, `CI_COMMIT_SHA`, or `git rev-parse HEAD`. CI/PR evidence must cite the frozen PR SHA under review; placeholder values such as `local-uncommitted` are not acceptable.
+- Manifest commit SHA must resolve to a real commit from `GITHUB_SHA`, `CI_COMMIT_SHA`, or `git rev-parse HEAD`. CI evidence must match `GITHUB_SHA`; PR evidence must be regenerated after the final commit so it cites the frozen PR SHA under review. Placeholder values such as `local-uncommitted` are not acceptable.
+- M15 evidence blocks unexpected non-local network traffic. Known external map tile/style/font hosts are fulfilled with deterministic neutral stubs so screenshots do not depend on live OpenTopoMap, Esri, or OpenStreetMap responses.
 - Pass/fail includes no incoherent overlap, stable panel/timeline dimensions, accessible names for icon controls, visible focus/hover states where tested, and design-token color/spacing checks where practical.
 - Playwright is the primary deterministic evidence runner. `agent-browser` may be used as an additional manual/browser smoke tool, especially for exploratory page inspection and screenshot sanity checks.
 

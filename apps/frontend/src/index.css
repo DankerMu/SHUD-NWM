@@ -63,9 +63,9 @@
   --focus-ring: 0 0 0 2px rgba(30, 136, 229, 0.28);
   --control-height: 36px;
   --control-height-lg: 40px;
-  --z-popover: 50;
-  --z-overlay: 50;
-  --z-toast: 50;
+  --z-popover: 300;
+  --z-overlay: 400;
+  --z-toast: 500;
   --m11-nav-height: 56px;
   --m15-nav-height: var(--m11-nav-height);
   --m15-control-height: var(--control-height);
