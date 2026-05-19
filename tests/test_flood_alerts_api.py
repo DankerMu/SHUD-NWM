@@ -16,12 +16,14 @@ from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import PsycopgForecastStore
+from workers.flood_frequency.return_period import compute_return_periods
 
 RUN_ID = "fcst_gfs_2026050300_all"
 PUBLISHED_RUN_ID = "fcst_gfs_2026050300_published"
 DUPLICATE_SEGMENT_RUN_ID = "fcst_gfs_2026050300_duplicate_segments"
 DUPLICATE_NETWORK_TIE_RUN_ID = "fcst_gfs_2026050300_duplicate_network_tie"
 TIMESTEP_DUPLICATE_RUN_ID = "fcst_gfs_2026050300_timestep_duplicates"
+RECOMPUTE_MOVED_PEAK_RUN_ID = "fcst_gfs_2026050300_recompute_moved_peak"
 VALID_TIME_1 = datetime(2026, 5, 3, 6, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 12, tzinfo=UTC)
 
@@ -179,6 +181,77 @@ def test_ranking_pagination_orders_duplicate_segment_ties_by_network_version() -
     assert [item["river_segment_id"] for item in items] == ["dup_seg", "dup_seg"]
     assert [item["river_network_version_id"] for item in items] == ["rnv_v1", "rnv_v2"]
     assert [item["rank"] for item in items] == [1, 2]
+
+
+def test_recomputed_moved_peak_exposes_one_current_peak_across_alert_views() -> None:
+    with _store() as session:
+        compute_return_periods(RECOMPUTE_MOVED_PEAK_RUN_ID, session)
+        session.execute(
+            text(
+                """
+                UPDATE hydro.river_timeseries
+                SET value = CASE
+                    WHEN river_segment_id = 'seg_001' AND valid_time = :valid_time_1 THEN 360.0
+                    WHEN river_segment_id = 'seg_001' AND valid_time = :valid_time_2 THEN 120.0
+                    ELSE value
+                END
+                WHERE run_id = :run_id
+                """
+            ),
+            {
+                "run_id": RECOMPUTE_MOVED_PEAK_RUN_ID,
+                "valid_time_1": VALID_TIME_1,
+                "valid_time_2": VALID_TIME_2,
+            },
+        )
+        compute_return_periods(RECOMPUTE_MOVED_PEAK_RUN_ID, session)
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                summary = client.get(f"/api/v1/flood-alerts/summary?run_id={RECOMPUTE_MOVED_PEAK_RUN_ID}")
+                first_page = client.get(f"/api/v1/flood-alerts/ranking?run_id={RECOMPUTE_MOVED_PEAK_RUN_ID}&limit=1")
+                second_page = client.get(
+                    f"/api/v1/flood-alerts/ranking?run_id={RECOMPUTE_MOVED_PEAK_RUN_ID}&limit=1&offset=1"
+                )
+                segments = client.get(
+                    f"/api/v1/flood-alerts/segments?run_id={RECOMPUTE_MOVED_PEAK_RUN_ID}&limit=10"
+                )
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+        peak_rows = session.execute(
+            text(
+                """
+                SELECT river_segment_id, valid_time, q_value, warning_level
+                FROM flood.return_period_result
+                WHERE run_id = :run_id
+                  AND max_over_window = true
+                ORDER BY river_network_version_id, river_segment_id, valid_time
+                """
+            ),
+            {"run_id": RECOMPUTE_MOVED_PEAK_RUN_ID},
+        ).mappings().all()
+
+    assert summary.status_code == first_page.status_code == second_page.status_code == segments.status_code == 200
+    assert [(row["river_segment_id"], str(row["valid_time"]), row["q_value"]) for row in peak_rows] == [
+        ("seg_001", "2026-05-03 06:00:00+00:00", 360.0),
+        ("seg_002", "2026-05-03 06:00:00+00:00", 210.0),
+    ]
+    summary_data = summary.json()["data"]
+    assert summary_data["total_segments"] == 2
+    assert summary_data["usable_curves"] == 2
+    assert _level_count(summary_data, "severe") == 1
+    assert _level_count(summary_data, "normal") == 1
+    ranking_pages = [first_page.json()["data"], second_page.json()["data"]]
+    assert [page["total"] for page in ranking_pages] == [2, 2]
+    assert [page["items"][0]["river_segment_id"] for page in ranking_pages] == ["seg_001", "seg_002"]
+    assert [page["items"][0]["valid_time"] for page in ranking_pages] == [_iso(VALID_TIME_1), _iso(VALID_TIME_1)]
+    segment_data = segments.json()["data"]
+    assert segment_data["total"] == 2
+    assert [(segment["river_segment_id"], segment["valid_time"]) for segment in segment_data["segments"]] == [
+        ("seg_001", _iso(VALID_TIME_1)),
+        ("seg_002", _iso(VALID_TIME_1)),
+    ]
 
 
 def test_ranking_limit_above_contract_uses_validation_envelope() -> None:
@@ -864,6 +937,23 @@ def _create_tables(connection: Any) -> None:
     connection.execute(
         text(
             """
+            CREATE TABLE hydro.river_timeseries (
+                run_id TEXT NOT NULL,
+                basin_version_id TEXT NOT NULL,
+                river_network_version_id TEXT NOT NULL,
+                river_segment_id TEXT NOT NULL,
+                valid_time DATETIME NOT NULL,
+                variable TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                quality_flag TEXT DEFAULT 'ok'
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
             CREATE TABLE flood.return_period_result (
                 run_id TEXT NOT NULL,
                 scenario_id TEXT NOT NULL,
@@ -962,6 +1052,7 @@ def _seed_data(connection: Any) -> None:
         (DUPLICATE_NETWORK_TIE_RUN_ID, "frequency_done"),
         (TIMESTEP_DUPLICATE_RUN_ID, "frequency_done"),
         ("run_oversized_geometry", "frequency_done"),
+        (RECOMPUTE_MOVED_PEAK_RUN_ID, "parsed"),
         ("run_pending", "parsed"),
         ("run_empty", "frequency_done"),
         ("run_stray", "parsed"),
@@ -1234,6 +1325,10 @@ def _seed_data(connection: Any) -> None:
         run_id="run_empty",
         quality_flag="no_usable_frequency_curve",
     )
+    _insert_timeseries_result(connection, "seg_001", RECOMPUTE_MOVED_PEAK_RUN_ID, VALID_TIME_1, 110.0)
+    _insert_timeseries_result(connection, "seg_001", RECOMPUTE_MOVED_PEAK_RUN_ID, VALID_TIME_2, 260.0)
+    _insert_timeseries_result(connection, "seg_002", RECOMPUTE_MOVED_PEAK_RUN_ID, VALID_TIME_1, 210.0)
+    _insert_timeseries_result(connection, "seg_002", RECOMPUTE_MOVED_PEAK_RUN_ID, VALID_TIME_2, 150.0)
     _insert_oversized_geometry_case(connection)
     connection.execute(
         text(
@@ -1248,6 +1343,23 @@ def _seed_data(connection: Any) -> None:
                 '1h', 'P-III', '1980-01-01', '2019-12-31', 40,
                 '{"sample_quality":{"Q20":{"quality_flag":"ok"}}}',
                 1200, 1800, 2300, 2900, 3700, 4500, 'm3/s', 'ok'
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO flood.flood_frequency_curve (
+                curve_id, model_id, river_network_version_id, basin_version_id, river_segment_id,
+                duration, method, sample_period_start, sample_period_end, sample_size, parameters_json,
+                q2, q5, q10, q20, q50, q100, unit, quality_flag
+            )
+            VALUES (
+                'curve_seg_001', 'model_1', 'rnv_v1', 'basin_v1', 'seg_001',
+                '1h', 'P-III', '1980-01-01', '2019-12-31', 40,
+                '{"sample_quality":{"Q20":{"quality_flag":"ok"},"Q50":{"quality_flag":"ok"},"Q100":{"quality_flag":"ok"}}}',
+                100, 150, 200, 250, 350, 400, 'm3/s', 'ok'
             )
             """
         )
@@ -1322,6 +1434,35 @@ def _insert_result(
             "cycle_time": datetime(2026, 5, 3, tzinfo=UTC),
             "max_over_window": max_over_window,
             "quality_flag": quality_flag,
+        },
+    )
+
+
+def _insert_timeseries_result(
+    connection: Any,
+    segment_id: str,
+    run_id: str,
+    valid_time: datetime,
+    value: float,
+) -> None:
+    connection.execute(
+        text(
+            """
+            INSERT INTO hydro.river_timeseries (
+                run_id, basin_version_id, river_network_version_id, river_segment_id,
+                valid_time, variable, value, unit
+            )
+            VALUES (
+                :run_id, 'basin_v1', 'rnv_v1', :segment_id,
+                :valid_time, 'q_down', :value, 'm3/s'
+            )
+            """
+        ),
+        {
+            "run_id": run_id,
+            "segment_id": segment_id,
+            "valid_time": valid_time,
+            "value": value,
         },
     )
 

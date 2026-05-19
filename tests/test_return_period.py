@@ -220,6 +220,43 @@ def test_upsert_to_return_period_result_updates_existing_row() -> None:
         assert row["warning_level"] == "extreme"
 
 
+def test_recompute_replaces_peak_when_peak_valid_time_moves() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0, 260.0]})
+        compute_return_periods("forecast_run", session)
+
+        first_peak = _result_row(session, segment_id="seg_001", max_over_window=True)
+        assert str(first_peak["valid_time"]) == "2026-05-01 01:00:00"
+        assert first_peak["q_value"] == 260.0
+
+        session.execute(
+            text(
+                """
+                UPDATE hydro.river_timeseries
+                SET value = CASE
+                    WHEN valid_time = :first_time THEN 360.0
+                    WHEN valid_time = :second_time THEN 120.0
+                    ELSE value
+                END
+                WHERE run_id = 'forecast_run'
+                  AND river_segment_id = 'seg_001'
+                """
+            ),
+            {
+                "first_time": datetime(2026, 5, 1),
+                "second_time": datetime(2026, 5, 1, 1),
+            },
+        )
+        compute_return_periods("forecast_run", session)
+
+        peak_rows = _result_rows(session, max_over_window=True)
+        assert len(peak_rows) == 1
+        assert str(peak_rows[0]["valid_time"]) == "2026-05-01 00:00:00"
+        assert peak_rows[0]["q_value"] == 360.0
+        assert peak_rows[0]["warning_level"] == "severe"
+
+
 def test_upsert_to_return_period_result_preserves_same_segment_in_different_networks() -> None:
     valid_time = datetime(2026, 5, 1, 1)
     base_context = {
