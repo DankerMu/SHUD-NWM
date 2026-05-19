@@ -190,10 +190,10 @@ uv run nhms-production validate-ops \
 ## M15 前端视觉收敛状态
 
 - GitHub issue #176 / OpenSpec `m15-frontend-visual-conformance` 已实现机械视觉证据：`/overview`、`/basins/basin-demo?...segmentId=seg-009`、`/flood-alerts`、`/monitoring` 在 `1920x1080`、`1440x900`、`1280x900` 均由 deterministic Playwright 夹具截图并校验。
-- 扩展证据已覆盖 `/segments/seg-009?...`、气象 grid/stations 两条 URL、`/system/model-assets?modelId=model-demo`，并覆盖 overview loading/error、basin empty、flood empty、monitoring RBAC denied、meteorology CLDAS restricted 等状态。
-- 证据命令：`cd apps/frontend && corepack pnpm run test:e2e:m15-visual`。Manifest：`.codex/evidence/issue-176/manifest.json`；截图：`.codex/evidence/issue-176/screenshots/`。当前本地 manifest SHA 字段为 `local-uncommitted`，CI 可通过 `GITHUB_SHA` 或 `CI_COMMIT_SHA` 注入真实提交。
+- 扩展证据已覆盖 `/segments/seg-009?...`、气象 grid/stations 两条 URL、`/system/model-assets?modelId=model-demo`；非 happy-state 证据在 canonical `1440x900` 覆盖 overview loading/partial/error、basin empty/partial/error、flood empty/warning/error、monitoring empty/failed/RBAC denied、segment missing/chart error、meteorology grid unavailable/restricted、stations empty/detail unavailable、model-assets denied/loading/redacted error。
+- 证据命令：`cd apps/frontend && corepack pnpm run test:e2e:m15-visual`。Manifest：`.codex/evidence/issue-176/manifest.json`；截图：`.codex/evidence/issue-176/screenshots/`。本地 manifest SHA 解析为运行时当前 git `HEAD`；CI/PR 证据必须使用 `GITHUB_SHA` / `CI_COMMIT_SHA` 或等价 frozen PR SHA，禁止 `local-uncommitted` 等 placeholder。
 - 治理文档：`apps/frontend/e2e/m15-visual-evidence.md` 记录 review checklist、acceptable deltas、no-overlap criteria 和 blocking criteria。截图二进制仍为本地 volatile evidence，不纳入仓库。
-- 已收敛共享根：06B/M15 CSS token aliases、focus ring、shared card/button/badge radius/shadow、M11 nav/panel/timeline tokens、warning/status palette。未改变 backend/OpenAPI contract、生产 time-series semantics、RBAC 数据边界、M14 redaction/model-assets sanitization。
+- 已收敛共享根：06B/M15 CSS token aliases、focus ring、shared card/button/badge/select/tabs/dialog/toast radius/shadow/spacing/control-height/z-index、M11 nav/panel/timeline tokens、warning/status palette。未改变 backend/OpenAPI contract、生产 time-series semantics、RBAC 数据边界、M14 redaction/model-assets sanitization。
 
 ## 注意事项
 

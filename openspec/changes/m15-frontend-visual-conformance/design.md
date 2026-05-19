@@ -48,6 +48,7 @@ Mandatory expanded triggers:
 - This is visual/test/evidence work only; remove API/data contract changes unless a state fixture is needed for visual tests.
 - Viewport acceptance: 1920x1080 and 1440x900 full layout; 1280x900 collapsible layout with default-left behavior; <1280 may show unsupported prompt if implemented.
 - Screenshot artifacts should live under `.codex/evidence/issue-176/screenshots/` with a manifest under `.codex/evidence/issue-176/manifest.json` or a documented markdown equivalent. Each record must include route, viewport, fixture mode, commit SHA, state label, capture command, and artifact path.
+- Manifest commit SHA must resolve to a real commit from `GITHUB_SHA`, `CI_COMMIT_SHA`, or `git rev-parse HEAD`. CI/PR evidence must cite the frozen PR SHA under review; placeholder values such as `local-uncommitted` are not acceptable.
 - Pass/fail includes no incoherent overlap, stable panel/timeline dimensions, accessible names for icon controls, visible focus/hover states where tested, and design-token color/spacing checks where practical.
 - Playwright is the primary deterministic evidence runner. `agent-browser` may be used as an additional manual/browser smoke tool, especially for exploratory page inspection and screenshot sanity checks.
 
@@ -76,6 +77,10 @@ Extended evidence routes:
 | `/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z&gridQueryLon=114.35&gridQueryLat=30.62` | yes after #174 | loaded grid metadata, empty grid, restricted/error, disabled timeline |
 | `/meteorology?tab=stations&basin=yangtze&stationId=HMT-Y2-0237` | yes after #174 | loaded stations, empty stations, station detail/error |
 | `/system/model-assets` | yes after #175 | allowed role loaded, restricted role denied, loading/error redaction |
+
+Loaded required routes are captured at all required desktop viewports. Non-happy required and
+extended state labels are captured at the canonical `1440x900` review viewport to keep the evidence
+gate deterministic and bounded while still proving the full declared route/state axis.
 
 ## No-Overlap and Accessibility Oracle
 
@@ -115,7 +120,7 @@ Extended evidence routes:
 
 ## Risks and Mitigations
 
-- Risk: screenshot evidence becomes stale. Mitigation: record route, viewport, fixture mode, commit SHA, and artifact path.
+- Risk: screenshot evidence becomes stale. Mitigation: record route, viewport, fixture mode, real commit SHA, and artifact path; reject placeholder SHA values.
 - Risk: visual work mutates behavior. Mitigation: existing route/E2E tests must remain green.
 - Risk: one-off fixes. Mitigation: shared tokens/components first.
 - Risk: broad visual fixes introduce hidden RBAC or redaction regressions. Mitigation: include restricted/RBAC-denied states and existing M14 behavior tests in verification.
@@ -126,7 +131,7 @@ Extended evidence routes:
 - OpenSpec strict validation.
 - Frontend unit/E2E/build checks.
 - Screenshot evidence for named routes and viewport matrix.
-- Governance/progress docs updated with route, fixture, SHA, and remaining-surface metadata.
+- Governance/progress docs updated with route, fixture, real SHA, and remaining-surface metadata.
 
 Expected verification outputs:
 

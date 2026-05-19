@@ -1,14 +1,17 @@
+import { execFileSync } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { expect, test, type Page, type Route } from '@playwright/test'
 
-test.setTimeout(60_000)
+test.setTimeout(120_000)
 
 const evidenceRoot = path.resolve(process.cwd(), '../../.codex/evidence/issue-176')
 const screenshotRoot = path.join(evidenceRoot, 'screenshots')
 const manifestPath = path.join(evidenceRoot, 'manifest.json')
 const captureCommand = 'cd apps/frontend && corepack pnpm run test:e2e:m15-visual'
-const commitSha = process.env.GITHUB_SHA ?? process.env.CI_COMMIT_SHA ?? 'local-uncommitted'
+const placeholderShaPattern = /^(local-uncommitted|unknown|placeholder|pending|none)$/i
+const commitShaPattern = /^[0-9a-f]{40}$/i
+const commitSha = resolveCommitSha()
 
 const requiredViewports = [
   { width: 1920, height: 1080, label: '1920x1080' },
@@ -52,14 +55,35 @@ const extendedRoutes = [
 
 const stateRoutes = [
   { name: 'overview-loading', path: '/overview?m15State=loading', stateLabel: 'loading' },
+  { name: 'overview-partial', path: '/overview?m15State=partial', stateLabel: 'overview-partial-data' },
   { name: 'overview-error', path: '/overview?m15State=error', stateLabel: 'api-error' },
   { name: 'basin-empty', path: '/basins/basin-demo?m15State=empty&basinVersionId=bv-001', stateLabel: 'empty-segments' },
+  { name: 'basin-partial', path: '/basins/basin-demo?m15State=partial&basinVersionId=bv-001', stateLabel: 'basin-partial-data' },
+  { name: 'basin-error', path: '/basins/basin-demo?m15State=basin-error&basinVersionId=bv-001', stateLabel: 'basin-api-error' },
   { name: 'flood-empty', path: '/flood-alerts?m15State=empty', stateLabel: 'empty-alerts' },
+  { name: 'flood-warning-levels', path: '/flood-alerts?m15State=warning-levels', stateLabel: 'warning-levels' },
+  { name: 'flood-error', path: '/flood-alerts?m15State=flood-error', stateLabel: 'flood-api-error' },
+  { name: 'monitoring-empty', path: '/monitoring?m15State=monitoring-empty', stateLabel: 'empty-jobs' },
+  { name: 'monitoring-error', path: '/monitoring?m15State=monitoring-error', stateLabel: 'failed-job-error' },
   { name: 'monitoring-denied', path: '/monitoring?m15Role=viewer', stateLabel: 'rbac-denied' },
-  { name: 'meteorology-restricted', path: '/meteorology?tab=grid&source=CLDAS&variable=PRCP', stateLabel: 'restricted' },
+  { name: 'segment-missing', path: '/segments/missing-seg?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=missing-seg', stateLabel: 'missing-segment' },
+  { name: 'segment-chart-error', path: '/segments/seg-009?m15State=segment-chart-error&source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009', stateLabel: 'chart-error' },
+  { name: 'meteorology-grid-unavailable', path: '/meteorology?tab=grid&source=GFS&variable=PRCP&validTime=2026-05-18T06:00:00.000Z', stateLabel: 'grid-unavailable' },
+  { name: 'meteorology-restricted', path: '/meteorology?tab=grid&source=CLDAS&variable=PRCP', stateLabel: 'grid-restricted-error' },
+  { name: 'meteorology-stations-empty', path: '/meteorology?tab=stations&search=no-such-station', stateLabel: 'empty-stations' },
+  { name: 'meteorology-station-error', path: '/meteorology?tab=stations&basin=hanjiang&stationId=HMT-HAN-0081', stateLabel: 'station-detail-error' },
+  { name: 'model-assets-denied', path: '/system/model-assets?m15Role=viewer', stateLabel: 'model-assets-rbac-denied' },
+  { name: 'model-assets-loading', path: '/system/model-assets?m15State=model-loading', stateLabel: 'model-assets-loading' },
+  { name: 'model-assets-redacted-error', path: '/system/model-assets?m15State=model-error&modelId=model-demo', stateLabel: 'model-assets-redacted-error' },
 ] as const
 
+const requiredLoadedMatrix = new Set(
+  requiredRoutes.flatMap((route) => requiredViewports.map((viewport) => `${route.path}|${viewport.label}|${route.stateLabel}`)),
+)
+const requiredStateLabels = new Set(stateRoutes.map((route) => route.stateLabel))
+
 const manifestEntries: EvidenceEntry[] = []
+const pageFixtureStates = new WeakMap<Page, string | null>()
 
 interface EvidenceEntry {
   route: string
@@ -69,6 +93,33 @@ interface EvidenceEntry {
   stateLabel: string
   command: string
   artifactPath: string
+}
+
+function resolveCommitSha() {
+  const candidates = [process.env.GITHUB_SHA, process.env.CI_COMMIT_SHA].filter((value): value is string => Boolean(value))
+  const envSha = candidates.find((value) => commitShaPattern.test(value) && !placeholderShaPattern.test(value))
+  if (envSha) return envSha
+
+  try {
+    const gitSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: path.resolve(process.cwd(), '../..'),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (commitShaPattern.test(gitSha) && !placeholderShaPattern.test(gitSha)) return gitSha
+  } catch {
+    // afterAll also validates the resolved SHA before any manifest is written.
+  }
+
+  throw new Error('M15 evidence requires a real 40-character commit SHA from GITHUB_SHA, CI_COMMIT_SHA, or git rev-parse HEAD.')
+}
+
+async function fulfillError(route: Route, message: string, status = 503) {
+  await route.fulfill({
+    status,
+    contentType: 'application/json',
+    body: JSON.stringify({ status: 'error', error: { message } }),
+  })
 }
 
 function success<T>(data: T) {
@@ -240,17 +291,37 @@ function forecastPayload(segmentId: string) {
 async function mockM15Apis(page: Page) {
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
-    const state = new URL(page.url()).searchParams.get('m15State')
+    const state = pageFixtureStates.get(page) ?? new URL(page.url()).searchParams.get('m15State')
 
     if (state === 'loading' && url.pathname === '/api/v1/basins') return
     if (state === 'error' && url.pathname === '/api/v1/basins') {
-      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ status: 'error', error: { message: 'm15 fixture API error' } }) })
+      return fulfillError(route, 'm15 fixture API error')
     }
-    if (url.pathname === '/api/v1/basins') return fulfill(route, [{ basin_id: 'basin-demo', basin_name: 'Demo Basin', basin_group: 'major', description: null, created_at: '2026-05-01T00:00:00Z' }])
+    if (state === 'partial' && url.pathname === '/api/v1/flood-alerts/summary') {
+      return fulfillError(route, 'overview partial flood summary fixture')
+    }
+    if (url.pathname === '/api/v1/basins') {
+      return fulfill(route, [
+        {
+          basin_id: 'basin-demo',
+          basin_name: 'Demo Basin',
+          basin_group: 'major',
+          description: null,
+          created_at: '2026-05-01T00:00:00Z',
+        },
+      ])
+    }
     if (url.pathname === '/api/v1/basins/basin-demo/versions') return fulfill(route, [basinVersion])
     if (url.pathname.startsWith('/api/v1/basins/') && url.pathname.endsWith('/versions')) return fulfill(route, [])
-    if (url.pathname === '/api/v1/models') return fulfill(route, { items: [model], total: 1, limit: 200, offset: 0 })
-    if (url.pathname === '/api/v1/models/model-demo') return fulfill(route, model)
+    if (url.pathname === '/api/v1/models') {
+      if (state === 'model-loading') return
+      if (state === 'model-error') return fulfillError(route, 'model source file:///secret/basins?token=redacted must not leak')
+      return fulfill(route, { items: [model], total: 1, limit: 200, offset: 0 })
+    }
+    if (url.pathname === '/api/v1/models/model-demo') {
+      if (state === 'model-error') return fulfillError(route, 'model detail /secret/basins/package.zip must not leak')
+      return fulfill(route, model)
+    }
     if (url.pathname === '/api/v1/runs') return fulfill(route, { items: runs, total: 1, limit: Number(url.searchParams.get('limit') ?? 20), offset: Number(url.searchParams.get('offset') ?? 0) })
     if (url.pathname === '/api/v1/layers') {
       return fulfill(route, [
@@ -264,6 +335,7 @@ async function mockM15Apis(page: Page) {
     }
     if (url.pathname === '/api/v1/queue/depth') return fulfill(route, { running: 1, pending: 0, idle: 3 })
     if (url.pathname === '/api/v1/pipeline/status') {
+      if (state === 'monitoring-error') return fulfillError(route, 'monitoring fixture API error')
       return fulfill(route, {
         cycle_id: 'cycle-gfs-1',
         source: 'GFS',
@@ -281,6 +353,7 @@ async function mockM15Apis(page: Page) {
       ])
     }
     if (url.pathname === '/api/v1/jobs') {
+      if (state === 'monitoring-empty') return fulfill(route, { items: [], total: 0, limit: 12, offset: 0 })
       return fulfill(route, {
         items: [{ job_id: 'job-m15', run_id: 'run-gfs-1', cycle_id: 'cycle-gfs-1', run_type: 'forecast', scenario: 'forecast_gfs_deterministic', job_type: 'forecast', slurm_job_id: '1001', model_id: 'model-demo', status: 'failed', stage: 'forecast', submitted_at: '2026-05-18T00:01:00Z', started_at: '2026-05-18T00:02:00Z', finished_at: '2026-05-18T00:05:00Z', exit_code: 1, retry_count: 0, error_code: 'M15_PARTIAL', error_message: 'partial fixture failure', log_uri: null, duration_seconds: 180 }],
         total: 1,
@@ -288,12 +361,19 @@ async function mockM15Apis(page: Page) {
         offset: 0,
       })
     }
+    if (url.pathname === '/api/v1/jobs/job-m15/logs') {
+      return fulfill(route, { job_id: 'job-m15', content: 'm15 deterministic log fixture', truncated: false })
+    }
     if (url.pathname === '/api/v1/metrics/stage-duration' || url.pathname === '/api/v1/metrics/success-rate') return fulfill(route, [])
     if (url.pathname === '/api/v1/flood-alerts/summary') {
+      if (state === 'flood-error') return fulfillError(route, 'flood summary fixture API error')
       if (state === 'empty') return fulfill(route, { run_id: 'run-gfs-1', total_segments: 0, usable_curves: 0, unavailable_count: 0, quality_note: null, levels: [] })
       return fulfill(route, { run_id: 'run-gfs-1', total_segments: 2, usable_curves: 2, unavailable_count: 0, quality_note: null, levels: [{ level: 'warning', count: 1, color: '#FFB74D' }] })
     }
-    if (url.pathname === '/api/v1/flood-alerts/ranking') return fulfill(route, state === 'empty' ? { ...floodRanking, items: [], total: 0 } : floodRanking)
+    if (url.pathname === '/api/v1/flood-alerts/ranking') {
+      if (state === 'flood-error') return fulfillError(route, 'flood ranking fixture API error')
+      return fulfill(route, state === 'empty' ? { ...floodRanking, items: [], total: 0 } : floodRanking)
+    }
     if (url.pathname === '/api/v1/tiles/flood-return-period') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ type: 'FeatureCollection', features: [] }) })
     if (url.pathname === '/api/v1/flood-alerts/timeline') {
       return fulfill(route, {
@@ -309,6 +389,7 @@ async function mockM15Apis(page: Page) {
       })
     }
     if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments') {
+      if (state === 'basin-error') return fulfillError(route, 'basin river segments fixture API error')
       return fulfill(route, state === 'empty' ? { ...riverSegments, total: 0, feature_total: 0, features: [] } : riverSegments)
     }
     if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments/seg-009') {
@@ -323,6 +404,9 @@ async function mockM15Apis(page: Page) {
         created_at: '2026-05-01T00:00:00Z',
       })
     }
+    if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments/missing-seg') {
+      return fulfillError(route, 'missing segment fixture', 404)
+    }
     if (url.pathname === '/api/v1/basin-versions/bv-001/river-segments/seg-001') {
       return fulfill(route, {
         river_segment_id: 'seg-001',
@@ -335,7 +419,11 @@ async function mockM15Apis(page: Page) {
         created_at: '2026-05-01T00:00:00Z',
       })
     }
-    if (url.pathname.endsWith('/forecast-series')) return fulfill(route, forecastPayload(url.pathname.split('/river-segments/')[1]?.split('/')[0] ?? 'seg-009'))
+    if (url.pathname.endsWith('/forecast-series')) {
+      if (state === 'partial') return fulfillError(route, 'basin partial forecast fixture')
+      if (state === 'segment-chart-error') return fulfillError(route, 'forecast chart fixture API error')
+      return fulfill(route, forecastPayload(url.pathname.split('/river-segments/')[1]?.split('/')[0] ?? 'seg-009'))
+    }
     if (url.pathname === '/api/v1/lineage/river-point') return fulfill(route, { target_type: 'river_point', target_id: 'seg-009', nodes: [], edges: [] })
 
     throw new Error(`Unhandled M15 API route: ${route.request().method()} ${url.pathname}`)
@@ -352,9 +440,10 @@ async function selectRoleIfAvailable(page: Page, roleName: 'Viewer' | 'Operator'
 async function prepareRoute(page: Page, routePath: string) {
   const url = new URL(routePath, 'http://example.test')
   const requestedRole = url.searchParams.get('m15Role')
+  pageFixtureStates.set(page, url.searchParams.get('m15State'))
   await page.goto(`${url.pathname}${url.search}`)
   if (routePath.startsWith('/monitoring') && requestedRole !== 'viewer') await selectRoleIfAvailable(page, 'Operator')
-  if (routePath.startsWith('/system/model-assets')) await selectRoleIfAvailable(page, 'Model Admin')
+  if (routePath.startsWith('/system/model-assets') && requestedRole !== 'viewer') await selectRoleIfAvailable(page, 'Model Admin')
 }
 
 async function waitForRouteReady(page: Page, routeName: string, stateLabel: string) {
@@ -367,8 +456,12 @@ async function waitForRouteReady(page: Page, routeName: string, stateLabel: stri
   else if (routeName.startsWith('flood')) await expect(page.getByRole('heading', { name: '洪水预警' })).toBeVisible({ timeout: 15_000 })
   else if (routeName.startsWith('monitoring')) await expect(stateLabel === 'rbac-denied' ? page.getByText('权限不足') : page.getByRole('heading', { name: '监控工作台' })).toBeVisible({ timeout: 15_000 })
   else if (routeName === 'segment-detail') await expect(page.getByRole('heading', { name: 'seg-009' })).toBeVisible({ timeout: 15_000 })
+  else if (routeName === 'segment-missing') await expect(page.getByRole('heading', { name: '未找到河段 missing-seg' })).toBeVisible({ timeout: 15_000 })
+  else if (routeName === 'segment-chart-error') await expect(page.getByRole('heading', { name: 'seg-009' })).toBeVisible({ timeout: 15_000 })
   else if (routeName.startsWith('meteorology')) await expect(page.getByRole('heading', { name: '气象数据产品' })).toBeVisible({ timeout: 15_000 })
-  else if (routeName === 'model-assets') await expect(page.getByRole('heading', { name: '模型资产管理' })).toBeVisible({ timeout: 15_000 })
+  else if (routeName === 'model-assets' || routeName.startsWith('model-assets-')) {
+    await expect(stateLabel.includes('rbac-denied') ? page.getByText('权限不足') : page.getByRole('heading', { name: '模型资产管理' })).toBeVisible({ timeout: 15_000 })
+  }
 }
 
 async function assertNoHorizontalScroll(page: Page) {
@@ -418,6 +511,150 @@ async function assertRouteOracle(page: Page, routeName: string) {
   }
 }
 
+async function assertStateOracle(page: Page, stateLabel: string) {
+  await assertNoHorizontalScroll(page)
+  switch (stateLabel) {
+    case 'loading':
+      await expect(page.getByText('总览数据加载中')).toBeVisible()
+      break
+    case 'overview-partial-data':
+      await expect(page.getByText(/flood summary:/).first()).toBeVisible()
+      break
+    case 'api-error':
+      await expect(page.getByText('basins: 暂不可用').first()).toBeVisible()
+      break
+    case 'empty-segments':
+      await expect(page.getByText('该流域暂无已发布的预报数据')).toBeVisible()
+      break
+    case 'basin-partial-data':
+      await expect(page.getByText(/forecast series:/).first()).toBeVisible()
+      break
+    case 'basin-api-error':
+      await expect(page.getByText('river segments: 暂不可用').first()).toBeVisible()
+      break
+    case 'empty-alerts':
+      await expect(page.getByText('暂无洪水预警数据').or(page.getByText('暂无排名数据'))).toBeVisible()
+      break
+    case 'warning-levels':
+      await expect(page.getByRole('button', { name: /警戒/ }).first()).toBeVisible()
+      await expect(page.locator('[style*="#FFB74D"], [style*="255, 183, 77"]').first()).toBeAttached()
+      break
+    case 'flood-api-error':
+      await expect(page.getByText(/flood summary fixture API error|flood ranking fixture API error|预警统计加载失败|预警排名加载失败/).first()).toBeVisible()
+      break
+    case 'empty-jobs':
+      await expect(page.getByText('暂无作业')).toBeVisible()
+      break
+    case 'failed-job-error':
+      await expect(page.getByText('刷新监控数据失败').or(page.getByText('失败'))).toBeVisible()
+      break
+    case 'rbac-denied':
+    case 'model-assets-rbac-denied':
+      await expect(page.getByRole('alert')).toContainText('权限不足')
+      break
+    case 'missing-segment':
+      await expect(page.getByText('missing segment fixture')).toBeVisible()
+      break
+    case 'chart-error':
+      await expect(page.getByText('forecast chart fixture API error').first()).toBeVisible()
+      break
+    case 'grid-unavailable':
+      await expect(page.getByTestId('grid-unavailable')).toContainText('实时栅格瓦片服务尚未接入')
+      break
+    case 'grid-restricted-error':
+      await expect(page.getByTestId('cldas-restricted')).toContainText('CLDAS 数据权限尚未开通')
+      await expect(page.getByLabel('气象有效时间')).toBeDisabled()
+      break
+    case 'empty-stations':
+      await expect(page.getByTestId('station-empty')).toContainText('搜索无结果')
+      break
+    case 'station-detail-error':
+      await expect(page.getByTestId('forcing-unavailable').first()).toBeVisible()
+      break
+    case 'model-assets-loading':
+      await expect(page.getByText('加载中...')).toBeVisible()
+      break
+    case 'model-assets-redacted-error':
+      await expect(page.getByText('模型资产列表加载失败').first()).toBeVisible()
+      await expect(page.getByText(/secret|token|file:\/\//)).toHaveCount(0)
+      break
+    default:
+      throw new Error(`Unhandled M15 state oracle: ${stateLabel}`)
+  }
+}
+
+async function assertSharedTokenBaseline(page: Page) {
+  await prepareRoute(page, '/monitoring')
+  const sourceTrigger = page.getByLabel('Source')
+  await expect(sourceTrigger).toBeVisible()
+  const selectStyles = await sourceTrigger.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return {
+      height: style.height,
+      radius: style.borderTopLeftRadius,
+      gap: style.gap,
+    }
+  })
+  expect(selectStyles).toEqual({ height: '40px', radius: '8px', gap: '8px' })
+
+  await sourceTrigger.click({ force: true })
+  const option = page.getByRole('option', { name: 'GFS' })
+  await expect(option).toBeVisible()
+  const selectContentStyles = await option.evaluate((element) => {
+    const content = element.closest('[data-radix-popper-content-wrapper]')?.firstElementChild ?? element.closest('[role="listbox"]')
+    if (!content) return null
+    const style = getComputedStyle(content)
+    return {
+      zIndex: style.zIndex,
+      radius: style.borderTopLeftRadius,
+      shadow: style.boxShadow,
+    }
+  })
+  expect(selectContentStyles?.zIndex).toBe('50')
+  expect(selectContentStyles?.radius).toBe('8px')
+  expect(selectContentStyles?.shadow).not.toBe('none')
+  await page.keyboard.press('Escape')
+
+  await page.getByRole('button', { name: /查看日志/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  const dialogStyles = await dialog.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return {
+      zIndex: style.zIndex,
+      radius: style.borderTopLeftRadius,
+      gap: style.gap,
+      shadow: style.boxShadow,
+    }
+  })
+  expect(dialogStyles.zIndex).toBe('50')
+  expect(dialogStyles.radius).toBe('8px')
+  expect(dialogStyles.gap).toBe('16px')
+  expect(dialogStyles.shadow).not.toBe('none')
+  await page.getByRole('button', { name: 'Close' }).click()
+
+  await prepareRoute(page, '/meteorology?tab=grid')
+  const tab = page.getByRole('tab', { name: '空间栅格' })
+  await expect(tab).toBeVisible()
+  await expect(tab).toHaveCSS('border-radius', '4px')
+
+  const toastStyles = await page.evaluate(() => {
+    const toast = document.createElement('div')
+    toast.className =
+      'group pointer-events-auto relative flex w-full items-start justify-between gap-[var(--space-3)] overflow-hidden rounded-[var(--radius-md)] border border-border bg-panel p-[var(--space-4)] pr-[var(--space-8)] text-foreground shadow-[var(--shadow-lg)] transition-all'
+    document.body.appendChild(toast)
+    const style = getComputedStyle(toast)
+    const result = {
+      radius: style.borderTopLeftRadius,
+      shadow: style.boxShadow,
+    }
+    toast.remove()
+    return result
+  })
+  expect(toastStyles.radius).toBe('8px')
+  expect(toastStyles.shadow).not.toBe('none')
+}
+
 async function captureEvidence(page: Page, route: { name: string; path: string; stateLabel: string }, viewportLabel: string) {
   await mkdir(screenshotRoot, { recursive: true })
   const artifactPath = path.join(screenshotRoot, `${route.name}-${viewportLabel}-${route.stateLabel}.png`)
@@ -439,13 +676,29 @@ test.beforeEach(async ({ page }) => {
 
 test.afterAll(async () => {
   await mkdir(evidenceRoot, { recursive: true })
-  const requiredEvidenceCount = requiredRoutes.length * requiredViewports.length
-  if (manifestEntries.filter((entry) => requiredRoutes.some((route) => route.path === entry.route)).length !== requiredEvidenceCount) {
-    throw new Error('M15 required route evidence matrix is incomplete.')
+  if (!commitShaPattern.test(commitSha) || placeholderShaPattern.test(commitSha)) {
+    throw new Error(`M15 manifest SHA must be a real commit; received ${commitSha}.`)
+  }
+  const observedLoadedMatrix = new Set(
+    manifestEntries
+      .filter((entry) => requiredRoutes.some((route) => route.path === entry.route))
+      .map((entry) => `${entry.route}|${entry.viewport}|${entry.stateLabel}`),
+  )
+  const missingLoaded = [...requiredLoadedMatrix].filter((key) => !observedLoadedMatrix.has(key))
+  if (missingLoaded.length > 0) {
+    throw new Error(`M15 required loaded route/viewport evidence matrix is incomplete: ${missingLoaded.join(', ')}`)
+  }
+  const observedStateLabels = new Set(manifestEntries.map((entry) => entry.stateLabel))
+  const missingStateLabels = [...requiredStateLabels].filter((stateLabel) => !observedStateLabels.has(stateLabel))
+  if (missingStateLabels.length > 0) {
+    throw new Error(`M15 required state-label evidence matrix is incomplete: ${missingStateLabels.join(', ')}`)
   }
   for (const entry of manifestEntries) {
     for (const key of ['route', 'viewport', 'fixtureMode', 'sha', 'stateLabel', 'command', 'artifactPath'] as const) {
       if (!entry[key]) throw new Error(`M15 manifest entry missing ${key}.`)
+    }
+    if (!commitShaPattern.test(entry.sha) || placeholderShaPattern.test(entry.sha)) {
+      throw new Error(`M15 manifest entry has invalid SHA: ${entry.sha}`)
     }
   }
   await writeFile(
@@ -493,9 +746,7 @@ test.describe('M15 visual conformance evidence', () => {
       await page.setViewportSize({ width: 1440, height: 900 })
       await prepareRoute(page, route.path)
       await waitForRouteReady(page, route.name, route.stateLabel)
-      await assertNoHorizontalScroll(page)
-      if (route.stateLabel === 'restricted') await expect(page.getByTestId('cldas-restricted')).toContainText('CLDAS 数据权限尚未开通')
-      if (route.stateLabel === 'rbac-denied') await expect(page.getByRole('alert')).toContainText('权限不足')
+      await assertStateOracle(page, route.stateLabel)
       await captureEvidence(page, route, '1440x900')
     })
   }
@@ -507,5 +758,10 @@ test.describe('M15 visual conformance evidence', () => {
     await expect(page.locator('[style*="#FFB74D"], [style*="255, 183, 77"]').first()).toBeAttached()
     await prepareRoute(page, '/flood-alerts')
     await expect(page.locator('[style*="#FFB74D"], [style*="255, 183, 77"]').first()).toBeAttached()
+  })
+
+  test('shared control roots inherit M15 token baseline', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await assertSharedTokenBaseline(page)
   })
 })

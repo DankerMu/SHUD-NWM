@@ -7,6 +7,10 @@ Loading, empty, error, restricted, RBAC-denied, hover/focus, and icon-control st
 WHEN required routes are tested for visual conformance
 THEN loaded, loading, empty, error, restricted or RBAC-denied, and partial-data states are covered by deterministic e2e assertions or screenshot fixtures
 
+#### Scenario: Extended state matrix
+WHEN completed segment detail, meteorology, or model asset routes are included in M15 evidence
+THEN missing segment, chart/error, grid unavailable/restricted, empty stations, station detail unavailable, model-assets denied, loading, and redacted-error states are covered or explicitly narrowed in governance documentation
+
 #### Scenario: Restricted data
 WHEN a data source is unavailable or restricted
 THEN UI shows warning/restricted state with accessible text and no fake data

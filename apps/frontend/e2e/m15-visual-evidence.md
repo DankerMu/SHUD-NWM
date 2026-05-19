@@ -19,6 +19,10 @@ The PNG files are volatile local review evidence and should not be committed unl
 policy changes. The manifest records route, viewport, fixture mode, SHA, state label, command, and
 artifact path for each captured screenshot.
 
+The manifest SHA is always a real commit identity. Local evidence resolves `GITHUB_SHA`,
+`CI_COMMIT_SHA`, or `git rev-parse HEAD`; PR evidence should cite the frozen PR head SHA under
+review. Placeholder values such as `local-uncommitted` are blocking for CI/PR evidence.
+
 ## Required Matrix
 
 The required loaded routes are captured at `1920x1080`, `1440x900`, and `1280x900`:
@@ -35,8 +39,17 @@ The same command also captures deterministic extended routes:
 - `/meteorology?tab=stations&basin=yangtze&stationId=HMT-Y2-0237`
 - `/system/model-assets?modelId=model-demo`
 
-State evidence covers overview loading/error, basin empty, flood empty, monitoring RBAC denied, and
-meteorology CLDAS restricted states.
+State evidence is captured once at the canonical `1440x900` review viewport. Loaded required routes
+retain the full three-viewport coverage above. The canonical state matrix covers:
+
+- overview loading, partial data, and API error.
+- basin detail empty segments, partial/unavailable data, and API error.
+- flood alerts empty alerts, warning levels, and API error.
+- monitoring empty jobs, failed job/error, and RBAC denied/restricted.
+- segment detail missing segment and chart/error state.
+- meteorology grid unavailable plus CLDAS restricted/error with disabled timeline.
+- meteorology stations empty stations and station detail/forcing unavailable state.
+- model assets restricted role denied, loading, and redacted error.
 
 ## Review Checklist
 
@@ -58,7 +71,8 @@ meteorology CLDAS restricted states.
   surfaces, not a production map-tile backend.
 - Header height may be `56px` content-box or `57px` rendered border-box.
 - Text wrapping inside panels is acceptable when it does not overflow, overlap, or hide controls.
-- Screenshot timestamps and local SHA values may differ between local and CI runs.
+- Screenshot timestamps may differ between local and CI runs. SHA values must remain real commit
+  hashes: local runs trace to current git `HEAD`, and PR evidence traces to the frozen PR SHA.
 
 ## Blocking Criteria
 
@@ -71,4 +85,5 @@ Visual regression review should block a PR when any of these are observed in the
 - Lost keyboard focus ring on interactive controls.
 - Inconsistent warning colors across overview, basin detail, and flood alerts.
 - Error, restricted, RBAC-denied, or empty states that display fake success data.
-- Missing required manifest metadata or missing screenshot artifacts for required route/viewports.
+- Missing required manifest metadata, missing state labels, placeholder SHA values, or missing
+  screenshot artifacts for required route/viewports.
