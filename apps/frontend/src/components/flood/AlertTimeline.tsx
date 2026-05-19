@@ -27,7 +27,7 @@ export function AlertTimeline({
   onTogglePlayback,
 }: AlertTimelineProps) {
   return (
-    <div className="rounded-lg border border-border bg-panel p-3">
+    <div className="rounded-lg border border-border bg-panel p-3" data-testid="flood-alert-timeline">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-foreground">预报时刻</h2>

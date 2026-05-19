@@ -245,7 +245,7 @@ describe('useOverviewDataStore', () => {
           usable_curves: 1,
           unavailable_count: 0,
           quality_note: null,
-          levels: [{ level: 'warning', count: 1, color: '#FF8C00' }],
+          levels: [{ level: 'warning', count: 1, color: '#FFB74D' }],
         }) as never
       }
       if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
@@ -344,7 +344,7 @@ describe('useOverviewDataStore', () => {
           usable_curves: 1,
           unavailable_count: 0,
           quality_note: null,
-          levels: [{ level: 'warning', count: 1, color: '#FF8C00' }],
+          levels: [{ level: 'warning', count: 1, color: '#FFB74D' }],
         }) as never
       }
       if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
@@ -482,8 +482,8 @@ describe('useOverviewDataStore', () => {
           unavailable_count: 0,
           quality_note: null,
           levels: [
-            { level: 'normal', count: 2, color: '#808080' },
-            { level: 'watch', count: 1, color: '#FFD700' },
+            { level: 'normal', count: 2, color: '#4FC3F7' },
+            { level: 'watch', count: 1, color: '#FFD54F' },
           ],
         }) as never
       }

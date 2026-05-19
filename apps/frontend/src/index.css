@@ -19,6 +19,7 @@
   --color-neutral-300: #d0d0dd;
   --color-neutral-100: #f0f0f5;
   --color-neutral-50: #fafafa;
+  --color-white: #ffffff;
   --color-success: #4caf50;
   --color-warning: #ff9800;
   --color-info: #2196f3;
@@ -41,16 +42,35 @@
   --accent: #2266cc;
   --danger: #b42318;
   /*
-    M11 maps the 06B GIS design tokens into CSS/Tailwind:
+    M15 visual conformance maps the 06B GIS design tokens into CSS/Tailwind:
     56px nav, 280px left panel, 320-360px right panel, 64px timeline,
-    4px spacing base, 4px/8px radii, and shared warning/status colors.
+    4px spacing base, 4px/8px radii, shared warning/status colors,
+    panel/card shadows, and one visible focus ring for all operational controls.
   */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.16);
+  --focus-ring: 0 0 0 2px rgba(30, 136, 229, 0.28);
   --m11-nav-height: 56px;
+  --m15-nav-height: var(--m11-nav-height);
   --m11-left-panel-width: 280px;
+  --m15-left-panel-width: var(--m11-left-panel-width);
   --m11-right-panel-width: 340px;
+  --m15-right-panel-width: var(--m11-right-panel-width);
   --m11-right-panel-min-width: 320px;
   --m11-right-panel-max-width: 360px;
   --m11-timeline-height: 64px;
+  --m15-timeline-height: var(--m11-timeline-height);
   --m11-radius-sm: 4px;
   --m11-radius-md: 8px;
   --m11-warning-normal: #4fc3f7;
@@ -94,4 +114,10 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+:where(button, a, input, select, textarea, [role='button'], [tabindex]:not([tabindex='-1'])):focus-visible {
+  outline: 2px solid #1e88e5;
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
 }

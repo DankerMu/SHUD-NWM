@@ -223,7 +223,7 @@ const layers: LayerState[] = [
     validTimeSource: 'api',
     disabledReason: null,
     freshness: { ...freshness, validTime: '2026-05-18T12:00:00.000Z' },
-    legend: [{ label: 'warning', color: '#FF8C00', min: 10, max: 20 }],
+    legend: [{ label: 'warning', color: '#FFB74D', min: 10, max: 20 }],
   },
   {
     layerId: 'water-level',
@@ -382,7 +382,7 @@ describe('M11 visual foundation shell', () => {
       '--m11-timeline-height': '64px',
     })
     expect(shell).toHaveAttribute('data-layout', 'map-first-compact')
-    expect(shell.className).toContain('h-[calc(100vh-88px)]')
+    expect(shell.className).toContain('h-[calc(100vh-var(--m11-nav-height)-32px)]')
     expect(shell.className).toContain('min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]')
     expect(shell).toHaveAttribute('data-left-panel', 'expanded')
     expect(shell).toHaveAttribute('data-right-panel', 'expanded')

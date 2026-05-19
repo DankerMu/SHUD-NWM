@@ -17,11 +17,13 @@ export const m11VisualTokens = {
     elevated: '#81C784',
     watch: '#FFD54F',
     warning: '#FFB74D',
+    high_risk: '#FF8A65',
     major: '#FF8A65',
     severe: '#E57373',
     extreme: '#AB47BC',
     orange: '#FF9800',
     red: '#F44336',
+    unavailable: '#CCCCCC',
   },
   statuses: {
     success: '#4CAF50',
