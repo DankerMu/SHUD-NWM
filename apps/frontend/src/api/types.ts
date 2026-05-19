@@ -1211,6 +1211,8 @@ export interface components {
         FloodAlertSegmentList: {
             segments: components["schemas"]["FloodAlertSegment"][];
             total: number;
+            limit: number;
+            offset: number;
         };
         FloodAlertTimelinePoint: {
             /** Format: date-time */
@@ -1955,6 +1957,8 @@ export interface operations {
                 bbox?: string;
                 /** @description Optional minimum return period in years. */
                 return_period?: number;
+                /** @description Maximum GeoJSON features to return; requests exceeding this budget fail with 413. */
+                limit?: number;
             };
             header?: never;
             path?: never;
@@ -2266,6 +2270,8 @@ export interface operations {
                 /** @description Comma-separated warning levels. */
                 warning_level?: string;
                 valid_time?: components["parameters"]["ValidTimeQuery"];
+                limit?: number;
+                offset?: components["parameters"]["Offset"];
             };
             header?: never;
             path?: never;

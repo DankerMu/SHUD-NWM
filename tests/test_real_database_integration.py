@@ -9,7 +9,7 @@ from sqlalchemy import text
 from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes import pipeline as pipeline_routes
-from packages.common.migrate import MIGRATIONS_DIR
+from packages.common.migrate import MIGRATIONS_DIR, apply_migration
 from tests.integration_helpers import (
     BASIN_VERSION_ID,
     CYCLE_TIME,
@@ -18,6 +18,7 @@ from tests.integration_helpers import (
     RIVER_NETWORK_VERSION_ID,
     STATE_ID,
     VALID_TIME_1,
+    VALID_TIME_2,
     apply_migrations_from_zero,
     seed_issue_126_data,
     set_integration_env,
@@ -127,6 +128,7 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "pipeline_job_array_task_idx",
                 "return_period_result_summary_idx",
                 "return_period_result_ranking_idx",
+                "return_period_result_valid_time_ranking_idx",
                 "return_period_result_timeline_idx",
                 "return_period_result_map_idx",
             } <= indexes
@@ -169,6 +171,159 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "duration",
                 "valid_time",
             ]
+
+            valid_time_ranking_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT a.attname AS column_name
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        JOIN pg_index ix ON ix.indexrelid = i.oid
+                        JOIN pg_attribute a ON a.attrelid = ix.indrelid
+                          AND a.attnum = ANY(ix.indkey)
+                        WHERE n.nspname = 'flood'
+                          AND i.relname = 'return_period_result_valid_time_ranking_idx'
+                        ORDER BY array_position(ix.indkey::int[], a.attnum::int)
+                        """
+                    )
+                ).mappings()
+            ]
+            assert valid_time_ranking_columns[:4] == ["run_id", "valid_time", "max_over_window", "quality_flag"]
+    finally:
+        engine.dispose()
+
+
+def test_real_return_period_repair_migration_replaces_old_key_idempotently(
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    migration_file = MIGRATIONS_DIR / "000015_flood_return_period_identity_indexes.sql"
+    engine = sqlalchemy_engine(integration_database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE flood.return_period_result DROP CONSTRAINT return_period_result_pkey"))
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE flood.return_period_result
+                      ADD CONSTRAINT return_period_result_pkey
+                      PRIMARY KEY (run_id, river_segment_id, duration, valid_time)
+                    """
+                )
+            )
+
+        import psycopg2
+
+        psycopg_connection = psycopg2.connect(integration_database_url)
+        psycopg_connection.autocommit = True
+        try:
+            apply_migration(psycopg_connection, migration_file)
+            apply_migration(psycopg_connection, migration_file)
+        finally:
+            psycopg_connection.close()
+
+        with engine.connect() as connection:
+            return_period_key_columns = [
+                row["column_name"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT kcu.column_name
+                        FROM information_schema.key_column_usage kcu
+                        WHERE kcu.table_schema = 'flood'
+                          AND kcu.table_name = 'return_period_result'
+                          AND kcu.constraint_name = 'return_period_result_pkey'
+                        ORDER BY kcu.ordinal_position
+                        """
+                    )
+                ).mappings()
+            ]
+        assert return_period_key_columns == [
+            "run_id",
+            "river_network_version_id",
+            "river_segment_id",
+            "duration",
+            "valid_time",
+        ]
+
+        seed_issue_126_data(integration_database_url)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO core.river_network_version (
+                        river_network_version_id, basin_version_id, version_label, segment_count, source_uri, checksum
+                    )
+                    VALUES ('it126_rnv_v2', :basin_version_id, 'integration-v2', 1, 'object://rivnet-v2', 'checksum-v2')
+                    ON CONFLICT (river_network_version_id) DO NOTHING
+                    """
+                ),
+                {"basin_version_id": BASIN_VERSION_ID},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO core.river_segment (
+                        river_segment_id, river_network_version_id, segment_order, geom, properties_json
+                    )
+                    VALUES (
+                        'it126_seg_inside',
+                        'it126_rnv_v2',
+                        1,
+                        ST_SetSRID(ST_MakeLine(ST_Point(110.1, 30.1), ST_Point(110.2, 30.2)), 4490),
+                        '{}'::jsonb
+                    )
+                    ON CONFLICT (river_segment_id, river_network_version_id) DO NOTHING
+                    """
+                ),
+                {"basin_version_id": BASIN_VERSION_ID},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO flood.return_period_result (
+                        run_id, scenario_id, basin_version_id, river_network_version_id, model_id,
+                        river_segment_id, valid_time, duration, q_value, return_period, warning_level,
+                        source_id, cycle_time, max_over_window, quality_flag
+                    )
+                    VALUES
+                      (
+                        :run_id, 'forecast_gfs_deterministic', :basin_version_id, :rnv_v1, :model_id,
+                        'it126_seg_inside', :valid_time, '24h', 10, 2, 'elevated',
+                        'GFS', :cycle_time, false, 'ok'
+                      ),
+                      (
+                        :run_id, 'forecast_gfs_deterministic', :basin_version_id, 'it126_rnv_v2', :model_id,
+                        'it126_seg_inside', :valid_time, '24h', 20, 5, 'watch',
+                        'GFS', :cycle_time, false, 'ok'
+                      )
+                    """
+                ),
+                {
+                    "run_id": FORECAST_RUN_ID,
+                    "basin_version_id": BASIN_VERSION_ID,
+                    "rnv_v1": RIVER_NETWORK_VERSION_ID,
+                    "model_id": MODEL_ID,
+                    "valid_time": VALID_TIME_2,
+                    "cycle_time": CYCLE_TIME,
+                },
+            )
+            versioned_count = connection.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM flood.return_period_result
+                    WHERE run_id = :run_id
+                      AND river_segment_id = 'it126_seg_inside'
+                      AND duration = '24h'
+                      AND valid_time = :valid_time
+                    """
+                ),
+                {"run_id": FORECAST_RUN_ID, "valid_time": VALID_TIME_2},
+            ).mappings().one()["count"]
+            assert versioned_count == 2
     finally:
         engine.dispose()
 
@@ -211,7 +366,11 @@ def test_real_schema_api_and_postgis_spatial_smoke(
         ranking = client.get("/api/v1/flood-alerts/ranking", params={"run_id": FORECAST_RUN_ID})
         timeline = client.get(
             "/api/v1/flood-alerts/timeline",
-            params={"run_id": FORECAST_RUN_ID, "segment_id": "it126_seg_inside"},
+            params={
+                "run_id": FORECAST_RUN_ID,
+                "segment_id": "it126_seg_inside",
+                "river_network_version_id": RIVER_NETWORK_VERSION_ID,
+            },
         )
         flood_map = client.get(
             "/api/v1/tiles/flood-return-period",

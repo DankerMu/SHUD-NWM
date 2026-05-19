@@ -34,6 +34,10 @@ USABLE_CURVE_FLAGS = {"ok", "partial_sample", "monotonicity_corrected"}
 FLOOD_PRODUCT_READY_STATUSES = {"frequency_done", "published"}
 NO_USABLE_CURVE_NOTE = "No usable frequency curves available"
 NO_SEGMENT_CURVE_NOTE = "No frequency curve available for this segment"
+SEGMENT_LIST_DEFAULT_LIMIT = 100
+SEGMENT_LIST_MAX_LIMIT = 500
+FLOOD_RETURN_PERIOD_MAP_DEFAULT_LIMIT = 10_000
+FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT = 10_000
 
 
 class AlertLevelCount(BaseModel):
@@ -94,6 +98,8 @@ class SegmentAlert(BaseModel):
 class SegmentListResponse(BaseModel):
     segments: list[SegmentAlert]
     total: int
+    limit: int
+    offset: int
 
 
 class FrequencyThresholds(BaseModel):
@@ -268,6 +274,8 @@ def flood_alert_segments(
     min_return_period: float | None = Query(default=None, ge=0),
     warning_level: str | None = Query(default=None),
     valid_time: datetime | None = Query(default=None),
+    limit: int = Query(default=SEGMENT_LIST_DEFAULT_LIMIT, ge=1, le=SEGMENT_LIST_MAX_LIMIT),
+    offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     _require_frequency_ready(session, run_id)
@@ -280,6 +288,26 @@ def flood_alert_segments(
         "levels": tuple(levels),
     }
     level_filter = "AND r.warning_level IN :levels" if levels else ""
+    where_sql = f"""
+            WHERE r.run_id = :run_id
+              AND {_time_filter_sql(valid_time, alias="r")}
+              AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
+              {level_filter}
+              AND r.quality_flag IN :usable_flags
+            """
+    count_statement = text(f"SELECT COUNT(*) AS count FROM flood.return_period_result r {where_sql}").bindparams(
+        bindparam("usable_flags", expanding=True)
+    )
+    if levels:
+        count_statement = count_statement.bindparams(bindparam("levels", expanding=True))
+    total = int(
+        session.execute(
+            count_statement,
+            {**params, "max_over_window": True, "usable_flags": tuple(USABLE_CURVE_FLAGS)},
+        )
+        .mappings()
+        .one()["count"]
+    )
     statement = text(
         f"""
             SELECT r.river_segment_id, r.basin_version_id, r.q_value, r.return_period,
@@ -290,19 +318,22 @@ def flood_alert_segments(
             LEFT JOIN core.river_segment rs
               ON rs.river_segment_id = r.river_segment_id
              AND rs.river_network_version_id = r.river_network_version_id
-            WHERE r.run_id = :run_id
-              AND {_time_filter_sql(valid_time)}
-              AND (:min_return_period IS NULL OR r.return_period >= :min_return_period)
-              {level_filter}
-              AND r.quality_flag IN :usable_flags
-            ORDER BY r.return_period DESC NULLS LAST, r.river_segment_id
+            {where_sql}
+            ORDER BY r.return_period DESC NULLS LAST, r.river_network_version_id, r.river_segment_id
+            LIMIT :limit OFFSET :offset
             """
     ).bindparams(bindparam("usable_flags", expanding=True))
     if levels:
         statement = statement.bindparams(bindparam("levels", expanding=True))
     rows = session.execute(
         statement,
-        {**params, "max_over_window": True, "usable_flags": tuple(USABLE_CURVE_FLAGS)},
+        {
+            **params,
+            "max_over_window": True,
+            "usable_flags": tuple(USABLE_CURVE_FLAGS),
+            "limit": limit,
+            "offset": offset,
+        },
     ).mappings()
     segments = [
         SegmentAlert(
@@ -319,7 +350,7 @@ def flood_alert_segments(
         )
         for row in rows
     ]
-    return _ok(request, SegmentListResponse(segments=segments, total=len(segments)).model_dump())
+    return _ok(request, SegmentListResponse(segments=segments, total=total, limit=limit, offset=offset).model_dump())
 
 
 @router.get("/api/v1/flood-alerts/timeline", response_model=dict[str, Any])
@@ -412,6 +443,12 @@ def flood_return_period_map(
     valid_time: datetime = Query(...),
     bbox: str | None = Query(default=None, description="Optional minLon,minLat,maxLon,maxLat filter."),
     return_period: float | None = Query(default=None, ge=0),
+    limit: int = Query(
+        default=FLOOD_RETURN_PERIOD_MAP_DEFAULT_LIMIT,
+        ge=1,
+        le=FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT,
+        description="Maximum GeoJSON features to return. Requests that exceed the budget fail with 413.",
+    ),
     session: Session = Depends(get_flood_alert_session),
 ) -> JSONResponse:
     """Return flood return-period map data as GeoJSON.
@@ -455,7 +492,8 @@ def flood_return_period_map(
               AND r.valid_time = :valid_time
               AND (:return_period IS NULL OR r.return_period >= :return_period)
               {bbox_filter}
-            ORDER BY r.river_segment_id
+            ORDER BY r.river_network_version_id, r.river_segment_id
+            LIMIT :query_limit
             """
         ),
         {
@@ -463,9 +501,18 @@ def flood_return_period_map(
             "duration": duration,
             "valid_time": valid_time,
             "return_period": return_period,
+            "query_limit": limit + 1,
             **(_bbox_params(bounds) if bounds is not None else {}),
         },
     ).mappings()
+    rows = list(rows)
+    if len(rows) > limit:
+        raise ApiError(
+            status_code=413,
+            code="FLOOD_RETURN_PERIOD_FEATURE_LIMIT_EXCEEDED",
+            message="Flood return-period GeoJSON feature budget exceeded; provide a bbox or lower the result size.",
+            details={"limit": limit},
+        )
     payload = TileFeatureCollection(
         features=[
             TileFeature(
@@ -578,10 +625,14 @@ def _result_segment_count(
         session.execute(
             text(
                 f"""
-                SELECT COUNT(DISTINCT river_segment_id) AS count
-                FROM flood.return_period_result
-                WHERE run_id = :run_id
-                  AND {_time_filter_sql(valid_time)}
+                SELECT COUNT(*) AS count
+                FROM (
+                    SELECT river_network_version_id, river_segment_id
+                    FROM flood.return_period_result
+                    WHERE run_id = :run_id
+                      AND {_time_filter_sql(valid_time)}
+                    GROUP BY river_network_version_id, river_segment_id
+                ) AS versioned_segments
                 """
             ),
             {"run_id": run_id, "valid_time": valid_time, "max_over_window": True},
@@ -615,11 +666,15 @@ def _usable_curve_count(session: Session, run_id: str, *, valid_time: datetime |
         session.execute(
             text(
                 f"""
-                SELECT COUNT(DISTINCT river_segment_id) AS count
-                FROM flood.return_period_result
-                WHERE run_id = :run_id
-                  AND {_time_filter_sql(valid_time)}
-                  AND quality_flag IN :usable_flags
+                SELECT COUNT(*) AS count
+                FROM (
+                    SELECT river_network_version_id, river_segment_id
+                    FROM flood.return_period_result
+                    WHERE run_id = :run_id
+                      AND {_time_filter_sql(valid_time)}
+                      AND quality_flag IN :usable_flags
+                    GROUP BY river_network_version_id, river_segment_id
+                ) AS versioned_segments
                 """
             ).bindparams(bindparam("usable_flags", expanding=True)),
             {

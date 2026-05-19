@@ -84,6 +84,7 @@ export function buildFloodReturnPeriodGeoJsonUrl(runId: string, validTime: strin
     run_id: runId,
     duration: '1h',
     valid_time: validTime,
+    limit: String(floodReturnPeriodGeoJsonBudget.maxFeatures),
   })
   return buildApiUrl(`/api/v1/tiles/flood-return-period?${params.toString()}`)
 }

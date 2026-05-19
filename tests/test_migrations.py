@@ -144,7 +144,30 @@ def test_flood_return_period_result_has_versioned_identity_and_hot_path_indexes(
     for index_name in (
         "return_period_result_summary_idx",
         "return_period_result_ranking_idx",
+        "return_period_result_valid_time_ranking_idx",
         "return_period_result_timeline_idx",
         "return_period_result_map_idx",
     ):
         assert index_name in repair_schema
+
+    expected_valid_time_prefix = (
+        "run_id,\n"
+        "    valid_time,\n"
+        "    max_over_window,\n"
+        "    quality_flag,\n"
+        "    return_period DESC NULLS LAST"
+    )
+    assert expected_valid_time_prefix in repair_schema
+
+
+def test_flood_return_period_repair_migration_preflights_duplicate_versioned_rows() -> None:
+    repair_schema = dict(_migration_sql())["000015_flood_return_period_identity_indexes.sql"]
+
+    preflight_position = repair_schema.index("duplicate versioned return-period rows exist")
+    drop_position = repair_schema.index("ALTER TABLE flood.return_period_result DROP CONSTRAINT")
+
+    assert preflight_position < drop_position
+    assert "GROUP BY run_id, river_network_version_id, river_segment_id, duration, valid_time" in repair_schema
+    assert "HAVING COUNT(*) > 1" in repair_schema
+    assert "Deduplicate or quarantine duplicate return-period rows before applying migration 000015" in repair_schema
+    assert "IF NOT EXISTS" in repair_schema

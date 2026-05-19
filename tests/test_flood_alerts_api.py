@@ -50,6 +50,19 @@ def test_summary_normal_threshold_and_valid_time() -> None:
         assert _level_count(valid_time_data, "warning") == 0
 
 
+def test_summary_counts_duplicate_segment_ids_by_river_network_version() -> None:
+    with _client() as client:
+        response = client.get(f"/api/v1/flood-alerts/summary?run_id={DUPLICATE_SEGMENT_RUN_ID}")
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+    assert data["total_segments"] == 2
+    assert data["usable_curves"] == 2
+    assert data["unavailable_count"] == 0
+    assert _level_count(data, "watch") == 1
+    assert _level_count(data, "severe") == 1
+
+
 def test_summary_errors_and_zero_usable_curves() -> None:
     with _client() as client:
         response = client.get("/api/v1/flood-alerts/summary?run_id=missing")
@@ -150,6 +163,8 @@ def test_segments_filters_and_empty_result() -> None:
         assert response.status_code == 200
         data = response.json()["data"]
         assert data["total"] == 2
+        assert data["limit"] == 100
+        assert data["offset"] == 0
         assert {segment["river_segment_id"] for segment in data["segments"]} == {"seg_003", "seg_004"}
         assert {segment["river_network_version_id"] for segment in data["segments"]} == {"rnv_v1", "rnv_v2"}
         assert data["segments"][0]["geom_centroid"]["type"] == "Point"
@@ -162,7 +177,22 @@ def test_segments_filters_and_empty_result() -> None:
         response = client.get(f"/api/v1/flood-alerts/segments?run_id={RUN_ID}&min_return_period=500")
         assert response.status_code == 200
         empty_data = response.json()["data"]
-        assert empty_data == {"segments": [], "total": 0}
+        assert empty_data == {"segments": [], "total": 0, "limit": 100, "offset": 0}
+
+
+def test_segments_pagination_preserves_total_matching_rows() -> None:
+    with _client() as client:
+        response = client.get(f"/api/v1/flood-alerts/segments?run_id={RUN_ID}&limit=1&offset=1")
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+        over_limit = client.get(f"/api/v1/flood-alerts/segments?run_id={RUN_ID}&limit=501")
+
+    assert data["total"] == 4
+    assert data["limit"] == 1
+    assert data["offset"] == 1
+    assert len(data["segments"]) == 1
+    assert over_limit.status_code == 422
 
 
 def test_timeline_normal_with_peak_and_no_frequency_curve() -> None:
@@ -331,6 +361,19 @@ def test_flood_tile_spatial_and_return_period_filters() -> None:
         )
         assert response.status_code == 200
         assert {feature["properties"]["segment_id"] for feature in response.json()["features"]} == {"seg_002"}
+
+
+def test_flood_tile_feature_budget_overflow_returns_413() -> None:
+    with _client() as client:
+        response = client.get(
+            "/api/v1/tiles/flood-return-period"
+            f"?run_id={RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}&limit=2"
+        )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "FLOOD_RETURN_PERIOD_FEATURE_LIMIT_EXCEEDED"
+    assert body["error"]["details"] == {"limit": 2}
 
 
 def test_flood_tile_legacy_pbf_route_redirects_to_geojson_endpoint() -> None:
@@ -763,7 +806,7 @@ def _seed_data(connection: Any) -> None:
         111.0,
         7.0,
         "watch",
-        False,
+        True,
         run_id=DUPLICATE_SEGMENT_RUN_ID,
     )
     _insert_result(
@@ -775,7 +818,7 @@ def _seed_data(connection: Any) -> None:
         222.0,
         80.0,
         "severe",
-        False,
+        True,
         run_id=DUPLICATE_SEGMENT_RUN_ID,
     )
     _insert_result(

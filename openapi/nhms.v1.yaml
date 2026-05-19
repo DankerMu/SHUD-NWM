@@ -712,6 +712,15 @@ paths:
             type: number
             minimum: 0
           description: Optional minimum return period in years.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 10000
+          description: Maximum GeoJSON features to return; requests exceeding this budget fail with 413.
       responses:
         "200":
           description: GeoJSON flood return-period FeatureCollection
@@ -1080,6 +1089,15 @@ paths:
             type: string
           description: Comma-separated warning levels.
         - $ref: "#/components/parameters/ValidTimeQuery"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - $ref: "#/components/parameters/Offset"
       responses:
         "200":
           description: Flood alert segment list
@@ -2796,13 +2814,20 @@ components:
           description: "GeoJSON point centroid, or null"
     FloodAlertSegmentList:
       type: object
-      required: [segments, total]
+      required: [segments, total, limit, offset]
       properties:
         segments:
           type: array
           items:
             $ref: "#/components/schemas/FloodAlertSegment"
         total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 500
+        offset:
           type: integer
           minimum: 0
     FloodAlertTimelinePoint:

@@ -60,6 +60,7 @@ describe('FloodReturnPeriodLayer', () => {
     expect(url).toContain('https://api.example.test/api/v1/tiles/flood-return-period?')
     expect(url).toContain('run_id=run+1')
     expect(url).toContain('duration=1h')
+    expect(url).toContain('limit=10000')
     expect(url).not.toContain('{z}')
     expect(url).not.toContain('.pbf')
   })
@@ -74,7 +75,7 @@ describe('FloodReturnPeriodLayer', () => {
 
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
     expect(fetch).toHaveBeenCalledWith(
-      'https://api.example.test/api/v1/tiles/flood-return-period?run_id=run-1&duration=1h&valid_time=2026-05-03T06%3A00%3A00Z',
+      'https://api.example.test/api/v1/tiles/flood-return-period?run_id=run-1&duration=1h&valid_time=2026-05-03T06%3A00%3A00Z&limit=10000',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
   })
