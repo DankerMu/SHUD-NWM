@@ -137,6 +137,8 @@ jobs:
     name: Frontend M15 Visual Evidence
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      M15_EVIDENCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

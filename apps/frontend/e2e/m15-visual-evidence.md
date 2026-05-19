@@ -22,10 +22,12 @@ The PNG files are volatile local review evidence and should not be committed unl
 policy changes. The manifest records route, viewport, fixture mode, SHA, state label, command, and
 artifact path for each captured screenshot.
 
-The manifest SHA is always a real commit identity. Local evidence resolves `GITHUB_SHA`,
-`CI_COMMIT_SHA`, or `git rev-parse HEAD`; CI evidence must match `GITHUB_SHA`. PR evidence must be
-rerun after the final commit so it cites the frozen PR head SHA under review. Placeholder values
-such as `local-uncommitted` are blocking for CI/PR evidence.
+The manifest SHA is always a real commit identity. Local evidence resolves `M15_EVIDENCE_SHA`, PR
+head SHA env, `GITHUB_SHA`, `CI_COMMIT_SHA`, or `git rev-parse HEAD`. CI evidence must match
+`M15_EVIDENCE_SHA` when set; the CI workflow sets it to the pull request head SHA for PR events and
+to `github.sha` for push/non-PR events. PR evidence must be rerun after the final commit so it cites
+the frozen PR head SHA under review. Placeholder values such as `local-uncommitted` are blocking for
+CI/PR evidence.
 
 ## Required Matrix
 
@@ -80,7 +82,8 @@ retain the full three-viewport coverage above. The canonical state matrix covers
 - Header height may be `56px` content-box or `57px` rendered border-box.
 - Text wrapping inside panels is acceptable when it does not overflow, overlap, or hide controls.
 - Screenshot timestamps may differ between local and CI runs. SHA values must remain real commit
-  hashes: local runs trace to current git `HEAD`, and PR evidence traces to the frozen PR SHA.
+  hashes: local runs trace to current git `HEAD` unless an explicit evidence SHA is provided, and PR
+  evidence traces to the frozen PR head SHA.
 
 ## Blocking Criteria
 

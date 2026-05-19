@@ -101,7 +101,13 @@ interface EvidenceEntry {
 }
 
 function resolveCommitSha() {
-  const candidates = [process.env.GITHUB_SHA, process.env.CI_COMMIT_SHA].filter((value): value is string => Boolean(value))
+  const candidates = [
+    process.env.M15_EVIDENCE_SHA,
+    process.env.GITHUB_PR_HEAD_SHA,
+    process.env.PR_HEAD_SHA,
+    process.env.GITHUB_SHA,
+    process.env.CI_COMMIT_SHA,
+  ].filter((value): value is string => Boolean(value))
   const envSha = candidates.find((value) => commitShaPattern.test(value) && !placeholderShaPattern.test(value))
   if (envSha) return envSha
 
@@ -116,7 +122,7 @@ function resolveCommitSha() {
     // afterAll also validates the resolved SHA before any manifest is written.
   }
 
-  throw new Error('M15 evidence requires a real 40-character commit SHA from GITHUB_SHA, CI_COMMIT_SHA, or git rev-parse HEAD.')
+  throw new Error('M15 evidence requires a real 40-character commit SHA from M15_EVIDENCE_SHA, PR head SHA env, GITHUB_SHA, CI_COMMIT_SHA, or git rev-parse HEAD.')
 }
 
 async function fulfillError(route: Route, message: string, status = 503) {
@@ -592,6 +598,50 @@ async function assertRouteOracle(page: Page, routeName: string) {
   }
 }
 
+async function assertExtendedRouteOracle(page: Page, routeName: string) {
+  await assertNoHorizontalScroll(page)
+  await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible()
+
+  switch (routeName) {
+    case 'segment-detail':
+      await expect(page.getByRole('heading', { name: 'seg-009' })).toBeVisible()
+      await expect(page.getByRole('region', { name: '多源预报曲线' })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Analysis' })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'GFS' })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'IFS' })).toBeVisible()
+      break
+    case 'meteorology-grid':
+      await expect(page.getByTestId('meteorology-grid-map')).toBeVisible()
+      await expect(page.getByLabel('气象有效时间')).toBeVisible()
+      await expect(page.getByRole('tablist', { name: '气象产品标签' })).toBeVisible()
+      await expect(page.getByRole('tab', { name: '空间栅格' })).toBeVisible()
+      await expect(page.getByRole('tab', { name: '气象代站' })).toBeVisible()
+      await expect(page.getByRole('tab', { name: '空间栅格', selected: true })).toBeVisible()
+      break
+    case 'meteorology-stations':
+      await expect(page.getByTestId('station-inventory')).toBeVisible()
+      await expect(page.getByLabel('流域')).toBeVisible()
+      await expect(page.getByPlaceholder('station_id / 名称')).toBeVisible()
+      await expect(page.getByLabel('排序')).toBeVisible()
+      await expect(page.getByLabel('选择站点 HMT-Y2-0237')).toBeVisible()
+      await expect(page.getByTestId('forcing-charts')).toBeVisible()
+      await expect(page.getByRole('tab', { name: '气象代站', selected: true })).toBeVisible()
+      break
+    case 'model-assets':
+      await expect(page.getByRole('heading', { name: '模型资产管理' })).toBeVisible()
+      await expect(page.getByPlaceholder('搜索流域、模型、版本')).toBeVisible()
+      await expect(page.getByLabel('模型状态筛选')).toBeVisible()
+      await expect(page.getByRole('button', { name: /Demo SHUD/ })).toBeVisible()
+      await expect(page.getByText('模型元数据')).toBeVisible()
+      await expect(page.getByText('版本时间线 / 依赖图')).toBeVisible()
+      await expect(page.getByText('产品资产')).toBeVisible()
+      await expect(page.getByText(/secret|token|file:\/\//)).toHaveCount(0)
+      break
+    default:
+      throw new Error(`Unhandled M15 extended route oracle: ${routeName}`)
+  }
+}
+
 async function assertStateOracle(page: Page, stateLabel: string) {
   await assertNoHorizontalScroll(page)
   switch (stateLabel) {
@@ -600,12 +650,14 @@ async function assertStateOracle(page: Page, stateLabel: string) {
       break
     case 'overview-partial-data':
       await expect(page.getByText(/flood summary:/).first()).toBeVisible()
+      await expect(page.getByTestId('m11-timeline')).toBeVisible()
       break
     case 'api-error':
       await expect(page.getByText('basins: 暂不可用').first()).toBeVisible()
       break
     case 'empty-segments':
       await expect(page.getByText('该流域暂无已发布的预报数据')).toBeVisible()
+      await expect(page.getByRole('button', { name: '折叠左侧面板' })).toBeVisible()
       break
     case 'basin-partial-data':
       await expect(page.getByText(/forecast series:/).first()).toBeVisible()
@@ -615,6 +667,7 @@ async function assertStateOracle(page: Page, stateLabel: string) {
       break
     case 'empty-alerts':
       await expect(page.getByText('暂无洪水预警数据').or(page.getByText('暂无排名数据'))).toBeVisible()
+      await expect(page.getByTestId('flood-alert-timeline')).toBeVisible()
       break
     case 'warning-levels':
       await expect(page.getByRole('button', { name: /警戒/ }).first()).toBeVisible()
@@ -625,6 +678,7 @@ async function assertStateOracle(page: Page, stateLabel: string) {
       break
     case 'empty-jobs':
       await expect(page.getByText('暂无作业')).toBeVisible()
+      await expect(page.getByLabel('Status filter')).toBeVisible()
       break
     case 'failed-job-error':
       await expect(page.getByText('刷新监控数据失败').or(page.getByText('失败'))).toBeVisible()
@@ -641,6 +695,7 @@ async function assertStateOracle(page: Page, stateLabel: string) {
       break
     case 'grid-unavailable':
       await expect(page.getByTestId('grid-unavailable')).toContainText('实时栅格瓦片服务尚未接入')
+      await expect(page.getByLabel('气象有效时间')).toBeVisible()
       break
     case 'grid-restricted-error':
       await expect(page.getByTestId('cldas-restricted')).toContainText('CLDAS 数据权限尚未开通')
@@ -648,12 +703,15 @@ async function assertStateOracle(page: Page, stateLabel: string) {
       break
     case 'empty-stations':
       await expect(page.getByTestId('station-empty')).toContainText('搜索无结果')
+      await expect(page.getByLabel('流域')).toBeVisible()
+      await expect(page.getByLabel('排序')).toBeVisible()
       break
     case 'station-detail-error':
       await expect(page.getByTestId('forcing-unavailable').first()).toBeVisible()
       break
     case 'model-assets-loading':
       await expect(page.getByText('加载中...')).toBeVisible()
+      await expect(page.getByPlaceholder('搜索流域、模型、版本')).toBeVisible()
       break
     case 'model-assets-redacted-error':
       await expect(page.getByText('模型资产列表加载失败').first()).toBeVisible()
@@ -780,8 +838,11 @@ test.afterAll(async () => {
   if (!commitShaPattern.test(commitSha) || placeholderShaPattern.test(commitSha)) {
     throw new Error(`M15 manifest SHA must be a real commit; received ${commitSha}.`)
   }
-  if (process.env.GITHUB_SHA && commitSha !== process.env.GITHUB_SHA) {
+  if (process.env.CI && !process.env.M15_EVIDENCE_SHA && process.env.GITHUB_SHA && commitSha !== process.env.GITHUB_SHA) {
     throw new Error(`M15 manifest SHA must match GITHUB_SHA in CI; received ${commitSha}, expected ${process.env.GITHUB_SHA}.`)
+  }
+  if (process.env.CI && process.env.M15_EVIDENCE_SHA && commitSha !== process.env.M15_EVIDENCE_SHA) {
+    throw new Error(`M15 manifest SHA must match M15_EVIDENCE_SHA in CI; received ${commitSha}, expected ${process.env.M15_EVIDENCE_SHA}.`)
   }
   const observedLoadedMatrix = new Set(
     manifestEntries
@@ -840,7 +901,7 @@ test.describe('M15 visual conformance evidence', () => {
       await page.setViewportSize({ width: 1440, height: 900 })
       await prepareRoute(page, route.path)
       await waitForRouteReady(page, route.name, route.stateLabel)
-      await assertNoHorizontalScroll(page)
+      await assertExtendedRouteOracle(page, route.name)
       await captureEvidence(page, route, '1440x900')
     })
   }
