@@ -171,12 +171,20 @@ function formatCycleTime(value?: string | null) {
 
 function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastData {
   const pointBudgetGuard = createForecastPointBudgetGuard()
-  const series = (payload.segments ?? []).map((segment): ForecastSeries => {
+  const sourceSegments = payload.segments ?? []
+  pointBudgetGuard.setSourceSeriesCount(sourceSegments.length)
+  pointBudgetGuard.setSourcePointCount(
+    sourceSegments.reduce((total, segment) => total + (Array.isArray(segment.data) ? segment.data.length : 0), 0),
+  )
+  const series: ForecastSeries[] = []
+  for (const segment of sourceSegments) {
     const scenario = segment.scenario ?? segment.scenario_id ?? ''
     const role = segment.segment_role ?? segment.role
     const source = inferSource(scenario, segment.source_id ?? segment.source)
     const isAnalysis = isAnalysisSegment(scenario, role)
-    return {
+    const retainedPoints = pointBudgetGuard.takeSeries(segment.data)
+    if (retainedPoints === null) break
+    series.push({
       scenario,
       source,
       role,
@@ -188,14 +196,14 @@ function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastDat
         segment.available_lead_hours !== undefined && segment.available_lead_hours !== null
           ? Number(segment.available_lead_hours)
           : null,
-      points: pointBudgetGuard.take(segment.data)
+      points: retainedPoints
         .filter((point) => point.value !== undefined && (point.valid_time !== undefined || point.time !== undefined))
         .map((point) => ({
           time: point.valid_time ?? point.time ?? '',
           value: Number(point.value),
         })),
-    }
-  })
+    })
+  }
 
   return {
     segmentId: payload.river_segment_id ?? payload.segment_id ?? '',
@@ -211,11 +219,19 @@ function normalizeSplicedResponse(payload: SplicedForecastResponse): ForecastDat
 
 function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastData {
   const pointBudgetGuard = createForecastPointBudgetGuard()
-  const series = ((payload.series ?? []) as RiverSeriesSegment[]).map((segment): ForecastSeries => {
+  const sourceSegments = (payload.series ?? []) as RiverSeriesSegment[]
+  pointBudgetGuard.setSourceSeriesCount(sourceSegments.length)
+  pointBudgetGuard.setSourcePointCount(
+    sourceSegments.reduce((total, segment) => total + (Array.isArray(segment.points) ? segment.points.length : 0), 0),
+  )
+  const series: ForecastSeries[] = []
+  for (const segment of sourceSegments) {
     const scenario = segment.scenario_id ?? 'forecast_gfs_deterministic'
     const source = inferSource(scenario, segment.source_id ?? segment.source)
     const isAnalysis = isAnalysisSegment(scenario, segment.segment_role)
-    return {
+    const retainedPoints = pointBudgetGuard.takeSeries(segment.points)
+    if (retainedPoints === null) break
+    series.push({
       scenario,
       source,
       role: segment.segment_role,
@@ -227,14 +243,14 @@ function normalizeRiverSeriesResponse(payload: RiverSeriesResponse): ForecastDat
         segment.available_lead_hours !== undefined && segment.available_lead_hours !== null
           ? Number(segment.available_lead_hours)
           : null,
-      points: pointBudgetGuard.take(segment.points)
+      points: retainedPoints
         .filter((point) => point.length >= 2)
         .map((point) => ({
           time: point[0],
           value: Number(point[1]),
         })),
-    }
-  })
+    })
+  }
 
   return {
     segmentId: payload.segment_id,

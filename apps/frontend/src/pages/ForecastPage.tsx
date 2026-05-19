@@ -197,6 +197,7 @@ function concreteForecastSource(data: ReturnType<typeof useForecastStore.getStat
 
 function firstForecastValidTime(data: ReturnType<typeof useForecastStore.getState>['forecastData']) {
   const points = (data?.series ?? [])
+    .filter((series) => !series.isAnalysis)
     .flatMap((series) => series.points)
     .map((point) => {
       const timestamp = typeof point.time === 'number' ? point.time : Date.parse(point.time)

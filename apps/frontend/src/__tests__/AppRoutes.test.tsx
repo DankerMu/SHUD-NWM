@@ -1364,6 +1364,47 @@ describe('App route state', () => {
     )
   })
 
+  it('synthesizes forecast handoff validTime from the first non-analysis forecast point', async () => {
+    vi.mocked(client.GET).mockImplementation(async (_path: string, options?: { params?: { path?: Record<string, string> } }) => ({
+      data: success({
+        river_segment_id: options?.params?.path?.segment_id ?? 'seg-009',
+        issue_time: '2026-05-18T00:00:00Z',
+        unit: 'm3/s',
+        segments: [
+          {
+            scenario: 'analysis_true_field',
+            scenario_id: 'analysis_true_field',
+            source: 'ERA5',
+            segment_role: 'past_7_days',
+            cycle_time: '2026-05-18T00:00:00Z',
+            data: [{ valid_time: '2026-05-17T18:00:00Z', value: 8 }],
+          },
+          {
+            scenario: 'forecast_gfs_deterministic',
+            scenario_id: 'forecast_gfs_deterministic',
+            source: 'GFS',
+            segment_role: 'future_7_days',
+            cycle_time: '2026-05-18T00:00:00Z',
+            data: [{ valid_time: '2026-05-18T06:00:00Z', value: 10 }],
+          },
+        ],
+        frequency_thresholds: null,
+      }),
+      error: undefined,
+    }) as never)
+    window.history.pushState({}, '', '/forecast')
+
+    render(<App />)
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: '河网地图' }))
+    await waitFor(() =>
+      expect(screen.getByRole('link', { name: '查看河段详情' })).toHaveAttribute(
+        'href',
+        '/segments/seg-010?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-010',
+      ),
+    )
+  })
+
   it('preserves source=best in forecast segment detail handoff until concrete forecast data resolves', async () => {
     let resolveForecast: (value: unknown) => void = () => undefined
     vi.mocked(client.GET).mockImplementation(
@@ -2475,7 +2516,8 @@ describe('App route state', () => {
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('frequency-curve')).toHaveTextContent('当前峰值'))
     expect(screen.getByLabelText('重现期频率曲线')).toBeInTheDocument()
-    expect(screen.getByTestId('frequency-curve')).toHaveTextContent('T')
+    expect(screen.getByTestId('frequency-curve')).toHaveTextContent('T31.6')
+    expect(screen.getByTestId('frequency-curve')).not.toHaveTextContent('T35.0')
     expect(screen.getByTestId('frequency-curve')).not.toHaveTextContent('阈值或有限峰值不足')
   })
 

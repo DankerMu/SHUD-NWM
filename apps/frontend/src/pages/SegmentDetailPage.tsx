@@ -878,7 +878,11 @@ function FrequencyCurve({
   const interpolatedPeriod =
     upper.value === lower.value
       ? lower.period
-      : lower.period + ((peakQ - lower.value) / (upper.value - lower.value)) * (upper.period - lower.period)
+      : Math.exp(
+          Math.log(lower.period) +
+            ((peakQ - lower.value) / (upper.value - lower.value)) *
+              (Math.log(upper.period) - Math.log(lower.period)),
+        )
   const boundedPeakPeriod = Math.max(2, Math.min(maxPeriod, interpolatedPeriod))
   const peak = plot(boundedPeakPeriod, peakQ)
 

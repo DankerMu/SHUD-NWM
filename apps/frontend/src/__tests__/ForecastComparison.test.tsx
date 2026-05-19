@@ -362,9 +362,47 @@ describe('forecast comparison UI', () => {
       pointBudget: FORECAST_CHART_POINT_BUDGET,
       sourcePointCount: FORECAST_CHART_POINT_BUDGET + 5,
       retainedPointCount: FORECAST_CHART_POINT_BUDGET,
+      seriesBudget: FORECAST_CHART_POINT_BUDGET,
+      sourceSeriesCount: 1,
+      retainedSeriesCount: 1,
       overBudget: true,
     })
     expect(forecast?.series[0]?.points).toHaveLength(FORECAST_CHART_POINT_BUDGET)
+  })
+
+  it('marks too many one-point series as over-budget and stops retaining extra series', async () => {
+    vi.mocked(client.GET).mockResolvedValue(
+      success({
+        segment_id: 'seg-1',
+        issue_time: '2026-05-18T00:00:00Z',
+        unit: 'm3/s',
+        series: Array.from({ length: FORECAST_CHART_POINT_BUDGET + 1 }, (_, index) => ({
+          scenario_id: 'forecast_gfs_deterministic',
+          source: 'GFS',
+          segment_role: 'future_7_days',
+          points: [[`2026-05-18T${String(index % 24).padStart(2, '0')}:00:00Z`, index]],
+        })),
+        frequency_thresholds: null,
+      }) as never,
+    )
+    resetForecastStore({
+      selectedSegment: { segmentId: 'seg-1', basinVersionId: 'basin-1', riverNetworkVersionId: 'rn-1' },
+      selectedScenarios: ['GFS'],
+    })
+
+    await useForecastStore.getState().fetchForecast({ source: 'gfs' })
+
+    const forecast = useForecastStore.getState().forecastData
+    expect(forecast?.pointBudgetStatus).toMatchObject({
+      pointBudget: FORECAST_CHART_POINT_BUDGET,
+      sourcePointCount: FORECAST_CHART_POINT_BUDGET + 1,
+      retainedPointCount: FORECAST_CHART_POINT_BUDGET,
+      seriesBudget: FORECAST_CHART_POINT_BUDGET,
+      sourceSeriesCount: FORECAST_CHART_POINT_BUDGET + 1,
+      retainedSeriesCount: FORECAST_CHART_POINT_BUDGET,
+      overBudget: true,
+    })
+    expect(forecast?.series).toHaveLength(FORECAST_CHART_POINT_BUDGET)
   })
 
   it('fails locally instead of issuing an unscoped forecast request', async () => {
@@ -459,6 +497,37 @@ describe('forecast comparison UI', () => {
             pointBudget: FORECAST_CHART_POINT_BUDGET,
             sourcePointCount: FORECAST_CHART_POINT_BUDGET + 1,
             retainedPointCount: FORECAST_CHART_POINT_BUDGET,
+            seriesBudget: FORECAST_CHART_POINT_BUDGET,
+            sourceSeriesCount: 1,
+            retainedSeriesCount: 1,
+            overBudget: true,
+          },
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('status')).toHaveTextContent('预报序列超出客户端渲染预算')
+    expect(screen.queryByTestId('echarts-option')).not.toBeInTheDocument()
+  })
+
+  it('renders a degraded state for too many retained one-point series before building ECharts options', () => {
+    render(
+      <ForecastChart
+        data={{
+          ...forecastData(
+            Array.from({ length: FORECAST_CHART_POINT_BUDGET }, (_, index) =>
+              forecastSeries({
+                points: [{ time: `2026-05-18T${String(index % 24).padStart(2, '0')}:00:00Z`, value: index }],
+              }),
+            ),
+          ),
+          pointBudgetStatus: {
+            pointBudget: FORECAST_CHART_POINT_BUDGET,
+            sourcePointCount: FORECAST_CHART_POINT_BUDGET + 1,
+            retainedPointCount: FORECAST_CHART_POINT_BUDGET,
+            seriesBudget: FORECAST_CHART_POINT_BUDGET,
+            sourceSeriesCount: FORECAST_CHART_POINT_BUDGET + 1,
+            retainedSeriesCount: FORECAST_CHART_POINT_BUDGET,
             overBudget: true,
           },
         }}
