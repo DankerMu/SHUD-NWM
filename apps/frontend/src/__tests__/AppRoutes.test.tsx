@@ -104,7 +104,10 @@ vi.mock('react-map-gl/maplibre', () => ({
             onClick?.({
               target: { getCanvas: () => ({ style: {} }) },
               features: [
-                { layer: { id: 'm11-flood-return-period-line' }, properties: { segment_id: 'overlay-first' } },
+                {
+                  layer: { id: 'm11-flood-return-period-line' },
+                  properties: { segment_id: 'overlay-first', river_network_version_id: 'rn-v1' },
+                },
                 { layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'basin-demo' } },
               ],
             })

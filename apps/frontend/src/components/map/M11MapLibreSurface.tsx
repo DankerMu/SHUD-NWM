@@ -470,7 +470,7 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
 
 function M11OverlayPrimitive({ overlay, data }: { overlay: M11RegisteredOverlay; data: FloodReturnPeriodFeatureCollection }) {
   return (
-    <Source id={overlay.sourceId} type="geojson" data={data} promoteId="segment_id">
+    <Source id={overlay.sourceId} type="geojson" data={data} promoteId="feature_id">
       <Layer {...overlay.layer} />
     </Source>
   )

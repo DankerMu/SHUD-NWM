@@ -60,7 +60,10 @@ vi.mock('react-map-gl/maplibre', () => ({
       ref,
     ) => {
       const canvasStyle: Record<string, string> = {}
-      const overlayFeature = { layer: { id: 'm11-flood-return-period-line' }, properties: { segment_id: 'seg-1' } }
+      const overlayFeature = {
+        layer: { id: 'm11-flood-return-period-line' },
+        properties: { segment_id: 'seg-1', river_network_version_id: 'rn-v1' },
+      }
       const riverFeature = {
         layer: { id: 'm11-basin-river-line' },
         properties: {
@@ -499,6 +502,7 @@ describe('M11 visual foundation shell', () => {
     expect(mapSources.at(-1)).toMatchObject({
       id: 'm11-flood-return-period-source',
       type: 'geojson',
+      promoteId: 'feature_id',
       data: { type: 'FeatureCollection', features: [] },
     })
     expect(fetch).toHaveBeenCalledWith(

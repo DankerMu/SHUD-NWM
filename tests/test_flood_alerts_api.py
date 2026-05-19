@@ -352,6 +352,7 @@ def test_flood_tile_feature_properties_complete() -> None:
         for feature in features:
             properties = feature["properties"]
             assert set(properties) == {
+                "feature_id",
                 "segment_id",
                 "basin_version_id",
                 "river_network_version_id",
@@ -361,6 +362,7 @@ def test_flood_tile_feature_properties_complete() -> None:
                 "return_period",
                 "warning_level",
             }
+            assert properties["feature_id"] == f"{properties['river_network_version_id']}::{properties['segment_id']}"
             assert isinstance(properties["segment_id"], str)
             assert properties["basin_version_id"] == "basin_v1"
             assert properties["river_network_version_id"] == "rnv_v1"
@@ -390,6 +392,18 @@ def test_flood_tile_spatial_and_return_period_filters() -> None:
         )
         assert response.status_code == 200
         assert {feature["properties"]["segment_id"] for feature in response.json()["features"]} == {"seg_002"}
+
+
+def test_flood_tile_duplicate_segment_features_have_network_scoped_identity() -> None:
+    with _client() as client:
+        response = client.get(
+            "/api/v1/tiles/flood-return-period"
+            f"?run_id={DUPLICATE_SEGMENT_RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+        )
+
+    assert response.status_code == 200
+    feature_ids = {feature["properties"]["feature_id"] for feature in response.json()["features"]}
+    assert feature_ids == {"rnv_v1::dup_seg", "rnv_v2::dup_seg"}
 
 
 def test_flood_tile_malformed_bbox_uses_validation_envelope() -> None:
@@ -474,6 +488,34 @@ def test_flood_tile_geojson_coordinate_budget_overflow_returns_413_below_feature
     body = response.json()
     assert body["error"]["code"] == "FLOOD_RETURN_PERIOD_GEOJSON_BUDGET_EXCEEDED"
     assert body["error"]["details"]["limit_type"] == "feature_coordinates"
+
+
+def test_flood_tile_postgis_geometry_budgets_precede_geojson_serialization() -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+    statement = flood_alert_routes._flood_return_period_map_sql(FakeSession(), bbox_filter="")
+
+    assert "JOIN core.river_segment rs" in statement
+    assert "rs.geom IS NOT NULL" in statement
+    assert "ST_NPoints(rs.geom) BETWEEN 2 AND :feature_coordinate_limit" in statement
+    assert "ST_NDims(rs.geom) <= :max_coordinate_dimensions" in statement
+    assert "SUM(ST_NPoints(geom)) OVER" in statement
+    assert "running_coordinate_count <= :collection_coordinate_limit" in statement
+    assert "ST_AsGeoJSON(geom)::text AS geom_json" in statement
+    assert statement.index("ST_NPoints(rs.geom) BETWEEN 2 AND :feature_coordinate_limit") < statement.index(
+        "ST_AsGeoJSON(geom)::text AS geom_json"
+    )
+    assert statement.index("running_coordinate_count <= :collection_coordinate_limit") < statement.index(
+        "ST_AsGeoJSON(geom)::text AS geom_json"
+    )
 
 
 def test_flood_tile_legacy_pbf_route_redirects_to_geojson_endpoint() -> None:

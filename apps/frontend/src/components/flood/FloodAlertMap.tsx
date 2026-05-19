@@ -20,6 +20,7 @@ import {
 import { FloodReturnPeriodLayer } from '@/components/flood/FloodReturnPeriodLayer'
 import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
+import { floodReturnPeriodFeatureId } from '@/lib/floodReturnPeriodGeoJson'
 import type { FloodAlertRankingItem } from '@/stores/floodAlert'
 
 const BASE_MAP_STYLE: MapStyle = {
@@ -42,6 +43,7 @@ const INTERACTIVE_LAYER_IDS = [
 ]
 
 interface FloodMapSegment {
+  featureId: string
   riverSegmentId: string
   segmentName?: string | null
   basinVersionId?: string | null
@@ -80,9 +82,12 @@ function readFloodProperties(properties: unknown): FloodMapSegment | null {
   const record = properties as Record<string, unknown>
   const riverSegmentId = String(record.segment_id ?? record.river_segment_id ?? '')
   if (!riverSegmentId) return null
+  const featureId = floodReturnPeriodFeatureId(record)
+  if (!featureId) return null
 
   const warningLevel = isAlertLevel(record.warning_level) ? record.warning_level : null
   return {
+    featureId,
     riverSegmentId,
     segmentName: typeof record.segment_name === 'string' ? record.segment_name : null,
     basinVersionId: typeof record.basin_version_id === 'string' ? record.basin_version_id : null,
@@ -110,11 +115,14 @@ export function FloodAlertMap({
   const mapRef = useRef<MapRef | null>(null)
   const [mapError, setMapError] = useState<string | null>(null)
   const [returnPeriodUnavailableReason, setReturnPeriodUnavailableReason] = useState<string | null>(null)
-  const [hoveredSegmentId, setHoveredSegmentId] = useState<string | null>(null)
+  const [hoveredFeatureId, setHoveredFeatureId] = useState<string | null>(null)
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
 
   const tileTime = validTime ?? tileFallbackTime
-  const selectedSegmentId = selectedSegment?.riverSegmentId ?? null
+  const selectedFeatureId =
+    selectedSegment?.riverNetworkVersionId && selectedSegment.riverSegmentId
+      ? `${selectedSegment.riverNetworkVersionId}::${selectedSegment.riverSegmentId}`
+      : null
 
   const initialViewState = useMemo(
     () => ({
@@ -132,7 +140,7 @@ export function FloodAlertMap({
   }, [selectedSegment])
 
   const clearHover = useCallback((event?: MapLayerMouseEvent) => {
-    setHoveredSegmentId(null)
+    setHoveredFeatureId(null)
     setTooltip(null)
     if (event) event.target.getCanvas().style.cursor = ''
   }, [])
@@ -145,7 +153,7 @@ export function FloodAlertMap({
         return
       }
 
-      setHoveredSegmentId(properties.riverSegmentId)
+      setHoveredFeatureId(properties.featureId)
       setTooltip({
         ...properties,
         x: event.point.x + 14,
@@ -255,8 +263,8 @@ export function FloodAlertMap({
             runId={runId}
             validTime={tileTime}
             selectedLevel={selectedLevel}
-            hoveredSegmentId={hoveredSegmentId}
-            selectedSegmentId={selectedSegmentId}
+            hoveredFeatureId={hoveredFeatureId}
+            selectedFeatureId={selectedFeatureId}
             onUnavailableReason={setReturnPeriodUnavailableReason}
           />
         ) : null}

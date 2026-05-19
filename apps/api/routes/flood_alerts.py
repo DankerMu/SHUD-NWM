@@ -43,6 +43,7 @@ FLOOD_RETURN_PERIOD_MAP_DEFAULT_LIMIT = 10_000
 FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT = 10_000
 FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES = 10_000
 FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES = 50_000
+FLOOD_RETURN_PERIOD_MAP_MAX_COORDINATE_DIMENSIONS = 3
 FLOOD_RETURN_PERIOD_MAP_MAX_SERIALIZED_BYTES = 2_000_000
 
 
@@ -494,7 +495,6 @@ def flood_return_period_map(
     _require_frequency_ready(session, run_id)
     if return_period is not None:
         return_period = _finite_query_float(return_period, field="return_period", original=return_period)
-    geom_sql, _centroid_sql = _geometry_select_sql(session)
     bounds = _parse_bbox(bbox)
     bbox_filter = ""
     if bounds is not None:
@@ -514,29 +514,16 @@ def flood_return_period_map(
               )
             """
     rows = session.execute(
-        text(
-            f"""
-            SELECT r.river_segment_id, r.basin_version_id, r.river_network_version_id, r.return_period,
-                   r.warning_level, r.q_value, r.q_unit, r.quality_flag, {geom_sql} AS geom_json
-            FROM flood.return_period_result r
-            LEFT JOIN core.river_segment rs
-              ON rs.river_segment_id = r.river_segment_id
-             AND rs.river_network_version_id = r.river_network_version_id
-            WHERE r.run_id = :run_id
-              AND r.duration = :duration
-              AND r.valid_time = :valid_time
-              AND (:return_period IS NULL OR r.return_period >= :return_period)
-              {bbox_filter}
-            ORDER BY r.river_network_version_id, r.river_segment_id
-            LIMIT :query_limit
-            """
-        ),
+        text(_flood_return_period_map_sql(session, bbox_filter=bbox_filter)),
         {
             "run_id": run_id,
             "duration": duration,
             "valid_time": valid_time,
             "return_period": return_period,
             "query_limit": limit + 1,
+            "feature_coordinate_limit": FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES,
+            "collection_coordinate_limit": FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES,
+            "max_coordinate_dimensions": FLOOD_RETURN_PERIOD_MAP_MAX_COORDINATE_DIMENSIONS,
             **(_bbox_params(bounds) if bounds is not None else {}),
         },
     ).mappings()
@@ -552,6 +539,7 @@ def flood_return_period_map(
         features=[
             TileFeature(
                 properties={
+                    "feature_id": _flood_return_period_feature_id(row),
                     "segment_id": str(row["river_segment_id"]),
                     "basin_version_id": str(row["basin_version_id"]),
                     "river_network_version_id": str(row["river_network_version_id"]),
@@ -785,6 +773,68 @@ def _geometry_select_sql(session: Session) -> tuple[str, str]:
     if session.get_bind().dialect.name == "sqlite":
         return "rs.geom", "rs.geom"
     return "ST_AsGeoJSON(rs.geom)::text", "ST_AsGeoJSON(ST_Centroid(rs.geom))::text"
+
+
+def _flood_return_period_map_sql(session: Session, *, bbox_filter: str) -> str:
+    if session.get_bind().dialect.name == "sqlite":
+        geom_sql, _centroid_sql = _geometry_select_sql(session)
+        return f"""
+            SELECT r.river_segment_id, r.basin_version_id, r.river_network_version_id, r.return_period,
+                   r.warning_level, r.q_value, r.q_unit, r.quality_flag, {geom_sql} AS geom_json
+            FROM flood.return_period_result r
+            LEFT JOIN core.river_segment rs
+              ON rs.river_segment_id = r.river_segment_id
+             AND rs.river_network_version_id = r.river_network_version_id
+            WHERE r.run_id = :run_id
+              AND r.duration = :duration
+              AND r.valid_time = :valid_time
+              AND (:return_period IS NULL OR r.return_period >= :return_period)
+              {bbox_filter}
+            ORDER BY r.river_network_version_id, r.river_segment_id
+            LIMIT :query_limit
+            """
+
+    return f"""
+            WITH eligible_segments AS (
+                SELECT r.river_segment_id, r.basin_version_id, r.river_network_version_id,
+                       r.return_period, r.warning_level, r.q_value, r.q_unit, r.quality_flag,
+                       rs.geom
+                FROM flood.return_period_result r
+                JOIN core.river_segment rs
+                  ON rs.river_segment_id = r.river_segment_id
+                 AND rs.river_network_version_id = r.river_network_version_id
+                WHERE r.run_id = :run_id
+                  AND r.duration = :duration
+                  AND r.valid_time = :valid_time
+                  AND (:return_period IS NULL OR r.return_period >= :return_period)
+                  AND rs.geom IS NOT NULL
+                  AND ST_NPoints(rs.geom) BETWEEN 2 AND :feature_coordinate_limit
+                  AND ST_NDims(rs.geom) <= :max_coordinate_dimensions
+                  {bbox_filter}
+            ),
+            budgeted_segments AS (
+                SELECT *,
+                       SUM(ST_NPoints(geom)) OVER (
+                           ORDER BY river_network_version_id, river_segment_id
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                       ) AS running_coordinate_count
+                FROM eligible_segments
+            ),
+            bounded_segments AS (
+                SELECT *
+                FROM budgeted_segments
+                WHERE running_coordinate_count <= :collection_coordinate_limit
+            )
+            SELECT river_segment_id, basin_version_id, river_network_version_id, return_period,
+                   warning_level, q_value, q_unit, quality_flag, ST_AsGeoJSON(geom)::text AS geom_json
+            FROM bounded_segments
+            ORDER BY river_network_version_id, river_segment_id
+            LIMIT :query_limit
+            """
+
+
+def _flood_return_period_feature_id(row: Any) -> str:
+    return f"{row['river_network_version_id']}::{row['river_segment_id']}"
 
 
 def _centroid_payload(value: Any) -> GeoPoint | None:
