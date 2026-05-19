@@ -209,7 +209,7 @@ function findRiverFeature(event: MapLayerMouseEvent) {
   return event.features?.find((feature) => RIVER_INTERACTIVE_LAYER_IDS.includes(feature.layer.id))
 }
 
-function toForecastSegment(properties: RiverFeatureProperties): ForecastSegmentInfo {
+export function toForecastSegment(properties: RiverFeatureProperties): ForecastSegmentInfo {
   return {
     segmentId: properties.segment_id,
     name: properties.name,

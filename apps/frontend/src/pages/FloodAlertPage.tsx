@@ -120,6 +120,7 @@ export function FloodAlertPage() {
     setSelectedSegment((current) => ({
       ...segment,
       basinVersionId: segment.basinVersionId ?? current?.basinVersionId ?? latestRun?.basin_version_id,
+      riverNetworkVersionId: segment.riverNetworkVersionId ?? current?.riverNetworkVersionId ?? latestRun?.river_network_version_id,
     }))
   }
 

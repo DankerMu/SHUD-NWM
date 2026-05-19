@@ -57,6 +57,7 @@ class RankingItem(BaseModel):
     segment_id: str
     segment_name: str | None = None
     basin_version_id: str
+    river_network_version_id: str | None = None
     q_value: float
     q_unit: str
     return_period: float | None = None
@@ -226,7 +227,7 @@ def flood_alert_ranking(
         text(
             f"""
             SELECT r.river_segment_id, r.basin_version_id, r.q_value, r.q_unit, r.return_period,
-                   r.warning_level, r.duration, r.valid_time, rs.properties_json
+                   r.warning_level, r.duration, r.valid_time, r.river_network_version_id, rs.properties_json
             FROM flood.return_period_result r
             LEFT JOIN core.river_segment rs
               ON rs.river_segment_id = r.river_segment_id
@@ -245,6 +246,7 @@ def flood_alert_ranking(
             segment_id=str(row["river_segment_id"]),
             segment_name=_segment_name(row.get("properties_json")),
             basin_version_id=str(row["basin_version_id"]),
+            river_network_version_id=_optional_str(row["river_network_version_id"]),
             q_value=float(row["q_value"]),
             q_unit=str(row["q_unit"] or "m3/s"),
             return_period=_optional_float(row["return_period"]),
@@ -422,8 +424,8 @@ def flood_return_period_map(
     rows = session.execute(
         text(
             f"""
-            SELECT r.river_segment_id, r.return_period, r.warning_level, r.q_value,
-                   r.q_unit, r.quality_flag, {geom_sql} AS geom_json
+            SELECT r.river_segment_id, r.basin_version_id, r.river_network_version_id, r.return_period,
+                   r.warning_level, r.q_value, r.q_unit, r.quality_flag, {geom_sql} AS geom_json
             FROM flood.return_period_result r
             LEFT JOIN core.river_segment rs
               ON rs.river_segment_id = r.river_segment_id
@@ -449,6 +451,8 @@ def flood_return_period_map(
             TileFeature(
                 properties={
                     "segment_id": str(row["river_segment_id"]),
+                    "basin_version_id": str(row["basin_version_id"]),
+                    "river_network_version_id": str(row["river_network_version_id"]),
                     "value": float(row["q_value"]),
                     "unit": str(row["q_unit"] or "m³/s"),
                     "quality_flag": str(row["quality_flag"]),

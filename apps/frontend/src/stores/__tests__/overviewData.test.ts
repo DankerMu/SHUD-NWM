@@ -779,7 +779,7 @@ describe('useOverviewDataStore', () => {
       lineageStatus: 'failed',
       lineageUnavailableReason: '河段追溯暂不可用',
       handoffUrl:
-        '/forecast?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&segmentId=seg-123',
+        '/forecast?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=seg-123',
       geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
     })
     expect(calls.find((call) => call.path === '/api/v1/models')?.query).toMatchObject({
@@ -787,6 +787,7 @@ describe('useOverviewDataStore', () => {
       active: 'true',
     })
     expect(calls.find((call) => call.path.endsWith('/forecast-series'))?.query).toMatchObject({
+      river_network_version_id: 'yangtze_rivnet_v12',
       issue_time: '2026-05-18T00:00:00Z',
       variables: 'q_down',
       scenarios: 'forecast_gfs_deterministic',
@@ -1940,7 +1941,7 @@ describe('useOverviewDataStore', () => {
       riverSegmentId: 'river-seg-123',
       segmentId: 'display-seg-123',
       handoffUrl:
-        '/forecast?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&segmentId=river-seg-123',
+        '/forecast?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=river-seg-123',
     })
     expect(
       calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')?.pathParams,
@@ -1959,6 +1960,9 @@ describe('useOverviewDataStore', () => {
     })
     expect(calls.find((call) => call.path.endsWith('/forecast-series'))?.pathParams).toMatchObject({
       segment_id: 'river-seg-123',
+    })
+    expect(calls.find((call) => call.path.endsWith('/forecast-series'))?.query).toMatchObject({
+      river_network_version_id: 'yangtze_rivnet_v12',
     })
     expect(calls.find((call) => call.path === '/api/v1/flood-alerts/timeline')?.query).toMatchObject({
       segment_id: 'river-seg-123',

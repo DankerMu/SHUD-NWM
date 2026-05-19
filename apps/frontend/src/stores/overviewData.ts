@@ -49,6 +49,7 @@ export interface M11SnapshotRequestScope {
   validTime: string | null
   basemap: M11QueryState['basemap']
   basinVersionId: string | null
+  riverNetworkVersionId: string | null
   segmentId: string | null
   warningLevel: M11QueryState['warningLevel']
   q: string | null
@@ -204,6 +205,7 @@ function overviewRequestScope(query: M11QueryState): M11OverviewRequestScope {
     validTime: query.validTime,
     basemap: query.basemap,
     basinVersionId: query.basinVersionId,
+    riverNetworkVersionId: query.riverNetworkVersionId,
     segmentId: query.segmentId,
     warningLevel: query.warningLevel,
     q: query.q,
@@ -1074,7 +1076,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         filterBasinSegmentRows(rows, query),
         segments,
         Boolean(segmentFetch?.reachedCap || segmentFetch?.truncated),
-        activeRiverNetwork.riverNetworkVersionId,
+        query.riverNetworkVersionId ?? activeRiverNetwork.riverNetworkVersionId,
       )
       let selectedSegment: SelectedSegmentDetail | null = null
 

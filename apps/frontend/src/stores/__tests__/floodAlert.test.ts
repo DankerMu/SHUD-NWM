@@ -179,6 +179,7 @@ describe('useFloodAlertStore', () => {
                     segment_id: 'seg-1',
                     segment_name: 'Segment 1',
                     basin_version_id: 'basin-v1',
+                    river_network_version_id: 'rivnet-v1',
                     q_value: 1234,
                     q_unit: 'm3/s',
                     return_period: 20,
@@ -241,6 +242,7 @@ describe('useFloodAlertStore', () => {
     expect(useFloodAlertStore.getState().summaryData?.totalSegments).toBe(4)
     expect(useFloodAlertStore.getState().rankingData?.items[0]).toMatchObject({
       riverSegmentId: 'seg-1',
+      riverNetworkVersionId: 'rivnet-v1',
       validTime: '2026-05-12T03:00:00Z',
     })
     expect(useFloodAlertStore.getState().timelineData?.segmentId).toBe('seg-1')

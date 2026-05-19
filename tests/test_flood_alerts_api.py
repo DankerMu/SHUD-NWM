@@ -184,7 +184,10 @@ def test_forecast_series_embeds_frequency_thresholds() -> None:
     app.dependency_overrides[get_forecast_store] = lambda: store
     try:
         with TestClient(app) as client:
-            response = client.get("/api/v1/basin-versions/basin_v1/river-segments/seg_002/forecast-series")
+            response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments/seg_002/forecast-series",
+                params={"river_network_version_id": "rnv_v1"},
+            )
     finally:
         app.dependency_overrides.pop(get_forecast_store, None)
 
@@ -206,7 +209,12 @@ def test_forecast_series_issue_time_latest_resolves_most_recent_available_issue_
         with TestClient(app) as client:
             response = client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_002/forecast-series",
-                params={"issue_time": "latest", "variables": "q_down", "scenarios": "GFS"},
+                params={
+                    "river_network_version_id": "rnv_v1",
+                    "issue_time": "latest",
+                    "variables": "q_down",
+                    "scenarios": "GFS",
+                },
             )
     finally:
         app.dependency_overrides.pop(get_forecast_store, None)
@@ -255,6 +263,8 @@ def test_flood_tile_feature_properties_complete() -> None:
             properties = feature["properties"]
             assert set(properties) == {
                 "segment_id",
+                "basin_version_id",
+                "river_network_version_id",
                 "value",
                 "unit",
                 "quality_flag",
@@ -262,6 +272,8 @@ def test_flood_tile_feature_properties_complete() -> None:
                 "warning_level",
             }
             assert isinstance(properties["segment_id"], str)
+            assert properties["basin_version_id"] == "basin_v1"
+            assert properties["river_network_version_id"] == "rnv_v1"
             assert isinstance(properties["value"], float)
             assert properties["unit"] == "m3/s"
             assert isinstance(properties["quality_flag"], str)
@@ -307,8 +319,16 @@ class ThresholdForecastStore(PsycopgForecastStore):
     def _transaction(self) -> Any:
         return _NullTransaction()
 
-    def _validate_series_target(self, cursor: Any, *, basin_version_id: str, segment_id: str) -> None:
-        del cursor, basin_version_id, segment_id
+    def _validate_series_target(
+        self,
+        cursor: Any,
+        *,
+        basin_version_id: str,
+        segment_id: str,
+        river_network_version_id: str,
+    ) -> None:
+        assert (basin_version_id, segment_id, river_network_version_id) == ("basin_v1", "seg_002", "rnv_v1")
+        del cursor
 
     def _per_source_latest_cycles(self, cursor: Any, **_kwargs: Any) -> dict[str, datetime]:
         del cursor

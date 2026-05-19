@@ -488,6 +488,7 @@ function basinAnalysisHref(basin: OverviewBasin, state: ReturnType<typeof parseM
   const segmentId = basinVersionId && basinVersionId === state.basinVersionId ? state.segmentId : null
   return m11QueryHref(`/basins/${encodeURIComponent(basin.basinId)}`, state, {
     basinVersionId,
+    riverNetworkVersionId: basinVersionId && basinVersionId === state.basinVersionId ? state.riverNetworkVersionId : null,
     segmentId,
   })
 }

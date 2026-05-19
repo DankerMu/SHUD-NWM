@@ -15,6 +15,7 @@ from tests.integration_helpers import (
     CYCLE_TIME,
     FORECAST_RUN_ID,
     MODEL_ID,
+    RIVER_NETWORK_VERSION_ID,
     STATE_ID,
     VALID_TIME_1,
     apply_migrations_from_zero,
@@ -163,7 +164,12 @@ def test_real_schema_api_and_postgis_spatial_smoke(
         segments = client.get(f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments")
         forecast = client.get(
             f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments/it126_seg_inside/forecast-series",
-            params={"issue_time": "latest", "variables": "q_down", "scenarios": "GFS"},
+            params={
+                "river_network_version_id": RIVER_NETWORK_VERSION_ID,
+                "issue_time": "latest",
+                "variables": "q_down",
+                "scenarios": "GFS",
+            },
         )
         status = client.get(
             "/api/v1/pipeline/status",
@@ -227,6 +233,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     assert jobs.json()["data"]["items"][0]["slurm_job_id"] == "8101"
     assert summary.json()["data"]["total_segments"] == 2
     assert ranking.json()["data"]["items"][0]["river_segment_id"] == "it126_seg_inside"
+    assert ranking.json()["data"]["items"][0]["river_network_version_id"] == RIVER_NETWORK_VERSION_ID
     assert timeline.json()["data"]["peak"]["warning_level"] == "high_risk"
     assert flood_map.json()["type"] == "FeatureCollection"
     assert {feature["properties"]["segment_id"] for feature in flood_map.json()["features"]} == {

@@ -60,11 +60,12 @@ export function BasinDetailPage() {
       layer: state.layer,
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
+      riverNetworkVersionId: state.riverNetworkVersionId,
       segmentId: state.segmentId,
       warningLevel: null,
       q: null,
     }),
-    [state.basinVersionId, state.cycle, state.layer, state.segmentId, state.source, state.validTime],
+    [state.basinVersionId, state.cycle, state.layer, state.riverNetworkVersionId, state.segmentId, state.source, state.validTime],
   )
   const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
   const basinData = useOverviewDataStore((store) => store.basinDetail)
@@ -438,7 +439,7 @@ function SegmentDiscoveryPanel({
               }}
               row={row}
               selected={row.riverSegmentId === selectedSegmentId || row.segmentId === selectedSegmentId}
-              onSelect={() => onQueryChange({ segmentId: row.riverSegmentId })}
+              onSelect={() => onQueryChange({ riverNetworkVersionId: row.riverNetworkVersionId, segmentId: row.riverSegmentId })}
             />
           ))}
         </div>

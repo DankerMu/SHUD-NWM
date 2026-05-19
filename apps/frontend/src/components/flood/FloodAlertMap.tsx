@@ -44,6 +44,8 @@ const INTERACTIVE_LAYER_IDS = [
 interface FloodMapSegment {
   riverSegmentId: string
   segmentName?: string | null
+  basinVersionId?: string | null
+  riverNetworkVersionId?: string | null
   qValue?: number | null
   returnPeriod?: number | null
   warningLevel?: AlertLevel | null
@@ -83,6 +85,8 @@ function readFloodProperties(properties: unknown): FloodMapSegment | null {
   return {
     riverSegmentId,
     segmentName: typeof record.segment_name === 'string' ? record.segment_name : null,
+    basinVersionId: typeof record.basin_version_id === 'string' ? record.basin_version_id : null,
+    riverNetworkVersionId: typeof record.river_network_version_id === 'string' ? record.river_network_version_id : null,
     qValue: numberOrNull(record.value ?? record.q_value),
     returnPeriod: numberOrNull(record.return_period),
     warningLevel,
@@ -162,6 +166,8 @@ export function FloodAlertMap({
         riverSegmentId: properties.riverSegmentId,
         segmentId: properties.riverSegmentId,
         segmentName: properties.segmentName,
+        basinVersionId: properties.basinVersionId,
+        riverNetworkVersionId: properties.riverNetworkVersionId,
         qValue: properties.qValue,
         returnPeriod: properties.returnPeriod,
         warningLevel: properties.warningLevel,

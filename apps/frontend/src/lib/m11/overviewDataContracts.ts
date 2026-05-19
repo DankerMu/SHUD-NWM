@@ -769,6 +769,7 @@ export function normalizeSelectedSegmentDetail(input: {
       layer: input.query.layer,
       basemap: input.query.basemap,
       basinVersionId: input.basinVersionId,
+      riverNetworkVersionId: input.segment?.river_network_version_id ?? input.feature?.properties.river_network_version_id ?? null,
       segmentId: riverSegmentId,
       warningLevel: input.query.warningLevel,
       q: input.query.q,

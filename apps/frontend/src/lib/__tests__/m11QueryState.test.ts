@@ -11,7 +11,7 @@ import {
 describe('M11 query state helpers', () => {
   it('round-trips supported values', () => {
     const state = parseM11QueryState(
-      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=warning-level&basemap=satellite&basinVersionId=bv-001&segmentId=seg-009&warningLevel=red&q=%E5%B9%B2%E6%B5%81',
+      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=warning-level&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=red&q=%E5%B9%B2%E6%B5%81',
     )
 
     expect(state).toEqual({
@@ -21,6 +21,7 @@ describe('M11 query state helpers', () => {
       layer: 'warning-level',
       basemap: 'satellite',
       basinVersionId: 'bv-001',
+      riverNetworkVersionId: 'rn-v1',
       segmentId: 'seg-009',
       warningLevel: 'red',
       q: '干流',
@@ -45,6 +46,7 @@ describe('M11 query state helpers', () => {
       layer: 'discharge' as const,
       basemap: 'vector' as const,
       cycle: 'bad',
+      riverNetworkVersionId: 'bad/id',
       segmentId: 'bad/id',
     }
 
@@ -104,10 +106,10 @@ describe('M11 query state helpers', () => {
 
   it('can explicitly clear segment identity when a handoff changes basin version', () => {
     const state = parseM11QueryState(
-      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-a&segmentId=seg-a&warningLevel=orange&q=mainstem',
+      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-a&riverNetworkVersionId=rn-a&segmentId=seg-a&warningLevel=orange&q=mainstem',
     )
 
-    expect(m11QueryHref('/basins/basin-b', state, { basinVersionId: 'bv-b', segmentId: null })).toBe(
+    expect(m11QueryHref('/basins/basin-b', state, { basinVersionId: 'bv-b', riverNetworkVersionId: null, segmentId: null })).toBe(
       '/basins/basin-b?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-b&warningLevel=orange&q=mainstem',
     )
   })

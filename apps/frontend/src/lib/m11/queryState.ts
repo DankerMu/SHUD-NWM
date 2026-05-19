@@ -10,6 +10,7 @@ export interface M11QueryState {
   layer: M11Layer
   basemap: M11Basemap
   basinVersionId: string | null
+  riverNetworkVersionId: string | null
   segmentId: string | null
   warningLevel: M11QueryWarningLevel | null
   q: string | null
@@ -29,6 +30,7 @@ export const defaultM11QueryState: M11QueryState = {
   layer: 'discharge',
   basemap: 'vector',
   basinVersionId: null,
+  riverNetworkVersionId: null,
   segmentId: null,
   warningLevel: null,
   q: null,
@@ -129,6 +131,7 @@ export function parseM11QueryState(input: string | URLSearchParams): M11QuerySta
     layer: isOneOf(layer, layers) ? layer : defaultM11QueryState.layer,
     basemap: isOneOf(basemap, basemaps) ? basemap : defaultM11QueryState.basemap,
     basinVersionId: normalizeIdentifier(params.get('basinVersionId')),
+    riverNetworkVersionId: normalizeIdentifier(params.get('riverNetworkVersionId')),
     segmentId: normalizeIdentifier(params.get('segmentId')),
     warningLevel: isOneOf(warningLevel, warningLevels) ? warningLevel : defaultM11QueryState.warningLevel,
     q: normalizeSearch(params.get('q')),
@@ -145,6 +148,7 @@ export function serializeM11QueryState(state: M11QueryState) {
   if (normalized.layer !== defaultM11QueryState.layer) params.set('layer', normalized.layer)
   if (normalized.basemap !== defaultM11QueryState.basemap) params.set('basemap', normalized.basemap)
   if (normalized.basinVersionId) params.set('basinVersionId', normalized.basinVersionId)
+  if (normalized.riverNetworkVersionId) params.set('riverNetworkVersionId', normalized.riverNetworkVersionId)
   if (normalized.segmentId) params.set('segmentId', normalized.segmentId)
   if (normalized.warningLevel) params.set('warningLevel', normalized.warningLevel)
   if (normalized.q) params.set('q', normalized.q)

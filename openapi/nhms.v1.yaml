@@ -2687,6 +2687,7 @@ components:
         - segment_id
         - segment_name
         - basin_version_id
+        - river_network_version_id
         - q_value
         - q_unit
         - return_period
@@ -2705,6 +2706,9 @@ components:
           nullable: true
         basin_version_id:
           type: string
+        river_network_version_id:
+          type: string
+          nullable: true
         q_value:
           type: number
         q_unit:
@@ -2886,7 +2890,7 @@ components:
           description: "GeoJSON geometry (LineString, MultiLineString, or Point), or null"
     FloodReturnPeriodFeatureProperties:
       type: object
-      required: [segment_id, value, unit, quality_flag, return_period, warning_level]
+      required: [segment_id, value, unit, quality_flag, basin_version_id, river_network_version_id, return_period, warning_level]
       properties:
         segment_id:
           type: string
@@ -2900,6 +2904,10 @@ components:
         quality_flag:
           type: string
           description: Data quality indicator from flood.return_period_result.
+        basin_version_id:
+          type: string
+        river_network_version_id:
+          type: string
         return_period:
           type: number
           description: Return period in years.

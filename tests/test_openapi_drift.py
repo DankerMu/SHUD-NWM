@@ -131,6 +131,20 @@ def test_openapi_issue_time_documents_latest_and_iso_datetime() -> None:
     assert {"type": "string", "format": "date-time"} in issue_time["schema"]["oneOf"]
 
 
+def test_forecast_series_river_network_query_parameter_matches_fastapi_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series"
+
+    static_param = _operation_parameter(static_spec, path, "get", "query", "river_network_version_id")
+    fastapi_param = _operation_parameter(fastapi_spec, path, "get", "query", "river_network_version_id")
+
+    for param in (static_param, fastapi_param):
+        assert param["required"] is True
+        assert param["schema"]["type"] == "string"
+        assert param["schema"]["minLength"] == 1
+
+
 def test_openapi_success_envelope_accepts_array_data_composition() -> None:
     spec = _openapi_spec()
     schema = spec["paths"]["/api/v1/basins"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
@@ -177,6 +191,21 @@ def _resolve_ref(ref: str, spec: dict[str, Any]) -> dict[str, Any]:
     for part in ref.removeprefix("#/").split("/"):
         node = node[part]
     return node
+
+
+def _operation_parameter(
+    spec: dict[str, Any],
+    path: str,
+    method: str,
+    location: str,
+    name: str,
+) -> dict[str, Any]:
+    parameters = spec["paths"][path][method]["parameters"]
+    for param in parameters:
+        resolved = _resolve_ref(param["$ref"], spec) if "$ref" in param else param
+        if resolved.get("in") == location and resolved.get("name") == name:
+            return resolved
+    raise AssertionError(f"{method.upper()} {path} missing {location} parameter {name}")
 
 
 def _matches_schema(value: dict[str, Any], schema: dict[str, Any]) -> bool:

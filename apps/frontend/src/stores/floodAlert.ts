@@ -45,6 +45,7 @@ export interface FloodAlertRankingItem {
   segmentId: string
   segmentName?: string | null
   basinVersionId?: string | null
+  riverNetworkVersionId?: string | null
   basinName?: string | null
   qValue?: number | null
   qUnit?: string | null
@@ -174,6 +175,7 @@ function normalizeRankingItem(item: ApiFloodAlertRankingItem, index: number): Fl
     segmentId: item.segment_id || segmentId,
     segmentName: stringOrNull(item.segment_name),
     basinVersionId: stringOrNull(item.basin_version_id),
+    riverNetworkVersionId: stringOrNull(item.river_network_version_id),
     basinName: null,
     qValue: numberOrNull(item.q_value),
     qUnit: stringOrNull(item.q_unit) ?? 'm3/s',

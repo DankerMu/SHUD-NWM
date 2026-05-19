@@ -9,7 +9,7 @@ export interface ForecastSegmentInfo {
   segmentId: string
   name?: string
   basinVersionId?: string
-  riverNetworkVersionId?: string
+  riverNetworkVersionId: string
   streamOrder?: number
 }
 
@@ -112,6 +112,7 @@ interface ForecastRequestIdentity {
   nonce: number
   segmentId: string
   basinVersionId?: string
+  riverNetworkVersionId: string
   issueTime?: string | null
   scenarios: string
   contextIssueTimeBound: boolean
@@ -266,6 +267,7 @@ function isCurrentForecastRequest(state: ForecastState, request: ForecastRequest
     activeForecastRequest.nonce !== request.nonce ||
     activeForecastRequest.segmentId !== request.segmentId ||
     activeForecastRequest.basinVersionId !== request.basinVersionId ||
+    activeForecastRequest.riverNetworkVersionId !== request.riverNetworkVersionId ||
     activeForecastRequest.issueTime !== request.issueTime ||
     activeForecastRequest.scenarios !== request.scenarios ||
     activeForecastRequest.contextIssueTimeBound !== request.contextIssueTimeBound ||
@@ -277,7 +279,8 @@ function isCurrentForecastRequest(state: ForecastState, request: ForecastRequest
   if (
     state.requestNonce !== request.nonce ||
     state.selectedSegment?.segmentId !== request.segmentId ||
-    state.selectedSegment.basinVersionId !== request.basinVersionId
+    state.selectedSegment.basinVersionId !== request.basinVersionId ||
+    state.selectedSegment.riverNetworkVersionId !== request.riverNetworkVersionId
   ) {
     return false
   }
@@ -306,8 +309,12 @@ async function fetchForecastSeries(
   if (!segment.basinVersionId) {
     throw new Error('缺少 basin_version_id，无法请求河段预报')
   }
+  if (!segment.riverNetworkVersionId) {
+    throw new Error('缺少 river_network_version_id，无法请求河段预报')
+  }
 
   const query = {
+    river_network_version_id: segment.riverNetworkVersionId,
     issue_time: options.issueTime ?? 'latest',
     variables: 'q_down',
     scenarios: selectedScenarios.join(','),
@@ -391,6 +398,7 @@ export const useForecastStore = create<ForecastState>((set, get) => ({
       nonce: requestNonce,
       segmentId: segment.segmentId,
       basinVersionId: segment.basinVersionId,
+      riverNetworkVersionId: segment.riverNetworkVersionId,
       issueTime,
       scenarios: selectedScenarios.join(','),
       contextIssueTimeBound,

@@ -1178,6 +1178,7 @@ export interface components {
             segment_id: string;
             segment_name: string | null;
             basin_version_id: string;
+            river_network_version_id: string | null;
             q_value: number;
             q_unit: string;
             return_period: number | null;
@@ -1261,6 +1262,8 @@ export interface components {
             unit: string;
             /** @description Data quality indicator from flood.return_period_result. */
             quality_flag: string;
+            basin_version_id: string;
+            river_network_version_id: string;
             /** @description Return period in years. */
             return_period: number;
             /** @description Alert level such as normal, warning, danger, or unavailable. */

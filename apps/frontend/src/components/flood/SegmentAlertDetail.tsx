@@ -159,6 +159,7 @@ export function SegmentAlertDetail({
   const forecastError = useForecastStore((state) => state.error)
   const selectForecastSegment = useForecastStore((state) => state.selectSegment)
   const fetchForecast = useForecastStore((state) => state.fetchForecast)
+  const forecastScopedUnavailable = Boolean(segment && basinVersionId && !segment.riverNetworkVersionId)
 
   useEffect(() => {
     if (!segment) return
@@ -173,12 +174,13 @@ export function SegmentAlertDetail({
   }, [fetchTimeline, segment, toast])
 
   useEffect(() => {
-    if (!segment || !basinVersionId) return
+    if (!segment || !basinVersionId || !segment.riverNetworkVersionId) return
 
     selectForecastSegment({
       segmentId: segment.riverSegmentId,
       name: segment.segmentName ?? undefined,
       basinVersionId,
+      riverNetworkVersionId: segment.riverNetworkVersionId,
     })
     void fetchForecast({
       includeAnalysis: true,
@@ -247,6 +249,12 @@ export function SegmentAlertDetail({
         {forecastError ? (
           <div className="rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger">
             {forecastError}
+          </div>
+        ) : null}
+
+        {forecastScopedUnavailable ? (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+            缺少 river_network_version_id，无法加载已限定河网版本的预报曲线。
           </div>
         ) : null}
 
