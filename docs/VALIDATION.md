@@ -29,7 +29,11 @@ uv run nhms-model basins-migration-report \
   --output /tmp/basins-migration-report.json
 ```
 
-`import-basins-registry` mutates core registry tables and requires explicit CLI auth evidence. The `--auth-actor-id` / `--auth-role` flags, or `NHMS_CLI_AUTH_ACTOR_ID` / `NHMS_CLI_AUTH_ROLES`, are deterministic dev/test policy evidence only; production live authorization remains through protected API/live IdP proof. Do not run it against production unless it is an intentional migration with backup, approval, and an explicit production database URL.
+`import-basins-registry` mutates core registry tables and requires explicit CLI auth evidence. The
+`--auth-actor-id` / `--auth-role` flags, or `NHMS_CLI_AUTH_ACTOR_ID` / `NHMS_CLI_AUTH_ROLES`, are
+deterministic dev/test policy evidence only; production live authorization remains through protected API/live
+IdP proof. Do not run it against production unless it is an intentional migration with backup, approval, and an
+explicit production database URL.
 
 Mutating flood CLI commands use the same explicit CLI evidence contract:
 
