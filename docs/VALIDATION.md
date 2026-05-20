@@ -47,6 +47,27 @@ uv run ruff check .
 uv run pytest -q
 ```
 
+Focused M16 production MVT/performance checks:
+
+```bash
+openspec validate m16-production-mvt-performance --strict --no-interactive
+uv run pytest -q tests/test_flood_alerts_api.py tests/test_production_scale_validation.py tests/test_openapi_drift.py tests/test_migrations.py
+cd apps/frontend && corepack pnpm check:api-types
+cd apps/frontend && corepack pnpm test
+cd apps/frontend && corepack pnpm build
+```
+
+M16 promotes canonical hydrology MVT endpoints for river-network, hydro, and
+flood-return-period tiles using `application/x-protobuf`. The query endpoint
+`/api/v1/tiles/flood-return-period` remains bounded GeoJSON compatibility for
+small/degraded views only; national rendering should use layer metadata from
+`/api/v1/layers` and MapLibre vector sources. Deterministic CI validates the
+MVT contract, Web Mercator XYZ validation, PostGIS-oriented SQL shape, cache
+identity, frontend metadata selection, and evidence schema. Live PostGIS and
+national-data proof remains opt-in and must be recorded as `not_executed` or a
+release blocker until target-environment validation passes; deterministic MVT
+evidence alone must not set `production_mvt_readiness_claimed=true`.
+
 Focused M9 Basins closeout checks:
 
 ```bash
@@ -604,8 +625,9 @@ Evidence is written under
   alert summary/ranking/timeline/map, forecast series, jobs/logs, and tile
   metadata row counts, plan text/hash, finite latency samples, p95, threshold
   comparison, `live_db_executed=false`, and `live_api_executed=false`.
-- `tile_evidence.json`: observed GeoJSON compatibility content type, max-byte
-  comparison, endpoint references, layer metadata, and blocker status.
+- `tile_evidence.json`: observed tile content type, max-byte comparison,
+  endpoint references, layer metadata, deterministic MVT metrics when
+  `application/x-protobuf` is expected, and blocker status.
 - `frontend_large_layer_evidence.json`: desktop/mobile load, render, timeline,
   chart, memory, lineage, recoverable oversized/unavailable behavior, and
   `live_frontend_executed=false`.
@@ -618,9 +640,11 @@ Evidence is written under
 
 MVT blocker semantics are explicit. In the default GeoJSON compatibility mode
 the lane may be `ready`, but `production_mvt_readiness_claimed=false`. If
-`application/x-protobuf` is expected while the current GeoJSON delivery remains
-in place, the lane writes `PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED`, lists the
-affected tile endpoints, and the summary is `blocked`.
+`application/x-protobuf` is expected, deterministic MVT contract evidence can
+pass while live PostGIS/national/browser proof remains `not_executed`; the lane
+writes `PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED`, lists affected tile endpoints
+and removal criteria, and the summary remains `blocked` until target-environment
+proof passes.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs, symlinked evidence paths, unsafe object/API values,

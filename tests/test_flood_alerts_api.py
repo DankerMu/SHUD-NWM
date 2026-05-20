@@ -844,14 +844,143 @@ def test_flood_tile_postgis_feature_geometry_sentinel_returns_413_before_payload
     }
 
 
-def test_flood_tile_legacy_pbf_route_redirects_to_geojson_endpoint() -> None:
+def test_flood_mvt_canonical_route_returns_protobuf_and_cache_headers() -> None:
     with _client() as client:
-        response = client.get(
+        first = client.get(
             f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf",
-            follow_redirects=False,
         )
-        assert response.status_code == 307
-        assert response.headers["location"].startswith("/api/v1/tiles/flood-return-period?")
+        second = client.get(
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf",
+        )
+
+    assert first.status_code == 200
+    assert first.headers["content-type"].startswith("application/x-protobuf")
+    assert first.headers["x-tile-layer-id"] == "flood-return-period"
+    assert first.headers["x-tile-checksum"]
+    assert first.headers["etag"] == second.headers["etag"]
+    assert first.content == second.content
+    assert first.content.startswith(b"\x1a")
+
+
+def test_flood_mvt_live_postgis_binds_requested_xyz(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRowResult:
+        def __init__(self, row: dict[str, Any] | None) -> None:
+            self.row = row
+
+        def mappings(self) -> FakeRowResult:
+            return self
+
+        def first(self) -> dict[str, Any] | None:
+            return self.row
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRowResult:
+            sql = str(statement)
+            if "ST_TileEnvelope(:z, :x, :y)" in sql:
+                assert parameters["run_id"] == RUN_ID
+                assert parameters["duration"] == "1h"
+                assert parameters["valid_time"] == VALID_TIME_1
+                assert (parameters["z"], parameters["x"], parameters["y"]) == (6, 12, 24)
+                return FakeRowResult({"tile": b"live-tile"})
+            if "information_schema.tables" in sql:
+                return FakeRowResult(None)
+            raise AssertionError(f"Unexpected SQL in live PostGIS tile test: {sql}")
+
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_frequency_ready",
+        lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+    )
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf"
+            )
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-protobuf")
+
+
+def test_hydro_and_river_network_mvt_routes_return_protobuf() -> None:
+    with _client() as client:
+        hydro = client.get(f"/api/v1/tiles/hydro/{RECOMPUTE_MOVED_PEAK_RUN_ID}/q_down/{_iso(VALID_TIME_1)}/4/12/6.pbf")
+        river = client.get("/api/v1/tiles/river-network/basin_v1/4/12/6.pbf")
+
+    assert hydro.status_code == 200
+    assert hydro.headers["content-type"].startswith("application/x-protobuf")
+    assert hydro.headers["x-tile-layer-id"] == "hydro:q_down"
+    assert river.status_code == 200
+    assert river.headers["content-type"].startswith("application/x-protobuf")
+    assert river.headers["x-tile-layer-id"] == "river-network"
+
+
+def test_mvt_invalid_xyz_fails_before_expensive_builders(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = False
+
+    def fail_if_called(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(flood_alert_routes, "_fetch_flood_mvt_features", fail_if_called)
+
+    with _client() as client:
+        response = client.get(f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/3/8/0.pbf")
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "TILE_XYZ_INVALID"
+    assert called is False
+
+
+def test_layer_metadata_discovery_exposes_mvt_contract() -> None:
+    with _client() as client:
+        response = client.get("/api/v1/layers")
+        valid_times = client.get("/api/v1/layers/flood-return-period/valid-times")
+
+    assert response.status_code == 200
+    layers = response.json()["data"]
+    flood_layer = next(layer for layer in layers if layer["layer_id"] == "flood-return-period")
+    metadata = flood_layer["metadata"]
+    assert metadata["layer_id"] == "flood-return-period"
+    assert metadata["tile_format"] == "mvt"
+    assert metadata["url_template"] == "/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf"
+    assert metadata["maplibre_source_layer"] == "flood_return_period"
+    assert metadata["property_schema_version"] == "m16-hydrology-mvt-v1"
+    assert metadata["min_zoom"] == 0
+    assert metadata["max_zoom"] == 14
+    assert metadata["bounds_crs"] == "EPSG:3857"
+    assert metadata["cache_etag"].startswith('W/"metadata-')
+    assert metadata["fallback_available"] is True
+    assert metadata["production_mvt_readiness_claimed"] is False
+    assert valid_times.status_code == 200
+    assert _iso(VALID_TIME_1) in valid_times.json()["data"]
+
+
+def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() -> None:
+    statement = flood_alert_routes.postgis_tile_sql("flood-return-period")
+
+    assert "ST_TileEnvelope(:z, :x, :y)" in statement
+    assert "ST_Transform(source_rows.geom, 3857)" in statement
+    assert "ST_AsMVTGeom" in statement
+    assert "extent => 4096" in statement
+    assert "buffer => 64" in statement
+    assert "clip_geom => true" in statement
+    assert "ST_AsMVT(tile_rows, 'flood_return_period', 4096, 'mvt_geom')" in statement
+    assert "feature_count <= :feature_limit" in statement
+    assert "coordinate_count <= :collection_coordinate_limit" in statement
 
 
 class ThresholdForecastStore(PsycopgForecastStore):
@@ -948,6 +1077,7 @@ def _attach_schemas(engine: Engine) -> None:
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS core")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS hydro")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS flood")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
 
 
 def _create_tables(connection: Any) -> None:
@@ -1069,6 +1199,32 @@ def _create_tables(connection: Any) -> None:
                 q100 REAL,
                 unit TEXT NOT NULL,
                 quality_flag TEXT NOT NULL
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE map.tile_cache (
+                layer_id TEXT NOT NULL,
+                z INTEGER NOT NULL,
+                x INTEGER NOT NULL,
+                y INTEGER NOT NULL,
+                tile_data BLOB,
+                tile_uri TEXT,
+                cache_key TEXT,
+                etag TEXT,
+                checksum TEXT,
+                source_id TEXT,
+                source_version TEXT,
+                valid_time DATETIME,
+                style_id TEXT NOT NULL DEFAULT 'default',
+                schema_version TEXT,
+                encoder_version TEXT,
+                status TEXT NOT NULL DEFAULT 'ready',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (layer_id, z, x, y)
             )
             """
         )

@@ -89,20 +89,26 @@ def test_validate_scale_mvt_expectation_creates_explicit_release_blocker(tmp_pat
     tile = _read_json(lane_dir / "tile_evidence.json")
     assert summary["status"] == "blocked"
     assert tile["status"] == "blocked"
+    assert tile["deterministic_mvt_passed"] is True
+    assert tile["observed_content_type"] == "application/x-protobuf"
+    assert tile["live_postgis_status"] == "not_executed"
     assert tile["production_mvt_readiness_claimed"] is False
     blocker = tile["blockers"][0]
     assert blocker["error_code"] == "PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"
+    assert blocker["blocker_id"] == "m16-live-postgis-national-proof"
+    assert blocker["surface"] == "live_postgis_national_frontend_evidence"
+    assert blocker["status"] == "not_executed"
     assert blocker["expected_content_type"] == "application/x-protobuf"
-    assert "production MVT readiness is not achieved" in blocker["message"]
+    assert "readiness is not claimed" in blocker["message"]
     assert "/api/v1/tiles/flood-return-period" in blocker["affected_endpoints"]
-    assert blocker["missing_implementation_work"] == [
-        "PostGIS tile clipping and vector-tile encoding for national-scale river and flood-return-period layers",
-        "application/x-protobuf content-type and response contract for .pbf tile endpoints",
-        "layer metadata validation for vector-tile layer IDs, fields, CRS, and extent assumptions",
-        "tile byte-bound enforcement for encoded protobuf responses",
-        "API, OpenAPI, and frontend contract updates where protobuf delivery changes clients",
-        "regression tests and validation documentation for production MVT delivery",
-    ]
+    assert "removal_criteria" in blocker
+    assert "residual_risk" in blocker
+    assert tile["mvt_deterministic_metrics"]["sql_shape_hash"]
+    assert tile["mvt_deterministic_metrics"]["query_plan_hash"]
+    assert tile["mvt_deterministic_metrics"]["p95_ms"] <= 300.0
+    assert tile["mvt_deterministic_metrics"]["payload_bytes"] <= tile["max_bytes_comparison"]["threshold_bytes"]
+    assert tile["layer_metadata"]["tile_format"] == "mvt"
+    assert tile["layer_metadata"]["maplibre_source_layer"] == "flood_return_period"
 
 
 def test_validate_scale_threshold_and_count_failures_block_readiness(tmp_path: Path) -> None:

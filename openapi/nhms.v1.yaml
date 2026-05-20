@@ -634,6 +634,10 @@ paths:
     get:
       operationId: getRiverNetworkTile
       summary: Get river network vector tile
+      description: >
+        Canonical M16 Mapbox Vector Tile route for river-network geometry.
+        Responses use Web Mercator XYZ semantics, the `river_network` source
+        layer, stable cache headers, and MVT schema version `m16-hydrology-mvt-v1`.
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/BasinVersionId"
@@ -643,6 +647,22 @@ paths:
       responses:
         "200":
           description: Raw Mapbox vector tile
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Layer-ID:
+              schema:
+                type: string
+            X-Tile-Checksum:
+              schema:
+                type: string
+            X-MVT-Schema-Version:
+              schema:
+                type: string
           content:
             application/x-protobuf:
               schema:
@@ -656,6 +676,10 @@ paths:
     get:
       operationId: getHydroTile
       summary: Get hydrological output vector tile
+      description: >
+        Canonical M16 Mapbox Vector Tile route for hydrological values. The
+        vector source-layer is `hydro` and features include run/source/time,
+        segment identity, value, unit, and quality metadata.
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/RunId"
@@ -667,6 +691,22 @@ paths:
       responses:
         "200":
           description: Raw Mapbox vector tile
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Layer-ID:
+              schema:
+                type: string
+            X-Tile-Checksum:
+              schema:
+                type: string
+            X-MVT-Schema-Version:
+              schema:
+                type: string
           content:
             application/x-protobuf:
               schema:
@@ -681,10 +721,9 @@ paths:
       operationId: getFloodReturnPeriodMap
       summary: Get flood return period GeoJSON map data
       description: >
-        Returns a GeoJSON FeatureCollection for flood return-period map rendering.
-        This release uses GeoJSON rather than `.pbf` vector tiles because MVT
-        encoding and tile clipping require a PostGIS-specific implementation that
-        is out of scope for the current release.
+        Bounded GeoJSON compatibility endpoint for small or degraded
+        flood-return-period rendering. National rendering must use the canonical
+        `.pbf` MVT route discovered through layer metadata.
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
@@ -732,6 +771,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FloodReturnPeriodFeatureCollection"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf:
+    get:
+      operationId: getFloodReturnPeriodTile
+      summary: Get flood return period vector tile
+      description: >
+        Canonical M16 Mapbox Vector Tile route for flood return-period data.
+        The vector source-layer is `flood_return_period`; bounded GeoJSON remains
+        available only at `/api/v1/tiles/flood-return-period`.
+      tags: [tiles]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: duration
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Aggregation duration such as 1h, 3h, or 24h.
+        - $ref: "#/components/parameters/ValidTimePath"
+        - $ref: "#/components/parameters/TileZ"
+        - $ref: "#/components/parameters/TileX"
+        - $ref: "#/components/parameters/TileY"
+      responses:
+        "200":
+          description: Raw Mapbox vector tile
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Layer-ID:
+              schema:
+                type: string
+            X-Tile-Checksum:
+              schema:
+                type: string
+            X-MVT-Schema-Version:
+              schema:
+                type: string
+          content:
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -3072,6 +3160,86 @@ components:
           items:
             type: string
         metadata:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/LayerMetadata"
+    LayerMetadata:
+      type: object
+      required:
+        - layer_id
+        - tile_format
+        - fallback_available
+        - release_blocking
+      properties:
+        layer_id:
+          type: string
+        tile_format:
+          type: string
+          enum: [mvt, geojson_compatibility]
+        url_template:
+          type: string
+          nullable: true
+        tile_url_template:
+          type: string
+          nullable: true
+        required_placeholders:
+          type: array
+          items:
+            type: string
+        maplibre_source_layer:
+          type: string
+          nullable: true
+        source_layer:
+          type: string
+          nullable: true
+        property_schema_version:
+          type: string
+          nullable: true
+        property_schema:
           type: object
           nullable: true
           additionalProperties: true
+        min_zoom:
+          type: integer
+          nullable: true
+        max_zoom:
+          type: integer
+          nullable: true
+        bounds_crs:
+          type: string
+          nullable: true
+        bounds:
+          type: array
+          nullable: true
+          items:
+            type: number
+        wgs84_bounds:
+          type: array
+          nullable: true
+          items:
+            type: number
+        valid_times:
+          type: array
+          items:
+            type: string
+            format: date-time
+        source_refs:
+          type: object
+          nullable: true
+          additionalProperties: true
+        cache_etag:
+          type: string
+          nullable: true
+        cache_version:
+          type: string
+          nullable: true
+        fallback_available:
+          type: boolean
+        fallback_endpoint:
+          type: string
+          nullable: true
+        release_blocking:
+          type: boolean
+        production_mvt_readiness_claimed:
+          type: boolean
+          nullable: true

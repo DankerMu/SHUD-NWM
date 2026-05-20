@@ -317,7 +317,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get river network vector tile */
+        /**
+         * Get river network vector tile
+         * @description Canonical M16 Mapbox Vector Tile route for river-network geometry. Responses use Web Mercator XYZ semantics, the `river_network` source layer, stable cache headers, and MVT schema version `m16-hydrology-mvt-v1`.
+         */
         get: operations["getRiverNetworkTile"];
         put?: never;
         post?: never;
@@ -334,7 +337,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get hydrological output vector tile */
+        /**
+         * Get hydrological output vector tile
+         * @description Canonical M16 Mapbox Vector Tile route for hydrological values. The vector source-layer is `hydro` and features include run/source/time, segment identity, value, unit, and quality metadata.
+         */
         get: operations["getHydroTile"];
         put?: never;
         post?: never;
@@ -353,9 +359,29 @@ export interface paths {
         };
         /**
          * Get flood return period GeoJSON map data
-         * @description Returns a GeoJSON FeatureCollection for flood return-period map rendering. This release uses GeoJSON rather than `.pbf` vector tiles because MVT encoding and tile clipping require a PostGIS-specific implementation that is out of scope for the current release.
+         * @description Bounded GeoJSON compatibility endpoint for small or degraded flood-return-period rendering. National rendering must use the canonical `.pbf` MVT route discovered through layer metadata.
          */
         get: operations["getFloodReturnPeriodMap"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get flood return period vector tile
+         * @description Canonical M16 Mapbox Vector Tile route for flood return-period data. The vector source-layer is `flood_return_period`; bounded GeoJSON remains available only at `/api/v1/tiles/flood-return-period`.
+         */
+        get: operations["getFloodReturnPeriodTile"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1308,9 +1334,36 @@ export interface components {
             layer_name: string;
             layer_type: string;
             variables: string[];
-            metadata?: {
+            metadata?: components["schemas"]["LayerMetadata"] | null;
+        };
+        LayerMetadata: {
+            layer_id: string;
+            /** @enum {string} */
+            tile_format: "mvt" | "geojson_compatibility";
+            url_template?: string | null;
+            tile_url_template?: string | null;
+            required_placeholders?: string[];
+            maplibre_source_layer?: string | null;
+            source_layer?: string | null;
+            property_schema_version?: string | null;
+            property_schema?: {
                 [key: string]: unknown;
             } | null;
+            min_zoom?: number | null;
+            max_zoom?: number | null;
+            bounds_crs?: string | null;
+            bounds?: number[] | null;
+            wgs84_bounds?: number[] | null;
+            valid_times?: string[];
+            source_refs?: {
+                [key: string]: unknown;
+            } | null;
+            cache_etag?: string | null;
+            cache_version?: string | null;
+            fallback_available: boolean;
+            fallback_endpoint?: string | null;
+            release_blocking: boolean;
+            production_mvt_readiness_claimed?: boolean | null;
         };
     };
     responses: {
@@ -1910,6 +1963,11 @@ export interface operations {
             /** @description Raw Mapbox vector tile */
             200: {
                 headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -1939,6 +1997,11 @@ export interface operations {
             /** @description Raw Mapbox vector tile */
             200: {
                 headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -1977,6 +2040,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FloodReturnPeriodFeatureCollection"];
+                };
+            };
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    getFloodReturnPeriodTile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: components["parameters"]["RunId"];
+                /** @description Aggregation duration such as 1h, 3h, or 24h. */
+                duration: string;
+                valid_time: components["parameters"]["ValidTimePath"];
+                z: components["parameters"]["TileZ"];
+                x: components["parameters"]["TileX"];
+                y: components["parameters"]["TileY"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-MVT-Schema-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-protobuf": string;
                 };
             };
             "4XX": components["responses"]["Error"];

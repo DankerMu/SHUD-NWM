@@ -20,6 +20,7 @@ import {
   fetchFloodReturnPeriodFeatureCollection,
   type FloodReturnPeriodFeatureCollection,
 } from '@/lib/floodReturnPeriodGeoJson'
+import { buildMvtTileUrlTemplate, isMvtLayerMetadata, type MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 import {
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
@@ -69,7 +70,9 @@ interface M11RegisteredOverlay {
   layerId: M11Layer
   sourceId: string
   layer: LayerProps
-  source: { type: 'geojson'; url: string }
+  source:
+    | { type: 'geojson'; url: string }
+    | { type: 'vector'; tiles: string[]; sourceLayer: string; minzoom: number; maxzoom: number; metadata: MvtLayerMetadata }
 }
 
 interface BasinFeatureProperties {
@@ -188,7 +191,7 @@ export function M11MapLibreSurface({
       }).length,
     [basins, visibleBasinIds],
   )
-  const renderableOverlay = overlay && overlayData ? overlay : null
+  const renderableOverlay = overlay && (overlay.source.type === 'vector' || overlayData) ? overlay : null
   const selectedSegmentFeatureCollection = useMemo(
     () => buildSelectedSegmentFeatureCollection(selectedSegmentId, selectedSegmentGeometry),
     [selectedSegmentGeometry, selectedSegmentId],
@@ -220,6 +223,7 @@ export function M11MapLibreSurface({
     setOverlayUnavailableReason(null)
 
     if (!overlay) return () => controller.abort()
+    if (overlay.source.type === 'vector') return () => controller.abort()
 
     fetchFloodReturnPeriodFeatureCollection(overlay.source.url, { signal: controller.signal })
       .then((result) => {
@@ -337,6 +341,8 @@ export function M11MapLibreSurface({
       data-segment-highlight-hook={selectedSegmentMapState}
       data-selected-segment-map-state={selectedSegmentMapState}
       data-hovered-segment-id={hoveredRiverSegmentId ?? ''}
+      data-overlay-source-type={renderableOverlay?.source.type ?? ''}
+      data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
     >
       <Map
         ref={mapRef}
@@ -452,6 +458,28 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   const layerId = `m11-${state.layer}-line`
 
   if (state.layer === 'flood-return-period') {
+    if (isMvtLayerMetadata(selectedLayer.metadata)) {
+      const tiles = [buildMvtTileUrlTemplate(selectedLayer.metadata, { run_id: runId, duration: '1h', valid_time: validTime })]
+      return {
+        layerId: state.layer,
+        sourceId,
+        source: {
+          type: 'vector',
+          tiles,
+          sourceLayer: selectedLayer.metadata.maplibre_source_layer,
+          minzoom: selectedLayer.metadata.min_zoom ?? 0,
+          maxzoom: selectedLayer.metadata.max_zoom ?? 14,
+          metadata: selectedLayer.metadata,
+        },
+        layer: {
+          id: layerId,
+          type: 'line',
+          source: sourceId,
+          'source-layer': selectedLayer.metadata.maplibre_source_layer,
+          paint: floodTileLayerPaint(),
+        },
+      }
+    }
     return {
       layerId: state.layer,
       sourceId,
@@ -468,7 +496,28 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   return null
 }
 
-function M11OverlayPrimitive({ overlay, data }: { overlay: M11RegisteredOverlay; data: FloodReturnPeriodFeatureCollection }) {
+function M11OverlayPrimitive({
+  overlay,
+  data,
+}: {
+  overlay: M11RegisteredOverlay
+  data: FloodReturnPeriodFeatureCollection | null
+}) {
+  if (overlay.source.type === 'vector') {
+    return (
+      <Source
+        id={overlay.sourceId}
+        type="vector"
+        tiles={overlay.source.tiles}
+        minzoom={overlay.source.minzoom}
+        maxzoom={overlay.source.maxzoom}
+        promoteId="feature_id"
+      >
+        <Layer {...overlay.layer} />
+      </Source>
+    )
+  }
+  if (!data) return null
   return (
     <Source id={overlay.sourceId} type="geojson" data={data} promoteId="feature_id">
       <Layer {...overlay.layer} />
@@ -804,7 +853,7 @@ function m11SelectedLayerUnavailableReason(
   overlayData: FloodReturnPeriodFeatureCollection | null,
   hasBasinRiverNetwork = false,
 ) {
-  if (overlay && overlayData) return null
+  if (overlay && (overlay.source.type === 'vector' || overlayData)) return null
   if (hasBasinRiverNetwork && (state.layer === 'discharge' || state.layer === 'flood-return-period' || state.layer === 'warning-level')) {
     return null
   }

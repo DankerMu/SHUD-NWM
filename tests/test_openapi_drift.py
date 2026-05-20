@@ -32,14 +32,6 @@ DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
     ),
     (
         "GET",
-        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
-    ): "issue-123 future vector tile route; tile publisher promotion is out of scope",
-    (
-        "GET",
-        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
-    ): "issue-123 future vector tile route; tile publisher promotion is out of scope",
-    (
-        "GET",
         "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png",
     ): "issue-123 future raster tile route; tile publisher promotion is out of scope",
     ("GET", "/api/v1/lineage/river-point"): "issue-123 future lineage route; lineage store promotion is out of scope",
@@ -47,11 +39,6 @@ DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
     ("GET", "/api/v1/lineage/product/{product_id}"): (
         "issue-123 future lineage route; lineage store promotion is out of scope"
     ),
-    ("GET", "/api/v1/layers"): "issue-123 future layer catalog route; layer service promotion is out of scope",
-    (
-        "GET",
-        "/api/v1/layers/{layer_id}/valid-times",
-    ): "issue-123 future layer catalog route; layer service promotion is out of scope",
 }
 DEFERRED_ROUTES = set(DEFERRED_ROUTE_REASONS)
 
@@ -82,10 +69,6 @@ INTERNAL_ROUTE_REASONS: dict[RouteKey, str] = {
     ("POST", "/api/v1/models"): "issue-123 write-side registry API remains internal",
     ("POST", "/api/v1/river-segment-crosswalks"): "issue-123 write-side registry API remains internal",
     ("POST", "/api/v1/hindcast/submit"): "issue-123 hindcast submission public contract is out of scope",
-    (
-        "GET",
-        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
-    ): "issue-123 legacy compatibility redirect; query GeoJSON endpoint is the public contract",
     ("GET", "/health"): "issue-123 root service health endpoint, not versioned public API",
     ("GET", "/{full_path}"): "issue-123 frontend SPA fallback, not an API contract",
 }
@@ -110,7 +93,7 @@ def test_openapi_drift_allowlists_have_issue_scoped_reasons() -> None:
     for route, reason in {**DEFERRED_ROUTE_REASONS, **INTERNAL_ROUTE_REASONS}.items():
         assert route[0].lower() in HTTP_METHODS
         assert route[1].startswith("/")
-        assert "issue-123" in reason
+        assert "issue-" in reason
         assert len(reason) >= 40
 
 

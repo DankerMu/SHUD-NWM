@@ -192,6 +192,7 @@ export interface LayerState {
   displayName: string
   group: 'hydrology' | 'meteorology' | 'base' | 'unknown'
   available: boolean
+  metadata: components['schemas']['Layer']['metadata'] | null
   validTimes: string[]
   currentValidTime: string | null
   validTimeSource: 'api' | 'derived' | 'none'
@@ -559,6 +560,7 @@ export function normalizeLayerStates(input: {
       displayName: apiLayer?.layer_name ?? layerLabels[layerId as M11Layer] ?? layerId,
       group: layerGroup(apiLayer, layerId),
       available,
+      metadata: apiLayer?.metadata ?? null,
       validTimes,
       currentValidTime,
       validTimeSource: apiValidTimes.length > 0 ? 'api' : derivedValidTimes.length > 0 ? 'derived' : 'none',

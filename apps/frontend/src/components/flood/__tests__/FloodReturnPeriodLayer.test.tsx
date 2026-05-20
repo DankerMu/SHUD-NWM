@@ -6,9 +6,11 @@ import { FloodAlertMap } from '@/components/flood/FloodAlertMap'
 import {
   FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY,
   FloodReturnPeriodLayer,
+  floodMvtTileUrlTemplate,
   floodReturnPeriodLayer,
   floodTileUrl,
 } from '@/components/flood/FloodReturnPeriodLayer'
+import type { MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 
 vi.mock('@/api/base', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/base')>()
@@ -23,6 +25,10 @@ const layerProps: unknown[] = []
 
 function geoJsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+}
+
+function emptyLayerCatalogResponse() {
+  return geoJsonResponse({ request_id: 'req-test', status: 'ok', data: [] })
 }
 
 function oversizedStreamResponse(maxBytes: number) {
@@ -55,7 +61,20 @@ vi.mock('react-map-gl/maplibre', () => ({
 }))
 
 describe('FloodReturnPeriodLayer', () => {
-  it('uses the GeoJSON endpoint URL without z/x/y or pbf semantics', () => {
+  const mvtMetadata: MvtLayerMetadata = {
+    layer_id: 'flood-return-period',
+    tile_format: 'mvt',
+    url_template: '/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf',
+    tile_url_template: '/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf',
+    maplibre_source_layer: 'flood_return_period',
+    source_layer: 'flood_return_period',
+    fallback_available: true,
+    release_blocking: false,
+    required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
+    valid_times: ['2026-05-03T06:00:00Z'],
+  }
+
+  it('builds the bounded GeoJSON compatibility endpoint without z/x/y or pbf semantics', () => {
     const url = floodTileUrl('run 1', '2026-05-03T06:00:00Z')
 
     expect(url).toContain('https://api.example.test/api/v1/tiles/flood-return-period?')
@@ -66,25 +85,54 @@ describe('FloodReturnPeriodLayer', () => {
     expect(url).not.toContain('.pbf')
   })
 
-  it('routes flood tile fetches through the configured API base', async () => {
+  it('builds MVT URLs from layer metadata placeholders', () => {
+    const url = floodMvtTileUrlTemplate(mvtMetadata, 'run-1', '2026-05-03T06:00:00Z')
+
+    expect(url).toBe(
+      'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf',
+    )
+  })
+
+  it('configures a vector source when MVT metadata is available', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    vi.stubGlobal('fetch', vi.fn())
+
+    render(<FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" metadata={mvtMetadata} />)
+
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
+    expect(sourceProps.at(-1)).toMatchObject({
+      tiles: [
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf',
+      ],
+    })
+    expect(floodReturnPeriodLayer(null, 'flood_return_period')).toMatchObject({ 'source-layer': 'flood_return_period' })
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+  })
+
+  it('routes bounded GeoJSON fallback fetches through the configured API base', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(geoJsonResponse({ type: 'FeatureCollection', features: [] })),
+      vi.fn()
+        .mockResolvedValueOnce(emptyLayerCatalogResponse())
+        .mockResolvedValueOnce(geoJsonResponse({ type: 'FeatureCollection', features: [] })),
     )
 
     render(<FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" />)
 
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
-    expect(fetch).toHaveBeenCalledWith(
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    expect(fetch).toHaveBeenLastCalledWith(
       'https://api.example.test/api/v1/tiles/flood-return-period?run_id=run-1&duration=1h&valid_time=2026-05-03T06%3A00%3A00Z&limit=10000',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
   })
 
-  it('configures a geojson source instead of a vector source', async () => {
+  it('configures a geojson source only when metadata is unavailable', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(geoJsonResponse({ type: 'FeatureCollection', features: [] })),
+      vi.fn()
+        .mockResolvedValueOnce(emptyLayerCatalogResponse())
+        .mockResolvedValueOnce(geoJsonResponse({ type: 'FeatureCollection', features: [] })),
     )
 
     render(<FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" />)
@@ -99,29 +147,31 @@ describe('FloodReturnPeriodLayer', () => {
     layerProps.length = 0
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        geoJsonResponse({
-          type: 'FeatureCollection',
-          features: [
-            {
-              type: 'Feature',
-              properties: {
-                segment_id: 'dup-seg',
-                river_network_version_id: 'rn-a',
+      vi.fn()
+        .mockResolvedValueOnce(emptyLayerCatalogResponse())
+        .mockResolvedValueOnce(
+          geoJsonResponse({
+            type: 'FeatureCollection',
+            features: [
+              {
+                type: 'Feature',
+                properties: {
+                  segment_id: 'dup-seg',
+                  river_network_version_id: 'rn-a',
+                },
+                geometry: { type: 'LineString', coordinates: [[110, 30], [111, 31]] },
               },
-              geometry: { type: 'LineString', coordinates: [[110, 30], [111, 31]] },
-            },
-            {
-              type: 'Feature',
-              properties: {
-                segment_id: 'dup-seg',
-                river_network_version_id: 'rn-b',
+              {
+                type: 'Feature',
+                properties: {
+                  segment_id: 'dup-seg',
+                  river_network_version_id: 'rn-b',
+                },
+                geometry: { type: 'LineString', coordinates: [[112, 32], [113, 33]] },
               },
-              geometry: { type: 'LineString', coordinates: [[112, 32], [113, 33]] },
-            },
-          ],
-        }),
-      ),
+            ],
+          }),
+        ),
     )
 
     render(
@@ -155,22 +205,24 @@ describe('FloodReturnPeriodLayer', () => {
     layerProps.length = 0
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 409,
-        headers: new Headers(),
-        text: vi.fn().mockResolvedValue(
-          JSON.stringify({
-            status: 'error',
-            error: { code: 'FREQUENCY_NOT_COMPUTED', message: 'not ready' },
-          }),
-        ),
-      }),
+      vi.fn()
+        .mockResolvedValueOnce(emptyLayerCatalogResponse())
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 409,
+          headers: new Headers(),
+          text: vi.fn().mockResolvedValue(
+            JSON.stringify({
+              status: 'error',
+              error: { code: 'FREQUENCY_NOT_COMPUTED', message: 'not ready' },
+            }),
+          ),
+        }),
     )
 
     render(<FloodReturnPeriodLayer runId="run-pending" validTime="2026-05-03T06:00:00Z" />)
 
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
     expect(sourceProps).toHaveLength(0)
     expect(layerProps).toHaveLength(0)
   })
@@ -181,12 +233,14 @@ describe('FloodReturnPeriodLayer', () => {
     const onUnavailableReason = vi.fn()
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        geoJsonResponse({
-          type: 'FeatureCollection',
-          features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }],
-        }),
-      ),
+      vi.fn()
+        .mockResolvedValueOnce(emptyLayerCatalogResponse())
+        .mockResolvedValueOnce(
+          geoJsonResponse({
+            type: 'FeatureCollection',
+            features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }],
+          }),
+        ),
     )
 
     render(
@@ -207,12 +261,14 @@ describe('FloodReturnPeriodLayer', () => {
     layerProps.length = 0
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        geoJsonResponse({
-          type: 'FeatureCollection',
-          features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
-        }),
-      ),
+      vi.fn()
+        .mockResolvedValueOnce(emptyLayerCatalogResponse())
+        .mockResolvedValueOnce(
+          geoJsonResponse({
+            type: 'FeatureCollection',
+            features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
+          }),
+        ),
     )
 
     render(
@@ -230,7 +286,10 @@ describe('FloodReturnPeriodLayer', () => {
   it('surfaces scoped unavailable state for oversized no-content-length streams on the flood-alert map', async () => {
     sourceProps.length = 0
     layerProps.length = 0
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(oversizedStreamResponse(2_000_000)))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(emptyLayerCatalogResponse()).mockResolvedValueOnce(oversizedStreamResponse(2_000_000)),
+    )
 
     render(
       <FloodAlertMap

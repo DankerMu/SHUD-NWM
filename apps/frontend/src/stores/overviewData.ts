@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 
+import { apiFetch } from '@/api/base'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
@@ -717,10 +718,12 @@ async function fetchLayers() {
   return cached(
     cacheKey('/api/v1/layers', { limit: 100, offset: 0 }),
     () =>
-      getApi<ApiLayer[]>(
-        '/api/v1/layers',
-        { params: { query: { limit: 100, offset: 0 } } },
-        '获取图层列表失败',
+      getApi<ApiLayer[]>('/api/v1/layers', { params: { query: { limit: 100, offset: 0 } } }, '获取图层列表失败').catch(
+        async () => {
+          const response = await apiFetch('/api/v1/layers?limit=100&offset=0')
+          if (!response.ok) throw new Error('获取图层列表失败')
+          return unwrapApiData<ApiLayer[]>(await response.json(), '获取图层列表失败')
+        },
       ),
   )
 }
@@ -733,7 +736,11 @@ async function fetchLayerValidTimes(layerId: string) {
         '/api/v1/layers/{layer_id}/valid-times',
         { params: { path: { layer_id: layerId } } },
         '获取图层有效时间失败',
-      ),
+      ).catch(async () => {
+        const response = await apiFetch(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times`)
+        if (!response.ok) throw new Error('获取图层有效时间失败')
+        return unwrapApiData<string[]>(await response.json(), '获取图层有效时间失败')
+      }),
   )
 }
 
