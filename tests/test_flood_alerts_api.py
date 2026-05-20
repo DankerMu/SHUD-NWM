@@ -888,7 +888,7 @@ def test_flood_mvt_live_postgis_returns_raw_bytes_and_binds_requested_xyz(monkey
                 assert parameters["duration"] == "1h"
                 assert parameters["valid_time"] == VALID_TIME_1
                 assert (parameters["z"], parameters["x"], parameters["y"]) == (6, 12, 24)
-                return FakeRowResult({"tile": b"live-tile"})
+                return FakeRowResult({"tile": b"live-tile", "source_feature_count": 1})
             if "information_schema.tables" in sql:
                 return FakeRowResult(None)
             raise AssertionError(f"Unexpected SQL in live PostGIS tile test: {sql}")
@@ -1014,7 +1014,7 @@ def test_flood_mvt_cache_identity_preserves_duration_variants(monkeypatch: pytes
         (
             f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
             flood_alert_routes.TileInput(
-                layer_id="hydro:q_down",
+                layer_id="discharge",
                 source_id=RUN_ID,
                 source_version="rnv_v1",
                 valid_time=VALID_TIME_1_ISO,
@@ -1024,12 +1024,12 @@ def test_flood_mvt_cache_identity_preserves_duration_variants(monkeypatch: pytes
                 variant_id="variable:q_down",
             ),
             "_fetch_hydro_mvt_tile_bytes",
-            [("hydro:q_down", "hydrological_output", "q_down")],
+            [("discharge", "hydrological_output", "q_down")],
         ),
         (
             f"/api/v1/tiles/hydro/{RUN_ID}/water_level/{VALID_TIME_1_ISO}/6/12/24.pbf",
             flood_alert_routes.TileInput(
-                layer_id="hydro:water_level",
+                layer_id="water-level",
                 source_id=RUN_ID,
                 source_version="rnv_v1",
                 valid_time=VALID_TIME_1_ISO,
@@ -1039,7 +1039,7 @@ def test_flood_mvt_cache_identity_preserves_duration_variants(monkeypatch: pytes
                 variant_id="variable:water_level",
             ),
             "_fetch_hydro_mvt_tile_bytes",
-            [("hydro:water_level", "hydrological_output", "water_level")],
+            [("water-level", "hydrological_output", "water_level")],
         ),
         (
             "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
@@ -1120,7 +1120,7 @@ def test_live_mvt_route_cache_hit_skips_postgis_fetch(
         (
             f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
             flood_alert_routes.TileInput(
-                layer_id="hydro:q_down",
+                layer_id="discharge",
                 source_id=RUN_ID,
                 source_version="rnv_v1",
                 valid_time=VALID_TIME_1_ISO,
@@ -1129,7 +1129,7 @@ def test_live_mvt_route_cache_hit_skips_postgis_fetch(
                 y=24,
                 variant_id="variable:q_down",
             ),
-            "hydro:q_down",
+            "discharge",
         ),
         (
             "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
@@ -1197,7 +1197,7 @@ def test_seeded_live_mvt_cache_hit_still_requires_live_postgis(
         ),
         (
             flood_alert_routes.TileInput(
-                layer_id="hydro:q_down",
+                layer_id="discharge",
                 source_id=RUN_ID,
                 source_version="rnv_v1",
                 valid_time=VALID_TIME_1_ISO,
@@ -1259,7 +1259,7 @@ def test_canonical_mvt_cache_write_upserts_layer_row_then_second_request_hits(
         (
             f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
             "_fetch_hydro_mvt_tile_bytes",
-            "hydro:q_down",
+            "discharge",
         ),
         (
             "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
@@ -1374,6 +1374,76 @@ def test_live_mvt_cache_write_failure_returns_tile_with_bypass_status(monkeypatc
     assert tile.cache_status == "bypass"
 
 
+def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRowResult:
+        def __init__(self, row: dict[str, Any] | None) -> None:
+            self.row = row
+
+        def mappings(self) -> FakeRowResult:
+            return self
+
+        def first(self) -> dict[str, Any] | None:
+            return self.row
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRowResult:
+            sql = str(statement)
+            if "ST_TileEnvelope(:z, :x, :y)" in sql:
+                assert parameters["variable"] == "q_down"
+                return FakeRowResult(
+                    {
+                        "tile": b"",
+                        "source_feature_count": 1,
+                        "feature_count": 0,
+                        "coordinate_count": 0,
+                        "feature_coordinate_overflow_count": 0,
+                        "feature_coordinate_count": 0,
+                        "coordinate_dimension_overflow_count": 0,
+                        "coordinate_dimension_count": 0,
+                        "invalid_property_count": 0,
+                        "invalid_properties": "",
+                    }
+                )
+            if "information_schema.tables" in sql:
+                return FakeRowResult(None)
+            raise AssertionError(f"Unexpected SQL in live PostGIS zero-feature test: {sql}")
+
+        def rollback(self) -> None:
+            return None
+
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_run",
+        lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+    )
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{_iso(VALID_TIME_1)}/6/12/24.pbf"
+            )
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].split(";")[0] == flood_alert_routes.MVT_MEDIA_TYPE
+    assert response.headers["cache-control"] == "public, max-age=300"
+    assert response.headers["x-tile-layer-id"] == "discharge"
+    assert response.headers["x-tile-cache"] == "bypass"
+    assert response.headers["x-mvt-schema-version"] == flood_alert_routes.MVT_SCHEMA_VERSION
+    assert response.content == b""
+
+
 def test_live_mvt_over_budget_stats_return_413_without_pbf(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeDialect:
         name = "postgresql"
@@ -1404,6 +1474,7 @@ def test_live_mvt_over_budget_stats_return_413_without_pbf(monkeypatch: pytest.M
                 return FakeRowResult(
                     {
                         "tile": None,
+                        "source_feature_count": 1,
                         "feature_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1,
                         "coordinate_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES + 2,
                     }
@@ -1469,6 +1540,7 @@ def test_live_mvt_feature_coordinate_overflow_returns_413_without_pbf(monkeypatc
                 return FakeRowResult(
                     {
                         "tile": b"must-not-return",
+                        "source_feature_count": 1,
                         "feature_count": 1,
                         "coordinate_count": 10,
                         "feature_coordinate_overflow_count": 1,
@@ -1537,6 +1609,7 @@ def test_live_mvt_invalid_required_properties_return_json_error(monkeypatch: pyt
                 return FakeRowResult(
                     {
                         "tile": b"must-not-return",
+                        "source_feature_count": 1,
                         "feature_count": 1,
                         "coordinate_count": 10,
                         "invalid_property_count": 2,
@@ -1637,7 +1710,7 @@ def test_hydro_and_river_network_live_postgis_bind_requested_xyz(
                 assert f"'{expected_layer.replace('-', '_')}'" in sql or expected_layer == "hydro"
                 for key, value in expected_params.items():
                     assert parameters[key] == value
-                return FakeRowResult({"tile": b"live-tile"})
+                return FakeRowResult({"tile": b"live-tile", "source_feature_count": 1})
             if "information_schema.tables" in sql:
                 return FakeRowResult(None)
             raise AssertionError(f"Unexpected SQL in live PostGIS tile test: {sql}")
@@ -1709,6 +1782,22 @@ def test_layer_metadata_discovery_exposes_mvt_contract() -> None:
     assert _iso(VALID_TIME_1) in valid_times.json()["data"]
 
 
+def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases() -> None:
+    with _client() as client:
+        response = client.get("/api/v1/layers")
+
+    assert response.status_code == 200
+    layers = {layer["layer_id"]: layer for layer in response.json()["data"]}
+    discharge = layers["discharge"]["metadata"]
+    water_level = layers["water-level"]["metadata"]
+    assert discharge["cache_layer_id"] == "discharge"
+    assert discharge["route_variable"] == "q_down"
+    assert discharge["legacy_layer_ids"] == ["hydro:q_down"]
+    assert water_level["cache_layer_id"] == "water-level"
+    assert water_level["route_variable"] == "water_level"
+    assert water_level["legacy_layer_ids"] == ["hydro:water_level"]
+
+
 def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() -> None:
     statement = flood_alert_routes.postgis_tile_sql("flood-return-period")
 
@@ -1721,6 +1810,8 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
     assert "ST_AsMVT(tile_rows, 'flood_return_period', 4096, 'mvt_geom')" in statement
     assert "feature_count <= :feature_limit" in statement
     assert "coordinate_count <= :collection_coordinate_limit" in statement
+    assert "source_stats AS" in statement
+    assert "FROM source_stats, budget_stats, prefilter_stats" in statement
 
 
 def test_mvt_postgis_sql_shape_projects_metadata_properties_and_bindable_casts() -> None:

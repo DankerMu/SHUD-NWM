@@ -603,7 +603,10 @@ Useful knobs:
   artifact. Without it, the lane writes generated defaults.
 - `NHMS_PRODUCTION_SCALE_TILE_CONTENT_TYPE_EXPECTATION`: defaults to
   `application/geo+json`. Set `application/x-protobuf` only when validating
-  production MVT readiness.
+  production MVT readiness. This expectation alone does not create measured MVT
+  evidence; provide `NHMS_PRODUCTION_SCALE_MVT_CONTRACT_ARTIFACT` or
+  `--mvt-contract-artifact` with a measured JSON artifact to satisfy the
+  deterministic MVT contract path.
 - `NHMS_PRODUCTION_SCALE_FRONTEND_BREAKPOINTS`: comma-separated values such as
   `desktop:1440x900,mobile:390x844`.
 - `NHMS_PRODUCTION_SCALE_API_BASE_URL` and

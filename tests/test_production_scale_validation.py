@@ -89,66 +89,70 @@ def test_validate_scale_mvt_expectation_creates_explicit_release_blocker(tmp_pat
     tile = _read_json(lane_dir / "tile_evidence.json")
     assert summary["status"] == "blocked"
     assert tile["status"] == "blocked"
-    assert tile["deterministic_mvt_passed"] is True
-    assert tile["mvt_deterministic_contract"]["status"] == "passed"
-    assert tile["mvt_deterministic_contract"]["artifact_source"] == "deterministic_contract_artifact"
-    assert tile["observed_content_type"] == "application/x-protobuf"
+    assert tile["deterministic_mvt_passed"] is False
+    assert tile["mvt_deterministic_contract"]["status"] == "not_executed"
+    assert tile["mvt_deterministic_contract"]["artifact_source"] == "missing_mvt_contract_artifact"
+    assert tile["observed_content_type"] == "not_measured"
     assert tile["live_postgis_status"] == "not_executed"
     assert tile["production_mvt_readiness_claimed"] is False
     blocker = tile["blockers"][0]
-    assert blocker["error_code"] == "PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"
-    assert blocker["blocker_id"] == "m16-live-postgis-national-proof"
-    assert blocker["surface"] == "live_postgis_national_frontend_evidence"
+    assert blocker["error_code"] == "PRODUCTION_SCALE_MVT_DETERMINISTIC_CONTRACT_BLOCKED"
+    assert blocker["surface"] == "deterministic_mvt_contract"
     assert blocker["status"] == "not_executed"
     assert blocker["expected_content_type"] == "application/x-protobuf"
-    assert "readiness is not claimed" in blocker["message"]
-    assert "/api/v1/tiles/flood-return-period" in blocker["affected_endpoints"]
-    assert "removal_criteria" in blocker
-    assert "residual_risk" in blocker
-    assert tile["mvt_deterministic_metrics"]["sql_shape_hash"]
-    assert tile["mvt_deterministic_metrics"]["query_plan_hash"]
-    assert tile["mvt_deterministic_metrics"]["p95_ms"] <= 300.0
-    assert tile["mvt_deterministic_metrics"]["payload_bytes"] <= tile["max_bytes_comparison"]["threshold_bytes"]
-    assert tile["layer_metadata"]["tile_format"] == "mvt"
+    delivery_blocker = tile["blockers"][1]
+    assert delivery_blocker["error_code"] == "PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"
+    assert delivery_blocker["blocker_id"] == "m16-live-postgis-national-proof"
+    assert delivery_blocker["surface"] == "live_postgis_national_frontend_evidence"
+    assert delivery_blocker["status"] == "not_executed"
+    assert "readiness is not claimed" in delivery_blocker["message"]
+    assert "/api/v1/tiles/flood-return-period" in delivery_blocker["affected_endpoints"]
+    assert "removal_criteria" in delivery_blocker
+    assert "residual_risk" in delivery_blocker
+    assert tile["mvt_deterministic_metrics"]["payload_bytes"] == 0
+    assert tile["layer_metadata"]["tile_format"] == "geojson_compatibility"
     assert tile["layer_metadata"]["maplibre_source_layer"] == "flood_return_period"
 
 
-def test_validate_scale_mvt_expectation_alone_does_not_create_deterministic_pass(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def expectation_only_record(
-        config: ProductionScaleConfig,
-        dataset_manifest: dict[str, object],
-    ) -> dict[str, object]:
-        del config, dataset_manifest
-        return {
-            "status": "blocked",
-            "passed": False,
-            "observed_content_type": "application/json",
-            "payload_bytes": 128,
-            "artifact_source": "expectation_only",
-            "artifact_paths": [],
-            "metrics": {"status": "blocked", "payload_bytes": 128, "thresholds": {}},
-        }
-
-    monkeypatch.setattr(scale_validation, "_deterministic_mvt_contract_record", expectation_only_record)
-
+def test_validate_scale_mvt_expectation_with_measured_artifact_records_deterministic_pass(tmp_path: Path) -> None:
+    artifact = tmp_path / "measured-mvt-contract.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "observed_content_type": "application/x-protobuf",
+                "raw_tile_bytes_observed": True,
+                "sql_shape_hash": "shape-hash",
+                "query_plan_hash": "plan-hash",
+                "artifact_paths": [str(artifact)],
+                "payload_bytes": 684000,
+                "p95_ms": 178.6,
+                "tile_count": 96,
+                "feature_count": 18500,
+                "coordinate_count": 37000,
+                "browser_timing_ms": {"first_tile": 214.0},
+            }
+        ),
+        encoding="utf-8",
+    )
     summary = validate_scale(
         ProductionScaleConfig.from_env(
             evidence_root=tmp_path / "artifacts",
-            run_id="mvt_expectation_only",
+            run_id="mvt_measured",
             tile_content_type_expectation="application/x-protobuf",
+            mvt_contract_artifact=artifact,
         )
     )
-    tile = _read_json(tmp_path / "artifacts" / "mvt_expectation_only" / "scale" / "tile_evidence.json")
+    tile = _read_json(tmp_path / "artifacts" / "mvt_measured" / "scale" / "tile_evidence.json")
 
     assert summary["status"] == "blocked"
-    assert tile["deterministic_mvt_passed"] is False
-    assert tile["observed_content_type"] == "application/json"
-    assert "PRODUCTION_SCALE_MVT_DETERMINISTIC_CONTRACT_BLOCKED" in {
-        blocker["error_code"] for blocker in tile["blockers"]
-    }
+    assert tile["deterministic_mvt_passed"] is True
+    assert tile["mvt_deterministic_contract"]["status"] == "passed"
+    assert tile["mvt_deterministic_contract"]["artifact_source"] == "measured_mvt_contract_artifact"
+    assert tile["observed_content_type"] == "application/x-protobuf"
+    assert tile["mvt_deterministic_metrics"]["artifact_path"] == str(artifact)
+    assert tile["mvt_deterministic_metrics"]["artifact_sha256"]
+    assert tile["layer_metadata"]["tile_format"] == "mvt"
+    assert {blocker["error_code"] for blocker in tile["blockers"]} == {"PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"}
 
 
 def test_validate_scale_threshold_and_count_failures_block_readiness(tmp_path: Path) -> None:

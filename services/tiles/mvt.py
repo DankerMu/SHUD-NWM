@@ -107,6 +107,10 @@ def stable_etag(data: bytes) -> str:
     return f'W/"m16-{hashlib.sha256(data).hexdigest()}"'
 
 
+def public_hydro_layer_id(variable: str) -> str:
+    return {"q_down": "discharge", "water_level": "water-level"}.get(variable, f"hydro:{variable}")
+
+
 def build_tile_response(
     session: Session,
     tile: TileInput,
@@ -153,15 +157,6 @@ def build_tile_response(
 
 def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> TileResponse:
     validate_xyz(tile.z, tile.x, tile.y)
-    if not data:
-        from apps.api.errors import ApiError
-
-        raise ApiError(
-            status_code=424,
-            code="MVT_LIVE_POSTGIS_UNAVAILABLE",
-            message="Live PostGIS MVT returned no tile bytes for the requested tile.",
-            details={"layer_id": tile.layer_id, "z": tile.z, "x": tile.x, "y": tile.y},
-        )
     if len(data) > MVT_MAX_BYTES:
         from apps.api.errors import ApiError
 
@@ -356,6 +351,9 @@ def postgis_tile_sql(layer: str) -> str:
         source_rows AS (
             {source_cte}
         ),
+        source_stats AS (
+            SELECT CASE WHEN EXISTS (SELECT 1 FROM source_rows) THEN 1 ELSE 0 END AS source_feature_count
+        ),
         intersecting AS (
             SELECT source_rows.*,
                    ST_NPoints(source_rows.geom) AS source_coordinate_count,
@@ -414,6 +412,7 @@ def postgis_tile_sql(layer: str) -> str:
                 ORDER BY river_network_version_id, river_segment_id
             ) AS tile_rows
         ) AS tile,
+        (SELECT source_feature_count FROM source_stats) AS source_feature_count,
         (SELECT feature_count FROM budget_stats) AS feature_count,
         (SELECT coordinate_count FROM budget_stats) AS coordinate_count,
         (SELECT feature_coordinate_overflow_count FROM prefilter_stats) AS feature_coordinate_overflow_count,
@@ -422,18 +421,7 @@ def postgis_tile_sql(layer: str) -> str:
         (SELECT coordinate_dimension_count FROM prefilter_stats) AS coordinate_dimension_count,
         (SELECT invalid_property_count FROM prefilter_stats) AS invalid_property_count,
         (SELECT invalid_properties FROM prefilter_stats) AS invalid_properties
-        FROM budget_stats, prefilter_stats
-        WHERE EXISTS (
-            SELECT *
-            FROM budgeted
-            WHERE feature_count <= :feature_limit
-              AND coordinate_count <= :collection_coordinate_limit
-        )
-        OR feature_count > :feature_limit
-        OR coordinate_count > :collection_coordinate_limit
-        OR feature_coordinate_overflow_count > 0
-        OR coordinate_dimension_overflow_count > 0
-        OR invalid_property_count > 0
+        FROM source_stats, budget_stats, prefilter_stats
     """
 
 
@@ -531,6 +519,21 @@ def layer_metadata(
         "wgs84_bounds": CHINA_WGS84_BOUNDS,
         "valid_times": valid_times or [],
         "source_refs": {"run_id": run_id, "source_version": source_version},
+        "cache_layer_id": layer_id,
+        "route_variable": (
+            "q_down"
+            if layer_id == "discharge"
+            else "water_level"
+            if layer_id == "water-level"
+            else "return_period"
+            if layer_id in {"flood-return-period", "warning-level"}
+            else None
+        ),
+        "legacy_layer_ids": [f"hydro:{'q_down' if layer_id == 'discharge' else 'water_level'}"]
+        if layer_id in {"discharge", "water-level"}
+        else ["flood_return_period_{run_id}"]
+        if layer_id == "flood-return-period"
+        else [],
         "cache_etag": f'W/"metadata-{version}"',
         "cache_version": version,
         "schema_version": MVT_SCHEMA_VERSION,
@@ -767,6 +770,15 @@ def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
             "tile_uri_template": "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
             "maplibre_source_layer": "river_network",
             "variable": None,
+            "fallback_available": False,
+        }
+    if tile.layer_id in {"discharge", "water-level"}:
+        variable = "q_down" if tile.layer_id == "discharge" else "water_level"
+        return {
+            "layer_type": "hydrological_output",
+            "tile_uri_template": f"/api/v1/tiles/hydro/{{run_id}}/{variable}/{{valid_time}}/{{z}}/{{x}}/{{y}}.pbf",
+            "maplibre_source_layer": "hydro",
+            "variable": variable,
             "fallback_available": False,
         }
     if tile.layer_id.startswith("hydro:"):

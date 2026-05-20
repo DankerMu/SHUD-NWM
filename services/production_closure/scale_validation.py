@@ -329,6 +329,7 @@ class ProductionScaleConfig:
     thresholds: ProductionScaleThresholds
     thresholds_file: Path | None = None
     latency_fixture: str = "valid"
+    mvt_contract_artifact: Path | None = None
     force: bool = False
 
     @property
@@ -353,6 +354,7 @@ class ProductionScaleConfig:
         api_base_url: str | None = None,
         object_prefix: str | None = None,
         latency_fixture: str | None = None,
+        mvt_contract_artifact: Path | None = None,
         force: bool = False,
     ) -> ProductionScaleConfig:
         resolved_evidence_root = _safe_resolved_evidence_root(evidence_root)
@@ -398,6 +400,8 @@ class ProductionScaleConfig:
             thresholds=thresholds,
             thresholds_file=resolved_thresholds_file,
             latency_fixture=latency_fixture or os.getenv("NHMS_PRODUCTION_SCALE_LATENCY_FIXTURE", "valid"),
+            mvt_contract_artifact=mvt_contract_artifact
+            or _optional_path_env("NHMS_PRODUCTION_SCALE_MVT_CONTRACT_ARTIFACT"),
             force=force,
         )
 
@@ -801,49 +805,83 @@ def _deterministic_mvt_contract_record(
             },
         }
 
-    measured = {
-        "observed_content_type": "application/x-protobuf",
-        "protobuf_magic": "mvt-layer-field",
-        "raw_tile_bytes_observed": True,
-        "sql_shape": "ST_TileEnvelope_ST_Transform_ST_AsMVTGeom_ST_AsMVT",
-        "sql_shape_hash": _stable_sha256(
-            {
-                "shape": "ST_TileEnvelope_ST_Transform_ST_AsMVTGeom_ST_AsMVT",
-                "extent": 4096,
-                "buffer": 64,
-                "schema_version": "m16-hydrology-mvt-v1",
-            }
-        ),
-        "query_plan_hash": _stable_sha256(
-            {
-                "plan": "Index Scan return_period_result_map_idx + river_segment_geom_gix + ST_AsMVT",
-                "dataset_checksum": dataset_manifest["checksum"],
-            }
-        ),
-        "p95_ms": 178.6,
-        "payload_bytes": 684_000,
-        "tile_count": 96,
-        "feature_count": 18_500,
-        "coordinate_count": 37_000,
-        "memory_proxy_mb": 146.0,
-        "browser_timing_ms": {"source_registration": 74.0, "first_tile": 214.0, "interactive": 1180.0},
-        "thresholds": {"p95_ms": 300.0, "payload_bytes": config.thresholds.max_tile_bytes, "memory_proxy_mb": 384.0},
-        "artifact_paths": ["tile_evidence.json"],
-    }
+    if config.mvt_contract_artifact is None:
+        return _blocked_mvt_contract_record(
+            config,
+            status="not_executed",
+            artifact_source="missing_mvt_contract_artifact",
+            message="No measured deterministic MVT artifact path was supplied.",
+        )
+
+    artifact_path = config.mvt_contract_artifact
+    _refuse_symlink_components(artifact_path)
+    try:
+        content = read_bytes_limited_no_follow(artifact_path, max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES)
+        measured = json.loads(content.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, SafeFilesystemError) as error:
+        return _blocked_mvt_contract_record(
+            config,
+            status="blocked",
+            artifact_source="invalid_mvt_contract_artifact",
+            message=f"Measured deterministic MVT artifact could not be read safely: {error}",
+            artifact_paths=[str(artifact_path)],
+        )
+    if not isinstance(measured, Mapping):
+        return _blocked_mvt_contract_record(
+            config,
+            status="blocked",
+            artifact_source="invalid_mvt_contract_artifact",
+            message="Measured deterministic MVT artifact must contain a JSON object.",
+            artifact_paths=[str(artifact_path)],
+        )
+    measured = dict(measured)
+    measured["artifact_path"] = str(artifact_path)
+    measured["artifact_sha256"] = hashlib.sha256(content).hexdigest()
+    measured.setdefault("thresholds", {"payload_bytes": config.thresholds.max_tile_bytes})
+    measured.setdefault("artifact_paths", [str(artifact_path)])
+    observed_content_type = str(measured.get("observed_content_type") or "not_measured")
+    raw_tile_bytes_observed = bool(measured.get("raw_tile_bytes_observed"))
+    payload_bytes = int(measured.get("payload_bytes") or 0)
     passed = (
-        measured["observed_content_type"] == "application/x-protobuf"
-        and bool(measured["raw_tile_bytes_observed"])
-        and bool(measured["sql_shape_hash"])
-        and int(measured["payload_bytes"]) <= config.thresholds.max_tile_bytes
+        observed_content_type == "application/x-protobuf"
+        and raw_tile_bytes_observed
+        and bool(measured.get("sql_shape_hash"))
+        and bool(measured.get("query_plan_hash"))
+        and bool(measured.get("artifact_sha256"))
+        and payload_bytes <= config.thresholds.max_tile_bytes
     )
     return {
         "status": "passed" if passed else "blocked",
         "passed": passed,
-        "observed_content_type": measured["observed_content_type"],
-        "payload_bytes": measured["payload_bytes"],
-        "artifact_source": "deterministic_contract_artifact",
-        "artifact_paths": measured["artifact_paths"],
+        "observed_content_type": observed_content_type,
+        "payload_bytes": payload_bytes,
+        "artifact_source": "measured_mvt_contract_artifact",
+        "artifact_paths": [str(item) for item in measured.get("artifact_paths", [str(artifact_path)])],
         "metrics": measured,
+    }
+
+
+def _blocked_mvt_contract_record(
+    config: ProductionScaleConfig,
+    *,
+    status: str,
+    artifact_source: str,
+    message: str,
+    artifact_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "passed": False,
+        "observed_content_type": "not_measured",
+        "payload_bytes": 0,
+        "artifact_source": artifact_source,
+        "artifact_paths": artifact_paths or [],
+        "metrics": {
+            "status": status,
+            "payload_bytes": 0,
+            "thresholds": {"payload_bytes": config.thresholds.max_tile_bytes},
+            "message": message,
+        },
     }
 
 
@@ -1042,6 +1080,7 @@ def _environment_payload(config: ProductionScaleConfig) -> dict[str, Any]:
         "NHMS_PRODUCTION_SCALE_API_BASE_URL",
         "NHMS_PRODUCTION_SCALE_OBJECT_PREFIX",
         "NHMS_PRODUCTION_SCALE_LATENCY_FIXTURE",
+        "NHMS_PRODUCTION_SCALE_MVT_CONTRACT_ARTIFACT",
         "DATABASE_URL",
         "AWS_SECRET_ACCESS_KEY",
     ]
@@ -1626,6 +1665,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--api-base-url", default=None)
     @click.option("--object-prefix", default=None)
     @click.option("--latency-fixture", default=None)
+    @click.option("--mvt-contract-artifact", type=click.Path(path_type=Path), default=None)
     @click.option("--force", is_flag=True, default=False)
     def validate_scale_command(
         evidence_root: Path,
@@ -1642,6 +1682,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         api_base_url: str | None,
         object_prefix: str | None,
         latency_fixture: str | None,
+        mvt_contract_artifact: Path | None,
         force: bool,
     ) -> None:
         try:
@@ -1661,6 +1702,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     api_base_url=api_base_url,
                     object_prefix=object_prefix,
                     latency_fixture=latency_fixture,
+                    mvt_contract_artifact=mvt_contract_artifact,
                     force=force,
                 )
             )
@@ -1704,6 +1746,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                             api_base_url=args.api_base_url,
                             object_prefix=args.object_prefix,
                             latency_fixture=args.latency_fixture,
+                            mvt_contract_artifact=args.mvt_contract_artifact,
                             force=args.force,
                         )
                     )
@@ -1735,6 +1778,7 @@ def _add_argparse_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-base-url", default=None)
     parser.add_argument("--object-prefix", default=None)
     parser.add_argument("--latency-fixture", default=None)
+    parser.add_argument("--mvt-contract-artifact", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
 
 

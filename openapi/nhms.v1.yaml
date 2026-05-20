@@ -3248,6 +3248,19 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+        cache_layer_id:
+          type: string
+          nullable: true
+          description: Stable public layer ID used in X-Tile-Layer-ID and map.tile_cache.layer_id.
+        route_variable:
+          type: string
+          nullable: true
+          description: Hydro or flood variable carried by the tile route path.
+        legacy_layer_ids:
+          type: array
+          description: Backward-compatible publisher or internal layer IDs that alias this public layer.
+          items:
+            type: string
         cache_etag:
           type: string
           nullable: true

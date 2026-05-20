@@ -1996,6 +1996,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--api-base-url", default=None)
     @click.option("--object-prefix", default=None)
     @click.option("--latency-fixture", default=None)
+    @click.option("--mvt-contract-artifact", type=click.Path(path_type=Path), default=None)
     @click.option("--force", is_flag=True, default=False)
     def validate_scale_command(
         evidence_root: Path,
@@ -2012,6 +2013,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         api_base_url: str | None,
         object_prefix: str | None,
         latency_fixture: str | None,
+        mvt_contract_artifact: Path | None,
         force: bool,
     ) -> None:
         try:
@@ -2031,6 +2033,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     api_base_url=api_base_url,
                     object_prefix=object_prefix,
                     latency_fixture=latency_fixture,
+                    mvt_contract_artifact=mvt_contract_artifact,
                     force=force,
                 )
             )
@@ -2166,6 +2169,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     scale_parser.add_argument("--api-base-url", default=None)
     scale_parser.add_argument("--object-prefix", default=None)
     scale_parser.add_argument("--latency-fixture", default=None)
+    scale_parser.add_argument("--mvt-contract-artifact", type=Path, default=None)
     scale_parser.add_argument("--force", action="store_true")
     ops_parser = subparsers.add_parser("validate-ops")
     ops_parser.add_argument("--evidence-root", type=Path, required=True)
@@ -2325,6 +2329,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                                 api_base_url=args.api_base_url,
                                 object_prefix=args.object_prefix,
                                 latency_fixture=args.latency_fixture,
+                                mvt_contract_artifact=args.mvt_contract_artifact,
                                 force=args.force,
                             )
                         )

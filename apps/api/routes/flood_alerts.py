@@ -29,6 +29,7 @@ from services.tiles.mvt import (
     latest_ready_run,
     layer_metadata,
     postgis_tile_sql,
+    public_hydro_layer_id,
     read_cached_tile_response,
     valid_times_for_layer,
     validate_identifier,
@@ -697,7 +698,7 @@ def hydro_mvt_tile(
     run = _require_run(session, run_id)
     source_version = str(run.get("river_network_version_id") or run.get("basin_version_id") or run_id)
     tile_input = TileInput(
-        layer_id=f"hydro:{variable}",
+        layer_id=public_hydro_layer_id(variable),
         source_id=run_id,
         source_version=source_version,
         valid_time=_format_time(valid_time),
@@ -791,7 +792,9 @@ def _require_live_postgis_mvt(session: Session, layer_id: str) -> None:
 
 def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, Any], *, z: int, x: int, y: int) -> bytes:
     _require_live_postgis_mvt(session, layer)
-    detail_layer_id = f"hydro:{params['variable']}" if layer == "hydro" and "variable" in params else layer
+    detail_layer_id = (
+        public_hydro_layer_id(str(params["variable"])) if layer == "hydro" and "variable" in params else layer
+    )
     row = session.execute(
         text(postgis_tile_sql(layer)),
         _postgis_tile_params(params, z=z, x=x, y=y),
@@ -799,6 +802,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
     feature_count = int(row.get("feature_count") or 0) if row else 0
     coordinate_count = int(row.get("coordinate_count") or 0) if row else 0
     feature_coordinate_overflow_count = int(row.get("feature_coordinate_overflow_count") or 0) if row else 0
+    source_feature_count = int(row.get("source_feature_count") or 0) if row else 0
     feature_coordinate_count = int(row.get("feature_coordinate_count") or 0) if row else 0
     coordinate_dimension_overflow_count = int(row.get("coordinate_dimension_overflow_count") or 0) if row else 0
     coordinate_dimension_count = int(row.get("coordinate_dimension_count") or 0) if row else 0
@@ -870,11 +874,11 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
             },
         )
     data = bytes(row["tile"] or b"") if row and row.get("tile") is not None else b""
-    if not data:
+    if not row or source_feature_count <= 0:
         raise ApiError(
             status_code=424,
             code="MVT_LIVE_POSTGIS_UNAVAILABLE",
-            message="Live PostGIS MVT query returned no tile bytes for the requested identity.",
+            message="Live PostGIS MVT query returned no source rows for the requested identity.",
             details={"layer_id": detail_layer_id, "z": z, "x": x, "y": y},
         )
     return data

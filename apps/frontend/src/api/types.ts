@@ -1358,6 +1358,12 @@ export interface components {
             source_refs?: {
                 [key: string]: unknown;
             } | null;
+            /** @description Stable public layer ID used in X-Tile-Layer-ID and map.tile_cache.layer_id. */
+            cache_layer_id?: string | null;
+            /** @description Hydro or flood variable carried by the tile route path. */
+            route_variable?: string | null;
+            /** @description Backward-compatible publisher or internal layer IDs that alias this public layer. */
+            legacy_layer_ids?: string[];
             cache_etag?: string | null;
             cache_version?: string | null;
             fallback_available: boolean;
