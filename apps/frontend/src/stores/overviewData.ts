@@ -4,6 +4,7 @@ import { apiFetch } from '@/api/base'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
+import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 import {
   createEmptyBasinDetail,
   createEmptyOverviewSummary,
@@ -729,18 +730,20 @@ async function fetchLayers() {
 }
 
 async function fetchLayerValidTimes(layerId: string, runId?: string | null) {
+  const duration = layerId === 'flood-return-period' || layerId === 'warning-level' ? DEFAULT_FLOOD_RETURN_PERIOD_DURATION : null
   return cached(
-    cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId, runId: runId ?? null }),
+    cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId, runId: runId ?? null, duration }),
     () =>
       getApi<components['schemas']['LayerValidTimes'] | string[]>(
         '/api/v1/layers/{layer_id}/valid-times',
-        { params: { path: { layer_id: layerId }, query: { run_id: runId ?? undefined } } },
+        { params: { path: { layer_id: layerId }, query: { run_id: runId ?? undefined, duration: duration ?? undefined } } },
         '获取图层有效时间失败',
       )
         .then(normalizeLayerValidTimesResponse)
         .catch(async () => {
           const params = new URLSearchParams()
           if (runId) params.set('run_id', runId)
+          if (duration) params.set('duration', duration)
           const suffix = params.size > 0 ? `?${params.toString()}` : ''
           const response = await apiFetch(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times${suffix}`)
           if (!response.ok) throw new Error('获取图层有效时间失败')

@@ -287,6 +287,7 @@ describe('useOverviewDataStore', () => {
     })
     expect(calls.find((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')?.query).toMatchObject({
       run_id: 'run-gfs-1',
+      duration: '1h',
     })
   })
 
@@ -391,6 +392,7 @@ describe('useOverviewDataStore', () => {
       if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
       if (path === '/api/v1/layers/{layer_id}/valid-times') {
         if (options?.params?.query?.run_id !== resolvedRun.run_id) throw new Error('valid-times not scoped to resolved run')
+        if (options?.params?.query?.duration !== '1h') throw new Error('flood valid-times not scoped to default duration')
         return success({
           valid_times: ['2026-05-18T09:17:00Z', '2026-05-18T11:41:00Z'],
           items: ['2026-05-18T09:17:00Z', '2026-05-18T11:41:00Z'],
@@ -406,6 +408,7 @@ describe('useOverviewDataStore', () => {
 
     expect(calls.find((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')?.query).toMatchObject({
       run_id: resolvedRun.run_id,
+      duration: '1h',
     })
     expect(snapshot.layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({
       currentValidTime: '2026-05-18T11:41:00.000Z',

@@ -227,6 +227,7 @@ describe('useFloodAlertStore', () => {
         }
         if (parsed.pathname === '/api/v1/layers/flood-return-period/valid-times') {
           expect(parsed.searchParams.get('run_id')).toBe('run-1')
+          expect(parsed.searchParams.get('duration')).toBe('1h')
           return {
             ok: true,
             json: async () =>
@@ -256,7 +257,7 @@ describe('useFloodAlertStore', () => {
       params: { query: { status: 'published', limit: 50 } },
     })
     expect(fetchUrls).toEqual([
-      `${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-1`,
+      `${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-1&duration=1h`,
       `${apiBase}/api/v1/flood-alerts/summary?run_id=run-1&valid_time=2026-05-12T02%3A15%3A00.000Z`,
       `${apiBase}/api/v1/flood-alerts/ranking?run_id=run-1&limit=20&offset=0&basin_id=basin-a&valid_time=2026-05-12T02%3A15%3A00.000Z`,
       `${apiBase}/api/v1/flood-alerts/timeline?run_id=run-1&segment_id=seg-1&river_network_version_id=rivnet-v1`,
@@ -481,7 +482,7 @@ describe('useFloodAlertStore', () => {
     })
     expect(useFloodAlertStore.getState().selectedRunId).toBe('run-sibling')
     expect(useFloodAlertStore.getState().selectedValidTime).toBe('2026-05-11T03:00:00.000Z')
-    expect(fetch).toHaveBeenCalledWith(`${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-sibling`)
+    expect(fetch).toHaveBeenCalledWith(`${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-sibling&duration=1h`)
   })
 
   it('uses run-scoped API valid-times for default, explicit irregular, and tile URL resolution', async () => {
@@ -502,6 +503,7 @@ describe('useFloodAlertStore', () => {
         const parsed = new URL(url)
         if (parsed.pathname === '/api/v1/layers/flood-return-period/valid-times') {
           expect(parsed.searchParams.get('run_id')).toBe('run-1')
+          expect(parsed.searchParams.get('duration')).toBe('1h')
           return floodResponse({
             valid_times: ['2026-05-12T00:22:00Z', '2026-05-12T02:45:00Z'],
             items: ['2026-05-12T00:22:00Z', '2026-05-12T02:45:00Z'],
@@ -539,7 +541,7 @@ describe('useFloodAlertStore', () => {
     await useFloodAlertStore.getState().fetchRanking()
 
     expect(fetchUrls).toEqual([
-      `${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-1`,
+      `${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-1&duration=1h`,
       `${apiBase}/api/v1/flood-alerts/summary?run_id=run-1&valid_time=2026-05-12T02%3A45%3A00.000Z`,
       `${apiBase}/api/v1/flood-alerts/ranking?run_id=run-1&limit=20&offset=0&valid_time=2026-05-12T02%3A45%3A00.000Z`,
     ])

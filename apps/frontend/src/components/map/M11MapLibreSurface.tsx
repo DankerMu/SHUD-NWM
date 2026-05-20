@@ -15,6 +15,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import type { components } from '@/api/types'
 import { floodTileLayerPaint } from '@/components/flood/alertLevels'
 import { cn } from '@/lib/cn'
+import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 import type { FloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriodGeoJson'
 import { buildMvtTileUrlTemplate, isMvtLayerMetadata, type MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 import {
@@ -434,7 +435,7 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
     const tiles = [
       buildMvtTileUrlTemplate(selectedLayer.metadata, {
         run_id: runId,
-        duration: '1h',
+        duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
         valid_time: validTime,
         variable,
       }),
@@ -455,12 +456,51 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
         type: 'line',
         source: sourceId,
         'source-layer': selectedLayer.metadata.maplibre_source_layer,
-        paint: floodTileLayerPaint(),
+        paint: m11RegisteredOverlayPaint(selectedLayer.layerId),
       },
     }
   }
 
   return null
+}
+
+function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
+  if (layerId === 'flood-return-period' || layerId === 'warning-level') return floodTileLayerPaint()
+  return {
+    'line-color': [
+      'interpolate',
+      ['linear'],
+      ['coalesce', ['get', 'value'], 0],
+      0,
+      '#E3F2FD',
+      500,
+      '#90CAF9',
+      1000,
+      '#42A5F5',
+      5000,
+      '#1E88E5',
+      10000,
+      '#FF9800',
+      50000,
+      '#F44336',
+    ],
+    'line-width': [
+      'interpolate',
+      ['linear'],
+      ['coalesce', ['get', 'value'], 0],
+      0,
+      1.2,
+      1000,
+      2,
+      5000,
+      3.2,
+      10000,
+      4.4,
+      50000,
+      6,
+    ],
+    'line-opacity': ['case', ['has', 'value'], 0.86, 0.42],
+  }
 }
 
 function M11OverlayPrimitive({

@@ -690,7 +690,7 @@ paths:
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/RunId"
-        - $ref: "#/components/parameters/Variable"
+        - $ref: "#/components/parameters/HydroMvtVariable"
         - $ref: "#/components/parameters/ValidTimePath"
         - $ref: "#/components/parameters/TileZ"
         - $ref: "#/components/parameters/TileX"
@@ -854,7 +854,7 @@ paths:
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/ProductId"
-        - $ref: "#/components/parameters/Variable"
+        - $ref: "#/components/parameters/MetTileVariable"
         - $ref: "#/components/parameters/ValidTimePath"
         - $ref: "#/components/parameters/TileZ"
         - $ref: "#/components/parameters/TileX"
@@ -1412,6 +1412,14 @@ paths:
           schema:
             type: string
           description: Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery.
+        - name: duration
+          in: query
+          required: false
+          schema:
+            type: string
+            default: 1h
+            enum: [1h, 3h, 6h, 24h, 72h, 7d]
+          description: Optional flood return-period duration for flood-return-period and warning-level discovery; defaults to the current UI route identity of 1h.
       responses:
         "200":
           description: Layer valid times
@@ -1663,13 +1671,19 @@ components:
       schema:
         type: string
         format: date-time
-    Variable:
+    HydroMvtVariable:
       name: variable
       in: path
       required: true
       schema:
         type: string
         enum: [q_down, water_level]
+    MetTileVariable:
+      name: variable
+      in: path
+      required: true
+      schema:
+        type: string
     VariableQuery:
       name: variable
       in: query

@@ -10,6 +10,7 @@ import {
   floodReturnPeriodLayer,
   floodTileUrl,
 } from '@/components/flood/FloodReturnPeriodLayer'
+import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 import type { MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 
 vi.mock('@/api/base', async (importOriginal) => {
@@ -98,6 +99,7 @@ describe('FloodReturnPeriodLayer', () => {
   it('builds MVT URLs from layer metadata placeholders', () => {
     const url = floodMvtTileUrlTemplate(mvtMetadata, 'run-1', '2026-05-03T06:00:00Z')
 
+    expect(DEFAULT_FLOOD_RETURN_PERIOD_DURATION).toBe('1h')
     expect(url).toBe(
       'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf',
     )
@@ -367,7 +369,9 @@ describe('FloodReturnPeriodLayer', () => {
       />,
     )
 
-    expect(await screen.findByTestId('flood-return-period-unavailable')).toHaveTextContent('bbox 限定的 GeoJSON 降级源')
+    await waitFor(() =>
+      expect(screen.getByTestId('flood-return-period-unavailable')).toHaveTextContent('bbox 限定的 GeoJSON 降级源'),
+    )
     await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'geojson' }))
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining('bbox=100%2C30%2C101%2C31'), expect.anything())

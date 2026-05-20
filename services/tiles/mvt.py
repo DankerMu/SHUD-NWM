@@ -27,6 +27,7 @@ MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down", "water_level")
 SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS = ("1h", "3h", "6h", "24h", "72h", "7d")
+DEFAULT_FLOOD_RETURN_PERIOD_DURATION = "1h"
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
 )
@@ -568,11 +569,12 @@ def layer_metadata(
         "valid_time_limit": valid_time_limit,
         "valid_time_observed_count": valid_time_observed_count,
         "valid_times_truncated": valid_times_truncated,
-        "source_refs": {
-            "run_id": run_id,
-            "source_version": source_version,
-            "basin_version_id": basin_version_id,
-        },
+        "source_refs": _layer_source_refs(
+            layer_id,
+            run_id=run_id,
+            source_version=source_version,
+            basin_version_id=basin_version_id,
+        ),
         "cache_layer_id": cache_layer_id,
         "route_variable": (
             "q_down"
@@ -604,6 +606,23 @@ def layer_metadata(
     }
 
 
+def _layer_source_refs(
+    layer_id: str,
+    *,
+    run_id: str | None,
+    source_version: str | None,
+    basin_version_id: str | None,
+) -> dict[str, str | None]:
+    refs = {
+        "run_id": run_id,
+        "source_version": source_version,
+        "basin_version_id": basin_version_id,
+    }
+    if layer_id in {"flood-return-period", "warning-level"}:
+        refs["duration"] = DEFAULT_FLOOD_RETURN_PERIOD_DURATION
+    return refs
+
+
 def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
     row = session.execute(
         text(
@@ -626,6 +645,7 @@ def valid_times_for_layer(
     layer_id: str,
     *,
     run_id: str | None = None,
+    duration: str = DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
     limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
 ) -> ValidTimeDiscovery:
     sample_limit = max(0, limit)
@@ -636,6 +656,7 @@ def valid_times_for_layer(
             FROM flood.return_period_result
             WHERE max_over_window = false
               AND (:run_id IS NULL OR run_id = :run_id)
+              AND duration = :duration
             ORDER BY valid_time DESC
             LIMIT :limit
         """
@@ -657,7 +678,7 @@ def valid_times_for_layer(
         return _valid_time_discovery(rows, sample_limit)
     else:
         return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
-    rows = session.execute(text(sql), {"run_id": run_id, "limit": query_limit}).mappings().all()
+    rows = session.execute(text(sql), {"run_id": run_id, "duration": duration, "limit": query_limit}).mappings().all()
     return _valid_time_discovery(rows, sample_limit)
 
 

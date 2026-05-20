@@ -1,0 +1,1 @@
+export const DEFAULT_FLOOD_RETURN_PERIOD_DURATION = '1h'

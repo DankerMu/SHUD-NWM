@@ -539,6 +539,8 @@ describe('M11 visual foundation shell', () => {
     })
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line', source: 'm11-flood-return-period-source' })
+    expect(JSON.stringify(mapLayers.at(-1)?.paint)).toContain('warning_level')
+    expect(JSON.stringify(mapLayers.at(-1)?.paint)).toContain('return_period')
 
     await user.click(screen.getByRole('button', { name: '地形底图' }))
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'terrain' })
@@ -563,6 +565,10 @@ describe('M11 visual foundation shell', () => {
       type: 'vector',
       tiles: ['/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf'],
     })
+    const paint = JSON.stringify(mapLayers.at(-1)?.paint)
+    expect(paint).toContain('value')
+    expect(paint).not.toContain('warning_level')
+    expect(paint).not.toContain('return_period')
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
   })
 
@@ -589,6 +595,10 @@ describe('M11 visual foundation shell', () => {
       tiles: ['/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf'],
     })
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
+    const paint = JSON.stringify(mapLayers.at(-1)?.paint)
+    expect(paint).toContain('value')
+    expect(paint).not.toContain('warning_level')
+    expect(paint).not.toContain('return_period')
   })
 
   it('does not create unbounded GeoJSON national source when MVT metadata is missing', async () => {

@@ -23,6 +23,7 @@ import {
   isMvtLayerMetadata,
   type MvtLayerMetadata,
 } from '@/lib/mvtLayerMetadata'
+import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 
 export const FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY = 'feature_id'
 
@@ -47,7 +48,7 @@ export function floodTileUrl(runId: string, validTime: string, bbox?: FloodRetur
 }
 
 export function floodMvtTileUrlTemplate(metadata: MvtLayerMetadata, runId: string, validTime: string) {
-  return buildMvtTileUrlTemplate(metadata, { run_id: runId, duration: '1h', valid_time: validTime })
+  return buildMvtTileUrlTemplate(metadata, { run_id: runId, duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION, valid_time: validTime })
 }
 
 export function floodReturnPeriodLayer(selectedLevel?: AlertLevel | null, sourceLayer?: string): LayerProps {

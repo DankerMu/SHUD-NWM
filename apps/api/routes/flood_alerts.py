@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from apps.api.errors import ApiError
 from apps.api.routes.pipeline import _ok
 from services.tiles.mvt import (
+    DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
     MVT_BUFFER,
     MVT_ENCODER_VERSION,
     MVT_EXTENT,
@@ -223,6 +224,13 @@ def list_layer_valid_times(
         default=None,
         description="Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery.",
     ),
+    duration: str | None = Query(
+        default=None,
+        description=(
+            "Optional flood return-period duration for flood-return-period and warning-level discovery; "
+            "defaults to the current UI route identity of 1h."
+        ),
+    ),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     validate_identifier(layer_id, "layer_id")
@@ -231,7 +239,22 @@ def list_layer_valid_times(
     else:
         run = latest_ready_run(session)
         run_id = str(run["run_id"]) if run else None
-    return _ok(request, valid_times_for_layer(session, layer_id, run_id=run_id).model_dump())
+    if duration is not None:
+        validate_identifier(duration, "duration")
+    if layer_id in {"flood-return-period", "warning-level"}:
+        resolved_duration = duration or DEFAULT_FLOOD_RETURN_PERIOD_DURATION
+        _validate_supported_flood_duration(resolved_duration)
+    elif duration is not None:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Duration is only supported for flood return-period valid-time discovery.",
+            details={"layer_id": layer_id, "duration": duration},
+        )
+    else:
+        resolved_duration = DEFAULT_FLOOD_RETURN_PERIOD_DURATION
+    valid_time_sample = valid_times_for_layer(session, layer_id, run_id=run_id, duration=resolved_duration)
+    return _ok(request, valid_time_sample.model_dump())
 
 
 @router.get("/api/v1/flood-alerts/summary", response_model=dict[str, Any])

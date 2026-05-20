@@ -243,6 +243,43 @@ def test_validate_scale_mvt_artifact_normalizes_stale_embedded_artifact_paths(tm
     assert tile["mvt_deterministic_metrics"]["artifact_paths"] == [str(artifact)]
 
 
+def test_validate_scale_mvt_artifact_drops_unapproved_credential_bearing_fields(tmp_path: Path) -> None:
+    artifact = tmp_path / "credential-bearing-mvt-contract.json"
+    _write_mvt_contract_artifact(
+        artifact,
+        database_url="postgresql://nhms:supersecret@example.invalid/nhms",
+        source_uri="s3://user:pass@bucket/private/path?token=secret",
+        benign_note="api_key=supersecret",
+    )
+
+    validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="mvt_extra_fields",
+            tile_content_type_expectation="application/x-protobuf",
+            mvt_contract_artifact=artifact,
+        )
+    )
+    lane_dir = tmp_path / "artifacts" / "mvt_extra_fields" / "scale"
+    tile = _read_json(lane_dir / "tile_evidence.json")
+    summary = _read_json(lane_dir / "summary.json")
+    evidence_text = json.dumps({"tile": tile, "summary": summary}, sort_keys=True)
+
+    metrics = tile["mvt_deterministic_metrics"]
+    assert tile["deterministic_mvt_passed"] is True
+    assert "database_url" not in metrics
+    assert "source_uri" not in metrics
+    assert "benign_note" not in metrics
+    assert "database_url" not in evidence_text
+    assert "source_uri" not in evidence_text
+    assert "benign_note" not in evidence_text
+    assert "supersecret" not in evidence_text
+    assert "user:pass" not in evidence_text
+    assert "token=secret" not in evidence_text
+    assert "s3://" not in evidence_text
+    assert "postgresql://" not in evidence_text
+
+
 def test_validate_scale_threshold_and_count_failures_block_readiness(tmp_path: Path) -> None:
     threshold_path = tmp_path / "thresholds.json"
     threshold_path.write_text(

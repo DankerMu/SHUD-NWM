@@ -1446,7 +1446,8 @@ export interface components {
         UserRole: "operator" | "model_admin" | "sys_admin";
         ValidTimePath: string;
         ValidTimeQuery: string;
-        Variable: "q_down" | "water_level";
+        HydroMvtVariable: "q_down" | "water_level";
+        MetTileVariable: string;
         VariableQuery: string;
     };
     requestBodies: never;
@@ -2023,7 +2024,7 @@ export interface operations {
             header?: never;
             path: {
                 run_id: components["parameters"]["RunId"];
-                variable: components["parameters"]["Variable"];
+                variable: components["parameters"]["HydroMvtVariable"];
                 valid_time: components["parameters"]["ValidTimePath"];
                 z: components["parameters"]["TileZ"];
                 x: components["parameters"]["TileX"];
@@ -2130,7 +2131,7 @@ export interface operations {
             header?: never;
             path: {
                 product_id: components["parameters"]["ProductId"];
-                variable: components["parameters"]["Variable"];
+                variable: components["parameters"]["MetTileVariable"];
                 valid_time: components["parameters"]["ValidTimePath"];
                 z: components["parameters"]["TileZ"];
                 x: components["parameters"]["TileX"];
@@ -2588,6 +2589,8 @@ export interface operations {
             query?: {
                 /** @description Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery. */
                 run_id?: string;
+                /** @description Optional flood return-period duration for flood-return-period and warning-level discovery; defaults to the current UI route identity of 1h. */
+                duration?: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
             };
             header?: never;
             path: {

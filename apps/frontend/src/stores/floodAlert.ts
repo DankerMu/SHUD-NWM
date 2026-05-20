@@ -6,6 +6,7 @@ import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
 import type { AlertLevel } from '@/components/flood/alertLevels'
 import { isAlertLevel } from '@/components/flood/alertLevels'
+import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 
 export type FloodAlertSortBy = 'return_period_desc' | 'q_value_desc'
 export type AlertThreshold = 'Q2' | 'Q5' | 'Q10' | 'Q20' | 'Q50' | 'Q100'
@@ -280,6 +281,9 @@ function buildValidTimes(run: ApiHydroRun | null) {
 async function fetchLayerValidTimes(layerId: string, runId: string): Promise<string[]> {
   return fetchJson<ApiLayerValidTimes | string[]>(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times`, {
     run_id: runId,
+    ...(layerId === 'flood-return-period' || layerId === 'warning-level'
+      ? { duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION }
+      : {}),
   }).then(normalizeLayerValidTimesResponse)
 }
 

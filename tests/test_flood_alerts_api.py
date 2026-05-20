@@ -2184,6 +2184,77 @@ def test_layer_valid_times_endpoint_scopes_to_explicit_run_id_latest_window() ->
     assert unscoped_data["valid_times"][0] != scoped_data["valid_times"][0]
 
 
+def test_flood_layer_valid_times_default_to_one_hour_duration_identity() -> None:
+    run_id = "duration_identity_run"
+    start = datetime(2026, 5, 22, tzinfo=UTC)
+    latest_1h = start + timedelta(hours=1)
+    later_24h = start + timedelta(hours=24)
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": start,
+                "start_time": start,
+                "end_time": later_24h,
+            },
+        )
+        _insert_result(
+            session,
+            "seg_001",
+            "basin_v1",
+            "rnv_v1",
+            latest_1h,
+            100.0,
+            2.0,
+            "normal",
+            False,
+            run_id=run_id,
+        )
+        _insert_result(
+            session,
+            "seg_001",
+            "basin_v1",
+            "rnv_v1",
+            later_24h,
+            200.0,
+            10.0,
+            "watch",
+            False,
+            run_id=run_id,
+            duration="24h",
+        )
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                default_flood = client.get(f"/api/v1/layers/flood-return-period/valid-times?run_id={run_id}")
+                default_warning = client.get(f"/api/v1/layers/warning-level/valid-times?run_id={run_id}")
+                explicit_24h = client.get(
+                    f"/api/v1/layers/flood-return-period/valid-times?run_id={run_id}&duration=24h"
+                )
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert default_flood.status_code == 200
+    assert default_flood.json()["data"]["valid_times"] == [_iso(latest_1h)]
+    assert default_warning.status_code == 200
+    assert default_warning.json()["data"]["valid_times"] == [_iso(latest_1h)]
+    assert explicit_24h.status_code == 200
+    assert explicit_24h.json()["data"]["valid_times"] == [_iso(later_24h)]
+
+
 def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases() -> None:
     with _client() as client:
         response = client.get("/api/v1/layers")
@@ -2201,7 +2272,7 @@ def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases(
 
 
 def test_layer_metadata_required_placeholders_resolve_from_source_refs_or_route_constants() -> None:
-    documented_route_constants = {"z", "x", "y", "valid_time", "duration"}
+    documented_route_constants = {"z", "x", "y", "valid_time"}
     with _client() as client:
         response = client.get("/api/v1/layers")
 
@@ -2220,6 +2291,9 @@ def test_layer_metadata_required_placeholders_resolve_from_source_refs_or_route_
 
     river_network = next(layer["metadata"] for layer in response.json()["data"] if layer["layer_id"] == "river-network")
     assert river_network["source_refs"]["basin_version_id"] == "basin_v1"
+    metadata = {layer["layer_id"]: layer["metadata"] for layer in response.json()["data"]}
+    assert metadata["flood-return-period"]["source_refs"]["duration"] == "1h"
+    assert metadata["warning-level"]["source_refs"]["duration"] == "1h"
     assert (
         river_network["url_template"]
         .replace("{basin_version_id}", river_network["source_refs"]["basin_version_id"])
@@ -3092,6 +3166,7 @@ def _insert_result(
     *,
     run_id: str = RUN_ID,
     quality_flag: str = "ok",
+    duration: str = "1h",
 ) -> None:
     connection.execute(
         text(
@@ -3103,7 +3178,7 @@ def _insert_result(
             )
             VALUES (
                 :run_id, 'forecast_gfs_deterministic', :basin_version_id, :rnv, 'model_1',
-                :segment_id, :valid_time, '1h', :q_value, 'm3/s', :return_period,
+                :segment_id, :valid_time, :duration, :q_value, 'm3/s', :return_period,
                 :warning_level, 'GFS', :cycle_time, :max_over_window, :quality_flag
             )
             """
@@ -3120,6 +3195,7 @@ def _insert_result(
             "cycle_time": datetime(2026, 5, 3, tzinfo=UTC),
             "max_over_window": max_over_window,
             "quality_flag": quality_flag,
+            "duration": duration,
         },
     )
 

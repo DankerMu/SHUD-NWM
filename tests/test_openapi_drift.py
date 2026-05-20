@@ -239,7 +239,21 @@ def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:
 
 def test_mvt_route_variant_openapi_enums_match_runtime_contract() -> None:
     spec = _openapi_spec()
-    hydro_variable = spec["components"]["parameters"]["Variable"]["schema"]["enum"]
+    hydro_variable = spec["components"]["parameters"]["HydroMvtVariable"]["schema"]["enum"]
+    hydro_path_variable = _operation_parameter(
+        spec,
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+        "get",
+        "path",
+        "variable",
+    )["schema"]["enum"]
+    met_path_variable = _operation_parameter(
+        spec,
+        "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png",
+        "get",
+        "path",
+        "variable",
+    )["schema"]
     flood_map_duration = _operation_parameter(spec, "/api/v1/tiles/flood-return-period", "get", "query", "duration")[
         "schema"
     ]["enum"]
@@ -250,10 +264,18 @@ def test_mvt_route_variant_openapi_enums_match_runtime_contract() -> None:
         "path",
         "duration",
     )["schema"]["enum"]
+    valid_times_duration = _operation_parameter(
+        spec, "/api/v1/layers/{layer_id}/valid-times", "get", "query", "duration"
+    )["schema"]
 
     assert hydro_variable == ["q_down", "water_level"]
+    assert hydro_path_variable == hydro_variable
+    assert met_path_variable["type"] == "string"
+    assert "enum" not in met_path_variable
     assert flood_map_duration == ["1h", "3h", "6h", "24h", "72h", "7d"]
     assert flood_mvt_duration == flood_map_duration
+    assert valid_times_duration["default"] == "1h"
+    assert valid_times_duration["enum"] == flood_map_duration
 
 
 def test_mvt_tile_z_above_documented_max_returns_runtime_validation_error() -> None:

@@ -58,6 +58,16 @@ MVT_CONTRACT_NUMERIC_FIELDS = (
     "coordinate_count",
     "browser_timing_ms",
 )
+MVT_CONTRACT_STRING_FIELDS = ("sql_shape_hash", "query_plan_hash")
+MVT_CONTRACT_ALLOWED_FIELDS = frozenset(
+    {
+        "observed_content_type",
+        "raw_tile_bytes_observed",
+        "artifact_paths",
+        *MVT_CONTRACT_STRING_FIELDS,
+        *MVT_CONTRACT_NUMERIC_FIELDS,
+    }
+)
 
 QUERY_TARGETS = {
     "model_listing": {
@@ -888,37 +898,37 @@ def _validated_mvt_contract_metrics(
     artifact_path: Path,
     artifact_sha256: str,
 ) -> dict[str, Any]:
-    metrics = dict(measured)
     required_fields = {
         "observed_content_type",
         "raw_tile_bytes_observed",
-        "sql_shape_hash",
-        "query_plan_hash",
+        *MVT_CONTRACT_STRING_FIELDS,
         *MVT_CONTRACT_NUMERIC_FIELDS,
     }
-    missing = sorted(field for field in required_fields if field not in metrics)
+    missing = sorted(field for field in required_fields if field not in measured)
     if missing:
         return {
             "ok": False,
             "message": f"Measured deterministic MVT artifact is missing required fields: {', '.join(missing)}.",
         }
-    if metrics["observed_content_type"] != "application/x-protobuf":
+    if measured["observed_content_type"] != "application/x-protobuf":
         return {"ok": False, "message": "Measured deterministic MVT artifact did not observe application/x-protobuf."}
-    if metrics["raw_tile_bytes_observed"] is not True:
+    if measured["raw_tile_bytes_observed"] is not True:
         return {
             "ok": False,
             "message": "Measured deterministic MVT artifact must confirm raw tile bytes were observed.",
         }
-    for field_name in ("sql_shape_hash", "query_plan_hash"):
-        if not isinstance(metrics[field_name], str) or not metrics[field_name]:
+    parsed_strings: dict[str, str] = {}
+    for field_name in MVT_CONTRACT_STRING_FIELDS:
+        if not isinstance(measured[field_name], str) or not measured[field_name]:
             return {
                 "ok": False,
                 "message": f"Measured deterministic MVT artifact field {field_name} must be a non-empty string.",
             }
+        parsed_strings[field_name] = measured[field_name]
 
     parsed_numbers: dict[str, int | float] = {}
     for field_name in MVT_CONTRACT_NUMERIC_FIELDS:
-        parsed = _mvt_contract_finite_number(metrics[field_name], field_name)
+        parsed = _mvt_contract_finite_number(measured[field_name], field_name)
         if parsed is None:
             return {
                 "ok": False,
@@ -935,7 +945,7 @@ def _validated_mvt_contract_metrics(
         }
 
     normalized = {
-        **metrics,
+        **parsed_strings,
         **parsed_numbers,
         "observed_content_type": "application/x-protobuf",
         "raw_tile_bytes_observed": True,
