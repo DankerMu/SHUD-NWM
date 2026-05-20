@@ -1,8 +1,10 @@
 import { create } from 'zustand'
 
+import { apiFetch } from '@/api/base'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
+import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 import {
   createEmptyBasinDetail,
   createEmptyOverviewSummary,
@@ -713,28 +715,57 @@ async function fetchQueueDepth() {
   return cached(cacheKey('/api/v1/queue/depth'), () => getApi<ApiQueueDepth>('/api/v1/queue/depth', undefined, '获取队列深度失败'))
 }
 
-async function fetchLayers() {
+async function fetchLayers(runId?: string | null) {
+  const query = { limit: 100, offset: 0, runId: runId ?? null }
   return cached(
-    cacheKey('/api/v1/layers', { limit: 100, offset: 0 }),
+    cacheKey('/api/v1/layers', query),
     () =>
       getApi<ApiLayer[]>(
         '/api/v1/layers',
-        { params: { query: { limit: 100, offset: 0 } } },
+        { params: { query: { limit: 100, offset: 0, run_id: runId ?? undefined } } },
         '获取图层列表失败',
+      ).catch(
+        async () => {
+          const params = new URLSearchParams({ limit: '100', offset: '0' })
+          if (runId) params.set('run_id', runId)
+          const response = await apiFetch(`/api/v1/layers?${params.toString()}`)
+          if (!response.ok) throw new Error('获取图层列表失败')
+          return unwrapApiData<ApiLayer[]>(await response.json(), '获取图层列表失败')
+        },
       ),
   )
 }
 
-async function fetchLayerValidTimes(layerId: string) {
+async function fetchLayerValidTimes(layerId: string, runId?: string | null) {
+  const duration = layerId === 'flood-return-period' || layerId === 'warning-level' ? DEFAULT_FLOOD_RETURN_PERIOD_DURATION : null
   return cached(
-    cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId }),
+    cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId, runId: runId ?? null, duration }),
     () =>
-      getApi<string[]>(
+      getApi<components['schemas']['LayerValidTimes'] | string[]>(
         '/api/v1/layers/{layer_id}/valid-times',
-        { params: { path: { layer_id: layerId } } },
+        { params: { path: { layer_id: layerId }, query: { run_id: runId ?? undefined, duration: duration ?? undefined } } },
         '获取图层有效时间失败',
-      ),
+      )
+        .then(normalizeLayerValidTimesResponse)
+        .catch(async () => {
+          const params = new URLSearchParams()
+          if (runId) params.set('run_id', runId)
+          if (duration) params.set('duration', duration)
+          const suffix = params.size > 0 ? `?${params.toString()}` : ''
+          const response = await apiFetch(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times${suffix}`)
+          if (!response.ok) throw new Error('获取图层有效时间失败')
+          return normalizeLayerValidTimesResponse(
+            unwrapApiData<components['schemas']['LayerValidTimes'] | string[]>(
+              await response.json(),
+              '获取图层有效时间失败',
+            ),
+          )
+        }),
   )
+}
+
+function normalizeLayerValidTimesResponse(value: components['schemas']['LayerValidTimes'] | string[]): string[] {
+  return Array.isArray(value) ? value : value.valid_times
 }
 
 async function fetchRiverSegmentsPage(
@@ -943,11 +974,10 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
     const load = (async () => {
       const partialErrors: string[] = []
-      const [basinsResult, modelsResult, runsResult, layersResult, queueResult] = await Promise.allSettled([
+      const [basinsResult, modelsResult, runsResult, queueResult] = await Promise.allSettled([
         fetchBasins(),
         fetchModels(),
         fetchRuns(query),
-        fetchLayers(),
         fetchQueueDepth(),
       ])
       const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
@@ -955,6 +985,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const runs = settledValue(runsResult, partialErrors, 'runs')
       const latestRun = latestPublishedRun(runs, query)
       const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
+      const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunFloodSurfaces ? latestRun?.run_id : null)])
       const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const queue = settledValue(queueResult, partialErrors, 'queue')
       const requestPlan = buildOverviewRequestPlan(
@@ -975,7 +1006,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         latestRun && useSingleRunFloodSurfaces ? fetchFloodSummary(latestRun.run_id, query.validTime) : Promise.resolve(null),
         latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery) : Promise.resolve(null),
         ...(requestPlan.shouldFetchVersions ? basins.map((basin) => fetchBasinVersions(basin.basin_id)) : []),
-        ...layerIdsForOverview(query).map((layerId) => fetchLayerValidTimes(layerId)),
+        ...layerIdsForOverview(query).map((layerId) =>
+          fetchLayerValidTimes(layerId, useSingleRunFloodSurfaces ? latestRun?.run_id : null),
+        ),
       ])
 
       const pipeline = settledValue(pipelineResult, partialErrors, 'pipeline')
@@ -1071,18 +1104,16 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
     const load = (async () => {
       const partialErrors: string[] = []
-      const [basinsResult, versionsResult, runsResult, layersResult] = await Promise.allSettled([
+      const [basinsResult, versionsResult, runsResult] = await Promise.allSettled([
         fetchBasins(),
         fetchBasinVersions(basinId),
         fetchRuns(requestQuery, basinId),
-        fetchLayers(),
       ])
       const basinLookupAvailable = basinsResult.status === 'fulfilled'
       const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
       const basin = basins.find((item) => item.basin_id === basinId) ?? null
       const versions = settledValue(versionsResult, partialErrors, 'basin versions') ?? []
       const runPage = settledValue(runsResult, partialErrors, 'runs')
-      const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const selectedVersion =
         versions.find((version) => version.basin_version_id === query.basinVersionId) ??
         versions.find((version) => version.active_flag) ??
@@ -1093,6 +1124,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const latestRun = latestPublishedRunForBasinVersion(versionCompleteRunPage, selectedVersion?.basin_version_id, requestQuery)
       const concreteSurfaceQuery = concreteQueryForSurfaces(requestQuery, latestRun)
       const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(requestQuery)
+      const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunFloodSurfaces ? latestRun?.run_id : null)])
+      const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const canFetchConcreteSurface =
         requestQuery.source === 'compare' ? true : Boolean(latestRun && hasResolvedSurfaceSource(requestQuery, latestRun))
       const sameVersionRankingUnavailableReason =
@@ -1119,7 +1152,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
           ? fetchRiverSegments(selectedVersion.basin_version_id, activeRiverNetwork.riverNetworkVersionId, query.segmentId)
           : Promise.resolve(null),
         latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery, basinId) : Promise.resolve(null),
-        ...layerIdsForOverview(requestQuery).map((layerId) => fetchLayerValidTimes(layerId)),
+        ...layerIdsForOverview(requestQuery).map((layerId) =>
+          fetchLayerValidTimes(layerId, useSingleRunFloodSurfaces ? latestRun?.run_id : null),
+        ),
       ])
 
       const segmentFetch = settledValue(segmentsResult, partialErrors, 'river segments')

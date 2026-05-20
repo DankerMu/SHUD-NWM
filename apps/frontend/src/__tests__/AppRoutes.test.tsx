@@ -18,6 +18,11 @@ import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState
 
 const m11FitBoundsCalls: Array<unknown[]> = []
 const m11FlyToCalls: Array<unknown> = []
+const floodAlertMapProps: Array<Record<string, unknown>> = []
+
+function floodApiResponse<T>(data: T) {
+  return new Response(JSON.stringify(success(data)), { headers: { 'content-type': 'application/json' } })
+}
 
 function geoJsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
@@ -127,6 +132,7 @@ vi.mock('react-map-gl/maplibre', () => ({
       data-source-id={String(props.id ?? '')}
       data-source-type={String(props.type ?? '')}
       data-source-data={String(props.data ?? '')}
+      data-source-tiles={Array.isArray(props.tiles) ? props.tiles.join(',') : ''}
     >
       {children}
     </div>
@@ -161,7 +167,10 @@ vi.mock('@/components/forecast/ForecastPanel', () => ({
 }))
 
 vi.mock('@/components/flood/FloodAlertMap', () => ({
-  FloodAlertMap: () => <div>mock flood map</div>,
+  FloodAlertMap: (props: Record<string, unknown>) => {
+    floodAlertMapProps.push(props)
+    return <div>mock flood map</div>
+  },
 }))
 
 vi.mock('@/components/charts/QueueDonut', () => ({
@@ -192,10 +201,32 @@ const m11LayerFreshness = {
   cycleTime: '2026-05-18T00:00:00.000Z',
   validTime: '2026-05-18T06:00:00.000Z',
   runId: 'run-gfs',
+  basinVersionId: 'bv-001',
+  riverNetworkVersionId: 'rn-v1',
   source: 'GFS' as const,
   isStale: false,
   staleAfterHours: 6,
   unavailableReason: null,
+}
+
+const m11FloodMvtMetadata: NonNullable<LayerState['metadata']> = {
+  layer_id: 'flood-return-period',
+  tile_format: 'mvt',
+  url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+  tile_url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+  maplibre_source_layer: 'flood_return_period',
+  source_layer: 'flood_return_period',
+  fallback_available: true,
+  release_blocking: false,
+  required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
+  source_refs: {
+    run_id: 'run-gfs',
+    source_version: 'rnv-v1',
+    basin_version_id: 'bv-001',
+    river_network_version_id: 'rn-v1',
+    duration: '1h',
+  },
+  valid_times: ['2026-05-18T06:00:00Z'],
 }
 
 const m11Layers: LayerState[] = [
@@ -208,6 +239,7 @@ const m11Layers: LayerState[] = [
     currentValidTime: '2026-05-18T06:00:00.000Z',
     validTimeSource: 'api',
     disabledReason: null,
+    metadata: null,
     freshness: m11LayerFreshness,
     legend: [{ label: '<500 m3/s', color: '#90CAF9', max: 500 }],
   },
@@ -220,6 +252,7 @@ const m11Layers: LayerState[] = [
     currentValidTime: '2026-05-18T06:00:00.000Z',
     validTimeSource: 'api',
     disabledReason: null,
+    metadata: m11FloodMvtMetadata,
     freshness: m11LayerFreshness,
     legend: [{ label: 'warning', color: '#FFB74D', min: 10, max: 20 }],
   },
@@ -661,6 +694,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   m11FitBoundsCalls.length = 0
   m11FlyToCalls.length = 0
+  floodAlertMapProps.length = 0
   overviewAsync.mockResolvedValue(undefined)
   useAuthStore.setState({ role: 'viewer' })
   useFloodAlertStore.setState({
@@ -937,8 +971,11 @@ describe('App route state', () => {
     await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 36, duration: 450 }]]))
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
-    expect(tileFetch.mock.calls.map(([url]) => String(url)).join('\n')).toContain('valid_time=2026-05-18T06%3A00%3A00.000Z')
-    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute('data-source-data', '[object Object]')
+    expect(tileFetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute('data-source-type', 'vector')
+    const sourceTiles = screen.getAllByTestId('mock-m11-map-source').at(-1)?.getAttribute('data-source-tiles')
+    expect(sourceTiles).toContain('/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf')
+    expect(sourceTiles).toContain('_mvt_cache_version=')
 
     await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
     await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))
@@ -3270,7 +3307,221 @@ describe('App route state', () => {
       cycleTime: '2026-05-12T00:00:00.000Z',
       validTime: '2026-05-12T03:00:00.000Z',
     })
+    expect(floodAlertMapProps.at(-1)).toMatchObject({
+      fallbackBbox: null,
+      degradedFallback: false,
+    })
     expect(useFloodAlertStore.getState().selectedAlertLevel).toBe('high_risk')
+  })
+
+  it('supplies bounded degraded flood-alert fallback bbox on the actual page path after selecting a focused segment', async () => {
+    const user = userEvent.setup()
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    const fetchCalls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        fetchCalls.push(url)
+        const parsed = new URL(url, 'http://localhost')
+        if (parsed.pathname === '/api/v1/flood-alerts/timeline') {
+          return floodApiResponse({
+            run_id: 'run-flood-1',
+            segment_id: parsed.searchParams.get('segment_id') ?? 'seg-focused',
+            river_segment_id: parsed.searchParams.get('segment_id') ?? 'seg-focused',
+            river_network_version_id: 'rivnet-v1',
+            timesteps: [],
+            timeline: [],
+            peak: null,
+            frequency_thresholds: null,
+            quality_note: null,
+          })
+        }
+        if (parsed.pathname !== '/api/v1/flood-alerts/ranking') throw new Error(`Unexpected flood request ${url}`)
+        return floodApiResponse({
+          items: [
+            {
+              rank: 1,
+              river_segment_id: 'seg-focused',
+              segment_id: 'seg-focused',
+              segment_name: 'Focused Flood Segment',
+              basin_version_id: 'basin-v1',
+              river_network_version_id: 'rivnet-v1',
+              q_value: 1234,
+              q_unit: 'm3/s',
+              return_period: 20,
+              warning_level: 'warning',
+              duration: '1h',
+              valid_time: '2026-05-12T03:00:00Z',
+              geom_centroid: { type: 'Point', coordinates: [101, 31] },
+            },
+          ],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        })
+      }),
+    )
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-flood-1',
+      latestRun: {
+        run_id: 'run-flood-1',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-v1',
+        source_id: 'gfs',
+        cycle_time: '2026-05-12T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-12T00:00:00Z',
+        end_time: '2026-05-12T03:00:00Z',
+        created_at: '2026-05-12T00:00:00Z',
+        updated_at: '2026-05-12T04:00:00Z',
+      },
+      validTimes: ['2026-05-12T03:00:00.000Z'],
+      summaryData: {
+        runId: 'run-flood-1',
+        levels: [{ level: 'warning', count: 1, color: '#f59e0b' }],
+        totalSegments: 1,
+        usableCurves: 1,
+        unavailableCount: 0,
+      },
+      rankingData: null,
+      fetchLatestFrequencyDoneRun,
+      fetchRanking: useFloodAlertStore.getInitialState().fetchRanking,
+    })
+    window.history.pushState({}, '', '/flood-alerts')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    expect(await screen.findByRole('row', { name: /Focused Flood Segment/ })).toBeInTheDocument()
+    expect(floodAlertMapProps.at(-1)).toMatchObject({
+      fallbackBbox: null,
+      degradedFallback: false,
+    })
+    await user.click(screen.getByRole('row', { name: /Focused Flood Segment/ }))
+    await waitFor(() =>
+      expect(floodAlertMapProps.at(-1)).toMatchObject({
+        fallbackBbox: { minLon: 100.75, minLat: 30.75, maxLon: 101.25, maxLat: 31.25 },
+        degradedFallback: true,
+      }),
+    )
+    expect(fetchCalls.filter((url) => new URL(url, 'http://localhost').pathname === '/api/v1/flood-alerts/ranking')).toEqual([
+      '/api/v1/flood-alerts/ranking?run_id=run-flood-1&limit=20&offset=0',
+    ])
+  })
+
+  it('keeps degraded flood-alert fallback blocked when API ranking centroid is missing or invalid', async () => {
+    const user = userEvent.setup()
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        const parsed = new URL(url, 'http://localhost')
+        if (parsed.pathname === '/api/v1/flood-alerts/timeline') {
+          return floodApiResponse({
+            run_id: 'run-flood-1',
+            segment_id: parsed.searchParams.get('segment_id') ?? 'seg-no-centroid',
+            river_segment_id: parsed.searchParams.get('segment_id') ?? 'seg-no-centroid',
+            river_network_version_id: 'rivnet-v1',
+            timesteps: [],
+            timeline: [],
+            peak: null,
+            frequency_thresholds: null,
+            quality_note: null,
+          })
+        }
+        if (parsed.pathname !== '/api/v1/flood-alerts/ranking') throw new Error(`Unexpected flood request ${url}`)
+        return floodApiResponse({
+          items: [
+            {
+              rank: 1,
+              river_segment_id: 'seg-no-centroid',
+              segment_id: 'seg-no-centroid',
+              segment_name: 'No Centroid Segment',
+              basin_version_id: 'basin-v1',
+              river_network_version_id: 'rivnet-v1',
+              q_value: 1234,
+              q_unit: 'm3/s',
+              return_period: 20,
+              warning_level: 'warning',
+              duration: '1h',
+              valid_time: '2026-05-12T03:00:00Z',
+              geom_centroid: null,
+            },
+            {
+              rank: 2,
+              river_segment_id: 'seg-invalid-centroid',
+              segment_id: 'seg-invalid-centroid',
+              segment_name: 'Invalid Centroid Segment',
+              basin_version_id: 'basin-v1',
+              river_network_version_id: 'rivnet-v1',
+              q_value: 1000,
+              q_unit: 'm3/s',
+              return_period: 10,
+              warning_level: 'warning',
+              duration: '1h',
+              valid_time: '2026-05-12T03:00:00Z',
+              geom_centroid: { type: 'Point', coordinates: [101, 'bad'] },
+            },
+          ],
+          total: 2,
+          limit: 20,
+          offset: 0,
+        })
+      }),
+    )
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-flood-1',
+      latestRun: {
+        run_id: 'run-flood-1',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-v1',
+        source_id: 'gfs',
+        cycle_time: '2026-05-12T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-12T00:00:00Z',
+        end_time: '2026-05-12T03:00:00Z',
+        created_at: '2026-05-12T00:00:00Z',
+        updated_at: '2026-05-12T04:00:00Z',
+      },
+      validTimes: ['2026-05-12T03:00:00.000Z'],
+      summaryData: {
+        runId: 'run-flood-1',
+        levels: [{ level: 'warning', count: 2, color: '#f59e0b' }],
+        totalSegments: 2,
+        usableCurves: 2,
+        unavailableCount: 0,
+      },
+      rankingData: null,
+      fetchLatestFrequencyDoneRun,
+      fetchRanking: useFloodAlertStore.getInitialState().fetchRanking,
+    })
+    window.history.pushState({}, '', '/flood-alerts')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    expect(await screen.findByRole('row', { name: /No Centroid Segment/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('row', { name: /No Centroid Segment/ }))
+    await waitFor(() =>
+      expect(floodAlertMapProps.at(-1)).toMatchObject({
+        fallbackBbox: null,
+        degradedFallback: false,
+      }),
+    )
+    await user.click(screen.getByRole('button', { name: '关闭详情' }))
+    await user.click(screen.getByRole('row', { name: /Invalid Centroid Segment/ }))
+    await waitFor(() =>
+      expect(floodAlertMapProps.at(-1)).toMatchObject({
+        fallbackBbox: null,
+        degradedFallback: false,
+      }),
+    )
   })
 
   it('does not leak forecast route source and cycle into flood-alert segment detail forecast requests', async () => {

@@ -21,6 +21,10 @@ EXPECTED_MIGRATIONS = [
     "000015_flood_return_period_identity_indexes.sql",
     "000016_river_segment_pagination_indexes.sql",
     "000017_return_period_max_over_window_identity.sql",
+    "000018_tile_cache_m16_contract.sql",
+    "000019_hydro_mvt_identity_lookup_idx.sql",
+    "000020_valid_time_discovery_indexes.sql",
+    "000021_latest_ready_run_discovery_idx.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -206,3 +210,234 @@ def test_river_segment_pagination_migration_adds_lookup_indexes() -> None:
     assert "ON core.river_segment (river_network_version_id, segment_order, river_segment_id)" in migration
     assert "CREATE INDEX IF NOT EXISTS river_network_version_basin_lookup_idx" in migration
     assert "ON core.river_network_version (basin_version_id, river_network_version_id)" in migration
+
+
+def test_river_network_public_identity_lookup_uses_indexed_version_table() -> None:
+    migration = dict(_migration_sql())["000016_river_segment_pagination_indexes.sql"]
+    route_source = (Path(__file__).resolve().parents[1] / "apps" / "api" / "routes" / "flood_alerts.py").read_text(
+        encoding="utf-8"
+    )
+
+    function_source = route_source[
+        route_source.index("def _river_network_source_version") : route_source.index(
+            "def _require_hydro_mvt_source_identity"
+        )
+    ]
+    assert "FROM core.river_network_version" in function_source
+    assert "WHERE basin_version_id = :basin_version_id" in function_source
+    assert "FROM core.model_instance" not in function_source
+    assert "ON core.river_network_version (basin_version_id, river_network_version_id)" in migration
+
+
+def test_tile_cache_m16_migration_upgrades_preexisting_cache_contract() -> None:
+    migration = dict(_migration_sql())["000018_tile_cache_m16_contract.sql"]
+
+    for expected in (
+        "ADD COLUMN IF NOT EXISTS cache_key TEXT",
+        "ADD COLUMN IF NOT EXISTS checksum TEXT",
+        "ADD COLUMN IF NOT EXISTS source_id TEXT",
+        "ADD COLUMN IF NOT EXISTS source_version TEXT",
+        "ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ready'",
+        "SET cache_key = NULL",
+        "SET tile_uri = NULL",
+        "SET cache_key = tile_uri",
+        "jsonb_build_object",
+        "'legacy_identity', 'map.tile_cache'",
+        "digest(",
+        "'sha256'",
+        "Duplicate tile cache cache_key rows exist after deterministic M16 backfill",
+        "Deduplicate or quarantine duplicate cache rows before applying migration 000018",
+        "ALTER COLUMN cache_key SET NOT NULL",
+        "ALTER TABLE map.tile_cache DROP CONSTRAINT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS tile_cache_cache_key_uidx ON map.tile_cache (cache_key)",
+    ):
+        assert expected in migration
+
+    assert migration.index("ADD COLUMN IF NOT EXISTS cache_key TEXT") < migration.index(
+        "UPDATE map.tile_cache\nSET cache_key = NULL"
+    )
+    assert migration.index("SET cache_key = tile_uri") < migration.index("jsonb_build_object")
+    assert migration.index("jsonb_build_object") < migration.index(
+        "Duplicate tile cache cache_key rows exist after deterministic M16 backfill"
+    )
+    assert (
+        migration.index("Duplicate tile cache cache_key rows exist after deterministic M16 backfill")
+        < migration.index("ALTER COLUMN cache_key SET NOT NULL")
+    )
+    assert migration.index("ALTER COLUMN cache_key SET NOT NULL") < migration.index(
+        "CREATE UNIQUE INDEX IF NOT EXISTS tile_cache_cache_key_uidx"
+    )
+
+
+def test_hydro_mvt_identity_migration_adds_ordered_lookup_index() -> None:
+    migration = dict(_migration_sql())["000019_hydro_mvt_identity_lookup_idx.sql"]
+
+    assert "CREATE INDEX IF NOT EXISTS river_timeseries_mvt_identity_lookup_idx" in migration
+    assert (
+        "ON hydro.river_timeseries (run_id, variable, valid_time, river_network_version_id, river_segment_id)"
+        in migration
+    )
+    assert migration.index("run_id") < migration.index("variable") < migration.index("valid_time")
+
+
+def test_hydro_mvt_identity_index_protects_public_valid_time_lookup_contract() -> None:
+    migration_sql = dict(_migration_sql())
+    initial_schema = migration_sql["000006_hydro.sql"]
+    identity_migration = migration_sql["000019_hydro_mvt_identity_lookup_idx.sql"]
+
+    assert "PRIMARY KEY (run_id, river_network_version_id, river_segment_id, variable, valid_time)" in initial_schema
+    assert "river_ts_segment_time_idx" not in identity_migration
+    assert "river_timeseries_mvt_identity_lookup_idx" in identity_migration
+
+    public_identity_columns = ("run_id", "variable", "valid_time")
+    indexed_columns = re.search(r"ON hydro\.river_timeseries \(([^)]+)\)", identity_migration)
+    assert indexed_columns is not None
+    ordered_columns = tuple(column.strip() for column in indexed_columns.group(1).split(","))
+    assert ordered_columns[:3] == public_identity_columns
+    assert ordered_columns[3:] == ("river_network_version_id", "river_segment_id")
+
+
+def test_valid_time_discovery_migration_adds_dedicated_ordered_indexes() -> None:
+    migration = dict(_migration_sql())["000020_valid_time_discovery_indexes.sql"]
+
+    flood_columns = _index_columns(migration, "flood", "return_period_result")
+    hydro_columns = _index_columns(migration, "hydro", "river_timeseries")
+
+    assert "CREATE INDEX IF NOT EXISTS return_period_result_valid_time_discovery_idx" in migration
+    assert flood_columns == ("run_id", "duration", "max_over_window", "valid_time DESC")
+    assert "CREATE INDEX IF NOT EXISTS river_timeseries_valid_time_discovery_idx" in migration
+    assert hydro_columns == ("run_id", "variable", "valid_time DESC")
+
+
+def test_latest_ready_run_discovery_migration_matches_query_predicate_and_order() -> None:
+    migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
+    mvt_source = (Path(__file__).resolve().parents[1] / "services" / "tiles" / "mvt.py").read_text(
+        encoding="utf-8"
+    )
+    function_source = mvt_source[
+        mvt_source.index("def latest_ready_run") : mvt_source.index("def valid_times_for_layer")
+    ]
+
+    assert "CREATE INDEX IF NOT EXISTS hydro_run_latest_ready_run_idx" in migration
+    assert "ON hydro.hydro_run (cycle_time DESC, run_id DESC)" in migration
+    assert "WHERE status IN ('frequency_done', 'published')" in migration
+    assert "WHERE h.status IN ('frequency_done', 'published')" in function_source
+    assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in function_source
+    assert "LIMIT 1" in function_source
+
+
+def test_selected_run_mvt_identity_migration_matches_strict_preflight_predicates() -> None:
+    migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
+    route_source = (Path(__file__).resolve().parents[1] / "apps" / "api" / "routes" / "flood_alerts.py").read_text(
+        encoding="utf-8"
+    )
+
+    hydro_preflight = route_source[
+        route_source.index("def _require_hydro_mvt_source_identity") : route_source.index(
+            "def _require_flood_mvt_source_identity"
+        )
+    ]
+    flood_preflight = route_source[
+        route_source.index("def _require_flood_mvt_source_identity") : route_source.index(
+            "def _require_run_source_identity"
+        )
+    ]
+    hydro_columns = _index_columns_by_name(migration, "river_timeseries_mvt_selected_identity_lookup_idx")
+    flood_columns = _index_columns_by_name(migration, "return_period_result_mvt_selected_identity_lookup_idx")
+
+    assert hydro_columns[:5] == (
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "variable",
+        "valid_time",
+    )
+    assert flood_columns[:6] == (
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "duration",
+        "max_over_window",
+        "valid_time",
+    )
+    for expected in (
+        "run_id = :run_id",
+        "basin_version_id = :basin_version_id",
+        "river_network_version_id = :river_network_version_id",
+    ):
+        assert expected in hydro_preflight
+        assert expected in flood_preflight
+    assert "variable = :variable" in hydro_preflight
+    assert "duration = :duration" in flood_preflight
+    assert "max_over_window = false" in flood_preflight
+
+
+def test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates() -> None:
+    migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
+    mvt_source = (Path(__file__).resolve().parents[1] / "services" / "tiles" / "mvt.py").read_text(
+        encoding="utf-8"
+    )
+    valid_time_source = mvt_source[
+        mvt_source.index("def valid_times_for_layer") : mvt_source.index("def _valid_time_discovery")
+    ]
+    hydro_columns = _index_columns_by_name(
+        migration,
+        "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+    )
+    flood_columns = _index_columns_by_name(
+        migration,
+        "return_period_result_mvt_selected_identity_valid_time_discovery_idx",
+    )
+
+    assert hydro_columns == (
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "variable",
+        "valid_time DESC",
+    )
+    assert flood_columns == (
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "duration",
+        "max_over_window",
+        "valid_time DESC",
+    )
+    for expected in (
+        "run_id = :run_id",
+        "basin_version_id = :basin_version_id",
+        "river_network_version_id = :river_network_version_id",
+    ):
+        assert expected in valid_time_source
+    assert "variable = :variable" in valid_time_source
+    assert "duration = :duration" in valid_time_source
+    assert "max_over_window = false" in valid_time_source
+    assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in valid_time_source
+    assert "(:river_network_version_id IS NULL OR river_network_version_id = :river_network_version_id)" not in (
+        valid_time_source
+    )
+
+
+def test_fresh_tile_cache_schema_requires_non_null_cache_key_identity() -> None:
+    migration = dict(_migration_sql())["000008_map.sql"]
+    tile_cache = migration[migration.index("CREATE TABLE IF NOT EXISTS map.tile_cache") :]
+
+    assert "cache_key TEXT NOT NULL" in tile_cache
+    assert "PRIMARY KEY (cache_key)" in tile_cache
+
+
+def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:
+    match = re.search(rf"ON {schema}\.{table} \(([^)]+)\)", migration)
+    assert match is not None
+    return tuple(column.strip() for column in match.group(1).split(","))
+
+
+def _index_columns_by_name(migration: str, index_name: str) -> tuple[str, ...]:
+    match = re.search(
+        rf"CREATE INDEX IF NOT EXISTS {index_name}\s+ON [^(]+ \((.*?)\);",
+        migration,
+        re.DOTALL,
+    )
+    assert match is not None
+    return tuple(re.sub(r"\s+", " ", column).strip() for column in match.group(1).split(","))

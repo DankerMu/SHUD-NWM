@@ -634,15 +634,42 @@ paths:
     get:
       operationId: getRiverNetworkTile
       summary: Get river network vector tile
+      description: >
+        Canonical M16 Mapbox Vector Tile route for river-network geometry.
+        Responses use Web Mercator XYZ semantics, the `river_network` source
+        layer, stable cache headers, and MVT schema version `m16-hydrology-mvt-v1`.
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/BasinVersionId"
-        - $ref: "#/components/parameters/TileZ"
-        - $ref: "#/components/parameters/TileX"
-        - $ref: "#/components/parameters/TileY"
+        - $ref: "#/components/parameters/MvtTileZ"
+        - $ref: "#/components/parameters/MvtTileX"
+        - $ref: "#/components/parameters/MvtTileY"
       responses:
         "200":
           description: Raw Mapbox vector tile
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Layer-ID:
+              schema:
+                type: string
+            X-Tile-Checksum:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum: [hit, miss, bypass]
+            X-Tile-Cache-Key:
+              schema:
+                type: string
+            X-MVT-Schema-Version:
+              schema:
+                type: string
           content:
             application/x-protobuf:
               schema:
@@ -650,23 +677,53 @@ paths:
                 format: binary
         "4XX":
           $ref: "#/components/responses/Error"
+        "424":
+          $ref: "#/components/responses/MvtLivePostgisUnavailable"
         "5XX":
           $ref: "#/components/responses/Error"
   /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf:
     get:
       operationId: getHydroTile
       summary: Get hydrological output vector tile
+      description: >
+        Canonical M16 Mapbox Vector Tile route for hydrological values. The
+        vector source-layer is `hydro` and features include `run_id`,
+        `variable`, `valid_time`, segment/network identity, value, unit, and
+        quality metadata.
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/RunId"
-        - $ref: "#/components/parameters/Variable"
+        - $ref: "#/components/parameters/HydroMvtVariable"
         - $ref: "#/components/parameters/ValidTimePath"
-        - $ref: "#/components/parameters/TileZ"
-        - $ref: "#/components/parameters/TileX"
-        - $ref: "#/components/parameters/TileY"
+        - $ref: "#/components/parameters/MvtTileZ"
+        - $ref: "#/components/parameters/MvtTileX"
+        - $ref: "#/components/parameters/MvtTileY"
       responses:
         "200":
           description: Raw Mapbox vector tile
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Layer-ID:
+              schema:
+                type: string
+            X-Tile-Checksum:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum: [hit, miss, bypass]
+            X-Tile-Cache-Key:
+              schema:
+                type: string
+            X-MVT-Schema-Version:
+              schema:
+                type: string
           content:
             application/x-protobuf:
               schema:
@@ -674,6 +731,8 @@ paths:
                 format: binary
         "4XX":
           $ref: "#/components/responses/Error"
+        "424":
+          $ref: "#/components/responses/MvtLivePostgisUnavailable"
         "5XX":
           $ref: "#/components/responses/Error"
   /api/v1/tiles/flood-return-period:
@@ -681,10 +740,9 @@ paths:
       operationId: getFloodReturnPeriodMap
       summary: Get flood return period GeoJSON map data
       description: >
-        Returns a GeoJSON FeatureCollection for flood return-period map rendering.
-        This release uses GeoJSON rather than `.pbf` vector tiles because MVT
-        encoding and tile clipping require a PostGIS-specific implementation that
-        is out of scope for the current release.
+        Bounded GeoJSON compatibility endpoint for small or degraded
+        flood-return-period rendering. National rendering must use the canonical
+        `.pbf` MVT route discovered through layer metadata.
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/RunIdQuery"
@@ -694,7 +752,8 @@ paths:
           schema:
             type: string
             default: 1h
-          description: Aggregation duration such as 1h, 3h, or 24h.
+            enum: [1h, 3h, 6h, 24h, 72h, 7d]
+          description: Supported return-period aggregation duration.
         - name: valid_time
           in: query
           required: true
@@ -736,6 +795,67 @@ paths:
           $ref: "#/components/responses/Error"
         "5XX":
           $ref: "#/components/responses/Error"
+  /api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf:
+    get:
+      operationId: getFloodReturnPeriodTile
+      summary: Get flood return period vector tile
+      description: >
+        Canonical M16 Mapbox Vector Tile route for flood return-period data.
+        The vector source-layer is `flood_return_period`; bounded GeoJSON remains
+        available only at `/api/v1/tiles/flood-return-period`. Features include
+        `run_id`, `duration`, `valid_time`, segment/network identity, value,
+        return_period, warning_level, unit, and quality metadata.
+      tags: [tiles]
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: duration
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [1h, 3h, 6h, 24h, 72h, 7d]
+          description: Supported return-period aggregation duration.
+        - $ref: "#/components/parameters/ValidTimePath"
+        - $ref: "#/components/parameters/MvtTileZ"
+        - $ref: "#/components/parameters/MvtTileX"
+        - $ref: "#/components/parameters/MvtTileY"
+      responses:
+        "200":
+          description: Raw Mapbox vector tile
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Layer-ID:
+              schema:
+                type: string
+            X-Tile-Checksum:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum: [hit, miss, bypass]
+            X-Tile-Cache-Key:
+              schema:
+                type: string
+            X-MVT-Schema-Version:
+              schema:
+                type: string
+          content:
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "424":
+          $ref: "#/components/responses/MvtLivePostgisUnavailable"
+        "5XX":
+          $ref: "#/components/responses/Error"
   /api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png:
     get:
       operationId: getMetTile
@@ -743,7 +863,7 @@ paths:
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/ProductId"
-        - $ref: "#/components/parameters/Variable"
+        - $ref: "#/components/parameters/MetTileVariable"
         - $ref: "#/components/parameters/ValidTimePath"
         - $ref: "#/components/parameters/TileZ"
         - $ref: "#/components/parameters/TileX"
@@ -1264,6 +1384,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - name: run_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional concrete hydro_run.run_id/source reference used to scope layer metadata and cache identity.
       responses:
         "200":
           description: Layer list
@@ -1286,7 +1412,8 @@ paths:
   /api/v1/layers/{layer_id}/valid-times:
     get:
       operationId: listLayerValidTimes
-      summary: List valid times for a map layer
+      summary: List bounded valid times for a map layer
+      description: Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. When run_id is supplied, discovery is scoped to that concrete hydro run/source identity. A true truncated flag means more distinct times were observed than are included in valid_times/items.
       tags: [layers]
       parameters:
         - name: layer_id
@@ -1294,6 +1421,20 @@ paths:
           required: true
           schema:
             type: string
+        - name: run_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery.
+        - name: duration
+          in: query
+          required: false
+          schema:
+            type: string
+            nullable: true
+            enum: [1h, 3h, 6h, 24h, 72h, 7d]
+          description: Optional flood return-period duration for flood-return-period and warning-level discovery; defaults to the current UI route identity of 1h.
       responses:
         "200":
           description: Layer valid times
@@ -1306,10 +1447,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          type: string
-                          format: date-time
+                        $ref: "#/components/schemas/LayerValidTimes"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1328,6 +1466,32 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    MvtLivePostgisUnavailable:
+      description: Live PostGIS MVT is unavailable for this canonical tile route.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [request_id, status, error]
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum: [error]
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code:
+                    type: string
+                    enum: [MVT_LIVE_POSTGIS_UNAVAILABLE]
+                  message:
+                    type: string
+                  details:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
   parameters:
     BasinId:
       name: basin_id
@@ -1498,20 +1662,50 @@ components:
       required: true
       schema:
         type: string
+    MvtTileX:
+      name: x
+      in: path
+      description: Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z.
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 16383
+    MvtTileY:
+      name: y
+      in: path
+      description: Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z.
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 16383
+    MvtTileZ:
+      name: z
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 14
     TileX:
       name: x
       in: path
+      description: Web Mercator XYZ tile column.
       required: true
       schema:
         type: integer
         minimum: 0
+        maximum: 16777215
     TileY:
       name: y
       in: path
+      description: Web Mercator XYZ tile row.
       required: true
       schema:
         type: integer
         minimum: 0
+        maximum: 16777215
     TileZ:
       name: z
       in: path
@@ -1548,7 +1742,14 @@ components:
       schema:
         type: string
         format: date-time
-    Variable:
+    HydroMvtVariable:
+      name: variable
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [q_down, water_level]
+    MetTileVariable:
       name: variable
       in: path
       required: true
@@ -2750,6 +2951,7 @@ components:
         - warning_level
         - duration
         - valid_time
+        - geom_centroid
       properties:
         rank:
           type: integer
@@ -2780,6 +2982,12 @@ components:
         valid_time:
           type: string
           format: date-time
+        geom_centroid:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/GeoJSONPoint"
+          description: "GeoJSON point centroid, or null"
     FloodAlertRanking:
       type: object
       required: [items, total, limit, offset]
@@ -2836,8 +3044,10 @@ components:
           type: string
           format: date-time
         geom_centroid:
-          nullable: true
           type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/GeoJSONPoint"
           description: "GeoJSON point centroid, or null"
     FloodAlertSegmentList:
       type: object
@@ -3072,6 +3282,163 @@ components:
           items:
             type: string
         metadata:
+          oneOf:
+            - $ref: "#/components/schemas/LayerMetadata"
+            - type: "null"
+    LayerMetadata:
+      type: object
+      required:
+        - layer_id
+        - tile_format
+        - fallback_available
+        - release_blocking
+      properties:
+        layer_id:
+          type: string
+        tile_format:
+          type: string
+          enum: [mvt, geojson_compatibility]
+        url_template:
+          type: string
+          nullable: true
+        tile_url_template:
+          type: string
+          nullable: true
+        required_placeholders:
+          type: array
+          items:
+            type: string
+        maplibre_source_layer:
+          type: string
+          nullable: true
+        source_layer:
+          type: string
+          nullable: true
+        property_schema_version:
+          type: string
+          nullable: true
+        schema_version:
+          type: string
+          nullable: true
+          description: MVT tile property schema version included in X-MVT-Schema-Version and cache identity.
+        encoder_version:
+          type: string
+          nullable: true
+          description: Deterministic MVT encoder version included in cache identity.
+        property_schema:
           type: object
           nullable: true
+          description: >
+            MVT feature property contract. For `hydro` source-layer features,
+            required properties include `run_id`, `variable`, `valid_time`,
+            segment/network identity, value, unit, and quality_flag. For
+            `flood_return_period` source-layer features, required properties
+            include `run_id`, `duration`, `valid_time`, segment/network
+            identity, value, unit, return_period, warning_level, and
+            quality_flag.
           additionalProperties: true
+        min_zoom:
+          type: integer
+          nullable: true
+        max_zoom:
+          type: integer
+          nullable: true
+        bounds_crs:
+          type: string
+          nullable: true
+        bounds:
+          type: array
+          nullable: true
+          items:
+            type: number
+        wgs84_bounds:
+          type: array
+          nullable: true
+          items:
+            type: number
+        valid_times:
+          type: array
+          description: Bounded newest-window valid-time sample for catalog display, sorted ascending so the final item is the newest sampled valid_time. See valid_time_limit and valid_times_truncated before treating it as complete.
+          items:
+            type: string
+            format: date-time
+        valid_time_limit:
+          type: integer
+          description: Maximum number of valid_times included in this metadata record.
+        valid_time_observed_count:
+          type: integer
+          description: Number of distinct valid times observed by the capped limit-plus-one discovery query; this is not a full total count when valid_times_truncated is true.
+        valid_times_truncated:
+          type: boolean
+          description: True when the bounded catalog sample omitted at least one additional distinct valid_time.
+        source_refs:
+          type: object
+          nullable: true
+          description: Concrete source identity used to resolve non-XYZ route placeholders, including run_id, basin_version_id, river_network_version_id, and bounded source_version/run revision when advertised by required_placeholders.
+          additionalProperties: true
+        cache_layer_id:
+          type: string
+          nullable: true
+          description: Stable public layer ID used in X-Tile-Layer-ID and map.tile_cache.layer_id.
+        route_variable:
+          type: string
+          nullable: true
+          description: Hydro or flood variable carried by the tile route path.
+        legacy_layer_ids:
+          type: array
+          description: Backward-compatible publisher or internal layer IDs that alias this public layer.
+          items:
+            type: string
+        alias_of:
+          type: string
+          nullable: true
+          description: Canonical advertised layer ID when this metadata record is a style or semantic alias.
+        alias_semantic:
+          type: string
+          nullable: true
+          description: Alias behavior such as style_layer when route/cache identity is intentionally shared.
+        canonical_route_layer_id:
+          type: string
+          nullable: true
+          description: Layer ID used by the canonical tile route, response header, and cache rows.
+        cache_etag:
+          type: string
+          nullable: true
+        cache_version:
+          type: string
+          nullable: true
+        fallback_available:
+          type: boolean
+        fallback_endpoint:
+          type: string
+          nullable: true
+        release_blocking:
+          type: boolean
+        production_mvt_readiness_claimed:
+          type: boolean
+          nullable: true
+    LayerValidTimes:
+      type: object
+      required: [valid_times, items, limit, observed_count, truncated]
+      properties:
+        valid_times:
+          type: array
+          description: Bounded newest-window valid-time sample sorted ascending so the final item is the newest sampled valid_time. This aliases items for compatibility with layer metadata naming.
+          items:
+            type: string
+            format: date-time
+        items:
+          type: array
+          description: Bounded newest-window valid-time sample, duplicated from valid_times for endpoint envelope consumers.
+          items:
+            type: string
+            format: date-time
+        limit:
+          type: integer
+          description: Maximum number of valid times returned by this endpoint.
+        observed_count:
+          type: integer
+          description: Number of distinct valid times observed by the capped limit-plus-one query; this is not a full total count when truncated is true.
+        truncated:
+          type: boolean
+          description: True when at least one additional distinct valid_time exists beyond the returned sample.

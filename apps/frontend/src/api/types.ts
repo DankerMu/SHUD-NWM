@@ -317,7 +317,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get river network vector tile */
+        /**
+         * Get river network vector tile
+         * @description Canonical M16 Mapbox Vector Tile route for river-network geometry. Responses use Web Mercator XYZ semantics, the `river_network` source layer, stable cache headers, and MVT schema version `m16-hydrology-mvt-v1`.
+         */
         get: operations["getRiverNetworkTile"];
         put?: never;
         post?: never;
@@ -334,7 +337,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get hydrological output vector tile */
+        /**
+         * Get hydrological output vector tile
+         * @description Canonical M16 Mapbox Vector Tile route for hydrological values. The vector source-layer is `hydro` and features include `run_id`, `variable`, `valid_time`, segment/network identity, value, unit, and quality metadata.
+         */
         get: operations["getHydroTile"];
         put?: never;
         post?: never;
@@ -353,9 +359,29 @@ export interface paths {
         };
         /**
          * Get flood return period GeoJSON map data
-         * @description Returns a GeoJSON FeatureCollection for flood return-period map rendering. This release uses GeoJSON rather than `.pbf` vector tiles because MVT encoding and tile clipping require a PostGIS-specific implementation that is out of scope for the current release.
+         * @description Bounded GeoJSON compatibility endpoint for small or degraded flood-return-period rendering. National rendering must use the canonical `.pbf` MVT route discovered through layer metadata.
          */
         get: operations["getFloodReturnPeriodMap"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get flood return period vector tile
+         * @description Canonical M16 Mapbox Vector Tile route for flood return-period data. The vector source-layer is `flood_return_period`; bounded GeoJSON remains available only at `/api/v1/tiles/flood-return-period`. Features include `run_id`, `duration`, `valid_time`, segment/network identity, value, return_period, warning_level, unit, and quality metadata.
+         */
+        get: operations["getFloodReturnPeriodTile"];
         put?: never;
         post?: never;
         delete?: never;
@@ -643,7 +669,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List valid times for a map layer */
+        /**
+         * List bounded valid times for a map layer
+         * @description Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. When run_id is supplied, discovery is scoped to that concrete hydro run/source identity. A true truncated flag means more distinct times were observed than are included in valid_times/items.
+         */
         get: operations["listLayerValidTimes"];
         put?: never;
         post?: never;
@@ -1187,6 +1216,8 @@ export interface components {
             duration: string;
             /** Format: date-time */
             valid_time: string;
+            /** @description GeoJSON point centroid, or null */
+            geom_centroid: components["schemas"]["GeoJSONPoint"] | null;
         };
         FloodAlertRanking: {
             items: components["schemas"]["FloodAlertRankingItem"][];
@@ -1206,7 +1237,7 @@ export interface components {
             /** Format: date-time */
             valid_time: string;
             /** @description GeoJSON point centroid, or null */
-            geom_centroid: Record<string, never> | null;
+            geom_centroid: components["schemas"]["GeoJSONPoint"] | null;
         };
         FloodAlertSegmentList: {
             segments: components["schemas"]["FloodAlertSegment"][];
@@ -1308,9 +1339,73 @@ export interface components {
             layer_name: string;
             layer_type: string;
             variables: string[];
-            metadata?: {
+            metadata?: components["schemas"]["LayerMetadata"] | null;
+        };
+        LayerMetadata: {
+            layer_id: string;
+            /** @enum {string} */
+            tile_format: "mvt" | "geojson_compatibility";
+            url_template?: string | null;
+            tile_url_template?: string | null;
+            required_placeholders?: string[];
+            maplibre_source_layer?: string | null;
+            source_layer?: string | null;
+            property_schema_version?: string | null;
+            /** @description MVT tile property schema version included in X-MVT-Schema-Version and cache identity. */
+            schema_version?: string | null;
+            /** @description Deterministic MVT encoder version included in cache identity. */
+            encoder_version?: string | null;
+            /** @description MVT feature property contract. For `hydro` source-layer features, required properties include `run_id`, `variable`, `valid_time`, segment/network identity, value, unit, and quality_flag. For `flood_return_period` source-layer features, required properties include `run_id`, `duration`, `valid_time`, segment/network identity, value, unit, return_period, warning_level, and quality_flag. */
+            property_schema?: {
                 [key: string]: unknown;
             } | null;
+            min_zoom?: number | null;
+            max_zoom?: number | null;
+            bounds_crs?: string | null;
+            bounds?: number[] | null;
+            wgs84_bounds?: number[] | null;
+            /** @description Bounded newest-window valid-time sample for catalog display, sorted ascending so the final item is the newest sampled valid_time. See valid_time_limit and valid_times_truncated before treating it as complete. */
+            valid_times?: string[];
+            /** @description Maximum number of valid_times included in this metadata record. */
+            valid_time_limit?: number;
+            /** @description Number of distinct valid times observed by the capped limit-plus-one discovery query; this is not a full total count when valid_times_truncated is true. */
+            valid_time_observed_count?: number;
+            /** @description True when the bounded catalog sample omitted at least one additional distinct valid_time. */
+            valid_times_truncated?: boolean;
+            /** @description Concrete source identity used to resolve non-XYZ route placeholders, including run_id, basin_version_id, river_network_version_id, and bounded source_version/run revision when advertised by required_placeholders. */
+            source_refs?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Stable public layer ID used in X-Tile-Layer-ID and map.tile_cache.layer_id. */
+            cache_layer_id?: string | null;
+            /** @description Hydro or flood variable carried by the tile route path. */
+            route_variable?: string | null;
+            /** @description Backward-compatible publisher or internal layer IDs that alias this public layer. */
+            legacy_layer_ids?: string[];
+            /** @description Canonical advertised layer ID when this metadata record is a style or semantic alias. */
+            alias_of?: string | null;
+            /** @description Alias behavior such as style_layer when route/cache identity is intentionally shared. */
+            alias_semantic?: string | null;
+            /** @description Layer ID used by the canonical tile route, response header, and cache rows. */
+            canonical_route_layer_id?: string | null;
+            cache_etag?: string | null;
+            cache_version?: string | null;
+            fallback_available: boolean;
+            fallback_endpoint?: string | null;
+            release_blocking: boolean;
+            production_mvt_readiness_claimed?: boolean | null;
+        };
+        LayerValidTimes: {
+            /** @description Bounded newest-window valid-time sample sorted ascending so the final item is the newest sampled valid_time. This aliases items for compatibility with layer metadata naming. */
+            valid_times: string[];
+            /** @description Bounded newest-window valid-time sample, duplicated from valid_times for endpoint envelope consumers. */
+            items: string[];
+            /** @description Maximum number of valid times returned by this endpoint. */
+            limit: number;
+            /** @description Number of distinct valid times observed by the capped limit-plus-one query; this is not a full total count when truncated is true. */
+            observed_count: number;
+            /** @description True when at least one additional distinct valid_time exists beyond the returned sample. */
+            truncated: boolean;
         };
     };
     responses: {
@@ -1321,6 +1416,27 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Live PostGIS MVT is unavailable for this canonical tile route. */
+        MvtLivePostgisUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "MVT_LIVE_POSTGIS_UNAVAILABLE";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
             };
         };
     };
@@ -1349,14 +1465,22 @@ export interface components {
         SourceQueryRequired: string;
         StationId: string;
         StationIdQuery: string;
+        /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+        MvtTileX: number;
+        /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+        MvtTileY: number;
+        MvtTileZ: number;
+        /** @description Web Mercator XYZ tile column. */
         TileX: number;
+        /** @description Web Mercator XYZ tile row. */
         TileY: number;
         TileZ: number;
         ToTime: string;
         UserRole: "operator" | "model_admin" | "sys_admin";
         ValidTimePath: string;
         ValidTimeQuery: string;
-        Variable: string;
+        HydroMvtVariable: "q_down" | "water_level";
+        MetTileVariable: string;
         VariableQuery: string;
     };
     requestBodies: never;
@@ -1899,9 +2023,11 @@ export interface operations {
             header?: never;
             path: {
                 basin_version_id: components["parameters"]["BasinVersionId"];
-                z: components["parameters"]["TileZ"];
-                x: components["parameters"]["TileX"];
-                y: components["parameters"]["TileY"];
+                z: components["parameters"]["MvtTileZ"];
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: components["parameters"]["MvtTileX"];
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: components["parameters"]["MvtTileY"];
             };
             cookie?: never;
         };
@@ -1910,12 +2036,20 @@ export interface operations {
             /** @description Raw Mapbox vector tile */
             200: {
                 headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/x-protobuf": string;
                 };
             };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -1926,11 +2060,13 @@ export interface operations {
             header?: never;
             path: {
                 run_id: components["parameters"]["RunId"];
-                variable: components["parameters"]["Variable"];
+                variable: components["parameters"]["HydroMvtVariable"];
                 valid_time: components["parameters"]["ValidTimePath"];
-                z: components["parameters"]["TileZ"];
-                x: components["parameters"]["TileX"];
-                y: components["parameters"]["TileY"];
+                z: components["parameters"]["MvtTileZ"];
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: components["parameters"]["MvtTileX"];
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: components["parameters"]["MvtTileY"];
             };
             cookie?: never;
         };
@@ -1939,12 +2075,20 @@ export interface operations {
             /** @description Raw Mapbox vector tile */
             200: {
                 headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/x-protobuf": string;
                 };
             };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -1953,8 +2097,8 @@ export interface operations {
         parameters: {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
-                /** @description Aggregation duration such as 1h, 3h, or 24h. */
-                duration?: string;
+                /** @description Supported return-period aggregation duration. */
+                duration?: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
                 /** @description Forecast valid time to render. */
                 valid_time: string;
                 /** @description Optional minLon,minLat,maxLon,maxLat spatial filter. */
@@ -1983,16 +2127,58 @@ export interface operations {
             "5XX": components["responses"]["Error"];
         };
     };
+    getFloodReturnPeriodTile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: components["parameters"]["RunId"];
+                /** @description Supported return-period aggregation duration. */
+                duration: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
+                valid_time: components["parameters"]["ValidTimePath"];
+                z: components["parameters"]["MvtTileZ"];
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: components["parameters"]["MvtTileX"];
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: components["parameters"]["MvtTileY"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-protobuf": string;
+                };
+            };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
     getMetTile: {
         parameters: {
             query?: never;
             header?: never;
             path: {
                 product_id: components["parameters"]["ProductId"];
-                variable: components["parameters"]["Variable"];
+                variable: components["parameters"]["MetTileVariable"];
                 valid_time: components["parameters"]["ValidTimePath"];
                 z: components["parameters"]["TileZ"];
+                /** @description Web Mercator XYZ tile column. */
                 x: components["parameters"]["TileX"];
+                /** @description Web Mercator XYZ tile row. */
                 y: components["parameters"]["TileY"];
             };
             cookie?: never;
@@ -2420,6 +2606,8 @@ export interface operations {
             query?: {
                 limit?: components["parameters"]["Limit"];
                 offset?: components["parameters"]["Offset"];
+                /** @description Optional concrete hydro_run.run_id/source reference used to scope layer metadata and cache identity. */
+                run_id?: string;
             };
             header?: never;
             path?: never;
@@ -2444,7 +2632,12 @@ export interface operations {
     };
     listLayerValidTimes: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery. */
+                run_id?: string;
+                /** @description Optional flood return-period duration for flood-return-period and warning-level discovery; defaults to the current UI route identity of 1h. */
+                duration?: "1h" | "3h" | "6h" | "24h" | "72h" | "7d" | null;
+            };
             header?: never;
             path: {
                 layer_id: string;
@@ -2460,7 +2653,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: string[];
+                        data: components["schemas"]["LayerValidTimes"];
                     };
                 };
             };

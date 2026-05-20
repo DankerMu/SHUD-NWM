@@ -73,6 +73,16 @@ const m11RiverDischargeLegend: LayerLegendEntry[] = [
   { label: '无径流数据', color: m11DischargeColor(null) },
 ]
 
+const m11RiverWaterLevelLegend: LayerLegendEntry[] = [
+  { label: '<0.5 m', color: '#E0F7FA', max: 0.5 },
+  { label: '0.5-1 m', color: '#80DEEA', min: 0.5, max: 1 },
+  { label: '1-2 m', color: '#26C6DA', min: 1, max: 2 },
+  { label: '2-4 m', color: '#00897B', min: 2, max: 4 },
+  { label: '4-8 m', color: '#FDD835', min: 4, max: 8 },
+  { label: '>8 m', color: '#D81B60', min: 8 },
+  { label: '无水位数据', color: m11WaterLevelColor(null) },
+]
+
 const m11RiverReturnPeriodLegend: LayerLegendEntry[] = [
   { label: '正常 T<2', color: ALERT_LEVEL_META.normal.color, min: 0, max: 2 },
   { label: '偏高 2-5', color: ALERT_LEVEL_META.elevated.color, min: 2, max: 5 },
@@ -131,6 +141,8 @@ export interface FreshnessMetadata {
   cycleTime: string | null
   validTime: string | null
   runId: string | null
+  basinVersionId: string | null
+  riverNetworkVersionId: string | null
   source: M11ResolvedSource | null
   isStale: boolean
   staleAfterHours: number
@@ -192,6 +204,7 @@ export interface LayerState {
   displayName: string
   group: 'hydrology' | 'meteorology' | 'base' | 'unknown'
   available: boolean
+  metadata: components['schemas']['Layer']['metadata'] | null
   validTimes: string[]
   currentValidTime: string | null
   validTimeSource: 'api' | 'derived' | 'none'
@@ -352,6 +365,8 @@ export function createFreshnessMetadata(input: Partial<FreshnessMetadata> = {}):
     cycleTime: normalizeIsoString(input.cycleTime),
     validTime: normalizeIsoString(input.validTime),
     runId: normalizeString(input.runId),
+    basinVersionId: normalizeString(input.basinVersionId),
+    riverNetworkVersionId: normalizeString(input.riverNetworkVersionId),
     source: input.source ?? null,
     isStale: isStale(reference, staleAfterHours),
     staleAfterHours,
@@ -523,6 +538,8 @@ export function normalizeOverviewSummary(input: {
       cycleTime: input.latestRun?.cycle_time ?? input.pipeline?.cycle_time ?? input.query.cycle,
       validTime: input.query.validTime,
       runId: input.floodSummary?.run_id ?? input.latestRun?.run_id ?? null,
+      basinVersionId: input.latestRun?.basin_version_id ?? null,
+      riverNetworkVersionId: input.latestRun?.river_network_version_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: latestUpdate ? null : 'No freshness metadata is available.',
     }),
@@ -559,6 +576,7 @@ export function normalizeLayerStates(input: {
       displayName: apiLayer?.layer_name ?? layerLabels[layerId as M11Layer] ?? layerId,
       group: layerGroup(apiLayer, layerId),
       available,
+      metadata: apiLayer?.metadata ?? null,
       validTimes,
       currentValidTime,
       validTimeSource: apiValidTimes.length > 0 ? 'api' : derivedValidTimes.length > 0 ? 'derived' : 'none',
@@ -575,6 +593,8 @@ export function normalizeLayerStates(input: {
         cycleTime: input.resolvedRun?.cycle_time ?? input.query.cycle,
         validTime: currentValidTime,
         runId: input.resolvedRun?.run_id ?? null,
+        basinVersionId: input.resolvedRun?.basin_version_id ?? null,
+        riverNetworkVersionId: input.resolvedRun?.river_network_version_id ?? null,
         source: sourceSelection.resolvedSource,
         unavailableReason: currentValidTime ? null : 'No valid-time metadata is available.',
       }),
@@ -626,6 +646,8 @@ export function normalizeBasinDetail(input: {
       cycleTime: input.latestRun?.cycle_time ?? input.query.cycle,
       validTime: input.query.validTime,
       runId: input.latestRun?.run_id ?? null,
+      basinVersionId: input.latestRun?.basin_version_id ?? null,
+      riverNetworkVersionId: input.latestRun?.river_network_version_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: input.latestRun ? null : 'No latest run is available for this basin/source.',
     }),
@@ -790,6 +812,8 @@ export function normalizeSelectedSegmentDetail(input: {
       cycleTime: input.resolvedRun?.cycle_time ?? selectionQuery.cycle,
       validTime: effectiveValidTime,
       runId: input.floodTimeline?.run_id ?? input.resolvedRun?.run_id ?? null,
+      basinVersionId: input.resolvedRun?.basin_version_id ?? null,
+      riverNetworkVersionId: input.floodTimeline?.river_network_version_id ?? input.resolvedRun?.river_network_version_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: forecastSeries.length > 0 || alert ? null : 'No forecast or flood-alert values are available.',
     }),
@@ -1157,7 +1181,7 @@ function serializedByteLength(value: unknown): number {
 }
 
 function isM11RenderableLayer(layerId: string) {
-  return layerId === 'discharge' || layerId === 'flood-return-period' || layerId === 'warning-level'
+  return layerId === 'discharge' || layerId === 'water-level' || layerId === 'flood-return-period' || layerId === 'warning-level'
 }
 
 function polygonAreaKm2(geom: components['schemas']['GeoJsonMultiPolygon']): number | null {
@@ -1229,6 +1253,7 @@ function layerLegend(layerId: string): LayerLegendEntry[] {
   if (layerId === 'warning-level') return m11RiverWarningLevelLegend.map((entry) => ({ ...entry }))
   if (layerId === 'flood-return-period') return m11RiverReturnPeriodLegend.map((entry) => ({ ...entry }))
   if (layerId === 'discharge') return m11RiverDischargeLegend.map((entry) => ({ ...entry }))
+  if (layerId === 'water-level') return m11RiverWaterLevelLegend.map((entry) => ({ ...entry }))
   return []
 }
 
@@ -1247,6 +1272,16 @@ export function m11DischargeColor(value: number | null) {
   if (value >= 1_000) return '#42A5F5'
   if (value >= 500) return '#90CAF9'
   return '#E3F2FD'
+}
+
+export function m11WaterLevelColor(value: number | null) {
+  if (value === null) return '#CBD5E1'
+  if (value >= 8) return '#D81B60'
+  if (value >= 4) return '#FDD835'
+  if (value >= 2) return '#00897B'
+  if (value >= 1) return '#26C6DA'
+  if (value >= 0.5) return '#80DEEA'
+  return '#E0F7FA'
 }
 
 export function m11ReturnPeriodColor(value: number | null) {

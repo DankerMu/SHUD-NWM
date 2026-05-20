@@ -47,13 +47,41 @@ MAX_SAMPLE_COUNT = 128
 MAX_OBJECT_LISTING_COUNT = 10_000
 MAX_PERCENT_DECODE_ROUNDS = 4
 MVT_MISSING_IMPLEMENTATION_WORK = [
-    "PostGIS tile clipping and vector-tile encoding for national-scale river and flood-return-period layers",
-    "application/x-protobuf content-type and response contract for .pbf tile endpoints",
-    "layer metadata validation for vector-tile layer IDs, fields, CRS, and extent assumptions",
-    "tile byte-bound enforcement for encoded protobuf responses",
-    "API, OpenAPI, and frontend contract updates where protobuf delivery changes clients",
-    "regression tests and validation documentation for production MVT delivery",
+    "Opt-in live PostGIS/national-data execution evidence from the target environment",
+    "Browser proof against real national MVT tiles rather than deterministic fixture metadata",
 ]
+MVT_ENDPOINT_REFERENCES = [
+    "/api/v1/tiles/flood-return-period",
+    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+    "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+]
+MVT_DETERMINISTIC_BLOCKER_ID = "m16-deterministic-mvt-contract-artifact"
+MVT_LIVE_POSTGIS_BLOCKER_ID = "m16-live-postgis-national-proof"
+TILE_BYTES_BLOCKER_ID = "m16-tile-byte-budget"
+MVT_CONTRACT_P95_THRESHOLD_KEY = "flood_alert_map_ms"
+MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME = "frontend_render_ms"
+MVT_CONTRACT_MIN_TILE_COUNT = 1
+MVT_CONTRACT_MIN_FEATURE_COUNT = 1
+MVT_CONTRACT_MIN_COORDINATE_COUNT = 1
+MVT_CONTRACT_NUMERIC_FIELDS = (
+    "payload_bytes",
+    "p95_ms",
+    "tile_count",
+    "feature_count",
+    "coordinate_count",
+    "browser_timing_ms",
+)
+MVT_CONTRACT_STRING_FIELDS = ("sql_shape_hash", "query_plan_hash")
+MVT_CONTRACT_ALLOWED_FIELDS = frozenset(
+    {
+        "observed_content_type",
+        "raw_tile_bytes_observed",
+        "artifact_paths",
+        *MVT_CONTRACT_STRING_FIELDS,
+        *MVT_CONTRACT_NUMERIC_FIELDS,
+    }
+)
 
 QUERY_TARGETS = {
     "model_listing": {
@@ -333,6 +361,7 @@ class ProductionScaleConfig:
     thresholds: ProductionScaleThresholds
     thresholds_file: Path | None = None
     latency_fixture: str = "valid"
+    mvt_contract_artifact: Path | None = None
     force: bool = False
 
     @property
@@ -357,6 +386,7 @@ class ProductionScaleConfig:
         api_base_url: str | None = None,
         object_prefix: str | None = None,
         latency_fixture: str | None = None,
+        mvt_contract_artifact: Path | None = None,
         force: bool = False,
     ) -> ProductionScaleConfig:
         resolved_evidence_root = _safe_resolved_evidence_root(evidence_root)
@@ -402,6 +432,8 @@ class ProductionScaleConfig:
             thresholds=thresholds,
             thresholds_file=resolved_thresholds_file,
             latency_fixture=latency_fixture or os.getenv("NHMS_PRODUCTION_SCALE_LATENCY_FIXTURE", "valid"),
+            mvt_contract_artifact=mvt_contract_artifact
+            or _optional_path_env("NHMS_PRODUCTION_SCALE_MVT_CONTRACT_ARTIFACT"),
             force=force,
         )
 
@@ -670,28 +702,69 @@ def _query_latency_evidence(
 
 
 def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str, Any]) -> dict[str, Any]:
-    current_content_type = "application/json"
+    deterministic_contract = _deterministic_mvt_contract_record(config, dataset_manifest)
+    current_content_type = deterministic_contract["observed_content_type"]
     compatible_expectations = {"application/geo+json", "application/json"}
-    tile_bytes = 1_280_000
+    tile_bytes = int(deterministic_contract["payload_bytes"])
     max_tile_bytes = config.thresholds.max_tile_bytes
-    endpoints = [
-        "/api/v1/tiles/flood-return-period",
-        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
-        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
-        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
-    ]
+    endpoints = MVT_ENDPOINT_REFERENCES
     blockers = []
     production_mvt_readiness_claimed = False
+    deterministic_mvt_passed = bool(deterministic_contract["passed"])
     if config.tile_content_type_expectation == "application/x-protobuf":
+        if not deterministic_mvt_passed:
+            blockers.append(
+                {
+                    "error_code": "PRODUCTION_SCALE_MVT_DETERMINISTIC_CONTRACT_BLOCKED",
+                    "blocker_id": MVT_DETERMINISTIC_BLOCKER_ID,
+                    "surface": "deterministic_mvt_contract",
+                    "status": deterministic_contract["status"],
+                    "expected_content_type": "application/x-protobuf",
+                    "observed_content_type": current_content_type,
+                    "affected_endpoints": endpoints,
+                    "removal_criteria": (
+                        "Provide a safe measured deterministic MVT contract artifact proving raw PBF bytes, SQL "
+                        "shape, query-plan hash, payload budget, tile counts, feature counts, coordinate counts, "
+                        "and browser timing for the canonical MVT endpoints."
+                    ),
+                    "residual_risk": (
+                        "Passing deterministic artifacts proves repeatable contract and encoder evidence only; "
+                        "live PostGIS national data volume and target-environment query plans remain separately "
+                        "blocked until the live MVT blocker is removed."
+                    ),
+                    "message": (
+                        "Deterministic MVT pass requires measured contract artifacts, "
+                        "not content-type expectation alone."
+                    ),
+                    "artifact_links": deterministic_contract["artifact_paths"],
+                }
+            )
         blockers.append(
             {
                 "error_code": "PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED",
+                "blocker_id": MVT_LIVE_POSTGIS_BLOCKER_ID,
+                "surface": "live_postgis_national_frontend_evidence",
+                "status": "not_executed",
                 "expected_content_type": "application/x-protobuf",
                 "observed_content_type": current_content_type,
                 "affected_endpoints": endpoints,
                 "missing_implementation_work": MVT_MISSING_IMPLEMENTATION_WORK,
+                "removal_criteria": (
+                    "Run opt-in live PostGIS national tile validation plus browser proof in the target environment "
+                    "and record passing artifacts for river-network, hydro, and flood-return-period MVT endpoints."
+                ),
+                "residual_risk": (
+                    "Deterministic CI proves contract/cache/SQL shape only; it cannot prove target data volume "
+                    "or PostGIS plan behavior."
+                ),
+                "artifact_links": [
+                    "tile_evidence.json",
+                    "query_latency_evidence.json",
+                    "frontend_large_layer_evidence.json",
+                ],
                 "message": (
-                    "Current flood tile delivery is GeoJSON compatibility; production MVT readiness is not achieved."
+                    "Live production MVT readiness is not claimed; "
+                    "deterministic contract status is reported separately."
                 ),
             }
         )
@@ -699,8 +772,21 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
         blockers.append(
             {
                 "error_code": "PRODUCTION_SCALE_TILE_BYTES_EXCEEDED",
+                "blocker_id": TILE_BYTES_BLOCKER_ID,
+                "surface": "tile_payload_byte_budget",
+                "status": "blocked",
+                "affected_endpoints": endpoints,
                 "observed_bytes": tile_bytes,
                 "threshold_bytes": max_tile_bytes,
+                "removal_criteria": (
+                    "Reduce deterministic tile payload bytes below the configured max_tile_bytes threshold or "
+                    "raise the threshold with measured production-scale evidence and release approval."
+                ),
+                "residual_risk": (
+                    "Passing the generic byte budget only proves deterministic payload size; live national MVT "
+                    "query plans and browser rendering remain separately evidenced."
+                ),
+                "artifact_links": deterministic_contract["artifact_paths"],
             }
         )
     return {
@@ -708,6 +794,8 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
         "run_id": config.run_id,
         "status": "blocked" if blockers else "ready",
         "execution_mode": "deterministic_tile_contract_evidence",
+        "live_postgis_execution_mode": "not_executed",
+        "live_postgis_status": "not_executed",
         "tile_content_type_expectation": config.tile_content_type_expectation,
         "observed_content_type": current_content_type,
         "content_type_satisfied": (
@@ -716,6 +804,7 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
         )
         and not blockers,
         "production_mvt_readiness_claimed": production_mvt_readiness_claimed,
+        "deterministic_mvt_passed": deterministic_mvt_passed,
         "geojson_compatibility_mode": config.tile_content_type_expectation in compatible_expectations,
         "geojson_compatibility_note": (
             "GeoJSON compatibility evidence is ready, but this mode does not claim production MVT readiness."
@@ -725,16 +814,327 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
             "threshold_bytes": max_tile_bytes,
             "passed": tile_bytes <= max_tile_bytes,
         },
+        "mvt_deterministic_contract": deterministic_contract,
+        "mvt_deterministic_metrics": deterministic_contract["metrics"],
         "endpoint_references": endpoints,
         "layer_metadata": {
             "layer_id": "flood-return-period",
+            "tile_format": "mvt" if deterministic_mvt_passed else "geojson_compatibility",
+            "url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+            "maplibre_source_layer": "flood_return_period",
+            "property_schema_version": "m16-hydrology-mvt-v1",
+            "min_zoom": 0,
+            "max_zoom": 14,
             "source": config.dataset_source,
             "segment_count": dataset_manifest["segment_count"],
             "fields": ["segment_id", "value", "unit", "quality_flag", "return_period", "warning_level"],
-            "legacy_pbf_route_behavior": "307 redirect to GeoJSON endpoint",
-            "mvt_encoder_executed": False,
+            "legacy_pbf_route_behavior": (
+                "canonical .pbf route is live-PostGIS-only; bounded GeoJSON remains query compatibility"
+            ),
+            "mvt_encoder_executed": deterministic_mvt_passed,
         },
         "blockers": blockers,
+    }
+
+
+def _deterministic_mvt_contract_record(
+    config: ProductionScaleConfig,
+    dataset_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    if config.tile_content_type_expectation != "application/x-protobuf":
+        payload_bytes = 1_280_000
+        return {
+            "status": "not_executed",
+            "passed": False,
+            "observed_content_type": "application/json",
+            "payload_bytes": payload_bytes,
+            "artifact_source": "geojson_compatibility_mode",
+            "artifact_paths": [],
+            "metrics": {
+                "status": "not_executed",
+                "payload_bytes": payload_bytes,
+                "thresholds": _mvt_contract_thresholds(config),
+                "threshold_comparison": _mvt_contract_comparisons(
+                    {
+                        "payload_bytes": payload_bytes,
+                        "p95_ms": 0.0,
+                        "browser_timing_ms": 0.0,
+                        "tile_count": 0,
+                        "feature_count": 0,
+                        "coordinate_count": 0,
+                    },
+                    config,
+                ),
+            },
+        }
+
+    if config.mvt_contract_artifact is None:
+        return _blocked_mvt_contract_record(
+            config,
+            status="not_executed",
+            artifact_source="missing_mvt_contract_artifact",
+            message="No measured deterministic MVT artifact path was supplied.",
+        )
+
+    artifact_path = config.mvt_contract_artifact
+    _refuse_symlink_components(artifact_path)
+    try:
+        content = read_bytes_limited_no_follow(artifact_path, max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES)
+        if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
+            return _blocked_mvt_contract_record(
+                config,
+                status="blocked",
+                artifact_source="oversized_mvt_contract_artifact",
+                message=(
+                    "Measured deterministic MVT artifact exceeds configured limit "
+                    f"of {MAX_EVIDENCE_PAYLOAD_BYTES} bytes."
+                ),
+                artifact_paths=[str(artifact_path)],
+            )
+        measured = json.loads(content.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, SafeFilesystemError) as error:
+        return _blocked_mvt_contract_record(
+            config,
+            status="blocked",
+            artifact_source="invalid_mvt_contract_artifact",
+            message=f"Measured deterministic MVT artifact could not be read safely: {error}",
+            artifact_paths=[str(artifact_path)],
+        )
+    if not isinstance(measured, Mapping):
+        return _blocked_mvt_contract_record(
+            config,
+            status="blocked",
+            artifact_source="invalid_mvt_contract_artifact",
+            message="Measured deterministic MVT artifact must contain a JSON object.",
+            artifact_paths=[str(artifact_path)],
+        )
+    artifact_sha256 = hashlib.sha256(content).hexdigest()
+    normalized = _validated_mvt_contract_metrics(
+        measured,
+        config=config,
+        artifact_path=artifact_path,
+        artifact_sha256=artifact_sha256,
+    )
+    if not normalized["ok"]:
+        return _blocked_mvt_contract_record(
+            config,
+            status="blocked",
+            artifact_source="invalid_mvt_contract_artifact",
+            message=str(normalized["message"]),
+            artifact_paths=[str(artifact_path)],
+            artifact_sha256=artifact_sha256,
+            extra_metrics=normalized.get("metrics") if isinstance(normalized.get("metrics"), Mapping) else None,
+        )
+    metrics = normalized["metrics"]
+    return {
+        "status": "passed",
+        "passed": True,
+        "observed_content_type": "application/x-protobuf",
+        "payload_bytes": metrics["payload_bytes"],
+        "artifact_source": "measured_mvt_contract_artifact",
+        "artifact_paths": [str(artifact_path)],
+        "metrics": metrics,
+    }
+
+
+def _validated_mvt_contract_metrics(
+    measured: Mapping[str, Any],
+    *,
+    config: ProductionScaleConfig,
+    artifact_path: Path,
+    artifact_sha256: str,
+) -> dict[str, Any]:
+    required_fields = {
+        "observed_content_type",
+        "raw_tile_bytes_observed",
+        *MVT_CONTRACT_STRING_FIELDS,
+        *MVT_CONTRACT_NUMERIC_FIELDS,
+    }
+    missing = sorted(field for field in required_fields if field not in measured)
+    if missing:
+        return {
+            "ok": False,
+            "message": f"Measured deterministic MVT artifact is missing required fields: {', '.join(missing)}.",
+        }
+    if measured["observed_content_type"] != "application/x-protobuf":
+        return {"ok": False, "message": "Measured deterministic MVT artifact did not observe application/x-protobuf."}
+    if measured["raw_tile_bytes_observed"] is not True:
+        return {
+            "ok": False,
+            "message": "Measured deterministic MVT artifact must confirm raw tile bytes were observed.",
+        }
+    parsed_strings: dict[str, str] = {}
+    for field_name in MVT_CONTRACT_STRING_FIELDS:
+        if not isinstance(measured[field_name], str) or not measured[field_name]:
+            return {
+                "ok": False,
+                "message": f"Measured deterministic MVT artifact field {field_name} must be a non-empty string.",
+            }
+        parsed_strings[field_name] = measured[field_name]
+
+    parsed_numbers: dict[str, int | float] = {}
+    for field_name in MVT_CONTRACT_NUMERIC_FIELDS:
+        parsed = _mvt_contract_finite_number(measured[field_name], field_name)
+        if parsed is None:
+            return {
+                "ok": False,
+                "message": f"Measured deterministic MVT artifact field {field_name} must be finite numeric evidence.",
+            }
+        parsed_numbers[field_name] = parsed
+    comparisons = _mvt_contract_comparisons(parsed_numbers, config)
+    failed = [
+        f"{field_name} {comparison['operator']} {comparison['threshold']}"
+        for field_name, comparison in comparisons.items()
+        if not comparison["passed"]
+    ]
+    if failed:
+        failed_metrics = {
+            **parsed_strings,
+            **parsed_numbers,
+            "observed_content_type": "application/x-protobuf",
+            "raw_tile_bytes_observed": True,
+            "artifact_path": str(artifact_path),
+            "artifact_sha256": artifact_sha256,
+            "artifact_paths": [str(artifact_path)],
+            "thresholds": _mvt_contract_thresholds(config),
+            "threshold_comparison": comparisons,
+        }
+        return {
+            "ok": False,
+            "message": (
+                "Measured deterministic MVT artifact failed threshold/minimum checks: "
+                f"{', '.join(failed)}."
+            ),
+            "metrics": failed_metrics,
+        }
+
+    normalized = {
+        **parsed_strings,
+        **parsed_numbers,
+        "observed_content_type": "application/x-protobuf",
+        "raw_tile_bytes_observed": True,
+        "artifact_path": str(artifact_path),
+        "artifact_sha256": artifact_sha256,
+        "artifact_paths": [str(artifact_path)],
+        "thresholds": _mvt_contract_thresholds(config),
+        "threshold_comparison": comparisons,
+    }
+    return {"ok": True, "metrics": normalized}
+
+
+def _mvt_contract_thresholds(config: ProductionScaleConfig) -> dict[str, Any]:
+    return {
+        "payload_bytes": config.thresholds.max_tile_bytes,
+        "p95_ms": config.thresholds.p95_query_ms[MVT_CONTRACT_P95_THRESHOLD_KEY],
+        "p95_threshold_key": MVT_CONTRACT_P95_THRESHOLD_KEY,
+        "browser_timing_ms": config.thresholds.frontend_render_ms,
+        "browser_timing_threshold_name": MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME,
+        "tile_count_min": MVT_CONTRACT_MIN_TILE_COUNT,
+        "feature_count_min": MVT_CONTRACT_MIN_FEATURE_COUNT,
+        "coordinate_count_min": MVT_CONTRACT_MIN_COORDINATE_COUNT,
+    }
+
+
+def _mvt_contract_comparisons(
+    parsed_numbers: Mapping[str, int | float],
+    config: ProductionScaleConfig,
+) -> dict[str, dict[str, Any]]:
+    return {
+        "payload_bytes": _threshold_comparison(
+            float(parsed_numbers["payload_bytes"]),
+            float(config.thresholds.max_tile_bytes),
+        ),
+        "p95_ms": {
+            **_threshold_comparison(
+                float(parsed_numbers["p95_ms"]),
+                float(config.thresholds.p95_query_ms[MVT_CONTRACT_P95_THRESHOLD_KEY]),
+            ),
+            "threshold_key": MVT_CONTRACT_P95_THRESHOLD_KEY,
+        },
+        "browser_timing_ms": {
+            **_threshold_comparison(
+                float(parsed_numbers["browser_timing_ms"]),
+                float(config.thresholds.frontend_render_ms),
+            ),
+            "threshold_name": MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME,
+        },
+        "tile_count": _minimum_comparison(parsed_numbers["tile_count"], MVT_CONTRACT_MIN_TILE_COUNT),
+        "feature_count": _minimum_comparison(parsed_numbers["feature_count"], MVT_CONTRACT_MIN_FEATURE_COUNT),
+        "coordinate_count": _minimum_comparison(
+            parsed_numbers["coordinate_count"],
+            MVT_CONTRACT_MIN_COORDINATE_COUNT,
+        ),
+    }
+
+
+def _minimum_comparison(observed: int | float, minimum: int) -> dict[str, Any]:
+    return {
+        "observed": observed,
+        "threshold": minimum,
+        "operator": ">=",
+        "passed": math.isfinite(float(observed)) and observed >= minimum,
+    }
+
+
+def _mvt_contract_finite_number(value: Any, field_name: str) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, int | float):
+        return None
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        return None
+    if field_name in {"payload_bytes", "tile_count", "feature_count", "coordinate_count"}:
+        if not parsed.is_integer():
+            return None
+        return int(parsed)
+    return parsed
+
+
+def _blocked_mvt_contract_record(
+    config: ProductionScaleConfig,
+    *,
+    status: str,
+    artifact_source: str,
+    message: str,
+    artifact_paths: list[str] | None = None,
+    artifact_sha256: str | None = None,
+    extra_metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "status": status,
+        "payload_bytes": 0,
+        "thresholds": _mvt_contract_thresholds(config),
+        "threshold_comparison": _mvt_contract_comparisons(
+            {
+                "payload_bytes": 0,
+                "p95_ms": 0.0,
+                "browser_timing_ms": 0.0,
+                "tile_count": 0,
+                "feature_count": 0,
+                "coordinate_count": 0,
+            },
+            config,
+        ),
+        "message": message,
+    }
+    if extra_metrics:
+        metrics.update(dict(extra_metrics))
+        metrics["status"] = status
+        metrics["message"] = message
+    if artifact_paths:
+        metrics["artifact_paths"] = artifact_paths
+        metrics["artifact_path"] = artifact_paths[0]
+    if artifact_sha256:
+        metrics["artifact_sha256"] = artifact_sha256
+    return {
+        "status": status,
+        "passed": False,
+        "observed_content_type": "not_measured",
+        "payload_bytes": 0,
+        "artifact_source": artifact_source,
+        "artifact_paths": artifact_paths or [],
+        "metrics": metrics,
     }
 
 
@@ -933,6 +1333,7 @@ def _environment_payload(config: ProductionScaleConfig) -> dict[str, Any]:
         "NHMS_PRODUCTION_SCALE_API_BASE_URL",
         "NHMS_PRODUCTION_SCALE_OBJECT_PREFIX",
         "NHMS_PRODUCTION_SCALE_LATENCY_FIXTURE",
+        "NHMS_PRODUCTION_SCALE_MVT_CONTRACT_ARTIFACT",
         "DATABASE_URL",
         "AWS_SECRET_ACCESS_KEY",
     ]
@@ -1343,6 +1744,7 @@ def _threshold_comparison(observed: float, threshold: float) -> dict[str, Any]:
     return {
         "observed": observed,
         "threshold": threshold,
+        "operator": "<=",
         "passed": math.isfinite(observed) and observed <= threshold,
     }
 
@@ -1517,6 +1919,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--api-base-url", default=None)
     @click.option("--object-prefix", default=None)
     @click.option("--latency-fixture", default=None)
+    @click.option("--mvt-contract-artifact", type=click.Path(path_type=Path), default=None)
     @click.option("--force", is_flag=True, default=False)
     def validate_scale_command(
         evidence_root: Path,
@@ -1533,6 +1936,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         api_base_url: str | None,
         object_prefix: str | None,
         latency_fixture: str | None,
+        mvt_contract_artifact: Path | None,
         force: bool,
     ) -> None:
         try:
@@ -1552,6 +1956,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     api_base_url=api_base_url,
                     object_prefix=object_prefix,
                     latency_fixture=latency_fixture,
+                    mvt_contract_artifact=mvt_contract_artifact,
                     force=force,
                 )
             )
@@ -1595,6 +2000,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                             api_base_url=args.api_base_url,
                             object_prefix=args.object_prefix,
                             latency_fixture=args.latency_fixture,
+                            mvt_contract_artifact=args.mvt_contract_artifact,
                             force=args.force,
                         )
                     )
@@ -1626,6 +2032,7 @@ def _add_argparse_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-base-url", default=None)
     parser.add_argument("--object-prefix", default=None)
     parser.add_argument("--latency-fixture", default=None)
+    parser.add_argument("--mvt-contract-artifact", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
 
 

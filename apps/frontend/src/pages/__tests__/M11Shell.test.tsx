@@ -15,6 +15,7 @@ import {
 import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
 import {
   m11BasinRiverCollectionBudget,
+  buildM11RegisteredOverlay,
   buildBasinFeatureCollection,
   buildBasinRiverFeatureCollection,
   buildSelectedSegmentFeatureCollection,
@@ -197,6 +198,79 @@ const freshness = {
   unavailableReason: null,
 }
 
+const floodMvtMetadata: NonNullable<LayerState['metadata']> = {
+  layer_id: 'flood-return-period',
+  tile_format: 'mvt',
+  url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+  tile_url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+  maplibre_source_layer: 'flood_return_period',
+  source_layer: 'flood_return_period',
+  fallback_available: true,
+  release_blocking: false,
+  required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
+  source_refs: { run_id: 'run-gfs', source_version: 'rnv-v1', basin_version_id: 'basin-v1', duration: '1h' },
+  valid_times: ['2026-05-18T06:00:00Z', '2026-05-18T12:00:00Z'],
+  cache_version: 'flood-cache-v1',
+  cache_etag: 'flood-etag-v1',
+  schema_version: 'schema-v1',
+  encoder_version: 'encoder-v1',
+}
+
+const dischargeMvtMetadata: NonNullable<LayerState['metadata']> = {
+  layer_id: 'discharge',
+  tile_format: 'mvt',
+  url_template: '/api/v1/tiles/hydro/{run_id}/q_down/{valid_time}/{z}/{x}/{y}.pbf',
+  tile_url_template: '/api/v1/tiles/hydro/{run_id}/q_down/{valid_time}/{z}/{x}/{y}.pbf',
+  maplibre_source_layer: 'hydro',
+  source_layer: 'hydro',
+  fallback_available: false,
+  release_blocking: false,
+  required_placeholders: ['run_id', 'valid_time', 'z', 'x', 'y'],
+  source_refs: { run_id: 'run-gfs', source_version: 'rnv-v1', basin_version_id: 'basin-v1' },
+  valid_times: ['2026-05-18T00:00:00Z', '2026-05-18T06:00:00Z', '2026-05-18T12:00:00Z'],
+  cache_version: 'discharge-cache-v1',
+  cache_etag: 'discharge-etag-v1',
+  schema_version: 'schema-v1',
+  encoder_version: 'encoder-v1',
+}
+
+const waterLevelMvtMetadata: NonNullable<LayerState['metadata']> = {
+  layer_id: 'water-level',
+  tile_format: 'mvt',
+  url_template: '/api/v1/tiles/hydro/{run_id}/water_level/{valid_time}/{z}/{x}/{y}.pbf',
+  tile_url_template: '/api/v1/tiles/hydro/{run_id}/water_level/{valid_time}/{z}/{x}/{y}.pbf',
+  maplibre_source_layer: 'hydro',
+  source_layer: 'hydro',
+  fallback_available: false,
+  release_blocking: false,
+  required_placeholders: ['run_id', 'valid_time', 'z', 'x', 'y'],
+  source_refs: { run_id: 'run-gfs', source_version: 'rnv-v1', basin_version_id: 'basin-v1' },
+  valid_times: ['2026-05-18T00:00:00Z'],
+  cache_version: 'water-level-cache-v1',
+  cache_etag: 'water-level-etag-v1',
+  schema_version: 'schema-v1',
+  encoder_version: 'encoder-v1',
+}
+
+const m11MvtMetadataByLayer = {
+  'discharge': dischargeMvtMetadata,
+  'water-level': waterLevelMvtMetadata,
+  'flood-return-period': floodMvtMetadata,
+  'warning-level': {
+    ...floodMvtMetadata,
+    layer_id: 'warning-level',
+    alias_of: 'flood-return-period',
+    canonical_route_layer_id: 'flood-return-period',
+  },
+} satisfies Record<M11QueryState['layer'], NonNullable<LayerState['metadata']>>
+
+const m11LayerValidTimeByLayer = {
+  'discharge': '2026-05-18T00:00:00.000Z',
+  'water-level': '2026-05-18T00:00:00.000Z',
+  'flood-return-period': '2026-05-18T06:00:00.000Z',
+  'warning-level': '2026-05-18T06:00:00.000Z',
+} satisfies Record<M11QueryState['layer'], string>
+
 const layers: LayerState[] = [
   {
     layerId: 'discharge',
@@ -207,6 +281,7 @@ const layers: LayerState[] = [
     currentValidTime: '2026-05-18T00:00:00.000Z',
     validTimeSource: 'api',
     disabledReason: null,
+    metadata: null,
     freshness,
     legend: [
       { label: '<500 m3/s', color: '#90CAF9', max: 500 },
@@ -222,6 +297,7 @@ const layers: LayerState[] = [
     currentValidTime: '2026-05-18T12:00:00.000Z',
     validTimeSource: 'api',
     disabledReason: null,
+    metadata: null,
     freshness: { ...freshness, validTime: '2026-05-18T12:00:00.000Z' },
     legend: [{ label: 'warning', color: '#FFB74D', min: 10, max: 20 }],
   },
@@ -234,6 +310,7 @@ const layers: LayerState[] = [
     currentValidTime: null,
     validTimeSource: 'none',
     disabledReason: 'Layer has no valid times.',
+    metadata: null,
     freshness: { ...freshness, validTime: null, unavailableReason: 'No valid-time metadata is available.' },
     legend: [],
   },
@@ -332,18 +409,6 @@ function geoJsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
 }
 
-function oversizedStreamResponse(maxBytes: number) {
-  return new Response(
-    new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode('x'.repeat(maxBytes + 1)))
-        controller.close()
-      },
-    }),
-    { headers: { 'content-type': 'application/json' } },
-  )
-}
-
 describe('M11 visual foundation shell', () => {
   beforeEach(() => {
     mapSources.length = 0
@@ -430,7 +495,7 @@ describe('M11 visual foundation shell', () => {
     expect(surface).toHaveAttribute('data-basemap', 'vector')
     expect(surface).not.toHaveAttribute('data-registered-overlays')
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
-    expect(screen.getByTestId('m11-map-unavailable')).toHaveTextContent('地图源尚未在本仓库实现')
+    expect(screen.getByTestId('m11-map-unavailable')).toHaveTextContent('不会请求无边界 GeoJSON')
     expect(mapSources).toHaveLength(0)
     expect(mapLayers).toHaveLength(0)
 
@@ -489,50 +554,227 @@ describe('M11 visual foundation shell', () => {
     expect(screen.queryByText('已由图层 API 注册')).not.toBeInTheDocument()
   })
 
-  it('registers validated flood return period geojson and keeps it through basemap switches using selected URL valid time', async () => {
+  it('registers flood return period vector source and keeps it through basemap switches using selected URL valid time', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
     const floodState = { ...state, layer: 'flood-return-period' as const, validTime: '2026-05-18T06:00:00.000Z' }
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+    )
 
-    const { rerender } = render(<M11MapSurface state={floodState} layers={layers} onQueryChange={onQueryChange} />)
+    const { rerender } = render(<M11MapSurface state={floodState} layers={layersWithMvt} onQueryChange={onQueryChange} />)
 
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
     expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-flood-return-period-line')
     expect(mapSources.at(-1)).toMatchObject({
       id: 'm11-flood-return-period-source',
-      type: 'geojson',
+      type: 'vector',
       promoteId: 'feature_id',
-      data: { type: 'FeatureCollection', features: [] },
+      tiles: [
+        '/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=flood-cache-v1',
+      ],
     })
-    expect(fetch).toHaveBeenCalledWith(
-      expect.stringContaining('valid_time=2026-05-18T06%3A00%3A00.000Z'),
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    )
-    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url)).join('\n')).not.toContain(
-      'valid_time=2026-05-18T12%3A00%3A00.000Z',
-    )
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line', source: 'm11-flood-return-period-source' })
+    expect(JSON.stringify(mapLayers.at(-1)?.paint)).toContain('warning_level')
+    expect(JSON.stringify(mapLayers.at(-1)?.paint)).toContain('return_period')
 
     await user.click(screen.getByRole('button', { name: '地形底图' }))
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'terrain' })
 
     mapSources.length = 0
     mapLayers.length = 0
-    rerender(<M11MapSurface state={{ ...floodState, basemap: 'terrain' }} layers={layers} onQueryChange={onQueryChange} />)
+    rerender(<M11MapSurface state={{ ...floodState, basemap: 'terrain' }} layers={layersWithMvt} onQueryChange={onQueryChange} />)
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
-    expect(mapSources.at(-1)).toMatchObject({ id: 'm11-flood-return-period-source', type: 'geojson' })
+    expect(mapSources.at(-1)).toMatchObject({ id: 'm11-flood-return-period-source', type: 'vector' })
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line' })
+  })
+
+  it('does not register M11 vector overlays when selected valid time is not advertised by metadata', () => {
+    for (const layerId of ['flood-return-period', 'warning-level', 'discharge', 'water-level'] as const) {
+      const selectedTime = m11LayerValidTimeByLayer[layerId]
+      const baseMetadata = m11MvtMetadataByLayer[layerId]
+      for (const validTimes of [[], ['2026-05-18T18:00:00.000Z']]) {
+        const testedLayer: LayerState = {
+          ...(layers.find((layer) => layer.layerId === layerId) ?? layers[0]),
+          layerId,
+          available: true,
+          validTimes: [selectedTime],
+          currentValidTime: selectedTime,
+          validTimeSource: 'api',
+          disabledReason: null,
+          metadata: { ...baseMetadata, valid_times: validTimes },
+          freshness: { ...freshness, validTime: selectedTime },
+        }
+
+        expect(buildM11RegisteredOverlay({ ...state, layer: layerId, validTime: selectedTime }, [testedLayer])).toBeNull()
+      }
+    }
+  })
+
+  it('registers discharge vector source from advertised hydrology MVT metadata', async () => {
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'discharge' ? { ...layer, metadata: dischargeMvtMetadata } : layer,
+    )
+    render(<M11MapSurface state={state} layers={layersWithMvt} onQueryChange={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge'))
+    expect(mapSources.at(-1)).toMatchObject({
+      id: 'm11-discharge-source',
+      type: 'vector',
+      tiles: [
+        '/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-cache-v1',
+      ],
+    })
+    const paint = JSON.stringify(mapLayers.at(-1)?.paint)
+    expect(paint).toContain('value')
+    expect(paint).not.toContain('warning_level')
+    expect(paint).not.toContain('return_period')
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+  })
+
+  it('registers water-level vector source from advertised hydrology MVT metadata', async () => {
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'water-level'
+        ? {
+            ...layer,
+            available: true,
+            validTimes: ['2026-05-18T00:00:00.000Z'],
+            currentValidTime: '2026-05-18T00:00:00.000Z',
+            disabledReason: null,
+            metadata: waterLevelMvtMetadata,
+            freshness: { ...layer.freshness, runId: 'run-gfs', validTime: '2026-05-18T00:00:00.000Z' },
+          }
+        : layer,
+    )
+    render(<M11MapSurface state={{ ...state, layer: 'water-level' }} layers={layersWithMvt} onQueryChange={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'water-level'))
+    expect(mapSources.at(-1)).toMatchObject({
+      id: 'm11-water-level-source',
+      type: 'vector',
+      tiles: [
+        '/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=water-level-cache-v1',
+      ],
+    })
+    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
+    const paint = JSON.stringify(mapLayers.at(-1)?.paint)
+    const dischargePaint = JSON.stringify(
+      buildM11RegisteredOverlay(
+        state,
+        layers.map((layer) => (layer.layerId === 'discharge' ? { ...layer, metadata: dischargeMvtMetadata } : layer)),
+      )?.layer.paint,
+    )
+    expect(paint).toContain('value')
+    expect(paint).toContain('0.5')
+    expect(paint).toContain('8')
+    expect(paint).not.toContain('50000')
+    expect(paint).not.toEqual(dischargePaint)
+    expect(paint).not.toContain('warning_level')
+    expect(paint).not.toContain('return_period')
+  })
+
+  it('changes M11 vector source identity across tile-defining metadata and route inputs', () => {
+    const floodOverlay = buildM11RegisteredOverlay(
+      { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
+      layers.map((layer) =>
+        layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+      ),
+    )
+    expect(floodOverlay?.source.tiles[0]).toContain('2026-05-18T06%3A00%3A00.000Z')
+    const warningOverlay = buildM11RegisteredOverlay(
+      { ...state, layer: 'warning-level', validTime: '2026-05-18T06:00:00.000Z' },
+      [
+        ...layers,
+        {
+          ...layers[1],
+          layerId: 'warning-level',
+          displayName: 'Warning level',
+          validTimes: ['2026-05-18T06:00:00.000Z'],
+          currentValidTime: '2026-05-18T06:00:00.000Z',
+          metadata: {
+            ...floodMvtMetadata,
+            layer_id: 'warning-level',
+            alias_of: 'flood-return-period',
+            canonical_route_layer_id: 'flood-return-period',
+          },
+        },
+      ],
+    )
+    const dischargeOverlay = buildM11RegisteredOverlay(
+      state,
+      layers.map((layer) => (layer.layerId === 'discharge' ? { ...layer, metadata: dischargeMvtMetadata } : layer)),
+    )
+    const waterLevelOverlay = buildM11RegisteredOverlay(
+      { ...state, layer: 'water-level' },
+      layers.map((layer) =>
+        layer.layerId === 'water-level'
+          ? {
+              ...layer,
+              available: true,
+              validTimes: ['2026-05-18T00:00:00.000Z'],
+              currentValidTime: '2026-05-18T00:00:00.000Z',
+              disabledReason: null,
+              metadata: waterLevelMvtMetadata,
+              freshness: { ...layer.freshness, runId: 'run-gfs', validTime: '2026-05-18T00:00:00.000Z' },
+            }
+          : layer,
+      ),
+    )
+    const floodRunChanged = buildM11RegisteredOverlay(
+      { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
+      layers.map((layer) =>
+        layer.layerId === 'flood-return-period'
+          ? { ...layer, metadata: floodMvtMetadata, freshness: { ...layer.freshness, runId: 'run-gfs-2' } }
+          : layer,
+      ),
+    )
+    const floodCacheChanged = buildM11RegisteredOverlay(
+      { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
+      layers.map((layer) =>
+        layer.layerId === 'flood-return-period'
+          ? { ...layer, metadata: { ...floodMvtMetadata, cache_version: 'flood-cache-v2', cache_etag: 'flood-etag-v2' } }
+          : layer,
+      ),
+    )
+
+    expect(floodOverlay?.sourceKey).toContain('flood-cache-v1')
+    expect(floodOverlay?.sourceKey).not.toEqual(dischargeOverlay?.sourceKey)
+    expect(dischargeOverlay?.sourceKey).not.toEqual(waterLevelOverlay?.sourceKey)
+    expect(floodOverlay?.sourceKey).not.toEqual(floodRunChanged?.sourceKey)
+    expect(floodOverlay?.sourceKey).not.toEqual(floodCacheChanged?.sourceKey)
+    expect(floodOverlay?.source.tiles[0]).toContain('_mvt_cache_version=flood-cache-v1')
+    expect(floodCacheChanged?.source.tiles[0]).toContain('_mvt_cache_version=flood-cache-v2')
+    expect(floodOverlay?.source.tiles).not.toEqual(floodCacheChanged?.source.tiles)
+    expect(warningOverlay?.source.tiles).toEqual(floodOverlay?.source.tiles)
+    expect(warningOverlay?.sourceKey).not.toEqual(floodOverlay?.sourceKey)
+  })
+
+  it('does not create unbounded GeoJSON national source when MVT metadata is missing', async () => {
+    const layersWithoutMvt = layers.map((layer) =>
+      layer.layerId === 'flood-return-period' ? { ...layer, metadata: null } : layer,
+    )
+    const floodState = { ...state, layer: 'flood-return-period' as const, validTime: '2026-05-18T06:00:00.000Z' }
+
+    render(<M11MapSurface state={floodState} layers={layersWithoutMvt} onQueryChange={vi.fn()} />)
+
+    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('不会请求无边界 GeoJSON')
+    expect(mapSources.find((source) => source.id === 'm11-flood-return-period-source')).toBeUndefined()
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
   })
 
   it('renders basin river network from segment rows and colors by active hydrology layer', async () => {
     const onOverlayHover = vi.fn()
     const onOverlayClick = vi.fn()
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+    )
 
     const { rerender } = render(
       <M11MapSurface
         state={state}
-        layers={layers}
+        layers={layersWithMvt}
         basinSegments={basinSegments}
         selectedSegmentId="seg-009"
         onOverlayHover={onOverlayHover}
@@ -619,25 +861,34 @@ describe('M11 visual foundation shell', () => {
       geometry: { type: 'LineString', coordinates: [[100 + index * 0.01, 30], [100.005 + index * 0.01, 30.005]] },
     }))
 
-    for (const layerId of ['discharge', 'flood-return-period', 'warning-level'] as const) {
+    for (const layerId of ['discharge', 'water-level', 'flood-return-period', 'warning-level'] as const) {
       const legendColors = normalizedLayers.find((layer) => layer.layerId === layerId)?.legend.map((entry) => entry.color)
       const fallbackLegendColors = m11FallbackLegends[layerId].map((entry) => entry.color)
       const featureColors = buildBasinRiverFeatureCollection(representativeRows, layerId).features.map(
         (feature) => feature.properties.layer_color,
       )
-      expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
-      expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+      if (layerId === 'water-level') {
+        expect(legendColors).toEqual(expect.arrayContaining(['#E0F7FA', '#D81B60']))
+        expect(fallbackLegendColors).toEqual(expect.arrayContaining(['#E0F7FA', '#D81B60']))
+        expect(legendColors).not.toEqual(m11FallbackLegends.discharge.map((entry) => entry.color))
+      } else {
+        expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+        expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+      }
     }
   })
 
   it('prioritizes river interactions when MapLibre returns overlapping basin and river features', () => {
     const onOverlayHover = vi.fn()
     const onOverlayClick = vi.fn()
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+    )
 
     render(
       <M11MapSurface
         state={state}
-        layers={layers}
+        layers={layersWithMvt}
         basins={overviewBasins}
         basinSegments={basinSegments}
         onOverlayHover={onOverlayHover}
@@ -700,17 +951,7 @@ describe('M11 visual foundation shell', () => {
     expect(JSON.stringify(hoveredSourceData)).not.toContain('selected')
   })
 
-  it('rejects oversized M11 flood return period payloads before registering a MapLibre source', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        geoJsonResponse({
-          type: 'FeatureCollection',
-          features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
-        }),
-      ),
-    )
-
+  it('blocks M11 flood return period national GeoJSON fallback when MVT metadata is missing', async () => {
     render(
       <M11MapSurface
         state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
@@ -718,23 +959,28 @@ describe('M11 visual foundation shell', () => {
       />,
     )
 
-    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('超过客户端要素预算')
+    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('不会请求无边界 GeoJSON')
     expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays')
     expect(mapSources).toHaveLength(0)
     expect(mapLayers).toHaveLength(0)
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
   })
 
-  it('rejects oversized streamed M11 flood return period payloads without registering a MapLibre source', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(oversizedStreamResponse(2_000_000)))
+  it('blocks release-blocked M11 flood return period MVT metadata without registering a source', async () => {
+    const blockedLayers = layers.map((layer) =>
+      layer.layerId === 'flood-return-period'
+        ? { ...layer, metadata: { ...floodMvtMetadata, release_blocking: true } }
+        : layer,
+    )
 
     render(
       <M11MapSurface
         state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
-        layers={layers}
+        layers={blockedLayers}
       />,
     )
 
-    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('超过客户端序列化预算')
+    expect(await screen.findByTestId('m11-map-unavailable')).toHaveTextContent('release-blocked')
     expect(screen.getByTestId('m11-map-surface')).not.toHaveAttribute('data-registered-overlays')
     expect(mapSources).toHaveLength(0)
     expect(mapLayers).toHaveLength(0)
@@ -743,11 +989,14 @@ describe('M11 visual foundation shell', () => {
   it('threads camera and overlay callbacks into the MapLibre primitive', async () => {
     const onOverlayHover = vi.fn()
     const onOverlayClick = vi.fn()
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+    )
 
     render(
       <M11MapSurface
         state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
-        layers={layers}
+        layers={layersWithMvt}
         fitTo={{ bounds: [[100, 30], [105, 35]], padding: 24 }}
         flyTo={{ center: [102, 32], zoom: 7 }}
         onOverlayHover={onOverlayHover}
@@ -774,11 +1023,14 @@ describe('M11 visual foundation shell', () => {
 
   it('dispatches the matched basin feature when overlay features are returned first', async () => {
     const onOverlayClick = vi.fn()
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+    )
 
     render(
       <M11MapSurface
         state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
-        layers={layers}
+        layers={layersWithMvt}
         basins={overviewBasins}
         onOverlayClick={onOverlayClick}
       />,
@@ -831,11 +1083,14 @@ describe('M11 visual foundation shell', () => {
   it('shows a scoped map source error while keeping other controls usable', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+    )
 
     render(
       <M11MapSurface
         state={{ ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' }}
-        layers={layers}
+        layers={layersWithMvt}
         basins={overviewBasins}
         onQueryChange={onQueryChange}
       />,
@@ -1000,10 +1255,15 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByText('Comparison requires both GFS and IFS series.')).toBeInTheDocument()
   })
 
-  it('selects legends for discharge, flood return period, and warning level semantics', () => {
+  it('selects legends for discharge, water level, flood return period, and warning level semantics', () => {
     const { rerender } = render(<LayerLegendPanel state={state} layers={layers} />)
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
     expect(screen.getByText('<500 m3/s')).toBeInTheDocument()
+
+    rerender(<LayerLegendPanel state={{ ...state, layer: 'water-level' }} layers={[]} />)
+    expect(screen.getByText('水位图例')).toBeInTheDocument()
+    expect(screen.getByText('0.5-1 m')).toBeInTheDocument()
+    expect(screen.queryByText('500-1000 m3/s')).not.toBeInTheDocument()
 
     rerender(<LayerLegendPanel state={{ ...state, layer: 'flood-return-period' }} layers={layers} />)
     expect(screen.getByText('重现期图例')).toBeInTheDocument()

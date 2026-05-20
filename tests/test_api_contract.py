@@ -512,6 +512,15 @@ def test_flood_alert_ranking_and_timeline_bounds_are_in_static_contract_and_type
     ranking_types = generated_types[ranking_start:segments_start]
     assert 'limit?: number;' in ranking_types
     assert 'limit?: components["parameters"]["Limit"];' not in ranking_types
+    ranking_item_schema = spec["components"]["schemas"]["FloodAlertRankingItem"]
+    assert "geom_centroid" in ranking_item_schema["required"]
+    assert ranking_item_schema["properties"]["geom_centroid"] == {
+        "type": "object",
+        "nullable": True,
+        "allOf": [{"$ref": "#/components/schemas/GeoJSONPoint"}],
+        "description": "GeoJSON point centroid, or null",
+    }
+    assert 'geom_centroid: components["schemas"]["GeoJSONPoint"] | null;' in generated_types
 
     timeline_start = generated_types.index("getFloodAlertTimeline:")
     lineage_start = generated_types.index("getRiverPointLineage:")

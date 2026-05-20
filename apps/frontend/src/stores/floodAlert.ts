@@ -6,6 +6,7 @@ import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
 import type { AlertLevel } from '@/components/flood/alertLevels'
 import { isAlertLevel } from '@/components/flood/alertLevels'
+import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 
 export type FloodAlertSortBy = 'return_period_desc' | 'q_value_desc'
 export type AlertThreshold = 'Q2' | 'Q5' | 'Q10' | 'Q20' | 'Q50' | 'Q100'
@@ -22,6 +23,8 @@ let latestRunRequestId = 0
 let summaryRequestId = 0
 let rankingRequestId = 0
 let timelineRequestId = 0
+
+type ApiLayerValidTimes = components['schemas']['LayerValidTimes']
 
 export interface FloodAlertLevelCount {
   level: AlertLevel
@@ -150,6 +153,16 @@ function normalizeLevel(value: string | null | undefined): AlertLevel | null {
   return isAlertLevel(value) ? value : null
 }
 
+function normalizeGeoPoint(value: unknown): { type: 'Point'; coordinates: [number, number] } | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as { type?: unknown; coordinates?: unknown }
+  if (record.type !== 'Point' || !Array.isArray(record.coordinates) || record.coordinates.length < 2) return null
+  const lon = Number(record.coordinates[0])
+  const lat = Number(record.coordinates[1])
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null
+  return { type: 'Point', coordinates: [lon, lat] }
+}
+
 function normalizeSummary(payload: ApiFloodAlertSummary): FloodAlertSummary {
   return {
     runId: payload.run_id,
@@ -184,7 +197,7 @@ function normalizeRankingItem(item: ApiFloodAlertRankingItem, index: number): Fl
     warningLevel: normalizeLevel(item.warning_level),
     duration: stringOrNull(item.duration),
     validTime: stringOrNull(item.valid_time),
-    geomCentroid: null,
+    geomCentroid: normalizeGeoPoint(item.geom_centroid),
   }
 }
 
@@ -236,20 +249,31 @@ function normalizeTimeline(payload: ApiFloodAlertTimeline): FloodAlertTimeline {
   }
 }
 
-function buildValidTimes(run: ApiHydroRun | null) {
-  if (!run) return []
-  const start = Date.parse(run.start_time)
-  const end = Date.parse(run.end_time)
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return []
-
-  const hours = Math.max(1, Math.round((end - start) / 3_600_000))
-  const stepHours = hours > 96 ? 6 : hours > 48 ? 3 : 1
-  const values: string[] = []
-  for (let time = start; time <= end && values.length < 128; time += stepHours * 3_600_000) {
-    values.push(new Date(time).toISOString())
-  }
-  if (values.at(-1) !== new Date(end).toISOString()) values.push(new Date(end).toISOString())
+function normalizeValidTimes(values: string[] | null | undefined) {
+  if (!Array.isArray(values)) return []
   return values
+    .map(normalizeIso)
+    .filter((value): value is string => value !== null)
+    .sort((a, b) => Date.parse(a) - Date.parse(b))
+    .filter((value, index, items) => index === 0 || value !== items[index - 1])
+}
+
+function normalizeLayerValidTimesResponse(value: ApiLayerValidTimes | string[]): string[] {
+  return normalizeValidTimes(Array.isArray(value) ? value : value?.valid_times)
+}
+
+async function fetchLayerValidTimes(layerId: string, runId: string): Promise<string[]> {
+  return fetchJson<ApiLayerValidTimes | string[]>(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times`, {
+    run_id: runId,
+    ...(layerId === 'flood-return-period' || layerId === 'warning-level'
+      ? { duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION }
+      : {}),
+  }).then(normalizeLayerValidTimesResponse)
+}
+
+function resolveSelectedValidTime(validTimes: string[], requestedValidTime: string | null) {
+  if (requestedValidTime && validTimes.includes(requestedValidTime)) return requestedValidTime
+  return validTimes.at(-1) ?? null
 }
 
 function mergeTimelineValidTimes(existing: string[], timeline: FloodAlertTimeline) {
@@ -401,15 +425,15 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const latestRun = sortLatestRuns(candidates).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(candidates)[0] ?? null
       const nextRunId = latestRun?.run_id ?? null
       const runChanged = previousRunId !== nextRunId
-      const validTimes = buildValidTimes(latestRun)
       const requestedValidTime = normalizeIso(context?.validTime)
+      const validTimes = latestRun ? await fetchLayerValidTimes('flood-return-period', latestRun.run_id) : []
       const contextMissReason = latestRun ? null : explicitContextMissReason(context)
       if (requestId !== latestRunRequestId) return
       set({
         latestRun,
         selectedRunId: nextRunId,
         validTimes,
-        selectedValidTime: requestedValidTime && validTimes.includes(requestedValidTime) ? requestedValidTime : null,
+        selectedValidTime: resolveSelectedValidTime(validTimes, requestedValidTime),
         loading: false,
         empty: latestRun === null,
         error: contextMissReason,

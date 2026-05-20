@@ -92,7 +92,7 @@ const basePlaceholders = [
 
 const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
   discharge: getM11LayerLegend('discharge'),
-  'water-level': [],
+  'water-level': getM11LayerLegend('water-level'),
   'flood-return-period': getM11LayerLegend('flood-return-period'),
   'warning-level': getM11LayerLegend('warning-level'),
 }
