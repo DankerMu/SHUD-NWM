@@ -1670,18 +1670,29 @@ def test_validate_ops_auth_live_proof_emits_redacted_live_evidence(tmp_path: Pat
     proof = {
         "execution_mode": "live_proof",
         "live_backend_auth_executed": True,
-        "actor_id": "live-operator",
         "provider": "oidc-prod",
-        "raw_roles": ["model_admin", "external-admin"],
-        "mapped_roles": ["model_admin"],
         "provider_metadata": {
             "issuer": "https://idp.example/realms/nhms",
             "token": "live-token-secret",
             "jwks_uri": "https://idp.example/.well-known/jwks.json?credential=secret",
         },
-        "role_mapping_result": {
-            "source_claim": "groups",
-            "credential_hint": "token=live-token-secret",
+        "allowed_subject": {
+            "actor_id": "live-admin",
+            "raw_roles": ["sys_admin", "external-admin"],
+            "mapped_roles": ["sys_admin"],
+            "role_mapping_result": {
+                "source_claim": "groups",
+                "credential_hint": "token=live-token-secret",
+            },
+        },
+        "denied_subject": {
+            "actor_id": "live-viewer",
+            "raw_roles": ["viewer", "external-viewer"],
+            "mapped_roles": ["viewer"],
+            "role_mapping_result": {
+                "source_claim": "groups",
+                "credential_hint": "token=viewer-token-secret",
+            },
         },
     }
 
@@ -1699,34 +1710,106 @@ def test_validate_ops_auth_live_proof_emits_redacted_live_evidence(tmp_path: Pat
     blockers = _read_json(lane_dir / "auth_release_blockers.json")
     rendered_auth = json.dumps(auth)
     assert summary["live_backend_auth_executed"] is True
+    assert not any(
+        blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
+        for blocker in summary["release_blockers"]
+    )
     assert auth["status"] == "ready"
     assert auth["live_backend_auth_executed"] is True
     assert auth["execution_modes"] == ["live_proof"]
     assert auth["live_proof"]["provider_metadata"]["provider"] == "oidc-prod"
     assert auth["live_proof"]["provider_metadata"]["token"] == "[redacted]"
     assert auth["live_proof"]["provider_metadata"]["jwks_uri"] == "[redacted]"
-    assert auth["live_proof"]["role_mapping_result"]["mapped_roles"] == ["model_admin"]
+    assert auth["live_proof"]["role_mapping_result"]["mapped_roles"] == ["sys_admin"]
     assert auth["live_proof"]["role_mapping_result"]["unmapped_roles"] == ["external-admin"]
+    assert auth["blockers"] == []
     assert {decision["decision"] for decision in auth["action_decisions"]} == {"allow", "deny"}
-    assert any(
-        decision["decision"] == "allow"
-        and decision["action_id"] == "models.activate"
-        and decision["live_backend_auth_executed"] is True
-        and decision["provider_metadata"]["provider"] == "oidc-prod"
-        and decision["role_mapping_result"]["mapping_status"] == "mapped"
-        for decision in auth["action_decisions"]
-    )
-    assert any(
-        decision["decision"] == "deny"
-        and decision["action_id"] == "models.activate"
-        and decision["previous_state"] == decision["new_state"]
-        and decision["state_mutated"] is False
-        for decision in auth["action_decisions"]
-    )
+    for action in auth["canonical_action_ids"]:
+        action_decisions = [decision for decision in auth["action_decisions"] if decision["action_id"] == action]
+        assert any(
+            decision["decision"] == "allow"
+            and decision["actor_id"] == "live-admin"
+            and decision["roles"] == ["sys_admin"]
+            and decision["live_backend_auth_executed"] is True
+            and decision["provider_metadata"]["provider"] == "oidc-prod"
+            and decision["role_mapping_result"]["mapping_status"] == "mapped"
+            for decision in action_decisions
+        )
+        assert any(
+            decision["decision"] == "deny"
+            and decision["actor_id"] == "live-viewer"
+            and decision["roles"] == ["viewer"]
+            and decision["role_mapping_result"]["raw_roles"] == ["viewer", "external-viewer"]
+            and "sys_admin" not in decision["role_mapping_result"]["raw_roles"]
+            and decision["previous_state"] == decision["new_state"]
+            and decision["state_mutated"] is False
+            for decision in action_decisions
+        )
     assert blockers["status"] == "ready"
     assert blockers["blockers"] == []
     assert "live-token-secret" not in rendered_auth
+    assert "viewer-token-secret" not in rendered_auth
     assert "credential=secret" not in rendered_auth
+
+
+def test_validate_ops_auth_live_proof_partial_action_coverage_remains_blocked(tmp_path: Path) -> None:
+    proof = {
+        "execution_mode": "live_proof",
+        "live_backend_auth_executed": True,
+        "provider": "oidc-prod",
+        "allowed_subject": {
+            "actor_id": "live-operator",
+            "raw_roles": ["operator"],
+            "mapped_roles": ["operator"],
+        },
+        "denied_subject": {
+            "actor_id": "live-viewer",
+            "raw_roles": ["viewer"],
+            "mapped_roles": ["viewer"],
+        },
+    }
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="partial_live_proof_auth",
+            auth_mode="backend_route_executed",
+            auth_live_proof=proof,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "partial_live_proof_auth" / "ops"
+    auth = _read_json(lane_dir / "auth_rbac.json")
+    blockers = _read_json(lane_dir / "auth_release_blockers.json")
+
+    assert summary["status"] == "release_blocked"
+    assert auth["status"] == "release_blocked"
+    assert blockers["status"] == "release_blocked"
+    missing_allowed_actions = {
+        blocker["action_id"]
+        for blocker in blockers["blockers"]
+        if "allowed_live_proof" in blocker["missing_coverage"]
+    }
+    assert {
+        "sources.update_config",
+        "models.activate",
+        "models.deactivate",
+        "models.switch_version",
+        "models.rollback_version",
+        "models.supersede",
+        "users.manage",
+    }.issubset(missing_allowed_actions)
+    assert all(
+        "denied_no_mutation_live_proof" not in blocker["missing_coverage"]
+        for blocker in blockers["blockers"]
+    )
+    assert missing_allowed_actions.issubset(
+        {
+            blocker["action_id"]
+            for blocker in summary["release_blockers"]
+            if blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
+        }
+    )
 
 
 def test_validate_ops_env_supplied_config_values_are_not_marked_missing(

@@ -14,6 +14,7 @@ THEN summary evidence sets final production auth readiness to release-blocked wi
 #### Scenario: Live proof supplied
 WHEN live IdP configuration is supplied in an opt-in environment
 THEN evidence records `execution_mode=live_proof`, provider metadata, role mapping result, and protected action checks without exposing tokens.
+AND final auth readiness is satisfied only when explicit allowed and denied live-proof subjects prove, for every canonical action, an allowed live decision and a denied no-mutation live decision with internally consistent actor and role-mapping evidence.
 
 #### Scenario: Execution mode truthfulness
 WHEN auth readiness evidence is emitted

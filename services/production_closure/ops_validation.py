@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 from apps.api.auth import (
@@ -578,7 +578,8 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 target_type=_target_type_for_action(action),
             ):
                 decisions.append(_action_decision(config, decision, state=state))
-    status = "ready" if live_backend_auth_executed else "release_blocked"
+    coverage_blockers = _auth_live_proof_coverage_blockers(config, decisions) if live_backend_auth_executed else []
+    status = "ready" if live_backend_auth_executed and not coverage_blockers else "release_blocked"
     blockers = []
     if not live_backend_auth_executed:
         blockers.append(
@@ -597,6 +598,7 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 ),
             }
         )
+    blockers.extend(coverage_blockers)
     return {
         "schema": "nhms.production_closure.ops.auth_rbac.v1",
         "run_id": config.run_id,
@@ -632,21 +634,59 @@ def _auth_live_proof(config: ProductionOpsConfig) -> dict[str, Any] | None:
     if proof.get("live_backend_auth_executed") is not True:
         return None
 
-    raw_roles = tuple(str(role) for role in proof.get("raw_roles", ()) if str(role))
+    allowed_subject = _auth_live_proof_subject(proof, "allowed")
+    if allowed_subject is None:
+        return None
+    denied_subject = _auth_live_proof_subject(proof, "denied")
+    live_proof = {
+        **allowed_subject,
+        "subjects": {"allowed": allowed_subject},
+    }
+    if denied_subject is not None:
+        live_proof["subjects"]["denied"] = denied_subject
+    return live_proof
+
+
+def _auth_live_proof_subject(
+    proof: Mapping[str, Any],
+    subject: Literal["allowed", "denied"],
+) -> dict[str, Any] | None:
+    subject_proof = proof.get(f"{subject}_subject")
+    if subject_proof is None and subject == "allowed":
+        subject_proof = proof
+    if not isinstance(subject_proof, Mapping):
+        return None
+
+    raw_roles = tuple(str(role) for role in subject_proof.get("raw_roles", ()) if str(role))
     mapped_roles = tuple(role for role in raw_roles if role in ROLE_VOCABULARY)
-    explicit_mapped_roles = proof.get("mapped_roles")
+    explicit_mapped_roles = subject_proof.get("mapped_roles")
     if explicit_mapped_roles is not None:
         mapped_roles = tuple(str(role) for role in explicit_mapped_roles if str(role) in ROLE_VOCABULARY)
     if not mapped_roles:
         return None
 
+    subject_provider_metadata = subject_proof.get("provider_metadata")
+    root_provider_metadata = proof.get("provider_metadata")
     provider_metadata = {
-        **dict(proof.get("provider_metadata") or {}),
-        "provider": str(proof.get("provider") or proof.get("provider_metadata", {}).get("provider") or "live_idp"),
-        "contract": str(proof.get("contract") or "supplied_ops_live_proof"),
+        **dict(root_provider_metadata if isinstance(root_provider_metadata, Mapping) else {}),
+        **dict(subject_provider_metadata if isinstance(subject_provider_metadata, Mapping) else {}),
+        "provider": str(
+            subject_proof.get("provider")
+            or proof.get("provider")
+            or (
+                subject_provider_metadata.get("provider")
+                if isinstance(subject_provider_metadata, Mapping)
+                else None
+            )
+            or (root_provider_metadata.get("provider") if isinstance(root_provider_metadata, Mapping) else None)
+            or "live_idp"
+        ),
+        "contract": str(subject_proof.get("contract") or proof.get("contract") or "supplied_ops_live_proof"),
     }
+
+    subject_role_mapping = subject_proof.get("role_mapping_result")
     role_mapping_result = {
-        **dict(proof.get("role_mapping_result") or {}),
+        **dict(subject_role_mapping if isinstance(subject_role_mapping, Mapping) else {}),
         "raw_roles_present": bool(raw_roles),
         "raw_roles": raw_roles,
         "mapped_roles": mapped_roles,
@@ -654,8 +694,8 @@ def _auth_live_proof(config: ProductionOpsConfig) -> dict[str, Any] | None:
         "mapping_status": "mapped",
     }
     return {
-        "actor_id": str(proof.get("actor_id") or "ops-live-proof"),
-        "auth_mode": str(proof.get("auth_mode") or "live_idp"),
+        "actor_id": str(subject_proof.get("actor_id") or proof.get("actor_id") or f"ops-live-proof-{subject}"),
+        "auth_mode": str(subject_proof.get("auth_mode") or proof.get("auth_mode") or "live_idp"),
         "provider_metadata": redact_audit_payload(provider_metadata),
         "role_mapping_result": redact_audit_payload(role_mapping_result),
     }
@@ -668,29 +708,20 @@ def _auth_live_proof_action_decisions(
     state: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     decisions = []
-    allowed_context = AuthContext(
-        actor_id=str(live_proof["actor_id"]),
-        roles=tuple(live_proof["role_mapping_result"]["mapped_roles"]),
-        auth_mode=str(live_proof["auth_mode"]),
-        live_backend_auth_executed=True,
-        provider_metadata=live_proof["provider_metadata"],
-        role_mapping_result=live_proof["role_mapping_result"],
-    )
-    denied_context = AuthContext(
-        actor_id=f"{live_proof['actor_id']}:viewer-denied",
-        roles=("viewer",),
-        auth_mode=str(live_proof["auth_mode"]),
-        live_backend_auth_executed=True,
-        provider_metadata=live_proof["provider_metadata"],
-        role_mapping_result={
-            **dict(live_proof["role_mapping_result"]),
-            "mapped_roles": ("viewer",),
-            "mapping_status": "mapped",
-        },
-    )
+    contexts = [
+        AuthContext(
+            actor_id=str(subject["actor_id"]),
+            roles=tuple(subject["role_mapping_result"]["mapped_roles"]),
+            auth_mode=str(subject["auth_mode"]),
+            live_backend_auth_executed=True,
+            provider_metadata=subject["provider_metadata"],
+            role_mapping_result=subject["role_mapping_result"],
+        )
+        for subject in live_proof.get("subjects", {}).values()
+    ]
     for action in ACTION_MATRIX:
         target = f"{action}:{config.run_id}"
-        for context in (allowed_context, denied_context):
+        for context in contexts:
             policy_decision = evaluate_policy(
                 context,
                 action,
@@ -743,13 +774,76 @@ def _action_decision(
     }
 
 
+def _auth_live_proof_coverage_blockers(
+    config: ProductionOpsConfig,
+    decisions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    blockers = []
+    for action, required_roles in ACTION_MATRIX.items():
+        action_decisions = [
+            decision
+            for decision in decisions
+            if decision["action_id"] == action
+            and decision["execution_mode"] == "live_proof"
+            and decision["live_backend_auth_executed"] is True
+        ]
+        allowed = any(
+            decision["decision"] == "allow"
+            and set(decision["matched_roles"]).intersection(required_roles)
+            for decision in action_decisions
+        )
+        denied = any(
+            decision["decision"] == "deny"
+            and decision["no_mutation_expected"] is True
+            and decision["state_mutated"] is False
+            and decision["previous_state"] == decision["new_state"]
+            for decision in action_decisions
+        )
+        if allowed and denied:
+            continue
+
+        missing_coverage = []
+        if not allowed:
+            missing_coverage.append("allowed_live_proof")
+        if not denied:
+            missing_coverage.append("denied_no_mutation_live_proof")
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING",
+                "action": action,
+                "action_id": action,
+                "required_roles": list(required_roles),
+                "current_fallback": config.auth_mode,
+                "missing_coverage": missing_coverage,
+                "residual_risk": (
+                    "Production auth readiness is not proven for both authorized and rejected live identities."
+                ),
+                "removal_criteria": (
+                    "Supply explicit allowed and denied live_proof subjects whose live role mappings produce an "
+                    "allowed decision and a denied no-mutation decision for this action."
+                ),
+                "linked_decision_ids": [
+                    decision["lineage"]["audit_correlation_id"] for decision in action_decisions
+                ],
+            }
+        )
+    return blockers
+
+
 def _auth_release_blockers(config: ProductionOpsConfig, auth_rbac: Mapping[str, Any]) -> dict[str, Any]:
-    if auth_rbac["live_backend_auth_executed"]:
+    if auth_rbac["status"] == "ready":
         return {
             "schema": "nhms.production_closure.ops.auth_release_blockers.v1",
             "run_id": config.run_id,
             "status": "ready",
             "blockers": [],
+        }
+    if auth_rbac["live_backend_auth_executed"]:
+        return {
+            "schema": "nhms.production_closure.ops.auth_release_blockers.v1",
+            "run_id": config.run_id,
+            "status": "release_blocked",
+            "blockers": list(auth_rbac["blockers"]),
         }
     blockers = []
     for action, required_roles in ACTION_MATRIX.items():

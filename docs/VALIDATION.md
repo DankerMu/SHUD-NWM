@@ -747,8 +747,13 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   The opt-in live-proof path is supplied explicitly with
   `--auth-live-proof` or `NHMS_PRODUCTION_OPS_AUTH_LIVE_PROOF` JSON containing
   `execution_mode=live_proof`, `live_backend_auth_executed=true`, provider
-  metadata, and role mapping input; token, credential, URI, and checksum-shaped
-  proof fields are redacted from emitted evidence.
+  metadata, and role mapping input. Final auth readiness requires explicit
+  allowed and denied live-proof subjects: the allowed subject must produce an
+  allowed live decision for every canonical action, and the denied subject must
+  produce a denied no-mutation live decision for every canonical action. Denied
+  live-proof rows are emitted only from the supplied denied subject and do not
+  reuse the allowed actor's raw role mapping evidence. Token, credential, URI,
+  and checksum-shaped proof fields are redacted from emitted evidence.
 - `audit_redaction.json`: allowed/denied/release-blocked audit rows with actor,
   roles, action id, target, previous/new state, decision, reason, reason code,
   execution mode, lineage, and redacted credential, URI, local path, log,
