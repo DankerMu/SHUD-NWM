@@ -402,6 +402,31 @@ def supersede_old_curves(
     policy_decision: PolicyDecision | None = None,
     trusted_internal: bool = False,
 ) -> int:
+    _require_supersede_policy(
+        old_model_id,
+        policy_decision=policy_decision,
+        trusted_internal=trusted_internal,
+    )
+    result = db_session.execute(
+        text(
+            """
+            UPDATE flood.flood_frequency_curve
+            SET quality_flag = 'superseded_by_model_upgrade'
+            WHERE model_id = :model_id
+              AND quality_flag NOT IN ('superseded_by_model_upgrade', 'fit_failed')
+            """
+        ),
+        {"model_id": old_model_id},
+    )
+    return int(result.rowcount or 0)
+
+
+def _require_supersede_policy(
+    old_model_id: str,
+    *,
+    policy_decision: PolicyDecision | None = None,
+    trusted_internal: bool = False,
+) -> PolicyDecision:
     if trusted_internal:
         policy_decision = trusted_internal_policy_decision(
             "models.supersede",
@@ -426,18 +451,7 @@ def supersede_old_curves(
                 "no_mutation_expected": True,
             },
         )
-    result = db_session.execute(
-        text(
-            """
-            UPDATE flood.flood_frequency_curve
-            SET quality_flag = 'superseded_by_model_upgrade'
-            WHERE model_id = :model_id
-              AND quality_flag NOT IN ('superseded_by_model_upgrade', 'fit_failed')
-            """
-        ),
-        {"model_id": old_model_id},
-    )
-    return int(result.rowcount or 0)
+    return decision
 
 
 def fit_segment_duration(
@@ -556,6 +570,12 @@ def fit_curves(
     trusted_internal: bool = False,
 ) -> FitCurvesStats:
     durations = [_validate_duration(duration)] if duration else list(DURATION_HOURS)
+    if supersede_model_id and not dry_run:
+        _require_supersede_policy(
+            supersede_model_id,
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+        )
     segments = [segment_id] if segment_id else _segments_for_model(model_id, db_session)
     items: list[dict[str, Any]] = []
     succeeded = 0

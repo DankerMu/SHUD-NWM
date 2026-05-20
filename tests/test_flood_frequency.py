@@ -313,6 +313,39 @@ def test_argparse_cli_supersede_without_policy_evidence_rejects_and_does_not_mut
         assert _curve_flags(session) == {"model_v1": "ok"}
 
 
+def test_argparse_cli_supersede_without_policy_evidence_preflights_before_segment_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_segments(_model_id: str, _session: Session) -> list[str]:
+        raise AssertionError("_segments_for_model should not be called before supersede auth")
+
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        session.commit()
+        _patch_fit_samples(monkeypatch)
+        monkeypatch.setattr(frequency, "_segments_for_model", fail_segments)
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "fit-curves",
+                "--model-id",
+                "model_v2",
+                "--duration",
+                "1h",
+                "--supersede-model-id",
+                "model_v1",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "AUTH_REQUIRED" in captured.err
+        assert _curve_flags(session) == {"model_v1": "ok"}
+
+
 def test_main_cli_supersede_without_policy_evidence_rejects_and_does_not_mutate(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -447,6 +480,44 @@ def test_argparse_cli_supersede_saml_blocks_cli_flag_auth_before_mutation(
                 "model_v2",
                 "--segment-id",
                 "seg_001",
+                "--duration",
+                "1h",
+                "--supersede-model-id",
+                "model_v1",
+                "--auth-actor-id",
+                "cli-model-admin",
+                "--auth-role",
+                "model_admin",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "RELEASE_BLOCKED" in captured.err
+        assert _curve_flags(session) == {"model_v1": "ok"}
+
+
+def test_argparse_cli_supersede_saml_preflights_before_segment_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_segments(_model_id: str, _session: Session) -> list[str]:
+        raise AssertionError("_segments_for_model should not be called before supersede auth")
+
+    monkeypatch.setenv("AUTH_BACKEND", "saml")
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        session.commit()
+        _patch_fit_samples(monkeypatch)
+        monkeypatch.setattr(frequency, "_segments_for_model", fail_segments)
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "fit-curves",
+                "--model-id",
+                "model_v2",
                 "--duration",
                 "1h",
                 "--supersede-model-id",
