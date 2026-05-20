@@ -22,6 +22,7 @@ import {
   fetchLayerCatalogMetadata,
   isMvtLayerMetadata,
   isRunMismatchMetadata,
+  metadataHasValidTime,
   metadataMatchesRun,
   type RunSourceIdentity,
   type MvtLayerMetadata,
@@ -57,18 +58,6 @@ function metadataIdentity(metadata: MvtLayerMetadata): string {
     schema_version: metadata.schema_version ?? metadata.property_schema_version ?? null,
     source_refs: metadata.source_refs ?? null,
   })
-}
-
-function metadataHasValidTime(metadata: MvtLayerMetadata, validTime: string): boolean {
-  const selected = normalizeMvtValidTime(validTime)
-  if (!selected || !Array.isArray(metadata.valid_times)) return false
-  return metadata.valid_times.some((metadataValidTime) => normalizeMvtValidTime(metadataValidTime) === selected)
-}
-
-function normalizeMvtValidTime(value: string | null | undefined): string | null {
-  if (!value) return null
-  const timestamp = Date.parse(value)
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
 }
 
 export function floodMvtSourceKey(metadata: MvtLayerMetadata, runId: string, validTime: string): string {

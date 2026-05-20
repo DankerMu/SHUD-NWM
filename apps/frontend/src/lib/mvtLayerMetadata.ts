@@ -73,8 +73,20 @@ export function metadataMatchesRun(metadata: MvtLayerMetadata, runId: string, id
   return true
 }
 
+export function metadataHasValidTime(metadata: MvtLayerMetadata, validTime: string | null | undefined): boolean {
+  const selected = normalizeMvtValidTime(validTime)
+  if (!selected || !Array.isArray(metadata.valid_times)) return false
+  return metadata.valid_times.some((metadataValidTime) => normalizeMvtValidTime(metadataValidTime) === selected)
+}
+
 export function isRunMismatchMetadata(metadata: unknown, runId: string): boolean {
   return isMvtLayerMetadata(metadata) && !metadataMatchesRun(metadata, runId)
+}
+
+function normalizeMvtValidTime(value: string | null | undefined): string | null {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
 }
 
 function isLayerRecord(value: unknown): value is components['schemas']['Layer'] {

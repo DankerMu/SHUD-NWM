@@ -17,7 +17,13 @@ import { floodTileLayerPaint } from '@/components/flood/alertLevels'
 import { cn } from '@/lib/cn'
 import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 import type { FloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriodGeoJson'
-import { buildMvtTileUrlTemplate, isMvtLayerMetadata, metadataMatchesRun, type MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
+import {
+  buildMvtTileUrlTemplate,
+  isMvtLayerMetadata,
+  metadataHasValidTime,
+  metadataMatchesRun,
+  type MvtLayerMetadata,
+} from '@/lib/mvtLayerMetadata'
 import {
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
@@ -434,6 +440,7 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   if (
     isMvtLayerMetadata(selectedLayer.metadata) &&
     !selectedLayer.metadata.release_blocking &&
+    metadataHasValidTime(selectedLayer.metadata, validTime) &&
     metadataMatchesRun(selectedLayer.metadata, runId, {
       basin_version_id: selectedLayer.freshness.basinVersionId,
       river_network_version_id: selectedLayer.freshness.riverNetworkVersionId,

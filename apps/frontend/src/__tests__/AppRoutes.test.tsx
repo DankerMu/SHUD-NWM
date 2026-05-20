@@ -226,6 +226,7 @@ const m11FloodMvtMetadata: NonNullable<LayerState['metadata']> = {
     river_network_version_id: 'rn-v1',
     duration: '1h',
   },
+  valid_times: ['2026-05-18T06:00:00Z'],
 }
 
 const m11Layers: LayerState[] = [
