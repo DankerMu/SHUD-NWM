@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+
 from .basins_geometry import (
     SHAPEFILE_REQUIRED_SUFFIXES,
     SHUD_CANONICAL_SUFFIXES,
@@ -72,6 +74,8 @@ def import_basins_registry(
     package_manifest_path: str | Path,
     database_url: str | None = None,
     output_path: str | Path | None = None,
+    policy_decision: PolicyDecision | None = None,
+    trusted_internal: bool = False,
 ) -> dict[str, Any]:
     inventory, inventory_bytes = _read_json_document(
         inventory_path,
@@ -91,7 +95,12 @@ def import_basins_registry(
             "DATABASE_URL or --database-url is required for Basins registry import.",
             model_id=str(manifest.get("model_id") or ""),
         )
-    report = _import_prepared_sources(sources, resolved_database_url)
+    report = _import_prepared_sources(
+        sources,
+        resolved_database_url,
+        policy_decision=policy_decision,
+        trusted_internal=trusted_internal,
+    )
     if output_path is not None:
         _write_report(output_path, report)
     return report
@@ -198,7 +207,34 @@ def _prepare_sources(
     )
 
 
-def _import_prepared_sources(sources: ImportSources, database_url: str) -> dict[str, Any]:
+def _import_prepared_sources(
+    sources: ImportSources,
+    database_url: str,
+    *,
+    policy_decision: PolicyDecision | None = None,
+    trusted_internal: bool = False,
+) -> dict[str, Any]:
+    if trusted_internal:
+        policy_decision = trusted_internal_policy_decision(
+            "models.switch_version",
+            target_type="model_registry",
+            target_id=sources.ids["model_id"],
+            actor_id="trusted-internal:basins-registry-import",
+            roles=("sys_admin",),
+        )
+    decision = require_policy_evidence(
+        policy_decision,
+        action_id="models.switch_version",
+        target_type="model_registry",
+        target_id=sources.ids["model_id"],
+    )
+    if decision.decision != "allow":
+        raise BasinsRegistryImportError(
+            decision.reason_code,
+            decision.reason,
+            model_id=sources.ids["model_id"],
+            details={"policy_decision": decision.to_dict(), "no_mutation_expected": True},
+        )
     try:
         with _transaction(database_url) as cursor:
             row_counts = {
@@ -235,6 +271,7 @@ def _import_prepared_sources(sources: ImportSources, database_url: str) -> dict[
         "model_package_uri": sources.manifest["model_package_uri"],
         "manifest_uri": sources.manifest["manifest_uri"],
         "package_checksum": sources.manifest["package_checksum"],
+        "auth_policy_decision": decision.to_dict(),
     }
 
 

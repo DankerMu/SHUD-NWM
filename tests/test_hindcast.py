@@ -525,6 +525,49 @@ def test_main_hindcast_submit_without_policy_rejects_and_does_not_mutate(
         assert _count(session, "hydro.hydro_run") == 0
 
 
+def test_argparse_hindcast_submit_with_cli_operator_policy_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(
+            HindcastConfig,
+            "from_env",
+            staticmethod(
+                lambda: HindcastConfig(
+                    workspace_root=Path(".").resolve(),
+                    object_store_root=Path(".").resolve(),
+                    slurm_client=_FakeSlurmClient(),
+                )
+            ),
+        )
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "hindcast-submit",
+                "--model-id",
+                "yangtze_shud_v12",
+                "--source-id",
+                "ERA5",
+                "--start-time",
+                "1993-01-01T00:00:00Z",
+                "--end-time",
+                "1993-12-31T23:00:00Z",
+                "--auth-actor-id",
+                "cli-operator",
+                "--auth-role",
+                "operator",
+            ]
+        )
+
+        output = json.loads(capsys.readouterr().out)
+        assert exit_code == 0
+        assert output["run_ids"] == [run_id_for_year("yangtze_shud_v12", 1993)]
+        assert _hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993))["status"] == "created"
+
+
 def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path) -> None:
     with _store() as session:
         _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")

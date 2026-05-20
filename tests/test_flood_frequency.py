@@ -345,6 +345,44 @@ def test_main_cli_supersede_without_policy_evidence_rejects_and_does_not_mutate(
         assert _curve_flags(session) == {"model_v1": "ok"}
 
 
+def test_argparse_cli_supersede_with_cli_model_admin_policy_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        session.commit()
+        _patch_fit_samples(monkeypatch)
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "fit-curves",
+                "--model-id",
+                "model_v2",
+                "--segment-id",
+                "seg_001",
+                "--duration",
+                "1h",
+                "--supersede-model-id",
+                "model_v1",
+                "--auth-actor-id",
+                "cli-model-admin",
+                "--auth-role",
+                "model_admin",
+            ]
+        )
+
+        output = json.loads(capsys.readouterr().out)
+        assert exit_code == 0
+        assert output["succeeded"] == 1
+        assert _curve_flags(session) == {
+            "model_v1": "superseded_by_model_upgrade",
+            "model_v2": "ok",
+        }
+
+
 def test_duration_1h_direct_extraction_vs_24h_sliding_window() -> None:
     with _store() as session:
         _insert_hindcast_hourly_year(session, year=2001)

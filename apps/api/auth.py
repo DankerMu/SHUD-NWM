@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
@@ -360,6 +361,69 @@ def simulated_decisions_for_action(
         evaluate_policy(context, action_id, target_type=target_type, target_id=target_id, execution_mode=mode)
         for context, mode in zip(state, modes, strict=True)
     ]
+
+
+def cli_policy_decision_from_evidence(
+    action_id: str,
+    *,
+    target_type: str,
+    target_id: str,
+    actor_id: str | None = None,
+    roles: Sequence[str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> PolicyDecision | None:
+    """Build deterministic dev/test CLI policy evidence from explicit flags or env."""
+    source_env = os.environ if env is None else env
+    raw_actor = (actor_id or source_env.get("NHMS_CLI_AUTH_ACTOR_ID", "")).strip()
+    raw_role_values = [str(role) for role in roles or () if str(role).strip()]
+    if not raw_role_values:
+        env_roles = source_env.get("NHMS_CLI_AUTH_ROLES", "")
+        raw_role_values = [env_roles] if env_roles.strip() else []
+    if not raw_actor and not raw_role_values:
+        return None
+
+    raw_roles_text = ",".join(raw_role_values)
+    mapped_roles = _parse_roles(raw_roles_text)
+    raw_roles = _raw_roles(raw_roles_text)
+    if not raw_actor or not mapped_roles:
+        return PolicyDecision(
+            action_id=action_id,
+            decision="deny",
+            required_roles=ACTION_MATRIX.get(action_id, ()),
+            matched_roles=(),
+            actor_id=raw_actor or "cli:missing-actor",
+            target_type=target_type,
+            target_id=target_id,
+            reason="CLI auth evidence must include an actor id and at least one known role.",
+            reason_code=RBAC_FORBIDDEN,
+            roles=mapped_roles,
+            execution_mode="backend_route_executed",
+            no_mutation_expected=True,
+            auth_mode="cli_dev_test",
+            live_backend_auth_executed=False,
+            provider_metadata=None,
+            role_mapping_result={
+                "raw_roles_present": bool(raw_roles),
+                "raw_roles": raw_roles,
+                "mapped_roles": mapped_roles,
+                "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
+                "mapping_status": "mapped" if mapped_roles else "unmapped",
+            },
+        )
+    context = AuthContext(
+        actor_id=raw_actor or "cli:missing-actor",
+        roles=mapped_roles,
+        auth_mode="cli_dev_test",
+        live_backend_auth_executed=False,
+        role_mapping_result={
+            "raw_roles_present": bool(raw_roles),
+            "raw_roles": raw_roles,
+            "mapped_roles": mapped_roles,
+            "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
+            "mapping_status": "mapped" if mapped_roles else "unmapped",
+        },
+    )
+    return evaluate_policy(context, action_id, target_type=target_type, target_id=target_id)
 
 
 def trusted_internal_policy_decision(

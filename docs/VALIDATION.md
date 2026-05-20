@@ -20,14 +20,36 @@ uv run nhms-model import-basins-registry \
   --inventory /tmp/basins-inventory.json \
   --package-manifest /tmp/basins-package-manifest.json \
   --database-url postgresql://nhms:nhms_dev@localhost:5432/nhms_scratch \
-  --output /tmp/basins-registry-import-report.json
+  --output /tmp/basins-registry-import-report.json \
+  --auth-actor-id cli-model-admin \
+  --auth-role model_admin
 
 uv run nhms-model basins-migration-report \
   --basins-root /volume/data/nwm/Basins \
   --output /tmp/basins-migration-report.json
 ```
 
-`import-basins-registry` mutates core registry tables. Do not run it against production unless it is an intentional migration with backup, approval, and an explicit production database URL.
+`import-basins-registry` mutates core registry tables and requires explicit CLI auth evidence. The `--auth-actor-id` / `--auth-role` flags, or `NHMS_CLI_AUTH_ACTOR_ID` / `NHMS_CLI_AUTH_ROLES`, are deterministic dev/test policy evidence only; production live authorization remains through protected API/live IdP proof. Do not run it against production unless it is an intentional migration with backup, approval, and an explicit production database URL.
+
+Mutating flood CLI commands use the same explicit CLI evidence contract:
+
+```bash
+uv run nhms-flood hindcast-submit \
+  --model-id yangtze_shud_v12 \
+  --source-id ERA5 \
+  --start-time 1993-01-01T00:00:00Z \
+  --end-time 1993-12-31T23:00:00Z \
+  --auth-actor-id cli-operator \
+  --auth-role operator
+
+uv run nhms-flood fit-curves \
+  --model-id model_v2 \
+  --supersede-model-id model_v1 \
+  --auth-actor-id cli-model-admin \
+  --auth-role model_admin
+```
+
+Missing CLI auth evidence fails with `AUTH_REQUIRED`; supplied roles outside the M17 action matrix fail with `RBAC_FORBIDDEN` before protected mutation. `fit-curves --dry-run` remains non-mutating and does not require CLI auth evidence for `--supersede-model-id`.
 
 Production migration evidence must point at a copied Basins directory. A symlink-only `/volume/data/nwm/Basins` target is rejected because Linux production hosts must copy the actual data, not only migrate the development symlink.
 

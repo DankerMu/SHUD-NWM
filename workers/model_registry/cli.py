@@ -5,6 +5,8 @@ import json
 import sys
 from typing import Sequence
 
+from apps.api.auth import PolicyDecision, cli_policy_decision_from_evidence
+
 from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory, resolve_basins_root, write_inventory
 from .basins_package import BasinsPackageError, publish_basins_package, write_basins_migration_report
 from .basins_registry_import import BasinsRegistryImportError, import_basins_registry
@@ -27,6 +29,35 @@ def _discover_basins(basins_root: str | None, output: str) -> dict[str, object]:
     inventory = discover_basins_inventory(root)
     write_inventory(inventory, output)
     return inventory
+
+
+def _import_policy_decision(
+    model_id: str,
+    *,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision | None:
+    return cli_policy_decision_from_evidence(
+        "models.switch_version",
+        target_type="model_registry",
+        target_id=model_id,
+        actor_id=auth_actor_id,
+        roles=auth_roles,
+    )
+
+
+def _model_id_from_manifest(package_manifest_path: str) -> str:
+    try:
+        with open(package_manifest_path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(manifest.get("model_id") or "")
+
+
+def _add_argparse_auth_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--auth-actor-id")
+    parser.add_argument("--auth-role", action="append", default=[])
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:
@@ -133,11 +164,15 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--package-manifest", required=True, help="Path to Basins package manifest JSON.")
     @click.option("--database-url", default=None, help="PostgreSQL/PostGIS URL. Defaults to DATABASE_URL.")
     @click.option("--output", default=None, help="Optional path to write import report JSON.")
+    @click.option("--auth-actor-id", default=None, help="Dev/test CLI auth actor id.")
+    @click.option("--auth-role", multiple=True, help="Dev/test CLI auth role. May be repeated.")
     def import_basins_registry_command(
         inventory: str,
         package_manifest: str,
         database_url: str | None,
         output: str | None,
+        auth_actor_id: str | None,
+        auth_role: tuple[str, ...],
     ) -> None:
         try:
             result = import_basins_registry(
@@ -145,6 +180,11 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 package_manifest_path=package_manifest,
                 database_url=database_url,
                 output_path=output,
+                policy_decision=_import_policy_decision(
+                    _model_id_from_manifest(package_manifest),
+                    auth_actor_id=auth_actor_id,
+                    auth_roles=auth_role,
+                ),
             )
         except BasinsRegistryImportError as error:
             click.echo(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), err=True)
@@ -178,6 +218,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     import_parser.add_argument("--package-manifest", required=True)
     import_parser.add_argument("--database-url", default=None)
     import_parser.add_argument("--output", default=None)
+    _add_argparse_auth_options(import_parser)
     args = parser.parse_args(argv)
 
     if args.command == "validate-package":
@@ -255,6 +296,11 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 package_manifest_path=args.package_manifest,
                 database_url=args.database_url,
                 output_path=args.output,
+                policy_decision=_import_policy_decision(
+                    _model_id_from_manifest(args.package_manifest),
+                    auth_actor_id=args.auth_actor_id,
+                    auth_roles=args.auth_role,
+                ),
             )
         except BasinsRegistryImportError as error:
             print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
