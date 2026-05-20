@@ -21,6 +21,16 @@ from services.production_closure.scale_validation import (
     validate_scale,
 )
 
+MVT_BLOCKER_REQUIRED_FIELDS = {
+    "blocker_id",
+    "surface",
+    "status",
+    "affected_endpoints",
+    "removal_criteria",
+    "residual_risk",
+    "artifact_links",
+}
+
 
 def _write_mvt_contract_artifact(path: Path, **overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
@@ -114,11 +124,18 @@ def test_validate_scale_mvt_expectation_creates_explicit_release_blocker(tmp_pat
     assert tile["observed_content_type"] == "not_measured"
     assert tile["live_postgis_status"] == "not_executed"
     assert tile["production_mvt_readiness_claimed"] is False
+    _assert_mvt_blockers_have_full_release_contract(tile["blockers"])
+    _assert_mvt_blockers_have_full_release_contract(summary["blockers"])
     blocker = tile["blockers"][0]
     assert blocker["error_code"] == "PRODUCTION_SCALE_MVT_DETERMINISTIC_CONTRACT_BLOCKED"
+    assert blocker["blocker_id"] == "m16-deterministic-mvt-contract-artifact"
     assert blocker["surface"] == "deterministic_mvt_contract"
     assert blocker["status"] == "not_executed"
     assert blocker["expected_content_type"] == "application/x-protobuf"
+    assert blocker["affected_endpoints"] == scale_validation.MVT_ENDPOINT_REFERENCES
+    assert "measured deterministic MVT contract artifact" in blocker["removal_criteria"]
+    assert "live PostGIS national data volume" in blocker["residual_risk"]
+    assert blocker["artifact_links"] == []
     delivery_blocker = tile["blockers"][1]
     assert delivery_blocker["error_code"] == "PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"
     assert delivery_blocker["blocker_id"] == "m16-live-postgis-national-proof"
@@ -155,6 +172,7 @@ def test_validate_scale_mvt_expectation_with_measured_artifact_records_determini
     assert tile["mvt_deterministic_metrics"]["artifact_sha256"]
     assert tile["mvt_deterministic_contract"]["artifact_paths"] == [str(artifact)]
     assert tile["layer_metadata"]["tile_format"] == "mvt"
+    _assert_mvt_blockers_have_full_release_contract(tile["blockers"])
     assert {blocker["error_code"] for blocker in tile["blockers"]} == {"PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"}
 
 
@@ -176,6 +194,7 @@ def test_validate_scale_mvt_artifact_rejects_oversized_padded_json(tmp_path: Pat
     assert tile["deterministic_mvt_passed"] is False
     assert tile["mvt_deterministic_contract"]["artifact_source"] == "oversized_mvt_contract_artifact"
     assert "exceeds configured limit" in tile["mvt_deterministic_metrics"]["message"]
+    _assert_mvt_blockers_have_full_release_contract(tile["blockers"])
 
 
 def test_validate_scale_mvt_artifact_blocks_incomplete_schema(tmp_path: Path) -> None:
@@ -198,6 +217,14 @@ def test_validate_scale_mvt_artifact_blocks_incomplete_schema(tmp_path: Path) ->
     assert tile["deterministic_mvt_passed"] is False
     assert tile["mvt_deterministic_contract"]["status"] == "blocked"
     assert "missing required fields: p95_ms" in tile["mvt_deterministic_metrics"]["message"]
+    _assert_mvt_blockers_have_full_release_contract(tile["blockers"])
+    blocker = next(
+        item
+        for item in tile["blockers"]
+        if item["error_code"] == "PRODUCTION_SCALE_MVT_DETERMINISTIC_CONTRACT_BLOCKED"
+    )
+    assert blocker["status"] == "blocked"
+    assert blocker["artifact_links"] == [str(artifact)]
 
 
 @pytest.mark.parametrize("field,value", [("payload_bytes", "bad"), ("p95_ms", float("inf"))])
@@ -222,6 +249,7 @@ def test_validate_scale_mvt_artifact_blocks_bad_numeric_without_raising(
     assert tile["deterministic_mvt_passed"] is False
     assert tile["mvt_deterministic_contract"]["status"] == "blocked"
     assert f"field {field} must be finite numeric evidence" in tile["mvt_deterministic_metrics"]["message"]
+    _assert_mvt_blockers_have_full_release_contract(tile["blockers"])
 
 
 def test_validate_scale_mvt_artifact_normalizes_stale_embedded_artifact_paths(tmp_path: Path) -> None:
@@ -846,6 +874,25 @@ def test_validate_scale_click_and_argparse_dispatch(tmp_path: Path, capsys: pyte
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _assert_mvt_blockers_have_full_release_contract(blockers: list[dict[str, object]]) -> None:
+    mvt_blockers = [
+        blocker
+        for blocker in blockers
+        if str(blocker.get("error_code", "")).startswith("PRODUCTION_SCALE_MVT_")
+    ]
+    assert mvt_blockers
+    for blocker in mvt_blockers:
+        missing = MVT_BLOCKER_REQUIRED_FIELDS - blocker.keys()
+        assert missing == set()
+        assert blocker["blocker_id"]
+        assert blocker["surface"]
+        assert blocker["status"]
+        assert blocker["affected_endpoints"] == scale_validation.MVT_ENDPOINT_REFERENCES
+        assert isinstance(blocker["artifact_links"], list)
+        assert str(blocker["removal_criteria"]).strip()
+        assert str(blocker["residual_risk"]).strip()
 
 
 def _percent_encode_rounds(value: str, rounds: int) -> str:

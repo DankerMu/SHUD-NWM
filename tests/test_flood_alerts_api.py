@@ -2541,6 +2541,49 @@ def test_mvt_postgis_sql_shape_projects_metadata_properties_and_bindable_casts()
     assert "ts.value" in flood_alert_routes.postgis_tile_sql("hydro")
 
 
+def test_mvt_postgis_sql_projects_source_time_identity_through_public_allowlist() -> None:
+    hydro = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("hydro"))
+    flood = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("flood-return-period"))
+
+    hydro_source_cte = hydro[hydro.index("source_rows AS") : hydro.index("source_stats AS")]
+    hydro_tile_projection = _mvt_tile_projection(hydro)
+    assert "ts.run_id" in hydro_source_cte
+    assert "ts.variable" in hydro_source_cte
+    assert "to_char(ts.valid_time AT TIME ZONE 'UTC'" in hydro_source_cte
+    assert "valid_time" in hydro_tile_projection
+    assert "run_id" in hydro_tile_projection
+    assert "variable" in hydro_tile_projection
+    assert hydro_tile_projection.index("run_id") < hydro_tile_projection.index("valid_time")
+
+    flood_source_cte = flood[flood.index("source_rows AS") : flood.index("source_stats AS")]
+    flood_tile_projection = _mvt_tile_projection(flood)
+    assert "r.run_id" in flood_source_cte
+    assert "r.duration" in flood_source_cte
+    assert "to_char(r.valid_time AT TIME ZONE 'UTC'" in flood_source_cte
+    assert "valid_time" in flood_tile_projection
+    assert "run_id" in flood_tile_projection
+    assert "duration" in flood_tile_projection
+    assert flood_tile_projection.index("run_id") < flood_tile_projection.index("valid_time")
+
+
+def test_layer_metadata_property_schema_declares_public_source_time_identity() -> None:
+    with _client() as client:
+        response = client.get("/api/v1/layers")
+
+    assert response.status_code == 200
+    metadata = {layer["layer_id"]: layer["metadata"] for layer in response.json()["data"]}
+
+    for layer_id in ("discharge", "water-level"):
+        required = metadata[layer_id]["property_schema"]["required"]
+        assert {"run_id", "variable", "valid_time"}.issubset(required)
+        assert "duration" not in required
+
+    for layer_id in ("flood-return-period", "warning-level"):
+        required = metadata[layer_id]["property_schema"]["required"]
+        assert {"run_id", "duration", "valid_time"}.issubset(required)
+        assert "variable" not in required
+
+
 def test_river_network_mvt_sql_scopes_basin_without_model_instance_cardinality_multiply() -> None:
     statement = flood_alert_routes.postgis_tile_sql("river-network")
     sql = re.sub(r"\s+", " ", statement)
@@ -2571,6 +2614,9 @@ def test_mvt_postgis_sql_shape_encodes_only_public_property_allowlist() -> None:
             "value",
             "unit",
             "quality_flag",
+            "run_id",
+            "variable",
+            "valid_time",
             "mvt_geom",
         ),
         "flood-return-period": (
@@ -2584,6 +2630,9 @@ def test_mvt_postgis_sql_shape_encodes_only_public_property_allowlist() -> None:
             "quality_flag",
             "return_period",
             "warning_level",
+            "run_id",
+            "duration",
+            "valid_time",
             "mvt_geom",
         ),
     }
@@ -2598,13 +2647,18 @@ def test_mvt_postgis_sql_shape_encodes_only_public_property_allowlist() -> None:
     for layer, columns in expected_columns.items():
         statement = flood_alert_routes.postgis_tile_sql(layer)
         sql = re.sub(r"\s+", " ", statement)
-        tile_subquery = sql[sql.index("SELECT ST_AsMVT") : sql.index(") AS tile,")]
-        projection_start = tile_subquery.index("FROM ( SELECT ") + len("FROM ( SELECT ")
-        projection = tile_subquery[projection_start : tile_subquery.index(" FROM budgeted")]
-        projected_columns = tuple(column.strip() for column in projection.split(","))
+        projected_columns = _mvt_tile_projection(sql)
+        projection = ", ".join(projected_columns)
         assert projected_columns == columns
         assert "*" not in projection
         assert forbidden_columns.isdisjoint(projected_columns)
+
+
+def _mvt_tile_projection(sql: str) -> tuple[str, ...]:
+    tile_subquery = sql[sql.index("SELECT ST_AsMVT") : sql.index(") AS tile,")]
+    projection_start = tile_subquery.index("FROM ( SELECT ") + len("FROM ( SELECT ")
+    projection = tile_subquery[projection_start : tile_subquery.index(" FROM budgeted")]
+    return tuple(column.strip() for column in projection.split(","))
 
 
 class ThresholdForecastStore(PsycopgForecastStore):

@@ -317,6 +317,8 @@ def postgis_tile_sql(layer: str) -> str:
             "value": f"value IS NULL OR value::double precision IN ({POSTGIS_NON_FINITE_DOUBLE_SQL})",
             "unit": "unit IS NULL OR unit::text = ''",
             "quality_flag": "quality_flag IS NULL OR quality_flag::text = ''",
+            "run_id": "run_id IS NULL OR run_id::text = ''",
+            "variable": "variable IS NULL OR variable::text = ''",
             "valid_time": "valid_time IS NULL",
         }
         source_cte = """
@@ -326,7 +328,10 @@ def postgis_tile_sql(layer: str) -> str:
                    ts.river_network_version_id,
                    ts.basin_version_id,
                    ts.value, ts.unit,
-                   ts.quality_flag, ts.valid_time, rs.geom
+                   ts.quality_flag,
+                   ts.run_id, ts.variable,
+                   to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
+                   rs.geom
             FROM hydro.river_timeseries ts
             JOIN core.river_segment rs
               ON rs.river_segment_id = ts.river_segment_id
@@ -350,6 +355,8 @@ def postgis_tile_sql(layer: str) -> str:
                 f"OR return_period::double precision IN ({POSTGIS_NON_FINITE_DOUBLE_SQL})"
             ),
             "warning_level": "warning_level IS NULL OR warning_level::text = ''",
+            "run_id": "run_id IS NULL OR run_id::text = ''",
+            "duration": "duration IS NULL OR duration::text = ''",
             "valid_time": "valid_time IS NULL",
         }
         source_cte = """
@@ -359,7 +366,11 @@ def postgis_tile_sql(layer: str) -> str:
                    r.river_network_version_id,
                    r.basin_version_id,
                    r.q_value AS value,
-                   r.q_unit AS unit, r.quality_flag, r.return_period, r.warning_level, r.valid_time, rs.geom
+                   r.q_unit AS unit,
+                   r.quality_flag, r.return_period, r.warning_level,
+                   r.run_id, r.duration,
+                   to_char(r.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
+                   rs.geom
             FROM flood.return_period_result r
             JOIN core.river_segment rs
               ON rs.river_segment_id = r.river_segment_id
@@ -491,6 +502,9 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
             "value",
             "unit",
             "quality_flag",
+            "run_id",
+            "variable",
+            "valid_time",
             "mvt_geom",
         )
     if layer == "flood-return-period":
@@ -505,6 +519,9 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
             "quality_flag",
             "return_period",
             "warning_level",
+            "run_id",
+            "duration",
+            "valid_time",
             "mvt_geom",
         )
     raise ValueError(f"Unsupported tile layer: {layer}")
@@ -542,6 +559,9 @@ def layer_metadata(
                 "value",
                 "unit",
                 "quality_flag",
+                "run_id",
+                "variable",
+                "valid_time",
             ],
         },
         "water-level": {
@@ -557,6 +577,9 @@ def layer_metadata(
                 "value",
                 "unit",
                 "quality_flag",
+                "run_id",
+                "variable",
+                "valid_time",
             ],
         },
         "flood-return-period": {
@@ -574,6 +597,9 @@ def layer_metadata(
                 "return_period",
                 "warning_level",
                 "quality_flag",
+                "run_id",
+                "duration",
+                "valid_time",
             ],
         },
         "warning-level": {
@@ -591,6 +617,9 @@ def layer_metadata(
                 "return_period",
                 "warning_level",
                 "quality_flag",
+                "run_id",
+                "duration",
+                "valid_time",
             ],
         },
     }

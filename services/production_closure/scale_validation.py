@@ -50,6 +50,14 @@ MVT_MISSING_IMPLEMENTATION_WORK = [
     "Opt-in live PostGIS/national-data execution evidence from the target environment",
     "Browser proof against real national MVT tiles rather than deterministic fixture metadata",
 ]
+MVT_ENDPOINT_REFERENCES = [
+    "/api/v1/tiles/flood-return-period",
+    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+    "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+]
+MVT_DETERMINISTIC_BLOCKER_ID = "m16-deterministic-mvt-contract-artifact"
+MVT_LIVE_POSTGIS_BLOCKER_ID = "m16-live-postgis-national-proof"
 MVT_CONTRACT_NUMERIC_FIELDS = (
     "payload_bytes",
     "p95_ms",
@@ -693,12 +701,7 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
     compatible_expectations = {"application/geo+json", "application/json"}
     tile_bytes = int(deterministic_contract["payload_bytes"])
     max_tile_bytes = config.thresholds.max_tile_bytes
-    endpoints = [
-        "/api/v1/tiles/flood-return-period",
-        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
-        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
-        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
-    ]
+    endpoints = MVT_ENDPOINT_REFERENCES
     blockers = []
     production_mvt_readiness_claimed = False
     deterministic_mvt_passed = bool(deterministic_contract["passed"])
@@ -707,10 +710,22 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
             blockers.append(
                 {
                     "error_code": "PRODUCTION_SCALE_MVT_DETERMINISTIC_CONTRACT_BLOCKED",
+                    "blocker_id": MVT_DETERMINISTIC_BLOCKER_ID,
                     "surface": "deterministic_mvt_contract",
                     "status": deterministic_contract["status"],
                     "expected_content_type": "application/x-protobuf",
                     "observed_content_type": current_content_type,
+                    "affected_endpoints": endpoints,
+                    "removal_criteria": (
+                        "Provide a safe measured deterministic MVT contract artifact proving raw PBF bytes, SQL "
+                        "shape, query-plan hash, payload budget, tile counts, feature counts, coordinate counts, "
+                        "and browser timing for the canonical MVT endpoints."
+                    ),
+                    "residual_risk": (
+                        "Passing deterministic artifacts proves repeatable contract and encoder evidence only; "
+                        "live PostGIS national data volume and target-environment query plans remain separately "
+                        "blocked until the live MVT blocker is removed."
+                    ),
                     "message": (
                         "Deterministic MVT pass requires measured contract artifacts, "
                         "not content-type expectation alone."
@@ -721,7 +736,7 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
         blockers.append(
             {
                 "error_code": "PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED",
-                "blocker_id": "m16-live-postgis-national-proof",
+                "blocker_id": MVT_LIVE_POSTGIS_BLOCKER_ID,
                 "surface": "live_postgis_national_frontend_evidence",
                 "status": "not_executed",
                 "expected_content_type": "application/x-protobuf",

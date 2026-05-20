@@ -339,7 +339,7 @@ export interface paths {
         };
         /**
          * Get hydrological output vector tile
-         * @description Canonical M16 Mapbox Vector Tile route for hydrological values. The vector source-layer is `hydro` and features include run/source/time, segment identity, value, unit, and quality metadata.
+         * @description Canonical M16 Mapbox Vector Tile route for hydrological values. The vector source-layer is `hydro` and features include `run_id`, `variable`, `valid_time`, segment/network identity, value, unit, and quality metadata.
          */
         get: operations["getHydroTile"];
         put?: never;
@@ -379,7 +379,7 @@ export interface paths {
         };
         /**
          * Get flood return period vector tile
-         * @description Canonical M16 Mapbox Vector Tile route for flood return-period data. The vector source-layer is `flood_return_period`; bounded GeoJSON remains available only at `/api/v1/tiles/flood-return-period`.
+         * @description Canonical M16 Mapbox Vector Tile route for flood return-period data. The vector source-layer is `flood_return_period`; bounded GeoJSON remains available only at `/api/v1/tiles/flood-return-period`. Features include `run_id`, `duration`, `valid_time`, segment/network identity, value, return_period, warning_level, unit, and quality metadata.
          */
         get: operations["getFloodReturnPeriodTile"];
         put?: never;
@@ -1351,6 +1351,7 @@ export interface components {
             maplibre_source_layer?: string | null;
             source_layer?: string | null;
             property_schema_version?: string | null;
+            /** @description MVT feature property contract. For `hydro` source-layer features, required properties include `run_id`, `variable`, `valid_time`, segment/network identity, value, unit, and quality_flag. For `flood_return_period` source-layer features, required properties include `run_id`, `duration`, `valid_time`, segment/network identity, value, unit, return_period, warning_level, and quality_flag. */
             property_schema?: {
                 [key: string]: unknown;
             } | null;
