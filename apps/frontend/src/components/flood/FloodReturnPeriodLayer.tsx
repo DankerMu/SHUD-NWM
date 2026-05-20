@@ -12,7 +12,6 @@ import {
 } from '@/components/flood/alertLevels'
 import {
   buildFloodReturnPeriodGeoJsonUrl,
-  fetchFloodReturnPeriodFeatureCollection,
   type FloodReturnPeriodFeatureCollection,
 } from '@/lib/floodReturnPeriodGeoJson'
 import {
@@ -67,20 +66,29 @@ export function FloodReturnPeriodLayer({
 }: FloodReturnPeriodLayerProps) {
   const [data, setData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
   const [catalogMetadata, setCatalogMetadata] = useState<MvtLayerMetadata | null>(metadata ?? null)
+  const [metadataState, setMetadataState] = useState<'ready' | 'loading' | 'unavailable'>(metadata ? 'ready' : 'loading')
   const activeMetadata = metadata ?? catalogMetadata
 
   useEffect(() => {
     if (metadata) {
       setCatalogMetadata(metadata)
+      setMetadataState('ready')
       return
     }
     const controller = new AbortController()
+    setCatalogMetadata(null)
+    setMetadataState('loading')
     fetchLayerCatalogMetadata(controller.signal)
       .then((layers) => {
         const layer = layers.find((item) => item.layer_id === 'flood-return-period')
-        setCatalogMetadata(isMvtLayerMetadata(layer?.metadata) ? layer.metadata : null)
+        const discovered = isMvtLayerMetadata(layer?.metadata) && !layer.metadata.release_blocking ? layer.metadata : null
+        setCatalogMetadata(discovered)
+        setMetadataState(discovered ? 'ready' : 'unavailable')
       })
-      .catch(() => setCatalogMetadata(null))
+      .catch(() => {
+        setCatalogMetadata(null)
+        setMetadataState('unavailable')
+      })
     return () => controller.abort()
   }, [metadata])
 
@@ -90,30 +98,13 @@ export function FloodReturnPeriodLayer({
       onUnavailableReason?.(null)
       return
     }
-    const controller = new AbortController()
     setData(null)
-    onUnavailableReason?.('洪水重现期正在使用有界 GeoJSON 兼容模式，非全国 MVT 渲染。')
-
-    fetchFloodReturnPeriodFeatureCollection(floodTileUrl(runId, validTime), { signal: controller.signal })
-      .then((result) => {
-        if (controller.signal.aborted) return
-        if (result.ok) {
-          setData(result.data)
-          onUnavailableReason?.(null)
-        } else {
-          setData(null)
-          onUnavailableReason?.(result.reason)
-        }
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted && !(error instanceof DOMException && error.name === 'AbortError')) {
-          setData(null)
-          onUnavailableReason?.('洪水重现期地图数据加载失败，地图暂不显示该叠加层。')
-        }
-      })
-
-    return () => controller.abort()
-  }, [activeMetadata, onUnavailableReason, runId, validTime])
+    if (metadataState === 'loading') {
+      onUnavailableReason?.('洪水重现期 MVT 元数据正在加载，暂不请求 GeoJSON 兼容端点。')
+      return
+    }
+    onUnavailableReason?.('洪水重现期全国 MVT 尚不可用，已阻止无边界 GeoJSON 兼容请求。')
+  }, [activeMetadata, metadataState, onUnavailableReason])
 
   const hoverLayer: LayerProps = {
     id: FLOOD_TILE_HOVER_LAYER_ID,

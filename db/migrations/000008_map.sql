@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS map.tile_cache (
   encoder_version TEXT,
   status TEXT NOT NULL DEFAULT 'ready',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (layer_id, z, x, y)
+  PRIMARY KEY (cache_key)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS tile_cache_key_idx ON map.tile_cache (cache_key) WHERE cache_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tile_cache_xyz_idx ON map.tile_cache (layer_id, z, x, y);

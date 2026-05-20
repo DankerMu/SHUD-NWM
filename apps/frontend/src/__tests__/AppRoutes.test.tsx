@@ -127,6 +127,7 @@ vi.mock('react-map-gl/maplibre', () => ({
       data-source-id={String(props.id ?? '')}
       data-source-type={String(props.type ?? '')}
       data-source-data={String(props.data ?? '')}
+      data-source-tiles={Array.isArray(props.tiles) ? props.tiles.join(',') : ''}
     >
       {children}
     </div>
@@ -198,6 +199,18 @@ const m11LayerFreshness = {
   unavailableReason: null,
 }
 
+const m11FloodMvtMetadata: NonNullable<LayerState['metadata']> = {
+  layer_id: 'flood-return-period',
+  tile_format: 'mvt',
+  url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+  tile_url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+  maplibre_source_layer: 'flood_return_period',
+  source_layer: 'flood_return_period',
+  fallback_available: true,
+  release_blocking: false,
+  required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
+}
+
 const m11Layers: LayerState[] = [
   {
     layerId: 'discharge',
@@ -208,6 +221,7 @@ const m11Layers: LayerState[] = [
     currentValidTime: '2026-05-18T06:00:00.000Z',
     validTimeSource: 'api',
     disabledReason: null,
+    metadata: null,
     freshness: m11LayerFreshness,
     legend: [{ label: '<500 m3/s', color: '#90CAF9', max: 500 }],
   },
@@ -220,6 +234,7 @@ const m11Layers: LayerState[] = [
     currentValidTime: '2026-05-18T06:00:00.000Z',
     validTimeSource: 'api',
     disabledReason: null,
+    metadata: m11FloodMvtMetadata,
     freshness: m11LayerFreshness,
     legend: [{ label: 'warning', color: '#FFB74D', min: 10, max: 20 }],
   },
@@ -937,8 +952,12 @@ describe('App route state', () => {
     await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 36, duration: 450 }]]))
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
-    expect(tileFetch.mock.calls.map(([url]) => String(url)).join('\n')).toContain('valid_time=2026-05-18T06%3A00%3A00.000Z')
-    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute('data-source-data', '[object Object]')
+    expect(tileFetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute('data-source-type', 'vector')
+    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute(
+      'data-source-tiles',
+      '/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf',
+    )
 
     await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
     await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))

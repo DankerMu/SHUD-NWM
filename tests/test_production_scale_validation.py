@@ -90,6 +90,8 @@ def test_validate_scale_mvt_expectation_creates_explicit_release_blocker(tmp_pat
     assert summary["status"] == "blocked"
     assert tile["status"] == "blocked"
     assert tile["deterministic_mvt_passed"] is True
+    assert tile["mvt_deterministic_contract"]["status"] == "passed"
+    assert tile["mvt_deterministic_contract"]["artifact_source"] == "deterministic_contract_artifact"
     assert tile["observed_content_type"] == "application/x-protobuf"
     assert tile["live_postgis_status"] == "not_executed"
     assert tile["production_mvt_readiness_claimed"] is False
@@ -109,6 +111,44 @@ def test_validate_scale_mvt_expectation_creates_explicit_release_blocker(tmp_pat
     assert tile["mvt_deterministic_metrics"]["payload_bytes"] <= tile["max_bytes_comparison"]["threshold_bytes"]
     assert tile["layer_metadata"]["tile_format"] == "mvt"
     assert tile["layer_metadata"]["maplibre_source_layer"] == "flood_return_period"
+
+
+def test_validate_scale_mvt_expectation_alone_does_not_create_deterministic_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def expectation_only_record(
+        config: ProductionScaleConfig,
+        dataset_manifest: dict[str, object],
+    ) -> dict[str, object]:
+        del config, dataset_manifest
+        return {
+            "status": "blocked",
+            "passed": False,
+            "observed_content_type": "application/json",
+            "payload_bytes": 128,
+            "artifact_source": "expectation_only",
+            "artifact_paths": [],
+            "metrics": {"status": "blocked", "payload_bytes": 128, "thresholds": {}},
+        }
+
+    monkeypatch.setattr(scale_validation, "_deterministic_mvt_contract_record", expectation_only_record)
+
+    summary = validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="mvt_expectation_only",
+            tile_content_type_expectation="application/x-protobuf",
+        )
+    )
+    tile = _read_json(tmp_path / "artifacts" / "mvt_expectation_only" / "scale" / "tile_evidence.json")
+
+    assert summary["status"] == "blocked"
+    assert tile["deterministic_mvt_passed"] is False
+    assert tile["observed_content_type"] == "application/json"
+    assert "PRODUCTION_SCALE_MVT_DETERMINISTIC_CONTRACT_BLOCKED" in {
+        blocker["error_code"] for blocker in tile["blockers"]
+    }
 
 
 def test_validate_scale_threshold_and_count_failures_block_readiness(tmp_path: Path) -> None:

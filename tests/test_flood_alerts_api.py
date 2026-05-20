@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -10,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -846,23 +848,17 @@ def test_flood_tile_postgis_feature_geometry_sentinel_returns_413_before_payload
 
 def test_flood_mvt_canonical_route_returns_protobuf_and_cache_headers() -> None:
     with _client() as client:
-        first = client.get(
-            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf",
-        )
-        second = client.get(
+        response = client.get(
             f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf",
         )
 
-    assert first.status_code == 200
-    assert first.headers["content-type"].startswith("application/x-protobuf")
-    assert first.headers["x-tile-layer-id"] == "flood-return-period"
-    assert first.headers["x-tile-checksum"]
-    assert first.headers["etag"] == second.headers["etag"]
-    assert first.content == second.content
-    assert first.content.startswith(b"\x1a")
+    assert response.status_code == 424
+    body = response.json()
+    assert body["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    assert body["error"]["details"]["layer_id"] == "flood-return-period"
 
 
-def test_flood_mvt_live_postgis_binds_requested_xyz(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_flood_mvt_live_postgis_returns_raw_bytes_and_binds_requested_xyz(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeDialect:
         name = "postgresql"
 
@@ -912,19 +908,180 @@ def test_flood_mvt_live_postgis_binds_requested_xyz(monkeypatch: pytest.MonkeyPa
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/x-protobuf")
+    assert response.content == b"live-tile"
+    checksum = hashlib.sha256(b"live-tile").hexdigest()
+    assert response.headers["x-tile-checksum"] == checksum
+    assert response.headers["etag"] == f'W/"m16-{checksum}"'
+    assert response.headers["x-tile-cache"] == "bypass"
 
 
-def test_hydro_and_river_network_mvt_routes_return_protobuf() -> None:
+def test_live_mvt_cache_identity_preserves_valid_time_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+
+        first = flood_alert_routes.build_raw_tile_response(
+            session,
+            flood_alert_routes.TileInput(
+                layer_id="flood-return-period",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=_iso(VALID_TIME_1),
+                z=6,
+                x=12,
+                y=24,
+            ),
+            b"tile-time-1",
+        )
+        second = flood_alert_routes.build_raw_tile_response(
+            session,
+            flood_alert_routes.TileInput(
+                layer_id="flood-return-period",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=_iso(VALID_TIME_2),
+                z=6,
+                x=12,
+                y=24,
+            ),
+            b"tile-time-2",
+        )
+
+        rows = session.execute(text("SELECT cache_key, tile_data FROM map.tile_cache")).mappings().all()
+
+    assert first.cache_key != second.cache_key
+    assert {bytes(row["tile_data"]) for row in rows} == {b"tile-time-1", b"tile-time-2"}
+
+
+def test_live_mvt_cache_write_failure_returns_tile_with_bypass_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRowResult:
+        def first(self) -> None:
+            raise RuntimeError("not used")
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> FakeRowResult:
+            raise SQLAlchemyError("cache unavailable")
+
+        def rollback(self) -> None:
+            return None
+
+    tile = flood_alert_routes.build_raw_tile_response(
+        FakeSession(),  # type: ignore[arg-type]
+        flood_alert_routes.TileInput(
+            layer_id="flood-return-period",
+            source_id=RUN_ID,
+            source_version="rnv_v1",
+            valid_time=_iso(VALID_TIME_1),
+            z=6,
+            x=12,
+            y=24,
+        ),
+        b"live-tile",
+    )
+
+    assert tile.data == b"live-tile"
+    assert tile.cache_status == "bypass"
+
+
+def test_hydro_and_river_network_mvt_routes_return_unavailable_without_live_postgis() -> None:
     with _client() as client:
         hydro = client.get(f"/api/v1/tiles/hydro/{RECOMPUTE_MOVED_PEAK_RUN_ID}/q_down/{_iso(VALID_TIME_1)}/4/12/6.pbf")
         river = client.get("/api/v1/tiles/river-network/basin_v1/4/12/6.pbf")
 
-    assert hydro.status_code == 200
-    assert hydro.headers["content-type"].startswith("application/x-protobuf")
-    assert hydro.headers["x-tile-layer-id"] == "hydro:q_down"
-    assert river.status_code == 200
-    assert river.headers["content-type"].startswith("application/x-protobuf")
-    assert river.headers["x-tile-layer-id"] == "river-network"
+    assert hydro.status_code == 424
+    assert hydro.json()["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    assert river.status_code == 424
+    assert river.json()["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_layer", "expected_params"),
+    [
+        (
+            "/api/v1/tiles/hydro/"
+            f"{RECOMPUTE_MOVED_PEAK_RUN_ID}/q_down/{VALID_TIME_1.isoformat()}/4/12/6.pbf",
+            "hydro",
+            {
+                "run_id": RECOMPUTE_MOVED_PEAK_RUN_ID,
+                "variable": "q_down",
+                "valid_time": VALID_TIME_1,
+                "z": 4,
+                "x": 12,
+                "y": 6,
+            },
+        ),
+        (
+            "/api/v1/tiles/river-network/basin_v1/4/12/6.pbf",
+            "river-network",
+            {"basin_version_id": "basin_v1", "z": 4, "x": 12, "y": 6},
+        ),
+    ],
+)
+def test_hydro_and_river_network_live_postgis_bind_requested_xyz(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    expected_layer: str,
+    expected_params: dict[str, Any],
+) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRowResult:
+        def __init__(self, row: dict[str, Any] | None) -> None:
+            self.row = row
+
+        def mappings(self) -> FakeRowResult:
+            return self
+
+        def first(self) -> dict[str, Any] | None:
+            return self.row
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRowResult:
+            sql = str(statement)
+            if "ST_TileEnvelope(:z, :x, :y)" in sql:
+                assert f"'{expected_layer.replace('-', '_')}'" in sql or expected_layer == "hydro"
+                for key, value in expected_params.items():
+                    assert parameters[key] == value
+                return FakeRowResult({"tile": b"live-tile"})
+            if "information_schema.tables" in sql:
+                return FakeRowResult(None)
+            raise AssertionError(f"Unexpected SQL in live PostGIS tile test: {sql}")
+
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_run",
+        lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+    )
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_frequency_ready",
+        lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+    )
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get(path)
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.content == b"live-tile"
 
 
 def test_mvt_invalid_xyz_fails_before_expensive_builders(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -935,7 +1092,7 @@ def test_mvt_invalid_xyz_fails_before_expensive_builders(monkeypatch: pytest.Mon
         called = True
         return []
 
-    monkeypatch.setattr(flood_alert_routes, "_fetch_flood_mvt_features", fail_if_called)
+    monkeypatch.setattr(flood_alert_routes, "_fetch_flood_mvt_tile_bytes", fail_if_called)
 
     with _client() as client:
         response = client.get(f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/3/8/0.pbf")
@@ -956,7 +1113,10 @@ def test_layer_metadata_discovery_exposes_mvt_contract() -> None:
     metadata = flood_layer["metadata"]
     assert metadata["layer_id"] == "flood-return-period"
     assert metadata["tile_format"] == "mvt"
-    assert metadata["url_template"] == "/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf"
+    assert metadata["url_template"] == (
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf"
+    )
+    assert metadata["release_blocking"] is True
     assert metadata["maplibre_source_layer"] == "flood_return_period"
     assert metadata["property_schema_version"] == "m16-hydrology-mvt-v1"
     assert metadata["min_zoom"] == 0
@@ -1224,7 +1384,7 @@ def _create_tables(connection: Any) -> None:
                 encoder_version TEXT,
                 status TEXT NOT NULL DEFAULT 'ready',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (layer_id, z, x, y)
+                PRIMARY KEY (cache_key)
             )
             """
         )

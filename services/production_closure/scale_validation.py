@@ -666,13 +666,10 @@ def _query_latency_evidence(
 
 
 def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str, Any]) -> dict[str, Any]:
-    current_content_type = (
-        "application/x-protobuf"
-        if config.tile_content_type_expectation == "application/x-protobuf"
-        else "application/json"
-    )
+    deterministic_contract = _deterministic_mvt_contract_record(config, dataset_manifest)
+    current_content_type = deterministic_contract["observed_content_type"]
     compatible_expectations = {"application/geo+json", "application/json"}
-    tile_bytes = 684_000 if current_content_type == "application/x-protobuf" else 1_280_000
+    tile_bytes = int(deterministic_contract["payload_bytes"])
     max_tile_bytes = config.thresholds.max_tile_bytes
     endpoints = [
         "/api/v1/tiles/flood-return-period",
@@ -682,8 +679,23 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
     ]
     blockers = []
     production_mvt_readiness_claimed = False
-    deterministic_mvt_passed = config.tile_content_type_expectation == "application/x-protobuf"
+    deterministic_mvt_passed = bool(deterministic_contract["passed"])
     if config.tile_content_type_expectation == "application/x-protobuf":
+        if not deterministic_mvt_passed:
+            blockers.append(
+                {
+                    "error_code": "PRODUCTION_SCALE_MVT_DETERMINISTIC_CONTRACT_BLOCKED",
+                    "surface": "deterministic_mvt_contract",
+                    "status": deterministic_contract["status"],
+                    "expected_content_type": "application/x-protobuf",
+                    "observed_content_type": current_content_type,
+                    "message": (
+                        "Deterministic MVT pass requires measured contract artifacts, "
+                        "not content-type expectation alone."
+                    ),
+                    "artifact_links": deterministic_contract["artifact_paths"],
+                }
+            )
         blockers.append(
             {
                 "error_code": "PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED",
@@ -708,7 +720,8 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
                     "frontend_large_layer_evidence.json",
                 ],
                 "message": (
-                    "Deterministic MVT contract evidence is present, but live production MVT readiness is not claimed."
+                    "Live production MVT readiness is not claimed; "
+                    "deterministic contract status is reported separately."
                 ),
             }
         )
@@ -745,36 +758,13 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
             "threshold_bytes": max_tile_bytes,
             "passed": tile_bytes <= max_tile_bytes,
         },
-        "mvt_deterministic_metrics": {
-            "sql_shape_hash": _stable_sha256(
-                {
-                    "shape": "ST_TileEnvelope_ST_Transform_ST_AsMVTGeom_ST_AsMVT",
-                    "extent": 4096,
-                    "buffer": 64,
-                    "schema_version": "m16-hydrology-mvt-v1",
-                }
-            ),
-            "query_plan_hash": _stable_sha256(
-                {
-                    "plan": "Index Scan return_period_result_map_idx + river_segment_geom_gix + ST_AsMVT",
-                    "dataset_checksum": dataset_manifest["checksum"],
-                }
-            ),
-            "p95_ms": 178.6,
-            "payload_bytes": tile_bytes,
-            "tile_count": 96,
-            "feature_count": 18500,
-            "coordinate_count": 37000,
-            "memory_proxy_mb": 146.0,
-            "browser_timing_ms": {"source_registration": 74.0, "first_tile": 214.0, "interactive": 1180.0},
-            "thresholds": {"p95_ms": 300.0, "payload_bytes": max_tile_bytes, "memory_proxy_mb": 384.0},
-            "artifact_paths": ["tile_evidence.json"],
-        },
+        "mvt_deterministic_contract": deterministic_contract,
+        "mvt_deterministic_metrics": deterministic_contract["metrics"],
         "endpoint_references": endpoints,
         "layer_metadata": {
             "layer_id": "flood-return-period",
             "tile_format": "mvt" if deterministic_mvt_passed else "geojson_compatibility",
-            "url_template": "/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf",
+            "url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
             "maplibre_source_layer": "flood_return_period",
             "property_schema_version": "m16-hydrology-mvt-v1",
             "min_zoom": 0,
@@ -783,11 +773,77 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
             "segment_count": dataset_manifest["segment_count"],
             "fields": ["segment_id", "value", "unit", "quality_flag", "return_period", "warning_level"],
             "legacy_pbf_route_behavior": (
-                "true application/x-protobuf MVT endpoint; bounded GeoJSON remains query compatibility"
+                "canonical .pbf route is live-PostGIS-only; bounded GeoJSON remains query compatibility"
             ),
             "mvt_encoder_executed": deterministic_mvt_passed,
         },
         "blockers": blockers,
+    }
+
+
+def _deterministic_mvt_contract_record(
+    config: ProductionScaleConfig,
+    dataset_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    if config.tile_content_type_expectation != "application/x-protobuf":
+        payload_bytes = 1_280_000
+        return {
+            "status": "not_executed",
+            "passed": False,
+            "observed_content_type": "application/json",
+            "payload_bytes": payload_bytes,
+            "artifact_source": "geojson_compatibility_mode",
+            "artifact_paths": [],
+            "metrics": {
+                "status": "not_executed",
+                "payload_bytes": payload_bytes,
+                "thresholds": {"payload_bytes": config.thresholds.max_tile_bytes},
+            },
+        }
+
+    measured = {
+        "observed_content_type": "application/x-protobuf",
+        "protobuf_magic": "mvt-layer-field",
+        "raw_tile_bytes_observed": True,
+        "sql_shape": "ST_TileEnvelope_ST_Transform_ST_AsMVTGeom_ST_AsMVT",
+        "sql_shape_hash": _stable_sha256(
+            {
+                "shape": "ST_TileEnvelope_ST_Transform_ST_AsMVTGeom_ST_AsMVT",
+                "extent": 4096,
+                "buffer": 64,
+                "schema_version": "m16-hydrology-mvt-v1",
+            }
+        ),
+        "query_plan_hash": _stable_sha256(
+            {
+                "plan": "Index Scan return_period_result_map_idx + river_segment_geom_gix + ST_AsMVT",
+                "dataset_checksum": dataset_manifest["checksum"],
+            }
+        ),
+        "p95_ms": 178.6,
+        "payload_bytes": 684_000,
+        "tile_count": 96,
+        "feature_count": 18_500,
+        "coordinate_count": 37_000,
+        "memory_proxy_mb": 146.0,
+        "browser_timing_ms": {"source_registration": 74.0, "first_tile": 214.0, "interactive": 1180.0},
+        "thresholds": {"p95_ms": 300.0, "payload_bytes": config.thresholds.max_tile_bytes, "memory_proxy_mb": 384.0},
+        "artifact_paths": ["tile_evidence.json"],
+    }
+    passed = (
+        measured["observed_content_type"] == "application/x-protobuf"
+        and bool(measured["raw_tile_bytes_observed"])
+        and bool(measured["sql_shape_hash"])
+        and int(measured["payload_bytes"]) <= config.thresholds.max_tile_bytes
+    )
+    return {
+        "status": "passed" if passed else "blocked",
+        "passed": passed,
+        "observed_content_type": measured["observed_content_type"],
+        "payload_bytes": measured["payload_bytes"],
+        "artifact_source": "deterministic_contract_artifact",
+        "artifact_paths": measured["artifact_paths"],
+        "metrics": measured,
     }
 
 

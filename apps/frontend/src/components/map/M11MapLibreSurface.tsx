@@ -15,11 +15,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import type { components } from '@/api/types'
 import { floodTileLayerPaint } from '@/components/flood/alertLevels'
 import { cn } from '@/lib/cn'
-import {
-  buildFloodReturnPeriodGeoJsonUrl,
-  fetchFloodReturnPeriodFeatureCollection,
-  type FloodReturnPeriodFeatureCollection,
-} from '@/lib/floodReturnPeriodGeoJson'
+import type { FloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriodGeoJson'
 import { buildMvtTileUrlTemplate, isMvtLayerMetadata, type MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 import {
   getM11BasinGeometryBudgetStatus,
@@ -71,7 +67,6 @@ interface M11RegisteredOverlay {
   sourceId: string
   layer: LayerProps
   source:
-    | { type: 'geojson'; url: string }
     | { type: 'vector'; tiles: string[]; sourceLayer: string; minzoom: number; maxzoom: number; metadata: MvtLayerMetadata }
 }
 
@@ -218,31 +213,8 @@ export function M11MapLibreSurface({
   }, [basinFeatureCollection.features.length, overlay?.sourceId, state.basemap, state.layer, state.validTime])
 
   useEffect(() => {
-    const controller = new AbortController()
     setOverlayData(null)
     setOverlayUnavailableReason(null)
-
-    if (!overlay) return () => controller.abort()
-    if (overlay.source.type === 'vector') return () => controller.abort()
-
-    fetchFloodReturnPeriodFeatureCollection(overlay.source.url, { signal: controller.signal })
-      .then((result) => {
-        if (controller.signal.aborted) return
-        if (result.ok) {
-          setOverlayData(result.data)
-          setOverlayUnavailableReason(null)
-        } else {
-          setOverlayData(null)
-          setOverlayUnavailableReason(result.reason)
-        }
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return
-        setOverlayData(null)
-        setOverlayUnavailableReason('洪水重现期地图数据加载失败，地图暂不显示该叠加层。')
-      })
-
-    return () => controller.abort()
   }, [overlay])
 
   useEffect(() => {
@@ -457,37 +429,32 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   const sourceId = `m11-${state.layer}-source`
   const layerId = `m11-${state.layer}-line`
 
-  if (state.layer === 'flood-return-period') {
-    if (isMvtLayerMetadata(selectedLayer.metadata)) {
-      const tiles = [buildMvtTileUrlTemplate(selectedLayer.metadata, { run_id: runId, duration: '1h', valid_time: validTime })]
-      return {
-        layerId: state.layer,
-        sourceId,
-        source: {
-          type: 'vector',
-          tiles,
-          sourceLayer: selectedLayer.metadata.maplibre_source_layer,
-          minzoom: selectedLayer.metadata.min_zoom ?? 0,
-          maxzoom: selectedLayer.metadata.max_zoom ?? 14,
-          metadata: selectedLayer.metadata,
-        },
-        layer: {
-          id: layerId,
-          type: 'line',
-          source: sourceId,
-          'source-layer': selectedLayer.metadata.maplibre_source_layer,
-          paint: floodTileLayerPaint(),
-        },
-      }
-    }
+  if (isMvtLayerMetadata(selectedLayer.metadata) && !selectedLayer.metadata.release_blocking) {
+    const variable = selectedLayer.layerId === 'water-level' ? 'water_level' : 'q_down'
+    const tiles = [
+      buildMvtTileUrlTemplate(selectedLayer.metadata, {
+        run_id: runId,
+        duration: '1h',
+        valid_time: validTime,
+        variable,
+      }),
+    ]
     return {
       layerId: state.layer,
       sourceId,
-      source: { type: 'geojson', url: buildFloodReturnPeriodGeoJsonUrl(runId, validTime) },
+      source: {
+        type: 'vector',
+        tiles,
+        sourceLayer: selectedLayer.metadata.maplibre_source_layer,
+        minzoom: selectedLayer.metadata.min_zoom ?? 0,
+        maxzoom: selectedLayer.metadata.max_zoom ?? 14,
+        metadata: selectedLayer.metadata,
+      },
       layer: {
         id: layerId,
         type: 'line',
         source: sourceId,
+        'source-layer': selectedLayer.metadata.maplibre_source_layer,
         paint: floodTileLayerPaint(),
       },
     }
@@ -863,8 +830,8 @@ function m11SelectedLayerUnavailableReason(
   if (!selectedLayer.available) return selectedLayer.disabledReason ?? '当前图层没有可渲染的有效时间。'
   if (!selectedLayer.freshness.runId) return '当前图层缺少可追溯 run_id，地图不会注册叠加层。'
   if (!selectedLayer.currentValidTime) return '当前图层缺少有效时间，地图不会注册叠加层。'
-  if (state.layer === 'discharge' || state.layer === 'water-level' || state.layer === 'warning-level') {
-    return '当前水文图层的地图源尚未在本仓库实现，地图不会注册该叠加层。'
+  if (state.layer === 'discharge' || state.layer === 'water-level' || state.layer === 'flood-return-period' || state.layer === 'warning-level') {
+    return '当前水文图层缺少可用 MVT 元数据或处于 release-blocked 状态，地图不会请求无边界 GeoJSON 兼容源。'
   }
   return '当前图层缺少可用地图源，地图不会注册叠加层。'
 }

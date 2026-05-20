@@ -31,18 +31,6 @@ function emptyLayerCatalogResponse() {
   return geoJsonResponse({ request_id: 'req-test', status: 'ok', data: [] })
 }
 
-function oversizedStreamResponse(maxBytes: number) {
-  return new Response(
-    new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode('x'.repeat(maxBytes + 1)))
-        controller.close()
-      },
-    }),
-    { headers: { 'content-type': 'application/json' } },
-  )
-}
-
 vi.mock('react-map-gl/maplibre', () => ({
   default: forwardRef(({ children }: { children: ReactNode }, ref) => {
     useImperativeHandle(ref, () => ({ flyTo: vi.fn() }))
@@ -64,14 +52,30 @@ describe('FloodReturnPeriodLayer', () => {
   const mvtMetadata: MvtLayerMetadata = {
     layer_id: 'flood-return-period',
     tile_format: 'mvt',
-    url_template: '/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf',
-    tile_url_template: '/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf',
+    url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+    tile_url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
     maplibre_source_layer: 'flood_return_period',
     source_layer: 'flood_return_period',
     fallback_available: true,
     release_blocking: false,
     required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
     valid_times: ['2026-05-03T06:00:00Z'],
+  }
+
+  function mvtLayerCatalogResponse() {
+    return geoJsonResponse({
+      request_id: 'req-test',
+      status: 'ok',
+      data: [
+        {
+          layer_id: 'flood-return-period',
+          layer_name: 'Flood return period',
+          layer_type: 'hydrology',
+          variables: ['return_period'],
+          metadata: mvtMetadata,
+        },
+      ],
+    })
   }
 
   it('builds the bounded GeoJSON compatibility endpoint without z/x/y or pbf semantics', () => {
@@ -110,69 +114,55 @@ describe('FloodReturnPeriodLayer', () => {
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
   })
 
-  it('routes bounded GeoJSON fallback fetches through the configured API base', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn()
-        .mockResolvedValueOnce(emptyLayerCatalogResponse())
-        .mockResolvedValueOnce(geoJsonResponse({ type: 'FeatureCollection', features: [] })),
-    )
-
-    render(<FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" />)
-
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
-    expect(fetch).toHaveBeenLastCalledWith(
-      'https://api.example.test/api/v1/tiles/flood-return-period?run_id=run-1&duration=1h&valid_time=2026-05-03T06%3A00%3A00Z&limit=10000',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    )
-  })
-
-  it('configures a geojson source only when metadata is unavailable', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn()
-        .mockResolvedValueOnce(emptyLayerCatalogResponse())
-        .mockResolvedValueOnce(geoJsonResponse({ type: 'FeatureCollection', features: [] })),
-    )
-
-    render(<FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" />)
-
-    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'geojson' }))
-    expect(sourceProps.at(-1)).not.toHaveProperty('tiles')
-    expect(floodReturnPeriodLayer()).not.toHaveProperty('source-layer')
-  })
-
-  it('promotes and filters flood features by river-network scoped feature identity', async () => {
+  it('does not fetch unbounded GeoJSON while catalog metadata is loading', async () => {
     sourceProps.length = 0
     layerProps.length = 0
-    vi.stubGlobal(
-      'fetch',
-      vi.fn()
-        .mockResolvedValueOnce(emptyLayerCatalogResponse())
-        .mockResolvedValueOnce(
-          geoJsonResponse({
-            type: 'FeatureCollection',
-            features: [
-              {
-                type: 'Feature',
-                properties: {
-                  segment_id: 'dup-seg',
-                  river_network_version_id: 'rn-a',
-                },
-                geometry: { type: 'LineString', coordinates: [[110, 30], [111, 31]] },
-              },
-              {
-                type: 'Feature',
-                properties: {
-                  segment_id: 'dup-seg',
-                  river_network_version_id: 'rn-b',
-                },
-                geometry: { type: 'LineString', coordinates: [[112, 32], [113, 33]] },
-              },
-            ],
-          }),
-        ),
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise(() => undefined)))
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-1"
+        validTime="2026-05-03T06:00:00Z"
+        onUnavailableReason={onUnavailableReason}
+      />,
     )
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/v1/layers?limit=100&offset=0',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+    expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('元数据正在加载'))
+    expect(sourceProps).toHaveLength(0)
+  })
+
+  it('shows unavailable instead of unbounded GeoJSON when metadata is missing', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(emptyLayerCatalogResponse()))
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-1"
+        validTime="2026-05-03T06:00:00Z"
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('已阻止无边界 GeoJSON')))
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+    expect(sourceProps).toHaveLength(0)
+    expect(layerProps).toHaveLength(0)
+  })
+
+  it('keeps vector feature identity filters when metadata is discovered from the catalog', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(mvtLayerCatalogResponse()))
 
     render(
       <FloodReturnPeriodLayer
@@ -183,15 +173,7 @@ describe('FloodReturnPeriodLayer', () => {
       />,
     )
 
-    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ promoteId: FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY }))
-    expect(sourceProps.at(-1)).toMatchObject({
-      data: {
-        features: [
-          { properties: { feature_id: 'rn-a::dup-seg' } },
-          { properties: { feature_id: 'rn-b::dup-seg' } },
-        ],
-      },
-    })
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector', promoteId: FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY }))
     expect(layerProps.at(-2)).toMatchObject({
       filter: ['==', ['get', FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY], 'rn-a::dup-seg'],
     })
@@ -205,42 +187,23 @@ describe('FloodReturnPeriodLayer', () => {
     layerProps.length = 0
     vi.stubGlobal(
       'fetch',
-      vi.fn()
-        .mockResolvedValueOnce(emptyLayerCatalogResponse())
-        .mockResolvedValueOnce({
-          ok: false,
-          status: 409,
-          headers: new Headers(),
-          text: vi.fn().mockResolvedValue(
-            JSON.stringify({
-              status: 'error',
-              error: { code: 'FREQUENCY_NOT_COMPUTED', message: 'not ready' },
-            }),
-          ),
-        }),
+      vi.fn().mockResolvedValueOnce(emptyLayerCatalogResponse()),
     )
 
     render(<FloodReturnPeriodLayer runId="run-pending" validTime="2026-05-03T06:00:00Z" />)
 
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
     expect(sourceProps).toHaveLength(0)
     expect(layerProps).toHaveLength(0)
   })
 
-  it('rejects malformed FeatureCollections before retaining a MapLibre source', async () => {
+  it('does not fetch malformed GeoJSON compatibility data when MVT metadata is unavailable', async () => {
     sourceProps.length = 0
     layerProps.length = 0
     const onUnavailableReason = vi.fn()
     vi.stubGlobal(
       'fetch',
-      vi.fn()
-        .mockResolvedValueOnce(emptyLayerCatalogResponse())
-        .mockResolvedValueOnce(
-          geoJsonResponse({
-            type: 'FeatureCollection',
-            features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } }],
-          }),
-        ),
+      vi.fn().mockResolvedValueOnce(emptyLayerCatalogResponse()),
     )
 
     render(
@@ -251,24 +214,17 @@ describe('FloodReturnPeriodLayer', () => {
       />,
     )
 
-    await waitFor(() => expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('空坐标几何')))
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('已阻止无边界 GeoJSON')))
     expect(sourceProps).toHaveLength(0)
     expect(layerProps).toHaveLength(0)
   })
 
-  it('surfaces scoped unavailable state from the flood-alert map when return-period payloads exceed budget', async () => {
+  it('surfaces scoped unavailable state from the flood-alert map when MVT metadata is unavailable', async () => {
     sourceProps.length = 0
     layerProps.length = 0
     vi.stubGlobal(
       'fetch',
-      vi.fn()
-        .mockResolvedValueOnce(emptyLayerCatalogResponse())
-        .mockResolvedValueOnce(
-          geoJsonResponse({
-            type: 'FeatureCollection',
-            features: new Array(10_001).fill({ type: 'Feature', properties: {}, geometry: null }),
-          }),
-        ),
+      vi.fn().mockResolvedValueOnce(emptyLayerCatalogResponse()),
     )
 
     render(
@@ -279,28 +235,24 @@ describe('FloodReturnPeriodLayer', () => {
       />,
     )
 
-    expect(await screen.findByTestId('flood-return-period-unavailable')).toHaveTextContent('超过客户端要素预算')
+    expect(await screen.findByTestId('flood-return-period-unavailable')).toHaveTextContent('已阻止无边界 GeoJSON')
     expect(sourceProps).toHaveLength(0)
   })
 
-  it('surfaces scoped unavailable state for oversized no-content-length streams on the flood-alert map', async () => {
+  it('registers flood-alert map vector source when MVT metadata is available', async () => {
     sourceProps.length = 0
     layerProps.length = 0
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValueOnce(emptyLayerCatalogResponse()).mockResolvedValueOnce(oversizedStreamResponse(2_000_000)),
-    )
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(mvtLayerCatalogResponse()))
 
     render(
       <FloodAlertMap
-        runId="run-stream-oversized"
+        runId="run-vector"
         validTime="2026-05-03T06:00:00Z"
         onSegmentSelect={vi.fn()}
       />,
     )
 
-    expect(await screen.findByTestId('flood-return-period-unavailable')).toHaveTextContent('超过客户端序列化预算')
-    expect(sourceProps).toHaveLength(0)
-    expect(layerProps).toHaveLength(0)
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
   })
 })

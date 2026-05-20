@@ -3160,9 +3160,9 @@ components:
           items:
             type: string
         metadata:
-          nullable: true
-          allOf:
+          oneOf:
             - $ref: "#/components/schemas/LayerMetadata"
+            - type: "null"
     LayerMetadata:
       type: object
       required:

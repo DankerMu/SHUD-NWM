@@ -111,7 +111,7 @@ def build_tile_response(
     validate_xyz(tile.z, tile.x, tile.y)
     _enforce_feature_budget(features)
     key = cache_key(tile)
-    cached = _read_cache(session, tile.layer_id, key, tile.z, tile.x, tile.y)
+    cached = _safe_read_cache(session, tile.layer_id, key, tile.z, tile.x, tile.y)
     if cached is not None:
         data, checksum, etag = cached
         return TileResponse(
@@ -135,13 +135,60 @@ def build_tile_response(
         )
     checksum = hashlib.sha256(data).hexdigest()
     etag = stable_etag(data)
-    _write_cache(session, tile, key, data, checksum, etag)
+    cache_status = "miss" if _safe_write_cache(session, tile, key, data, checksum, etag) else "bypass"
     return TileResponse(
         data=data,
         checksum=checksum,
         etag=etag,
         cache_key=key,
-        cache_status="miss",
+        cache_status=cache_status,
+        layer_id=tile.layer_id,
+    )
+
+
+def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> TileResponse:
+    validate_xyz(tile.z, tile.x, tile.y)
+    if not data:
+        from apps.api.errors import ApiError
+
+        raise ApiError(
+            status_code=424,
+            code="MVT_LIVE_POSTGIS_UNAVAILABLE",
+            message="Live PostGIS MVT returned no tile bytes for the requested tile.",
+            details={"layer_id": tile.layer_id, "z": tile.z, "x": tile.x, "y": tile.y},
+        )
+    if len(data) > MVT_MAX_BYTES:
+        from apps.api.errors import ApiError
+
+        raise ApiError(
+            status_code=413,
+            code="MVT_TILE_BUDGET_EXCEEDED",
+            message="Raw MVT tile payload exceeded the configured byte budget.",
+            details={"max_bytes": MVT_MAX_BYTES, "payload_bytes": len(data), "layer_id": tile.layer_id},
+        )
+
+    key = cache_key(tile)
+    cached = _safe_read_cache(session, tile.layer_id, key, tile.z, tile.x, tile.y)
+    if cached is not None:
+        cached_data, checksum, etag = cached
+        return TileResponse(
+            data=cached_data,
+            checksum=checksum,
+            etag=etag,
+            cache_key=key,
+            cache_status="hit",
+            layer_id=tile.layer_id,
+        )
+
+    checksum = hashlib.sha256(data).hexdigest()
+    etag = stable_etag(data)
+    cache_status = "miss" if _safe_write_cache(session, tile, key, data, checksum, etag) else "bypass"
+    return TileResponse(
+        data=data,
+        checksum=checksum,
+        etag=etag,
+        cache_key=key,
+        cache_status=cache_status,
         layer_id=tile.layer_id,
     )
 
@@ -295,7 +342,7 @@ def layer_metadata(
             ],
         },
         "flood-return-period": {
-            "tile_url_template": "/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf",
+            "tile_url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
             "maplibre_source_layer": "flood_return_period",
             "required_placeholders": ["run_id", "duration", "valid_time", "z", "x", "y"],
             "properties": [
@@ -312,7 +359,7 @@ def layer_metadata(
             ],
         },
         "warning-level": {
-            "tile_url_template": "/api/v1/tiles/flood-return-period/{run_id}/1h/{valid_time}/{z}/{x}/{y}.pbf",
+            "tile_url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
             "maplibre_source_layer": "flood_return_period",
             "required_placeholders": ["run_id", "duration", "valid_time", "z", "x", "y"],
             "properties": ["feature_id", "segment_id", "river_network_version_id", "warning_level", "quality_flag"],
@@ -451,9 +498,27 @@ def _read_cache(session: Session, layer_id: str, key: str, z: int, x: int, y: in
     return data, checksum, etag
 
 
-def _write_cache(session: Session, tile: TileInput, key: str, data: bytes, checksum: str, etag: str) -> None:
+def _safe_read_cache(
+    session: Session,
+    layer_id: str,
+    key: str,
+    z: int,
+    x: int,
+    y: int,
+) -> tuple[bytes, str, str] | None:
+    try:
+        return _read_cache(session, layer_id, key, z, x, y)
+    except SQLAlchemyError:
+        try:
+            session.rollback()
+        except SQLAlchemyError:
+            pass
+        return None
+
+
+def _write_cache(session: Session, tile: TileInput, key: str, data: bytes, checksum: str, etag: str) -> bool:
     if not _table_exists(session, "tile_cache", "map"):
-        return
+        return False
     params = {
         "layer_id": tile.layer_id,
         "z": tile.z,
@@ -474,20 +539,36 @@ def _write_cache(session: Session, tile: TileInput, key: str, data: bytes, check
     }
     columns = _table_columns(session, "tile_cache", "map")
     supported = {name: value for name, value in params.items() if name in columns}
-    assignments = ", ".join(
-        f"{name} = excluded.{name}" for name in supported if name not in {"layer_id", "z", "x", "y"}
-    )
+    if "cache_key" not in supported:
+        return False
+    conflict_target = "(cache_key)"
+    conflict_immutable = {"cache_key"}
+    assignments = ", ".join(f"{name} = excluded.{name}" for name in supported if name not in conflict_immutable)
+    if not assignments:
+        return False
     session.execute(
         text(
             f"""
             INSERT INTO map.tile_cache ({", ".join(supported)})
             VALUES ({", ".join(f":{name}" for name in supported)})
-            ON CONFLICT(layer_id, z, x, y) DO UPDATE SET {assignments}
+            ON CONFLICT{conflict_target} DO UPDATE SET {assignments}
             """
         ),
         supported,
     )
     session.commit()
+    return True
+
+
+def _safe_write_cache(session: Session, tile: TileInput, key: str, data: bytes, checksum: str, etag: str) -> bool:
+    try:
+        return _write_cache(session, tile, key, data, checksum, etag)
+    except SQLAlchemyError:
+        try:
+            session.rollback()
+        except SQLAlchemyError:
+            pass
+        return False
 
 
 def _table_exists(session: Session, table_name: str, schema: str) -> bool:

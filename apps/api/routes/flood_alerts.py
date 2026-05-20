@@ -24,6 +24,7 @@ from services.tiles.mvt import (
     MVT_MEDIA_TYPE,
     MVT_SCHEMA_VERSION,
     TileInput,
+    build_raw_tile_response,
     build_tile_response,
     latest_ready_run,
     layer_metadata,
@@ -652,23 +653,26 @@ def flood_return_period_mvt_tile(
     validate_identifier(duration, "duration")
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
-    rows = _fetch_flood_mvt_features(session, run_id=run_id, duration=duration, valid_time=valid_time, z=z, x=x, y=y)
     source_version = str(run.get("river_network_version_id") or run.get("basin_version_id") or run_id)
-    tile = build_tile_response(
-        session,
-        TileInput(
-            layer_id="flood-return-period",
-            source_id=run_id,
-            source_version=source_version,
-            valid_time=_format_time(valid_time),
-            z=z,
-            x=x,
-            y=y,
-        ),
-        "flood_return_period",
-        rows,
+    tile_input = TileInput(
+        layer_id="flood-return-period",
+        source_id=run_id,
+        source_version=source_version,
+        valid_time=_format_time(valid_time),
+        z=z,
+        x=x,
+        y=y,
     )
-    return _mvt_response(tile)
+    data = _fetch_flood_mvt_tile_bytes(
+        session,
+        run_id=run_id,
+        duration=duration,
+        valid_time=valid_time,
+        z=z,
+        x=x,
+        y=y,
+    )
+    return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
 
 @router.get("/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf")
@@ -685,23 +689,26 @@ def hydro_mvt_tile(
     validate_identifier(variable, "variable")
     validate_xyz(z, x, y)
     run = _require_run(session, run_id)
-    rows = _fetch_hydro_mvt_features(session, run_id=run_id, variable=variable, valid_time=valid_time)
     source_version = str(run.get("river_network_version_id") or run.get("basin_version_id") or run_id)
-    tile = build_tile_response(
-        session,
-        TileInput(
-            layer_id=f"hydro:{variable}",
-            source_id=run_id,
-            source_version=source_version,
-            valid_time=_format_time(valid_time),
-            z=z,
-            x=x,
-            y=y,
-        ),
-        "hydro",
-        rows,
+    tile_input = TileInput(
+        layer_id=f"hydro:{variable}",
+        source_id=run_id,
+        source_version=source_version,
+        valid_time=_format_time(valid_time),
+        z=z,
+        x=x,
+        y=y,
     )
-    return _mvt_response(tile)
+    data = _fetch_hydro_mvt_tile_bytes(
+        session,
+        run_id=run_id,
+        variable=variable,
+        valid_time=valid_time,
+        z=z,
+        x=x,
+        y=y,
+    )
+    return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
 
 @router.get("/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf")
@@ -714,22 +721,132 @@ def river_network_mvt_tile(
 ) -> Response:
     validate_identifier(basin_version_id, "basin_version_id")
     validate_xyz(z, x, y)
-    rows = _fetch_river_network_mvt_features(session, basin_version_id=basin_version_id)
-    tile = build_tile_response(
-        session,
-        TileInput(
-            layer_id="river-network",
-            source_id=basin_version_id,
-            source_version=basin_version_id,
-            valid_time=None,
-            z=z,
-            x=x,
-            y=y,
-        ),
-        "river_network",
-        rows,
+    tile_input = TileInput(
+        layer_id="river-network",
+        source_id=basin_version_id,
+        source_version=basin_version_id,
+        valid_time=None,
+        z=z,
+        x=x,
+        y=y,
     )
-    return _mvt_response(tile)
+    data = _fetch_river_network_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y)
+    return _mvt_response(build_raw_tile_response(session, tile_input, data))
+
+
+def _build_deterministic_tile_response_for_tests(
+    session: Session,
+    tile: TileInput,
+    layer_name: str,
+    features: list[dict[str, Any]],
+) -> Response:
+    """Private helper for deterministic encoder unit coverage; not used by canonical routes."""
+    return _mvt_response(
+        build_tile_response(
+            session,
+            tile,
+            layer_name,
+            features,
+        )
+    )
+
+
+def _mvt_live_postgis_enabled(session: Session) -> bool:
+    return session.get_bind().dialect.name != "sqlite" and os.getenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _require_live_postgis_mvt(session: Session, layer_id: str) -> None:
+    if _mvt_live_postgis_enabled(session):
+        return
+    raise ApiError(
+        status_code=424,
+        code="MVT_LIVE_POSTGIS_UNAVAILABLE",
+        message="Live PostGIS MVT is required for canonical .pbf tile routes and is not enabled.",
+        details={
+            "layer_id": layer_id,
+            "required_env": "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
+            "fallback_endpoint": "/api/v1/tiles/flood-return-period" if layer_id == "flood-return-period" else None,
+        },
+    )
+
+
+def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, Any], *, z: int, x: int, y: int) -> bytes:
+    _require_live_postgis_mvt(session, layer)
+    row = session.execute(
+        text(postgis_tile_sql(layer)),
+        _postgis_tile_params(params, z=z, x=x, y=y),
+    ).mappings().first()
+    data = bytes(row["tile"] or b"") if row and row.get("tile") is not None else b""
+    if not data:
+        raise ApiError(
+            status_code=424,
+            code="MVT_LIVE_POSTGIS_UNAVAILABLE",
+            message="Live PostGIS MVT query returned no tile bytes for the requested identity.",
+            details={"layer_id": layer, "z": z, "x": x, "y": y},
+        )
+    return data
+
+
+def _fetch_flood_mvt_tile_bytes(
+    session: Session,
+    *,
+    run_id: str,
+    duration: str,
+    valid_time: datetime,
+    z: int,
+    x: int,
+    y: int,
+) -> bytes:
+    return _fetch_postgis_tile_bytes(
+        session,
+        "flood-return-period",
+        {"run_id": run_id, "duration": duration, "valid_time": valid_time},
+        z=z,
+        x=x,
+        y=y,
+    )
+
+
+def _fetch_hydro_mvt_tile_bytes(
+    session: Session,
+    *,
+    run_id: str,
+    variable: str,
+    valid_time: datetime,
+    z: int,
+    x: int,
+    y: int,
+) -> bytes:
+    return _fetch_postgis_tile_bytes(
+        session,
+        "hydro",
+        {"run_id": run_id, "variable": variable, "valid_time": valid_time},
+        z=z,
+        x=x,
+        y=y,
+    )
+
+
+def _fetch_river_network_mvt_tile_bytes(
+    session: Session,
+    *,
+    basin_version_id: str,
+    z: int,
+    x: int,
+    y: int,
+) -> bytes:
+    return _fetch_postgis_tile_bytes(
+        session,
+        "river-network",
+        {"basin_version_id": basin_version_id},
+        z=z,
+        x=x,
+        y=y,
+    )
 
 
 def _require_frequency_ready(session: Session, run_id: str) -> dict[str, Any]:
@@ -820,133 +937,10 @@ def _default_layer_catalog(session: Session, *, run_id: str | None, source_versi
                 run_id=run_id,
                 valid_times=valid_times_for_layer(session, layer_id, run_id=run_id),
                 source_version=source_version,
-                release_blocking=False,
+                release_blocking=not _mvt_live_postgis_enabled(session),
             ),
         )
         for layer_id, name, layer_type, variables in definitions
-    ]
-
-
-def _fetch_flood_mvt_features(
-    session: Session,
-    *,
-    run_id: str,
-    duration: str,
-    valid_time: datetime,
-    z: int,
-    x: int,
-    y: int,
-) -> list[dict[str, Any]]:
-    if session.get_bind().dialect.name != "sqlite" and os.getenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "").lower() in {
-        "1",
-        "true",
-        "yes",
-    }:
-        row = session.execute(
-            text(postgis_tile_sql("flood-return-period")),
-            _postgis_tile_params(
-                {
-                    "run_id": run_id,
-                    "duration": duration,
-                    "valid_time": valid_time,
-                },
-                z=z,
-                x=x,
-                y=y,
-            ),
-        ).mappings().first()
-        return [{"postgis_tile_bytes": len(bytes(row["tile"] or b""))}] if row and row.get("tile") else []
-    rows = session.execute(
-        text(
-            """
-            SELECT r.river_segment_id, r.basin_version_id, r.river_network_version_id, r.return_period,
-                   r.warning_level, r.q_value, r.q_unit, r.quality_flag, r.source_id, r.cycle_time, r.valid_time
-            FROM flood.return_period_result r
-            WHERE r.run_id = :run_id
-              AND r.duration = :duration
-              AND r.valid_time = :valid_time
-              AND r.max_over_window = :max_over_window
-            ORDER BY r.river_network_version_id, r.river_segment_id
-            """
-        ),
-        {"run_id": run_id, "duration": duration, "valid_time": valid_time, "max_over_window": False},
-    ).mappings().all()
-    return [
-        {
-            "feature_id": _flood_return_period_feature_id(row),
-            "segment_id": str(row["river_segment_id"]),
-            "river_segment_id": str(row["river_segment_id"]),
-            "basin_version_id": str(row["basin_version_id"]),
-            "river_network_version_id": str(row["river_network_version_id"]),
-            "value": _finite_result_float(row["q_value"], field="q_value"),
-            "unit": str(row["q_unit"] or "m3/s"),
-            "return_period": _optional_float(row["return_period"]) or 0.0,
-            "warning_level": _optional_str(row["warning_level"]) or "unavailable",
-            "quality_flag": str(row["quality_flag"]),
-            "source": _optional_str(row.get("source_id")) or "",
-            "valid_time": _format_time(row["valid_time"]),
-        }
-        for row in rows
-    ]
-
-
-def _fetch_hydro_mvt_features(
-    session: Session,
-    *,
-    run_id: str,
-    variable: str,
-    valid_time: datetime,
-) -> list[dict[str, Any]]:
-    rows = session.execute(
-        text(
-            """
-            SELECT river_segment_id, basin_version_id, river_network_version_id, value, unit, quality_flag, valid_time
-            FROM hydro.river_timeseries
-            WHERE run_id = :run_id
-              AND variable = :variable
-              AND valid_time = :valid_time
-            ORDER BY river_network_version_id, river_segment_id
-            """
-        ),
-        {"run_id": run_id, "variable": variable, "valid_time": valid_time},
-    ).mappings().all()
-    return [
-        {
-            "segment_id": str(row["river_segment_id"]),
-            "river_segment_id": str(row["river_segment_id"]),
-            "basin_version_id": str(row["basin_version_id"]),
-            "river_network_version_id": str(row["river_network_version_id"]),
-            "value": _finite_result_float(row["value"], field="value"),
-            "unit": str(row["unit"]),
-            "quality_flag": str(row["quality_flag"] or "ok"),
-            "valid_time": _format_time(row["valid_time"]),
-        }
-        for row in rows
-    ]
-
-
-def _fetch_river_network_mvt_features(session: Session, *, basin_version_id: str) -> list[dict[str, Any]]:
-    rows = session.execute(
-        text(
-            """
-            SELECT rs.river_segment_id, rs.river_network_version_id, mi.basin_version_id
-            FROM core.river_segment rs
-            JOIN core.model_instance mi ON mi.river_network_version_id = rs.river_network_version_id
-            WHERE mi.basin_version_id = :basin_version_id
-            ORDER BY rs.river_network_version_id, rs.river_segment_id
-            LIMIT :limit
-            """
-        ),
-        {"basin_version_id": basin_version_id, "limit": FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT},
-    ).mappings().all()
-    return [
-        {
-            "segment_id": str(row["river_segment_id"]),
-            "river_segment_id": str(row["river_segment_id"]),
-            "basin_version_id": str(row["basin_version_id"]),
-            "river_network_version_id": str(row["river_network_version_id"]),
-        }
-        for row in rows
     ]
 
 

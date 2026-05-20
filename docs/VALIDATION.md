@@ -57,14 +57,17 @@ cd apps/frontend && corepack pnpm test
 cd apps/frontend && corepack pnpm build
 ```
 
-M16 promotes canonical hydrology MVT endpoints for river-network, hydro, and
-flood-return-period tiles using `application/x-protobuf`. The query endpoint
-`/api/v1/tiles/flood-return-period` remains bounded GeoJSON compatibility for
-small/degraded views only; national rendering should use layer metadata from
-`/api/v1/layers` and MapLibre vector sources. Deterministic CI validates the
-MVT contract, Web Mercator XYZ validation, PostGIS-oriented SQL shape, cache
-identity, frontend metadata selection, and evidence schema. Live PostGIS and
-national-data proof remains opt-in and must be recorded as `not_executed` or a
+M16 defines canonical hydrology MVT endpoints for river-network, hydro, and
+flood-return-period tiles using `application/x-protobuf`, but those `.pbf`
+routes are live-PostGIS-only at runtime. If live PostGIS MVT is unavailable,
+the routes return `MVT_LIVE_POSTGIS_UNAVAILABLE` before national row
+materialization. The query endpoint `/api/v1/tiles/flood-return-period`
+remains bounded GeoJSON compatibility for explicitly scoped views only;
+national rendering should use layer metadata from `/api/v1/layers` and
+MapLibre vector sources. Deterministic CI validates the contract artifacts,
+Web Mercator XYZ validation, PostGIS-oriented SQL shape, cache identity,
+frontend metadata selection, and evidence schema. Live PostGIS, national-data,
+and browser proof remains opt-in and must be recorded as `not_executed` or a
 release blocker until target-environment validation passes; deterministic MVT
 evidence alone must not set `production_mvt_readiness_claimed=true`.
 
@@ -625,9 +628,9 @@ Evidence is written under
   alert summary/ranking/timeline/map, forecast series, jobs/logs, and tile
   metadata row counts, plan text/hash, finite latency samples, p95, threshold
   comparison, `live_db_executed=false`, and `live_api_executed=false`.
-- `tile_evidence.json`: observed tile content type, max-byte comparison,
-  endpoint references, layer metadata, deterministic MVT metrics when
-  `application/x-protobuf` is expected, and blocker status.
+- `tile_evidence.json`: observed tile content type from deterministic contract
+  artifacts, max-byte comparison, endpoint references, layer metadata,
+  deterministic MVT metrics when measured artifacts exist, and blocker status.
 - `frontend_large_layer_evidence.json`: desktop/mobile load, render, timeline,
   chart, memory, lineage, recoverable oversized/unavailable behavior, and
   `live_frontend_executed=false`.
@@ -641,10 +644,12 @@ Evidence is written under
 MVT blocker semantics are explicit. In the default GeoJSON compatibility mode
 the lane may be `ready`, but `production_mvt_readiness_claimed=false`. If
 `application/x-protobuf` is expected, deterministic MVT contract evidence can
-pass while live PostGIS/national/browser proof remains `not_executed`; the lane
-writes `PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED`, lists affected tile endpoints
-and removal criteria, and the summary remains `blocked` until target-environment
-proof passes.
+pass only from measured contract artifacts while live PostGIS/national/browser
+proof remains `not_executed`; the lane writes
+`PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED`, lists affected tile endpoints and
+removal criteria, and the summary remains `blocked` until target-environment
+proof passes. A protobuf expectation by itself is recorded as blocked rather
+than as deterministic pass evidence.
 
 Reusing a run ID refuses to overwrite the existing bundle unless `--force` is
 supplied. Unsafe run IDs, symlinked evidence paths, unsafe object/API values,
