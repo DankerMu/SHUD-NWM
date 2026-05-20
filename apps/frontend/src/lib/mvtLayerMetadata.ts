@@ -28,10 +28,11 @@ export function buildMvtTileUrlTemplate(
   for (const [key, value] of Object.entries(replacements)) {
     template = template.replaceAll(`{${key}}`, encodeURIComponent(value))
   }
-  return buildApiUrl(template)
+  const url = buildApiUrl(template)
     .replaceAll('%7Bz%7D', '{z}')
     .replaceAll('%7Bx%7D', '{x}')
     .replaceAll('%7By%7D', '{y}')
+  return appendMvtCacheVersion(url, metadata)
 }
 
 export async function fetchLayerCatalogMetadata(signal?: AbortSignal): Promise<components['schemas']['Layer'][]> {
@@ -48,4 +49,28 @@ function isLayerRecord(value: unknown): value is components['schemas']['Layer'] 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function appendMvtCacheVersion(url: string, metadata: MvtLayerMetadata): string {
+  const token = mvtCacheVersionToken(metadata)
+  if (!token) return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}_mvt_cache_version=${encodeURIComponent(token)}`
+}
+
+function mvtCacheVersionToken(metadata: MvtLayerMetadata): string | null {
+  if (metadata.cache_version) return metadata.cache_version
+  if (metadata.cache_etag) return metadata.cache_etag
+  const basis = {
+    encoder_version: metadata.encoder_version ?? null,
+    schema_version: metadata.schema_version ?? metadata.property_schema_version ?? null,
+    source_refs: stableRecord(metadata.source_refs ?? null),
+  }
+  if (!basis.encoder_version && !basis.schema_version && !basis.source_refs) return null
+  return JSON.stringify(basis)
+}
+
+function stableRecord(value: unknown): unknown {
+  if (!isRecord(value)) return value ?? null
+  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
 }

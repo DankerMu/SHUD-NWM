@@ -902,7 +902,15 @@ def test_flood_mvt_live_postgis_returns_raw_bytes_and_binds_requested_xyz(monkey
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_frequency_ready",
-        lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+        lambda _session, _run_id: {
+            "run_id": RUN_ID,
+            "status": "frequency_done",
+            "river_network_version_id": "rnv_v1",
+            "basin_version_id": "basin_v1",
+            "source_id": "GFS",
+            "cycle_time": datetime(2026, 5, 3, tzinfo=UTC),
+            "updated_at": datetime(2026, 5, 3, 1, tzinfo=UTC),
+        },
     )
     app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
     try:
@@ -1188,53 +1196,9 @@ def test_live_mvt_route_cache_hit_skips_postgis_fetch(
 ) -> None:
     with _store() as session:
         monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
-        monkeypatch.setattr(
-            flood_alert_routes,
-            "_require_run",
-            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
-        )
-        monkeypatch.setattr(
-            flood_alert_routes,
-            "_require_frequency_ready",
-            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
-        )
-        if seed_tile.layer_id == "flood-return-period":
-            source_version = flood_alert_routes._mutable_source_version(
-                seed_tile.source_version,
-                flood_alert_routes._flood_return_period_data_revision(
-                    session,
-                    run_id=seed_tile.source_id,
-                    duration="1h",
-                    valid_time=VALID_TIME_1,
-                ),
-            )
-        elif seed_tile.layer_id in {"discharge", "water-level"}:
-            source_version = flood_alert_routes._mutable_source_version(
-                seed_tile.source_version,
-                flood_alert_routes._hydro_timeseries_data_revision(
-                    session,
-                    run_id=seed_tile.source_id,
-                    variable="q_down" if seed_tile.layer_id == "discharge" else "water_level",
-                    valid_time=VALID_TIME_1,
-                ),
-            )
-        else:
-            source_version = seed_tile.source_version
         seeded = flood_alert_routes.build_raw_tile_response(
             session,
-            flood_alert_routes.TileInput(
-                layer_id=seed_tile.layer_id,
-                source_id=seed_tile.source_id,
-                source_version=source_version,
-                valid_time=seed_tile.valid_time,
-                z=seed_tile.z,
-                x=seed_tile.x,
-                y=seed_tile.y,
-                style_id=seed_tile.style_id,
-                variant_id=seed_tile.variant_id,
-                schema_version=seed_tile.schema_version,
-                encoder_version=seed_tile.encoder_version,
-            ),
+            _with_route_source_version(session, seed_tile),
             b"cached-live-tile",
         )
 
@@ -1306,7 +1270,7 @@ def test_live_mvt_route_cache_hit_skips_postgis_fetch(
         ),
     ],
 )
-def test_seeded_live_mvt_cache_hit_still_requires_live_postgis(
+def test_seeded_live_mvt_cache_hit_succeeds_with_live_postgis_disabled(
     monkeypatch: pytest.MonkeyPatch,
     path: str,
     seed_tile: flood_alert_routes.TileInput,
@@ -1314,18 +1278,12 @@ def test_seeded_live_mvt_cache_hit_still_requires_live_postgis(
 ) -> None:
     with _store() as session:
         monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
-        flood_alert_routes.build_raw_tile_response(session, seed_tile, b"cached-live-tile")
+        seeded = flood_alert_routes.build_raw_tile_response(
+            session,
+            _with_route_source_version(session, seed_tile),
+            b"cached-live-tile",
+        )
         monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: False)
-        monkeypatch.setattr(
-            flood_alert_routes,
-            "_require_run",
-            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
-        )
-        monkeypatch.setattr(
-            flood_alert_routes,
-            "_require_frequency_ready",
-            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
-        )
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
         try:
             with TestClient(app) as client:
@@ -1333,10 +1291,11 @@ def test_seeded_live_mvt_cache_hit_still_requires_live_postgis(
         finally:
             app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
 
-    assert response.status_code == 424
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json()["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
-    assert response.json()["error"]["details"]["layer_id"] == expected_layer
+    assert response.status_code == 200
+    assert response.content == b"cached-live-tile"
+    assert response.headers["x-tile-cache"] == "hit"
+    assert response.headers["x-tile-layer-id"] == expected_layer
+    assert response.headers["x-tile-cache-key"] == seeded.cache_key
 
 
 @pytest.mark.parametrize(
@@ -1441,17 +1400,12 @@ def test_canonical_mvt_route_invalid_cache_rows_are_misses_without_serving_cache
 ) -> None:
     with _store() as session:
         monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
-        monkeypatch.setattr(
-            flood_alert_routes,
-            "_require_run",
-            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+        _seed_mvt_cache_row(
+            session,
+            _with_route_source_version(session, seed_tile),
+            b"invalid-cached-pbf",
+            **invalid_overrides,
         )
-        monkeypatch.setattr(
-            flood_alert_routes,
-            "_require_frequency_ready",
-            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
-        )
-        _seed_mvt_cache_row(session, seed_tile, b"invalid-cached-pbf", **invalid_overrides)
         monkeypatch.setattr(flood_alert_routes, fetch_name, lambda *_args, **_kwargs: b"fresh-live-pbf")
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
         try:
@@ -1563,16 +1517,6 @@ def test_canonical_mvt_route_first_request_writes_fk_backed_cache_then_second_hi
 ) -> None:
     with _store() as session:
         monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
-        monkeypatch.setattr(
-            flood_alert_routes,
-            "_require_run",
-            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
-        )
-        monkeypatch.setattr(
-            flood_alert_routes,
-            "_require_frequency_ready",
-            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
-        )
         monkeypatch.setattr(flood_alert_routes, fetch_name, lambda *_args, **_kwargs: b"fresh-route-tile")
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
         try:
@@ -1671,7 +1615,7 @@ def test_river_network_cache_identity_changes_with_model_instance_version_set(
     assert layer_source_version == ("basin_v1", RIVER_NETWORK_SOURCE_VERSION_V1_V2)
 
 
-def test_flood_mvt_cache_identity_changes_when_return_period_rows_mutate(
+def test_flood_mvt_cache_identity_changes_when_run_updated_at_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf"
@@ -1695,17 +1639,12 @@ def test_flood_mvt_cache_identity_changes_when_return_period_rows_mutate(
                 session.execute(
                     text(
                         """
-                        UPDATE flood.return_period_result
-                        SET q_value = q_value + 111.0,
-                            return_period = return_period + 1.0,
-                            warning_level = 'severe'
+                        UPDATE hydro.hydro_run
+                        SET updated_at = :updated_at
                         WHERE run_id = :run_id
-                          AND duration = '1h'
-                          AND valid_time = :valid_time
-                          AND max_over_window = false
                         """
                     ),
-                    {"run_id": RUN_ID, "valid_time": VALID_TIME_1},
+                    {"run_id": RUN_ID, "updated_at": datetime(2026, 5, 3, 2, tzinfo=UTC)},
                 )
                 session.commit()
                 monkeypatch.setattr(
@@ -1740,11 +1679,11 @@ def test_flood_mvt_cache_identity_changes_when_return_period_rows_mutate(
     assert second.content == b"flood-tile-v2"
     assert second.headers["x-tile-cache-key"] != first_key
     assert first_source_version != second_source_version
-    assert all("data-revision:flood-return-period" in row["source_version"] for row in cache_rows)
+    assert all("run-revision:" in row["source_version"] for row in cache_rows)
     assert {bytes(row["tile_data"]) for row in cache_rows} == {b"flood-tile-v1", b"flood-tile-v2"}
 
 
-def test_hydro_mvt_cache_identity_changes_when_timeseries_rows_mutate(
+def test_hydro_mvt_cache_identity_changes_when_run_updated_at_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf"
@@ -1768,15 +1707,12 @@ def test_hydro_mvt_cache_identity_changes_when_timeseries_rows_mutate(
                 session.execute(
                     text(
                         """
-                        UPDATE hydro.river_timeseries
-                        SET value = value + 222.0,
-                            quality_flag = 'corrected'
+                        UPDATE hydro.hydro_run
+                        SET updated_at = :updated_at
                         WHERE run_id = :run_id
-                          AND variable = 'q_down'
-                          AND valid_time = :valid_time
                         """
                     ),
-                    {"run_id": RUN_ID, "valid_time": VALID_TIME_1},
+                    {"run_id": RUN_ID, "updated_at": datetime(2026, 5, 3, 3, tzinfo=UTC)},
                 )
                 session.commit()
                 monkeypatch.setattr(
@@ -1811,8 +1747,44 @@ def test_hydro_mvt_cache_identity_changes_when_timeseries_rows_mutate(
     assert second.content == b"hydro-tile-v2"
     assert second.headers["x-tile-cache-key"] != first_key
     assert first_source_version != second_source_version
-    assert all("data-revision:hydro" in row["source_version"] for row in cache_rows)
+    assert all("run-revision:" in row["source_version"] for row in cache_rows)
     assert {bytes(row["tile_data"]) for row in cache_rows} == {b"hydro-tile-v1", b"hydro-tile-v2"}
+
+
+def test_layer_metadata_cache_identity_changes_when_run_updated_at_changes() -> None:
+    with _store() as session:
+        old_metadata = {
+            layer.layer_id: layer.metadata or {}
+            for layer in flood_alert_routes._default_layer_catalog(
+                session,
+                run_id=RUN_ID,
+                source_version=flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID)),
+                basin_version_id="basin_v1",
+            )
+        }
+        session.execute(
+            text("UPDATE hydro.hydro_run SET updated_at = :updated_at WHERE run_id = :run_id"),
+            {"run_id": RUN_ID, "updated_at": datetime(2026, 5, 3, 4, tzinfo=UTC)},
+        )
+        session.commit()
+        new_metadata = {
+            layer.layer_id: layer.metadata or {}
+            for layer in flood_alert_routes._default_layer_catalog(
+                session,
+                run_id=RUN_ID,
+                source_version=flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID)),
+                basin_version_id="basin_v1",
+            )
+        }
+
+    for layer_id in ("discharge", "water-level", "flood-return-period", "warning-level"):
+        assert old_metadata[layer_id]["source_refs"]["run_id"] == RUN_ID
+        assert (
+            old_metadata[layer_id]["source_refs"]["source_version"]
+            != new_metadata[layer_id]["source_refs"]["source_version"]
+        )
+        assert old_metadata[layer_id]["cache_version"] != new_metadata[layer_id]["cache_version"]
+        assert old_metadata[layer_id]["cache_etag"] != new_metadata[layer_id]["cache_etag"]
 
 
 def test_mvt_cache_fixture_enforces_tile_layer_fk() -> None:
@@ -2842,10 +2814,37 @@ def test_advertised_mvt_layer_cache_identity_matches_route_or_declared_alias(
                 app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
         layers = {layer["layer_id"]: layer["metadata"] for layer in response.json()["data"]}
         for layer_id, tile_input in route_inputs.items():
-            receipt = flood_alert_routes.build_raw_tile_response(session, tile_input, f"{layer_id}-tile".encode())
             metadata = layers[layer_id]
+            advertised_run_id = metadata["source_refs"].get("run_id")
+            route_tile_input = (
+                flood_alert_routes.TileInput(
+                    layer_id=tile_input.layer_id,
+                    source_id=advertised_run_id,
+                    source_version=tile_input.source_version,
+                    valid_time=tile_input.valid_time,
+                    z=tile_input.z,
+                    x=tile_input.x,
+                    y=tile_input.y,
+                    style_id=tile_input.style_id,
+                    variant_id=tile_input.variant_id,
+                    schema_version=tile_input.schema_version,
+                    encoder_version=tile_input.encoder_version,
+                )
+                if layer_id != "river-network"
+                else tile_input
+            )
+            receipt = flood_alert_routes.build_raw_tile_response(
+                session,
+                _with_route_source_version(session, route_tile_input),
+                f"{layer_id}-tile".encode(),
+            )
             expected_layer_id = metadata["cache_layer_id"]
             assert receipt.layer_id == expected_layer_id
+            if layer_id != "river-network":
+                source_version = flood_alert_routes._run_source_version(
+                    flood_alert_routes._require_run(session, advertised_run_id)
+                )
+                assert metadata["source_refs"]["source_version"] == source_version
             assert session.execute(
                 text("SELECT COUNT(*) FROM map.tile_layer WHERE layer_id = :layer_id"),
                 {"layer_id": expected_layer_id},
@@ -3162,6 +3161,28 @@ def _seed_mvt_cache_row(session: Session, tile: flood_alert_routes.TileInput, da
     session.commit()
 
 
+def _route_tile_source_version(session: Session, tile: flood_alert_routes.TileInput) -> str:
+    if tile.layer_id == "river-network":
+        return flood_alert_routes._river_network_source_version(session, tile.source_id)
+    return flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, tile.source_id))
+
+
+def _with_route_source_version(session: Session, tile: flood_alert_routes.TileInput) -> flood_alert_routes.TileInput:
+    return flood_alert_routes.TileInput(
+        layer_id=tile.layer_id,
+        source_id=tile.source_id,
+        source_version=_route_tile_source_version(session, tile),
+        valid_time=tile.valid_time,
+        z=tile.z,
+        x=tile.x,
+        y=tile.y,
+        style_id=tile.style_id,
+        variant_id=tile.variant_id,
+        schema_version=tile.schema_version,
+        encoder_version=tile.encoder_version,
+    )
+
+
 def _attach_schemas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
     def _attach(dbapi_connection: Any, _connection_record: Any) -> None:
@@ -3221,7 +3242,8 @@ def _create_tables(connection: Any) -> None:
                 start_time DATETIME NOT NULL,
                 end_time DATETIME NOT NULL,
                 status TEXT NOT NULL,
-                run_manifest_uri TEXT NOT NULL
+                run_manifest_uri TEXT NOT NULL,
+                updated_at DATETIME
             )
             """
         )
@@ -3406,11 +3428,11 @@ def _seed_data(connection: Any) -> None:
                 """
                 INSERT INTO hydro.hydro_run (
                     run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
-                    start_time, end_time, status, run_manifest_uri
+                    start_time, end_time, status, run_manifest_uri, updated_at
                 )
                 VALUES (
                     :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
-                    'GFS', :cycle_time, :start_time, :end_time, :status, 'object://manifest'
+                    'GFS', :cycle_time, :start_time, :end_time, :status, 'object://manifest', :updated_at
                 )
                 """
             ),
@@ -3420,6 +3442,7 @@ def _seed_data(connection: Any) -> None:
                 "cycle_time": datetime(2026, 5, 3, tzinfo=UTC),
                 "start_time": datetime(2026, 5, 3, tzinfo=UTC),
                 "end_time": datetime(2026, 5, 10, tzinfo=UTC),
+                "updated_at": datetime(2026, 5, 3, 1, tzinfo=UTC),
             },
         )
     _insert_result(connection, "seg_001", "basin_v1", "rnv_v1", VALID_TIME_2, 100.0, 1.5, "normal", True)

@@ -14,7 +14,6 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
@@ -31,7 +30,6 @@ from services.tiles.mvt import (
     SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS,
     SUPPORTED_HYDRO_MVT_VARIABLES,
     TileInput,
-    _table_columns,
     build_raw_tile_response,
     build_tile_response,
     canonical_mvt_time,
@@ -236,7 +234,7 @@ def list_layers(
     run = latest_ready_run(session)
     run_id = str(run["run_id"]) if run else None
     basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
-    source_version = str(run.get("river_network_version_id") or run.get("basin_version_id")) if run else None
+    source_version = _run_source_version(run) if run else None
     river_network_source_version = (
         _river_network_source_version(session, basin_version_id) if basin_version_id is not None else source_version
     )
@@ -739,10 +737,7 @@ def flood_return_period_mvt_tile(
     _validate_supported_flood_duration(duration)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
-    source_version = _mutable_source_version(
-        str(run.get("river_network_version_id") or run.get("basin_version_id") or run_id),
-        _flood_return_period_data_revision(session, run_id=run_id, duration=duration, valid_time=valid_time),
-    )
+    source_version = _run_source_version(run)
     tile_input = TileInput(
         layer_id="flood-return-period",
         source_id=run_id,
@@ -753,10 +748,10 @@ def flood_return_period_mvt_tile(
         y=y,
         variant_id=f"duration:{duration}",
     )
-    _require_live_postgis_mvt(session, tile_input.layer_id)
     cached = read_cached_tile_response(session, tile_input)
     if cached is not None:
         return _mvt_response(cached)
+    _require_live_postgis_mvt(session, tile_input.layer_id)
     data = _fetch_flood_mvt_tile_bytes(
         session,
         run_id=run_id,
@@ -788,10 +783,7 @@ def hydro_mvt_tile(
     _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
     run = _require_run(session, run_id)
-    source_version = _mutable_source_version(
-        str(run.get("river_network_version_id") or run.get("basin_version_id") or run_id),
-        _hydro_timeseries_data_revision(session, run_id=run_id, variable=variable, valid_time=valid_time),
-    )
+    source_version = _run_source_version(run)
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
         source_id=run_id,
@@ -802,10 +794,10 @@ def hydro_mvt_tile(
         y=y,
         variant_id=f"variable:{variable}",
     )
-    _require_live_postgis_mvt(session, tile_input.layer_id)
     cached = read_cached_tile_response(session, tile_input)
     if cached is not None:
         return _mvt_response(cached)
+    _require_live_postgis_mvt(session, tile_input.layer_id)
     data = _fetch_hydro_mvt_tile_bytes(
         session,
         run_id=run_id,
@@ -832,7 +824,6 @@ def river_network_mvt_tile(
 ) -> Response:
     validate_identifier(basin_version_id, "basin_version_id")
     validate_xyz(z, x, y)
-    _require_live_postgis_mvt(session, "river-network")
     source_version = _river_network_source_version(session, basin_version_id)
     tile_input = TileInput(
         layer_id="river-network",
@@ -846,6 +837,7 @@ def river_network_mvt_tile(
     cached = read_cached_tile_response(session, tile_input)
     if cached is not None:
         return _mvt_response(cached)
+    _require_live_postgis_mvt(session, "river-network")
     data = _fetch_river_network_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y)
     return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
@@ -1070,197 +1062,29 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
     return f"river-network-set:{digest}:{joined}"
 
 
-def _mutable_source_version(base_version: str, data_revision: str) -> str:
-    return f"{base_version};data-revision:{data_revision}"
-
-
-def _flood_return_period_data_revision(
-    session: Session,
-    *,
-    run_id: str,
-    duration: str,
-    valid_time: datetime,
-) -> str:
-    columns = _safe_table_columns(session, "return_period_result", "flood")
-    if not columns:
-        return "flood-return-period:unknown-schema"
-    row_hash_sql = _row_revision_sql(
-        [
-            "river_network_version_id",
-            "river_segment_id",
-            "basin_version_id",
-            "model_id",
-            "q_value",
-            "q_unit",
-            "return_period",
-            "warning_level",
-            "source_id",
-            "cycle_time",
-            "quality_flag",
-        ],
-        columns,
-    )
-    return _data_revision(
-        session,
-        scope="flood-return-period",
-        table="flood.return_period_result",
-        row_hash_sql=row_hash_sql,
-        timestamp_columns=[column for column in ("updated_at", "created_at") if column in columns],
-        where_sql="""
-            run_id = :run_id
-            AND duration = :duration
-            AND valid_time = :valid_time
-            AND max_over_window = false
-        """,
-        params={"run_id": run_id, "duration": duration, "valid_time": valid_time},
-        order_by=[
-            column
-            for column in ("river_network_version_id", "river_segment_id", "duration", "valid_time")
-            if column in columns
-        ],
-    )
-
-
-def _hydro_timeseries_data_revision(
-    session: Session,
-    *,
-    run_id: str,
-    variable: str,
-    valid_time: datetime,
-) -> str:
-    columns = _safe_table_columns(session, "river_timeseries", "hydro")
-    if not columns:
-        return "hydro:unknown-schema"
-    row_hash_sql = _row_revision_sql(
-        [
-            "river_network_version_id",
-            "river_segment_id",
-            "basin_version_id",
-            "value",
-            "unit",
-            "quality_flag",
-            "lead_time_hours",
-        ],
-        columns,
-    )
-    return _data_revision(
-        session,
-        scope="hydro",
-        table="hydro.river_timeseries",
-        row_hash_sql=row_hash_sql,
-        timestamp_columns=[column for column in ("updated_at", "created_at") if column in columns],
-        where_sql="""
-            run_id = :run_id
-            AND variable = :variable
-            AND valid_time = :valid_time
-        """,
-        params={"run_id": run_id, "variable": variable, "valid_time": valid_time},
-        order_by=[
-            column
-            for column in ("river_network_version_id", "river_segment_id", "variable", "valid_time")
-            if column in columns
-        ],
-    )
-
-
-def _data_revision(
-    session: Session,
-    *,
-    scope: str,
-    table: str,
-    row_hash_sql: str,
-    timestamp_columns: list[str],
-    where_sql: str,
-    params: dict[str, Any],
-    order_by: list[str],
-) -> str:
-    timestamp_sql = _timestamp_revision_sql(timestamp_columns)
-    if session.get_bind().dialect.name == "sqlite":
-        rows = session.execute(
-            text(
-                f"""
-                SELECT {row_hash_sql} AS row_payload, {timestamp_sql} AS revision_time
-                FROM {table}
-                WHERE {where_sql}
-                ORDER BY {", ".join(order_by) if order_by else "row_payload"}
-                """
-            ),
-            params,
-        ).mappings().all()
-        return _revision_from_payloads(scope, [str(row["row_payload"]) for row in rows], rows)
-    aggregate_order_by = ", ".join(order_by) if order_by else row_hash_sql
-    row = session.execute(
-        text(
-            f"""
-            SELECT COUNT(*) AS row_count,
-                   COALESCE(MD5(STRING_AGG({row_hash_sql}, E'\\n' ORDER BY {aggregate_order_by})), '') AS payload_hash,
-                   MAX({timestamp_sql}) AS revision_time
-            FROM {table}
-            WHERE {where_sql}
-            """
-        ),
-        params,
-    ).mappings().first()
-    return _revision_from_row(scope, row)
-
-
-def _row_revision_sql(candidate_columns: list[str], available_columns: set[str]) -> str:
-    parts = [f"COALESCE(CAST({column} AS TEXT), '')" for column in candidate_columns if column in available_columns]
-    if not parts:
-        return "''"
-    return " || '|' || ".join(parts)
-
-
-def _safe_table_columns(session: Session, table_name: str, schema: str) -> set[str]:
-    try:
-        return _table_columns(session, table_name, schema)
-    except (AssertionError, SQLAlchemyError):
-        return set()
-
-
-def _timestamp_revision_sql(timestamp_columns: list[str]) -> str:
-    if not timestamp_columns:
-        return "NULL"
-    preferred_columns = [column for column in ("updated_at", "created_at") if column in timestamp_columns]
-    return "COALESCE(" + ", ".join(f"CAST({column} AS TEXT)" for column in preferred_columns) + ", '')"
-
-
-def _revision_from_payloads(scope: str, payloads: list[str], rows: list[Any]) -> str:
-    revision_time = "none"
-    if rows:
-        revision_time = max(
-            canonical_mvt_time(row.get("revision_time")) or "none"
-            for row in rows
-        )
-    payload_hash = hashlib.sha256("\n".join(payloads).encode("utf-8")).hexdigest()
-    return _format_data_revision(scope, len(payloads), revision_time, payload_hash)
-
-
-def _revision_from_row(scope: str, row: Any) -> str:
-    if row is None:
-        return _format_data_revision(scope, 0, "none", "")
-    row_count = int(row.get("row_count") or 0)
-    revision_time = canonical_mvt_time(row.get("revision_time")) or "none"
-    payload_hash = str(row.get("payload_hash") or "")
-    return _format_data_revision(scope, row_count, revision_time, payload_hash)
-
-
-def _format_data_revision(scope: str, row_count: int, revision_time: str, payload_hash: str) -> str:
-    basis = {
-        "scope": scope,
-        "row_count": row_count,
-        "revision_time": revision_time,
-        "payload_hash": payload_hash,
+def _run_source_version(run: dict[str, Any] | Any) -> str:
+    base_version = str(run.get("river_network_version_id") or run.get("basin_version_id") or run.get("run_id"))
+    revision_basis = {
+        "basin_version_id": run.get("basin_version_id"),
+        "cycle_time": canonical_mvt_time(run.get("cycle_time")),
+        "river_network_version_id": run.get("river_network_version_id"),
+        "run_id": run.get("run_id"),
+        "source_id": run.get("source_id"),
+        "status": run.get("status"),
+        "updated_at": canonical_mvt_time(run.get("updated_at")),
     }
-    digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
-    return f"{scope}:rows:{row_count}:time:{revision_time}:hash:{digest}"
+    digest = hashlib.sha256(
+        json.dumps(revision_basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{base_version};run-revision:{digest}"
 
 
 def _require_frequency_ready(session: Session, run_id: str) -> dict[str, Any]:
     row = session.execute(
         text(
             """
-            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, mi.river_network_version_id
+            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time,
+                   h.updated_at, mi.river_network_version_id
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
             WHERE h.run_id = :run_id
@@ -1290,7 +1114,8 @@ def _require_run(session: Session, run_id: str) -> dict[str, Any]:
     row = session.execute(
         text(
             """
-            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, mi.river_network_version_id
+            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time,
+                   h.updated_at, mi.river_network_version_id
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
             WHERE h.run_id = :run_id

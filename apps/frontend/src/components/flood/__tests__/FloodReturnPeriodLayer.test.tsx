@@ -108,7 +108,7 @@ describe('FloodReturnPeriodLayer', () => {
 
     expect(DEFAULT_FLOOD_RETURN_PERIOD_DURATION).toBe('1h')
     expect(url).toBe(
-      'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf',
+      'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf?_mvt_cache_version=cache-v1',
     )
   })
 
@@ -122,7 +122,7 @@ describe('FloodReturnPeriodLayer', () => {
     await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
     expect(sourceProps.at(-1)).toMatchObject({
       tiles: [
-        'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf',
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf?_mvt_cache_version=cache-v1',
       ],
     })
     expect(floodReturnPeriodLayer(null, 'flood_return_period')).toMatchObject({ 'source-layer': 'flood_return_period' })
@@ -144,7 +144,7 @@ describe('FloodReturnPeriodLayer', () => {
     await waitFor(() => expect(sourceProps.at(-1)).not.toBe(initialSource))
     expect(sourceProps.at(-1)).toMatchObject({
       tiles: [
-        'https://api.example.test/api/v1/tiles/flood-return-period/run-2/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf',
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-2/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf?_mvt_cache_version=cache-v1',
       ],
     })
     const runChangedSource = sourceProps.at(-1)
@@ -153,7 +153,7 @@ describe('FloodReturnPeriodLayer', () => {
     await waitFor(() => expect(sourceProps.at(-1)).not.toBe(runChangedSource))
     expect(sourceProps.at(-1)).toMatchObject({
       tiles: [
-        'https://api.example.test/api/v1/tiles/flood-return-period/run-2/1h/2026-05-03T12%3A00%3A00Z/{z}/{x}/{y}.pbf',
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-2/1h/2026-05-03T12%3A00%3A00Z/{z}/{x}/{y}.pbf?_mvt_cache_version=cache-v1',
       ],
     })
     const timeChangedSource = sourceProps.at(-1)
@@ -166,7 +166,13 @@ describe('FloodReturnPeriodLayer', () => {
       />,
     )
     await waitFor(() => expect(sourceProps.at(-1)).not.toBe(timeChangedSource))
-    expect(sourceProps.at(-1)).toMatchObject({ id: FLOOD_TILE_SOURCE_ID, type: 'vector' })
+    expect(sourceProps.at(-1)).toMatchObject({
+      id: FLOOD_TILE_SOURCE_ID,
+      type: 'vector',
+      tiles: [
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-2/1h/2026-05-03T12%3A00%3A00Z/{z}/{x}/{y}.pbf?_mvt_cache_version=cache-v2',
+      ],
+    })
   })
 
   it('blocks direct release-blocking metadata without GeoJSON fallback', async () => {
@@ -209,7 +215,7 @@ describe('FloodReturnPeriodLayer', () => {
     await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
     expect(sourceProps.at(-1)).toMatchObject({
       tiles: [
-        'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T07%3A17%3A00.000Z/{z}/{x}/{y}.pbf',
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T07%3A17%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=cache-v1',
       ],
     })
   })
@@ -400,7 +406,9 @@ describe('FloodReturnPeriodLayer', () => {
       />,
     )
 
-    expect(await screen.findByTestId('flood-return-period-unavailable')).toHaveTextContent('已阻止无边界 GeoJSON')
+    await waitFor(() =>
+      expect(screen.getByTestId('flood-return-period-unavailable')).toHaveTextContent('已阻止无边界 GeoJSON'),
+    )
     expect(sourceProps).toHaveLength(0)
   })
 

@@ -550,7 +550,7 @@ describe('M11 visual foundation shell', () => {
       type: 'vector',
       promoteId: 'feature_id',
       tiles: [
-        '/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf',
+        '/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=flood-cache-v1',
       ],
     })
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
@@ -579,7 +579,9 @@ describe('M11 visual foundation shell', () => {
     expect(mapSources.at(-1)).toMatchObject({
       id: 'm11-discharge-source',
       type: 'vector',
-      tiles: ['/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf'],
+      tiles: [
+        '/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-cache-v1',
+      ],
     })
     const paint = JSON.stringify(mapLayers.at(-1)?.paint)
     expect(paint).toContain('value')
@@ -608,7 +610,9 @@ describe('M11 visual foundation shell', () => {
     expect(mapSources.at(-1)).toMatchObject({
       id: 'm11-water-level-source',
       type: 'vector',
-      tiles: ['/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf'],
+      tiles: [
+        '/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=water-level-cache-v1',
+      ],
     })
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
     const paint = JSON.stringify(mapLayers.at(-1)?.paint)
@@ -695,6 +699,9 @@ describe('M11 visual foundation shell', () => {
     expect(dischargeOverlay?.sourceKey).not.toEqual(waterLevelOverlay?.sourceKey)
     expect(floodOverlay?.sourceKey).not.toEqual(floodRunChanged?.sourceKey)
     expect(floodOverlay?.sourceKey).not.toEqual(floodCacheChanged?.sourceKey)
+    expect(floodOverlay?.source.tiles[0]).toContain('_mvt_cache_version=flood-cache-v1')
+    expect(floodCacheChanged?.source.tiles[0]).toContain('_mvt_cache_version=flood-cache-v2')
+    expect(floodOverlay?.source.tiles).not.toEqual(floodCacheChanged?.source.tiles)
     expect(warningOverlay?.source.tiles).toEqual(floodOverlay?.source.tiles)
     expect(warningOverlay?.sourceKey).not.toEqual(floodOverlay?.sourceKey)
   })

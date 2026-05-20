@@ -753,7 +753,7 @@ def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
     row = session.execute(
         text(
             """
-            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time,
+            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time, h.updated_at,
                    mi.river_network_version_id
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
