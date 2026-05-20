@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from apps.api.auth import trusted_internal_policy_decision
 from apps.api.main import app
 from apps.api.routes import forecast as forecast_routes
 from apps.api.routes import hindcast as hindcast_routes
@@ -449,6 +450,13 @@ def test_hindcast_submit_cli_marks_created_run_failed_when_forcing_preflight_fai
                 "1993-01-01T00:00:00Z",
                 "1993-12-31T23:00:00Z",
                 "flood_frequency_sample",
+                policy_decision=trusted_internal_policy_decision(
+                    "pipeline.rerun_cycle",
+                    target_type="hindcast",
+                    target_id="yangtze_shud_v12",
+                    actor_id="trusted-internal:test",
+                    roles=("sys_admin",),
+                ),
             )
 
         assert exc_info.value.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
@@ -458,6 +466,63 @@ def test_hindcast_submit_cli_marks_created_run_failed_when_forcing_preflight_fai
         assert run["status"] == "failed"
         assert run["error_code"] == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
         assert run["error_message"] == exc_info.value.message
+
+
+def test_argparse_hindcast_submit_without_policy_rejects_and_does_not_mutate(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "submit_hindcast_slurm", _fail_slurm_submission)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "hindcast-submit",
+                "--model-id",
+                "yangtze_shud_v12",
+                "--source-id",
+                "ERA5",
+                "--start-time",
+                "1993-01-01T00:00:00Z",
+                "--end-time",
+                "1993-12-31T23:00:00Z",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "AUTH_REQUIRED" in captured.err
+        assert _count(session, "hydro.hydro_run") == 0
+
+
+def test_main_hindcast_submit_without_policy_rejects_and_does_not_mutate(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "submit_hindcast_slurm", _fail_slurm_submission)
+
+        with pytest.raises(SystemExit) as exc_info:
+            flood_cli.main(
+                [
+                    "hindcast-submit",
+                    "--model-id",
+                    "yangtze_shud_v12",
+                    "--source-id",
+                    "ERA5",
+                    "--start-time",
+                    "1993-01-01T00:00:00Z",
+                    "--end-time",
+                    "1993-12-31T23:00:00Z",
+                ]
+            )
+
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 1
+        assert "AUTH_REQUIRED" in captured.err
+        assert _count(session, "hydro.hydro_run") == 0
 
 
 def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path) -> None:
@@ -689,6 +754,10 @@ class _FakeSlurmClient:
         assert payload["manifest"]["object_store_root"]
         assert "object_store_prefix" in payload["manifest"]
         return {"job_id": "slurm_array_1", "status": "submitted"}
+
+
+def _fail_slurm_submission(*_args: Any, **_kwargs: Any) -> None:
+    raise AssertionError("Slurm submission must not be attempted without policy evidence")
 
 
 class _ForecastIsolationStore:

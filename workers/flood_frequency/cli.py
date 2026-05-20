@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from apps.api.auth import PolicyDecision
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
@@ -31,9 +32,25 @@ def _session_from_env() -> Session:
     return Session(create_engine(database_url, future=True))
 
 
-def _hindcast_submit(model_id: str, source_id: str, start_time: str, end_time: str, purpose: str) -> dict[str, object]:
+def _hindcast_submit(
+    model_id: str,
+    source_id: str,
+    start_time: str,
+    end_time: str,
+    purpose: str,
+    *,
+    policy_decision: PolicyDecision | None = None,
+) -> dict[str, object]:
     with _session_from_env() as session:
-        result = submit_hindcast(model_id, source_id, start_time, end_time, purpose, session, trusted_internal=True)
+        result = submit_hindcast(
+            model_id,
+            source_id,
+            start_time,
+            end_time,
+            purpose,
+            session,
+            policy_decision=policy_decision,
+        )
         years = _years_from_run_ids(result.run_ids)
         config = HindcastConfig.from_env()
         try:
