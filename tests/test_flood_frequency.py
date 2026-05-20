@@ -313,6 +313,76 @@ def test_argparse_cli_supersede_without_policy_evidence_rejects_and_does_not_mut
         assert _curve_flags(session) == {"model_v1": "ok"}
 
 
+def test_argparse_cli_supersede_missing_auth_without_database_url_returns_auth_required(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    exit_code = flood_cli._argparse_main(_supersede_argv())
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "AUTH_REQUIRED" in captured.err
+    assert "DATABASE_URL_MISSING" not in captured.err
+
+
+def test_argparse_cli_supersede_release_blocked_without_database_url_returns_release_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("AUTH_BACKEND", "saml")
+
+    exit_code = flood_cli._argparse_main(
+        [
+            *_supersede_argv(),
+            "--auth-actor-id",
+            "cli-model-admin",
+            "--auth-role",
+            "model_admin",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "RELEASE_BLOCKED" in captured.err
+    assert "DATABASE_URL_MISSING" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "env", "expected_error"),
+    [
+        ([], {}, "AUTH_REQUIRED"),
+        (["--auth-actor-id", "cli-viewer", "--auth-role", "viewer"], {}, "RBAC_FORBIDDEN"),
+        (
+            ["--auth-actor-id", "cli-model-admin", "--auth-role", "model_admin"],
+            {"AUTH_BACKEND": "saml"},
+            "RELEASE_BLOCKED",
+        ),
+    ],
+)
+def test_argparse_cli_supersede_preflight_does_not_reach_session_for_denials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra_args: list[str],
+    env: dict[str, str],
+    expected_error: str,
+) -> None:
+    def fail_session() -> Session:
+        raise AssertionError("_session_from_env must not be reached before auth preflight allow")
+
+    monkeypatch.setattr(flood_cli, "_session_from_env", fail_session)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    exit_code = flood_cli._argparse_main([*_supersede_argv(), *extra_args])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert expected_error in captured.err
+
+
 def test_argparse_cli_supersede_without_policy_evidence_preflights_before_segment_discovery(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -376,6 +446,40 @@ def test_main_cli_supersede_without_policy_evidence_rejects_and_does_not_mutate(
         assert exc_info.value.code == 1
         assert "AUTH_REQUIRED" in captured.err
         assert _curve_flags(session) == {"model_v1": "ok"}
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "env", "expected_error"),
+    [
+        ([], {}, "AUTH_REQUIRED"),
+        (["--auth-actor-id", "cli-viewer", "--auth-role", "viewer"], {}, "RBAC_FORBIDDEN"),
+        (
+            ["--auth-actor-id", "cli-model-admin", "--auth-role", "model_admin"],
+            {"AUTH_BACKEND": "saml"},
+            "RELEASE_BLOCKED",
+        ),
+    ],
+)
+def test_main_cli_supersede_preflight_does_not_reach_session_for_denials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra_args: list[str],
+    env: dict[str, str],
+    expected_error: str,
+) -> None:
+    def fail_session() -> Session:
+        raise AssertionError("_session_from_env must not be reached before auth preflight allow")
+
+    monkeypatch.setattr(flood_cli, "_session_from_env", fail_session)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(SystemExit) as exc_info:
+        flood_cli.main([*_supersede_argv(), *extra_args])
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert expected_error in captured.err
 
 
 def test_argparse_cli_supersede_with_cli_model_admin_policy_succeeds(
@@ -747,6 +851,20 @@ def _insert_model_v2(session: Session) -> None:
             """
         )
     )
+
+
+def _supersede_argv() -> list[str]:
+    return [
+        "fit-curves",
+        "--model-id",
+        "model_v2",
+        "--segment-id",
+        "seg_001",
+        "--duration",
+        "1h",
+        "--supersede-model-id",
+        "model_v1",
+    ]
 
 
 def _patch_fit_samples(monkeypatch: pytest.MonkeyPatch) -> None:

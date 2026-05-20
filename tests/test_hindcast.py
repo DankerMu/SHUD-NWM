@@ -496,6 +496,72 @@ def test_argparse_hindcast_submit_without_policy_rejects_and_does_not_mutate(
         assert _count(session, "hydro.hydro_run") == 0
 
 
+def test_argparse_hindcast_submit_missing_auth_without_database_url_returns_auth_required(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    exit_code = flood_cli._argparse_main(_hindcast_submit_argv())
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "AUTH_REQUIRED" in captured.err
+    assert "DATABASE_URL_MISSING" not in captured.err
+
+
+def test_argparse_hindcast_submit_release_blocked_without_database_url_returns_release_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("AUTH_BACKEND", "saml")
+
+    exit_code = flood_cli._argparse_main(
+        [
+            *_hindcast_submit_argv(),
+            "--auth-actor-id",
+            "cli-operator",
+            "--auth-role",
+            "operator",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "RELEASE_BLOCKED" in captured.err
+    assert "DATABASE_URL_MISSING" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "env", "expected_error"),
+    [
+        ([], {}, "AUTH_REQUIRED"),
+        (["--auth-actor-id", "cli-viewer", "--auth-role", "viewer"], {}, "RBAC_FORBIDDEN"),
+        (["--auth-actor-id", "cli-operator", "--auth-role", "operator"], {"AUTH_BACKEND": "saml"}, "RELEASE_BLOCKED"),
+    ],
+)
+def test_argparse_hindcast_submit_preflight_does_not_reach_session_for_denials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra_args: list[str],
+    env: dict[str, str],
+    expected_error: str,
+) -> None:
+    def fail_session() -> Session:
+        raise AssertionError("_session_from_env must not be reached before auth preflight allow")
+
+    monkeypatch.setattr(flood_cli, "_session_from_env", fail_session)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    exit_code = flood_cli._argparse_main([*_hindcast_submit_argv(), *extra_args])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert expected_error in captured.err
+
+
 def test_main_hindcast_submit_without_policy_rejects_and_does_not_mutate(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -523,6 +589,36 @@ def test_main_hindcast_submit_without_policy_rejects_and_does_not_mutate(
         assert exc_info.value.code == 1
         assert "AUTH_REQUIRED" in captured.err
         assert _count(session, "hydro.hydro_run") == 0
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "env", "expected_error"),
+    [
+        ([], {}, "AUTH_REQUIRED"),
+        (["--auth-actor-id", "cli-viewer", "--auth-role", "viewer"], {}, "RBAC_FORBIDDEN"),
+        (["--auth-actor-id", "cli-operator", "--auth-role", "operator"], {"AUTH_BACKEND": "saml"}, "RELEASE_BLOCKED"),
+    ],
+)
+def test_main_hindcast_submit_preflight_does_not_reach_session_for_denials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra_args: list[str],
+    env: dict[str, str],
+    expected_error: str,
+) -> None:
+    def fail_session() -> Session:
+        raise AssertionError("_session_from_env must not be reached before auth preflight allow")
+
+    monkeypatch.setattr(flood_cli, "_session_from_env", fail_session)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(SystemExit) as exc_info:
+        flood_cli.main([*_hindcast_submit_argv(), *extra_args])
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert expected_error in captured.err
 
 
 def test_argparse_hindcast_submit_with_cli_operator_policy_succeeds(
@@ -911,6 +1007,20 @@ def _submit_body() -> dict[str, str]:
         "end_time": "1993-12-31T23:00:00Z",
         "purpose": "flood_frequency_sample",
     }
+
+
+def _hindcast_submit_argv() -> list[str]:
+    return [
+        "hindcast-submit",
+        "--model-id",
+        "yangtze_shud_v12",
+        "--source-id",
+        "ERA5",
+        "--start-time",
+        "1993-01-01T00:00:00Z",
+        "--end-time",
+        "1993-12-31T23:00:00Z",
+    ]
 
 
 @contextmanager

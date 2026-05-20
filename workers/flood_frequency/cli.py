@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from apps.api.auth import PolicyDecision, cli_policy_decision_from_evidence
+from apps.api.auth import PolicyDecision, cli_policy_decision_from_evidence, require_policy_evidence
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
@@ -180,6 +180,76 @@ def _cli_policy_decision(
     )
 
 
+def _require_cli_policy_decision(
+    action_id: str,
+    *,
+    target_type: str,
+    target_id: str,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision:
+    return require_policy_evidence(
+        _cli_policy_decision(
+            action_id,
+            target_type=target_type,
+            target_id=target_id,
+            auth_actor_id=auth_actor_id,
+            auth_roles=auth_roles,
+        ),
+        action_id=action_id,
+        target_type=target_type,
+        target_id=target_id,
+    )
+
+
+def _require_hindcast_submit_cli_policy(
+    model_id: str,
+    *,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision:
+    decision = _require_cli_policy_decision(
+        "pipeline.rerun_cycle",
+        target_type="hindcast",
+        target_id=model_id,
+        auth_actor_id=auth_actor_id,
+        auth_roles=auth_roles,
+    )
+    if decision.decision != "allow":
+        raise HindcastError(
+            decision.reason_code,
+            decision.reason,
+            {"model_id": model_id, "policy_decision": decision.to_dict(), "no_mutation_expected": True},
+        )
+    return decision
+
+
+def _require_supersede_cli_policy(
+    supersede_model_id: str,
+    *,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision:
+    decision = _require_cli_policy_decision(
+        "models.supersede",
+        target_type="model_instance",
+        target_id=supersede_model_id,
+        auth_actor_id=auth_actor_id,
+        auth_roles=auth_roles,
+    )
+    if decision.decision != "allow":
+        raise FrequencyFitError(
+            decision.reason,
+            error_code=decision.reason_code,
+            details={
+                "model_id": supersede_model_id,
+                "policy_decision": decision.to_dict(),
+                "no_mutation_expected": True,
+            },
+        )
+    return decision
+
+
 def _add_argparse_auth_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--auth-actor-id")
     parser.add_argument("--auth-role", action="append", default=[])
@@ -220,10 +290,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         auth_role: tuple[str, ...],
     ) -> None:
         try:
-            policy_decision = _cli_policy_decision(
-                "pipeline.rerun_cycle",
-                target_type="hindcast",
-                target_id=model_id,
+            policy_decision = _require_hindcast_submit_cli_policy(
+                model_id,
                 auth_actor_id=auth_actor_id,
                 auth_roles=auth_role,
             )
@@ -287,10 +355,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     ) -> None:
         try:
             policy_decision = (
-                _cli_policy_decision(
-                    "models.supersede",
-                    target_type="model_instance",
-                    target_id=supersede_model_id,
+                _require_supersede_cli_policy(
+                    supersede_model_id,
                     auth_actor_id=auth_actor_id,
                     auth_roles=auth_role,
                 )
@@ -379,19 +445,18 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "hindcast-submit":
+            policy_decision = _require_hindcast_submit_cli_policy(
+                args.model_id,
+                auth_actor_id=args.auth_actor_id,
+                auth_roles=args.auth_role,
+            )
             result = _hindcast_submit(
                 args.model_id,
                 args.source_id,
                 args.start_time,
                 args.end_time,
                 args.purpose,
-                policy_decision=_cli_policy_decision(
-                    "pipeline.rerun_cycle",
-                    target_type="hindcast",
-                    target_id=args.model_id,
-                    auth_actor_id=args.auth_actor_id,
-                    auth_roles=args.auth_role,
-                ),
+                policy_decision=policy_decision,
             )
             print(json.dumps(result))
             return 0
@@ -402,6 +467,15 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(_hindcast_status(args.model_id), default=str))
             return 0
         if args.command == "fit-curves":
+            policy_decision = (
+                _require_supersede_cli_policy(
+                    args.supersede_model_id,
+                    auth_actor_id=args.auth_actor_id,
+                    auth_roles=args.auth_role,
+                )
+                if args.supersede_model_id and not args.dry_run
+                else None
+            )
             result = _fit_curves(
                 args.model_id,
                 args.segment_id,
@@ -410,17 +484,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 args.dry_run,
                 supersede_model_id=args.supersede_model_id,
                 verbose=args.verbose,
-                policy_decision=(
-                    _cli_policy_decision(
-                        "models.supersede",
-                        target_type="model_instance",
-                        target_id=args.supersede_model_id,
-                        auth_actor_id=args.auth_actor_id,
-                        auth_roles=args.auth_role,
-                    )
-                    if args.supersede_model_id and not args.dry_run
-                    else None
-                ),
+                policy_decision=policy_decision,
             )
             print(json.dumps(result))
             return 0
