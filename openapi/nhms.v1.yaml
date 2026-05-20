@@ -747,7 +747,8 @@ paths:
           schema:
             type: string
             default: 1h
-          description: Aggregation duration such as 1h, 3h, or 24h.
+            enum: [1h, 3h, 6h, 24h, 72h, 7d]
+          description: Supported return-period aggregation duration.
         - name: valid_time
           in: query
           required: true
@@ -805,7 +806,8 @@ paths:
           required: true
           schema:
             type: string
-          description: Aggregation duration such as 1h, 3h, or 24h.
+            enum: [1h, 3h, 6h, 24h, 72h, 7d]
+          description: Supported return-period aggregation duration.
         - $ref: "#/components/parameters/ValidTimePath"
         - $ref: "#/components/parameters/TileZ"
         - $ref: "#/components/parameters/TileX"
@@ -1396,7 +1398,7 @@ paths:
     get:
       operationId: listLayerValidTimes
       summary: List bounded valid times for a map layer
-      description: Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. A true truncated flag means more distinct times were observed than are included in valid_times/items.
+      description: Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. When run_id is supplied, discovery is scoped to that concrete hydro run/source identity. A true truncated flag means more distinct times were observed than are included in valid_times/items.
       tags: [layers]
       parameters:
         - name: layer_id
@@ -1404,6 +1406,12 @@ paths:
           required: true
           schema:
             type: string
+        - name: run_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery.
       responses:
         "200":
           description: Layer valid times
@@ -1661,6 +1669,7 @@ components:
       required: true
       schema:
         type: string
+        enum: [q_down, water_level]
     VariableQuery:
       name: variable
       in: query
@@ -3264,6 +3273,7 @@ components:
         source_refs:
           type: object
           nullable: true
+          description: Concrete source identity used to resolve non-XYZ route placeholders, including run_id and basin_version_id when advertised by required_placeholders.
           additionalProperties: true
         cache_layer_id:
           type: string

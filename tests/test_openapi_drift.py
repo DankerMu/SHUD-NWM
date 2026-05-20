@@ -221,8 +221,10 @@ def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:
     data_schema = response_schema["allOf"][1]["properties"]["data"]
     envelope_schema = spec["components"]["schemas"]["LayerValidTimes"]
     metadata_schema = spec["components"]["schemas"]["LayerMetadata"]
+    run_id_param = _operation_parameter(spec, "/api/v1/layers/{layer_id}/valid-times", "get", "query", "run_id")
 
     assert data_schema["$ref"] == "#/components/schemas/LayerValidTimes"
+    assert run_id_param["required"] is False
     assert envelope_schema["required"] == ["valid_times", "items", "limit", "observed_count", "truncated"]
     assert envelope_schema["properties"]["valid_times"]["type"] == "array"
     assert envelope_schema["properties"]["items"]["type"] == "array"
@@ -232,6 +234,26 @@ def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:
     assert metadata_schema["properties"]["valid_time_limit"]["type"] == "integer"
     assert metadata_schema["properties"]["valid_time_observed_count"]["type"] == "integer"
     assert metadata_schema["properties"]["valid_times_truncated"]["type"] == "boolean"
+    assert "basin_version_id" in metadata_schema["properties"]["source_refs"]["description"]
+
+
+def test_mvt_route_variant_openapi_enums_match_runtime_contract() -> None:
+    spec = _openapi_spec()
+    hydro_variable = spec["components"]["parameters"]["Variable"]["schema"]["enum"]
+    flood_map_duration = _operation_parameter(spec, "/api/v1/tiles/flood-return-period", "get", "query", "duration")[
+        "schema"
+    ]["enum"]
+    flood_mvt_duration = _operation_parameter(
+        spec,
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+        "get",
+        "path",
+        "duration",
+    )["schema"]["enum"]
+
+    assert hydro_variable == ["q_down", "water_level"]
+    assert flood_map_duration == ["1h", "3h", "6h", "24h", "72h", "7d"]
+    assert flood_mvt_duration == flood_map_duration
 
 
 def test_mvt_tile_z_above_documented_max_returns_runtime_validation_error() -> None:

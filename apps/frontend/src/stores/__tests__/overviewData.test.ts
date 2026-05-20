@@ -285,6 +285,9 @@ describe('useOverviewDataStore', () => {
     expect(calls.find((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')?.pathParams).toMatchObject({
       layer_id: 'flood-return-period',
     })
+    expect(calls.find((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')?.query).toMatchObject({
+      run_id: 'run-gfs-1',
+    })
   })
 
   it('keeps basin-version and bbox fields when the measured overview plan stays inside the request threshold', async () => {
@@ -360,6 +363,55 @@ describe('useOverviewDataStore', () => {
       currentValidTime: '2026-05-21T12:00:00.000Z',
       freshness: {
         validTime: '2026-05-21T12:00:00.000Z',
+      },
+    })
+  })
+
+  it('scopes overview layer valid-times to the resolved run and defaults to that run sample tail', async () => {
+    const noValidTimeQuery = { ...query, validTime: null }
+    const olderRun = { ...run, run_id: 'run-gfs-old', end_time: '2026-05-19T00:00:00Z', updated_at: '2026-05-18T01:00:00Z' }
+    const resolvedRun = { ...run, run_id: 'run-gfs-ready', end_time: '2026-05-25T00:00:00Z', updated_at: '2026-05-18T02:00:00Z' }
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query })
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/runs') return success({ items: [olderRun, resolvedRun], total: 2, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') {
+        return success([{ layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: [] }]) as never
+      }
+      if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+      if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+      if (path === '/api/v1/flood-alerts/summary') {
+        return success({ run_id: resolvedRun.run_id, total_segments: 1, usable_curves: 1, unavailable_count: 0, levels: [] }) as never
+      }
+      if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') {
+        if (options?.params?.query?.run_id !== resolvedRun.run_id) throw new Error('valid-times not scoped to resolved run')
+        return success({
+          valid_times: ['2026-05-18T09:17:00Z', '2026-05-18T11:41:00Z'],
+          items: ['2026-05-18T09:17:00Z', '2026-05-18T11:41:00Z'],
+          limit: 2,
+          observed_count: 3,
+          truncated: true,
+        }) as never
+      }
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadOverview(noValidTimeQuery)
+
+    expect(calls.find((call) => call.path === '/api/v1/layers/{layer_id}/valid-times')?.query).toMatchObject({
+      run_id: resolvedRun.run_id,
+    })
+    expect(snapshot.layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({
+      currentValidTime: '2026-05-18T11:41:00.000Z',
+      freshness: {
+        runId: resolvedRun.run_id,
+        validTime: '2026-05-18T11:41:00.000Z',
       },
     })
   })

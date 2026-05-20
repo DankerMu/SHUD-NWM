@@ -23,6 +23,8 @@ let summaryRequestId = 0
 let rankingRequestId = 0
 let timelineRequestId = 0
 
+type ApiLayerValidTimes = components['schemas']['LayerValidTimes']
+
 export interface FloodAlertLevelCount {
   level: AlertLevel
   count: number
@@ -246,6 +248,19 @@ function normalizeTimeline(payload: ApiFloodAlertTimeline): FloodAlertTimeline {
   }
 }
 
+function normalizeValidTimes(values: string[] | null | undefined) {
+  if (!Array.isArray(values)) return []
+  return values
+    .map(normalizeIso)
+    .filter((value): value is string => value !== null)
+    .sort((a, b) => Date.parse(a) - Date.parse(b))
+    .filter((value, index, items) => index === 0 || value !== items[index - 1])
+}
+
+function normalizeLayerValidTimesResponse(value: ApiLayerValidTimes | string[]): string[] {
+  return normalizeValidTimes(Array.isArray(value) ? value : value?.valid_times)
+}
+
 function buildValidTimes(run: ApiHydroRun | null) {
   if (!run) return []
   const start = Date.parse(run.start_time)
@@ -260,6 +275,17 @@ function buildValidTimes(run: ApiHydroRun | null) {
   }
   if (values.at(-1) !== new Date(end).toISOString()) values.push(new Date(end).toISOString())
   return values
+}
+
+async function fetchLayerValidTimes(layerId: string, runId: string): Promise<string[]> {
+  return fetchJson<ApiLayerValidTimes | string[]>(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times`, {
+    run_id: runId,
+  }).then(normalizeLayerValidTimesResponse)
+}
+
+function resolveSelectedValidTime(validTimes: string[], requestedValidTime: string | null) {
+  if (requestedValidTime && validTimes.includes(requestedValidTime)) return requestedValidTime
+  return validTimes.at(-1) ?? null
 }
 
 function mergeTimelineValidTimes(existing: string[], timeline: FloodAlertTimeline) {
@@ -411,15 +437,16 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const latestRun = sortLatestRuns(candidates).find((run) => run.run_type === 'forecast') ?? sortLatestRuns(candidates)[0] ?? null
       const nextRunId = latestRun?.run_id ?? null
       const runChanged = previousRunId !== nextRunId
-      const validTimes = buildValidTimes(latestRun)
       const requestedValidTime = normalizeIso(context?.validTime)
+      let validTimes = latestRun ? await fetchLayerValidTimes('flood-return-period', latestRun.run_id) : []
+      if (latestRun && validTimes.length === 0) validTimes = buildValidTimes(latestRun)
       const contextMissReason = latestRun ? null : explicitContextMissReason(context)
       if (requestId !== latestRunRequestId) return
       set({
         latestRun,
         selectedRunId: nextRunId,
         validTimes,
-        selectedValidTime: requestedValidTime && validTimes.includes(requestedValidTime) ? requestedValidTime : null,
+        selectedValidTime: resolveSelectedValidTime(validTimes, requestedValidTime),
         loading: false,
         empty: latestRun === null,
         error: contextMissReason,

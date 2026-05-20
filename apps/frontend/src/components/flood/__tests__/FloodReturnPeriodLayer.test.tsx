@@ -120,6 +120,28 @@ describe('FloodReturnPeriodLayer', () => {
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
   })
 
+  it('renders map MVT tiles with the API-resolved sample tail instead of run end time fallback', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(mvtLayerCatalogResponse()))
+
+    render(
+      <FloodAlertMap
+        runId="run-1"
+        validTime={null}
+        tileFallbackTime="2026-05-03T07:17:00.000Z"
+        onSegmentSelect={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
+    expect(sourceProps.at(-1)).toMatchObject({
+      tiles: [
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-1/1h/2026-05-03T07%3A17%3A00.000Z/{z}/{x}/{y}.pbf',
+      ],
+    })
+  })
+
   it('does not fetch unbounded GeoJSON while catalog metadata is loading', async () => {
     sourceProps.length = 0
     layerProps.length = 0

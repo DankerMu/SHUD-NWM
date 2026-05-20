@@ -23,6 +23,8 @@ from services.tiles.mvt import (
     MVT_EXTENT,
     MVT_MEDIA_TYPE,
     MVT_SCHEMA_VERSION,
+    SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS,
+    SUPPORTED_HYDRO_MVT_VARIABLES,
     TileInput,
     build_raw_tile_response,
     build_tile_response,
@@ -202,8 +204,14 @@ def list_layers(
 ) -> dict[str, Any]:
     run = latest_ready_run(session)
     run_id = str(run["run_id"]) if run else None
+    basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
     source_version = str(run.get("river_network_version_id") or run.get("basin_version_id")) if run else None
-    layers = _default_layer_catalog(session, run_id=run_id, source_version=source_version)
+    layers = _default_layer_catalog(
+        session,
+        run_id=run_id,
+        source_version=source_version,
+        basin_version_id=basin_version_id,
+    )
     return _ok(request, [layer.model_dump() for layer in layers[offset : offset + limit]])
 
 
@@ -211,11 +219,18 @@ def list_layers(
 def list_layer_valid_times(
     request: Request,
     layer_id: str,
+    run_id: str | None = Query(
+        default=None,
+        description="Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery.",
+    ),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     validate_identifier(layer_id, "layer_id")
-    run = latest_ready_run(session)
-    run_id = str(run["run_id"]) if run else None
+    if run_id is not None:
+        validate_identifier(run_id, "run_id")
+    else:
+        run = latest_ready_run(session)
+        run_id = str(run["run_id"]) if run else None
     return _ok(request, valid_times_for_layer(session, layer_id, run_id=run_id).model_dump())
 
 
@@ -549,6 +564,7 @@ def flood_return_period_map(
     National rendering should use the canonical `.pbf` MVT route discovered
     through `/api/v1/layers` metadata.
     """
+    _validate_supported_flood_duration(duration)
     _require_frequency_ready(session, run_id)
     if return_period is not None:
         return_period = _finite_query_float(return_period, field="return_period", original=return_period)
@@ -659,6 +675,7 @@ def flood_return_period_mvt_tile(
 ) -> Response:
     validate_identifier(run_id, "run_id")
     validate_identifier(duration, "duration")
+    _validate_supported_flood_duration(duration)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
     source_version = str(run.get("river_network_version_id") or run.get("basin_version_id") or run_id)
@@ -700,6 +717,7 @@ def hydro_mvt_tile(
 ) -> Response:
     validate_identifier(run_id, "run_id")
     validate_identifier(variable, "variable")
+    _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
     run = _require_run(session, run_id)
     source_version = str(run.get("river_network_version_id") or run.get("basin_version_id") or run_id)
@@ -1025,7 +1043,13 @@ def _mvt_response(tile: Any) -> Response:
     )
 
 
-def _default_layer_catalog(session: Session, *, run_id: str | None, source_version: str | None) -> list[Layer]:
+def _default_layer_catalog(
+    session: Session,
+    *,
+    run_id: str | None,
+    source_version: str | None,
+    basin_version_id: str | None,
+) -> list[Layer]:
     definitions = [
         ("discharge", "Discharge", "hydrology", ["q_down"]),
         ("water-level", "Water level", "hydrology", ["water_level"]),
@@ -1050,11 +1074,34 @@ def _default_layer_catalog(session: Session, *, run_id: str | None, source_versi
                     valid_time_observed_count=valid_time_sample.observed_count,
                     valid_times_truncated=valid_time_sample.truncated,
                     source_version=source_version,
+                    basin_version_id=basin_version_id,
                     release_blocking=not _mvt_live_postgis_enabled(session),
                 ),
             )
         )
     return layers
+
+
+def _validate_supported_hydro_variable(variable: str) -> None:
+    if variable in SUPPORTED_HYDRO_MVT_VARIABLES:
+        return
+    raise ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="Unsupported hydrological MVT variable.",
+        details={"variable": variable, "supported": list(SUPPORTED_HYDRO_MVT_VARIABLES)},
+    )
+
+
+def _validate_supported_flood_duration(duration: str) -> None:
+    if duration in SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS:
+        return
+    raise ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="Unsupported flood return-period duration.",
+        details={"duration": duration, "supported": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS)},
+    )
 
 
 def _postgis_tile_params(params: dict[str, Any], *, z: int, x: int, y: int) -> dict[str, Any]:

@@ -137,7 +137,7 @@ export function FloodAlertPage() {
     clearForecastSelection()
   }
 
-  const tileFallbackTime = useMemo(() => latestRun?.end_time ?? validTimes.at(-1) ?? null, [latestRun, validTimes])
+  const tileFallbackTime = useMemo(() => validTimes.at(-1) ?? latestRun?.end_time ?? null, [latestRun, validTimes])
   const floodRunForecastIssueTime = useMemo(() => normalizeRunCycleTime(latestRun?.cycle_time), [latestRun?.cycle_time])
   const fallbackBbox = useMemo(() => boundedFloodFallbackBbox(selectedSegment), [selectedSegment])
 

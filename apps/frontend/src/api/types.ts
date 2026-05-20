@@ -671,7 +671,7 @@ export interface paths {
         };
         /**
          * List bounded valid times for a map layer
-         * @description Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. A true truncated flag means more distinct times were observed than are included in valid_times/items.
+         * @description Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. When run_id is supplied, discovery is scoped to that concrete hydro run/source identity. A true truncated flag means more distinct times were observed than are included in valid_times/items.
          */
         get: operations["listLayerValidTimes"];
         put?: never;
@@ -1367,6 +1367,7 @@ export interface components {
             valid_time_observed_count?: number;
             /** @description True when the bounded catalog sample omitted at least one additional distinct valid_time. */
             valid_times_truncated?: boolean;
+            /** @description Concrete source identity used to resolve non-XYZ route placeholders, including run_id and basin_version_id when advertised by required_placeholders. */
             source_refs?: {
                 [key: string]: unknown;
             } | null;
@@ -1445,7 +1446,7 @@ export interface components {
         UserRole: "operator" | "model_admin" | "sys_admin";
         ValidTimePath: string;
         ValidTimeQuery: string;
-        Variable: string;
+        Variable: "q_down" | "water_level";
         VariableQuery: string;
     };
     requestBodies: never;
@@ -2056,8 +2057,8 @@ export interface operations {
         parameters: {
             query: {
                 run_id: components["parameters"]["RunIdQuery"];
-                /** @description Aggregation duration such as 1h, 3h, or 24h. */
-                duration?: string;
+                /** @description Supported return-period aggregation duration. */
+                duration?: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
                 /** @description Forecast valid time to render. */
                 valid_time: string;
                 /** @description Optional minLon,minLat,maxLon,maxLat spatial filter. */
@@ -2092,8 +2093,8 @@ export interface operations {
             header?: never;
             path: {
                 run_id: components["parameters"]["RunId"];
-                /** @description Aggregation duration such as 1h, 3h, or 24h. */
-                duration: string;
+                /** @description Supported return-period aggregation duration. */
+                duration: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
                 valid_time: components["parameters"]["ValidTimePath"];
                 z: components["parameters"]["TileZ"];
                 x: components["parameters"]["TileX"];
@@ -2584,7 +2585,10 @@ export interface operations {
     };
     listLayerValidTimes: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery. */
+                run_id?: string;
+            };
             header?: never;
             path: {
                 layer_id: string;

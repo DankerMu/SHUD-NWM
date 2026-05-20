@@ -1885,6 +1885,121 @@ def test_mvt_invalid_xyz_fails_before_expensive_builders(monkeypatch: pytest.Mon
     assert called is False
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/api/v1/tiles/hydro/{RUN_ID}/velocity/{VALID_TIME_1_ISO}/6/12/24.pbf",
+        f"/api/v1/tiles/flood-return-period/{RUN_ID}/2h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+    ],
+)
+def test_unsupported_mvt_route_variants_fail_before_live_cache_or_sql(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("unsupported route variants must fail before SQL/cache access")
+
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_run",
+        lambda *_args, **_kwargs: pytest.fail("_require_run called"),
+    )
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_frequency_ready",
+        lambda *_args, **_kwargs: pytest.fail("_require_frequency_ready called"),
+    )
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_fetch_hydro_mvt_tile_bytes",
+        lambda *_args, **_kwargs: pytest.fail("hydro fetch called"),
+    )
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_fetch_flood_mvt_tile_bytes",
+        lambda *_args, **_kwargs: pytest.fail("flood fetch called"),
+    )
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get(path)
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("path", "fetch_name"),
+    [
+        (f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf", "_fetch_hydro_mvt_tile_bytes"),
+        (
+            f"/api/v1/tiles/hydro/{RUN_ID}/water_level/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_hydro_mvt_tile_bytes",
+        ),
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_flood_mvt_tile_bytes",
+        ),
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/3h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_flood_mvt_tile_bytes",
+        ),
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/6h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_flood_mvt_tile_bytes",
+        ),
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/24h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_flood_mvt_tile_bytes",
+        ),
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/72h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_flood_mvt_tile_bytes",
+        ),
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/7d/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_flood_mvt_tile_bytes",
+        ),
+    ],
+)
+def test_advertised_mvt_route_variables_are_accepted_by_route_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    fetch_name: str,
+) -> None:
+    monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_run",
+        lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+    )
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_frequency_ready",
+        lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+    )
+    monkeypatch.setattr(flood_alert_routes, fetch_name, lambda *_args, **_kwargs: b"accepted")
+
+    with _client() as client:
+        response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.content == b"accepted"
+
+
 def test_layer_metadata_discovery_exposes_mvt_contract() -> None:
     with _client() as client:
         response = client.get("/api/v1/layers")
@@ -2007,6 +2122,68 @@ def test_layer_valid_times_budget_caps_catalog_and_endpoint() -> None:
     }
 
 
+def test_layer_valid_times_endpoint_scopes_to_explicit_run_id_latest_window() -> None:
+    old_run_id = "aa_valid_time_old_run"
+    new_run_id = "zz_valid_time_new_run"
+    old_start = datetime(2026, 5, 20, tzinfo=UTC)
+    new_start = datetime(2026, 5, 21, tzinfo=UTC)
+    with _store() as session:
+        for run_id, start in ((old_run_id, old_start), (new_run_id, new_start)):
+            session.execute(
+                text(
+                    """
+                    INSERT INTO hydro.hydro_run (
+                        run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                        start_time, end_time, status, run_manifest_uri
+                    )
+                    VALUES (
+                        :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                        'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "cycle_time": start,
+                    "start_time": start,
+                    "end_time": start + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT + 5),
+                },
+            )
+            for offset in range(MVT_VALID_TIME_SAMPLE_LIMIT + 5):
+                valid_time = start + timedelta(hours=offset)
+                _insert_result(
+                    session,
+                    "seg_001",
+                    "basin_v1",
+                    "rnv_v1",
+                    valid_time,
+                    100.0 + offset,
+                    2.0,
+                    "normal",
+                    False,
+                    run_id=run_id,
+                )
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                scoped = client.get(f"/api/v1/layers/flood-return-period/valid-times?run_id={old_run_id}")
+                unscoped = client.get("/api/v1/layers/flood-return-period/valid-times")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert scoped.status_code == 200
+    scoped_data = scoped.json()["data"]
+    assert scoped_data["valid_times"][0] == _iso(old_start + timedelta(hours=5))
+    assert scoped_data["valid_times"][-1] == _iso(old_start + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT + 4))
+    assert scoped_data["valid_times"] == sorted(scoped_data["valid_times"])
+
+    assert unscoped.status_code == 200
+    unscoped_data = unscoped.json()["data"]
+    assert unscoped_data["valid_times"][-1] == _iso(new_start + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT + 4))
+    assert unscoped_data["valid_times"][0] != scoped_data["valid_times"][0]
+
+
 def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases() -> None:
     with _client() as client:
         response = client.get("/api/v1/layers")
@@ -2021,6 +2198,36 @@ def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases(
     assert water_level["cache_layer_id"] == "water-level"
     assert water_level["route_variable"] == "water_level"
     assert water_level["legacy_layer_ids"] == ["hydro:water_level"]
+
+
+def test_layer_metadata_required_placeholders_resolve_from_source_refs_or_route_constants() -> None:
+    documented_route_constants = {"z", "x", "y", "valid_time", "duration"}
+    with _client() as client:
+        response = client.get("/api/v1/layers")
+
+    assert response.status_code == 200
+    for layer in response.json()["data"]:
+        metadata = layer["metadata"]
+        if metadata.get("tile_format") != "mvt":
+            continue
+        source_refs = metadata.get("source_refs") or {}
+        missing = [
+            placeholder
+            for placeholder in metadata.get("required_placeholders", [])
+            if placeholder not in source_refs and placeholder not in documented_route_constants
+        ]
+        assert missing == []
+
+    river_network = next(layer["metadata"] for layer in response.json()["data"] if layer["layer_id"] == "river-network")
+    assert river_network["source_refs"]["basin_version_id"] == "basin_v1"
+    assert (
+        river_network["url_template"]
+        .replace("{basin_version_id}", river_network["source_refs"]["basin_version_id"])
+        .replace("{z}", "0")
+        .replace("{x}", "0")
+        .replace("{y}", "0")
+        == "/api/v1/tiles/river-network/basin_v1/0/0/0.pbf"
+    )
 
 
 def test_warning_level_metadata_declares_flood_return_period_alias_identity() -> None:
@@ -2124,10 +2331,10 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
     statement = flood_alert_routes.postgis_tile_sql("flood-return-period")
 
     assert "ST_TileEnvelope(:z, :x, :y)" in statement
-    assert "ST_Transform(intersecting.geom, 3857)" in statement
+    assert "ST_Transform(eligible.geom, 3857)" in statement
     assert "ST_AsMVTGeom" in statement
     assert statement.index("ST_SimplifyPreserveTopology") < statement.index("ST_AsMVTGeom")
-    assert "ST_MakeValid(ST_Transform(intersecting.geom, 3857))" in statement
+    assert "ST_MakeValid(ST_Transform(eligible.geom, 3857))" in statement
     assert ":simplification_tolerance_m" in statement
     assert "extent => 4096" in statement
     assert "buffer => 64" in statement
@@ -2142,12 +2349,29 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
 def test_mvt_postgis_sql_shape_simplifies_all_production_layers_before_encoding() -> None:
     for layer in ("flood-return-period", "hydro", "river-network"):
         statement = flood_alert_routes.postgis_tile_sql(layer)
+        assert "eligible AS" in statement
         assert "simplified AS" in statement
         assert "ST_SimplifyPreserveTopology" in statement
-        assert "ST_MakeValid(ST_Transform(intersecting.geom, 3857))" in statement
+        assert "ST_MakeValid(ST_Transform(eligible.geom, 3857))" in statement
         assert "simplified.geom_3857" in statement
-        assert statement.index("simplified AS") < statement.index("clipped AS") < statement.index("ST_AsMVTGeom")
+        assert statement.index("eligible AS") < statement.index("simplified AS") < statement.index("clipped AS")
         assert ":simplification_tolerance_m" in statement
+
+
+def test_mvt_postgis_sql_shape_filters_over_budget_features_before_expensive_geometry_work() -> None:
+    for layer in ("flood-return-period", "hydro", "river-network"):
+        statement = flood_alert_routes.postgis_tile_sql(layer)
+        eligible_index = statement.index("eligible AS")
+        expensive_indexes = [
+            statement.index("ST_MakeValid"),
+            statement.index("ST_Transform(eligible.geom, 3857)"),
+            statement.index("ST_SimplifyPreserveTopology"),
+            statement.index("ST_AsMVTGeom"),
+        ]
+        assert "WHERE source_coordinate_count <= :feature_coordinate_limit" in statement
+        assert "AND source_coordinate_dimensions <= :max_coordinate_dimensions" in statement
+        assert all(eligible_index < expensive_index for expensive_index in expensive_indexes)
+        assert statement.index("prefilter_stats AS") < statement.index("clipped AS")
 
 
 def test_mvt_postgis_tile_params_bind_zoom_safe_simplification_tolerance() -> None:

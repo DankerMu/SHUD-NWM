@@ -25,6 +25,8 @@ MVT_MAX_BYTES = 5_000_000
 MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
+SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down", "water_level")
+SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS = ("1h", "3h", "6h", "24h", "72h", "7d")
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
 )
@@ -389,13 +391,19 @@ def postgis_tile_sql(layer: str) -> str:
             WHERE source_rows.geom IS NOT NULL
               AND source_rows.geom && ST_Transform(bounds.geom_3857, 4490)
         ),
+        eligible AS (
+            SELECT *
+            FROM intersecting
+            WHERE source_coordinate_count <= :feature_coordinate_limit
+              AND source_coordinate_dimensions <= :max_coordinate_dimensions
+        ),
         simplified AS (
-            SELECT intersecting.*,
+            SELECT eligible.*,
                    ST_SimplifyPreserveTopology(
-                       ST_MakeValid(ST_Transform(intersecting.geom, 3857)),
+                       ST_MakeValid(ST_Transform(eligible.geom, 3857)),
                        :simplification_tolerance_m
                    ) AS geom_3857
-            FROM intersecting
+            FROM eligible
         ),
         prefilter_stats AS (
             SELECT COUNT(*) AS intersecting_feature_count,
@@ -424,8 +432,6 @@ def postgis_tile_sql(layer: str) -> str:
                        clip_geom => true
                    ) AS mvt_geom
             FROM simplified, bounds
-            WHERE simplified.source_coordinate_count <= :feature_coordinate_limit
-              AND simplified.source_coordinate_dimensions <= :max_coordinate_dimensions
         ),
         budgeted AS (
             SELECT *, COUNT(*) OVER () AS feature_count, SUM(ST_NPoints(geom)) OVER () AS coordinate_count
@@ -469,6 +475,7 @@ def layer_metadata(
     valid_time_observed_count: int = 0,
     valid_times_truncated: bool = False,
     source_version: str | None = None,
+    basin_version_id: str | None = None,
     release_blocking: bool = False,
 ) -> dict[str, Any]:
     metadata_by_layer = {
@@ -561,7 +568,11 @@ def layer_metadata(
         "valid_time_limit": valid_time_limit,
         "valid_time_observed_count": valid_time_observed_count,
         "valid_times_truncated": valid_times_truncated,
-        "source_refs": {"run_id": run_id, "source_version": source_version},
+        "source_refs": {
+            "run_id": run_id,
+            "source_version": source_version,
+            "basin_version_id": basin_version_id,
+        },
         "cache_layer_id": cache_layer_id,
         "route_variable": (
             "q_down"

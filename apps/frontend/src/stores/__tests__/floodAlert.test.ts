@@ -153,7 +153,7 @@ describe('useFloodAlertStore', () => {
         const parsed = new URL(url)
         if (parsed.pathname === '/api/v1/flood-alerts/summary') {
           expect(parsed.searchParams.get('run_id')).toBe('run-1')
-          expect(parsed.searchParams.get('valid_time')).toBe('2026-05-12T03:00:00Z')
+          expect(parsed.searchParams.get('valid_time')).toBe('2026-05-12T02:15:00.000Z')
           return {
             ok: true,
             json: async () =>
@@ -170,7 +170,7 @@ describe('useFloodAlertStore', () => {
         if (parsed.pathname === '/api/v1/flood-alerts/ranking') {
           expect(parsed.searchParams.get('run_id')).toBe('run-1')
           expect(parsed.searchParams.get('basin_id')).toBe('basin-a')
-          expect(parsed.searchParams.get('valid_time')).toBe('2026-05-12T03:00:00Z')
+          expect(parsed.searchParams.get('valid_time')).toBe('2026-05-12T02:15:00.000Z')
           return {
             ok: true,
             json: async () =>
@@ -188,7 +188,7 @@ describe('useFloodAlertStore', () => {
                     return_period: 20,
                     warning_level: 'warning',
                     duration: '1h',
-                    valid_time: '2026-05-12T03:00:00Z',
+                    valid_time: '2026-05-12T02:15:00.000Z',
                     geom_centroid: { type: 'Point', coordinates: ['101.5', 31.25] },
                   },
                 ],
@@ -225,13 +225,26 @@ describe('useFloodAlertStore', () => {
               }),
           }
         }
+        if (parsed.pathname === '/api/v1/layers/flood-return-period/valid-times') {
+          expect(parsed.searchParams.get('run_id')).toBe('run-1')
+          return {
+            ok: true,
+            json: async () =>
+              success({
+                valid_times: ['2026-05-12T01:30:00Z', '2026-05-12T02:15:00Z'],
+                items: ['2026-05-12T01:30:00Z', '2026-05-12T02:15:00Z'],
+                limit: 2,
+                observed_count: 3,
+                truncated: true,
+              }),
+          }
+        }
         throw new Error(`Unexpected flood request ${url}`)
       }),
     )
 
     await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun()
     useFloodAlertStore.getState().setBasinId('basin-a')
-    useFloodAlertStore.getState().setSelectedValidTime('2026-05-12T03:00:00Z')
     await useFloodAlertStore.getState().fetchSummary()
     await useFloodAlertStore.getState().fetchRanking()
     await useFloodAlertStore.getState().fetchTimeline('seg-1')
@@ -243,8 +256,9 @@ describe('useFloodAlertStore', () => {
       params: { query: { status: 'published', limit: 50 } },
     })
     expect(fetchUrls).toEqual([
-      `${apiBase}/api/v1/flood-alerts/summary?run_id=run-1&valid_time=2026-05-12T03%3A00%3A00Z`,
-      `${apiBase}/api/v1/flood-alerts/ranking?run_id=run-1&limit=20&offset=0&basin_id=basin-a&valid_time=2026-05-12T03%3A00%3A00Z`,
+      `${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-1`,
+      `${apiBase}/api/v1/flood-alerts/summary?run_id=run-1&valid_time=2026-05-12T02%3A15%3A00.000Z`,
+      `${apiBase}/api/v1/flood-alerts/ranking?run_id=run-1&limit=20&offset=0&basin_id=basin-a&valid_time=2026-05-12T02%3A15%3A00.000Z`,
       `${apiBase}/api/v1/flood-alerts/timeline?run_id=run-1&segment_id=seg-1&river_network_version_id=rivnet-v1`,
     ])
     expect(useFloodAlertStore.getState().latestRun?.run_id).toBe('run-1')
@@ -252,7 +266,7 @@ describe('useFloodAlertStore', () => {
     expect(useFloodAlertStore.getState().rankingData?.items[0]).toMatchObject({
       riverSegmentId: 'seg-1',
       riverNetworkVersionId: 'rivnet-v1',
-      validTime: '2026-05-12T03:00:00Z',
+      validTime: '2026-05-12T02:15:00.000Z',
       geomCentroid: { type: 'Point', coordinates: [101.5, 31.25] },
     })
     expect(useFloodAlertStore.getState().timelineData?.segmentId).toBe('seg-1')
@@ -440,6 +454,18 @@ describe('useFloodAlertStore', () => {
       }),
       error: undefined,
     } as never)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        floodResponse({
+          valid_times: ['2026-05-11T01:17:00Z', '2026-05-11T03:00:00Z'],
+          items: ['2026-05-11T01:17:00Z', '2026-05-11T03:00:00Z'],
+          limit: 2,
+          observed_count: 2,
+          truncated: false,
+        }),
+      ),
+    )
 
     await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
       source: 'ifs',
@@ -455,6 +481,68 @@ describe('useFloodAlertStore', () => {
     })
     expect(useFloodAlertStore.getState().selectedRunId).toBe('run-sibling')
     expect(useFloodAlertStore.getState().selectedValidTime).toBe('2026-05-11T03:00:00.000Z')
+    expect(fetch).toHaveBeenCalledWith(`${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-sibling`)
+  })
+
+  it('uses run-scoped API valid-times for default, explicit irregular, and tile URL resolution', async () => {
+    const fetchUrls: string[] = []
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [latestRun],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        fetchUrls.push(url)
+        const parsed = new URL(url)
+        if (parsed.pathname === '/api/v1/layers/flood-return-period/valid-times') {
+          expect(parsed.searchParams.get('run_id')).toBe('run-1')
+          return floodResponse({
+            valid_times: ['2026-05-12T00:22:00Z', '2026-05-12T02:45:00Z'],
+            items: ['2026-05-12T00:22:00Z', '2026-05-12T02:45:00Z'],
+            limit: 2,
+            observed_count: 3,
+            truncated: true,
+          })
+        }
+        if (parsed.pathname === '/api/v1/flood-alerts/summary') {
+          expect(parsed.searchParams.get('valid_time')).toBe('2026-05-12T02:45:00.000Z')
+          return floodResponse({
+            run_id: 'run-1',
+            levels: [],
+            total_segments: 1,
+            usable_curves: 1,
+            unavailable_count: 0,
+            quality_note: null,
+          })
+        }
+        if (parsed.pathname === '/api/v1/flood-alerts/ranking') {
+          expect(parsed.searchParams.get('valid_time')).toBe('2026-05-12T02:45:00.000Z')
+          return floodResponse({ items: [], total: 0, limit: 20, offset: 0 })
+        }
+        throw new Error(`Unexpected flood request ${url}`)
+      }),
+    )
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun()
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      validTimes: ['2026-05-12T00:22:00.000Z', '2026-05-12T02:45:00.000Z'],
+      selectedValidTime: '2026-05-12T02:45:00.000Z',
+    })
+
+    await useFloodAlertStore.getState().fetchSummary()
+    await useFloodAlertStore.getState().fetchRanking()
+
+    expect(fetchUrls).toEqual([
+      `${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-1`,
+      `${apiBase}/api/v1/flood-alerts/summary?run_id=run-1&valid_time=2026-05-12T02%3A45%3A00.000Z`,
+      `${apiBase}/api/v1/flood-alerts/ranking?run_id=run-1&limit=20&offset=0&valid_time=2026-05-12T02%3A45%3A00.000Z`,
+    ])
   })
 
   it('does not fall back to an unrelated latest run when explicit overview context is absent', async () => {
@@ -467,6 +555,7 @@ describe('useFloodAlertStore', () => {
       }),
       error: undefined,
     } as never)
+    vi.stubGlobal('fetch', vi.fn())
 
     await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
       source: 'ifs',
@@ -538,6 +627,10 @@ describe('useFloodAlertStore', () => {
       }),
       error: undefined,
     } as never)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(floodResponse({ valid_times: [], items: [], limit: 100, observed_count: 0, truncated: false })),
+    )
 
     await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
       source: 'ifs',
@@ -586,6 +679,7 @@ describe('useFloodAlertStore', () => {
       timelineLoading: true,
     })
     vi.mocked(client.GET).mockRejectedValue(new Error('lookup unavailable'))
+    vi.stubGlobal('fetch', vi.fn())
 
     await expect(
       useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
@@ -684,6 +778,10 @@ describe('useFloodAlertStore', () => {
         }),
         error: undefined,
       } as never)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(floodResponse({ valid_times: [], items: [], limit: 100, observed_count: 0, truncated: false })),
+    )
 
     await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun()
 
@@ -952,6 +1050,10 @@ describe('useFloodAlertStore', () => {
       const query = (options as { params: { query: { source: string; status: string } } }).params.query
       return lookupResponses.get(`${query.source}:${query.status}`) as never
     })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(floodResponse({ valid_times: [], items: [], limit: 100, observed_count: 0, truncated: false })),
+    )
 
     const olderRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
       source: 'gfs',
@@ -1048,6 +1150,10 @@ describe('useFloodAlertStore', () => {
       const query = (options as { params: { query: { source: string; status: string } } }).params.query
       return lookupResponses.get(`${query.source}:${query.status}`) as never
     })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(floodResponse({ valid_times: [], items: [], limit: 100, observed_count: 0, truncated: false })),
+    )
 
     const olderRequest = useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
       source: 'gfs',
@@ -1099,6 +1205,11 @@ describe('useFloodAlertStore', () => {
       loading: false,
       error: null,
     })
-    expect(useFloodAlertStore.getState().validTimes).toContain('2026-05-13T03:00:00.000Z')
+    expect(useFloodAlertStore.getState().validTimes).toEqual([
+      '2026-05-13T00:00:00.000Z',
+      '2026-05-13T01:00:00.000Z',
+      '2026-05-13T02:00:00.000Z',
+      '2026-05-13T03:00:00.000Z',
+    ])
   })
 })

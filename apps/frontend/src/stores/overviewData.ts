@@ -728,18 +728,21 @@ async function fetchLayers() {
   )
 }
 
-async function fetchLayerValidTimes(layerId: string) {
+async function fetchLayerValidTimes(layerId: string, runId?: string | null) {
   return cached(
-    cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId }),
+    cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId, runId: runId ?? null }),
     () =>
       getApi<components['schemas']['LayerValidTimes'] | string[]>(
         '/api/v1/layers/{layer_id}/valid-times',
-        { params: { path: { layer_id: layerId } } },
+        { params: { path: { layer_id: layerId }, query: { run_id: runId ?? undefined } } },
         '获取图层有效时间失败',
       )
         .then(normalizeLayerValidTimesResponse)
         .catch(async () => {
-          const response = await apiFetch(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times`)
+          const params = new URLSearchParams()
+          if (runId) params.set('run_id', runId)
+          const suffix = params.size > 0 ? `?${params.toString()}` : ''
+          const response = await apiFetch(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times${suffix}`)
           if (!response.ok) throw new Error('获取图层有效时间失败')
           return normalizeLayerValidTimesResponse(
             unwrapApiData<components['schemas']['LayerValidTimes'] | string[]>(
@@ -993,7 +996,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         latestRun && useSingleRunFloodSurfaces ? fetchFloodSummary(latestRun.run_id, query.validTime) : Promise.resolve(null),
         latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery) : Promise.resolve(null),
         ...(requestPlan.shouldFetchVersions ? basins.map((basin) => fetchBasinVersions(basin.basin_id)) : []),
-        ...layerIdsForOverview(query).map((layerId) => fetchLayerValidTimes(layerId)),
+        ...layerIdsForOverview(query).map((layerId) =>
+          fetchLayerValidTimes(layerId, useSingleRunFloodSurfaces ? latestRun?.run_id : null),
+        ),
       ])
 
       const pipeline = settledValue(pipelineResult, partialErrors, 'pipeline')
@@ -1137,7 +1142,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
           ? fetchRiverSegments(selectedVersion.basin_version_id, activeRiverNetwork.riverNetworkVersionId, query.segmentId)
           : Promise.resolve(null),
         latestRun && useSingleRunFloodSurfaces ? fetchFloodRanking(latestRun.run_id, concreteSurfaceQuery, basinId) : Promise.resolve(null),
-        ...layerIdsForOverview(requestQuery).map((layerId) => fetchLayerValidTimes(layerId)),
+        ...layerIdsForOverview(requestQuery).map((layerId) =>
+          fetchLayerValidTimes(layerId, useSingleRunFloodSurfaces ? latestRun?.run_id : null),
+        ),
       ])
 
       const segmentFetch = settledValue(segmentsResult, partialErrors, 'river segments')
