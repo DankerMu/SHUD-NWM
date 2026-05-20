@@ -99,6 +99,7 @@ def _fit_curves(
             method=method,
             dry_run=dry_run,
             supersede_model_id=supersede_model_id,
+            trusted_internal=bool(supersede_model_id and not dry_run),
         )
         output: dict[str, object] = {
             "total_segments": result.total_segments,

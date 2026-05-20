@@ -12,10 +12,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from apps.api.auth import AuthContext, evaluate_policy
 from workers.flood_frequency import cli as flood_cli
 from workers.flood_frequency import frequency
 from workers.flood_frequency.frequency import (
     AnnualMaximaResult,
+    FrequencyFitError,
     check_monotonicity,
     check_sample_size,
     extract_annual_maxima,
@@ -175,6 +177,7 @@ def test_fit_curves_supersedes_old_model_curves(monkeypatch: pytest.MonkeyPatch)
             segment_id="seg_001",
             duration="1h",
             supersede_model_id="model_v1",
+            trusted_internal=True,
         )
 
         rows = session.execute(
@@ -186,6 +189,85 @@ def test_fit_curves_supersedes_old_model_curves(monkeypatch: pytest.MonkeyPatch)
             "model_v1": "superseded_by_model_upgrade",
             "model_v2": "ok",
         }
+
+
+def test_fit_curves_supersede_without_policy_evidence_rejects_and_does_not_mutate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        _patch_fit_samples(monkeypatch)
+
+        with pytest.raises(FrequencyFitError) as exc_info:
+            fit_curves(
+                "model_v2",
+                session,
+                segment_id="seg_001",
+                duration="1h",
+                supersede_model_id="model_v1",
+            )
+
+        assert exc_info.value.error_code == "AUTH_REQUIRED"
+        assert exc_info.value.details["no_mutation_expected"] is True
+        assert exc_info.value.details["policy_decision"]["action_id"] == "models.supersede"
+        assert exc_info.value.details["policy_decision"]["target_type"] == "model_instance"
+        assert exc_info.value.details["policy_decision"]["target_id"] == "model_v1"
+        assert _curve_flags(session) == {"model_v1": "ok"}
+
+
+def test_fit_curves_supersede_accepts_model_admin_policy_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        _patch_fit_samples(monkeypatch)
+        decision = evaluate_policy(
+            AuthContext(
+                actor_id="dev-test:model-admin",
+                roles=("model_admin",),
+                auth_mode="dev_test",
+                live_backend_auth_executed=False,
+            ),
+            "models.supersede",
+            target_type="model_instance",
+            target_id="model_v1",
+        )
+
+        result = fit_curves(
+            "model_v2",
+            session,
+            segment_id="seg_001",
+            duration="1h",
+            supersede_model_id="model_v1",
+            policy_decision=decision,
+        )
+
+        assert result.succeeded == 1
+        assert _curve_flags(session) == {
+            "model_v1": "superseded_by_model_upgrade",
+            "model_v2": "ok",
+        }
+
+
+def test_fit_curves_supersede_dry_run_does_not_require_policy_or_mutate() -> None:
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+
+        result = fit_curves(
+            "model_v2",
+            session,
+            segment_id="seg_001",
+            duration="1h",
+            dry_run=True,
+            supersede_model_id="model_v1",
+        )
+
+        assert result.skipped == 1
+        assert result.items == [{"river_segment_id": "seg_001", "duration": "1h", "status": "dry_run"}]
+        assert _curve_flags(session) == {"model_v1": "ok"}
 
 
 def test_argparse_cli_dry_run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -367,6 +449,33 @@ def _seed_model(connection: Any) -> None:
             """
         )
     )
+
+
+def _insert_model_v2(session: Session) -> None:
+    session.execute(
+        text(
+            """
+            INSERT INTO core.model_instance (model_id, basin_version_id, river_network_version_id)
+            VALUES ('model_v2', 'basin_v1', 'rnv_v1')
+            """
+        )
+    )
+
+
+def _patch_fit_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_annual(
+        monkeypatch,
+        AnnualMaximaResult(
+            samples=[(1980 + index, float(100 + index * 4 + (index % 5) * 3)) for index in range(40)],
+            excluded_years=[],
+            observed_years=list(range(1980, 2020)),
+        ),
+    )
+
+
+def _curve_flags(session: Session) -> dict[str, str]:
+    rows = session.execute(text("SELECT model_id, quality_flag FROM flood.flood_frequency_curve ORDER BY model_id"))
+    return {str(row["model_id"]): str(row["quality_flag"]) for row in rows.mappings()}
 
 
 def _insert_hindcast_hourly_year(session: Session, year: int) -> None:

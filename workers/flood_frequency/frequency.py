@@ -12,6 +12,8 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+
 RETURN_PERIODS: tuple[int, ...] = (2, 5, 10, 20, 50, 100)
 QUANTILE_KEYS: tuple[str, ...] = tuple(f"Q{return_period}" for return_period in RETURN_PERIODS)
 DURATION_HOURS: dict[str, int] = {
@@ -33,7 +35,17 @@ SAMPLE_THRESHOLDS: dict[str, int] = {
 
 
 class FrequencyFitError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "FREQUENCY_FIT_ERROR",
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code
+        self.details = dict(details or {})
 
 
 @dataclass(frozen=True)
@@ -383,7 +395,37 @@ def write_frequency_qc_result(curve_id: str, curve_data: Mapping[str, Any], db_s
     )
 
 
-def supersede_old_curves(old_model_id: str, db_session: Session) -> int:
+def supersede_old_curves(
+    old_model_id: str,
+    db_session: Session,
+    *,
+    policy_decision: PolicyDecision | None = None,
+    trusted_internal: bool = False,
+) -> int:
+    if trusted_internal:
+        policy_decision = trusted_internal_policy_decision(
+            "models.supersede",
+            target_type="model_instance",
+            target_id=old_model_id,
+            actor_id="trusted-internal:flood-frequency",
+            roles=("sys_admin",),
+        )
+    decision = require_policy_evidence(
+        policy_decision,
+        action_id="models.supersede",
+        target_type="model_instance",
+        target_id=old_model_id,
+    )
+    if decision.decision != "allow":
+        raise FrequencyFitError(
+            decision.reason,
+            error_code=decision.reason_code,
+            details={
+                "model_id": old_model_id,
+                "policy_decision": decision.to_dict(),
+                "no_mutation_expected": True,
+            },
+        )
     result = db_session.execute(
         text(
             """
@@ -510,6 +552,8 @@ def fit_curves(
     method: str = "auto",
     dry_run: bool = False,
     supersede_model_id: str | None = None,
+    policy_decision: PolicyDecision | None = None,
+    trusted_internal: bool = False,
 ) -> FitCurvesStats:
     durations = [_validate_duration(duration)] if duration else list(DURATION_HOURS)
     segments = [segment_id] if segment_id else _segments_for_model(model_id, db_session)
@@ -519,7 +563,12 @@ def fit_curves(
     skipped = 0
 
     if supersede_model_id and not dry_run:
-        supersede_old_curves(supersede_model_id, db_session)
+        supersede_old_curves(
+            supersede_model_id,
+            db_session,
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+        )
         db_session.commit()
 
     for segment in segments:
