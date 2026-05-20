@@ -13,6 +13,7 @@ from .basins_registry_import import BasinsRegistryImportError, import_basins_reg
 from .validator import ModelPackageValidationError, validate_model_package_path
 
 DEFAULT_BASINS_MIGRATION_SOURCE_URI = "/volume/data/nwm/Basins"
+PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID = "unknown"
 
 
 def _validate_package(package_path: str) -> dict[str, object]:
@@ -53,6 +54,26 @@ def _model_id_from_manifest(package_manifest_path: str) -> str:
     except (OSError, json.JSONDecodeError):
         return ""
     return str(manifest.get("model_id") or "")
+
+
+def _registry_import_policy_decision(
+    package_manifest_path: str,
+    *,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision | None:
+    decision = _import_policy_decision(
+        PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID,
+        auth_actor_id=auth_actor_id,
+        auth_roles=auth_roles,
+    )
+    if decision is None or decision.decision != "allow":
+        return decision
+    return _import_policy_decision(
+        _model_id_from_manifest(package_manifest_path),
+        auth_actor_id=auth_actor_id,
+        auth_roles=auth_roles,
+    )
 
 
 def _add_argparse_auth_options(parser: argparse.ArgumentParser) -> None:
@@ -180,8 +201,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 package_manifest_path=package_manifest,
                 database_url=database_url,
                 output_path=output,
-                policy_decision=_import_policy_decision(
-                    _model_id_from_manifest(package_manifest),
+                policy_decision=_registry_import_policy_decision(
+                    package_manifest,
                     auth_actor_id=auth_actor_id,
                     auth_roles=auth_role,
                 ),
@@ -296,8 +317,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 package_manifest_path=args.package_manifest,
                 database_url=args.database_url,
                 output_path=args.output,
-                policy_decision=_import_policy_decision(
-                    _model_id_from_manifest(args.package_manifest),
+                policy_decision=_registry_import_policy_decision(
+                    args.package_manifest,
                     auth_actor_id=args.auth_actor_id,
                     auth_roles=args.auth_role,
                 ),

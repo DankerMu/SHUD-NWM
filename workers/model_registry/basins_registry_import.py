@@ -7,7 +7,7 @@ import re
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ from .basins_geometry import (
 
 BASINS_REGISTRY_IMPORT_SCHEMA_VERSION = "basins.registry_import.v1"
 RIVER_SEGMENT_INSERT_PAGE_SIZE = 1000
+PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID = "unknown"
 
 
 class BasinsRegistryImportError(RuntimeError):
@@ -81,6 +82,10 @@ def import_basins_registry(
     policy_decision: PolicyDecision | None = None,
     trusted_internal: bool = False,
 ) -> dict[str, Any]:
+    _require_public_import_preflight_policy(
+        policy_decision=policy_decision,
+        trusted_internal=trusted_internal,
+    )
     manifest = _read_json_object(
         package_manifest_path,
         error_code="BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
@@ -313,6 +318,34 @@ def _require_import_policy(
             details={"policy_decision": decision.to_dict(), "no_mutation_expected": True},
         )
     return decision
+
+
+def _require_public_import_preflight_policy(
+    *,
+    policy_decision: PolicyDecision | None = None,
+    trusted_internal: bool = False,
+) -> None:
+    if trusted_internal:
+        return
+    if policy_decision is not None and policy_decision.decision == "allow":
+        return
+    decision = (
+        require_policy_evidence(
+            None,
+            action_id="models.switch_version",
+            target_type="model_registry",
+            target_id=PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID,
+        )
+        if policy_decision is None
+        else replace(policy_decision, target_id=PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID)
+    )
+    if decision.decision != "allow":
+        raise BasinsRegistryImportError(
+            decision.reason_code,
+            decision.reason,
+            model_id=PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID,
+            details={"policy_decision": decision.to_dict(), "no_mutation_expected": True},
+        )
 
 
 def _ensure_basin(cursor: Any, sources: ImportSources) -> int:

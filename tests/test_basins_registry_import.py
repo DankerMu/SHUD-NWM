@@ -11,6 +11,7 @@ import pytest
 from pyproj import Transformer
 
 import workers.model_registry.basins_geometry as basins_geometry
+from apps.api.auth import cli_policy_decision_from_evidence
 from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
@@ -23,6 +24,7 @@ from workers.model_registry.basins_registry_import import (
 from workers.model_registry.cli import _argparse_main, _click_main
 
 _CLI_MODEL_ADMIN_AUTH_ARGS = ["--auth-actor-id", "cli-model-admin", "--auth-role", "model_admin"]
+_PUBLIC_IMPORT_UNKNOWN_TARGET_ID = "unknown"
 
 
 def test_parser_reads_real_shapefiles_and_shud_evidence(tmp_path: Path) -> None:
@@ -722,12 +724,20 @@ def test_argparse_import_basins_registry_without_cli_auth_rejects_before_prepara
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    _, _, inventory_path, manifest_path, _ = _write_registry_fixture(tmp_path)
     report_path = tmp_path / "import-report.json"
+
+    def fail_model_id_from_manifest(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("_model_id_from_manifest must not run before missing auth is denied")
+
+    def fail_read_manifest(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("service manifest reader must not run before missing auth is denied")
 
     def fail_prepare(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("_prepare_sources must not run before denied auth policy")
 
+    monkeypatch.setattr("workers.model_registry.cli._model_id_from_manifest", fail_model_id_from_manifest)
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._read_json_object", fail_read_manifest)
     monkeypatch.setattr("workers.model_registry.basins_registry_import._prepare_sources", fail_prepare)
 
     exit_code = _argparse_main(
@@ -749,7 +759,8 @@ def test_argparse_import_basins_registry_without_cli_auth_rejects_before_prepara
     assert exit_code == 1
     assert captured.out == ""
     assert error["error_code"] == "AUTH_REQUIRED"
-    assert error["policy_decision"]["target_id"] == model_id
+    assert error["model_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert error["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
     assert not report_path.exists()
 
 
@@ -759,12 +770,20 @@ def test_argparse_import_basins_registry_saml_blocks_cli_auth_before_preparation
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("AUTH_BACKEND", "saml")
-    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    _, _, inventory_path, manifest_path, _ = _write_registry_fixture(tmp_path)
     report_path = tmp_path / "import-report.json"
+
+    def fail_model_id_from_manifest(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("_model_id_from_manifest must not run before release-blocked auth is denied")
+
+    def fail_read_manifest(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("service manifest reader must not run before release-blocked auth is denied")
 
     def fail_prepare(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("_prepare_sources must not run before release-blocked auth policy")
 
+    monkeypatch.setattr("workers.model_registry.cli._model_id_from_manifest", fail_model_id_from_manifest)
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._read_json_object", fail_read_manifest)
     monkeypatch.setattr("workers.model_registry.basins_registry_import._prepare_sources", fail_prepare)
 
     exit_code = _argparse_main(
@@ -790,9 +809,55 @@ def test_argparse_import_basins_registry_saml_blocks_cli_auth_before_preparation
     assert exit_code == 1
     assert captured.out == ""
     assert error["error_code"] == "RELEASE_BLOCKED"
-    assert error["policy_decision"]["target_id"] == model_id
+    assert error["model_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert error["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
     assert error["policy_decision"]["auth_mode"] == "cli_dev_test_blocked_by_auth_backend_saml"
     assert error["policy_decision"]["no_mutation_expected"] is True
+    assert not report_path.exists()
+
+
+def test_click_import_basins_registry_without_cli_auth_rejects_before_manifest_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, _ = _write_registry_fixture(tmp_path)
+    report_path = tmp_path / "import-report.json"
+
+    def fail_model_id_from_manifest(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("_model_id_from_manifest must not run before missing auth is denied")
+
+    def fail_read_manifest(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("service manifest reader must not run before missing auth is denied")
+
+    def fail_prepare(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("_prepare_sources must not run before denied auth policy")
+
+    monkeypatch.setattr("workers.model_registry.cli._model_id_from_manifest", fail_model_id_from_manifest)
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._read_json_object", fail_read_manifest)
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._prepare_sources", fail_prepare)
+
+    exit_code = _invoke_click(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+            "--output",
+            str(report_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "AUTH_REQUIRED"
+    assert error["model_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert error["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
     assert not report_path.exists()
 
 
@@ -943,8 +1008,75 @@ def test_import_basins_registry_without_policy_rejects_before_writes(
     assert exc_info.value.details["no_mutation_expected"] is True
     assert exc_info.value.details["policy_decision"]["action_id"] == "models.switch_version"
     assert exc_info.value.details["policy_decision"]["target_type"] == "model_registry"
-    assert exc_info.value.details["policy_decision"]["target_id"] == model_id
+    assert exc_info.value.model_id == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert exc_info.value.details["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
     _assert_registry_fixture_rows_absent(integration_database_url, inventory_path, model_id)
+
+
+def test_import_basins_registry_without_policy_rejects_before_manifest_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path = tmp_path / "inventory.json"
+    manifest_path = tmp_path / "attacker-manifest.json"
+
+    def fail_read_manifest(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("service manifest reader must not run before missing auth is denied")
+
+    def fail_prepare(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("_prepare_sources must not run before missing auth is denied")
+
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._read_json_object", fail_read_manifest)
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._prepare_sources", fail_prepare)
+
+    with pytest.raises(BasinsRegistryImportError) as exc_info:
+        import_basins_registry(
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+            database_url="postgresql://nhms:nhms@localhost:1/nhms",
+        )
+
+    assert exc_info.value.error_code == "AUTH_REQUIRED"
+    assert exc_info.value.model_id == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert exc_info.value.details["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+
+
+def test_import_basins_registry_release_blocked_rejects_before_manifest_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path = tmp_path / "inventory.json"
+    manifest_path = tmp_path / "attacker-manifest.json"
+    policy_decision = cli_policy_decision_from_evidence(
+        "models.switch_version",
+        target_type="model_registry",
+        target_id=_PUBLIC_IMPORT_UNKNOWN_TARGET_ID,
+        actor_id="cli-model-admin",
+        roles=("model_admin",),
+        env={"AUTH_BACKEND": "saml"},
+    )
+
+    def fail_read_manifest(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("service manifest reader must not run before release-blocked auth is denied")
+
+    def fail_prepare(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("_prepare_sources must not run before release-blocked auth is denied")
+
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._read_json_object", fail_read_manifest)
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._prepare_sources", fail_prepare)
+
+    with pytest.raises(BasinsRegistryImportError) as exc_info:
+        import_basins_registry(
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+            database_url="postgresql://nhms:nhms@localhost:1/nhms",
+            policy_decision=policy_decision,
+        )
+
+    assert exc_info.value.error_code == "RELEASE_BLOCKED"
+    assert exc_info.value.model_id == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert exc_info.value.details["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert exc_info.value.details["policy_decision"]["decision"] == "release_blocked"
 
 
 @pytest.mark.integration
@@ -979,7 +1111,7 @@ def test_argparse_import_basins_registry_without_cli_auth_rejects_without_report
     assert exit_code == 1
     assert captured.out == ""
     assert error["error_code"] == "AUTH_REQUIRED"
-    assert error["policy_decision"]["target_id"] == model_id
+    assert error["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
     assert not report_path.exists()
     _assert_registry_fixture_rows_absent(integration_database_url, inventory_path, model_id)
 
@@ -1016,7 +1148,7 @@ def test_click_import_basins_registry_without_cli_auth_rejects_without_report_or
     assert exit_code == 1
     assert captured.out == ""
     assert error["error_code"] == "AUTH_REQUIRED"
-    assert error["policy_decision"]["target_id"] == model_id
+    assert error["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
     assert not report_path.exists()
     _assert_registry_fixture_rows_absent(integration_database_url, inventory_path, model_id)
 
@@ -1105,7 +1237,7 @@ def test_argparse_import_basins_registry_production_mode_blocks_cli_auth_without
     assert exit_code == 1
     assert captured.out == ""
     assert error["error_code"] == "RELEASE_BLOCKED"
-    assert error["policy_decision"]["target_id"] == model_id
+    assert error["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
     assert error["policy_decision"]["decision"] == "release_blocked"
     assert error["policy_decision"]["no_mutation_expected"] is True
     assert not report_path.exists()
