@@ -23,6 +23,7 @@ EXPECTED_MIGRATIONS = [
     "000017_return_period_max_over_window_identity.sql",
     "000018_tile_cache_m16_contract.sql",
     "000019_hydro_mvt_identity_lookup_idx.sql",
+    "000020_valid_time_discovery_indexes.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -278,9 +279,27 @@ def test_hydro_mvt_identity_index_protects_public_valid_time_lookup_contract() -
     assert ordered_columns[3:] == ("river_network_version_id", "river_segment_id")
 
 
+def test_valid_time_discovery_migration_adds_dedicated_ordered_indexes() -> None:
+    migration = dict(_migration_sql())["000020_valid_time_discovery_indexes.sql"]
+
+    flood_columns = _index_columns(migration, "flood", "return_period_result")
+    hydro_columns = _index_columns(migration, "hydro", "river_timeseries")
+
+    assert "CREATE INDEX IF NOT EXISTS return_period_result_valid_time_discovery_idx" in migration
+    assert flood_columns == ("run_id", "duration", "max_over_window", "valid_time DESC")
+    assert "CREATE INDEX IF NOT EXISTS river_timeseries_valid_time_discovery_idx" in migration
+    assert hydro_columns == ("run_id", "variable", "valid_time DESC")
+
+
 def test_fresh_tile_cache_schema_requires_non_null_cache_key_identity() -> None:
     migration = dict(_migration_sql())["000008_map.sql"]
     tile_cache = migration[migration.index("CREATE TABLE IF NOT EXISTS map.tile_cache") :]
 
     assert "cache_key TEXT NOT NULL" in tile_cache
     assert "PRIMARY KEY (cache_key)" in tile_cache
+
+
+def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:
+    match = re.search(rf"ON {schema}\.{table} \(([^)]+)\)", migration)
+    assert match is not None
+    return tuple(column.strip() for column in match.group(1).split(","))

@@ -781,25 +781,46 @@ def valid_times_for_layer(
     sample_limit = max(0, limit)
     query_limit = sample_limit + 1
     if layer_id in {"flood-return-period", "warning-level"}:
-        sql = """
-            SELECT DISTINCT valid_time
-            FROM flood.return_period_result
-            WHERE max_over_window = false
-              AND (:run_id IS NULL OR run_id = :run_id)
-              AND duration = :duration
-            ORDER BY valid_time DESC
-            LIMIT :limit
-        """
+        sql = (
+            """
+                SELECT DISTINCT valid_time
+                FROM flood.return_period_result
+                WHERE run_id = :run_id
+                  AND duration = :duration
+                  AND max_over_window = false
+                ORDER BY valid_time DESC
+                LIMIT :limit
+            """
+            if run_id is not None
+            else """
+                SELECT DISTINCT valid_time
+                FROM flood.return_period_result
+                WHERE duration = :duration
+                  AND max_over_window = false
+                ORDER BY valid_time DESC
+                LIMIT :limit
+            """
+        )
     elif layer_id in {"discharge", "water-level"}:
         variable = "q_down" if layer_id == "discharge" else "water_level"
-        sql = """
-            SELECT DISTINCT valid_time
-            FROM hydro.river_timeseries
-            WHERE variable = :variable
-              AND (:run_id IS NULL OR run_id = :run_id)
-            ORDER BY valid_time DESC
-            LIMIT :limit
-        """
+        sql = (
+            """
+                SELECT DISTINCT valid_time
+                FROM hydro.river_timeseries
+                WHERE run_id = :run_id
+                  AND variable = :variable
+                ORDER BY valid_time DESC
+                LIMIT :limit
+            """
+            if run_id is not None
+            else """
+                SELECT DISTINCT valid_time
+                FROM hydro.river_timeseries
+                WHERE variable = :variable
+                ORDER BY valid_time DESC
+                LIMIT :limit
+            """
+        )
         rows = (
             session.execute(text(sql), {"run_id": run_id, "variable": variable, "limit": query_limit})
             .mappings()

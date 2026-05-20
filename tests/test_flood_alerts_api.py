@@ -19,7 +19,7 @@ from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import PsycopgForecastStore
-from services.tiles.mvt import MVT_MAX_BYTES, MVT_VALID_TIME_SAMPLE_LIMIT, cache_key
+from services.tiles.mvt import MVT_MAX_BYTES, MVT_VALID_TIME_SAMPLE_LIMIT, cache_key, valid_times_for_layer
 from workers.flood_frequency.return_period import compute_return_periods
 
 RUN_ID = "fcst_gfs_2026050300_all"
@@ -2789,6 +2789,79 @@ def test_layer_valid_times_unscoped_no_ready_run_returns_empty_without_discovery
         "observed_count": 0,
         "truncated": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("layer_id", "expected_table", "expected_identity"),
+    [
+        ("flood-return-period", "flood.return_period_result", ("run_id = :run_id", "duration = :duration")),
+        ("warning-level", "flood.return_period_result", ("run_id = :run_id", "duration = :duration")),
+        ("discharge", "hydro.river_timeseries", ("run_id = :run_id", "variable = :variable")),
+        ("water-level", "hydro.river_timeseries", ("run_id = :run_id", "variable = :variable")),
+    ],
+)
+def test_valid_times_for_layer_concrete_run_uses_direct_index_friendly_predicate(
+    layer_id: str,
+    expected_table: str,
+    expected_identity: tuple[str, str],
+) -> None:
+    class FakeRows:
+        def mappings(self) -> "FakeRows":
+            return self
+
+        def all(self) -> list[dict[str, Any]]:
+            return [{"valid_time": VALID_TIME_1}]
+
+    class FakeSession:
+        statement = ""
+        parameters: dict[str, Any] = {}
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRows:
+            self.statement = str(statement)
+            self.parameters = parameters
+            return FakeRows()
+
+    session = FakeSession()
+
+    result = valid_times_for_layer(session, layer_id, run_id=RUN_ID, duration="1h")
+
+    sql = re.sub(r"\s+", " ", session.statement)
+    assert result.valid_times == [_iso(VALID_TIME_1)]
+    assert expected_table in sql
+    for predicate in expected_identity:
+        assert predicate in sql
+    assert "(:run_id IS NULL OR run_id = :run_id)" not in sql
+    assert "OR run_id = :run_id" not in sql
+    assert "ORDER BY valid_time DESC LIMIT :limit" in sql
+    assert session.parameters["run_id"] == RUN_ID
+    assert session.parameters["limit"] == MVT_VALID_TIME_SAMPLE_LIMIT + 1
+
+
+def test_valid_times_for_layer_internal_unscoped_discovery_keeps_no_nullable_run_or() -> None:
+    class FakeRows:
+        def mappings(self) -> "FakeRows":
+            return self
+
+        def all(self) -> list[dict[str, Any]]:
+            return []
+
+    class FakeSession:
+        statement = ""
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRows:
+            self.statement = str(statement)
+            assert parameters["run_id"] is None
+            return FakeRows()
+
+    session = FakeSession()
+
+    result = valid_times_for_layer(session, "discharge", run_id=None)
+
+    sql = re.sub(r"\s+", " ", session.statement)
+    assert result.valid_times == []
+    assert "hydro.river_timeseries" in sql
+    assert "run_id = :run_id" not in sql
+    assert "(:run_id IS NULL OR run_id = :run_id)" not in sql
 
 
 def test_layer_metadata_endpoint_scopes_cache_identity_to_explicit_run_id() -> None:
