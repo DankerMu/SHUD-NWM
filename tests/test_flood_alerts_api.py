@@ -2321,6 +2321,74 @@ def test_warning_level_metadata_declares_flood_return_period_alias_identity() ->
     assert warning["maplibre_source_layer"] == canonical["maplibre_source_layer"]
 
 
+def test_layer_metadata_cache_identity_changes_with_latest_source_refs_and_valid_times() -> None:
+    old_run_id = "aa_metadata_identity_old"
+    new_run_id = "zz_metadata_identity_new"
+    old_valid_time = datetime(2026, 5, 20, 6, tzinfo=UTC)
+    new_valid_time = datetime(2026, 5, 21, 6, tzinfo=UTC)
+    with _store() as session:
+        for run_id, valid_time in ((old_run_id, old_valid_time), (new_run_id, new_valid_time)):
+            session.execute(
+                text(
+                    """
+                    INSERT INTO hydro.hydro_run (
+                        run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                        start_time, end_time, status, run_manifest_uri
+                    )
+                    VALUES (
+                        :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                        'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "cycle_time": valid_time,
+                    "start_time": valid_time,
+                    "end_time": valid_time + timedelta(hours=1),
+                },
+            )
+            _insert_result(
+                session,
+                "seg_001",
+                "basin_v1",
+                "rnv_v1",
+                valid_time,
+                100.0,
+                2.0,
+                "normal",
+                False,
+                run_id=run_id,
+            )
+            _insert_timeseries_result(session, "seg_001", run_id, valid_time, 100.0)
+            _insert_timeseries_result(session, "seg_001", run_id, valid_time, 1.25, variable="water_level", unit="m")
+        session.commit()
+
+        def catalog_for(run_id: str) -> dict[str, dict[str, Any]]:
+            return {
+                layer.layer_id: layer.metadata or {}
+                for layer in flood_alert_routes._default_layer_catalog(
+                    session,
+                    run_id=run_id,
+                    source_version="rnv_v1",
+                    basin_version_id="basin_v1",
+                )
+            }
+
+        old_catalog = catalog_for(old_run_id)
+        new_catalog = catalog_for(new_run_id)
+
+    for layer_id in ("discharge", "water-level", "flood-return-period", "warning-level"):
+        old_metadata = old_catalog[layer_id]
+        new_metadata = new_catalog[layer_id]
+        assert old_metadata["source_refs"]["source_version"] == new_metadata["source_refs"]["source_version"]
+        assert old_metadata["source_refs"]["run_id"] == old_run_id
+        assert new_metadata["source_refs"]["run_id"] == new_run_id
+        assert old_metadata["valid_times"] != new_metadata["valid_times"]
+        assert old_metadata["cache_version"] != new_metadata["cache_version"]
+        assert old_metadata["cache_etag"] != new_metadata["cache_etag"]
+
+
 def test_advertised_mvt_layer_cache_identity_matches_route_or_declared_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2471,6 +2539,72 @@ def test_mvt_postgis_sql_shape_projects_metadata_properties_and_bindable_casts()
     )
     assert "r.q_value AS value" in flood_alert_routes.postgis_tile_sql("flood-return-period")
     assert "ts.value" in flood_alert_routes.postgis_tile_sql("hydro")
+
+
+def test_river_network_mvt_sql_scopes_basin_without_model_instance_cardinality_multiply() -> None:
+    statement = flood_alert_routes.postgis_tile_sql("river-network")
+    sql = re.sub(r"\s+", " ", statement)
+
+    source_cte = sql[sql.index("source_rows AS") : sql.index("source_stats AS")]
+    assert "WHERE EXISTS ( SELECT 1 FROM core.model_instance mi" in source_cte
+    assert "mi.river_network_version_id = rs.river_network_version_id" in source_cte
+    assert "mi.basin_version_id = :basin_version_id" in source_cte
+    assert "JOIN core.model_instance" not in source_cte
+    assert "ORDER BY river_network_version_id, river_segment_id" in sql
+
+
+def test_mvt_postgis_sql_shape_encodes_only_public_property_allowlist() -> None:
+    expected_columns = {
+        "river-network": (
+            "segment_id",
+            "river_segment_id",
+            "river_network_version_id",
+            "basin_version_id",
+            "mvt_geom",
+        ),
+        "hydro": (
+            "feature_id",
+            "segment_id",
+            "river_segment_id",
+            "river_network_version_id",
+            "basin_version_id",
+            "value",
+            "unit",
+            "quality_flag",
+            "mvt_geom",
+        ),
+        "flood-return-period": (
+            "feature_id",
+            "segment_id",
+            "river_segment_id",
+            "river_network_version_id",
+            "basin_version_id",
+            "value",
+            "unit",
+            "quality_flag",
+            "return_period",
+            "warning_level",
+            "mvt_geom",
+        ),
+    }
+    forbidden_columns = {
+        "properties_json",
+        "source_coordinate_count",
+        "source_coordinate_dimensions",
+        "feature_count",
+        "coordinate_count",
+    }
+
+    for layer, columns in expected_columns.items():
+        statement = flood_alert_routes.postgis_tile_sql(layer)
+        sql = re.sub(r"\s+", " ", statement)
+        tile_subquery = sql[sql.index("SELECT ST_AsMVT") : sql.index(") AS tile,")]
+        projection_start = tile_subquery.index("FROM ( SELECT ") + len("FROM ( SELECT ")
+        projection = tile_subquery[projection_start : tile_subquery.index(" FROM budgeted")]
+        projected_columns = tuple(column.strip() for column in projection.split(","))
+        assert projected_columns == columns
+        assert "*" not in projection
+        assert forbidden_columns.isdisjoint(projected_columns)
 
 
 class ThresholdForecastStore(PsycopgForecastStore):
@@ -3206,6 +3340,9 @@ def _insert_timeseries_result(
     run_id: str,
     valid_time: datetime,
     value: float,
+    *,
+    variable: str = "q_down",
+    unit: str = "m3/s",
 ) -> None:
     connection.execute(
         text(
@@ -3216,7 +3353,7 @@ def _insert_timeseries_result(
             )
             VALUES (
                 :run_id, 'basin_v1', 'rnv_v1', :segment_id,
-                :valid_time, 'q_down', :value, 'm3/s'
+                :valid_time, :variable, :value, :unit
             )
             """
         ),
@@ -3225,6 +3362,8 @@ def _insert_timeseries_result(
             "segment_id": segment_id,
             "valid_time": valid_time,
             "value": value,
+            "variable": variable,
+            "unit": unit,
         },
     )
 

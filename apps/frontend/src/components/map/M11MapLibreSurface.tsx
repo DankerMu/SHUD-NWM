@@ -466,6 +466,11 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
 
 function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
   if (layerId === 'flood-return-period' || layerId === 'warning-level') return floodTileLayerPaint()
+  if (layerId === 'water-level') return waterLevelTileLayerPaint()
+  return dischargeTileLayerPaint()
+}
+
+function dischargeTileLayerPaint(): LayerProps['paint'] {
   return {
     'line-color': [
       'interpolate',
@@ -498,6 +503,44 @@ function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
       4.4,
       50000,
       6,
+    ],
+    'line-opacity': ['case', ['has', 'value'], 0.86, 0.42],
+  }
+}
+
+function waterLevelTileLayerPaint(): LayerProps['paint'] {
+  return {
+    'line-color': [
+      'interpolate',
+      ['linear'],
+      ['coalesce', ['get', 'value'], 0],
+      0,
+      '#E0F7FA',
+      0.5,
+      '#80DEEA',
+      1,
+      '#26C6DA',
+      2,
+      '#00897B',
+      4,
+      '#FDD835',
+      8,
+      '#D81B60',
+    ],
+    'line-width': [
+      'interpolate',
+      ['linear'],
+      ['coalesce', ['get', 'value'], 0],
+      0,
+      1.2,
+      1,
+      2,
+      2,
+      3,
+      4,
+      4.2,
+      8,
+      5.4,
     ],
     'line-opacity': ['case', ['has', 'value'], 0.86, 0.42],
   }

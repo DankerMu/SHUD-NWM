@@ -300,8 +300,12 @@ def postgis_tile_sql(layer: str) -> str:
                    CAST(:basin_version_id AS text) AS basin_version_id,
                    rs.geom, rs.properties_json
             FROM core.river_segment rs
-            JOIN core.model_instance mi ON mi.river_network_version_id = rs.river_network_version_id
-            WHERE mi.basin_version_id = :basin_version_id
+            WHERE EXISTS (
+                SELECT 1
+                FROM core.model_instance mi
+                WHERE mi.river_network_version_id = rs.river_network_version_id
+                  AND mi.basin_version_id = :basin_version_id
+            )
         """
     elif layer == "hydro":
         required_property_checks = {
@@ -374,6 +378,7 @@ def postgis_tile_sql(layer: str) -> str:
         f"CASE WHEN COUNT(*) FILTER (WHERE {condition}) > 0 THEN '{name}' END"
         for name, condition in required_property_checks.items()
     )
+    tile_row_columns = ",\n                       ".join(_mvt_public_tile_columns(layer))
     return f"""
         WITH bounds AS (
             SELECT ST_TileEnvelope(:z, :x, :y) AS geom_3857
@@ -447,7 +452,7 @@ def postgis_tile_sql(layer: str) -> str:
         SELECT (
             SELECT ST_AsMVT(tile_rows, '{layer_name}', {MVT_EXTENT}, 'mvt_geom')
             FROM (
-                SELECT *
+                SELECT {tile_row_columns}
                 FROM budgeted
                 WHERE feature_count <= :feature_limit
                   AND coordinate_count <= :collection_coordinate_limit
@@ -465,6 +470,44 @@ def postgis_tile_sql(layer: str) -> str:
         (SELECT invalid_properties FROM prefilter_stats) AS invalid_properties
         FROM source_stats, budget_stats, prefilter_stats
     """
+
+
+def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
+    if layer == "river-network":
+        return (
+            "segment_id",
+            "river_segment_id",
+            "river_network_version_id",
+            "basin_version_id",
+            "mvt_geom",
+        )
+    if layer == "hydro":
+        return (
+            "feature_id",
+            "segment_id",
+            "river_segment_id",
+            "river_network_version_id",
+            "basin_version_id",
+            "value",
+            "unit",
+            "quality_flag",
+            "mvt_geom",
+        )
+    if layer == "flood-return-period":
+        return (
+            "feature_id",
+            "segment_id",
+            "river_segment_id",
+            "river_network_version_id",
+            "basin_version_id",
+            "value",
+            "unit",
+            "quality_flag",
+            "return_period",
+            "warning_level",
+            "mvt_geom",
+        )
+    raise ValueError(f"Unsupported tile layer: {layer}")
 
 
 def layer_metadata(
@@ -491,6 +534,7 @@ def layer_metadata(
             "maplibre_source_layer": "hydro",
             "required_placeholders": ["run_id", "valid_time", "z", "x", "y"],
             "properties": [
+                "feature_id",
                 "segment_id",
                 "river_segment_id",
                 "basin_version_id",
@@ -536,7 +580,18 @@ def layer_metadata(
             "tile_url_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
             "maplibre_source_layer": "flood_return_period",
             "required_placeholders": ["run_id", "duration", "valid_time", "z", "x", "y"],
-            "properties": ["feature_id", "segment_id", "river_network_version_id", "warning_level", "quality_flag"],
+            "properties": [
+                "feature_id",
+                "segment_id",
+                "river_segment_id",
+                "basin_version_id",
+                "river_network_version_id",
+                "value",
+                "unit",
+                "return_period",
+                "warning_level",
+                "quality_flag",
+            ],
         },
     }
     base = metadata_by_layer.get(layer_id)
@@ -549,7 +604,56 @@ def layer_metadata(
         }
     cache_layer_id = "flood-return-period" if layer_id == "warning-level" else layer_id
     is_warning_alias = layer_id == "warning-level"
-    version = _stable_json_hash({"layer_id": layer_id, "source_version": source_version, "schema": MVT_SCHEMA_VERSION})
+    source_refs = _layer_source_refs(
+        layer_id,
+        run_id=run_id,
+        source_version=source_version,
+        basin_version_id=basin_version_id,
+    )
+    route_variable = (
+        "q_down"
+        if layer_id == "discharge"
+        else "water_level"
+        if layer_id == "water-level"
+        else "return_period"
+        if layer_id in {"flood-return-period", "warning-level"}
+        else None
+    )
+    alias_of = "flood-return-period" if is_warning_alias else None
+    alias_semantic = "style_layer" if is_warning_alias else None
+    legacy_layer_ids = (
+        [f"hydro:{'q_down' if layer_id == 'discharge' else 'water_level'}"]
+        if layer_id in {"discharge", "water-level"}
+        else ["flood_return_period_{run_id}"]
+        if layer_id == "flood-return-period"
+        else ["flood-return-period", "flood_return_period_{run_id}"]
+        if is_warning_alias
+        else []
+    )
+    property_schema = {"version": MVT_SCHEMA_VERSION, "required": base["properties"]}
+    version = _stable_json_hash(
+        {
+            "alias_of": alias_of,
+            "alias_semantic": alias_semantic,
+            "cache_layer_id": cache_layer_id,
+            "canonical_route_layer_id": cache_layer_id,
+            "encoder_version": MVT_ENCODER_VERSION,
+            "layer_id": layer_id,
+            "legacy_layer_ids": legacy_layer_ids,
+            "maplibre_source_layer": base["maplibre_source_layer"],
+            "property_schema": property_schema,
+            "release_blocking": release_blocking,
+            "required_placeholders": base["required_placeholders"],
+            "route_variable": route_variable,
+            "schema_version": MVT_SCHEMA_VERSION,
+            "source_refs": source_refs,
+            "tile_url_template": base["tile_url_template"],
+            "valid_time_limit": valid_time_limit,
+            "valid_time_observed_count": valid_time_observed_count,
+            "valid_times": valid_times or [],
+            "valid_times_truncated": valid_times_truncated,
+        }
+    )
     return {
         "layer_id": layer_id,
         "tile_format": "mvt",
@@ -559,7 +663,7 @@ def layer_metadata(
         "maplibre_source_layer": base["maplibre_source_layer"],
         "source_layer": base["maplibre_source_layer"],
         "property_schema_version": MVT_SCHEMA_VERSION,
-        "property_schema": {"version": MVT_SCHEMA_VERSION, "required": base["properties"]},
+        "property_schema": property_schema,
         "min_zoom": 0,
         "max_zoom": MVT_MAX_ZOOM,
         "bounds_crs": "EPSG:3857",
@@ -569,32 +673,13 @@ def layer_metadata(
         "valid_time_limit": valid_time_limit,
         "valid_time_observed_count": valid_time_observed_count,
         "valid_times_truncated": valid_times_truncated,
-        "source_refs": _layer_source_refs(
-            layer_id,
-            run_id=run_id,
-            source_version=source_version,
-            basin_version_id=basin_version_id,
-        ),
+        "source_refs": source_refs,
         "cache_layer_id": cache_layer_id,
-        "route_variable": (
-            "q_down"
-            if layer_id == "discharge"
-            else "water_level"
-            if layer_id == "water-level"
-            else "return_period"
-            if layer_id in {"flood-return-period", "warning-level"}
-            else None
-        ),
-        "alias_of": "flood-return-period" if is_warning_alias else None,
-        "alias_semantic": "style_layer" if is_warning_alias else None,
+        "route_variable": route_variable,
+        "alias_of": alias_of,
+        "alias_semantic": alias_semantic,
         "canonical_route_layer_id": cache_layer_id,
-        "legacy_layer_ids": [f"hydro:{'q_down' if layer_id == 'discharge' else 'water_level'}"]
-        if layer_id in {"discharge", "water-level"}
-        else ["flood_return_period_{run_id}"]
-        if layer_id == "flood-return-period"
-        else ["flood-return-period", "flood_return_period_{run_id}"]
-        if is_warning_alias
-        else [],
+        "legacy_layer_ids": legacy_layer_ids,
         "cache_etag": f'W/"metadata-{version}"',
         "cache_version": version,
         "schema_version": MVT_SCHEMA_VERSION,

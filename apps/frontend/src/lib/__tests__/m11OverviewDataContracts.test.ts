@@ -5,6 +5,7 @@ import {
   createSourceScenarioSelection,
   decideAggregationEndpoint,
   filterBasinSegmentRows,
+  getM11LayerLegend,
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
   m11BasinGeometryBudget,
@@ -349,6 +350,17 @@ describe('M11 overview data contracts', () => {
       available: false,
       disabledReason: 'Layer is registered but no renderable map source is implemented in this repository.',
     })
+  })
+
+  it('keeps water-level legend independent from discharge thresholds and units', () => {
+    const waterLevel = getM11LayerLegend('water-level')
+    const discharge = getM11LayerLegend('discharge')
+
+    expect(waterLevel).toEqual(expect.arrayContaining([expect.objectContaining({ label: '0.5-1 m' })]))
+    expect(waterLevel.map((entry) => entry.label).join(' ')).toContain('m')
+    expect(waterLevel.map((entry) => entry.label).join(' ')).not.toContain('m3/s')
+    expect(waterLevel.map((entry) => entry.max)).not.toContain(500)
+    expect(waterLevel).not.toEqual(discharge)
   })
 
   it('derives best layer freshness from a resolved concrete run', () => {

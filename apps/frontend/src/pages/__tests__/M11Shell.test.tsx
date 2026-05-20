@@ -15,6 +15,7 @@ import {
 import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
 import {
   m11BasinRiverCollectionBudget,
+  buildM11RegisteredOverlay,
   buildBasinFeatureCollection,
   buildBasinRiverFeatureCollection,
   buildSelectedSegmentFeatureCollection,
@@ -596,7 +597,17 @@ describe('M11 visual foundation shell', () => {
     })
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
     const paint = JSON.stringify(mapLayers.at(-1)?.paint)
+    const dischargePaint = JSON.stringify(
+      buildM11RegisteredOverlay(
+        state,
+        layers.map((layer) => (layer.layerId === 'discharge' ? { ...layer, metadata: dischargeMvtMetadata } : layer)),
+      )?.layer.paint,
+    )
     expect(paint).toContain('value')
+    expect(paint).toContain('0.5')
+    expect(paint).toContain('8')
+    expect(paint).not.toContain('50000')
+    expect(paint).not.toEqual(dischargePaint)
     expect(paint).not.toContain('warning_level')
     expect(paint).not.toContain('return_period')
   })
@@ -711,14 +722,20 @@ describe('M11 visual foundation shell', () => {
       geometry: { type: 'LineString', coordinates: [[100 + index * 0.01, 30], [100.005 + index * 0.01, 30.005]] },
     }))
 
-    for (const layerId of ['discharge', 'flood-return-period', 'warning-level'] as const) {
+    for (const layerId of ['discharge', 'water-level', 'flood-return-period', 'warning-level'] as const) {
       const legendColors = normalizedLayers.find((layer) => layer.layerId === layerId)?.legend.map((entry) => entry.color)
       const fallbackLegendColors = m11FallbackLegends[layerId].map((entry) => entry.color)
       const featureColors = buildBasinRiverFeatureCollection(representativeRows, layerId).features.map(
         (feature) => feature.properties.layer_color,
       )
-      expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
-      expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+      if (layerId === 'water-level') {
+        expect(legendColors).toEqual(expect.arrayContaining(['#E0F7FA', '#D81B60']))
+        expect(fallbackLegendColors).toEqual(expect.arrayContaining(['#E0F7FA', '#D81B60']))
+        expect(legendColors).not.toEqual(m11FallbackLegends.discharge.map((entry) => entry.color))
+      } else {
+        expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+        expect(fallbackLegendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))
+      }
     }
   })
 
@@ -1099,10 +1116,15 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByText('Comparison requires both GFS and IFS series.')).toBeInTheDocument()
   })
 
-  it('selects legends for discharge, flood return period, and warning level semantics', () => {
+  it('selects legends for discharge, water level, flood return period, and warning level semantics', () => {
     const { rerender } = render(<LayerLegendPanel state={state} layers={layers} />)
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
     expect(screen.getByText('<500 m3/s')).toBeInTheDocument()
+
+    rerender(<LayerLegendPanel state={{ ...state, layer: 'water-level' }} layers={[]} />)
+    expect(screen.getByText('水位图例')).toBeInTheDocument()
+    expect(screen.getByText('0.5-1 m')).toBeInTheDocument()
+    expect(screen.queryByText('500-1000 m3/s')).not.toBeInTheDocument()
 
     rerender(<LayerLegendPanel state={{ ...state, layer: 'flood-return-period' }} layers={layers} />)
     expect(screen.getByText('重现期图例')).toBeInTheDocument()

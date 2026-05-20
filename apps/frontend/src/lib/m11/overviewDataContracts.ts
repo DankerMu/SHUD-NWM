@@ -73,6 +73,16 @@ const m11RiverDischargeLegend: LayerLegendEntry[] = [
   { label: '无径流数据', color: m11DischargeColor(null) },
 ]
 
+const m11RiverWaterLevelLegend: LayerLegendEntry[] = [
+  { label: '<0.5 m', color: '#E0F7FA', max: 0.5 },
+  { label: '0.5-1 m', color: '#80DEEA', min: 0.5, max: 1 },
+  { label: '1-2 m', color: '#26C6DA', min: 1, max: 2 },
+  { label: '2-4 m', color: '#00897B', min: 2, max: 4 },
+  { label: '4-8 m', color: '#FDD835', min: 4, max: 8 },
+  { label: '>8 m', color: '#D81B60', min: 8 },
+  { label: '无水位数据', color: m11WaterLevelColor(null) },
+]
+
 const m11RiverReturnPeriodLegend: LayerLegendEntry[] = [
   { label: '正常 T<2', color: ALERT_LEVEL_META.normal.color, min: 0, max: 2 },
   { label: '偏高 2-5', color: ALERT_LEVEL_META.elevated.color, min: 2, max: 5 },
@@ -1231,6 +1241,7 @@ function layerLegend(layerId: string): LayerLegendEntry[] {
   if (layerId === 'warning-level') return m11RiverWarningLevelLegend.map((entry) => ({ ...entry }))
   if (layerId === 'flood-return-period') return m11RiverReturnPeriodLegend.map((entry) => ({ ...entry }))
   if (layerId === 'discharge') return m11RiverDischargeLegend.map((entry) => ({ ...entry }))
+  if (layerId === 'water-level') return m11RiverWaterLevelLegend.map((entry) => ({ ...entry }))
   return []
 }
 
@@ -1249,6 +1260,16 @@ export function m11DischargeColor(value: number | null) {
   if (value >= 1_000) return '#42A5F5'
   if (value >= 500) return '#90CAF9'
   return '#E3F2FD'
+}
+
+export function m11WaterLevelColor(value: number | null) {
+  if (value === null) return '#CBD5E1'
+  if (value >= 8) return '#D81B60'
+  if (value >= 4) return '#FDD835'
+  if (value >= 2) return '#00897B'
+  if (value >= 1) return '#26C6DA'
+  if (value >= 0.5) return '#80DEEA'
+  return '#E0F7FA'
 }
 
 export function m11ReturnPeriodColor(value: number | null) {
