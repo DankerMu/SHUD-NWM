@@ -310,6 +310,49 @@ describe('FloodReturnPeriodLayer', () => {
     expect(sourceProps).toHaveLength(0)
   })
 
+  it('uses bounded GeoJSON fallback from the flood-alert map wrapper when MVT metadata is unavailable', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    const featureCollection = {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: {
+            feature_id: 'rnv_v1::seg-1',
+            river_network_version_id: 'rnv_v1',
+            segment_id: 'seg-1',
+            warning_level: 'watch',
+          },
+          geometry: { type: 'LineString', coordinates: [[100, 30], [100.1, 30.1]] },
+        },
+      ],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(emptyLayerCatalogResponse())
+        .mockResolvedValueOnce(geoJsonResponse(featureCollection)),
+    )
+
+    render(
+      <FloodAlertMap
+        runId="run-small"
+        validTime="2026-05-03T06:00:00Z"
+        fallbackBbox={{ minLon: 100, minLat: 30, maxLon: 101, maxLat: 31 }}
+        degradedFallback
+        onSegmentSelect={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByTestId('flood-return-period-unavailable')).toHaveTextContent('bbox 限定的 GeoJSON 降级源')
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'geojson' }))
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('bbox=100%2C30%2C101%2C31'), expect.anything())
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('limit=500'), expect.anything())
+    expect(sourceProps.at(-1)).toMatchObject({ data: featureCollection })
+  })
+
   it('registers flood-alert map vector source when MVT metadata is available', async () => {
     sourceProps.length = 0
     layerProps.length = 0

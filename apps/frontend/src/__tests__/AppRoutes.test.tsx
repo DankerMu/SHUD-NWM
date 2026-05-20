@@ -18,6 +18,7 @@ import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState
 
 const m11FitBoundsCalls: Array<unknown[]> = []
 const m11FlyToCalls: Array<unknown> = []
+const floodAlertMapProps: Array<Record<string, unknown>> = []
 
 function geoJsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
@@ -162,7 +163,10 @@ vi.mock('@/components/forecast/ForecastPanel', () => ({
 }))
 
 vi.mock('@/components/flood/FloodAlertMap', () => ({
-  FloodAlertMap: () => <div>mock flood map</div>,
+  FloodAlertMap: (props: Record<string, unknown>) => {
+    floodAlertMapProps.push(props)
+    return <div>mock flood map</div>
+  },
 }))
 
 vi.mock('@/components/charts/QueueDonut', () => ({
@@ -676,6 +680,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   m11FitBoundsCalls.length = 0
   m11FlyToCalls.length = 0
+  floodAlertMapProps.length = 0
   overviewAsync.mockResolvedValue(undefined)
   useAuthStore.setState({ role: 'viewer' })
   useFloodAlertStore.setState({
@@ -3289,7 +3294,80 @@ describe('App route state', () => {
       cycleTime: '2026-05-12T00:00:00.000Z',
       validTime: '2026-05-12T03:00:00.000Z',
     })
+    expect(floodAlertMapProps.at(-1)).toMatchObject({
+      fallbackBbox: null,
+      degradedFallback: false,
+    })
     expect(useFloodAlertStore.getState().selectedAlertLevel).toBe('high_risk')
+  })
+
+  it('supplies bounded degraded flood-alert fallback bbox on the actual page path after selecting a focused segment', async () => {
+    const user = userEvent.setup()
+    const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
+    useFloodAlertStore.setState({
+      selectedRunId: 'run-flood-1',
+      latestRun: {
+        run_id: 'run-flood-1',
+        run_type: 'forecast',
+        scenario_id: 'forecast_gfs_deterministic',
+        model_id: 'model-1',
+        basin_version_id: 'basin-v1',
+        river_network_version_id: 'rivnet-v1',
+        source_id: 'gfs',
+        cycle_time: '2026-05-12T00:00:00Z',
+        status: 'frequency_done',
+        start_time: '2026-05-12T00:00:00Z',
+        end_time: '2026-05-12T03:00:00Z',
+        created_at: '2026-05-12T00:00:00Z',
+        updated_at: '2026-05-12T04:00:00Z',
+      },
+      validTimes: ['2026-05-12T03:00:00.000Z'],
+      summaryData: {
+        runId: 'run-flood-1',
+        levels: [{ level: 'warning', count: 1, color: '#f59e0b' }],
+        totalSegments: 1,
+        usableCurves: 1,
+        unavailableCount: 0,
+      },
+      rankingData: {
+        items: [
+          {
+            rank: 1,
+            riverSegmentId: 'seg-focused',
+            segmentId: 'seg-focused',
+            segmentName: 'Focused Flood Segment',
+            basinVersionId: 'basin-v1',
+            riverNetworkVersionId: 'rivnet-v1',
+            qValue: 1234,
+            qUnit: 'm3/s',
+            returnPeriod: 20,
+            warningLevel: 'warning',
+            validTime: '2026-05-12T03:00:00Z',
+            geomCentroid: { type: 'Point', coordinates: [101, 31] },
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      },
+      fetchLatestFrequencyDoneRun,
+    })
+    window.history.pushState({}, '', '/flood-alerts')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
+    expect(floodAlertMapProps.at(-1)).toMatchObject({
+      fallbackBbox: null,
+      degradedFallback: false,
+    })
+    await user.click(screen.getByRole('row', { name: /Focused Flood Segment/ }))
+    await waitFor(() =>
+      expect(floodAlertMapProps.at(-1)).toMatchObject({
+        fallbackBbox: { minLon: 100.75, minLat: 30.75, maxLon: 101.25, maxLat: 31.25 },
+        degradedFallback: true,
+      }),
+    )
   })
 
   it('does not leak forecast route source and cycle into flood-alert segment detail forecast requests', async () => {

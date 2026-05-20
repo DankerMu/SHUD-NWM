@@ -1628,7 +1628,7 @@ components:
       schema:
         type: integer
         minimum: 0
-        maximum: 24
+        maximum: 14
     ToTime:
       name: to
       in: query

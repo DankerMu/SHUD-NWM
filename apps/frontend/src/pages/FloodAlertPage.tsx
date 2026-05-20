@@ -11,6 +11,7 @@ import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
 import { formatDate } from '@/lib/format'
 import { parseM11QueryState } from '@/lib/m11/queryState'
+import type { FloodReturnPeriodGeoJsonBbox } from '@/lib/floodReturnPeriodGeoJson'
 import type { AlertLevel } from '@/components/flood/alertLevels'
 import { isAlertLevel } from '@/components/flood/alertLevels'
 import type { FloodAlertRankingItem } from '@/stores/floodAlert'
@@ -138,6 +139,7 @@ export function FloodAlertPage() {
 
   const tileFallbackTime = useMemo(() => latestRun?.end_time ?? validTimes.at(-1) ?? null, [latestRun, validTimes])
   const floodRunForecastIssueTime = useMemo(() => normalizeRunCycleTime(latestRun?.cycle_time), [latestRun?.cycle_time])
+  const fallbackBbox = useMemo(() => boundedFloodFallbackBbox(selectedSegment), [selectedSegment])
 
   if (loading) {
     return (
@@ -194,6 +196,8 @@ export function FloodAlertPage() {
               selectedSegment={selectedSegment}
               onSegmentSelect={selectSegment}
               className="h-full"
+              fallbackBbox={fallbackBbox}
+              degradedFallback={fallbackBbox !== null}
             />
           </div>
           <AlertTimeline
@@ -248,4 +252,18 @@ function normalizeRunCycleTime(value: string | null | undefined) {
   if (!value) return null
   const timestamp = Date.parse(value)
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value
+}
+
+function boundedFloodFallbackBbox(segment: FloodAlertRankingItem | null): FloodReturnPeriodGeoJsonBbox | null {
+  const coordinates = segment?.geomCentroid?.coordinates
+  if (!coordinates) return null
+  const [lon, lat] = coordinates
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null
+  const delta = 0.25
+  return {
+    minLon: Math.max(-180, lon - delta),
+    minLat: Math.max(-90, lat - delta),
+    maxLon: Math.min(180, lon + delta),
+    maxLat: Math.min(90, lat + delta),
+  }
 }

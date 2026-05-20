@@ -19,6 +19,7 @@ from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import PsycopgForecastStore
+from services.tiles.mvt import MVT_MAX_BYTES, cache_key
 from workers.flood_frequency.return_period import compute_return_periods
 
 RUN_ID = "fcst_gfs_2026050300_all"
@@ -1180,6 +1181,133 @@ def test_seeded_live_mvt_cache_hit_still_requires_live_postgis(
 
 
 @pytest.mark.parametrize(
+    ("path", "seed_tile", "fetch_name", "invalid_overrides"),
+    [
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="flood-return-period",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=VALID_TIME_1_ISO,
+                z=6,
+                x=12,
+                y=24,
+                variant_id="duration:1h",
+            ),
+            "_fetch_flood_mvt_tile_bytes",
+            {"tile_data": b"x" * (MVT_MAX_BYTES + 1)},
+        ),
+        (
+            f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="discharge",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=VALID_TIME_1_ISO,
+                z=6,
+                x=12,
+                y=24,
+                variant_id="variable:q_down",
+            ),
+            "_fetch_hydro_mvt_tile_bytes",
+            {"status": "failed"},
+        ),
+        (
+            "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="river-network",
+                source_id="basin_v1",
+                source_version="basin_v1",
+                valid_time=None,
+                z=6,
+                x=12,
+                y=24,
+            ),
+            "_fetch_river_network_mvt_tile_bytes",
+            {"checksum": "not-the-cached-byte-checksum"},
+        ),
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="flood-return-period",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=VALID_TIME_1_ISO,
+                z=6,
+                x=12,
+                y=24,
+                variant_id="duration:1h",
+            ),
+            "_fetch_flood_mvt_tile_bytes",
+            {"schema_version": "stale-schema"},
+        ),
+        (
+            f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="discharge",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=VALID_TIME_1_ISO,
+                z=6,
+                x=12,
+                y=24,
+                variant_id="variable:q_down",
+            ),
+            "_fetch_hydro_mvt_tile_bytes",
+            {"encoder_version": "stale-encoder"},
+        ),
+        (
+            "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="river-network",
+                source_id="basin_v1",
+                source_version="basin_v1",
+                valid_time=None,
+                z=6,
+                x=12,
+                y=24,
+            ),
+            "_fetch_river_network_mvt_tile_bytes",
+            {"source_id": "wrong-source"},
+        ),
+    ],
+)
+def test_canonical_mvt_route_invalid_cache_rows_are_misses_without_serving_cached_pbf(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    seed_tile: flood_alert_routes.TileInput,
+    fetch_name: str,
+    invalid_overrides: dict[str, Any],
+) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_require_run",
+            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_require_frequency_ready",
+            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+        )
+        _seed_mvt_cache_row(session, seed_tile, b"invalid-cached-pbf", **invalid_overrides)
+        monkeypatch.setattr(flood_alert_routes, fetch_name, lambda *_args, **_kwargs: b"fresh-live-pbf")
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(path)
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(flood_alert_routes.MVT_MEDIA_TYPE)
+    assert response.headers["x-tile-cache"] == "miss"
+    assert response.content == b"fresh-live-pbf"
+
+
+@pytest.mark.parametrize(
     ("tile", "fetch_name"),
     [
         (
@@ -2036,6 +2164,23 @@ def _store() -> Iterator[Session]:
         yield session
     finally:
         session.close()
+
+
+def _seed_mvt_cache_row(session: Session, tile: flood_alert_routes.TileInput, data: bytes, **overrides: Any) -> None:
+    flood_alert_routes.build_raw_tile_response(session, tile, data)
+    updates = []
+    params: dict[str, Any] = {"cache_key": cache_key(tile)}
+    for index, (column, value) in enumerate(overrides.items()):
+        param_name = f"value_{index}"
+        updates.append(f"{column} = :{param_name}")
+        params[param_name] = value
+    if not updates:
+        return
+    session.execute(
+        text(f"UPDATE map.tile_cache SET {', '.join(updates)} WHERE cache_key = :cache_key"),
+        params,
+    )
+    session.commit()
 
 
 def _attach_schemas(engine: Engine) -> None:

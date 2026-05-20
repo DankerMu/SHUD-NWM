@@ -4,8 +4,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from apps.api.routes import flood_alerts as flood_alert_routes
+from services.tiles.mvt import MVT_MAX_ZOOM
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 RouteKey = tuple[str, str]
@@ -181,6 +184,45 @@ def test_flood_return_period_feature_properties_document_stable_identity() -> No
     assert "river_network_version_id::segment_id" in schema["properties"]["feature_id"]["description"]
     assert schema["properties"]["segment_id"]["type"] == "string"
     assert schema["properties"]["river_network_version_id"]["type"] == "string"
+
+
+def test_mvt_tile_z_openapi_maximum_matches_runtime_contract() -> None:
+    spec = _openapi_spec()
+    mvt_paths = (
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    )
+
+    assert spec["components"]["parameters"]["TileZ"]["schema"]["maximum"] == MVT_MAX_ZOOM
+    for path in mvt_paths:
+        z_param = _operation_parameter(spec, path, "get", "path", "z")
+        assert z_param["schema"]["maximum"] == MVT_MAX_ZOOM
+
+
+def test_mvt_tile_z_above_documented_max_returns_runtime_validation_error() -> None:
+    class FakeDialect:
+        name = "sqlite"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/tiles/river-network/basin_v1/15/0/0.pbf")
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert body["error"]["code"] == "TILE_XYZ_INVALID"
+    assert body["error"]["details"]["max_z"] == MVT_MAX_ZOOM
 
 
 def test_river_segment_collection_413_contract_matches_runtime_and_static_openapi() -> None:

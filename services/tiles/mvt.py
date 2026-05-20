@@ -129,7 +129,7 @@ def build_tile_response(
     validate_xyz(tile.z, tile.x, tile.y)
     _enforce_feature_budget(features)
     key = cache_key(tile)
-    cached = _safe_read_cache(session, tile.layer_id, key, tile.z, tile.x, tile.y)
+    cached = _safe_read_cache(session, tile, key)
     if cached is not None:
         data, checksum, etag = cached
         return TileResponse(
@@ -177,7 +177,7 @@ def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> T
         )
 
     key = cache_key(tile)
-    cached = _safe_read_cache(session, tile.layer_id, key, tile.z, tile.x, tile.y)
+    cached = _safe_read_cache(session, tile, key)
     if cached is not None:
         cached_data, checksum, etag = cached
         return TileResponse(
@@ -205,7 +205,7 @@ def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> T
 def read_cached_tile_response(session: Session, tile: TileInput) -> TileResponse | None:
     validate_xyz(tile.z, tile.x, tile.y)
     key = cache_key(tile)
-    cached = _safe_read_cache(session, tile.layer_id, key, tile.z, tile.x, tile.y)
+    cached = _safe_read_cache(session, tile, key)
     if cached is None:
         return None
     data, checksum, etag = cached
@@ -636,16 +636,26 @@ def _enforce_feature_budget(features: list[Mapping[str, Any]]) -> None:
         )
 
 
-def _read_cache(session: Session, layer_id: str, key: str, z: int, x: int, y: int) -> tuple[bytes, str, str] | None:
+def _read_cache(session: Session, tile: TileInput, key: str) -> tuple[bytes, str, str] | None:
     if not _table_exists(session, "tile_cache", "map"):
         return None
     columns = _table_columns(session, "tile_cache", "map")
     checksum_sql = "checksum" if "checksum" in columns else "NULL AS checksum"
     key_filter = "cache_key = :cache_key" if "cache_key" in columns else "tile_uri = :cache_key"
+    selected_optional_columns = [
+        "source_id",
+        "source_version",
+        "valid_time",
+        "style_id",
+        "schema_version",
+        "encoder_version",
+        "status",
+    ]
+    optional_select = "".join(f", {column}" for column in selected_optional_columns if column in columns)
     row = session.execute(
         text(
             f"""
-            SELECT tile_data, {checksum_sql}, etag
+            SELECT tile_data, {checksum_sql}, etag{optional_select}
             FROM map.tile_cache
             WHERE layer_id = :layer_id
               AND z = :z
@@ -655,26 +665,45 @@ def _read_cache(session: Session, layer_id: str, key: str, z: int, x: int, y: in
             LIMIT 1
             """
         ),
-        {"layer_id": layer_id, "z": z, "x": x, "y": y, "cache_key": key},
+        {"layer_id": tile.layer_id, "z": tile.z, "x": tile.x, "y": tile.y, "cache_key": key},
     ).mappings().first()
     if row is None or row["tile_data"] is None:
         return None
     data = bytes(row["tile_data"])
-    checksum = str(row.get("checksum") or hashlib.sha256(data).hexdigest())
-    etag = str(row.get("etag") or stable_etag(data))
+    if len(data) > MVT_MAX_BYTES:
+        return None
+    computed_checksum = hashlib.sha256(data).hexdigest()
+    checksum = str(row.get("checksum") or "")
+    if not checksum or checksum != computed_checksum:
+        return None
+    computed_etag = stable_etag(data)
+    etag = str(row.get("etag") or "")
+    if not etag or etag != computed_etag:
+        return None
+    if "status" in columns and row.get("status") != "ready":
+        return None
+    if "schema_version" in columns and row.get("schema_version") != tile.schema_version:
+        return None
+    if "encoder_version" in columns and row.get("encoder_version") != tile.encoder_version:
+        return None
+    if "source_id" in columns and row.get("source_id") != tile.source_id:
+        return None
+    if "source_version" in columns and row.get("source_version") != tile.source_version:
+        return None
+    if "valid_time" in columns and _format_time(row.get("valid_time")) != _format_time(tile.valid_time):
+        return None
+    if "style_id" in columns and row.get("style_id") != tile.style_id:
+        return None
     return data, checksum, etag
 
 
 def _safe_read_cache(
     session: Session,
-    layer_id: str,
+    tile: TileInput,
     key: str,
-    z: int,
-    x: int,
-    y: int,
 ) -> tuple[bytes, str, str] | None:
     try:
-        return _read_cache(session, layer_id, key, z, x, y)
+        return _read_cache(session, tile, key)
     except SQLAlchemyError:
         try:
             session.rollback()
