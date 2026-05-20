@@ -22,6 +22,8 @@ from workers.model_registry.basins_registry_import import (
 )
 from workers.model_registry.cli import _argparse_main, _click_main
 
+_CLI_MODEL_ADMIN_AUTH_ARGS = ["--auth-actor-id", "cli-model-admin", "--auth-role", "model_admin"]
+
 
 def test_parser_reads_real_shapefiles_and_shud_evidence(tmp_path: Path) -> None:
     root, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
@@ -69,6 +71,7 @@ def test_manifest_must_match_selected_inventory_source_before_database(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -97,6 +100,7 @@ def test_manifest_source_identity_fields_are_required_before_database(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -125,6 +129,7 @@ def test_manifest_uri_is_required_before_database(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -170,6 +175,7 @@ def test_import_rejects_wrong_raw_inventory_byte_checksum(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -200,6 +206,7 @@ def test_manifest_checksum_conflict_fails_before_database(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -228,6 +235,7 @@ def test_import_rejects_required_file_traversal_before_database(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -256,6 +264,7 @@ def test_import_rejects_mutated_source_symlink_before_database(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -284,6 +293,7 @@ def test_import_rejects_input_alias_directory_symlink_before_database(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -695,6 +705,7 @@ def test_import_command_requires_database_but_consumes_manifests_first(
             str(inventory_path),
             "--package-manifest",
             str(manifest_path),
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -704,6 +715,85 @@ def test_import_command_requires_database_but_consumes_manifests_first(
     assert captured.out == ""
     assert error["error_code"] == "BASINS_REGISTRY_DATABASE_URL_MISSING"
     assert error["model_id"] == model_id
+
+
+def test_argparse_import_basins_registry_without_cli_auth_rejects_before_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    report_path = tmp_path / "import-report.json"
+
+    def fail_prepare(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("_prepare_sources must not run before denied auth policy")
+
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._prepare_sources", fail_prepare)
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+            "--output",
+            str(report_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "AUTH_REQUIRED"
+    assert error["policy_decision"]["target_id"] == model_id
+    assert not report_path.exists()
+
+
+def test_argparse_import_basins_registry_saml_blocks_cli_auth_before_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "saml")
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    report_path = tmp_path / "import-report.json"
+
+    def fail_prepare(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("_prepare_sources must not run before release-blocked auth policy")
+
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._prepare_sources", fail_prepare)
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+            "--output",
+            str(report_path),
+            "--auth-actor-id",
+            "cli-model-admin",
+            "--auth-role",
+            "model_admin",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "RELEASE_BLOCKED"
+    assert error["policy_decision"]["target_id"] == model_id
+    assert error["policy_decision"]["auth_mode"] == "cli_dev_test_blocked_by_auth_backend_saml"
+    assert error["policy_decision"]["no_mutation_expected"] is True
+    assert not report_path.exists()
 
 
 def test_import_command_reports_missing_sidecar_as_json(
@@ -722,6 +812,7 @@ def test_import_command_reports_missing_sidecar_as_json(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -750,6 +841,7 @@ def test_import_command_reports_missing_gis_directory_as_json(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 
@@ -778,6 +870,7 @@ def test_import_command_reports_segment_count_mismatch_before_database(
             str(manifest_path),
             "--database-url",
             "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
         ]
     )
 

@@ -39,6 +39,7 @@ ACTION_MATRIX: dict[str, tuple[AuthRole, ...]] = {
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_LIVE_AUTH_BACKENDS = {"live", "live_idp", "oidc", "saml"}
 _URI_OR_PATH_KEY_RE = re.compile(r"(uri|url|path|log|checksum|lineage|manifest|credential)", re.IGNORECASE)
 _LOCAL_PATH_RE = re.compile(r"(^|[\s=:])(?:/[A-Za-z0-9_.-][^\s,;]*|[A-Za-z]:\\[^\s,;]*)")
 _CHECKSUM_RE = re.compile(r"\b(?:sha(?:256|1)?[:=_-]?)?[a-f0-9]{32,128}\b", re.IGNORECASE)
@@ -604,7 +605,7 @@ def _cli_dev_test_blocking_auth_mode(env: Mapping[str, str]) -> str | None:
     if auth_mode in {"production", "live", "live_idp"}:
         return auth_mode
     auth_backend = env.get("AUTH_BACKEND", "").strip().lower()
-    if auth_backend in {"oidc", "live", "live_idp"}:
+    if auth_backend in _LIVE_AUTH_BACKENDS:
         return f"auth_backend_{auth_backend}"
     return None
 
@@ -612,7 +613,7 @@ def _cli_dev_test_blocking_auth_mode(env: Mapping[str, str]) -> str | None:
 def _live_auth_requested() -> bool:
     auth_backend = os.getenv("AUTH_BACKEND", "").strip().lower()
     auth_mode = os.getenv("NHMS_AUTH_MODE", "").strip().lower()
-    return auth_backend in {"live", "live_idp", "oidc", "saml"} or auth_mode in {"live", "live_idp"}
+    return auth_backend in _LIVE_AUTH_BACKENDS or auth_mode in {"live", "live_idp"}
 
 
 def _live_auth_release_blocked() -> bool:

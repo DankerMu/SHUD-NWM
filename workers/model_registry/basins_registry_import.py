@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from apps.api.auth import (
+    PolicyDecision,
+    require_policy_evidence,
+    trusted_internal_policy_decision,
+)
 
 from .basins_geometry import (
     SHAPEFILE_REQUIRED_SUFFIXES,
@@ -77,24 +81,30 @@ def import_basins_registry(
     policy_decision: PolicyDecision | None = None,
     trusted_internal: bool = False,
 ) -> dict[str, Any]:
-    inventory, inventory_bytes = _read_json_document(
-        inventory_path,
-        error_code="BASINS_REGISTRY_INVENTORY_INVALID",
-        not_found_code="BASINS_REGISTRY_INVENTORY_NOT_FOUND",
-    )
     manifest = _read_json_object(
         package_manifest_path,
         error_code="BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
         not_found_code="BASINS_REGISTRY_PACKAGE_MANIFEST_NOT_FOUND",
     )
-    sources = _prepare_sources(inventory, manifest, inventory_raw_checksum=_sha256_bytes(inventory_bytes))
+    model_id = _required_str(manifest, "model_id", "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID")
+    _require_import_policy(
+        model_id,
+        policy_decision=policy_decision,
+        trusted_internal=trusted_internal,
+    )
     resolved_database_url = database_url or os.getenv("DATABASE_URL", "").strip()
     if not resolved_database_url:
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_DATABASE_URL_MISSING",
             "DATABASE_URL or --database-url is required for Basins registry import.",
-            model_id=str(manifest.get("model_id") or ""),
+            model_id=model_id,
         )
+    inventory, inventory_bytes = _read_json_document(
+        inventory_path,
+        error_code="BASINS_REGISTRY_INVENTORY_INVALID",
+        not_found_code="BASINS_REGISTRY_INVENTORY_NOT_FOUND",
+    )
+    sources = _prepare_sources(inventory, manifest, inventory_raw_checksum=_sha256_bytes(inventory_bytes))
     report = _import_prepared_sources(
         sources,
         resolved_database_url,
@@ -273,6 +283,36 @@ def _import_prepared_sources(
         "package_checksum": sources.manifest["package_checksum"],
         "auth_policy_decision": decision.to_dict(),
     }
+
+
+def _require_import_policy(
+    model_id: str,
+    *,
+    policy_decision: PolicyDecision | None = None,
+    trusted_internal: bool = False,
+) -> PolicyDecision:
+    if trusted_internal:
+        policy_decision = trusted_internal_policy_decision(
+            "models.switch_version",
+            target_type="model_registry",
+            target_id=model_id,
+            actor_id="trusted-internal:basins-registry-import",
+            roles=("sys_admin",),
+        )
+    decision = require_policy_evidence(
+        policy_decision,
+        action_id="models.switch_version",
+        target_type="model_registry",
+        target_id=model_id,
+    )
+    if decision.decision != "allow":
+        raise BasinsRegistryImportError(
+            decision.reason_code,
+            decision.reason,
+            model_id=model_id,
+            details={"policy_decision": decision.to_dict(), "no_mutation_expected": True},
+        )
+    return decision
 
 
 def _ensure_basin(cursor: Any, sources: ImportSources) -> int:

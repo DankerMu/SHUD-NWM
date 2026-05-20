@@ -611,6 +611,40 @@ def test_argparse_hindcast_submit_production_mode_blocks_cli_flag_auth_before_mu
         assert _count(session, "hydro.hydro_run") == 0
 
 
+def test_argparse_hindcast_submit_saml_blocks_cli_flag_auth_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "saml")
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "submit_hindcast_slurm", _fail_slurm_submission)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "hindcast-submit",
+                "--model-id",
+                "yangtze_shud_v12",
+                "--source-id",
+                "ERA5",
+                "--start-time",
+                "1993-01-01T00:00:00Z",
+                "--end-time",
+                "1993-12-31T23:00:00Z",
+                "--auth-actor-id",
+                "cli-operator",
+                "--auth-role",
+                "operator",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "RELEASE_BLOCKED" in captured.err
+        assert _count(session, "hydro.hydro_run") == 0
+
+
 def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path) -> None:
     with _store() as session:
         _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")

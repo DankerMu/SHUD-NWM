@@ -428,6 +428,42 @@ def test_argparse_cli_supersede_live_backend_blocks_cli_flag_auth_before_mutatio
         assert _curve_flags(session) == {"model_v1": "ok"}
 
 
+def test_argparse_cli_supersede_saml_blocks_cli_flag_auth_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "saml")
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        session.commit()
+        _patch_fit_samples(monkeypatch)
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "fit-curves",
+                "--model-id",
+                "model_v2",
+                "--segment-id",
+                "seg_001",
+                "--duration",
+                "1h",
+                "--supersede-model-id",
+                "model_v1",
+                "--auth-actor-id",
+                "cli-model-admin",
+                "--auth-role",
+                "model_admin",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "RELEASE_BLOCKED" in captured.err
+        assert _curve_flags(session) == {"model_v1": "ok"}
+
+
 def test_argparse_cli_supersede_production_mode_blocks_env_auth_before_mutation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
