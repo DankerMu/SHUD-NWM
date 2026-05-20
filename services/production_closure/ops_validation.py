@@ -20,7 +20,9 @@ from urllib.parse import unquote, urlsplit
 from apps.api.auth import (
     ACTION_MATRIX,
     ROLE_VOCABULARY,
+    AuthContext,
     audit_record,
+    evaluate_policy,
     redact_audit_payload,
     simulated_decisions_for_action,
 )
@@ -345,6 +347,7 @@ class ProductionOpsConfig:
     rollback_scope: str
     dependency_roots: Mapping[str, Path | None]
     dependency_statuses: Mapping[str, str | None]
+    auth_live_proof: Mapping[str, Any] | None = None
     force: bool = False
 
     @property
@@ -368,6 +371,7 @@ class ProductionOpsConfig:
         e2e_evidence_root: Path | None = None,
         scale_evidence_root: Path | None = None,
         dependency_statuses: str | None = None,
+        auth_live_proof: Mapping[str, Any] | str | None = None,
         force: bool = False,
     ) -> ProductionOpsConfig:
         resolved_evidence_root = _safe_resolved_evidence_root(evidence_root)
@@ -398,6 +402,9 @@ class ProductionOpsConfig:
             },
             dependency_statuses=_parse_dependency_statuses(
                 dependency_statuses or os.getenv("NHMS_PRODUCTION_OPS_DEPENDENCY_STATUSES")
+            ),
+            auth_live_proof=_parse_auth_live_proof(
+                auth_live_proof if auth_live_proof is not None else os.getenv("NHMS_PRODUCTION_OPS_AUTH_LIVE_PROOF")
             ),
             force=force,
         )
@@ -556,39 +563,25 @@ def _production_config_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
 
 
 def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
-    live_backend_auth_executed = False
+    live_proof = _auth_live_proof(config)
+    live_backend_auth_executed = live_proof is not None
     decisions = []
     state = _auth_fixture_state()
-    for action in ACTION_MATRIX:
-        target = f"{action}:{config.run_id}"
-        for decision in simulated_decisions_for_action(
-            action,
-            target_id=target,
-            target_type=_target_type_for_action(action),
-        ):
-            decisions.append(_action_decision(config, decision, state=state))
-    return {
-        "schema": "nhms.production_closure.ops.auth_rbac.v1",
-        "run_id": config.run_id,
-        "status": "release_blocked",
-        "auth_mode": config.auth_mode,
-        "canonical_roles": list(ROLE_VOCABULARY),
-        "canonical_action_ids": list(ACTION_MATRIX),
-        "model_activation_boundary": {
-            "backend_enforcement_available": True,
-            "requested_auth_mode": config.auth_mode,
-            "fallback_release_gate": True,
-            "frontend_only_rbac_accepted_for_production": False,
-        },
-        "required_roles": list(config.required_roles),
-        "action_decisions": decisions,
-        "live_backend_auth_executed": live_backend_auth_executed,
-        "execution_modes": sorted({item["execution_mode"] for item in decisions}),
-        "state_mutation_assertions": {
-            "denied_actions_mutated_state": False,
-            "release_blocked_actions_mutated_state": False,
-        },
-        "blockers": [
+    if live_proof is not None:
+        decisions.extend(_auth_live_proof_action_decisions(config, live_proof, state=state))
+    else:
+        for action in ACTION_MATRIX:
+            target = f"{action}:{config.run_id}"
+            for decision in simulated_decisions_for_action(
+                action,
+                target_id=target,
+                target_type=_target_type_for_action(action),
+            ):
+                decisions.append(_action_decision(config, decision, state=state))
+    status = "ready" if live_backend_auth_executed else "release_blocked"
+    blockers = []
+    if not live_backend_auth_executed:
+        blockers.append(
             {
                 "error_code": "PRODUCTION_OPS_BACKEND_AUTH_RELEASE_BLOCKED",
                 "message": (
@@ -603,8 +596,109 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                     "audit decisions."
                 ),
             }
-        ],
+        )
+    return {
+        "schema": "nhms.production_closure.ops.auth_rbac.v1",
+        "run_id": config.run_id,
+        "status": status,
+        "auth_mode": config.auth_mode,
+        "canonical_roles": list(ROLE_VOCABULARY),
+        "canonical_action_ids": list(ACTION_MATRIX),
+        "model_activation_boundary": {
+            "backend_enforcement_available": True,
+            "requested_auth_mode": config.auth_mode,
+            "fallback_release_gate": not live_backend_auth_executed,
+            "frontend_only_rbac_accepted_for_production": False,
+        },
+        "required_roles": list(config.required_roles),
+        "live_proof": live_proof or {},
+        "action_decisions": decisions,
+        "live_backend_auth_executed": live_backend_auth_executed,
+        "execution_modes": sorted({item["execution_mode"] for item in decisions}),
+        "state_mutation_assertions": {
+            "denied_actions_mutated_state": False,
+            "release_blocked_actions_mutated_state": False,
+        },
+        "blockers": blockers,
     }
+
+
+def _auth_live_proof(config: ProductionOpsConfig) -> dict[str, Any] | None:
+    proof = config.auth_live_proof
+    if not proof:
+        return None
+    if proof.get("execution_mode") != "live_proof":
+        return None
+    if proof.get("live_backend_auth_executed") is not True:
+        return None
+
+    raw_roles = tuple(str(role) for role in proof.get("raw_roles", ()) if str(role))
+    mapped_roles = tuple(role for role in raw_roles if role in ROLE_VOCABULARY)
+    explicit_mapped_roles = proof.get("mapped_roles")
+    if explicit_mapped_roles is not None:
+        mapped_roles = tuple(str(role) for role in explicit_mapped_roles if str(role) in ROLE_VOCABULARY)
+    if not mapped_roles:
+        return None
+
+    provider_metadata = {
+        **dict(proof.get("provider_metadata") or {}),
+        "provider": str(proof.get("provider") or proof.get("provider_metadata", {}).get("provider") or "live_idp"),
+        "contract": str(proof.get("contract") or "supplied_ops_live_proof"),
+    }
+    role_mapping_result = {
+        **dict(proof.get("role_mapping_result") or {}),
+        "raw_roles_present": bool(raw_roles),
+        "raw_roles": raw_roles,
+        "mapped_roles": mapped_roles,
+        "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
+        "mapping_status": "mapped",
+    }
+    return {
+        "actor_id": str(proof.get("actor_id") or "ops-live-proof"),
+        "auth_mode": str(proof.get("auth_mode") or "live_idp"),
+        "provider_metadata": redact_audit_payload(provider_metadata),
+        "role_mapping_result": redact_audit_payload(role_mapping_result),
+    }
+
+
+def _auth_live_proof_action_decisions(
+    config: ProductionOpsConfig,
+    live_proof: Mapping[str, Any],
+    *,
+    state: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    decisions = []
+    allowed_context = AuthContext(
+        actor_id=str(live_proof["actor_id"]),
+        roles=tuple(live_proof["role_mapping_result"]["mapped_roles"]),
+        auth_mode=str(live_proof["auth_mode"]),
+        live_backend_auth_executed=True,
+        provider_metadata=live_proof["provider_metadata"],
+        role_mapping_result=live_proof["role_mapping_result"],
+    )
+    denied_context = AuthContext(
+        actor_id=f"{live_proof['actor_id']}:viewer-denied",
+        roles=("viewer",),
+        auth_mode=str(live_proof["auth_mode"]),
+        live_backend_auth_executed=True,
+        provider_metadata=live_proof["provider_metadata"],
+        role_mapping_result={
+            **dict(live_proof["role_mapping_result"]),
+            "mapped_roles": ("viewer",),
+            "mapping_status": "mapped",
+        },
+    )
+    for action in ACTION_MATRIX:
+        target = f"{action}:{config.run_id}"
+        for context in (allowed_context, denied_context):
+            policy_decision = evaluate_policy(
+                context,
+                action,
+                target_id=target,
+                target_type=_target_type_for_action(action),
+            )
+            decisions.append(_action_decision(config, policy_decision, state=state))
+    return decisions
 
 
 def _action_decision(
@@ -634,6 +728,8 @@ def _action_decision(
         "execution_mode": policy_decision.execution_mode,
         "auth_mode": policy_decision.auth_mode,
         "live_backend_auth_executed": policy_decision.live_backend_auth_executed,
+        "provider_metadata": redact_audit_payload(dict(getattr(policy_decision, "provider_metadata", None) or {})),
+        "role_mapping_result": redact_audit_payload(dict(getattr(policy_decision, "role_mapping_result", None) or {})),
         "no_mutation_expected": policy_decision.no_mutation_expected,
         "previous_state": dict(state),
         "new_state": _new_state_for_action(state, policy_decision.action_id) if mutated else dict(state),
@@ -648,6 +744,13 @@ def _action_decision(
 
 
 def _auth_release_blockers(config: ProductionOpsConfig, auth_rbac: Mapping[str, Any]) -> dict[str, Any]:
+    if auth_rbac["live_backend_auth_executed"]:
+        return {
+            "schema": "nhms.production_closure.ops.auth_release_blockers.v1",
+            "run_id": config.run_id,
+            "status": "ready",
+            "blockers": [],
+        }
     blockers = []
     for action, required_roles in ACTION_MATRIX.items():
         blockers.append(
@@ -941,6 +1044,7 @@ def _environment_payload(config: ProductionOpsConfig) -> dict[str, Any]:
     env_keys = [
         "NHMS_RUN_PRODUCTION_CLOSURE",
         "NHMS_PRODUCTION_OPS_AUTH_MODE",
+        "NHMS_PRODUCTION_OPS_AUTH_LIVE_PROOF",
         "NHMS_PRODUCTION_OPS_REQUIRED_ROLES",
         "NHMS_PRODUCTION_OPS_ALERT_TARGET",
         "NHMS_PRODUCTION_OPS_DEPLOYMENT_CONFIG_SOURCE",
@@ -2049,6 +2153,8 @@ def _evidence_alert_target(value: str) -> str:
 def _environment_value_for_evidence(key: str, value: str) -> str:
     if key == "NHMS_PRODUCTION_OPS_ALERT_TARGET":
         return _evidence_alert_target(value)
+    if key == "NHMS_PRODUCTION_OPS_AUTH_LIVE_PROOF":
+        return "[redacted]"
     return value
 
 
@@ -2194,6 +2300,26 @@ def _parse_dependency_statuses(value: str | None) -> Mapping[str, str | None]:
     return statuses
 
 
+def _parse_auth_live_proof(value: Mapping[str, Any] | str | None) -> Mapping[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return dict(value)
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ProductionOpsValidationError(
+            "PRODUCTION_OPS_AUTH_LIVE_PROOF_INVALID",
+            "Auth live proof must be a JSON object.",
+        ) from error
+    if not isinstance(parsed, Mapping):
+        raise ProductionOpsValidationError(
+            "PRODUCTION_OPS_AUTH_LIVE_PROOF_INVALID",
+            "Auth live proof must be a JSON object.",
+        )
+    return dict(parsed)
+
+
 def _dependency_root(env_name: str, explicit: Path | None) -> Path | None:
     if explicit is not None:
         return explicit.expanduser()
@@ -2261,6 +2387,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--e2e-evidence-root", type=click.Path(path_type=Path), default=None)
     @click.option("--scale-evidence-root", type=click.Path(path_type=Path), default=None)
     @click.option("--dependency-statuses", default=None)
+    @click.option("--auth-live-proof", default=None)
     @click.option("--force", is_flag=True, default=False)
     def validate_ops_command(
         evidence_root: Path,
@@ -2276,6 +2403,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         e2e_evidence_root: Path | None,
         scale_evidence_root: Path | None,
         dependency_statuses: str | None,
+        auth_live_proof: str | None,
         force: bool,
     ) -> None:
         try:
@@ -2294,6 +2422,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     e2e_evidence_root=e2e_evidence_root,
                     scale_evidence_root=scale_evidence_root,
                     dependency_statuses=dependency_statuses,
+                    auth_live_proof=auth_live_proof,
                     force=force,
                 )
             )
@@ -2336,6 +2465,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                             e2e_evidence_root=args.e2e_evidence_root,
                             scale_evidence_root=args.scale_evidence_root,
                             dependency_statuses=args.dependency_statuses,
+                            auth_live_proof=args.auth_live_proof,
                             force=args.force,
                         )
                     )
@@ -2366,6 +2496,7 @@ def _add_argparse_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--e2e-evidence-root", type=Path, default=None)
     parser.add_argument("--scale-evidence-root", type=Path, default=None)
     parser.add_argument("--dependency-statuses", default=None)
+    parser.add_argument("--auth-live-proof", default=None)
     parser.add_argument("--force", action="store_true")
 
 

@@ -9,7 +9,13 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from apps.api.auth import PolicyDecision, audit_record, require_policy_evidence, trusted_internal_policy_decision
+from apps.api.auth import (
+    PolicyDecision,
+    audit_record,
+    redact_audit_payload,
+    require_policy_evidence,
+    trusted_internal_policy_decision,
+)
 
 
 class ModelRegistryError(RuntimeError):
@@ -653,7 +659,7 @@ class PsycopgModelRegistryStore:
                 actor_id="trusted-internal:model-registry",
                 roles=("sys_admin",),
             )
-            request_id = request_id or str(uuid4())
+        request_id = request_id or str(uuid4())
         decision = require_policy_evidence(
             policy_decision,
             action_id=action_id,
@@ -954,6 +960,7 @@ class PsycopgModelRegistryStore:
         basins_lineage = _basins_lineage_details(updated.get("resource_profile"))
         if basins_lineage:
             details["basins_lineage"] = basins_lineage
+        details = redact_audit_payload(details)
         cursor.execute(
             """
             INSERT INTO ops.audit_log (

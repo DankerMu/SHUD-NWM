@@ -1803,6 +1803,9 @@ def test_m17_registry_admin_write_methods_accept_explicit_trusted_internal(
 def test_set_model_active_writes_audit_details_after_successful_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    package_checksum = "a" * 64
+    source_inventory_checksum = "b" * 64
+
     class FakeCursor:
         def __init__(self) -> None:
             self.rows: list[dict[str, Any]] = [
@@ -1821,8 +1824,8 @@ def test_set_model_active_writes_audit_details_after_successful_update(
                         "manifest_uri": (
                             "s3://user:pass@nhms/models/basins_model/v1/manifest.json?token=secret#credential"
                         ),
-                        "package_checksum": "package-sha-1",
-                        "source_inventory_checksum": "inventory-sha-1",
+                        "package_checksum": package_checksum,
+                        "source_inventory_checksum": source_inventory_checksum,
                         "other": "kept-out-of-audit-lineage",
                     },
                 },
@@ -1841,8 +1844,8 @@ def test_set_model_active_writes_audit_details_after_successful_update(
                         "manifest_uri": (
                             "s3://user:pass@nhms/models/basins_model/v1/manifest.json?token=secret#credential"
                         ),
-                        "package_checksum": "package-sha-1",
-                        "source_inventory_checksum": "inventory-sha-1",
+                        "package_checksum": package_checksum,
+                        "source_inventory_checksum": source_inventory_checksum,
                         "other": "kept-out-of-audit-lineage",
                     },
                 },
@@ -1892,19 +1895,21 @@ def test_set_model_active_writes_audit_details_after_successful_update(
         "basin_version_id": "basin_v01",
         "river_network_version_id": "basin_rivnet_v01",
         "mesh_version_id": "basin_mesh_v01",
-        "model_package_uri": "s3://nhms/models/basins_model/package/",
+        "model_package_uri": "[redacted]",
         "basins_lineage": {
-            "basin_slug": "basin-a",
-            "shud_input_name": "basin_a",
-            "manifest_uri": "s3://nhms/models/basins_model/v1/manifest.json",
-            "package_checksum": "package-sha-1",
-            "source_inventory_checksum": "inventory-sha-1",
+            "basin_slug": "[redacted]",
+            "shud_input_name": "[redacted]",
+            "manifest_uri": "[redacted]",
+            "package_checksum": "[redacted]",
+            "source_inventory_checksum": "[redacted]",
         },
     }.items() <= details.items()
     assert details["action_id"] == "models.activate"
     assert details["decision"] == "allow"
     assert details["roles"] == ["sys_admin"]
     assert details["request_id"]
+    assert package_checksum not in json.dumps(details)
+    assert source_inventory_checksum not in json.dumps(details)
 
 
 def test_set_model_active_writes_explicit_request_id_to_activation_audit(
@@ -1959,6 +1964,74 @@ def test_set_model_active_writes_explicit_request_id_to_activation_audit(
 
     details = cursor.parameters[-1][4]
     assert details["request_id"] == "req-activate"
+
+
+def test_set_model_active_direct_policy_evidence_generates_activation_audit_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = [
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": False,
+                    "resource_profile": {},
+                },
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": True,
+                    "resource_profile": {},
+                },
+            ]
+            self.parameters: list[tuple[Any, ...]] = []
+
+        def execute(self, _statement: str, parameters: tuple[Any, ...]) -> None:
+            self.parameters.append(parameters)
+
+        def fetchone(self) -> dict[str, Any]:
+            return self.rows.pop(0)
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    store = PsycopgModelRegistryStore("postgresql://example")
+    decision = evaluate_policy(
+        AuthContext(
+            actor_id="external-admin",
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.activate",
+        target_type="model_instance",
+        target_id="basins_model",
+    )
+
+    store.set_model_active("basins_model", True, policy_decision=decision)
+
+    audit_parameters = cursor.parameters[-1]
+    assert audit_parameters[:4] == ("external-admin", "model_admin", "models.activate", "basins_model")
+    details = audit_parameters[4]
+    assert details["request_id"]
+    assert isinstance(details["request_id"], str)
 
 
 def test_set_model_active_direct_call_requires_policy_evidence(monkeypatch: pytest.MonkeyPatch) -> None:

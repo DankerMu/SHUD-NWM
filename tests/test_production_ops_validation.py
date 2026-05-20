@@ -1666,6 +1666,69 @@ def test_validate_ops_live_ready_config_knobs_do_not_claim_live_execution(tmp_pa
     assert {alert["sink"] for alert in alerts["alerts"]} == {"https://alerts.example/[redacted-alert-path]"}
 
 
+def test_validate_ops_auth_live_proof_emits_redacted_live_evidence(tmp_path: Path) -> None:
+    proof = {
+        "execution_mode": "live_proof",
+        "live_backend_auth_executed": True,
+        "actor_id": "live-operator",
+        "provider": "oidc-prod",
+        "raw_roles": ["model_admin", "external-admin"],
+        "mapped_roles": ["model_admin"],
+        "provider_metadata": {
+            "issuer": "https://idp.example/realms/nhms",
+            "token": "live-token-secret",
+            "jwks_uri": "https://idp.example/.well-known/jwks.json?credential=secret",
+        },
+        "role_mapping_result": {
+            "source_claim": "groups",
+            "credential_hint": "token=live-token-secret",
+        },
+    }
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="live_proof_auth",
+            auth_mode="backend_route_executed",
+            auth_live_proof=proof,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "live_proof_auth" / "ops"
+    auth = _read_json(lane_dir / "auth_rbac.json")
+    blockers = _read_json(lane_dir / "auth_release_blockers.json")
+    rendered_auth = json.dumps(auth)
+    assert summary["live_backend_auth_executed"] is True
+    assert auth["status"] == "ready"
+    assert auth["live_backend_auth_executed"] is True
+    assert auth["execution_modes"] == ["live_proof"]
+    assert auth["live_proof"]["provider_metadata"]["provider"] == "oidc-prod"
+    assert auth["live_proof"]["provider_metadata"]["token"] == "[redacted]"
+    assert auth["live_proof"]["provider_metadata"]["jwks_uri"] == "[redacted]"
+    assert auth["live_proof"]["role_mapping_result"]["mapped_roles"] == ["model_admin"]
+    assert auth["live_proof"]["role_mapping_result"]["unmapped_roles"] == ["external-admin"]
+    assert {decision["decision"] for decision in auth["action_decisions"]} == {"allow", "deny"}
+    assert any(
+        decision["decision"] == "allow"
+        and decision["action_id"] == "models.activate"
+        and decision["live_backend_auth_executed"] is True
+        and decision["provider_metadata"]["provider"] == "oidc-prod"
+        and decision["role_mapping_result"]["mapping_status"] == "mapped"
+        for decision in auth["action_decisions"]
+    )
+    assert any(
+        decision["decision"] == "deny"
+        and decision["action_id"] == "models.activate"
+        and decision["previous_state"] == decision["new_state"]
+        and decision["state_mutated"] is False
+        for decision in auth["action_decisions"]
+    )
+    assert blockers["status"] == "ready"
+    assert blockers["blockers"] == []
+    assert "live-token-secret" not in rendered_auth
+    assert "credential=secret" not in rendered_auth
+
+
 def test_validate_ops_env_supplied_config_values_are_not_marked_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
