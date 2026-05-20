@@ -48,6 +48,9 @@ MAX_EVIDENCE_PAYLOAD_BYTES = 768 * 1024
 MAX_PERCENT_DECODE_ROUNDS = 4
 MAX_DEPENDENCY_SUMMARY_DEPTH = 128
 MAX_DEPENDENCY_SUMMARY_NODES = 10_000
+MAX_AUTH_LIVE_PROOF_BYTES = MAX_EVIDENCE_PAYLOAD_BYTES
+MAX_AUTH_LIVE_PROOF_DEPTH = MAX_DEPENDENCY_SUMMARY_DEPTH
+MAX_AUTH_LIVE_PROOF_NODES = MAX_DEPENDENCY_SUMMARY_NODES
 
 SERVICE_CONFIGS = {
     "api": ("DATABASE_URL", "AUTH_BACKEND", "AUDIT_LOG_DESTINATION", "CORS_ALLOWED_ORIGINS"),
@@ -635,6 +638,7 @@ def _auth_live_proof(config: ProductionOpsConfig) -> dict[str, Any] | None:
     proof = config.auth_live_proof
     if not proof:
         return None
+    _validate_auth_live_proof_complexity(proof)
     if proof.get("execution_mode") != "live_proof":
         return None
     if proof.get("live_backend_auth_executed") is not True:
@@ -656,16 +660,16 @@ def _auth_live_proof_subject(
     proof: Mapping[str, Any],
     subject: Literal["allowed", "denied"],
 ) -> dict[str, Any] | None:
-    subject_proof = proof.get(f"{subject}_subject")
+    subject_label = f"{subject}_subject"
+    subject_proof = proof.get(subject_label)
     if not isinstance(subject_proof, Mapping):
         return None
 
-    raw_roles = tuple(str(role) for role in subject_proof.get("raw_roles", ()) if str(role))
-    mapped_roles = tuple(role for role in raw_roles if role in ROLE_VOCABULARY)
+    actor_id = str(subject_proof.get("actor_id") or "")
+    raw_roles = _auth_live_proof_role_values(subject_proof.get("raw_roles"))
     explicit_mapped_roles = subject_proof.get("mapped_roles")
-    if explicit_mapped_roles is not None:
-        mapped_roles = tuple(str(role) for role in explicit_mapped_roles if str(role) in ROLE_VOCABULARY)
-    if not mapped_roles:
+    mapped_roles = _auth_live_proof_role_values(explicit_mapped_roles, canonical_only=True)
+    if not actor_id or not raw_roles or not mapped_roles:
         return None
 
     subject_provider_metadata = subject_proof.get("provider_metadata")
@@ -697,11 +701,26 @@ def _auth_live_proof_subject(
         "mapping_status": "mapped",
     }
     return {
-        "actor_id": str(subject_proof.get("actor_id") or proof.get("actor_id") or f"ops-live-proof-{subject}"),
+        "subject_label": subject_label,
+        "actor_id": actor_id,
         "auth_mode": str(subject_proof.get("auth_mode") or proof.get("auth_mode") or "live_idp"),
         "provider_metadata": redact_audit_payload(provider_metadata),
         "role_mapping_result": redact_audit_payload(role_mapping_result),
     }
+
+
+def _auth_live_proof_role_values(value: Any, *, canonical_only: bool = False) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple, set)):
+        return ()
+    roles = []
+    for item in value:
+        role = str(item or "").strip()
+        if not role:
+            continue
+        if canonical_only and role not in ROLE_VOCABULARY:
+            continue
+        roles.append(role)
+    return tuple(roles)
 
 
 def _auth_live_proof_action_decisions(
@@ -712,26 +731,31 @@ def _auth_live_proof_action_decisions(
 ) -> list[dict[str, Any]]:
     decisions = []
     contexts = [
-        AuthContext(
-            actor_id=str(subject["actor_id"]),
-            roles=tuple(subject["role_mapping_result"]["mapped_roles"]),
-            auth_mode=str(subject["auth_mode"]),
-            live_backend_auth_executed=True,
-            provider_metadata=subject["provider_metadata"],
-            role_mapping_result=subject["role_mapping_result"],
+        (
+            str(subject["subject_label"]),
+            AuthContext(
+                actor_id=str(subject["actor_id"]),
+                roles=tuple(subject["role_mapping_result"]["mapped_roles"]),
+                auth_mode=str(subject["auth_mode"]),
+                live_backend_auth_executed=True,
+                provider_metadata=subject["provider_metadata"],
+                role_mapping_result=subject["role_mapping_result"],
+            ),
         )
         for subject in live_proof.get("subjects", {}).values()
     ]
     for action in ACTION_MATRIX:
         target = f"{action}:{config.run_id}"
-        for context in contexts:
+        for subject_label, context in contexts:
             policy_decision = evaluate_policy(
                 context,
                 action,
                 target_id=target,
                 target_type=_target_type_for_action(action),
             )
-            decisions.append(_action_decision(config, policy_decision, state=state))
+            decision = _action_decision(config, policy_decision, state=state)
+            decision["auth_live_proof_subject"] = subject_label
+            decisions.append(decision)
     return decisions
 
 
@@ -878,11 +902,13 @@ def _auth_live_proof_coverage_blockers(
         ]
         allowed = any(
             decision["decision"] == "allow"
+            and decision.get("auth_live_proof_subject") == "allowed_subject"
             and set(decision["matched_roles"]).intersection(required_roles)
             for decision in action_decisions
         )
         denied = any(
             decision["decision"] == "deny"
+            and decision.get("auth_live_proof_subject") == "denied_subject"
             and decision["no_mutation_expected"] is True
             and decision["state_mutated"] is False
             and decision["previous_state"] == decision["new_state"]
@@ -1726,29 +1752,79 @@ def _validate_dependency_receipt_complexity(receipt: Mapping[str, Any]) -> None:
     )
 
 
-def _validate_dependency_json_complexity(value: Any, *, error_code: str, subject: str) -> None:
-    tuple(_walk_json_fields(value, error_code=error_code, subject=subject))
+def _validate_auth_live_proof_complexity(proof: Mapping[str, Any]) -> None:
+    _validate_dependency_json_complexity(
+        proof,
+        error_code="PRODUCTION_OPS_AUTH_LIVE_PROOF_INVALID",
+        subject="Auth live proof",
+        max_depth=MAX_AUTH_LIVE_PROOF_DEPTH,
+        max_nodes=MAX_AUTH_LIVE_PROOF_NODES,
+    )
 
 
-def _walk_json_fields(value: Any, *, error_code: str, subject: str) -> tuple[tuple[str, Any], ...]:
+def _validate_auth_live_proof_payload_size(proof: Mapping[str, Any] | str) -> None:
+    if isinstance(proof, str):
+        payload_size = len(proof.encode("utf-8"))
+    else:
+        try:
+            payload_size = len(json.dumps(proof, default=str).encode("utf-8"))
+        except (TypeError, ValueError) as error:
+            raise ProductionOpsValidationError(
+                "PRODUCTION_OPS_AUTH_LIVE_PROOF_INVALID",
+                "Auth live proof must be JSON serializable.",
+            ) from error
+    if payload_size > MAX_AUTH_LIVE_PROOF_BYTES:
+        raise ProductionOpsValidationError(
+            "PRODUCTION_OPS_AUTH_LIVE_PROOF_TOO_LARGE",
+            f"Auth live proof exceeds configured payload limit of {MAX_AUTH_LIVE_PROOF_BYTES} bytes.",
+        )
+
+
+def _validate_dependency_json_complexity(
+    value: Any,
+    *,
+    error_code: str,
+    subject: str,
+    max_depth: int = MAX_DEPENDENCY_SUMMARY_DEPTH,
+    max_nodes: int = MAX_DEPENDENCY_SUMMARY_NODES,
+) -> None:
+    tuple(
+        _walk_json_fields(
+            value,
+            error_code=error_code,
+            subject=subject,
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+        )
+    )
+
+
+def _walk_json_fields(
+    value: Any,
+    *,
+    error_code: str,
+    subject: str,
+    max_depth: int = MAX_DEPENDENCY_SUMMARY_DEPTH,
+    max_nodes: int = MAX_DEPENDENCY_SUMMARY_NODES,
+) -> tuple[tuple[str, Any], ...]:
     fields: list[tuple[str, Any]] = []
     stack: list[tuple[Any, int]] = [(value, 0)]
     visited_nodes = 0
     while stack:
         current, depth = stack.pop()
         visited_nodes += 1
-        if visited_nodes > MAX_DEPENDENCY_SUMMARY_NODES:
+        if visited_nodes > max_nodes:
             raise ProductionOpsValidationError(
                 error_code,
                 (
                     f"{subject} exceeds configured complexity limit of "
-                    f"{MAX_DEPENDENCY_SUMMARY_NODES} visited JSON nodes."
+                    f"{max_nodes} visited JSON nodes."
                 ),
             )
-        if depth > MAX_DEPENDENCY_SUMMARY_DEPTH:
+        if depth > max_depth:
             raise ProductionOpsValidationError(
                 error_code,
-                f"{subject} exceeds configured nesting limit of {MAX_DEPENDENCY_SUMMARY_DEPTH} levels.",
+                f"{subject} exceeds configured nesting limit of {max_depth} levels.",
             )
         if isinstance(current, Mapping):
             for key, nested in reversed(tuple(current.items())):
@@ -2487,7 +2563,11 @@ def _parse_auth_live_proof(value: Mapping[str, Any] | str | None) -> Mapping[str
     if value is None:
         return None
     if isinstance(value, Mapping):
-        return dict(value)
+        parsed = dict(value)
+        _validate_auth_live_proof_complexity(parsed)
+        _validate_auth_live_proof_payload_size(parsed)
+        return parsed
+    _validate_auth_live_proof_payload_size(value)
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as error:
@@ -2500,7 +2580,9 @@ def _parse_auth_live_proof(value: Mapping[str, Any] | str | None) -> Mapping[str
             "PRODUCTION_OPS_AUTH_LIVE_PROOF_INVALID",
             "Auth live proof must be a JSON object.",
         )
-    return dict(parsed)
+    parsed = dict(parsed)
+    _validate_auth_live_proof_complexity(parsed)
+    return parsed
 
 
 def _dependency_root(env_name: str, explicit: Path | None) -> Path | None:

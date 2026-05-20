@@ -1728,6 +1728,7 @@ def test_validate_ops_auth_live_proof_emits_redacted_live_evidence(tmp_path: Pat
         action_decisions = [decision for decision in auth["action_decisions"] if decision["action_id"] == action]
         assert any(
             decision["decision"] == "allow"
+            and decision["auth_live_proof_subject"] == "allowed_subject"
             and decision["actor_id"] == "live-admin"
             and decision["roles"] == ["sys_admin"]
             and decision["live_backend_auth_executed"] is True
@@ -1737,6 +1738,7 @@ def test_validate_ops_auth_live_proof_emits_redacted_live_evidence(tmp_path: Pat
         )
         assert any(
             decision["decision"] == "deny"
+            and decision["auth_live_proof_subject"] == "denied_subject"
             and decision["actor_id"] == "live-viewer"
             and decision["roles"] == ["viewer"]
             and decision["role_mapping_result"]["raw_roles"] == ["viewer", "external-viewer"]
@@ -1750,6 +1752,64 @@ def test_validate_ops_auth_live_proof_emits_redacted_live_evidence(tmp_path: Pat
     assert "live-token-secret" not in rendered_auth
     assert "viewer-token-secret" not in rendered_auth
     assert "credential=secret" not in rendered_auth
+
+
+def test_validate_ops_auth_live_proof_swapped_subject_labels_remains_blocked(tmp_path: Path) -> None:
+    proof = {
+        "execution_mode": "live_proof",
+        "live_backend_auth_executed": True,
+        "provider": "oidc-prod",
+        "allowed_subject": {
+            "actor_id": "live-viewer",
+            "raw_roles": ["viewer"],
+            "mapped_roles": ["viewer"],
+        },
+        "denied_subject": {
+            "actor_id": "live-admin",
+            "raw_roles": ["sys_admin"],
+            "mapped_roles": ["sys_admin"],
+        },
+    }
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="swapped_live_proof_auth",
+            auth_mode="backend_route_executed",
+            auth_live_proof=proof,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "swapped_live_proof_auth" / "ops"
+    auth = _read_json(lane_dir / "auth_rbac.json")
+    blockers = _read_json(lane_dir / "auth_release_blockers.json")
+
+    assert summary["status"] == "release_blocked"
+    assert auth["status"] == "release_blocked"
+    assert blockers["status"] == "release_blocked"
+    assert {decision["auth_live_proof_subject"] for decision in auth["action_decisions"]} == {
+        "allowed_subject",
+        "denied_subject",
+    }
+    coverage_blockers = [
+        blocker
+        for blocker in blockers["blockers"]
+        if blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
+    ]
+    assert coverage_blockers
+    assert all(
+        set(blocker["missing_coverage"]) == {"allowed_live_proof", "denied_no_mutation_live_proof"}
+        for blocker in coverage_blockers
+    )
+    assert all(
+        blocker.get("error_code") != "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID"
+        for blocker in blockers["blockers"]
+    )
+    assert any(
+        blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
+        and set(blocker["missing_coverage"]) == {"allowed_live_proof", "denied_no_mutation_live_proof"}
+        for blocker in summary["release_blockers"]
+    )
 
 
 def test_validate_ops_auth_live_proof_partial_action_coverage_remains_blocked(tmp_path: Path) -> None:
@@ -1857,6 +1917,120 @@ def test_validate_ops_auth_live_proof_requires_explicit_allowed_subject(tmp_path
         and blocker.get("subject") == "allowed_subject"
         for blocker in blockers["blockers"]
     )
+
+
+def test_validate_ops_auth_live_proof_rejects_incomplete_explicit_subject_objects(tmp_path: Path) -> None:
+    proof = {
+        "execution_mode": "live_proof",
+        "live_backend_auth_executed": True,
+        "provider": "oidc-prod",
+        "actor_id": "legacy-live-admin",
+        "allowed_subject": {
+            "raw_roles": ["sys_admin"],
+            "mapped_roles": ["sys_admin"],
+        },
+        "denied_subject": {
+            "actor_id": "live-viewer",
+            "mapped_roles": ["viewer"],
+        },
+    }
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="incomplete_subject_live_proof_auth",
+            auth_mode="backend_route_executed",
+            auth_live_proof=proof,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "incomplete_subject_live_proof_auth" / "ops"
+    auth = _read_json(lane_dir / "auth_rbac.json")
+    blockers = _read_json(lane_dir / "auth_release_blockers.json")
+
+    assert summary["status"] == "release_blocked"
+    assert auth["status"] == "release_blocked"
+    assert blockers["status"] == "release_blocked"
+    assert auth["live_proof"]["subjects"] == {}
+    for subject in ("allowed_subject", "denied_subject"):
+        assert any(
+            blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID"
+            and blocker.get("subject") == subject
+            for blocker in auth["blockers"]
+        )
+        assert any(
+            blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID"
+            and blocker.get("subject") == subject
+            for blocker in blockers["blockers"]
+        )
+        assert any(
+            blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID"
+            and blocker.get("subject") == subject
+            for blocker in summary["release_blockers"]
+        )
+
+
+def test_validate_ops_auth_live_proof_rejects_unbounded_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ops_validation_module, "MAX_AUTH_LIVE_PROOF_BYTES", 128)
+    oversized_proof = json.dumps(
+        {
+            "execution_mode": "live_proof",
+            "live_backend_auth_executed": True,
+            "allowed_subject": {"actor_id": "a", "raw_roles": ["sys_admin"], "mapped_roles": ["sys_admin"]},
+            "denied_subject": {"actor_id": "d", "raw_roles": ["viewer"], "mapped_roles": ["viewer"]},
+            "provider_metadata": {"token": "x" * 256},
+        }
+    )
+    with pytest.raises(ProductionOpsValidationError) as size_exc:
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="oversized_live_proof_auth",
+            auth_live_proof=oversized_proof,
+        )
+    assert size_exc.value.error_code == "PRODUCTION_OPS_AUTH_LIVE_PROOF_TOO_LARGE"
+
+    with pytest.raises(ProductionOpsValidationError) as mapping_size_exc:
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="oversized_mapping_live_proof_auth",
+            auth_live_proof={
+                "execution_mode": "live_proof",
+                "live_backend_auth_executed": True,
+                "allowed_subject": {"actor_id": "a", "raw_roles": ["sys_admin"], "mapped_roles": ["sys_admin"]},
+                "denied_subject": {"actor_id": "d", "raw_roles": ["viewer"], "mapped_roles": ["viewer"]},
+                "provider_metadata": {"token": "x" * 256},
+            },
+        )
+    assert mapping_size_exc.value.error_code == "PRODUCTION_OPS_AUTH_LIVE_PROOF_TOO_LARGE"
+
+    monkeypatch.setattr(ops_validation_module, "MAX_AUTH_LIVE_PROOF_DEPTH", 3)
+    with pytest.raises(ProductionOpsValidationError) as depth_exc:
+        validate_ops(
+            ProductionOpsConfig.from_env(
+                evidence_root=tmp_path / "artifacts",
+                run_id="deep_live_proof_auth",
+                auth_mode="backend_route_executed",
+                auth_live_proof={
+                    "execution_mode": "live_proof",
+                    "live_backend_auth_executed": True,
+                    "allowed_subject": {
+                        "actor_id": "a",
+                        "raw_roles": ["sys_admin"],
+                        "mapped_roles": ["sys_admin"],
+                        "provider_metadata": {"nested": {"too": "deep"}},
+                    },
+                    "denied_subject": {
+                        "actor_id": "d",
+                        "raw_roles": ["viewer"],
+                        "mapped_roles": ["viewer"],
+                    },
+                },
+            )
+        )
+    assert depth_exc.value.error_code == "PRODUCTION_OPS_AUTH_LIVE_PROOF_INVALID"
 
 
 def test_validate_ops_auth_live_proof_inconsistent_same_actor_roles_remains_blocked(tmp_path: Path) -> None:

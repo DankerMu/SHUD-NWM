@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -95,26 +96,22 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     assert audit["action"] == "models.activate"
     assert audit["entity_type"] == "model_instance"
     assert audit["entity_id"] == ids["basins_model_id"]
-    assert _has_no_sensitive_uri_parts(audit["details"]["model_package_uri"])
-    assert _has_no_sensitive_uri_parts(audit["details"]["basins_lineage"]["manifest_uri"])
     assert {
         "previous_active": False,
         "active": True,
         "basin_version_id": ids["basin_version_id"],
         "river_network_version_id": ids["river_network_version_id"],
         "mesh_version_id": ids["mesh_version_id"],
-        "model_package_uri": "s3://nhms/models/it137_basins_model/package/",
-        "basins_lineage": {
-            "basin_slug": "it137-basin",
-            "shud_input_name": "it137_basin",
-            "manifest_uri": "s3://nhms/models/it137_basins_model/v1/manifest.json",
-            "package_checksum": "package-sha-it137",
-            "source_inventory_checksum": "inventory-sha-it137",
-        },
     }.items() <= audit["details"].items()
     assert audit["details"]["action_id"] == "models.activate"
     assert audit["details"]["decision"] == "allow"
     assert audit["details"]["roles"] == ["model_admin"]
+    assert audit["details"]["target"] == {"type": "model_instance", "id": ids["basins_model_id"]}
+    assert audit["details"].get("model_package_uri") in (None, "[redacted]")
+    assert "package-sha-it137" not in json.dumps(audit["details"])
+    assert "inventory-sha-it137" not in json.dumps(audit["details"])
+    assert "token=secret" not in json.dumps(audit["details"])
+    assert "user:pass@" not in json.dumps(audit["details"])
     assert missing_audit_count == 0
 
 
