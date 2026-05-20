@@ -29,6 +29,7 @@ from services.tiles.mvt import (
     latest_ready_run,
     layer_metadata,
     postgis_tile_sql,
+    read_cached_tile_response,
     valid_times_for_layer,
     validate_identifier,
     validate_xyz,
@@ -662,7 +663,11 @@ def flood_return_period_mvt_tile(
         z=z,
         x=x,
         y=y,
+        variant_id=f"duration:{duration}",
     )
+    cached = read_cached_tile_response(session, tile_input)
+    if cached is not None:
+        return _mvt_response(cached)
     data = _fetch_flood_mvt_tile_bytes(
         session,
         run_id=run_id,
@@ -698,7 +703,11 @@ def hydro_mvt_tile(
         z=z,
         x=x,
         y=y,
+        variant_id=f"variable:{variable}",
     )
+    cached = read_cached_tile_response(session, tile_input)
+    if cached is not None:
+        return _mvt_response(cached)
     data = _fetch_hydro_mvt_tile_bytes(
         session,
         run_id=run_id,
@@ -730,6 +739,9 @@ def river_network_mvt_tile(
         x=x,
         y=y,
     )
+    cached = read_cached_tile_response(session, tile_input)
+    if cached is not None:
+        return _mvt_response(cached)
     data = _fetch_river_network_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y)
     return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
@@ -780,6 +792,27 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
         text(postgis_tile_sql(layer)),
         _postgis_tile_params(params, z=z, x=x, y=y),
     ).mappings().first()
+    feature_count = int(row.get("feature_count") or 0) if row else 0
+    coordinate_count = int(row.get("coordinate_count") or 0) if row else 0
+    if (
+        feature_count > FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT
+        or coordinate_count > FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES
+    ):
+        raise ApiError(
+            status_code=413,
+            code="MVT_TILE_BUDGET_EXCEEDED",
+            message="Live PostGIS MVT tile exceeded the configured feature or coordinate budget.",
+            details={
+                "layer_id": layer,
+                "z": z,
+                "x": x,
+                "y": y,
+                "feature_count": feature_count,
+                "max_features": FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT,
+                "coordinate_count": coordinate_count,
+                "max_coordinates": FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES,
+            },
+        )
     data = bytes(row["tile"] or b"") if row and row.get("tile") is not None else b""
     if not data:
         raise ApiError(

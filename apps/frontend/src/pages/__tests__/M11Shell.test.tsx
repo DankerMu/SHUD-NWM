@@ -221,6 +221,18 @@ const dischargeMvtMetadata: NonNullable<LayerState['metadata']> = {
   required_placeholders: ['run_id', 'valid_time', 'z', 'x', 'y'],
 }
 
+const waterLevelMvtMetadata: NonNullable<LayerState['metadata']> = {
+  layer_id: 'water-level',
+  tile_format: 'mvt',
+  url_template: '/api/v1/tiles/hydro/{run_id}/water_level/{valid_time}/{z}/{x}/{y}.pbf',
+  tile_url_template: '/api/v1/tiles/hydro/{run_id}/water_level/{valid_time}/{z}/{x}/{y}.pbf',
+  maplibre_source_layer: 'hydro',
+  source_layer: 'hydro',
+  fallback_available: false,
+  release_blocking: false,
+  required_placeholders: ['run_id', 'valid_time', 'z', 'x', 'y'],
+}
+
 const layers: LayerState[] = [
   {
     layerId: 'discharge',
@@ -552,6 +564,31 @@ describe('M11 visual foundation shell', () => {
       tiles: ['/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf'],
     })
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+  })
+
+  it('registers water-level vector source from advertised hydrology MVT metadata', async () => {
+    const layersWithMvt = layers.map((layer) =>
+      layer.layerId === 'water-level'
+        ? {
+            ...layer,
+            available: true,
+            validTimes: ['2026-05-18T00:00:00.000Z'],
+            currentValidTime: '2026-05-18T00:00:00.000Z',
+            disabledReason: null,
+            metadata: waterLevelMvtMetadata,
+            freshness: { ...layer.freshness, runId: 'run-gfs', validTime: '2026-05-18T00:00:00.000Z' },
+          }
+        : layer,
+    )
+    render(<M11MapSurface state={{ ...state, layer: 'water-level' }} layers={layersWithMvt} onQueryChange={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'water-level'))
+    expect(mapSources.at(-1)).toMatchObject({
+      id: 'm11-water-level-source',
+      type: 'vector',
+      tiles: ['/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf'],
+    })
+    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
   })
 
   it('does not create unbounded GeoJSON national source when MVT metadata is missing', async () => {

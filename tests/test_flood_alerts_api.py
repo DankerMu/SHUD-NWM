@@ -29,6 +29,8 @@ TIMESTEP_DUPLICATE_RUN_ID = "fcst_gfs_2026050300_timestep_duplicates"
 RECOMPUTE_MOVED_PEAK_RUN_ID = "fcst_gfs_2026050300_recompute_moved_peak"
 VALID_TIME_1 = datetime(2026, 5, 3, 6, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 12, tzinfo=UTC)
+VALID_TIME_1_ISO = VALID_TIME_1.isoformat().replace("+00:00", "Z")
+VALID_TIME_2_ISO = VALID_TIME_2.isoformat().replace("+00:00", "Z")
 
 
 def test_summary_normal_threshold_and_valid_time() -> None:
@@ -849,7 +851,7 @@ def test_flood_tile_postgis_feature_geometry_sentinel_returns_413_before_payload
 def test_flood_mvt_canonical_route_returns_protobuf_and_cache_headers() -> None:
     with _client() as client:
         response = client.get(
-            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf",
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
         )
 
     assert response.status_code == 424
@@ -925,7 +927,7 @@ def test_live_mvt_cache_identity_preserves_valid_time_variants(monkeypatch: pyte
                 layer_id="flood-return-period",
                 source_id=RUN_ID,
                 source_version="rnv_v1",
-                valid_time=_iso(VALID_TIME_1),
+                valid_time=VALID_TIME_1_ISO,
                 z=6,
                 x=12,
                 y=24,
@@ -950,6 +952,128 @@ def test_live_mvt_cache_identity_preserves_valid_time_variants(monkeypatch: pyte
 
     assert first.cache_key != second.cache_key
     assert {bytes(row["tile_data"]) for row in rows} == {b"tile-time-1", b"tile-time-2"}
+
+
+def test_flood_mvt_cache_identity_preserves_duration_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+
+        first = flood_alert_routes.build_raw_tile_response(
+            session,
+            flood_alert_routes.TileInput(
+                layer_id="flood-return-period",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=_iso(VALID_TIME_1),
+                z=6,
+                x=12,
+                y=24,
+                variant_id="duration:1h",
+            ),
+            b"tile-duration-1h",
+        )
+        second = flood_alert_routes.build_raw_tile_response(
+            session,
+            flood_alert_routes.TileInput(
+                layer_id="flood-return-period",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=_iso(VALID_TIME_1),
+                z=6,
+                x=12,
+                y=24,
+                variant_id="duration:24h",
+            ),
+            b"tile-duration-24h",
+        )
+
+        rows = session.execute(text("SELECT cache_key, tile_data FROM map.tile_cache")).mappings().all()
+
+    assert first.cache_key != second.cache_key
+    assert {bytes(row["tile_data"]) for row in rows} == {b"tile-duration-1h", b"tile-duration-24h"}
+
+
+@pytest.mark.parametrize(
+    ("path", "seed_tile", "fetch_name"),
+    [
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="flood-return-period",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=VALID_TIME_1_ISO,
+                z=6,
+                x=12,
+                y=24,
+                variant_id="duration:1h",
+            ),
+            "_fetch_flood_mvt_tile_bytes",
+        ),
+        (
+            f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="hydro:q_down",
+                source_id=RUN_ID,
+                source_version="rnv_v1",
+                valid_time=VALID_TIME_1_ISO,
+                z=6,
+                x=12,
+                y=24,
+                variant_id="variable:q_down",
+            ),
+            "_fetch_hydro_mvt_tile_bytes",
+        ),
+        (
+            "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="river-network",
+                source_id="basin_v1",
+                source_version="basin_v1",
+                valid_time=None,
+                z=6,
+                x=12,
+                y=24,
+            ),
+            "_fetch_river_network_mvt_tile_bytes",
+        ),
+    ],
+)
+def test_live_mvt_route_cache_hit_skips_postgis_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    seed_tile: flood_alert_routes.TileInput,
+    fetch_name: str,
+) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_require_run",
+            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_require_frequency_ready",
+            lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+        )
+        seeded = flood_alert_routes.build_raw_tile_response(session, seed_tile, b"cached-live-tile")
+
+        def fail_if_called(*_args: Any, **_kwargs: Any) -> bytes:
+            raise AssertionError("live PostGIS fetch should not execute on cache hit")
+
+        monkeypatch.setattr(flood_alert_routes, fetch_name, fail_if_called)
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(path)
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.content == b"cached-live-tile"
+    assert response.headers["x-tile-cache"] == "hit"
+    assert response.headers["x-tile-cache-key"] == seeded.cache_key
 
 
 def test_live_mvt_cache_write_failure_returns_tile_with_bypass_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -989,6 +1113,70 @@ def test_live_mvt_cache_write_failure_returns_tile_with_bypass_status(monkeypatc
 
     assert tile.data == b"live-tile"
     assert tile.cache_status == "bypass"
+
+
+def test_live_mvt_over_budget_stats_return_413_without_pbf(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRowResult:
+        def __init__(self, row: dict[str, Any] | None) -> None:
+            self.row = row
+
+        def mappings(self) -> FakeRowResult:
+            return self
+
+        def first(self) -> dict[str, Any] | None:
+            return self.row
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRowResult:
+            sql = str(statement)
+            if "ST_TileEnvelope(:z, :x, :y)" in sql:
+                assert parameters["collection_coordinate_limit"] == (
+                    flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES
+                )
+                return FakeRowResult(
+                    {
+                        "tile": None,
+                        "feature_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1,
+                        "coordinate_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES + 2,
+                    }
+                )
+            if "information_schema.tables" in sql:
+                return FakeRowResult(None)
+            raise AssertionError(f"Unexpected SQL in live PostGIS budget test: {sql}")
+
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_frequency_ready",
+        lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
+    )
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf"
+            )
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 413
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-type"].split(";")[0] != flood_alert_routes.MVT_MEDIA_TYPE
+    body = response.json()
+    assert body["error"]["code"] == "MVT_TILE_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["feature_count"] == flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1
+    assert body["error"]["details"]["coordinate_count"] == (
+        flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES + 2
+    )
 
 
 def test_hydro_and_river_network_mvt_routes_return_unavailable_without_live_postgis() -> None:
@@ -1141,6 +1329,23 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
     assert "ST_AsMVT(tile_rows, 'flood_return_period', 4096, 'mvt_geom')" in statement
     assert "feature_count <= :feature_limit" in statement
     assert "coordinate_count <= :collection_coordinate_limit" in statement
+
+
+def test_mvt_postgis_sql_shape_projects_metadata_properties_and_bindable_casts() -> None:
+    for layer in ("flood-return-period", "hydro", "river-network"):
+        statement = flood_alert_routes.postgis_tile_sql(layer)
+        sql = re.sub(r"\s+", " ", statement)
+        assert "feature_id" in sql
+        assert " AS segment_id" in sql
+        assert "river_segment_id" in sql
+        assert "river_network_version_id" in sql
+        assert ":basin_version_id::text" not in statement
+
+    assert "CAST(:basin_version_id AS text) AS basin_version_id" in flood_alert_routes.postgis_tile_sql(
+        "river-network"
+    )
+    assert "r.q_value AS value" in flood_alert_routes.postgis_tile_sql("flood-return-period")
+    assert "ts.value" in flood_alert_routes.postgis_tile_sql("hydro")
 
 
 class ThresholdForecastStore(PsycopgForecastStore):

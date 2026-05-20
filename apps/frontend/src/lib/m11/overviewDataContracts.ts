@@ -1159,7 +1159,7 @@ function serializedByteLength(value: unknown): number {
 }
 
 function isM11RenderableLayer(layerId: string) {
-  return layerId === 'discharge' || layerId === 'flood-return-period' || layerId === 'warning-level'
+  return layerId === 'discharge' || layerId === 'water-level' || layerId === 'flood-return-period' || layerId === 'warning-level'
 }
 
 function polygonAreaKm2(geom: components['schemas']['GeoJsonMultiPolygon']): number | null {

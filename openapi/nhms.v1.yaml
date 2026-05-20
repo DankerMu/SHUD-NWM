@@ -660,6 +660,13 @@ paths:
             X-Tile-Checksum:
               schema:
                 type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum: [hit, miss, bypass]
+            X-Tile-Cache-Key:
+              schema:
+                type: string
             X-MVT-Schema-Version:
               schema:
                 type: string
@@ -702,6 +709,13 @@ paths:
               schema:
                 type: string
             X-Tile-Checksum:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum: [hit, miss, bypass]
+            X-Tile-Cache-Key:
               schema:
                 type: string
             X-MVT-Schema-Version:
@@ -810,6 +824,13 @@ paths:
               schema:
                 type: string
             X-Tile-Checksum:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum: [hit, miss, bypass]
+            X-Tile-Cache-Key:
               schema:
                 type: string
             X-MVT-Schema-Version:

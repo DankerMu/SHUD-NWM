@@ -36,6 +36,7 @@ class TileInput:
     x: int
     y: int
     style_id: str = "default"
+    variant_id: str | None = None
     schema_version: str = MVT_SCHEMA_VERSION
     encoder_version: str = MVT_ENCODER_VERSION
 
@@ -91,6 +92,7 @@ def cache_key(tile: TileInput) -> str:
         "source_version": tile.source_version,
         "style_id": tile.style_id,
         "valid_time": tile.valid_time,
+        "variant_id": tile.variant_id,
         "x": tile.x,
         "y": tile.y,
         "z": tile.z,
@@ -193,6 +195,23 @@ def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> T
     )
 
 
+def read_cached_tile_response(session: Session, tile: TileInput) -> TileResponse | None:
+    validate_xyz(tile.z, tile.x, tile.y)
+    key = cache_key(tile)
+    cached = _safe_read_cache(session, tile.layer_id, key, tile.z, tile.x, tile.y)
+    if cached is None:
+        return None
+    data, checksum, etag = cached
+    return TileResponse(
+        data=data,
+        checksum=checksum,
+        etag=etag,
+        cache_key=key,
+        cache_status="hit",
+        layer_id=tile.layer_id,
+    )
+
+
 def encode_mvt_layer(layer_name: str, features: list[Mapping[str, Any]], *, extent: int = MVT_EXTENT) -> bytes:
     validate_identifier(layer_name, "source_layer")
     keys = _ordered_keys(features)
@@ -239,7 +258,11 @@ def postgis_tile_sql(layer: str) -> str:
     layer_name = _source_layer_id(layer)
     if layer == "river-network":
         source_cte = """
-            SELECT rs.river_segment_id, rs.river_network_version_id, :basin_version_id::text AS basin_version_id,
+            SELECT (rs.river_network_version_id || '::' || rs.river_segment_id) AS feature_id,
+                   rs.river_segment_id AS segment_id,
+                   rs.river_segment_id,
+                   rs.river_network_version_id,
+                   CAST(:basin_version_id AS text) AS basin_version_id,
                    rs.geom, rs.properties_json
             FROM core.river_segment rs
             JOIN core.model_instance mi ON mi.river_network_version_id = rs.river_network_version_id
@@ -247,7 +270,12 @@ def postgis_tile_sql(layer: str) -> str:
         """
     elif layer == "hydro":
         source_cte = """
-            SELECT ts.river_segment_id, ts.river_network_version_id, ts.basin_version_id, ts.value, ts.unit,
+            SELECT (ts.river_network_version_id || '::' || ts.river_segment_id) AS feature_id,
+                   ts.river_segment_id AS segment_id,
+                   ts.river_segment_id,
+                   ts.river_network_version_id,
+                   ts.basin_version_id,
+                   ts.value, ts.unit,
                    ts.quality_flag, ts.valid_time, rs.geom
             FROM hydro.river_timeseries ts
             JOIN core.river_segment rs
@@ -259,7 +287,12 @@ def postgis_tile_sql(layer: str) -> str:
         """
     elif layer == "flood-return-period":
         source_cte = """
-            SELECT r.river_segment_id, r.river_network_version_id, r.basin_version_id, r.q_value AS value,
+            SELECT (r.river_network_version_id || '::' || r.river_segment_id) AS feature_id,
+                   r.river_segment_id AS segment_id,
+                   r.river_segment_id,
+                   r.river_network_version_id,
+                   r.basin_version_id,
+                   r.q_value AS value,
                    r.q_unit AS unit, r.quality_flag, r.return_period, r.warning_level, r.valid_time, rs.geom
             FROM flood.return_period_result r
             JOIN core.river_segment rs
@@ -298,17 +331,33 @@ def postgis_tile_sql(layer: str) -> str:
             SELECT *, COUNT(*) OVER () AS feature_count, SUM(ST_NPoints(geom)) OVER () AS coordinate_count
             FROM clipped
             WHERE mvt_geom IS NOT NULL
+        ),
+        budget_stats AS (
+            SELECT COALESCE(MAX(feature_count), 0) AS feature_count,
+                   COALESCE(MAX(coordinate_count), 0) AS coordinate_count
+            FROM budgeted
         )
-        SELECT ST_AsMVT(tile_rows, '{layer_name}', {MVT_EXTENT}, 'mvt_geom') AS tile,
-               MAX(feature_count) AS feature_count,
-               MAX(coordinate_count) AS coordinate_count
-        FROM (
+        SELECT (
+            SELECT ST_AsMVT(tile_rows, '{layer_name}', {MVT_EXTENT}, 'mvt_geom')
+            FROM (
+                SELECT *
+                FROM budgeted
+                WHERE feature_count <= :feature_limit
+                  AND coordinate_count <= :collection_coordinate_limit
+                ORDER BY river_network_version_id, river_segment_id
+            ) AS tile_rows
+        ) AS tile,
+        (SELECT feature_count FROM budget_stats) AS feature_count,
+        (SELECT coordinate_count FROM budget_stats) AS coordinate_count
+        FROM budget_stats
+        WHERE EXISTS (
             SELECT *
             FROM budgeted
             WHERE feature_count <= :feature_limit
               AND coordinate_count <= :collection_coordinate_limit
-            ORDER BY river_network_version_id, river_segment_id
-        ) AS tile_rows
+        )
+        OR feature_count > :feature_limit
+        OR coordinate_count > :collection_coordinate_limit
     """
 
 
@@ -332,6 +381,21 @@ def layer_metadata(
             "maplibre_source_layer": "hydro",
             "required_placeholders": ["run_id", "valid_time", "z", "x", "y"],
             "properties": [
+                "segment_id",
+                "river_segment_id",
+                "basin_version_id",
+                "river_network_version_id",
+                "value",
+                "unit",
+                "quality_flag",
+            ],
+        },
+        "water-level": {
+            "tile_url_template": "/api/v1/tiles/hydro/{run_id}/water_level/{valid_time}/{z}/{x}/{y}.pbf",
+            "maplibre_source_layer": "hydro",
+            "required_placeholders": ["run_id", "valid_time", "z", "x", "y"],
+            "properties": [
+                "feature_id",
                 "segment_id",
                 "river_segment_id",
                 "basin_version_id",

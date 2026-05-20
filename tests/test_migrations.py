@@ -21,6 +21,7 @@ EXPECTED_MIGRATIONS = [
     "000015_flood_return_period_identity_indexes.sql",
     "000016_river_segment_pagination_indexes.sql",
     "000017_return_period_max_over_window_identity.sql",
+    "000018_tile_cache_m16_contract.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -206,3 +207,23 @@ def test_river_segment_pagination_migration_adds_lookup_indexes() -> None:
     assert "ON core.river_segment (river_network_version_id, segment_order, river_segment_id)" in migration
     assert "CREATE INDEX IF NOT EXISTS river_network_version_basin_lookup_idx" in migration
     assert "ON core.river_network_version (basin_version_id, river_network_version_id)" in migration
+
+
+def test_tile_cache_m16_migration_upgrades_preexisting_cache_contract() -> None:
+    migration = dict(_migration_sql())["000018_tile_cache_m16_contract.sql"]
+
+    for expected in (
+        "ADD COLUMN IF NOT EXISTS cache_key TEXT",
+        "ADD COLUMN IF NOT EXISTS checksum TEXT",
+        "ADD COLUMN IF NOT EXISTS source_id TEXT",
+        "ADD COLUMN IF NOT EXISTS source_version TEXT",
+        "ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ready'",
+        "SET cache_key = COALESCE(cache_key, tile_uri)",
+        "ALTER TABLE map.tile_cache DROP CONSTRAINT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS tile_cache_cache_key_uidx ON map.tile_cache (cache_key)",
+    ):
+        assert expected in migration
+
+    assert migration.index("ADD COLUMN IF NOT EXISTS cache_key TEXT") < migration.index(
+        "CREATE UNIQUE INDEX IF NOT EXISTS tile_cache_cache_key_uidx"
+    )

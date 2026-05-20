@@ -1967,6 +1967,8 @@ export interface operations {
                     ETag?: string;
                     "X-Tile-Layer-ID"?: string;
                     "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
                     "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
@@ -2001,6 +2003,8 @@ export interface operations {
                     ETag?: string;
                     "X-Tile-Layer-ID"?: string;
                     "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
                     "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
@@ -2070,6 +2074,8 @@ export interface operations {
                     ETag?: string;
                     "X-Tile-Layer-ID"?: string;
                     "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
                     "X-MVT-Schema-Version"?: string;
                     [name: string]: unknown;
                 };
