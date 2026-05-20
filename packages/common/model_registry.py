@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from apps.api.auth import PolicyDecision, audit_record, require_policy_evidence, trusted_internal_policy_decision
 
@@ -641,6 +642,7 @@ class PsycopgModelRegistryStore:
         *,
         policy_decision: PolicyDecision | None = None,
         trusted_internal: bool = False,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         action_id = "models.activate" if active else "models.deactivate"
         if trusted_internal:
@@ -651,6 +653,7 @@ class PsycopgModelRegistryStore:
                 actor_id="trusted-internal:model-registry",
                 roles=("sys_admin",),
             )
+            request_id = request_id or str(uuid4())
         decision = require_policy_evidence(
             policy_decision,
             action_id=action_id,
@@ -691,6 +694,7 @@ class PsycopgModelRegistryStore:
                 updated=updated,
                 active=active,
                 policy_decision=decision,
+                request_id=request_id,
             )
             return _model_public_projection(updated)
 
@@ -923,10 +927,11 @@ class PsycopgModelRegistryStore:
         updated: Mapping[str, Any],
         active: bool,
         policy_decision: PolicyDecision,
+        request_id: str | None,
     ) -> None:
         details = audit_record(
             policy_decision,
-            request_id=None,
+            request_id=request_id,
             previous_state={"active": bool(current["active_flag"])},
             new_state={"active": bool(active)},
             payload={

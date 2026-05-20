@@ -90,6 +90,7 @@ class FakeModelRegistryStore:
                 "created_at": "2026-05-07T00:00:00Z",
             },
         }
+        self.activation_audit_rows: list[dict[str, Any]] = []
 
     def create_basin_with_version(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
         self.write_calls.append("create_basin_with_version")
@@ -195,14 +196,39 @@ class FakeModelRegistryStore:
         self.models[record["model_id"]] = record
         return record
 
-    def set_model_active(self, model_id: str, active: bool, **_kwargs: Any) -> dict[str, Any]:
+    def set_model_active(
+        self,
+        model_id: str,
+        active: bool,
+        *,
+        policy_decision: Any = None,
+        request_id: str | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
         self.write_calls.append("set_model_active")
         if model_id not in self.models:
             raise MissingResourceError(f"model_id not found: {model_id}")
         model = self.models[model_id]
         if model["active_flag"] == active:
             raise DuplicateResourceError(f"model_id {model_id} is already active.")
+        previous_active = bool(model["active_flag"])
         model["active_flag"] = active
+        self.activation_audit_rows.append(
+            {
+                "action": "models.activate" if active else "models.deactivate",
+                "entity_type": "model_instance",
+                "entity_id": model_id,
+                "details": {
+                    "request_id": request_id,
+                    "actor": getattr(policy_decision, "actor_id", None),
+                    "roles": list(getattr(policy_decision, "roles", ())),
+                    "action_id": getattr(policy_decision, "action_id", None),
+                    "decision": getattr(policy_decision, "decision", None),
+                    "previous_active": previous_active,
+                    "active": bool(active),
+                },
+            }
+        )
         return dict(model)
 
     def list_models(
@@ -1015,24 +1041,49 @@ async def test_model_listing_active_filter_vectors(fake_store: FakeModelRegistry
 
 @pytest.mark.asyncio
 async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeModelRegistryStore) -> None:
+    request_id = "req-activate"
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         active_response = await client.put(
             "/api/v1/models/inactive_model/active",
             json={"active": True},
-            headers=_model_admin_headers(),
+            headers={**_model_admin_headers(), "X-Request-ID": request_id},
         )
         conflict_response = await client.put(
             "/api/v1/models/inactive_model/active",
             json={"active": True},
             headers=_model_admin_headers(),
         )
+        missing_response = await client.put(
+            "/api/v1/models/missing_model/active",
+            json={"active": True},
+            headers=_model_admin_headers(),
+        )
 
     assert fake_store.models["inactive_model"]["active_flag"] is True
     assert active_response.status_code == 200
+    assert active_response.headers["X-Request-ID"] == request_id
     active_body = active_response.json()
     assert active_body["status"] == "ok"
+    assert active_body["request_id"] == request_id
     assert active_body["data"]["active_flag"] is True
+    assert active_body["auth_policy_decisions"][0]["request_id"] == request_id
+    assert fake_store.activation_audit_rows == [
+        {
+            "action": "models.activate",
+            "entity_type": "model_instance",
+            "entity_id": "inactive_model",
+            "details": {
+                "request_id": request_id,
+                "actor": "dev-test:model_admin",
+                "roles": ["model_admin"],
+                "action_id": "models.activate",
+                "decision": "allow",
+                "previous_active": False,
+                "active": True,
+            },
+        }
+    ]
     assert conflict_response.status_code == 409
     _assert_error_envelope(
         conflict_response.json(),
@@ -1040,6 +1091,14 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
         message_contains="already active",
         error_type="DuplicateResourceError",
     )
+    assert missing_response.status_code == 404
+    _assert_error_envelope(
+        missing_response.json(),
+        code="MODEL_REGISTRY_NOT_FOUND",
+        message_contains="missing_model",
+        error_type="MissingResourceError",
+    )
+    assert len(fake_store.activation_audit_rows) == 1
 
 
 @pytest.mark.asyncio
@@ -1845,6 +1904,61 @@ def test_set_model_active_writes_audit_details_after_successful_update(
     assert details["action_id"] == "models.activate"
     assert details["decision"] == "allow"
     assert details["roles"] == ["sys_admin"]
+    assert details["request_id"]
+
+
+def test_set_model_active_writes_explicit_request_id_to_activation_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = [
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": False,
+                    "resource_profile": {},
+                },
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": True,
+                    "resource_profile": {},
+                },
+            ]
+            self.parameters: list[tuple[Any, ...]] = []
+
+        def execute(self, _statement: str, parameters: tuple[Any, ...]) -> None:
+            self.parameters.append(parameters)
+
+        def fetchone(self) -> dict[str, Any]:
+            return self.rows.pop(0)
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    store.set_model_active("basins_model", True, trusted_internal=True, request_id="req-activate")
+
+    details = cursor.parameters[-1][4]
+    assert details["request_id"] == "req-activate"
 
 
 def test_set_model_active_direct_call_requires_policy_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
