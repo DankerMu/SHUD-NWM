@@ -192,6 +192,36 @@ def test_validate_scale_mvt_expectation_with_measured_artifact_records_determini
     assert {blocker["error_code"] for blocker in tile["blockers"]} == {"PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"}
 
 
+def test_validate_scale_json_tile_byte_threshold_blocker_has_full_release_contract(tmp_path: Path) -> None:
+    thresholds_path = tmp_path / "thresholds.json"
+    thresholds = {
+        **scale_validation.ProductionScaleThresholds.default().__dict__,
+        "max_tile_bytes": 1,
+    }
+    thresholds_path.write_text(json.dumps(thresholds), encoding="utf-8")
+
+    validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="json_tile_tiny_budget",
+            tile_content_type_expectation="application/json",
+            thresholds_file=thresholds_path,
+        )
+    )
+    tile = _read_json(tmp_path / "artifacts" / "json_tile_tiny_budget" / "scale" / "tile_evidence.json")
+
+    assert tile["status"] == "blocked"
+    assert tile["geojson_compatibility_mode"] is True
+    _assert_tile_blockers_have_full_release_contract(tile["blockers"])
+    blocker = tile["blockers"][0]
+    assert blocker["error_code"] == "PRODUCTION_SCALE_TILE_BYTES_EXCEEDED"
+    assert blocker["blocker_id"] == "m16-tile-byte-budget"
+    assert blocker["surface"] == "tile_payload_byte_budget"
+    assert blocker["status"] == "blocked"
+    assert blocker["observed_bytes"] > blocker["threshold_bytes"]
+    assert blocker["artifact_links"] == []
+
+
 @pytest.mark.parametrize(
     ("field", "value", "expected_operator"),
     [
@@ -940,6 +970,26 @@ def _assert_mvt_blockers_have_full_release_contract(blockers: list[dict[str, obj
     ]
     assert mvt_blockers
     for blocker in mvt_blockers:
+        missing = MVT_BLOCKER_REQUIRED_FIELDS - blocker.keys()
+        assert missing == set()
+        assert blocker["blocker_id"]
+        assert blocker["surface"]
+        assert blocker["status"]
+        assert blocker["affected_endpoints"] == scale_validation.MVT_ENDPOINT_REFERENCES
+        assert isinstance(blocker["artifact_links"], list)
+        assert str(blocker["removal_criteria"]).strip()
+        assert str(blocker["residual_risk"]).strip()
+
+
+def _assert_tile_blockers_have_full_release_contract(blockers: list[dict[str, object]]) -> None:
+    tile_blockers = [
+        blocker
+        for blocker in blockers
+        if str(blocker.get("error_code", "")).startswith("PRODUCTION_SCALE_TILE_")
+        or str(blocker.get("error_code", "")).startswith("PRODUCTION_SCALE_MVT_")
+    ]
+    assert tile_blockers
+    for blocker in tile_blockers:
         missing = MVT_BLOCKER_REQUIRED_FIELDS - blocker.keys()
         assert missing == set()
         assert blocker["blocker_id"]

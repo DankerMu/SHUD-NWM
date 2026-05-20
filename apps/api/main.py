@@ -71,11 +71,141 @@ def custom_openapi():
                 parameter["description"] = TILE_Y_DESCRIPTION
                 parameter.setdefault("schema", {})["minimum"] = 0
                 parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
+    _patch_layer_metadata_openapi(schema)
     app.openapi_schema = schema
     return app.openapi_schema
 
 
 app.openapi = custom_openapi
+
+
+def _patch_layer_metadata_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {}).setdefault("schemas", {})
+    components.pop("Layer", None)
+    components.pop("LayerMetadata", None)
+    components.pop("LayerValidTimes", None)
+    layer_list_response = components.pop("LayerListResponse", None)
+    layer_valid_times_response = components.pop("LayerValidTimesResponse", None)
+    api_success_envelope = components.pop("ApiSuccessEnvelope", None)
+
+    if api_success_envelope is not None:
+        components.setdefault("SuccessEnvelope", api_success_envelope)
+    components["Layer"] = _layer_schema()
+    components["LayerMetadata"] = _layer_metadata_schema()
+    components["LayerValidTimes"] = _layer_valid_times_schema()
+
+    if layer_list_response is not None:
+        layer_list_response = _success_response_schema(
+            {"type": "array", "items": {"$ref": "#/components/schemas/Layer"}}
+        )
+        _set_operation_response_schema(schema, "/api/v1/layers", layer_list_response)
+
+    if layer_valid_times_response is not None:
+        layer_valid_times_response = _success_response_schema({"$ref": "#/components/schemas/LayerValidTimes"})
+        _set_operation_response_schema(schema, "/api/v1/layers/{layer_id}/valid-times", layer_valid_times_response)
+
+
+def _success_response_schema(data_schema: dict) -> dict:
+    return {
+        "allOf": [
+            {"$ref": "#/components/schemas/SuccessEnvelope"},
+            {
+                "type": "object",
+                "required": ["data"],
+                "properties": {"data": data_schema},
+            },
+        ]
+    }
+
+
+def _set_operation_response_schema(schema: dict, path: str, response_schema: dict) -> None:
+    operation = schema.get("paths", {}).get(path, {}).get("get")
+    if not operation:
+        return
+    response = operation.get("responses", {}).get("200", {})
+    content = response.get("content", {}).get("application/json", {})
+    content["schema"] = response_schema
+
+
+def _layer_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["layer_id", "layer_name", "layer_type", "variables"],
+        "properties": {
+            "layer_id": {"type": "string"},
+            "layer_name": {"type": "string"},
+            "layer_type": {"type": "string"},
+            "variables": {"type": "array", "items": {"type": "string"}},
+            "metadata": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/LayerMetadata"},
+                    {"type": "null"},
+                ]
+            },
+        },
+    }
+
+
+def _layer_valid_times_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["valid_times", "items", "limit", "observed_count", "truncated"],
+        "properties": {
+            "valid_times": {"type": "array", "items": {"type": "string", "format": "date-time"}},
+            "items": {"type": "array", "items": {"type": "string", "format": "date-time"}},
+            "limit": {"type": "integer"},
+            "observed_count": {"type": "integer"},
+            "truncated": {"type": "boolean"},
+        },
+    }
+
+
+def _nullable(schema: dict) -> dict:
+    return {**schema, "nullable": True}
+
+
+def _layer_metadata_schema() -> dict:
+    string_array = {"type": "array", "items": {"type": "string"}}
+    number_array = {"type": "array", "items": {"type": "number"}}
+    return {
+        "type": "object",
+        "required": ["layer_id", "tile_format", "fallback_available", "release_blocking"],
+        "properties": {
+            "layer_id": {"type": "string"},
+            "tile_format": {"type": "string", "enum": ["mvt", "geojson_compatibility"]},
+            "url_template": _nullable({"type": "string"}),
+            "tile_url_template": _nullable({"type": "string"}),
+            "required_placeholders": string_array,
+            "maplibre_source_layer": _nullable({"type": "string"}),
+            "source_layer": _nullable({"type": "string"}),
+            "property_schema_version": _nullable({"type": "string"}),
+            "schema_version": _nullable({"type": "string"}),
+            "encoder_version": _nullable({"type": "string"}),
+            "property_schema": _nullable({"type": "object", "additionalProperties": True}),
+            "min_zoom": _nullable({"type": "integer"}),
+            "max_zoom": _nullable({"type": "integer"}),
+            "bounds_crs": _nullable({"type": "string"}),
+            "bounds": _nullable(number_array),
+            "wgs84_bounds": _nullable(number_array),
+            "valid_times": {"type": "array", "items": {"type": "string", "format": "date-time"}},
+            "valid_time_limit": {"type": "integer"},
+            "valid_time_observed_count": {"type": "integer"},
+            "valid_times_truncated": {"type": "boolean"},
+            "source_refs": _nullable({"type": "object", "additionalProperties": True}),
+            "cache_layer_id": _nullable({"type": "string"}),
+            "route_variable": _nullable({"type": "string"}),
+            "legacy_layer_ids": string_array,
+            "alias_of": _nullable({"type": "string"}),
+            "alias_semantic": _nullable({"type": "string"}),
+            "canonical_route_layer_id": _nullable({"type": "string"}),
+            "cache_etag": _nullable({"type": "string"}),
+            "cache_version": _nullable({"type": "string"}),
+            "fallback_available": {"type": "boolean"},
+            "fallback_endpoint": _nullable({"type": "string"}),
+            "release_blocking": {"type": "boolean"},
+            "production_mvt_readiness_claimed": _nullable({"type": "boolean"}),
+        },
+    }
 
 
 @app.get("/health")

@@ -2545,6 +2545,68 @@ def test_layer_valid_times_endpoint_scopes_to_explicit_run_id_latest_window() ->
     assert unscoped_data["valid_times"][0] != scoped_data["valid_times"][0]
 
 
+def test_layer_metadata_endpoint_scopes_cache_identity_to_explicit_run_id() -> None:
+    old_run_id = "aa_metadata_endpoint_old"
+    new_run_id = "zz_metadata_endpoint_new"
+    old_valid_time = datetime(2026, 5, 20, 6, tzinfo=UTC)
+    new_valid_time = datetime(2026, 5, 21, 6, tzinfo=UTC)
+    with _store() as session:
+        for run_id, valid_time in ((old_run_id, old_valid_time), (new_run_id, new_valid_time)):
+            session.execute(
+                text(
+                    """
+                    INSERT INTO hydro.hydro_run (
+                        run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                        start_time, end_time, status, run_manifest_uri
+                    )
+                    VALUES (
+                        :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                        'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "cycle_time": valid_time,
+                    "start_time": valid_time,
+                    "end_time": valid_time + timedelta(hours=1),
+                },
+            )
+            _insert_result(
+                session,
+                "seg_001",
+                "basin_v1",
+                "rnv_v1",
+                valid_time,
+                100.0,
+                2.0,
+                "normal",
+                False,
+                run_id=run_id,
+            )
+            _insert_timeseries_result(session, "seg_001", run_id, valid_time, 100.0)
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                scoped = client.get(f"/api/v1/layers?run_id={old_run_id}")
+                unscoped = client.get("/api/v1/layers")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert scoped.status_code == 200
+    assert unscoped.status_code == 200
+    scoped_metadata = {layer["layer_id"]: layer["metadata"] for layer in scoped.json()["data"]}
+    unscoped_metadata = {layer["layer_id"]: layer["metadata"] for layer in unscoped.json()["data"]}
+    for layer_id in ("discharge", "flood-return-period", "warning-level"):
+        assert scoped_metadata[layer_id]["source_refs"]["run_id"] == old_run_id
+        assert unscoped_metadata[layer_id]["source_refs"]["run_id"] == new_run_id
+        assert scoped_metadata[layer_id]["cache_version"] != unscoped_metadata[layer_id]["cache_version"]
+        assert scoped_metadata[layer_id]["source_refs"]["source_version"] != unscoped_metadata[layer_id]["source_refs"][
+            "source_version"
+        ]
+
+
 def test_flood_layer_valid_times_default_to_one_hour_duration_identity() -> None:
     run_id = "duration_identity_run"
     start = datetime(2026, 5, 22, tzinfo=UTC)
@@ -2874,6 +2936,7 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
     assert "coordinate_count <= :collection_coordinate_limit" in statement
     assert "budget_gate AS" in statement
     assert "CROSS JOIN budget_gate" in statement
+    assert "bounded_rows AS" in statement
     assert "source_stats AS" in statement
     assert "FROM source_stats, budget_stats, prefilter_stats" in statement
 
@@ -2911,6 +2974,27 @@ def test_mvt_postgis_sql_shape_short_circuits_tile_budgets_before_expensive_geom
         assert statement.index("prefilter_stats AS") < budget_gate_index < statement.index("simplified AS")
 
 
+def test_mvt_postgis_sql_bounds_source_rows_before_reusable_aggregates() -> None:
+    for layer in ("flood-return-period", "hydro", "river-network"):
+        statement = flood_alert_routes.postgis_tile_sql(layer)
+        sql = re.sub(r"\s+", " ", statement)
+        bounded_cte = sql[sql.index("bounded_rows AS") : sql.index("source_stats AS")]
+        source_stats_cte = sql[sql.index("source_stats AS") : sql.index("eligible AS")]
+        prefilter_cte = sql[sql.index("prefilter_stats AS") : sql.index("budget_stats AS")]
+
+        assert "source_rows AS NOT MATERIALIZED" in sql
+        assert "FROM source_rows, bounds" in bounded_cte
+        assert "source_rows.geom && ST_Transform(bounds.geom_3857, 4490)" in bounded_cte
+        assert sql.index("bounded_rows AS") < sql.index("source_stats AS") < sql.index("budget_stats AS")
+        assert "FROM bounded_rows" in source_stats_cte
+        assert "FROM bounded_rows" in prefilter_cte
+        assert "FROM source_rows" not in source_stats_cte
+        assert "FROM source_rows" not in prefilter_cte
+        assert sql.count("FROM source_rows") == 1
+        assert sql.index("source_rows.geom && ST_Transform(bounds.geom_3857, 4490)") < sql.index("source_stats AS")
+        assert sql.index("bounded_rows AS") < sql.index("ST_MakeValid")
+
+
 def test_mvt_postgis_tile_params_bind_zoom_safe_simplification_tolerance() -> None:
     low_zoom = flood_alert_routes._postgis_tile_params({}, z=0, x=0, y=0)["simplification_tolerance_m"]
     high_zoom = flood_alert_routes._postgis_tile_params({}, z=14, x=0, y=0)["simplification_tolerance_m"]
@@ -2940,7 +3024,7 @@ def test_mvt_postgis_sql_projects_source_time_identity_through_public_allowlist(
     hydro = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("hydro"))
     flood = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("flood-return-period"))
 
-    hydro_source_cte = hydro[hydro.index("source_rows AS") : hydro.index("source_stats AS")]
+    hydro_source_cte = hydro[hydro.index("source_rows AS") : hydro.index("bounded_rows AS")]
     hydro_tile_projection = _mvt_tile_projection(hydro)
     assert "ts.run_id" in hydro_source_cte
     assert "ts.variable" in hydro_source_cte
@@ -2950,7 +3034,7 @@ def test_mvt_postgis_sql_projects_source_time_identity_through_public_allowlist(
     assert "variable" in hydro_tile_projection
     assert hydro_tile_projection.index("run_id") < hydro_tile_projection.index("valid_time")
 
-    flood_source_cte = flood[flood.index("source_rows AS") : flood.index("source_stats AS")]
+    flood_source_cte = flood[flood.index("source_rows AS") : flood.index("bounded_rows AS")]
     flood_tile_projection = _mvt_tile_projection(flood)
     assert "r.run_id" in flood_source_cte
     assert "r.duration" in flood_source_cte
@@ -2983,7 +3067,7 @@ def test_river_network_mvt_sql_scopes_basin_without_model_instance_cardinality_m
     statement = flood_alert_routes.postgis_tile_sql("river-network")
     sql = re.sub(r"\s+", " ", statement)
 
-    source_cte = sql[sql.index("source_rows AS") : sql.index("source_stats AS")]
+    source_cte = sql[sql.index("source_rows AS") : sql.index("bounded_rows AS")]
     assert "WHERE EXISTS ( SELECT 1 FROM core.model_instance mi" in source_cte
     assert "mi.river_network_version_id = rs.river_network_version_id" in source_cte
     assert "mi.basin_version_id = :basin_version_id" in source_cte

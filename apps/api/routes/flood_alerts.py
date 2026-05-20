@@ -207,6 +207,27 @@ class Layer(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class ApiSuccessEnvelope(BaseModel):
+    request_id: str
+    status: str
+
+
+class LayerListResponse(ApiSuccessEnvelope):
+    data: list[Layer]
+
+
+class LayerValidTimes(BaseModel):
+    valid_times: list[str]
+    items: list[str]
+    limit: int
+    observed_count: int
+    truncated: bool
+
+
+class LayerValidTimesResponse(ApiSuccessEnvelope):
+    data: LayerValidTimes
+
+
 @lru_cache
 def _engine(database_url: str) -> Engine:
     return create_engine(database_url, future=True)
@@ -224,15 +245,25 @@ def get_flood_alert_session() -> Generator[Session, None, None]:
         yield session
 
 
-@router.get("/api/v1/layers", response_model=dict[str, Any])
+@router.get("/api/v1/layers", response_model=LayerListResponse)
 def list_layers(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    run_id: str | None = Query(
+        default=None,
+        description=(
+            "Optional concrete hydro_run.run_id/source reference used to scope layer metadata and cache identity."
+        ),
+    ),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
-    run = latest_ready_run(session)
-    run_id = str(run["run_id"]) if run else None
+    if run_id is not None:
+        validate_identifier(run_id, "run_id")
+        run = _require_frequency_ready(session, run_id)
+    else:
+        run = latest_ready_run(session)
+    resolved_run_id = str(run["run_id"]) if run else None
     basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
     source_version = _run_source_version(run) if run else None
     river_network_source_version = (
@@ -240,7 +271,7 @@ def list_layers(
     )
     layers = _default_layer_catalog(
         session,
-        run_id=run_id,
+        run_id=resolved_run_id,
         source_version=source_version,
         river_network_source_version=river_network_source_version,
         basin_version_id=basin_version_id,
@@ -248,7 +279,7 @@ def list_layers(
     return _ok(request, [layer.model_dump() for layer in layers[offset : offset + limit]])
 
 
-@router.get("/api/v1/layers/{layer_id}/valid-times", response_model=dict[str, Any])
+@router.get("/api/v1/layers/{layer_id}/valid-times", response_model=LayerValidTimesResponse)
 def list_layer_valid_times(
     request: Request,
     layer_id: str,

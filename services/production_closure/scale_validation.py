@@ -58,6 +58,7 @@ MVT_ENDPOINT_REFERENCES = [
 ]
 MVT_DETERMINISTIC_BLOCKER_ID = "m16-deterministic-mvt-contract-artifact"
 MVT_LIVE_POSTGIS_BLOCKER_ID = "m16-live-postgis-national-proof"
+TILE_BYTES_BLOCKER_ID = "m16-tile-byte-budget"
 MVT_CONTRACT_P95_THRESHOLD_KEY = "flood_alert_map_ms"
 MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME = "frontend_render_ms"
 MVT_CONTRACT_MIN_TILE_COUNT = 1
@@ -771,8 +772,21 @@ def _tile_evidence(config: ProductionScaleConfig, dataset_manifest: Mapping[str,
         blockers.append(
             {
                 "error_code": "PRODUCTION_SCALE_TILE_BYTES_EXCEEDED",
+                "blocker_id": TILE_BYTES_BLOCKER_ID,
+                "surface": "tile_payload_byte_budget",
+                "status": "blocked",
+                "affected_endpoints": endpoints,
                 "observed_bytes": tile_bytes,
                 "threshold_bytes": max_tile_bytes,
+                "removal_criteria": (
+                    "Reduce deterministic tile payload bytes below the configured max_tile_bytes threshold or "
+                    "raise the threshold with measured production-scale evidence and release approval."
+                ),
+                "residual_risk": (
+                    "Passing the generic byte budget only proves deterministic payload size; live national MVT "
+                    "query plans and browser rendering remain separately evidenced."
+                ),
+                "artifact_links": deterministic_contract["artifact_paths"],
             }
         )
     return {

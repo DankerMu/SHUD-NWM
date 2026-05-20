@@ -304,6 +304,36 @@ def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:
     assert "basin_version_id" in metadata_schema["properties"]["source_refs"]["description"]
 
 
+@pytest.mark.parametrize(
+    ("path", "data_schema"),
+    [
+        ("/api/v1/layers", {"type": "array", "items": {"$ref": "#/components/schemas/Layer"}}),
+        ("/api/v1/layers/{layer_id}/valid-times", {"$ref": "#/components/schemas/LayerValidTimes"}),
+    ],
+)
+def test_layer_metadata_runtime_openapi_matches_static_success_schema(path: str, data_schema: dict[str, Any]) -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    runtime_spec: dict[str, Any] = app.openapi()
+    static_schema = static_spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    runtime_schema = runtime_spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+
+    assert runtime_schema == static_schema
+    assert runtime_schema["allOf"][0]["$ref"] == "#/components/schemas/SuccessEnvelope"
+    assert runtime_schema["allOf"][1]["properties"]["data"] == data_schema
+
+
+def test_layer_catalog_runtime_openapi_documents_run_scoped_metadata_parameter() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    runtime_spec: dict[str, Any] = app.openapi()
+
+    for spec in (static_spec, runtime_spec):
+        run_id_param = _operation_parameter(spec, "/api/v1/layers", "get", "query", "run_id")
+        assert run_id_param["required"] is False
+        assert "scope layer metadata" in run_id_param["description"]
+
+
 def test_mvt_route_variant_openapi_enums_match_runtime_contract() -> None:
     spec = _openapi_spec()
     hydro_variable = spec["components"]["parameters"]["HydroMvtVariable"]["schema"]["enum"]

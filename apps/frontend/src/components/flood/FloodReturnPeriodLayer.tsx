@@ -21,6 +21,8 @@ import {
   buildMvtTileUrlTemplate,
   fetchLayerCatalogMetadata,
   isMvtLayerMetadata,
+  isRunMismatchMetadata,
+  metadataMatchesRun,
   type MvtLayerMetadata,
 } from '@/lib/mvtLayerMetadata'
 import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
@@ -97,18 +99,24 @@ export function FloodReturnPeriodLayer({
 }: FloodReturnPeriodLayerProps) {
   const [data, setData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
   const [catalogMetadata, setCatalogMetadata] = useState<MvtLayerMetadata | null>(() =>
-    isMvtLayerMetadata(metadata) && !metadata.release_blocking ? metadata : null,
+    isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId) ? metadata : null,
   )
   const [metadataState, setMetadataState] = useState<'ready' | 'loading' | 'unavailable'>(
-    metadata === undefined ? 'loading' : isMvtLayerMetadata(metadata) && !metadata.release_blocking ? 'ready' : 'unavailable',
+    metadata === undefined
+      ? 'loading'
+      : isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId)
+        ? 'ready'
+        : 'unavailable',
   )
-  const directMetadata = isMvtLayerMetadata(metadata) && !metadata.release_blocking ? metadata : null
+  const directMetadata =
+    isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId) ? metadata : null
   const directMetadataBlocked = metadata !== undefined && !directMetadata
   const activeMetadata = directMetadata ?? catalogMetadata
+  const metadataRunMismatch = isRunMismatchMetadata(metadata, runId)
 
   useEffect(() => {
     if (metadata !== undefined) {
-      const usable = isMvtLayerMetadata(metadata) && !metadata.release_blocking ? metadata : null
+      const usable = isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId) ? metadata : null
       setCatalogMetadata(usable)
       setMetadataState(usable ? 'ready' : 'unavailable')
       return
@@ -116,9 +124,14 @@ export function FloodReturnPeriodLayer({
     const controller = new AbortController()
     setCatalogMetadata(null)
     setMetadataState('loading')
-    fetchLayerCatalogMetadata(controller.signal)
+    fetchLayerCatalogMetadata(controller.signal, runId)
       .then((layers) => {
         const layer = layers.find((item) => item.layer_id === 'flood-return-period')
+        if (isRunMismatchMetadata(layer?.metadata, runId)) {
+          setCatalogMetadata(null)
+          setMetadataState('unavailable')
+          return
+        }
         const discovered = isMvtLayerMetadata(layer?.metadata) && !layer.metadata.release_blocking ? layer.metadata : null
         setCatalogMetadata(discovered)
         setMetadataState(discovered ? 'ready' : 'unavailable')
@@ -128,7 +141,7 @@ export function FloodReturnPeriodLayer({
         setMetadataState('unavailable')
       })
     return () => controller.abort()
-  }, [metadata])
+  }, [metadata, runId])
 
   useEffect(() => {
     if (activeMetadata) {
@@ -138,7 +151,11 @@ export function FloodReturnPeriodLayer({
     }
     setData(null)
     if (directMetadataBlocked) {
-      onUnavailableReason?.('洪水重现期 MVT 元数据不可用或处于 release-blocking 状态，地图暂不显示该叠加层。')
+      onUnavailableReason?.('洪水重现期 MVT 元数据不可用、运行批次不匹配或处于 release-blocking 状态，地图暂不显示该叠加层。')
+      return
+    }
+    if (metadataRunMismatch) {
+      onUnavailableReason?.('洪水重现期 MVT 元数据运行批次不匹配，地图暂不显示该叠加层。')
       return
     }
     if (metadataState === 'loading') {

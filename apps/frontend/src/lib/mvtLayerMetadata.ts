@@ -20,10 +20,7 @@ export function isMvtLayerMetadata(value: unknown): value is MvtLayerMetadata {
   )
 }
 
-export function buildMvtTileUrlTemplate(
-  metadata: MvtLayerMetadata,
-  replacements: Record<string, string>,
-): string {
+export function buildMvtTileUrlTemplate(metadata: MvtLayerMetadata, replacements: Record<string, string>): string {
   let template = metadata.url_template
   for (const [key, value] of Object.entries(replacements)) {
     template = template.replaceAll(`{${key}}`, encodeURIComponent(value))
@@ -35,12 +32,26 @@ export function buildMvtTileUrlTemplate(
   return appendMvtCacheVersion(url, metadata)
 }
 
-export async function fetchLayerCatalogMetadata(signal?: AbortSignal): Promise<components['schemas']['Layer'][]> {
-  const response = await apiFetch('/api/v1/layers?limit=100&offset=0', { signal })
+export async function fetchLayerCatalogMetadata(
+  signal?: AbortSignal,
+  runId?: string | null,
+): Promise<components['schemas']['Layer'][]> {
+  const params = new URLSearchParams({ limit: '100', offset: '0' })
+  if (runId) params.set('run_id', runId)
+  const response = await apiFetch(`/api/v1/layers?${params.toString()}`, { signal })
   if (!response.ok) return []
   const body = (await response.json()) as unknown
   if (!isRecord(body) || !Array.isArray(body.data)) return []
   return body.data.filter(isLayerRecord)
+}
+
+export function metadataMatchesRun(metadata: MvtLayerMetadata, runId: string): boolean {
+  const metadataRunId = metadata.source_refs?.run_id
+  return typeof metadataRunId !== 'string' || metadataRunId === runId
+}
+
+export function isRunMismatchMetadata(metadata: unknown, runId: string): boolean {
+  return isMvtLayerMetadata(metadata) && !metadataMatchesRun(metadata, runId)
 }
 
 function isLayerRecord(value: unknown): value is components['schemas']['Layer'] {

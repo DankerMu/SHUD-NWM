@@ -1378,6 +1378,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - name: run_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional concrete hydro_run.run_id/source reference used to scope layer metadata and cache identity.
       responses:
         "200":
           description: Layer list

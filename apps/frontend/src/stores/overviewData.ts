@@ -715,13 +715,20 @@ async function fetchQueueDepth() {
   return cached(cacheKey('/api/v1/queue/depth'), () => getApi<ApiQueueDepth>('/api/v1/queue/depth', undefined, '获取队列深度失败'))
 }
 
-async function fetchLayers() {
+async function fetchLayers(runId?: string | null) {
+  const query = { limit: 100, offset: 0, runId: runId ?? null }
   return cached(
-    cacheKey('/api/v1/layers', { limit: 100, offset: 0 }),
+    cacheKey('/api/v1/layers', query),
     () =>
-      getApi<ApiLayer[]>('/api/v1/layers', { params: { query: { limit: 100, offset: 0 } } }, '获取图层列表失败').catch(
+      getApi<ApiLayer[]>(
+        '/api/v1/layers',
+        { params: { query: { limit: 100, offset: 0, run_id: runId ?? undefined } } },
+        '获取图层列表失败',
+      ).catch(
         async () => {
-          const response = await apiFetch('/api/v1/layers?limit=100&offset=0')
+          const params = new URLSearchParams({ limit: '100', offset: '0' })
+          if (runId) params.set('run_id', runId)
+          const response = await apiFetch(`/api/v1/layers?${params.toString()}`)
           if (!response.ok) throw new Error('获取图层列表失败')
           return unwrapApiData<ApiLayer[]>(await response.json(), '获取图层列表失败')
         },
@@ -967,11 +974,10 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
     const load = (async () => {
       const partialErrors: string[] = []
-      const [basinsResult, modelsResult, runsResult, layersResult, queueResult] = await Promise.allSettled([
+      const [basinsResult, modelsResult, runsResult, queueResult] = await Promise.allSettled([
         fetchBasins(),
         fetchModels(),
         fetchRuns(query),
-        fetchLayers(),
         fetchQueueDepth(),
       ])
       const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
@@ -979,6 +985,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const runs = settledValue(runsResult, partialErrors, 'runs')
       const latestRun = latestPublishedRun(runs, query)
       const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(query)
+      const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunFloodSurfaces ? latestRun?.run_id : null)])
       const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const queue = settledValue(queueResult, partialErrors, 'queue')
       const requestPlan = buildOverviewRequestPlan(
@@ -1097,18 +1104,16 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
     const load = (async () => {
       const partialErrors: string[] = []
-      const [basinsResult, versionsResult, runsResult, layersResult] = await Promise.allSettled([
+      const [basinsResult, versionsResult, runsResult] = await Promise.allSettled([
         fetchBasins(),
         fetchBasinVersions(basinId),
         fetchRuns(requestQuery, basinId),
-        fetchLayers(),
       ])
       const basinLookupAvailable = basinsResult.status === 'fulfilled'
       const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
       const basin = basins.find((item) => item.basin_id === basinId) ?? null
       const versions = settledValue(versionsResult, partialErrors, 'basin versions') ?? []
       const runPage = settledValue(runsResult, partialErrors, 'runs')
-      const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const selectedVersion =
         versions.find((version) => version.basin_version_id === query.basinVersionId) ??
         versions.find((version) => version.active_flag) ??
@@ -1119,6 +1124,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
       const latestRun = latestPublishedRunForBasinVersion(versionCompleteRunPage, selectedVersion?.basin_version_id, requestQuery)
       const concreteSurfaceQuery = concreteQueryForSurfaces(requestQuery, latestRun)
       const useSingleRunFloodSurfaces = shouldUseSingleRunFloodSurfaces(requestQuery)
+      const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunFloodSurfaces ? latestRun?.run_id : null)])
+      const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
       const canFetchConcreteSurface =
         requestQuery.source === 'compare' ? true : Boolean(latestRun && hasResolvedSurfaceSource(requestQuery, latestRun))
       const sameVersionRankingUnavailableReason =

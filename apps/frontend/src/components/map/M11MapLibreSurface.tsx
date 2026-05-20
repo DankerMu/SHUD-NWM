@@ -17,7 +17,7 @@ import { floodTileLayerPaint } from '@/components/flood/alertLevels'
 import { cn } from '@/lib/cn'
 import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 import type { FloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriodGeoJson'
-import { buildMvtTileUrlTemplate, isMvtLayerMetadata, type MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
+import { buildMvtTileUrlTemplate, isMvtLayerMetadata, metadataMatchesRun, type MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 import {
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
@@ -431,7 +431,11 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   const sourceId = `m11-${state.layer}-source`
   const layerId = `m11-${state.layer}-line`
 
-  if (isMvtLayerMetadata(selectedLayer.metadata) && !selectedLayer.metadata.release_blocking) {
+  if (
+    isMvtLayerMetadata(selectedLayer.metadata) &&
+    !selectedLayer.metadata.release_blocking &&
+    metadataMatchesRun(selectedLayer.metadata, runId)
+  ) {
     const variable = selectedLayer.layerId === 'water-level' ? 'water_level' : 'q_down'
     const tiles = [
       buildMvtTileUrlTemplate(selectedLayer.metadata, {

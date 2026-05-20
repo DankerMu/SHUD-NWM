@@ -2577,6 +2577,8 @@ export interface operations {
             query?: {
                 limit?: components["parameters"]["Limit"];
                 offset?: components["parameters"]["Offset"];
+                /** @description Optional concrete hydro_run.run_id/source reference used to scope layer metadata and cache identity. */
+                run_id?: string;
             };
             header?: never;
             path?: never;

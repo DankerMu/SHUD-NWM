@@ -70,7 +70,7 @@ describe('FloodReturnPeriodLayer', () => {
     encoder_version: 'encoder-v1',
   }
 
-  function mvtLayerCatalogResponse() {
+  function mvtLayerCatalogResponse(metadata: MvtLayerMetadata = mvtMetadata) {
     return geoJsonResponse({
       request_id: 'req-test',
       status: 'ok',
@@ -80,7 +80,7 @@ describe('FloodReturnPeriodLayer', () => {
           layer_name: 'Flood return period',
           layer_type: 'hydrology',
           variables: ['return_period'],
-          metadata: mvtMetadata,
+          metadata,
         },
       ],
     })
@@ -140,7 +140,8 @@ describe('FloodReturnPeriodLayer', () => {
     await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
     const initialSource = sourceProps.at(-1)
 
-    rerender(<FloodReturnPeriodLayer runId="run-2" validTime="2026-05-03T06:00:00Z" metadata={mvtMetadata} />)
+    const run2Metadata = { ...mvtMetadata, source_refs: { ...mvtMetadata.source_refs, run_id: 'run-2' } }
+    rerender(<FloodReturnPeriodLayer runId="run-2" validTime="2026-05-03T06:00:00Z" metadata={run2Metadata} />)
     await waitFor(() => expect(sourceProps.at(-1)).not.toBe(initialSource))
     expect(sourceProps.at(-1)).toMatchObject({
       tiles: [
@@ -149,7 +150,7 @@ describe('FloodReturnPeriodLayer', () => {
     })
     const runChangedSource = sourceProps.at(-1)
 
-    rerender(<FloodReturnPeriodLayer runId="run-2" validTime="2026-05-03T12:00:00Z" metadata={mvtMetadata} />)
+    rerender(<FloodReturnPeriodLayer runId="run-2" validTime="2026-05-03T12:00:00Z" metadata={run2Metadata} />)
     await waitFor(() => expect(sourceProps.at(-1)).not.toBe(runChangedSource))
     expect(sourceProps.at(-1)).toMatchObject({
       tiles: [
@@ -162,7 +163,7 @@ describe('FloodReturnPeriodLayer', () => {
       <FloodReturnPeriodLayer
         runId="run-2"
         validTime="2026-05-03T12:00:00Z"
-        metadata={{ ...mvtMetadata, cache_version: 'cache-v2', cache_etag: 'etag-v2' }}
+        metadata={{ ...run2Metadata, cache_version: 'cache-v2', cache_etag: 'etag-v2' }}
       />,
     )
     await waitFor(() => expect(sourceProps.at(-1)).not.toBe(timeChangedSource))
@@ -201,7 +202,12 @@ describe('FloodReturnPeriodLayer', () => {
   it('renders map MVT tiles with the API-resolved sample tail instead of run end time fallback', async () => {
     sourceProps.length = 0
     layerProps.length = 0
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(mvtLayerCatalogResponse()))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        mvtLayerCatalogResponse(),
+      ),
+    )
 
     render(
       <FloodAlertMap
@@ -236,12 +242,73 @@ describe('FloodReturnPeriodLayer', () => {
 
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
     expect(fetch).toHaveBeenCalledWith(
-      '/api/v1/layers?limit=100&offset=0',
+      '/api/v1/layers?limit=100&offset=0&run_id=run-1',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
     expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('元数据正在加载'))
     expect(sourceProps).toHaveLength(0)
+  })
+
+  it('refetches selected-run catalog metadata and uses its cache token for MVT registration', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    const selectedRunMetadata = {
+      ...mvtMetadata,
+      source_refs: { ...mvtMetadata.source_refs, run_id: 'run-selected', source_version: 'selected-revision' },
+      cache_version: 'cache-selected',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        geoJsonResponse({
+          request_id: 'req-test',
+          status: 'ok',
+          data: [
+            {
+              layer_id: 'flood-return-period',
+              layer_name: 'Flood return period',
+              layer_type: 'hydrology',
+              variables: ['return_period'],
+              metadata: selectedRunMetadata,
+            },
+          ],
+        }),
+      ),
+    )
+
+    render(<FloodReturnPeriodLayer runId="run-selected" validTime="2026-05-03T06:00:00Z" />)
+
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/v1/layers?limit=100&offset=0&run_id=run-selected',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    expect(sourceProps.at(-1)).toMatchObject({
+      tiles: [
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-selected/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf?_mvt_cache_version=cache-selected',
+      ],
+    })
+  })
+
+  it('rejects direct metadata when source refs mismatch the selected run', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal('fetch', vi.fn())
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-selected"
+        validTime="2026-05-03T06:00:00Z"
+        metadata={{ ...mvtMetadata, source_refs: { ...mvtMetadata.source_refs, run_id: 'run-latest' } }}
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('运行批次不匹配')))
+    expect(sourceProps).toHaveLength(0)
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('shows unavailable instead of unbounded GeoJSON when metadata is missing', async () => {
@@ -333,7 +400,12 @@ describe('FloodReturnPeriodLayer', () => {
   it('keeps vector feature identity filters when metadata is discovered from the catalog', async () => {
     sourceProps.length = 0
     layerProps.length = 0
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(mvtLayerCatalogResponse()))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        mvtLayerCatalogResponse(),
+      ),
+    )
 
     render(
       <FloodReturnPeriodLayer
@@ -460,7 +532,12 @@ describe('FloodReturnPeriodLayer', () => {
   it('registers flood-alert map vector source when MVT metadata is available', async () => {
     sourceProps.length = 0
     layerProps.length = 0
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(mvtLayerCatalogResponse()))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        mvtLayerCatalogResponse({ ...mvtMetadata, source_refs: { ...mvtMetadata.source_refs, run_id: 'run-vector' } }),
+      ),
+    )
 
     render(
       <FloodAlertMap

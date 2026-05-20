@@ -395,13 +395,10 @@ def postgis_tile_sql(layer: str) -> str:
         WITH bounds AS (
             SELECT ST_TileEnvelope(:z, :x, :y) AS geom_3857
         ),
-        source_rows AS (
+        source_rows AS NOT MATERIALIZED (
             {source_cte}
         ),
-        source_stats AS (
-            SELECT CASE WHEN EXISTS (SELECT 1 FROM source_rows) THEN 1 ELSE 0 END AS source_feature_count
-        ),
-        intersecting AS (
+        bounded_rows AS (
             SELECT source_rows.*,
                    ST_NPoints(source_rows.geom) AS source_coordinate_count,
                    ST_NDims(source_rows.geom) AS source_coordinate_dimensions
@@ -409,9 +406,12 @@ def postgis_tile_sql(layer: str) -> str:
             WHERE source_rows.geom IS NOT NULL
               AND source_rows.geom && ST_Transform(bounds.geom_3857, 4490)
         ),
+        source_stats AS (
+            SELECT CASE WHEN EXISTS (SELECT 1 FROM bounded_rows) THEN 1 ELSE 0 END AS source_feature_count
+        ),
         eligible AS (
             SELECT *
-            FROM intersecting
+            FROM bounded_rows
             WHERE source_coordinate_count <= :feature_coordinate_limit
               AND source_coordinate_dimensions <= :max_coordinate_dimensions
         ),
@@ -430,7 +430,7 @@ def postgis_tile_sql(layer: str) -> str:
                    concat_ws(',',
                    {invalid_property_names_sql}
                    ) AS invalid_properties
-            FROM intersecting
+            FROM bounded_rows
         ),
         budget_stats AS (
             SELECT COUNT(*) AS feature_count,
