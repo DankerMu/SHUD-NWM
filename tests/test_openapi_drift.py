@@ -213,6 +213,43 @@ def test_mvt_tile_z_openapi_maximum_matches_runtime_contract() -> None:
         assert z_param["schema"]["maximum"] == MVT_MAX_ZOOM
 
 
+def test_mvt_pbf_response_contract_matches_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    mvt_paths = (
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    )
+    expected_headers = {
+        "Cache-Control",
+        "ETag",
+        "X-Tile-Layer-ID",
+        "X-Tile-Checksum",
+        "X-Tile-Cache",
+        "X-Tile-Cache-Key",
+        "X-MVT-Schema-Version",
+    }
+
+    for path in mvt_paths:
+        static_200 = static_spec["paths"][path]["get"]["responses"]["200"]
+        runtime_200 = fastapi_spec["paths"][path]["get"]["responses"]["200"]
+        assert set(static_200["content"]) == {"application/x-protobuf"}
+        assert set(runtime_200["content"]) == {"application/x-protobuf"}
+        assert static_200["content"]["application/x-protobuf"]["schema"] == {
+            "type": "string",
+            "format": "binary",
+        }
+        assert runtime_200["content"]["application/x-protobuf"]["schema"] == {
+            "type": "string",
+            "format": "binary",
+        }
+        assert expected_headers.issubset(static_200["headers"])
+        assert expected_headers.issubset(runtime_200["headers"])
+        for header in expected_headers:
+            assert runtime_200["headers"][header]["schema"] == static_200["headers"][header]["schema"]
+
+
 def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:
     spec = _openapi_spec()
     response_schema = spec["paths"]["/api/v1/layers/{layer_id}/valid-times"]["get"]["responses"]["200"]["content"][

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 from collections.abc import Generator
-from datetime import UTC, datetime
+from datetime import datetime
 from functools import lru_cache
 from typing import Any
 
@@ -29,6 +30,7 @@ from services.tiles.mvt import (
     TileInput,
     build_raw_tile_response,
     build_tile_response,
+    canonical_mvt_time,
     latest_ready_run,
     layer_metadata,
     postgis_tile_sql,
@@ -66,6 +68,22 @@ FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES = 10_000
 FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES = 50_000
 FLOOD_RETURN_PERIOD_MAP_MAX_COORDINATE_DIMENSIONS = 3
 FLOOD_RETURN_PERIOD_MAP_MAX_SERIALIZED_BYTES = 2_000_000
+MVT_RESPONSE_HEADERS = {
+    "Cache-Control": {"schema": {"type": "string"}},
+    "ETag": {"schema": {"type": "string"}},
+    "X-Tile-Layer-ID": {"schema": {"type": "string"}},
+    "X-Tile-Checksum": {"schema": {"type": "string"}},
+    "X-Tile-Cache": {"schema": {"type": "string", "enum": ["hit", "miss", "bypass"]}},
+    "X-Tile-Cache-Key": {"schema": {"type": "string"}},
+    "X-MVT-Schema-Version": {"schema": {"type": "string"}},
+}
+MVT_ROUTE_RESPONSES = {
+    200: {
+        "description": "Raw Mapbox vector tile",
+        "headers": MVT_RESPONSE_HEADERS,
+        "content": {MVT_MEDIA_TYPE: {"schema": {"type": "string", "format": "binary"}}},
+    }
+}
 
 
 class AlertLevelCount(BaseModel):
@@ -207,10 +225,14 @@ def list_layers(
     run_id = str(run["run_id"]) if run else None
     basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
     source_version = str(run.get("river_network_version_id") or run.get("basin_version_id")) if run else None
+    river_network_source_version = (
+        _river_network_source_version(session, basin_version_id) if basin_version_id is not None else source_version
+    )
     layers = _default_layer_catalog(
         session,
         run_id=run_id,
         source_version=source_version,
+        river_network_source_version=river_network_source_version,
         basin_version_id=basin_version_id,
     )
     return _ok(request, [layer.model_dump() for layer in layers[offset : offset + limit]])
@@ -686,7 +708,11 @@ def flood_return_period_map(
     return JSONResponse(content=payload.model_dump(), media_type="application/json")
 
 
-@router.get("/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf")
+@router.get(
+    "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    responses=MVT_ROUTE_RESPONSES,
+    response_class=Response,
+)
 def flood_return_period_mvt_tile(
     run_id: str,
     duration: str,
@@ -728,7 +754,11 @@ def flood_return_period_mvt_tile(
     return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
 
-@router.get("/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf")
+@router.get(
+    "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+    responses=MVT_ROUTE_RESPONSES,
+    response_class=Response,
+)
 def hydro_mvt_tile(
     run_id: str,
     variable: str,
@@ -770,7 +800,11 @@ def hydro_mvt_tile(
     return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
 
-@router.get("/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf")
+@router.get(
+    "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+    responses=MVT_ROUTE_RESPONSES,
+    response_class=Response,
+)
 def river_network_mvt_tile(
     basin_version_id: str,
     z: int,
@@ -780,16 +814,17 @@ def river_network_mvt_tile(
 ) -> Response:
     validate_identifier(basin_version_id, "basin_version_id")
     validate_xyz(z, x, y)
+    _require_live_postgis_mvt(session, "river-network")
+    source_version = _river_network_source_version(session, basin_version_id)
     tile_input = TileInput(
         layer_id="river-network",
         source_id=basin_version_id,
-        source_version=basin_version_id,
+        source_version=source_version,
         valid_time=None,
         z=z,
         x=x,
         y=y,
     )
-    _require_live_postgis_mvt(session, tile_input.layer_id)
     cached = read_cached_tile_response(session, tile_input)
     if cached is not None:
         return _mvt_response(cached)
@@ -997,6 +1032,26 @@ def _fetch_river_network_mvt_tile_bytes(
     )
 
 
+def _river_network_source_version(session: Session, basin_version_id: str) -> str:
+    rows = session.execute(
+        text(
+            """
+            SELECT DISTINCT river_network_version_id
+            FROM core.model_instance
+            WHERE basin_version_id = :basin_version_id
+            ORDER BY river_network_version_id
+            """
+        ),
+        {"basin_version_id": basin_version_id},
+    ).mappings().all()
+    versions = [str(row["river_network_version_id"]) for row in rows if row.get("river_network_version_id") is not None]
+    if not versions:
+        return f"river-network-set:{basin_version_id}:empty"
+    joined = ",".join(versions)
+    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    return f"river-network-set:{digest}:{joined}"
+
+
 def _require_frequency_ready(session: Session, run_id: str) -> dict[str, Any]:
     row = session.execute(
         text(
@@ -1072,6 +1127,7 @@ def _default_layer_catalog(
     run_id: str | None,
     source_version: str | None,
     basin_version_id: str | None,
+    river_network_source_version: str | None = None,
 ) -> list[Layer]:
     definitions = [
         ("discharge", "Discharge", "hydrology", ["q_down"]),
@@ -1096,7 +1152,7 @@ def _default_layer_catalog(
                     valid_time_limit=valid_time_sample.limit,
                     valid_time_observed_count=valid_time_sample.observed_count,
                     valid_times_truncated=valid_time_sample.truncated,
-                    source_version=source_version,
+                    source_version=river_network_source_version if layer_id == "river-network" else source_version,
                     basin_version_id=basin_version_id,
                     release_blocking=not _mvt_live_postgis_enabled(session),
                 ),
@@ -1723,10 +1779,5 @@ def _optional_str(value: Any) -> str | None:
 
 
 def _format_time(value: Any) -> str:
-    if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=UTC)
-        return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    text_value = str(value).replace("+00:00", "Z")
-    if len(text_value) >= 19 and text_value[10] == " ":
-        text_value = f"{text_value[:10]}T{text_value[11:]}"
-    return text_value
+    formatted = canonical_mvt_time(value)
+    return "None" if formatted is None else formatted

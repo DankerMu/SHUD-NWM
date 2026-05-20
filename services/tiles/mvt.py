@@ -5,7 +5,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Iterable, Mapping
 
 from sqlalchemy import text
@@ -117,7 +117,7 @@ def cache_key(tile: TileInput) -> str:
         "source_id": tile.source_id,
         "source_version": tile.source_version,
         "style_id": tile.style_id,
-        "valid_time": tile.valid_time,
+        "valid_time": canonical_mvt_time(tile.valid_time),
         "variant_id": tile.variant_id,
         "x": tile.x,
         "y": tile.y,
@@ -897,7 +897,7 @@ def _read_cache(session: Session, tile: TileInput, key: str) -> tuple[bytes, str
         return None
     if "source_version" in columns and row.get("source_version") != tile.source_version:
         return None
-    if "valid_time" in columns and _format_time(row.get("valid_time")) != _format_time(tile.valid_time):
+    if "valid_time" in columns and canonical_mvt_time(row.get("valid_time")) != canonical_mvt_time(tile.valid_time):
         return None
     if "style_id" in columns and row.get("style_id") != tile.style_id:
         return None
@@ -936,7 +936,7 @@ def _write_cache(session: Session, tile: TileInput, key: str, data: bytes, check
         "checksum": checksum,
         "source_id": tile.source_id,
         "source_version": tile.source_version,
-        "valid_time": tile.valid_time,
+        "valid_time": canonical_mvt_time(tile.valid_time),
         "style_id": tile.style_id,
         "schema_version": tile.schema_version,
         "encoder_version": tile.encoder_version,
@@ -977,7 +977,7 @@ def _ensure_tile_layer(session: Session, tile: TileInput) -> bool:
         "source_product_id": tile.source_id,
         "source_version": tile.source_version,
         "variable": metadata.get("variable"),
-        "valid_time": tile.valid_time,
+        "valid_time": canonical_mvt_time(tile.valid_time),
         "tile_format": "mvt",
         "tile_uri_template": metadata["tile_uri_template"],
         "maplibre_source_layer": metadata["maplibre_source_layer"],
@@ -1214,12 +1214,30 @@ def _stable_json_hash(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _format_time(value: Any) -> str:
+def canonical_mvt_time(value: Any) -> str | None:
+    if value is None:
+        return None
     if isinstance(value, datetime):
-        return value.isoformat().replace("+00:00", "Z")
+        dt = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
     text_value = str(value)
     if " " in text_value and "T" not in text_value:
         text_value = text_value.replace(" ", "T", 1)
-    if text_value.endswith("+00:00"):
-        return text_value[:-6] + "Z"
+    parsed = _parse_iso_datetime(text_value)
+    if parsed is not None:
+        dt = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
     return text_value
+
+
+def _format_time(value: Any) -> str:
+    formatted = canonical_mvt_time(value)
+    return "None" if formatted is None else formatted
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        return None

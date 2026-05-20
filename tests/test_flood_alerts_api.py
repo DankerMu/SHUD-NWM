@@ -4,7 +4,7 @@ import hashlib
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -32,6 +32,8 @@ VALID_TIME_1 = datetime(2026, 5, 3, 6, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 12, tzinfo=UTC)
 VALID_TIME_1_ISO = VALID_TIME_1.isoformat().replace("+00:00", "Z")
 VALID_TIME_2_ISO = VALID_TIME_2.isoformat().replace("+00:00", "Z")
+RIVER_NETWORK_SOURCE_VERSION_V1 = "river-network-set:f2326d264dd358c8:rnv_v1"
+RIVER_NETWORK_SOURCE_VERSION_V1_V2 = "river-network-set:c839aae30c28f855:rnv_v1,rnv_v2"
 
 
 def test_summary_normal_threshold_and_valid_time() -> None:
@@ -957,6 +959,123 @@ def test_live_mvt_cache_identity_preserves_valid_time_variants(monkeypatch: pyte
     assert {bytes(row["tile_data"]) for row in rows} == {b"tile-time-1", b"tile-time-2"}
 
 
+@pytest.mark.parametrize(
+    "tile",
+    [
+        flood_alert_routes.TileInput(
+            layer_id="flood-return-period",
+            source_id=RUN_ID,
+            source_version="rnv_v1",
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="duration:1h",
+        ),
+        flood_alert_routes.TileInput(
+            layer_id="discharge",
+            source_id=RUN_ID,
+            source_version="rnv_v1",
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="variable:q_down",
+        ),
+    ],
+)
+def test_mvt_cache_identity_hits_timezone_equivalent_row_valid_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tile: flood_alert_routes.TileInput,
+) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        seeded_tile = flood_alert_routes.TileInput(
+            layer_id=tile.layer_id,
+            source_id=tile.source_id,
+            source_version=tile.source_version,
+            valid_time="2026-05-18T06:00:00Z",
+            z=tile.z,
+            x=tile.x,
+            y=tile.y,
+            style_id=tile.style_id,
+            variant_id=tile.variant_id,
+            schema_version=tile.schema_version,
+            encoder_version=tile.encoder_version,
+        )
+        seeded = flood_alert_routes.build_raw_tile_response(session, seeded_tile, b"timezone-cached-pbf")
+        session.execute(
+            text(
+                """
+                UPDATE map.tile_cache
+                SET valid_time = :valid_time
+                WHERE cache_key = :cache_key
+                """
+            ),
+            {
+                "cache_key": seeded.cache_key,
+                "valid_time": datetime(2026, 5, 18, 14, tzinfo=timezone(timedelta(hours=8))),
+            },
+        )
+        session.commit()
+
+        equivalent_tile = flood_alert_routes.TileInput(
+            layer_id=tile.layer_id,
+            source_id=tile.source_id,
+            source_version=tile.source_version,
+            valid_time="2026-05-18T06:00:00Z",
+            z=tile.z,
+            x=tile.x,
+            y=tile.y,
+            style_id=tile.style_id,
+            variant_id=tile.variant_id,
+            schema_version=tile.schema_version,
+            encoder_version=tile.encoder_version,
+        )
+        cached = flood_alert_routes.read_cached_tile_response(session, equivalent_tile)
+
+    assert cached is not None
+    assert cached.cache_status == "hit"
+    assert cached.cache_key == seeded.cache_key
+    assert cached.data == b"timezone-cached-pbf"
+
+
+def test_mvt_cache_identity_canonicalizes_parseable_iso_strings() -> None:
+    utc_tile = flood_alert_routes.TileInput(
+        layer_id="flood-return-period",
+        source_id=RUN_ID,
+        source_version="rnv_v1",
+        valid_time="2026-05-18T06:00:00Z",
+        z=6,
+        x=12,
+        y=24,
+        variant_id="duration:1h",
+    )
+    offset_tile = flood_alert_routes.TileInput(
+        layer_id="flood-return-period",
+        source_id=RUN_ID,
+        source_version="rnv_v1",
+        valid_time="2026-05-18T14:00:00+08:00",
+        z=6,
+        x=12,
+        y=24,
+        variant_id="duration:1h",
+    )
+    non_date_tile = flood_alert_routes.TileInput(
+        layer_id="flood-return-period",
+        source_id=RUN_ID,
+        source_version="rnv_v1",
+        valid_time="latest",
+        z=6,
+        x=12,
+        y=24,
+        variant_id="duration:1h",
+    )
+
+    assert cache_key(utc_tile) == cache_key(offset_tile)
+    assert cache_key(non_date_tile) != cache_key(utc_tile)
+
+
 def test_flood_mvt_cache_identity_preserves_duration_variants(monkeypatch: pytest.MonkeyPatch) -> None:
     with _store() as session:
         monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
@@ -1049,7 +1168,7 @@ def test_flood_mvt_cache_identity_preserves_duration_variants(monkeypatch: pytes
             flood_alert_routes.TileInput(
                 layer_id="river-network",
                 source_id="basin_v1",
-                source_version="basin_v1",
+                source_version=RIVER_NETWORK_SOURCE_VERSION_V1,
                 valid_time=None,
                 z=6,
                 x=12,
@@ -1139,7 +1258,7 @@ def test_live_mvt_route_cache_hit_skips_postgis_fetch(
             flood_alert_routes.TileInput(
                 layer_id="river-network",
                 source_id="basin_v1",
-                source_version="basin_v1",
+                source_version=RIVER_NETWORK_SOURCE_VERSION_V1,
                 valid_time=None,
                 z=6,
                 x=12,
@@ -1220,7 +1339,7 @@ def test_seeded_live_mvt_cache_hit_still_requires_live_postgis(
             flood_alert_routes.TileInput(
                 layer_id="river-network",
                 source_id="basin_v1",
-                source_version="basin_v1",
+                source_version=RIVER_NETWORK_SOURCE_VERSION_V1,
                 valid_time=None,
                 z=6,
                 x=12,
@@ -1264,7 +1383,7 @@ def test_seeded_live_mvt_cache_hit_still_requires_live_postgis(
             flood_alert_routes.TileInput(
                 layer_id="river-network",
                 source_id="basin_v1",
-                source_version="basin_v1",
+                source_version=RIVER_NETWORK_SOURCE_VERSION_V1,
                 valid_time=None,
                 z=6,
                 x=12,
@@ -1342,7 +1461,7 @@ def test_canonical_mvt_route_invalid_cache_rows_are_misses_without_serving_cache
             flood_alert_routes.TileInput(
                 layer_id="river-network",
                 source_id="basin_v1",
-                source_version="basin_v1",
+                source_version=RIVER_NETWORK_SOURCE_VERSION_V1,
                 valid_time=None,
                 z=6,
                 x=12,
@@ -1447,6 +1566,71 @@ def test_canonical_mvt_route_first_request_writes_fk_backed_cache_then_second_hi
     assert second.content == b"fresh-route-tile"
     assert layer_count == 1
     assert cache_count == 1
+
+
+def test_river_network_cache_identity_changes_with_model_instance_version_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf"
+    with _store() as session:
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_fetch_river_network_mvt_tile_bytes",
+            lambda *_args, **_kwargs: b"rnv-a",
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                first = client.get(path)
+                first_key = first.headers["x-tile-cache-key"]
+
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO core.model_instance (model_id, basin_version_id, river_network_version_id)
+                        VALUES ('model_2', 'basin_v1', 'rnv_v2')
+                        """
+                    )
+                )
+                session.commit()
+                monkeypatch.setattr(
+                    flood_alert_routes,
+                    "_fetch_river_network_mvt_tile_bytes",
+                    lambda *_args, **_kwargs: b"rnv-a-plus-b",
+                )
+                second = client.get(path)
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+        cache_rows = session.execute(
+            text(
+                """
+                SELECT cache_key, source_id, source_version, tile_data
+                FROM map.tile_cache
+                WHERE layer_id = 'river-network'
+                ORDER BY created_at, cache_key
+                """
+            )
+        ).mappings().all()
+        layer_source_version = session.execute(
+            text("SELECT source_product_id, source_version FROM map.tile_layer WHERE layer_id = 'river-network'")
+        ).one()
+
+    assert first.status_code == 200
+    assert first.headers["x-tile-cache"] == "miss"
+    assert first.content == b"rnv-a"
+    assert second.status_code == 200
+    assert second.headers["x-tile-cache"] == "miss"
+    assert second.content == b"rnv-a-plus-b"
+    assert second.headers["x-tile-cache-key"] != first_key
+    assert [row["source_id"] for row in cache_rows] == ["basin_v1", "basin_v1"]
+    assert {row["source_version"] for row in cache_rows} == {
+        RIVER_NETWORK_SOURCE_VERSION_V1,
+        RIVER_NETWORK_SOURCE_VERSION_V1_V2,
+    }
+    assert {bytes(row["tile_data"]) for row in cache_rows} == {b"rnv-a", b"rnv-a-plus-b"}
+    assert layer_source_version == ("basin_v1", RIVER_NETWORK_SOURCE_VERSION_V1_V2)
 
 
 def test_mvt_cache_fixture_enforces_tile_layer_fk() -> None:
@@ -1821,14 +2005,18 @@ def test_hydro_and_river_network_live_postgis_bind_requested_xyz(
         dialect = FakeDialect()
 
     class FakeRowResult:
-        def __init__(self, row: dict[str, Any] | None) -> None:
+        def __init__(self, row: dict[str, Any] | None, rows: list[dict[str, Any]] | None = None) -> None:
             self.row = row
+            self.rows = rows if rows is not None else ([row] if row is not None else [])
 
         def mappings(self) -> FakeRowResult:
             return self
 
         def first(self) -> dict[str, Any] | None:
             return self.row
+
+        def all(self) -> list[dict[str, Any]]:
+            return self.rows
 
     class FakeSession:
         def get_bind(self) -> FakeBind:
@@ -1841,6 +2029,9 @@ def test_hydro_and_river_network_live_postgis_bind_requested_xyz(
                 for key, value in expected_params.items():
                     assert parameters[key] == value
                 return FakeRowResult({"tile": b"live-tile", "source_feature_count": 1})
+            if "SELECT DISTINCT river_network_version_id" in sql:
+                assert parameters["basin_version_id"] == "basin_v1"
+                return FakeRowResult(None, [{"river_network_version_id": "rnv_v1"}])
             if "information_schema.tables" in sql:
                 return FakeRowResult(None)
             raise AssertionError(f"Unexpected SQL in live PostGIS tile test: {sql}")
@@ -2436,7 +2627,7 @@ def test_advertised_mvt_layer_cache_identity_matches_route_or_declared_alias(
         "river-network": flood_alert_routes.TileInput(
             layer_id="river-network",
             source_id="basin_v1",
-            source_version="basin_v1",
+            source_version=RIVER_NETWORK_SOURCE_VERSION_V1,
             valid_time=None,
             z=6,
             x=12,
