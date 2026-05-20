@@ -312,6 +312,8 @@ def list_layers(
         run = _require_frequency_ready(session, run_id)
     else:
         run = latest_ready_run(session)
+        if run is None:
+            return _ok(request, [])
     resolved_run_id = str(run["run_id"]) if run else None
     basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
     source_version = _run_source_version(run) if run else None
@@ -1132,7 +1134,7 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
         text(
             """
             SELECT DISTINCT river_network_version_id
-            FROM core.model_instance
+            FROM core.river_network_version
             WHERE basin_version_id = :basin_version_id
             ORDER BY river_network_version_id
             """

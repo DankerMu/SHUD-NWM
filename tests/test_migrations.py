@@ -211,6 +211,23 @@ def test_river_segment_pagination_migration_adds_lookup_indexes() -> None:
     assert "ON core.river_network_version (basin_version_id, river_network_version_id)" in migration
 
 
+def test_river_network_public_identity_lookup_uses_indexed_version_table() -> None:
+    migration = dict(_migration_sql())["000016_river_segment_pagination_indexes.sql"]
+    route_source = (Path(__file__).resolve().parents[1] / "apps" / "api" / "routes" / "flood_alerts.py").read_text(
+        encoding="utf-8"
+    )
+
+    function_source = route_source[
+        route_source.index("def _river_network_source_version") : route_source.index(
+            "def _require_hydro_mvt_source_identity"
+        )
+    ]
+    assert "FROM core.river_network_version" in function_source
+    assert "WHERE basin_version_id = :basin_version_id" in function_source
+    assert "FROM core.model_instance" not in function_source
+    assert "ON core.river_network_version (basin_version_id, river_network_version_id)" in migration
+
+
 def test_tile_cache_m16_migration_upgrades_preexisting_cache_contract() -> None:
     migration = dict(_migration_sql())["000018_tile_cache_m16_contract.sql"]
 

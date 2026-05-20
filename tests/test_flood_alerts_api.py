@@ -1557,7 +1557,7 @@ def test_canonical_mvt_route_first_request_writes_fk_backed_cache_then_second_hi
     assert cache_count == 1
 
 
-def test_river_network_cache_identity_changes_with_model_instance_version_set(
+def test_river_network_cache_identity_changes_with_river_network_version_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf"
@@ -1577,8 +1577,9 @@ def test_river_network_cache_identity_changes_with_model_instance_version_set(
                 session.execute(
                     text(
                         """
-                        INSERT INTO core.model_instance (model_id, basin_version_id, river_network_version_id)
-                        VALUES ('model_2', 'basin_v1', 'rnv_v2')
+                        UPDATE core.river_network_version
+                        SET basin_version_id = 'basin_v1'
+                        WHERE river_network_version_id = 'rnv_v2'
                         """
                     )
                 )
@@ -2531,7 +2532,7 @@ def test_hydro_mvt_rejects_non_ready_run_even_when_matching_cache_row_exists(
             "map.tile_cache",
         ),
         (
-            "/api/v1/tiles/river-network/basin_v2/6/12/24.pbf",
+            "/api/v1/tiles/river-network/basin_missing/6/12/24.pbf",
             "_fetch_river_network_mvt_tile_bytes",
             "map.tile_cache",
         ),
@@ -2568,6 +2569,12 @@ def test_absent_mvt_source_identity_fails_before_cache_lookup_or_live_sql(
 
 def test_mvt_source_identity_preflight_sql_uses_index_friendly_public_route_keys() -> None:
     class CapturingResult:
+        def mappings(self) -> CapturingResult:
+            return self
+
+        def all(self) -> list[dict[str, Any]]:
+            return []
+
         def first(self) -> None:
             return None
 
@@ -2591,8 +2598,13 @@ def test_mvt_source_identity_preflight_sql_uses_index_friendly_public_route_keys
             flood_session, run_id=RUN_ID, duration="1h", valid_time=VALID_TIME_1
         )
 
+    river_session = CapturingSession()
+    with pytest.raises(flood_alert_routes.ApiError):
+        flood_alert_routes._river_network_source_version(river_session, "basin_missing")
+
     hydro_sql, hydro_params = hydro_session.calls[0]
     flood_sql, flood_params = flood_session.calls[0]
+    river_sql, river_params = river_session.calls[0]
     assert (
         "FROM hydro.river_timeseries WHERE run_id = :run_id "
         "AND variable = :variable AND valid_time = :valid_time"
@@ -2605,6 +2617,10 @@ def test_mvt_source_identity_preflight_sql_uses_index_friendly_public_route_keys
     ) in flood_sql
     assert "LIMIT 1" in flood_sql
     assert flood_params == {"run_id": RUN_ID, "duration": "1h", "valid_time": VALID_TIME_1}
+    assert "FROM core.river_network_version WHERE basin_version_id = :basin_version_id" in river_sql
+    assert "ORDER BY river_network_version_id" in river_sql
+    assert "core.model_instance" not in river_sql
+    assert river_params == {"basin_version_id": "basin_missing"}
 
 
 @pytest.mark.parametrize(
@@ -2906,6 +2922,38 @@ def test_layer_valid_times_unscoped_no_ready_run_returns_empty_without_discovery
     }
 
 
+def test_layer_catalog_unscoped_no_ready_run_returns_empty_without_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "valid_times_for_layer",
+        lambda *_args, **_kwargs: pytest.fail("valid_times_for_layer called without a ready run"),
+    )
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "read_cached_tile_response",
+        lambda *_args, **_kwargs: pytest.fail("tile cache lookup called during layer discovery"),
+    )
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "postgis_tile_sql",
+        lambda *_args, **_kwargs: pytest.fail("live tile SQL called during layer discovery"),
+    )
+    with _store() as session:
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get("/api/v1/layers")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
 @pytest.mark.parametrize(
     ("layer_id", "expected_table", "expected_identity"),
     [
@@ -3142,7 +3190,7 @@ def test_layer_metadata_required_placeholders_resolve_from_source_refs_or_route_
         missing = [
             placeholder
             for placeholder in metadata.get("required_placeholders", [])
-            if placeholder not in source_refs and placeholder not in documented_route_constants
+            if not source_refs.get(placeholder) and placeholder not in documented_route_constants
         ]
         assert missing == []
 
@@ -3510,10 +3558,10 @@ def test_river_network_mvt_sql_scopes_basin_without_model_instance_cardinality_m
     sql = re.sub(r"\s+", " ", statement)
 
     source_cte = sql[sql.index("source_rows AS") : sql.index("bounded_rows AS")]
-    assert "WHERE EXISTS ( SELECT 1 FROM core.model_instance mi" in source_cte
-    assert "mi.river_network_version_id = rs.river_network_version_id" in source_cte
-    assert "mi.basin_version_id = :basin_version_id" in source_cte
-    assert "JOIN core.model_instance" not in source_cte
+    assert "WHERE EXISTS ( SELECT 1 FROM core.river_network_version rnv" in source_cte
+    assert "rnv.river_network_version_id = rs.river_network_version_id" in source_cte
+    assert "rnv.basin_version_id = :basin_version_id" in source_cte
+    assert "core.model_instance" not in source_cte
     assert "ORDER BY river_network_version_id, river_segment_id" in sql
 
 
@@ -3744,6 +3792,16 @@ def _create_tables(connection: Any) -> None:
     connection.execute(
         text(
             """
+            CREATE TABLE core.river_network_version (
+                river_network_version_id TEXT PRIMARY KEY,
+                basin_version_id TEXT NOT NULL
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
             CREATE TABLE core.river_segment (
                 river_segment_id TEXT NOT NULL,
                 river_network_version_id TEXT NOT NULL,
@@ -3903,6 +3961,14 @@ def _seed_data(connection: Any) -> None:
     )
     connection.execute(
         text("INSERT INTO core.basin_version (basin_version_id, basin_id) VALUES ('basin_v2', 'pearl')")
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO core.river_network_version (river_network_version_id, basin_version_id)
+            VALUES ('rnv_v1', 'basin_v1'), ('rnv_v2', 'basin_v2')
+            """
+        )
     )
     connection.execute(
         text(

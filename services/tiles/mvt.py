@@ -303,9 +303,9 @@ def postgis_tile_sql(layer: str) -> str:
             FROM core.river_segment rs
             WHERE EXISTS (
                 SELECT 1
-                FROM core.model_instance mi
-                WHERE mi.river_network_version_id = rs.river_network_version_id
-                  AND mi.basin_version_id = :basin_version_id
+                FROM core.river_network_version rnv
+                WHERE rnv.river_network_version_id = rs.river_network_version_id
+                  AND rnv.basin_version_id = :basin_version_id
             )
         """
     elif layer == "hydro":
@@ -655,6 +655,17 @@ def layer_metadata(
         source_version=source_version,
         basin_version_id=basin_version_id,
     )
+    source_ref_constants = {"z", "x", "y", "valid_time"}
+    if any(
+        placeholder not in source_ref_constants and not source_refs.get(placeholder)
+        for placeholder in base["required_placeholders"]
+    ):
+        return {
+            "layer_id": layer_id,
+            "tile_format": "geojson_compatibility",
+            "fallback_available": layer_id == "flood-return-period",
+            "release_blocking": True,
+        }
     route_variable = (
         "q_down"
         if layer_id == "discharge"
@@ -744,9 +755,13 @@ def _layer_source_refs(
     basin_version_id: str | None,
 ) -> dict[str, str | None]:
     refs = {
-        "run_id": run_id,
-        "source_version": source_version,
-        "basin_version_id": basin_version_id,
+        key: value
+        for key, value in {
+            "run_id": run_id if layer_id != "river-network" else None,
+            "source_version": source_version,
+            "basin_version_id": basin_version_id,
+        }.items()
+        if value is not None
     }
     if layer_id in {"flood-return-period", "warning-level"}:
         refs["duration"] = DEFAULT_FLOOD_RETURN_PERIOD_DURATION
