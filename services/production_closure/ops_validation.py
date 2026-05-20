@@ -641,15 +641,14 @@ def _auth_live_proof(config: ProductionOpsConfig) -> dict[str, Any] | None:
         return None
 
     allowed_subject = _auth_live_proof_subject(proof, "allowed")
-    if allowed_subject is None:
-        return None
     denied_subject = _auth_live_proof_subject(proof, "denied")
-    live_proof = {
-        **allowed_subject,
-        "subjects": {"allowed": allowed_subject},
-    }
+    subjects = {}
+    live_proof = {"subjects": subjects}
+    if allowed_subject is not None:
+        subjects["allowed"] = allowed_subject
+        live_proof.update(allowed_subject)
     if denied_subject is not None:
-        live_proof["subjects"]["denied"] = denied_subject
+        subjects["denied"] = denied_subject
     return live_proof
 
 
@@ -658,8 +657,6 @@ def _auth_live_proof_subject(
     subject: Literal["allowed", "denied"],
 ) -> dict[str, Any] | None:
     subject_proof = proof.get(f"{subject}_subject")
-    if subject_proof is None and subject == "allowed":
-        subject_proof = proof
     if not isinstance(subject_proof, Mapping):
         return None
 
@@ -747,10 +744,35 @@ def _auth_live_proof_subject_blockers(
     subjects = live_proof.get("subjects", {})
     if not isinstance(subjects, Mapping):
         return []
+    blockers = []
     allowed_subject = subjects.get("allowed")
     denied_subject = subjects.get("denied")
-    if not isinstance(allowed_subject, Mapping) or not isinstance(denied_subject, Mapping):
-        return []
+    for subject_name, subject_proof in (("allowed", allowed_subject), ("denied", denied_subject)):
+        if isinstance(subject_proof, Mapping):
+            continue
+        explicit_key = f"{subject_name}_subject"
+        blockers.append(
+            {
+                "error_code": "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID",
+                "subject": explicit_key,
+                "message": f"Missing or invalid explicit {explicit_key} live-proof subject.",
+                "residual_risk": (
+                    "Production auth readiness could be proven by legacy or incomplete live-proof subject "
+                    "evidence instead of explicit allowed and denied identities."
+                ),
+                "removal_criteria": (
+                    f"Supply {explicit_key} as an object with actor_id, raw_roles, and mapped_roles that map to "
+                    "the canonical production RBAC vocabulary."
+                ),
+                "linked_decision_ids": [
+                    decision["lineage"]["audit_correlation_id"]
+                    for decision in decisions
+                    if "lineage" in decision
+                ],
+            }
+        )
+    if blockers or not isinstance(allowed_subject, Mapping) or not isinstance(denied_subject, Mapping):
+        return blockers
 
     allowed_actor = str(allowed_subject.get("actor_id") or "")
     denied_actor = str(denied_subject.get("actor_id") or "")

@@ -1812,6 +1812,53 @@ def test_validate_ops_auth_live_proof_partial_action_coverage_remains_blocked(tm
     )
 
 
+def test_validate_ops_auth_live_proof_requires_explicit_allowed_subject(tmp_path: Path) -> None:
+    proof = {
+        "execution_mode": "live_proof",
+        "live_backend_auth_executed": True,
+        "provider": "oidc-prod",
+        "actor_id": "legacy-live-admin",
+        "raw_roles": ["sys_admin"],
+        "mapped_roles": ["sys_admin"],
+        "denied_subject": {
+            "actor_id": "live-viewer",
+            "raw_roles": ["viewer"],
+            "mapped_roles": ["viewer"],
+        },
+    }
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="missing_allowed_subject_live_proof_auth",
+            auth_mode="backend_route_executed",
+            auth_live_proof=proof,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "missing_allowed_subject_live_proof_auth" / "ops"
+    auth = _read_json(lane_dir / "auth_rbac.json")
+    blockers = _read_json(lane_dir / "auth_release_blockers.json")
+
+    assert auth["status"] == "release_blocked"
+    assert blockers["status"] == "release_blocked"
+    assert "allowed" not in auth["live_proof"]["subjects"]
+    assert auth["live_proof"]["subjects"]["denied"]["actor_id"] == "live-viewer"
+
+    allowed_subject_blocker = next(
+        blocker
+        for blocker in summary["release_blockers"]
+        if blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID"
+        and blocker.get("subject") == "allowed_subject"
+    )
+    assert "Missing or invalid explicit allowed_subject" in allowed_subject_blocker["message"]
+    assert any(
+        blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID"
+        and blocker.get("subject") == "allowed_subject"
+        for blocker in blockers["blockers"]
+    )
+
+
 def test_validate_ops_auth_live_proof_inconsistent_same_actor_roles_remains_blocked(tmp_path: Path) -> None:
     proof = {
         "execution_mode": "live_proof",
