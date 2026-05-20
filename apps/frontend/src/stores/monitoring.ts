@@ -41,6 +41,8 @@ interface MonitoringState {
   jobTotal: number
   queue: QueueState | null
   queueError: string | null
+  operationalError: string | null
+  jobsError: string | null
   jobFilters: JobFilters
   isPolling: boolean
   isJobsLoading: boolean
@@ -139,6 +141,8 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   jobTotal: 0,
   queue: null,
   queueError: null,
+  operationalError: null,
+  jobsError: null,
   jobFilters: { page: 1, pageSize: 12, sortBy: 'submitted_at', sortOrder: 'desc' },
   isPolling: false,
   isJobsLoading: false,
@@ -151,7 +155,7 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   fetchAll: async () => {
     const { source, cycleTime } = get()
     const apiCycleTime = cycleTimeForApi(cycleTime)
-    set({ isPolling: true, error: null, queueError: null })
+    set((state) => ({ isPolling: true, operationalError: null, queueError: null, error: state.jobsError }))
 
     try {
       const [cycle, stages] = await Promise.all([
@@ -174,11 +178,12 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
         queue,
         queueError,
         isPolling: false,
-        error: queueError,
+        operationalError: queueError,
+        error: queueError ?? get().jobsError,
       })
     } catch (error) {
       const message = getApiErrorMessage(error, '刷新监控数据失败')
-      set({ error: message, isPolling: false })
+      set({ operationalError: message, error: message, isPolling: false })
       throw error
     }
   },
@@ -186,7 +191,7 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
     const { source, cycleTime, jobFilters } = get()
     const nextFilters = { ...jobFilters, ...filters }
     const apiCycleTime = cycleTimeForApi(cycleTime)
-    set({ jobFilters: nextFilters, isJobsLoading: true, error: null })
+    set((state) => ({ jobFilters: nextFilters, isJobsLoading: true, jobsError: null, error: state.operationalError }))
 
     try {
       const page = await getJobsPage(source, apiCycleTime, nextFilters)
@@ -194,11 +199,12 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
         jobs: page.items.map(normalizeJob),
         jobTotal: page.total,
         isJobsLoading: false,
-        error: null,
+        jobsError: null,
+        error: get().operationalError,
       })
     } catch (error) {
       const message = getApiErrorMessage(error, '获取作业列表失败')
-      set({ error: message, isJobsLoading: false })
+      set({ jobsError: message, error: get().operationalError ?? message, isJobsLoading: false })
       throw error
     }
   },

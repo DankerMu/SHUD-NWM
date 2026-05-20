@@ -17,7 +17,11 @@ THEN progress or governance documentation lists required routes, extended routes
 
 #### Scenario: Evidence SHA identity
 WHEN visual evidence is generated for CI or PR review
-THEN every manifest entry uses a real commit SHA tied to the commit under review and rejects placeholder SHA values
+THEN every manifest entry uses the checked-out `git rev-parse HEAD` commit SHA, PR CI checks out the pull request head SHA, and evidence capture rejects placeholder or environment SHA values that differ from `HEAD`
+
+#### Scenario: Evidence artifact closure
+WHEN visual evidence is generated under `.codex/evidence/issue-176`
+THEN the run cleans or rejects stale screenshots so uploaded PNG artifacts are exactly the manifest-listed screenshots
 
 #### Scenario: CI and local evidence split
 WHEN screenshot binaries are too volatile for git

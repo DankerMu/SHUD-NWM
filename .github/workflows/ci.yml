@@ -141,6 +141,15 @@ jobs:
       M15_EVIDENCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - name: Verify M15 evidence checkout identity
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$HEAD_SHA" != "$M15_EVIDENCE_SHA" ]; then
+            echo "M15 evidence checkout mismatch: HEAD=$HEAD_SHA M15_EVIDENCE_SHA=$M15_EVIDENCE_SHA" >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

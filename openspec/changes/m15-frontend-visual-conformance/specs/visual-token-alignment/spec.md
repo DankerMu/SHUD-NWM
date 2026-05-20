@@ -36,4 +36,4 @@ THEN API calls use deterministic fixtures, known external map tile/style/font re
 
 #### Scenario: Frozen head metadata
 WHEN M15 visual evidence runs in CI for a PR
-THEN the manifest SHA is a real commit SHA equal to `M15_EVIDENCE_SHA`, where CI sets `M15_EVIDENCE_SHA` to the pull request head SHA, and PR evidence is regenerated after the final commit/frozen head before closure
+THEN CI checks out the pull request head SHA, `M15_EVIDENCE_SHA` equals the checked-out `HEAD`, the manifest SHA is that same real commit SHA, and PR evidence is regenerated after the final commit/frozen head before closure

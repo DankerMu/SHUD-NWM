@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
 test.setTimeout(120_000)
 
@@ -16,6 +16,7 @@ const deterministicTilePng = Buffer.from(
 const mapChromeZIndexThreshold = 200
 const placeholderShaPattern = /^(local-uncommitted|unknown|placeholder|pending|none)$/i
 const commitShaPattern = /^[0-9a-f]{40}$/i
+const repoRoot = path.resolve(process.cwd(), '../..')
 const commitSha = resolveCommitSha()
 
 const requiredViewports = [
@@ -100,20 +101,10 @@ interface EvidenceEntry {
   artifactPath: string
 }
 
-function resolveCommitSha() {
-  const candidates = [
-    process.env.M15_EVIDENCE_SHA,
-    process.env.GITHUB_PR_HEAD_SHA,
-    process.env.PR_HEAD_SHA,
-    process.env.GITHUB_SHA,
-    process.env.CI_COMMIT_SHA,
-  ].filter((value): value is string => Boolean(value))
-  const envSha = candidates.find((value) => commitShaPattern.test(value) && !placeholderShaPattern.test(value))
-  if (envSha) return envSha
-
+function readGitHeadSha() {
   try {
     const gitSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: path.resolve(process.cwd(), '../..'),
+      cwd: repoRoot,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
@@ -122,7 +113,45 @@ function resolveCommitSha() {
     // afterAll also validates the resolved SHA before any manifest is written.
   }
 
-  throw new Error('M15 evidence requires a real 40-character commit SHA from M15_EVIDENCE_SHA, PR head SHA env, GITHUB_SHA, CI_COMMIT_SHA, or git rev-parse HEAD.')
+  throw new Error('M15 evidence requires a checked-out git HEAD with a real 40-character commit SHA.')
+}
+
+function assertRealCommitSha(sha: string) {
+  if (!commitShaPattern.test(sha) || placeholderShaPattern.test(sha)) {
+    throw new Error(`M15 evidence requires a real 40-character commit SHA; received ${sha}.`)
+  }
+}
+
+function assertEnvShaMatchesHead(name: string, value: string | undefined, headSha: string, required = false) {
+  if (!value) {
+    if (required) throw new Error(`M15 CI evidence requires ${name} to be set.`)
+    return
+  }
+  if (!commitShaPattern.test(value) || placeholderShaPattern.test(value)) {
+    throw new Error(`M15 ${name} must be a real 40-character commit SHA; received ${value}.`)
+  }
+  if (value !== headSha) {
+    throw new Error(`M15 ${name} must match checked-out HEAD before evidence capture; received ${value}, HEAD is ${headSha}.`)
+  }
+}
+
+function resolveCommitShaForEnv(env: NodeJS.ProcessEnv, readHeadSha = readGitHeadSha) {
+  const headSha = readHeadSha()
+  assertRealCommitSha(headSha)
+
+  assertEnvShaMatchesHead('M15_EVIDENCE_SHA', env.M15_EVIDENCE_SHA, headSha, Boolean(env.CI))
+  assertEnvShaMatchesHead('GITHUB_PR_HEAD_SHA', env.GITHUB_PR_HEAD_SHA, headSha)
+  assertEnvShaMatchesHead('PR_HEAD_SHA', env.PR_HEAD_SHA, headSha)
+  if (env.CI && !env.M15_EVIDENCE_SHA && !env.GITHUB_PR_HEAD_SHA && !env.PR_HEAD_SHA) {
+    assertEnvShaMatchesHead('GITHUB_SHA', env.GITHUB_SHA, headSha, Boolean(env.GITHUB_SHA))
+    assertEnvShaMatchesHead('CI_COMMIT_SHA', env.CI_COMMIT_SHA, headSha, Boolean(!env.GITHUB_SHA && env.CI_COMMIT_SHA))
+  }
+
+  return headSha
+}
+
+function resolveCommitSha() {
+  return resolveCommitShaForEnv(process.env)
 }
 
 async function fulfillError(route: Route, message: string, status = 503) {
@@ -417,6 +446,7 @@ async function mockM15Apis(page: Page) {
     }
     if (url.pathname === '/api/v1/jobs') {
       if (state === 'monitoring-empty') return fulfill(route, { items: [], total: 0, limit: 12, offset: 0 })
+      if (state === 'monitoring-error') return fulfill(route, { items: [], total: 0, limit: 12, offset: 0 })
       return fulfill(route, {
         items: [{ job_id: 'job-m15', run_id: 'run-gfs-1', cycle_id: 'cycle-gfs-1', run_type: 'forecast', scenario: 'forecast_gfs_deterministic', job_type: 'forecast', slurm_job_id: '1001', model_id: 'model-demo', status: 'failed', stage: 'forecast', submitted_at: '2026-05-18T00:01:00Z', started_at: '2026-05-18T00:02:00Z', finished_at: '2026-05-18T00:05:00Z', exit_code: 1, retry_count: 0, error_code: 'M15_PARTIAL', error_message: 'partial fixture failure', log_uri: null, duration_seconds: 180 }],
         total: 1,
@@ -570,6 +600,61 @@ async function assertVerticalNonOverlap(page: Page, topSelector: string, bottomS
   expect(boxes!.topBottom).toBeLessThanOrEqual(boxes!.bottomTop + 1)
 }
 
+async function locatorBox(locator: Locator) {
+  await expect(locator).toBeVisible()
+  const box = await locator.boundingBox()
+  expect(box).not.toBeNull()
+  return box!
+}
+
+function boxesOverlap(
+  left: { x: number; y: number; width: number; height: number },
+  right: { x: number; y: number; width: number; height: number },
+  tolerance = 1,
+) {
+  return !(
+    left.x + left.width <= right.x + tolerance ||
+    right.x + right.width <= left.x + tolerance ||
+    left.y + left.height <= right.y + tolerance ||
+    right.y + right.height <= left.y + tolerance
+  )
+}
+
+async function assertLocatorsDoNotOverlap(first: Locator, second: Locator) {
+  const firstBox = await locatorBox(first)
+  const secondBox = await locatorBox(second)
+  expect(boxesOverlap(firstBox, secondBox)).toBe(false)
+}
+
+async function assertLocatorContainsLocator(container: Locator, child: Locator) {
+  const containerBox = await locatorBox(container)
+  const childBox = await locatorBox(child)
+  expect(childBox.x).toBeGreaterThanOrEqual(containerBox.x - 1)
+  expect(childBox.y).toBeGreaterThanOrEqual(containerBox.y - 1)
+  expect(childBox.x + childBox.width).toBeLessThanOrEqual(containerBox.x + containerBox.width + 1)
+  expect(childBox.y + childBox.height).toBeLessThanOrEqual(containerBox.y + containerBox.height + 1)
+}
+
+async function assertVisibleFocus(locator: Locator) {
+  await locator.page().keyboard.press('Tab')
+  await locator.focus()
+  await expect(locator).toBeFocused()
+  const focusStyle = await locator.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return {
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth,
+      outlineColor: style.outlineColor,
+      boxShadow: style.boxShadow,
+    }
+  })
+  const outlineWidth = Number.parseFloat(focusStyle.outlineWidth)
+  expect(
+    (focusStyle.outlineStyle !== 'none' && Number.isFinite(outlineWidth) && outlineWidth >= 1) ||
+      focusStyle.boxShadow !== 'none',
+  ).toBe(true)
+}
+
 async function assertM11LayoutOracle(page: Page) {
   await assertNoHorizontalScroll(page)
   await expect(page.getByTestId('m11-timeline')).toBeVisible()
@@ -593,8 +678,11 @@ async function assertRouteOracle(page: Page, routeName: string) {
     await assertVerticalNonOverlap(page, '[aria-label="洪水预警地图"]', '[data-testid="flood-alert-timeline"]')
   }
   if (routeName === 'monitoring') {
-    await expect(page.getByRole('button', { name: /刷新/ })).toBeVisible()
-    await expect(page.getByRole('button', { name: /查看日志/ })).toBeVisible()
+    const refreshButton = page.getByRole('button', { name: /刷新/ }).first()
+    const logButton = page.getByRole('button', { name: /查看日志/ }).first()
+    await expect(refreshButton).toBeVisible()
+    await expect(logButton).toBeVisible()
+    await assertVisibleFocus(refreshButton)
   }
 }
 
@@ -605,18 +693,33 @@ async function assertExtendedRouteOracle(page: Page, routeName: string) {
   switch (routeName) {
     case 'segment-detail':
       await expect(page.getByRole('heading', { name: 'seg-009' })).toBeVisible()
+      await expect(page.getByRole('region', { name: '站点与强迫数据' })).toBeVisible()
+      await expect(page.getByRole('region', { name: '河段身份' })).toBeVisible()
       await expect(page.getByRole('region', { name: '多源预报曲线' })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'Analysis' })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'GFS' })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'IFS' })).toBeVisible()
+      await expect(page.getByRole('region', { name: '洪水阈值' })).toBeVisible()
+      await expect(page.getByRole('region', { name: '频率曲线' })).toBeVisible()
+      await expect(page.getByRole('region', { name: '天气驱动' })).toBeVisible()
+      await assertLocatorsDoNotOverlap(page.getByRole('region', { name: '站点与强迫数据' }), page.getByRole('region', { name: '多源预报曲线' }))
+      await assertLocatorsDoNotOverlap(page.getByRole('region', { name: '多源预报曲线' }), page.getByRole('region', { name: '洪水阈值' }))
+      await assertLocatorsDoNotOverlap(page.getByRole('region', { name: '洪水阈值' }), page.getByRole('region', { name: '频率曲线' }))
+      await assertVisibleFocus(page.getByRole('button', { name: 'Analysis' }))
+      await assertVisibleFocus(page.getByRole('button', { name: 'GFS' }))
+      await assertVisibleFocus(page.getByRole('button', { name: 'IFS' }))
       break
     case 'meteorology-grid':
       await expect(page.getByTestId('meteorology-grid-map')).toBeVisible()
+      await expect(page.getByLabel('气象栅格地图')).toBeVisible()
+      await expect(page.getByTestId('grid-timeline')).toBeVisible()
       await expect(page.getByLabel('气象有效时间')).toBeVisible()
       await expect(page.getByRole('tablist', { name: '气象产品标签' })).toBeVisible()
-      await expect(page.getByRole('tab', { name: '空间栅格' })).toBeVisible()
-      await expect(page.getByRole('tab', { name: '气象代站' })).toBeVisible()
       await expect(page.getByRole('tab', { name: '空间栅格', selected: true })).toBeVisible()
+      await assertLocatorContainsLocator(page.getByTestId('meteorology-page'), page.getByRole('tablist', { name: '气象产品标签' }))
+      await assertLocatorsDoNotOverlap(page.getByRole('tablist', { name: '气象产品标签' }), page.getByLabel('气象栅格地图'))
+      await assertLocatorsDoNotOverlap(page.getByLabel('气象栅格地图'), page.getByTestId('grid-timeline'))
+      await assertLocatorsDoNotOverlap(page.getByLabel('气象有效时间'), page.getByLabel('气象栅格地图'))
+      await assertVisibleFocus(page.getByRole('tab', { name: '空间栅格' }))
+      await assertVisibleFocus(page.getByRole('tab', { name: '气象代站' }))
+      await assertVisibleFocus(page.getByLabel('气象有效时间'))
       break
     case 'meteorology-stations':
       await expect(page.getByTestId('station-inventory')).toBeVisible()
@@ -626,6 +729,14 @@ async function assertExtendedRouteOracle(page: Page, routeName: string) {
       await expect(page.getByLabel('选择站点 HMT-Y2-0237')).toBeVisible()
       await expect(page.getByTestId('forcing-charts')).toBeVisible()
       await expect(page.getByRole('tab', { name: '气象代站', selected: true })).toBeVisible()
+      await expect(page.getByLabel('气象站地图')).toBeVisible()
+      await assertLocatorsDoNotOverlap(page.getByTestId('station-inventory'), page.getByLabel('气象站地图'))
+      await assertLocatorsDoNotOverlap(page.getByLabel('气象站地图'), page.getByTestId('forcing-charts'))
+      await assertLocatorsDoNotOverlap(page.getByPlaceholder('station_id / 名称'), page.getByLabel('气象站地图'))
+      await assertVisibleFocus(page.getByRole('tab', { name: '气象代站' }))
+      await assertVisibleFocus(page.getByLabel('流域'))
+      await assertVisibleFocus(page.getByPlaceholder('station_id / 名称'))
+      await assertVisibleFocus(page.getByLabel('选择站点 HMT-Y2-0237'))
       break
     case 'model-assets':
       await expect(page.getByRole('heading', { name: '模型资产管理' })).toBeVisible()
@@ -636,6 +747,12 @@ async function assertExtendedRouteOracle(page: Page, routeName: string) {
       await expect(page.getByText('版本时间线 / 依赖图')).toBeVisible()
       await expect(page.getByText('产品资产')).toBeVisible()
       await expect(page.getByText(/secret|token|file:\/\//)).toHaveCount(0)
+      await assertLocatorsDoNotOverlap(page.getByPlaceholder('搜索流域、模型、版本'), page.getByText('模型元数据'))
+      await assertLocatorsDoNotOverlap(page.getByText('模型元数据'), page.getByText('版本时间线 / 依赖图'))
+      await assertLocatorsDoNotOverlap(page.getByText('版本时间线 / 依赖图'), page.getByText('产品资产'))
+      await assertVisibleFocus(page.getByPlaceholder('搜索流域、模型、版本'))
+      await assertVisibleFocus(page.getByRole('button', { name: /全部/ }))
+      await assertVisibleFocus(page.getByRole('button', { name: /Demo SHUD/ }))
       break
     default:
       throw new Error(`Unhandled M15 extended route oracle: ${routeName}`)
@@ -666,7 +783,8 @@ async function assertStateOracle(page: Page, stateLabel: string) {
       await expect(page.getByText('river segments: 暂不可用').first()).toBeVisible()
       break
     case 'empty-alerts':
-      await expect(page.getByText('暂无洪水预警数据').or(page.getByText('暂无排名数据'))).toBeVisible()
+      await expect(page.getByText('0/0 条河段有可用频率曲线')).toBeVisible()
+      await expect(page.getByText('暂无排名数据')).toBeVisible()
       await expect(page.getByTestId('flood-alert-timeline')).toBeVisible()
       break
     case 'warning-levels':
@@ -681,7 +799,10 @@ async function assertStateOracle(page: Page, stateLabel: string) {
       await expect(page.getByLabel('Status filter')).toBeVisible()
       break
     case 'failed-job-error':
-      await expect(page.getByText('刷新监控数据失败').or(page.getByText('失败'))).toBeVisible()
+      await expect(page.getByText('monitoring fixture API error')).toBeVisible()
+      await expect(page.getByText('暂无作业')).toBeVisible()
+      await expect(page.getByText('partial fixture failure')).toHaveCount(0)
+      await expect(page.locator('tbody').getByText('failed')).toHaveCount(0)
       break
     case 'rbac-denied':
     case 'model-assets-rbac-denied':
@@ -828,6 +949,36 @@ async function captureEvidence(page: Page, route: { name: string; path: string; 
   })
 }
 
+async function readScreenshotArtifactPaths() {
+  const files = await readdir(screenshotRoot).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return []
+    throw error
+  })
+  return files.filter((file) => file.endsWith('.png')).map((file) => path.join(screenshotRoot, file))
+}
+
+async function assertEvidenceArtifactsClosedOverManifest() {
+  const expectedArtifacts = new Set(manifestEntries.map((entry) => path.resolve(repoRoot, entry.artifactPath)))
+  const observedArtifacts = new Set((await readScreenshotArtifactPaths()).map((file) => path.resolve(file)))
+  const missing = [...expectedArtifacts].filter((file) => !observedArtifacts.has(file))
+  const stale = [...observedArtifacts].filter((file) => !expectedArtifacts.has(file))
+  if (missing.length > 0 || stale.length > 0) {
+    throw new Error(
+      [
+        missing.length ? `missing manifest artifacts: ${missing.map((file) => path.relative(repoRoot, file)).join(', ')}` : '',
+        stale.length ? `unmanifested screenshot artifacts: ${stale.map((file) => path.relative(repoRoot, file)).join(', ')}` : '',
+      ]
+        .filter(Boolean)
+        .join('; '),
+    )
+  }
+}
+
+test.beforeAll(async () => {
+  await rm(evidenceRoot, { recursive: true, force: true })
+  await mkdir(screenshotRoot, { recursive: true })
+})
+
 test.beforeEach(async ({ page }) => {
   await installM15NetworkGuard(page)
   await mockM15Apis(page)
@@ -835,15 +986,7 @@ test.beforeEach(async ({ page }) => {
 
 test.afterAll(async () => {
   await mkdir(evidenceRoot, { recursive: true })
-  if (!commitShaPattern.test(commitSha) || placeholderShaPattern.test(commitSha)) {
-    throw new Error(`M15 manifest SHA must be a real commit; received ${commitSha}.`)
-  }
-  if (process.env.CI && !process.env.M15_EVIDENCE_SHA && process.env.GITHUB_SHA && commitSha !== process.env.GITHUB_SHA) {
-    throw new Error(`M15 manifest SHA must match GITHUB_SHA in CI; received ${commitSha}, expected ${process.env.GITHUB_SHA}.`)
-  }
-  if (process.env.CI && process.env.M15_EVIDENCE_SHA && commitSha !== process.env.M15_EVIDENCE_SHA) {
-    throw new Error(`M15 manifest SHA must match M15_EVIDENCE_SHA in CI; received ${commitSha}, expected ${process.env.M15_EVIDENCE_SHA}.`)
-  }
+  resolveCommitShaForEnv(process.env)
   const observedLoadedMatrix = new Set(
     manifestEntries
       .filter((entry) => requiredRoutes.some((route) => route.path === entry.route))
@@ -865,7 +1008,11 @@ test.afterAll(async () => {
     if (!commitShaPattern.test(entry.sha) || placeholderShaPattern.test(entry.sha)) {
       throw new Error(`M15 manifest entry has invalid SHA: ${entry.sha}`)
     }
+    if (entry.sha !== commitSha) {
+      throw new Error(`M15 manifest entry SHA must match checked-out HEAD ${commitSha}; received ${entry.sha}.`)
+    }
   }
+  await assertEvidenceArtifactsClosedOverManifest()
   await writeFile(
     manifestPath,
     JSON.stringify(
@@ -884,6 +1031,23 @@ test.afterAll(async () => {
 })
 
 test.describe('M15 visual conformance evidence', () => {
+  test('rejects CI evidence SHA that differs from checked-out HEAD before capture', () => {
+    const headSha = '1111111111111111111111111111111111111111'
+    const env = {
+      CI: 'true',
+      M15_EVIDENCE_SHA: '2222222222222222222222222222222222222222',
+    } as NodeJS.ProcessEnv
+    expect(() => resolveCommitShaForEnv(env, () => headSha)).toThrow(/must match checked-out HEAD/)
+  })
+
+  test('rejects stale screenshot artifacts outside the manifest contract', async () => {
+    const stalePath = path.join(screenshotRoot, 'stale-m15-artifact.png')
+    await mkdir(screenshotRoot, { recursive: true })
+    await writeFile(stalePath, deterministicTilePng)
+    await expect(assertEvidenceArtifactsClosedOverManifest()).rejects.toThrow(/unmanifested screenshot artifacts/)
+    await rm(stalePath, { force: true })
+  })
+
   for (const route of requiredRoutes) {
     for (const viewport of requiredViewports) {
       test(`${route.name} ${viewport.label} loaded evidence`, async ({ page }) => {

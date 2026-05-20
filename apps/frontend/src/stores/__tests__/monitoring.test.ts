@@ -219,4 +219,23 @@ describe('useMonitoringStore', () => {
     expect(state.error).toBe('backend unavailable')
     expect(state.isPolling).toBe(false)
   })
+
+  it('preserves pipeline refresh errors when jobs refresh succeeds', async () => {
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      if (path === '/api/v1/pipeline/status') return failure('pipeline unavailable') as never
+      if (path === '/api/v1/pipeline/stages') return success(stages) as never
+      if (path === '/api/v1/jobs') return success({ items: [], total: 0, limit: 12, offset: 0 }) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await expect(useMonitoringStore.getState().fetchAll()).rejects.toThrow('pipeline unavailable')
+    await useMonitoringStore.getState().fetchJobs()
+
+    const state = useMonitoringStore.getState()
+    expect(state.operationalError).toBe('pipeline unavailable')
+    expect(state.jobsError).toBeNull()
+    expect(state.error).toBe('pipeline unavailable')
+    expect(state.jobs).toEqual([])
+  })
 })
