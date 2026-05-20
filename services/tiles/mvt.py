@@ -414,14 +414,6 @@ def postgis_tile_sql(layer: str) -> str:
             WHERE source_coordinate_count <= :feature_coordinate_limit
               AND source_coordinate_dimensions <= :max_coordinate_dimensions
         ),
-        simplified AS (
-            SELECT eligible.*,
-                   ST_SimplifyPreserveTopology(
-                       ST_MakeValid(ST_Transform(eligible.geom, 3857)),
-                       :simplification_tolerance_m
-                   ) AS geom_3857
-            FROM eligible
-        ),
         prefilter_stats AS (
             SELECT COUNT(*) AS intersecting_feature_count,
                    COALESCE(SUM(source_coordinate_count), 0) AS intersecting_coordinate_count,
@@ -439,6 +431,29 @@ def postgis_tile_sql(layer: str) -> str:
                    ) AS invalid_properties
             FROM intersecting
         ),
+        budget_stats AS (
+            SELECT COUNT(*) AS feature_count,
+                   COALESCE(SUM(source_coordinate_count), 0) AS coordinate_count
+            FROM eligible
+        ),
+        budget_gate AS (
+            SELECT budget_stats.feature_count, budget_stats.coordinate_count
+            FROM budget_stats, prefilter_stats
+            WHERE budget_stats.feature_count <= :feature_limit
+              AND budget_stats.coordinate_count <= :collection_coordinate_limit
+              AND prefilter_stats.feature_coordinate_overflow_count = 0
+              AND prefilter_stats.coordinate_dimension_overflow_count = 0
+              AND prefilter_stats.invalid_property_count = 0
+        ),
+        simplified AS (
+            SELECT eligible.*,
+                   ST_SimplifyPreserveTopology(
+                       ST_MakeValid(ST_Transform(eligible.geom, 3857)),
+                       :simplification_tolerance_m
+                   ) AS geom_3857
+            FROM eligible
+            CROSS JOIN budget_gate
+        ),
         clipped AS (
             SELECT simplified.*,
                    ST_AsMVTGeom(
@@ -451,22 +466,18 @@ def postgis_tile_sql(layer: str) -> str:
             FROM simplified, bounds
         ),
         budgeted AS (
-            SELECT *, COUNT(*) OVER () AS feature_count, SUM(ST_NPoints(geom)) OVER () AS coordinate_count
+            SELECT clipped.*,
+                   budget_gate.feature_count,
+                   budget_gate.coordinate_count
             FROM clipped
+            CROSS JOIN budget_gate
             WHERE mvt_geom IS NOT NULL
-        ),
-        budget_stats AS (
-            SELECT COALESCE(MAX(feature_count), 0) AS feature_count,
-                   COALESCE(MAX(coordinate_count), 0) AS coordinate_count
-            FROM budgeted
         )
         SELECT (
             SELECT ST_AsMVT(tile_rows, '{layer_name}', {MVT_EXTENT}, 'mvt_geom')
             FROM (
                 SELECT {tile_row_columns}
                 FROM budgeted
-                WHERE feature_count <= :feature_limit
-                  AND coordinate_count <= :collection_coordinate_limit
                 ORDER BY river_network_version_id, river_segment_id
             ) AS tile_rows
         ) AS tile,

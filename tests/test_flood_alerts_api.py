@@ -2484,6 +2484,8 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
     assert "ST_AsMVT(tile_rows, 'flood_return_period', 4096, 'mvt_geom')" in statement
     assert "feature_count <= :feature_limit" in statement
     assert "coordinate_count <= :collection_coordinate_limit" in statement
+    assert "budget_gate AS" in statement
+    assert "CROSS JOIN budget_gate" in statement
     assert "source_stats AS" in statement
     assert "FROM source_stats, budget_stats, prefilter_stats" in statement
 
@@ -2496,14 +2498,15 @@ def test_mvt_postgis_sql_shape_simplifies_all_production_layers_before_encoding(
         assert "ST_SimplifyPreserveTopology" in statement
         assert "ST_MakeValid(ST_Transform(eligible.geom, 3857))" in statement
         assert "simplified.geom_3857" in statement
-        assert statement.index("eligible AS") < statement.index("simplified AS") < statement.index("clipped AS")
+        assert statement.index("eligible AS") < statement.index("budget_gate AS") < statement.index("simplified AS")
+        assert statement.index("budget_gate AS") < statement.index("clipped AS")
         assert ":simplification_tolerance_m" in statement
 
 
-def test_mvt_postgis_sql_shape_filters_over_budget_features_before_expensive_geometry_work() -> None:
+def test_mvt_postgis_sql_shape_short_circuits_tile_budgets_before_expensive_geometry_work() -> None:
     for layer in ("flood-return-period", "hydro", "river-network"):
         statement = flood_alert_routes.postgis_tile_sql(layer)
-        eligible_index = statement.index("eligible AS")
+        budget_gate_index = statement.index("budget_gate AS")
         expensive_indexes = [
             statement.index("ST_MakeValid"),
             statement.index("ST_Transform(eligible.geom, 3857)"),
@@ -2512,8 +2515,12 @@ def test_mvt_postgis_sql_shape_filters_over_budget_features_before_expensive_geo
         ]
         assert "WHERE source_coordinate_count <= :feature_coordinate_limit" in statement
         assert "AND source_coordinate_dimensions <= :max_coordinate_dimensions" in statement
-        assert all(eligible_index < expensive_index for expensive_index in expensive_indexes)
-        assert statement.index("prefilter_stats AS") < statement.index("clipped AS")
+        assert "budget_stats AS" in statement
+        assert "FROM eligible" in statement[statement.index("budget_stats AS") : statement.index("budget_gate AS")]
+        assert "budget_stats.feature_count <= :feature_limit" in statement
+        assert "budget_stats.coordinate_count <= :collection_coordinate_limit" in statement
+        assert all(budget_gate_index < expensive_index for expensive_index in expensive_indexes)
+        assert statement.index("prefilter_stats AS") < budget_gate_index < statement.index("simplified AS")
 
 
 def test_mvt_postgis_tile_params_bind_zoom_safe_simplification_tolerance() -> None:

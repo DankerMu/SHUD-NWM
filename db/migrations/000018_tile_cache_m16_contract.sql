@@ -31,9 +31,66 @@ ALTER TABLE map.tile_cache
   ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ready';
 
 UPDATE map.tile_cache
-SET cache_key = COALESCE(cache_key, tile_uri)
+SET cache_key = NULL
+WHERE cache_key IS NOT NULL
+  AND btrim(cache_key) = '';
+
+UPDATE map.tile_cache
+SET tile_uri = NULL
+WHERE tile_uri IS NOT NULL
+  AND btrim(tile_uri) = '';
+
+UPDATE map.tile_cache
+SET cache_key = tile_uri
 WHERE cache_key IS NULL
   AND tile_uri IS NOT NULL;
+
+UPDATE map.tile_cache
+SET cache_key = encode(
+  digest(
+    jsonb_build_object(
+      'legacy_identity', 'map.tile_cache',
+      'layer_id', layer_id,
+      'z', z,
+      'x', x,
+      'y', y,
+      'source_id', source_id,
+      'source_version', source_version,
+      'valid_time', CASE
+        WHEN valid_time IS NULL THEN NULL
+        ELSE to_char(valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      END,
+      'style_id', COALESCE(style_id, 'default'),
+      'schema_version', schema_version,
+      'encoder_version', encoder_version
+    )::text,
+    'sha256'
+  ),
+  'hex'
+)
+WHERE cache_key IS NULL;
+
+DO $$
+DECLARE
+  duplicate_count BIGINT;
+BEGIN
+  SELECT COUNT(*)
+    INTO duplicate_count
+    FROM (
+      SELECT cache_key
+      FROM map.tile_cache
+      GROUP BY cache_key
+      HAVING COUNT(*) > 1
+    ) duplicate_cache_keys;
+
+  IF duplicate_count > 0 THEN
+    RAISE EXCEPTION
+      'Duplicate tile cache cache_key rows exist after deterministic M16 backfill. Deduplicate or quarantine duplicate cache rows before applying migration 000018.';
+  END IF;
+END $$;
+
+ALTER TABLE map.tile_cache
+  ALTER COLUMN cache_key SET NOT NULL;
 
 DO $$
 DECLARE

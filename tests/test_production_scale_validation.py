@@ -170,10 +170,66 @@ def test_validate_scale_mvt_expectation_with_measured_artifact_records_determini
     assert tile["observed_content_type"] == "application/x-protobuf"
     assert tile["mvt_deterministic_metrics"]["artifact_path"] == str(artifact)
     assert tile["mvt_deterministic_metrics"]["artifact_sha256"]
+    comparisons = tile["mvt_deterministic_metrics"]["threshold_comparison"]
+    assert (
+        comparisons["payload_bytes"]["threshold"]
+        == scale_validation.ProductionScaleThresholds.default().max_tile_bytes
+    )
+    assert comparisons["payload_bytes"]["passed"] is True
+    assert comparisons["p95_ms"]["threshold_key"] == scale_validation.MVT_CONTRACT_P95_THRESHOLD_KEY
+    assert comparisons["p95_ms"]["passed"] is True
+    assert comparisons["browser_timing_ms"]["threshold_name"] == (
+        scale_validation.MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME
+    )
+    assert comparisons["browser_timing_ms"]["passed"] is True
+    assert comparisons["tile_count"]["operator"] == ">="
+    assert comparisons["tile_count"]["passed"] is True
+    assert comparisons["feature_count"]["passed"] is True
+    assert comparisons["coordinate_count"]["passed"] is True
     assert tile["mvt_deterministic_contract"]["artifact_paths"] == [str(artifact)]
     assert tile["layer_metadata"]["tile_format"] == "mvt"
     _assert_mvt_blockers_have_full_release_contract(tile["blockers"])
     assert {blocker["error_code"] for blocker in tile["blockers"]} == {"PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_operator"),
+    [
+        ("p95_ms", 301.0, "<="),
+        ("browser_timing_ms", 1501.0, "<="),
+        ("tile_count", 0, ">="),
+        ("feature_count", 0, ">="),
+        ("coordinate_count", 0, ">="),
+    ],
+)
+def test_validate_scale_mvt_artifact_blocks_threshold_and_zero_coverage_failures(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    expected_operator: str,
+) -> None:
+    artifact = tmp_path / f"failed-{field}-mvt-contract.json"
+    _write_mvt_contract_artifact(artifact, **{field: value})
+
+    validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id=f"mvt_failed_{field}",
+            tile_content_type_expectation="application/x-protobuf",
+            mvt_contract_artifact=artifact,
+        )
+    )
+    tile = _read_json(tmp_path / "artifacts" / f"mvt_failed_{field}" / "scale" / "tile_evidence.json")
+    metrics = tile["mvt_deterministic_metrics"]
+    comparison = metrics["threshold_comparison"][field]
+
+    assert tile["deterministic_mvt_passed"] is False
+    assert tile["mvt_deterministic_contract"]["status"] == "blocked"
+    assert field in metrics["message"]
+    assert comparison["observed"] == value
+    assert comparison["operator"] == expected_operator
+    assert comparison["passed"] is False
+    _assert_mvt_blockers_have_full_release_contract(tile["blockers"])
 
 
 def test_validate_scale_mvt_artifact_rejects_oversized_padded_json(tmp_path: Path) -> None:

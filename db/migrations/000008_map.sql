@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS map.tile_cache (
   y INT NOT NULL,
   tile_data BYTEA,
   tile_uri TEXT,
-  cache_key TEXT,
+  cache_key TEXT NOT NULL,
   etag TEXT,
   checksum TEXT,
   source_id TEXT,

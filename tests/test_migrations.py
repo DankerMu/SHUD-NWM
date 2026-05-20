@@ -218,12 +218,40 @@ def test_tile_cache_m16_migration_upgrades_preexisting_cache_contract() -> None:
         "ADD COLUMN IF NOT EXISTS source_id TEXT",
         "ADD COLUMN IF NOT EXISTS source_version TEXT",
         "ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ready'",
-        "SET cache_key = COALESCE(cache_key, tile_uri)",
+        "SET cache_key = NULL",
+        "SET tile_uri = NULL",
+        "SET cache_key = tile_uri",
+        "jsonb_build_object",
+        "'legacy_identity', 'map.tile_cache'",
+        "digest(",
+        "'sha256'",
+        "Duplicate tile cache cache_key rows exist after deterministic M16 backfill",
+        "Deduplicate or quarantine duplicate cache rows before applying migration 000018",
+        "ALTER COLUMN cache_key SET NOT NULL",
         "ALTER TABLE map.tile_cache DROP CONSTRAINT",
         "CREATE UNIQUE INDEX IF NOT EXISTS tile_cache_cache_key_uidx ON map.tile_cache (cache_key)",
     ):
         assert expected in migration
 
     assert migration.index("ADD COLUMN IF NOT EXISTS cache_key TEXT") < migration.index(
+        "UPDATE map.tile_cache\nSET cache_key = NULL"
+    )
+    assert migration.index("SET cache_key = tile_uri") < migration.index("jsonb_build_object")
+    assert migration.index("jsonb_build_object") < migration.index(
+        "Duplicate tile cache cache_key rows exist after deterministic M16 backfill"
+    )
+    assert (
+        migration.index("Duplicate tile cache cache_key rows exist after deterministic M16 backfill")
+        < migration.index("ALTER COLUMN cache_key SET NOT NULL")
+    )
+    assert migration.index("ALTER COLUMN cache_key SET NOT NULL") < migration.index(
         "CREATE UNIQUE INDEX IF NOT EXISTS tile_cache_cache_key_uidx"
     )
+
+
+def test_fresh_tile_cache_schema_requires_non_null_cache_key_identity() -> None:
+    migration = dict(_migration_sql())["000008_map.sql"]
+    tile_cache = migration[migration.index("CREATE TABLE IF NOT EXISTS map.tile_cache") :]
+
+    assert "cache_key TEXT NOT NULL" in tile_cache
+    assert "PRIMARY KEY (cache_key)" in tile_cache

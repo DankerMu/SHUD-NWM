@@ -58,6 +58,11 @@ MVT_ENDPOINT_REFERENCES = [
 ]
 MVT_DETERMINISTIC_BLOCKER_ID = "m16-deterministic-mvt-contract-artifact"
 MVT_LIVE_POSTGIS_BLOCKER_ID = "m16-live-postgis-national-proof"
+MVT_CONTRACT_P95_THRESHOLD_KEY = "flood_alert_map_ms"
+MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME = "frontend_render_ms"
+MVT_CONTRACT_MIN_TILE_COUNT = 1
+MVT_CONTRACT_MIN_FEATURE_COUNT = 1
+MVT_CONTRACT_MIN_COORDINATE_COUNT = 1
 MVT_CONTRACT_NUMERIC_FIELDS = (
     "payload_bytes",
     "p95_ms",
@@ -834,7 +839,18 @@ def _deterministic_mvt_contract_record(
             "metrics": {
                 "status": "not_executed",
                 "payload_bytes": payload_bytes,
-                "thresholds": {"payload_bytes": config.thresholds.max_tile_bytes},
+                "thresholds": _mvt_contract_thresholds(config),
+                "threshold_comparison": _mvt_contract_comparisons(
+                    {
+                        "payload_bytes": payload_bytes,
+                        "p95_ms": 0.0,
+                        "browser_timing_ms": 0.0,
+                        "tile_count": 0,
+                        "feature_count": 0,
+                        "coordinate_count": 0,
+                    },
+                    config,
+                ),
             },
         }
 
@@ -893,6 +909,7 @@ def _deterministic_mvt_contract_record(
             message=str(normalized["message"]),
             artifact_paths=[str(artifact_path)],
             artifact_sha256=artifact_sha256,
+            extra_metrics=normalized.get("metrics") if isinstance(normalized.get("metrics"), Mapping) else None,
         )
     metrics = normalized["metrics"]
     return {
@@ -950,13 +967,31 @@ def _validated_mvt_contract_metrics(
                 "message": f"Measured deterministic MVT artifact field {field_name} must be finite numeric evidence.",
             }
         parsed_numbers[field_name] = parsed
-    if parsed_numbers["payload_bytes"] > config.thresholds.max_tile_bytes:
+    comparisons = _mvt_contract_comparisons(parsed_numbers, config)
+    failed = [
+        f"{field_name} {comparison['operator']} {comparison['threshold']}"
+        for field_name, comparison in comparisons.items()
+        if not comparison["passed"]
+    ]
+    if failed:
+        failed_metrics = {
+            **parsed_strings,
+            **parsed_numbers,
+            "observed_content_type": "application/x-protobuf",
+            "raw_tile_bytes_observed": True,
+            "artifact_path": str(artifact_path),
+            "artifact_sha256": artifact_sha256,
+            "artifact_paths": [str(artifact_path)],
+            "thresholds": _mvt_contract_thresholds(config),
+            "threshold_comparison": comparisons,
+        }
         return {
             "ok": False,
             "message": (
-                "Measured deterministic MVT artifact payload_bytes exceeds configured threshold "
-                f"{config.thresholds.max_tile_bytes}."
+                "Measured deterministic MVT artifact failed threshold/minimum checks: "
+                f"{', '.join(failed)}."
             ),
+            "metrics": failed_metrics,
         }
 
     normalized = {
@@ -967,9 +1002,64 @@ def _validated_mvt_contract_metrics(
         "artifact_path": str(artifact_path),
         "artifact_sha256": artifact_sha256,
         "artifact_paths": [str(artifact_path)],
-        "thresholds": {"payload_bytes": config.thresholds.max_tile_bytes},
+        "thresholds": _mvt_contract_thresholds(config),
+        "threshold_comparison": comparisons,
     }
     return {"ok": True, "metrics": normalized}
+
+
+def _mvt_contract_thresholds(config: ProductionScaleConfig) -> dict[str, Any]:
+    return {
+        "payload_bytes": config.thresholds.max_tile_bytes,
+        "p95_ms": config.thresholds.p95_query_ms[MVT_CONTRACT_P95_THRESHOLD_KEY],
+        "p95_threshold_key": MVT_CONTRACT_P95_THRESHOLD_KEY,
+        "browser_timing_ms": config.thresholds.frontend_render_ms,
+        "browser_timing_threshold_name": MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME,
+        "tile_count_min": MVT_CONTRACT_MIN_TILE_COUNT,
+        "feature_count_min": MVT_CONTRACT_MIN_FEATURE_COUNT,
+        "coordinate_count_min": MVT_CONTRACT_MIN_COORDINATE_COUNT,
+    }
+
+
+def _mvt_contract_comparisons(
+    parsed_numbers: Mapping[str, int | float],
+    config: ProductionScaleConfig,
+) -> dict[str, dict[str, Any]]:
+    return {
+        "payload_bytes": _threshold_comparison(
+            float(parsed_numbers["payload_bytes"]),
+            float(config.thresholds.max_tile_bytes),
+        ),
+        "p95_ms": {
+            **_threshold_comparison(
+                float(parsed_numbers["p95_ms"]),
+                float(config.thresholds.p95_query_ms[MVT_CONTRACT_P95_THRESHOLD_KEY]),
+            ),
+            "threshold_key": MVT_CONTRACT_P95_THRESHOLD_KEY,
+        },
+        "browser_timing_ms": {
+            **_threshold_comparison(
+                float(parsed_numbers["browser_timing_ms"]),
+                float(config.thresholds.frontend_render_ms),
+            ),
+            "threshold_name": MVT_CONTRACT_BROWSER_TIMING_THRESHOLD_NAME,
+        },
+        "tile_count": _minimum_comparison(parsed_numbers["tile_count"], MVT_CONTRACT_MIN_TILE_COUNT),
+        "feature_count": _minimum_comparison(parsed_numbers["feature_count"], MVT_CONTRACT_MIN_FEATURE_COUNT),
+        "coordinate_count": _minimum_comparison(
+            parsed_numbers["coordinate_count"],
+            MVT_CONTRACT_MIN_COORDINATE_COUNT,
+        ),
+    }
+
+
+def _minimum_comparison(observed: int | float, minimum: int) -> dict[str, Any]:
+    return {
+        "observed": observed,
+        "threshold": minimum,
+        "operator": ">=",
+        "passed": math.isfinite(float(observed)) and observed >= minimum,
+    }
 
 
 def _mvt_contract_finite_number(value: Any, field_name: str) -> int | float | None:
@@ -995,13 +1085,29 @@ def _blocked_mvt_contract_record(
     message: str,
     artifact_paths: list[str] | None = None,
     artifact_sha256: str | None = None,
+    extra_metrics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "status": status,
         "payload_bytes": 0,
-        "thresholds": {"payload_bytes": config.thresholds.max_tile_bytes},
+        "thresholds": _mvt_contract_thresholds(config),
+        "threshold_comparison": _mvt_contract_comparisons(
+            {
+                "payload_bytes": 0,
+                "p95_ms": 0.0,
+                "browser_timing_ms": 0.0,
+                "tile_count": 0,
+                "feature_count": 0,
+                "coordinate_count": 0,
+            },
+            config,
+        ),
         "message": message,
     }
+    if extra_metrics:
+        metrics.update(dict(extra_metrics))
+        metrics["status"] = status
+        metrics["message"] = message
     if artifact_paths:
         metrics["artifact_paths"] = artifact_paths
         metrics["artifact_path"] = artifact_paths[0]
@@ -1624,6 +1730,7 @@ def _threshold_comparison(observed: float, threshold: float) -> dict[str, Any]:
     return {
         "observed": observed,
         "threshold": threshold,
+        "operator": "<=",
         "passed": math.isfinite(observed) and observed <= threshold,
     }
 
