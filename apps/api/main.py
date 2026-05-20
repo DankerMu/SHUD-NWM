@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -52,13 +53,22 @@ _PRE_BODY_PROTECTED_MUTATIONS: dict[tuple[str, str], tuple[str, str, str]] = {
     ): ("models.switch_version", "model_registry", "river-segment-crosswalks"),
     ("POST", "/api/v1/hindcast/submit"): ("pipeline.rerun_cycle", "hindcast", "pre-body"),
 }
+_ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES = 4096
 
 
 @app.middleware("http")
 async def protected_mutation_auth_guard(request: Any, call_next: Any) -> Any:
-    path_policy = _protected_mutation_policy(request.method, request.url.path)
+    path_policy = await _protected_mutation_policy(request)
     if path_policy is None:
         return await call_next(request)
+    if isinstance(path_policy, _PreBodyPolicyError):
+        return error_response(
+            request,
+            status_code=path_policy.status_code,
+            code=path_policy.code,
+            message=path_policy.message,
+            details=path_policy.details,
+        )
 
     request_id = _ensure_request_id(request)
     action_id, target_type, target_id = path_policy
@@ -94,19 +104,80 @@ async def protected_mutation_auth_guard(request: Any, call_next: Any) -> Any:
     )
 
 
-def _protected_mutation_policy(method: str, path: str) -> tuple[str, str, str] | None:
+class _PreBodyPolicyError:
+    def __init__(self, *, status_code: int, code: str, message: str, details: Any | None = None) -> None:
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
+
+
+async def _protected_mutation_policy(request: Any) -> tuple[str, str, str] | _PreBodyPolicyError | None:
+    method = request.method.upper()
+    path = request.url.path
     policy = _PRE_BODY_PROTECTED_MUTATIONS.get((method.upper(), path))
     if policy is not None:
         return policy
-    if method.upper() == "POST" and path.startswith("/api/v1/basins/") and path.endswith("/versions"):
+    if method == "POST" and path.startswith("/api/v1/basins/") and path.endswith("/versions"):
         basin_id = path.removeprefix("/api/v1/basins/").removesuffix("/versions")
         if basin_id and "/" not in basin_id:
             return ("models.switch_version", "model_registry", basin_id)
-    if method.upper() == "PUT" and path.startswith("/api/v1/models/") and path.endswith("/active"):
+    if method == "PUT" and path.startswith("/api/v1/models/") and path.endswith("/active"):
         model_id = path.removeprefix("/api/v1/models/").removesuffix("/active")
         if model_id and "/" not in model_id:
-            return ("models.switch_version", "model_registry", model_id)
+            active = await _active_toggle_flag(request)
+            if isinstance(active, _PreBodyPolicyError):
+                return active
+            action_id = "models.activate" if active else "models.deactivate"
+            return (action_id, "model_instance", model_id)
     return None
+
+
+async def _active_toggle_flag(request: Any) -> bool | _PreBodyPolicyError:
+    request_id = _ensure_request_id(request)
+    content_length = request.headers.get("content-length")
+    try:
+        if content_length is not None and int(content_length) > _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES:
+            return _active_toggle_validation_error(request_id)
+    except ValueError:
+        return _active_toggle_validation_error(request_id)
+
+    body = await request.body()
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request._receive = receive
+    if len(body) > _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES:
+        return _active_toggle_validation_error(request_id)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return _active_toggle_validation_error(request_id)
+    if not isinstance(payload, dict):
+        return _active_toggle_validation_error(request_id)
+    active = payload.get("active", payload.get("active_flag"))
+    if not isinstance(active, bool):
+        return _active_toggle_validation_error(request_id)
+    return active
+
+
+def _active_toggle_validation_error(request_id: str) -> _PreBodyPolicyError:
+    return _PreBodyPolicyError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="Request validation failed.",
+        details=[
+            {
+                "field": "body.active",
+                "rejected_value": None,
+                "reason": (
+                    "Active-toggle requests require a bounded JSON object with boolean active "
+                    "or active_flag before authorization can be evaluated."
+                ),
+                "request_id": request_id,
+            }
+        ],
+    )
 
 
 def _ensure_request_id(request: Any) -> str:

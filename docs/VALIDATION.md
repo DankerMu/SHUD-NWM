@@ -744,6 +744,11 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   route-backed `backend_route_executed`, opt-in `live_proof`, and
   `release_blocked` modes. Fast validation never executes live IdP calls and
   cannot satisfy final production auth readiness without accepted live proof.
+  `execution_modes` remains the per-action mode list, while
+  `auth_readiness_execution_mode` is the final machine-readable auth readiness
+  mode emitted in both `auth_rbac.json` and `summary.json`: `release_blocked`
+  when live auth readiness is missing or incomplete, and `live_proof` when
+  accepted live proof satisfies every canonical action.
   The opt-in live-proof path is supplied explicitly with
   `--auth-live-proof` or `NHMS_PRODUCTION_OPS_AUTH_LIVE_PROOF` JSON containing
   `execution_mode=live_proof`, `live_backend_auth_executed=true`, provider

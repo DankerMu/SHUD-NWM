@@ -677,16 +677,26 @@ async def test_pre_body_static_denial_preserves_request_id_correlation(
 
 
 @pytest.mark.asyncio
-async def test_pre_body_dynamic_denial_preserves_request_id_and_neutral_active_action(
+@pytest.mark.parametrize(
+    ("active", "expected_action", "expected_active"),
+    [
+        (True, "models.activate", True),
+        (False, "models.deactivate", True),
+    ],
+)
+async def test_pre_body_dynamic_denial_preserves_request_id_and_canonical_active_action(
     fake_store: FakeModelRegistryStore,
+    active: bool,
+    expected_action: str,
+    expected_active: bool,
 ) -> None:
-    request_id = "req-dynamic-pre-body-403"
+    request_id = f"req-dynamic-pre-body-403-{str(active).lower()}"
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.put(
             "/api/v1/models/active_model/active",
             headers={"X-Request-ID": request_id, "X-User-Role": "viewer"},
-            json={"active": False},
+            json={"active": active},
         )
 
     assert response.status_code == 403
@@ -694,15 +704,12 @@ async def test_pre_body_dynamic_denial_preserves_request_id_and_neutral_active_a
         response,
         request_id=request_id,
         code="RBAC_FORBIDDEN",
-        action_id="models.switch_version",
+        action_id=expected_action,
         decision="deny",
-        target={"type": "model_registry", "id": "active_model"},
+        target={"type": "model_instance", "id": "active_model"},
     )
-    body = response.json()
-    assert body["error"]["details"]["policy_decision"]["action_id"] != "models.activate"
-    assert body["error"]["details"]["audit_record"]["action_id"] != "models.activate"
     assert fake_store.write_calls == []
-    assert fake_store.models["active_model"]["active_flag"] is True
+    assert fake_store.models["active_model"]["active_flag"] is expected_active
 
 
 @pytest.mark.asyncio
@@ -739,6 +746,50 @@ async def test_pre_body_live_release_block_preserves_request_id_correlation(
     assert details["policy_decision"]["execution_mode"] == "release_blocked"
     assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
     assert fake_store.write_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("active", "expected_action", "expected_model_id", "expected_active"),
+    [
+        (True, "models.activate", "inactive_model", False),
+        (False, "models.deactivate", "active_model", True),
+    ],
+)
+async def test_pre_body_active_toggle_live_release_block_uses_canonical_action(
+    fake_store: FakeModelRegistryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    active: bool,
+    expected_action: str,
+    expected_model_id: str,
+    expected_active: bool,
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    request_id = f"req-active-pre-body-503-{str(active).lower()}"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            f"/api/v1/models/{expected_model_id}/active",
+            headers={"X-Request-ID": request_id, "X-User-Role": "model_admin"},
+            json={"active": active},
+        )
+
+    assert response.status_code == 503
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="RELEASE_BLOCKED",
+        action_id=expected_action,
+        decision="release_blocked",
+        target={"type": "model_instance", "id": expected_model_id},
+    )
+    details = response.json()["error"]["details"]
+    assert details["policy_decision"]["execution_mode"] == "release_blocked"
+    assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
+    assert fake_store.write_calls == []
+    assert fake_store.models[expected_model_id]["active_flag"] is expected_active
 
 
 @pytest.mark.asyncio
@@ -1099,6 +1150,40 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
         error_type="MissingResourceError",
     )
     assert len(fake_store.activation_audit_rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_active_toggle_allows_model_admin_activation_and_sys_admin_deactivation(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        activation = await client.put(
+            "/api/v1/models/inactive_model/active",
+            json={"active": True},
+            headers={"X-User-Role": "model_admin", "X-User-ID": "model-admin"},
+        )
+        deactivation = await client.put(
+            "/api/v1/models/active_model/active",
+            json={"active": False},
+            headers={"X-User-Role": "sys_admin", "X-User-ID": "sys-admin"},
+        )
+
+    assert activation.status_code == 200
+    assert deactivation.status_code == 200
+    assert fake_store.models["inactive_model"]["active_flag"] is True
+    assert fake_store.models["active_model"]["active_flag"] is False
+    decisions = [
+        response.json()["auth_policy_decisions"][0]
+        for response in (activation, deactivation)
+    ]
+    assert [
+        (decision["action_id"], decision["target"], decision["decision"])
+        for decision in decisions
+    ] == [
+        ("models.activate", {"type": "model_instance", "id": "inactive_model"}, "allow"),
+        ("models.deactivate", {"type": "model_instance", "id": "active_model"}, "allow"),
+    ]
 
 
 @pytest.mark.asyncio

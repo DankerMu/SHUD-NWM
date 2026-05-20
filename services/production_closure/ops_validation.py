@@ -588,6 +588,7 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
         if live_backend_auth_executed and not subject_blockers and not coverage_blockers
         else "release_blocked"
     )
+    auth_readiness_execution_mode = "live_proof" if status == "ready" else "release_blocked"
     blockers = []
     if not live_backend_auth_executed:
         blockers.append(
@@ -625,6 +626,7 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
         "live_proof": live_proof or {},
         "action_decisions": decisions,
         "live_backend_auth_executed": live_backend_auth_executed,
+        "auth_readiness_execution_mode": auth_readiness_execution_mode,
         "execution_modes": sorted({item["execution_mode"] for item in decisions}),
         "state_mutation_assertions": {
             "denied_actions_mutated_state": False,
@@ -1216,6 +1218,7 @@ def _summary(
         "required_roles": list(config.required_roles),
         "final_production_readiness_claimed": final_ready,
         "live_backend_auth_executed": auth_rbac["live_backend_auth_executed"],
+        "auth_readiness_execution_mode": auth_rbac["auth_readiness_execution_mode"],
         "live_alert_sink_delivered": monitoring["live_alert_sink_delivered"],
         "live_rollback_executed": rollback["live_rollback_executed"],
         "dependency_status": dependencies["status"],
@@ -1246,7 +1249,34 @@ def _summary_blockers(
     blockers = []
     for evidence in (production_config, auth_rbac, release_blockers, monitoring, rollback, dependencies):
         blockers.extend(evidence.get("blockers", []))
-    return blockers
+    return _unique_blockers(blockers)
+
+
+def _unique_blockers(blockers: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    unique = []
+    seen: set[str] = set()
+    for blocker in blockers:
+        key = json.dumps(_stable_blocker_key(blocker), sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(dict(blocker))
+    return unique
+
+
+def _stable_blocker_key(blocker: Mapping[str, Any]) -> dict[str, Any]:
+    key_fields = (
+        "error_code",
+        "action_id",
+        "subject",
+        "dependency",
+        "service",
+        "setting",
+        "missing_coverage",
+        "removal_criteria",
+        "residual_risk",
+    )
+    return {field: blocker.get(field) for field in key_fields if field in blocker}
 
 
 def _environment_payload(config: ProductionOpsConfig) -> dict[str, Any]:

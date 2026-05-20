@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
 
@@ -31,6 +32,7 @@ def test_validate_ops_default_lane_writes_required_release_blocked_evidence(tmp_
     assert summary["final_production_readiness_claimed"] is False
     assert summary["evidence_dir"] == "m10_152/ops"
     assert summary["live_backend_auth_executed"] is False
+    assert summary["auth_readiness_execution_mode"] == "release_blocked"
     assert summary["live_alert_sink_delivered"] is False
     assert summary["live_rollback_executed"] is False
     assert summary["dependency_status"] == "release_blocked"
@@ -131,6 +133,7 @@ def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path
         "release_blocked",
     }
     assert set(auth["execution_modes"]) == {"policy_simulated", "release_blocked"}
+    assert auth["auth_readiness_execution_mode"] == "release_blocked"
     assert auth["live_backend_auth_executed"] is False
     assert auth["state_mutation_assertions"] == {
         "denied_actions_mutated_state": False,
@@ -1710,12 +1713,14 @@ def test_validate_ops_auth_live_proof_emits_redacted_live_evidence(tmp_path: Pat
     blockers = _read_json(lane_dir / "auth_release_blockers.json")
     rendered_auth = json.dumps(auth)
     assert summary["live_backend_auth_executed"] is True
+    assert summary["auth_readiness_execution_mode"] == "live_proof"
     assert not any(
         blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
         for blocker in summary["release_blockers"]
     )
     assert auth["status"] == "ready"
     assert auth["live_backend_auth_executed"] is True
+    assert auth["auth_readiness_execution_mode"] == "live_proof"
     assert auth["execution_modes"] == ["live_proof"]
     assert auth["live_proof"]["provider_metadata"]["provider"] == "oidc-prod"
     assert auth["live_proof"]["provider_metadata"]["token"] == "[redacted]"
@@ -1786,6 +1791,8 @@ def test_validate_ops_auth_live_proof_swapped_subject_labels_remains_blocked(tmp
 
     assert summary["status"] == "release_blocked"
     assert auth["status"] == "release_blocked"
+    assert auth["auth_readiness_execution_mode"] == "release_blocked"
+    assert summary["auth_readiness_execution_mode"] == "release_blocked"
     assert blockers["status"] == "release_blocked"
     assert {decision["auth_live_proof_subject"] for decision in auth["action_decisions"]} == {
         "allowed_subject",
@@ -1870,6 +1877,16 @@ def test_validate_ops_auth_live_proof_partial_action_coverage_remains_blocked(tm
             if blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
         }
     )
+    summary_coverage_keys = [
+        (
+            blocker["error_code"],
+            blocker["action_id"],
+            tuple(blocker["missing_coverage"]),
+        )
+        for blocker in summary["release_blockers"]
+        if blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
+    ]
+    assert all(count == 1 for count in Counter(summary_coverage_keys).values())
 
 
 def test_validate_ops_auth_live_proof_requires_explicit_allowed_subject(tmp_path: Path) -> None:
