@@ -665,6 +665,7 @@ def flood_return_period_mvt_tile(
         y=y,
         variant_id=f"duration:{duration}",
     )
+    _require_live_postgis_mvt(session, tile_input.layer_id)
     cached = read_cached_tile_response(session, tile_input)
     if cached is not None:
         return _mvt_response(cached)
@@ -705,6 +706,7 @@ def hydro_mvt_tile(
         y=y,
         variant_id=f"variable:{variable}",
     )
+    _require_live_postgis_mvt(session, tile_input.layer_id)
     cached = read_cached_tile_response(session, tile_input)
     if cached is not None:
         return _mvt_response(cached)
@@ -739,6 +741,7 @@ def river_network_mvt_tile(
         x=x,
         y=y,
     )
+    _require_live_postgis_mvt(session, tile_input.layer_id)
     cached = read_cached_tile_response(session, tile_input)
     if cached is not None:
         return _mvt_response(cached)
@@ -788,12 +791,65 @@ def _require_live_postgis_mvt(session: Session, layer_id: str) -> None:
 
 def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, Any], *, z: int, x: int, y: int) -> bytes:
     _require_live_postgis_mvt(session, layer)
+    detail_layer_id = f"hydro:{params['variable']}" if layer == "hydro" and "variable" in params else layer
     row = session.execute(
         text(postgis_tile_sql(layer)),
         _postgis_tile_params(params, z=z, x=x, y=y),
     ).mappings().first()
     feature_count = int(row.get("feature_count") or 0) if row else 0
     coordinate_count = int(row.get("coordinate_count") or 0) if row else 0
+    feature_coordinate_overflow_count = int(row.get("feature_coordinate_overflow_count") or 0) if row else 0
+    feature_coordinate_count = int(row.get("feature_coordinate_count") or 0) if row else 0
+    coordinate_dimension_overflow_count = int(row.get("coordinate_dimension_overflow_count") or 0) if row else 0
+    coordinate_dimension_count = int(row.get("coordinate_dimension_count") or 0) if row else 0
+    invalid_property_count = int(row.get("invalid_property_count") or 0) if row else 0
+    invalid_properties = _mvt_invalid_properties(row.get("invalid_properties") if row else None)
+    if feature_coordinate_overflow_count > 0:
+        raise ApiError(
+            status_code=413,
+            code="MVT_TILE_BUDGET_EXCEEDED",
+            message="Live PostGIS MVT tile contained a feature over the coordinate budget.",
+            details={
+                "layer_id": detail_layer_id,
+                "z": z,
+                "x": x,
+                "y": y,
+                "limit_type": "feature_coordinates",
+                "feature_count": feature_coordinate_overflow_count,
+                "coordinate_count": feature_coordinate_count,
+                "max_coordinates": FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES,
+            },
+        )
+    if coordinate_dimension_overflow_count > 0:
+        raise ApiError(
+            status_code=413,
+            code="MVT_TILE_BUDGET_EXCEEDED",
+            message="Live PostGIS MVT tile contained a feature over the coordinate dimension budget.",
+            details={
+                "layer_id": detail_layer_id,
+                "z": z,
+                "x": x,
+                "y": y,
+                "limit_type": "coordinate_dimensions",
+                "feature_count": coordinate_dimension_overflow_count,
+                "coordinate_dimensions": coordinate_dimension_count,
+                "max_coordinate_dimensions": FLOOD_RETURN_PERIOD_MAP_MAX_COORDINATE_DIMENSIONS,
+            },
+        )
+    if invalid_property_count > 0:
+        raise ApiError(
+            status_code=500,
+            code="MVT_PROPERTY_INVALID",
+            message="Live PostGIS MVT tile contained missing or non-finite required feature properties.",
+            details={
+                "layer_id": detail_layer_id,
+                "z": z,
+                "x": x,
+                "y": y,
+                "invalid_property_count": invalid_property_count,
+                "properties": invalid_properties,
+            },
+        )
     if (
         feature_count > FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT
         or coordinate_count > FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES
@@ -803,7 +859,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
             code="MVT_TILE_BUDGET_EXCEEDED",
             message="Live PostGIS MVT tile exceeded the configured feature or coordinate budget.",
             details={
-                "layer_id": layer,
+                "layer_id": detail_layer_id,
                 "z": z,
                 "x": x,
                 "y": y,
@@ -819,9 +875,17 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
             status_code=424,
             code="MVT_LIVE_POSTGIS_UNAVAILABLE",
             message="Live PostGIS MVT query returned no tile bytes for the requested identity.",
-            details={"layer_id": layer, "z": z, "x": x, "y": y},
+            details={"layer_id": detail_layer_id, "z": z, "x": x, "y": y},
         )
     return data
+
+
+def _mvt_invalid_properties(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    return [item for item in str(value).split(",") if item]
 
 
 def _fetch_flood_mvt_tile_bytes(

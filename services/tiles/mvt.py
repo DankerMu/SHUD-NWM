@@ -22,6 +22,9 @@ MVT_MAX_ZOOM = 14
 MVT_MAX_FEATURES = 10_000
 MVT_MAX_COORDINATES = 50_000
 MVT_MAX_BYTES = 5_000_000
+POSTGIS_NON_FINITE_DOUBLE_SQL = (
+    "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
+)
 WEB_MERCATOR_BOUNDS = [-20037508.342789244, -20037508.342789244, 20037508.342789244, 20037508.342789244]
 CHINA_WGS84_BOUNDS = [73.5, 18.1, 134.8, 53.6]
 
@@ -257,6 +260,13 @@ def encode_mvt_layer(layer_name: str, features: list[Mapping[str, Any]], *, exte
 def postgis_tile_sql(layer: str) -> str:
     layer_name = _source_layer_id(layer)
     if layer == "river-network":
+        required_property_checks = {
+            "feature_id": "feature_id IS NULL OR feature_id::text = ''",
+            "segment_id": "segment_id IS NULL OR segment_id::text = ''",
+            "river_segment_id": "river_segment_id IS NULL OR river_segment_id::text = ''",
+            "river_network_version_id": "river_network_version_id IS NULL OR river_network_version_id::text = ''",
+            "basin_version_id": "basin_version_id IS NULL OR basin_version_id::text = ''",
+        }
         source_cte = """
             SELECT (rs.river_network_version_id || '::' || rs.river_segment_id) AS feature_id,
                    rs.river_segment_id AS segment_id,
@@ -269,6 +279,17 @@ def postgis_tile_sql(layer: str) -> str:
             WHERE mi.basin_version_id = :basin_version_id
         """
     elif layer == "hydro":
+        required_property_checks = {
+            "feature_id": "feature_id IS NULL OR feature_id::text = ''",
+            "segment_id": "segment_id IS NULL OR segment_id::text = ''",
+            "river_segment_id": "river_segment_id IS NULL OR river_segment_id::text = ''",
+            "river_network_version_id": "river_network_version_id IS NULL OR river_network_version_id::text = ''",
+            "basin_version_id": "basin_version_id IS NULL OR basin_version_id::text = ''",
+            "value": f"value IS NULL OR value::double precision IN ({POSTGIS_NON_FINITE_DOUBLE_SQL})",
+            "unit": "unit IS NULL OR unit::text = ''",
+            "quality_flag": "quality_flag IS NULL OR quality_flag::text = ''",
+            "valid_time": "valid_time IS NULL",
+        }
         source_cte = """
             SELECT (ts.river_network_version_id || '::' || ts.river_segment_id) AS feature_id,
                    ts.river_segment_id AS segment_id,
@@ -286,6 +307,22 @@ def postgis_tile_sql(layer: str) -> str:
               AND ts.valid_time = :valid_time
         """
     elif layer == "flood-return-period":
+        required_property_checks = {
+            "feature_id": "feature_id IS NULL OR feature_id::text = ''",
+            "segment_id": "segment_id IS NULL OR segment_id::text = ''",
+            "river_segment_id": "river_segment_id IS NULL OR river_segment_id::text = ''",
+            "river_network_version_id": "river_network_version_id IS NULL OR river_network_version_id::text = ''",
+            "basin_version_id": "basin_version_id IS NULL OR basin_version_id::text = ''",
+            "value": f"value IS NULL OR value::double precision IN ({POSTGIS_NON_FINITE_DOUBLE_SQL})",
+            "unit": "unit IS NULL OR unit::text = ''",
+            "quality_flag": "quality_flag IS NULL OR quality_flag::text = ''",
+            "return_period": (
+                "return_period IS NULL "
+                f"OR return_period::double precision IN ({POSTGIS_NON_FINITE_DOUBLE_SQL})"
+            ),
+            "warning_level": "warning_level IS NULL OR warning_level::text = ''",
+            "valid_time": "valid_time IS NULL",
+        }
         source_cte = """
             SELECT (r.river_network_version_id || '::' || r.river_segment_id) AS feature_id,
                    r.river_segment_id AS segment_id,
@@ -305,6 +342,13 @@ def postgis_tile_sql(layer: str) -> str:
         """
     else:
         raise ValueError(f"Unsupported tile layer: {layer}")
+    invalid_property_count_sql = " + ".join(
+        f"COUNT(*) FILTER (WHERE {condition})" for condition in required_property_checks.values()
+    )
+    invalid_property_names_sql = ",\n                   ".join(
+        f"CASE WHEN COUNT(*) FILTER (WHERE {condition}) > 0 THEN '{name}' END"
+        for name, condition in required_property_checks.items()
+    )
     return f"""
         WITH bounds AS (
             SELECT ST_TileEnvelope(:z, :x, :y) AS geom_3857
@@ -312,20 +356,43 @@ def postgis_tile_sql(layer: str) -> str:
         source_rows AS (
             {source_cte}
         ),
-        clipped AS (
+        intersecting AS (
             SELECT source_rows.*,
+                   ST_NPoints(source_rows.geom) AS source_coordinate_count,
+                   ST_NDims(source_rows.geom) AS source_coordinate_dimensions
+            FROM source_rows, bounds
+            WHERE source_rows.geom IS NOT NULL
+              AND source_rows.geom && ST_Transform(bounds.geom_3857, 4490)
+        ),
+        prefilter_stats AS (
+            SELECT COUNT(*) AS intersecting_feature_count,
+                   COALESCE(SUM(source_coordinate_count), 0) AS intersecting_coordinate_count,
+                   COALESCE(MAX(source_coordinate_count), 0) AS feature_coordinate_count,
+                   COUNT(*) FILTER (
+                       WHERE source_coordinate_count > :feature_coordinate_limit
+                   ) AS feature_coordinate_overflow_count,
+                   COALESCE(MAX(source_coordinate_dimensions), 0) AS coordinate_dimension_count,
+                   COUNT(*) FILTER (
+                       WHERE source_coordinate_dimensions > :max_coordinate_dimensions
+                   ) AS coordinate_dimension_overflow_count,
+                   {invalid_property_count_sql} AS invalid_property_count,
+                   concat_ws(',',
+                   {invalid_property_names_sql}
+                   ) AS invalid_properties
+            FROM intersecting
+        ),
+        clipped AS (
+            SELECT intersecting.*,
                    ST_AsMVTGeom(
-                       ST_Transform(source_rows.geom, 3857),
+                       ST_Transform(intersecting.geom, 3857),
                        bounds.geom_3857,
                        extent => {MVT_EXTENT},
                        buffer => {MVT_BUFFER},
                        clip_geom => true
                    ) AS mvt_geom
-            FROM source_rows, bounds
-            WHERE source_rows.geom IS NOT NULL
-              AND source_rows.geom && ST_Transform(bounds.geom_3857, 4490)
-              AND ST_NPoints(source_rows.geom) <= :feature_coordinate_limit
-              AND ST_NDims(source_rows.geom) <= :max_coordinate_dimensions
+            FROM intersecting, bounds
+            WHERE intersecting.source_coordinate_count <= :feature_coordinate_limit
+              AND intersecting.source_coordinate_dimensions <= :max_coordinate_dimensions
         ),
         budgeted AS (
             SELECT *, COUNT(*) OVER () AS feature_count, SUM(ST_NPoints(geom)) OVER () AS coordinate_count
@@ -348,8 +415,14 @@ def postgis_tile_sql(layer: str) -> str:
             ) AS tile_rows
         ) AS tile,
         (SELECT feature_count FROM budget_stats) AS feature_count,
-        (SELECT coordinate_count FROM budget_stats) AS coordinate_count
-        FROM budget_stats
+        (SELECT coordinate_count FROM budget_stats) AS coordinate_count,
+        (SELECT feature_coordinate_overflow_count FROM prefilter_stats) AS feature_coordinate_overflow_count,
+        (SELECT feature_coordinate_count FROM prefilter_stats) AS feature_coordinate_count,
+        (SELECT coordinate_dimension_overflow_count FROM prefilter_stats) AS coordinate_dimension_overflow_count,
+        (SELECT coordinate_dimension_count FROM prefilter_stats) AS coordinate_dimension_count,
+        (SELECT invalid_property_count FROM prefilter_stats) AS invalid_property_count,
+        (SELECT invalid_properties FROM prefilter_stats) AS invalid_properties
+        FROM budget_stats, prefilter_stats
         WHERE EXISTS (
             SELECT *
             FROM budgeted
@@ -358,6 +431,9 @@ def postgis_tile_sql(layer: str) -> str:
         )
         OR feature_count > :feature_limit
         OR coordinate_count > :collection_coordinate_limit
+        OR feature_coordinate_overflow_count > 0
+        OR coordinate_dimension_overflow_count > 0
+        OR invalid_property_count > 0
     """
 
 
@@ -583,6 +659,8 @@ def _safe_read_cache(
 def _write_cache(session: Session, tile: TileInput, key: str, data: bytes, checksum: str, etag: str) -> bool:
     if not _table_exists(session, "tile_cache", "map"):
         return False
+    if not _ensure_tile_layer(session, tile):
+        return False
     params = {
         "layer_id": tile.layer_id,
         "z": tile.z,
@@ -622,6 +700,95 @@ def _write_cache(session: Session, tile: TileInput, key: str, data: bytes, check
     )
     session.commit()
     return True
+
+
+def _ensure_tile_layer(session: Session, tile: TileInput) -> bool:
+    if not _table_exists(session, "tile_layer", "map"):
+        return True
+    columns = _table_columns(session, "tile_layer", "map")
+    metadata = _cache_layer_metadata(tile)
+    values = {
+        "layer_id": tile.layer_id,
+        "layer_type": metadata["layer_type"],
+        "source_run_id": tile.source_id if tile.layer_id != "river-network" else None,
+        "source_product_id": tile.source_id,
+        "source_version": tile.source_version,
+        "variable": metadata.get("variable"),
+        "valid_time": tile.valid_time,
+        "tile_format": "mvt",
+        "tile_uri_template": metadata["tile_uri_template"],
+        "maplibre_source_layer": metadata["maplibre_source_layer"],
+        "property_schema_version": tile.schema_version,
+        "cache_version": _stable_json_hash(
+            {"layer_id": tile.layer_id, "schema": tile.schema_version, "source_version": tile.source_version}
+        ),
+        "fallback_available": bool(metadata["fallback_available"]),
+        "release_blocking": False,
+        "min_zoom": 0,
+        "max_zoom": MVT_MAX_ZOOM,
+        "published_flag": False,
+    }
+    supported = {name: value for name, value in values.items() if name in columns}
+    required = {"layer_id", "layer_type", "tile_format", "tile_uri_template"}
+    if not required.issubset(supported):
+        return False
+    assignments = [
+        f"{column} = excluded.{column}"
+        for column in supported
+        if column not in {"layer_id"}
+    ]
+    if not assignments:
+        return True
+    session.execute(
+        text(
+            f"""
+            INSERT INTO map.tile_layer ({", ".join(supported)})
+            VALUES ({", ".join(f":{name}" for name in supported)})
+            ON CONFLICT (layer_id) DO UPDATE SET {", ".join(assignments)}
+            """
+        ),
+        supported,
+    )
+    return True
+
+
+def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
+    if tile.layer_id == "flood-return-period":
+        return {
+            "layer_type": "flood_return_period",
+            "tile_uri_template": "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+            "maplibre_source_layer": "flood_return_period",
+            "variable": "return_period",
+            "fallback_available": True,
+        }
+    if tile.layer_id == "river-network":
+        return {
+            "layer_type": "river_network",
+            "tile_uri_template": "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+            "maplibre_source_layer": "river_network",
+            "variable": None,
+            "fallback_available": False,
+        }
+    if tile.layer_id.startswith("hydro:"):
+        variable = tile.layer_id.split(":", 1)[1]
+        return {
+            "layer_type": "hydrological_output",
+            "tile_uri_template": f"/api/v1/tiles/hydro/{{run_id}}/{variable}/{{valid_time}}/{{z}}/{{x}}/{{y}}.pbf",
+            "maplibre_source_layer": "hydro",
+            "variable": variable,
+            "fallback_available": False,
+        }
+    return {
+        "layer_type": "mvt",
+        "tile_uri_template": f"/api/v1/tiles/{tile.layer_id}/{{z}}/{{x}}/{{y}}.pbf",
+        "maplibre_source_layer": (
+            _source_layer_id(tile.layer_id)
+            if tile.layer_id in {"river-network", "flood-return-period"}
+            else tile.layer_id
+        ),
+        "variable": None,
+        "fallback_available": False,
+    }
 
 
 def _safe_write_cache(session: Session, tile: TileInput, key: str, data: bytes, checksum: str, etag: str) -> bool:
