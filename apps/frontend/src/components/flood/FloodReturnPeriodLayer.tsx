@@ -43,6 +43,29 @@ function featureFilter(featureId?: string | null): FilterSpecification {
   return ['==', ['get', FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY], featureId ?? ''] as FilterSpecification
 }
 
+function metadataIdentity(metadata: MvtLayerMetadata): string {
+  return JSON.stringify({
+    cache_etag: metadata.cache_etag ?? null,
+    cache_version: metadata.cache_version ?? null,
+    canonical_route_layer_id: metadata.canonical_route_layer_id ?? metadata.layer_id,
+    encoder_version: metadata.encoder_version ?? null,
+    maplibre_source_layer: metadata.maplibre_source_layer,
+    schema_version: metadata.schema_version ?? metadata.property_schema_version ?? null,
+    source_refs: metadata.source_refs ?? null,
+  })
+}
+
+export function floodMvtSourceKey(metadata: MvtLayerMetadata, runId: string, validTime: string): string {
+  return JSON.stringify({
+    layer_id: metadata.layer_id,
+    route_layer_id: metadata.canonical_route_layer_id ?? metadata.layer_id,
+    run_id: runId,
+    valid_time: validTime,
+    duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
+    metadata: metadataIdentity(metadata),
+  })
+}
+
 export function floodTileUrl(runId: string, validTime: string, bbox?: FloodReturnPeriodGeoJsonBbox) {
   return buildFloodReturnPeriodGeoJsonUrl(runId, validTime, bbox ? { bbox, limit: floodReturnPeriodGeoJsonBudget.maxFallbackFeatures } : {})
 }
@@ -73,14 +96,21 @@ export function FloodReturnPeriodLayer({
   degradedFallback = false,
 }: FloodReturnPeriodLayerProps) {
   const [data, setData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
-  const [catalogMetadata, setCatalogMetadata] = useState<MvtLayerMetadata | null>(metadata ?? null)
-  const [metadataState, setMetadataState] = useState<'ready' | 'loading' | 'unavailable'>(metadata ? 'ready' : 'loading')
-  const activeMetadata = metadata ?? catalogMetadata
+  const [catalogMetadata, setCatalogMetadata] = useState<MvtLayerMetadata | null>(() =>
+    isMvtLayerMetadata(metadata) && !metadata.release_blocking ? metadata : null,
+  )
+  const [metadataState, setMetadataState] = useState<'ready' | 'loading' | 'unavailable'>(
+    metadata === undefined ? 'loading' : isMvtLayerMetadata(metadata) && !metadata.release_blocking ? 'ready' : 'unavailable',
+  )
+  const directMetadata = isMvtLayerMetadata(metadata) && !metadata.release_blocking ? metadata : null
+  const directMetadataBlocked = metadata !== undefined && !directMetadata
+  const activeMetadata = directMetadata ?? catalogMetadata
 
   useEffect(() => {
-    if (metadata) {
-      setCatalogMetadata(metadata)
-      setMetadataState('ready')
+    if (metadata !== undefined) {
+      const usable = isMvtLayerMetadata(metadata) && !metadata.release_blocking ? metadata : null
+      setCatalogMetadata(usable)
+      setMetadataState(usable ? 'ready' : 'unavailable')
       return
     }
     const controller = new AbortController()
@@ -107,6 +137,10 @@ export function FloodReturnPeriodLayer({
       return
     }
     setData(null)
+    if (directMetadataBlocked) {
+      onUnavailableReason?.('洪水重现期 MVT 元数据不可用或处于 release-blocking 状态，地图暂不显示该叠加层。')
+      return
+    }
     if (metadataState === 'loading') {
       onUnavailableReason?.('洪水重现期 MVT 元数据正在加载，暂不请求 GeoJSON 兼容端点。')
       return
@@ -147,7 +181,7 @@ export function FloodReturnPeriodLayer({
         onUnavailableReason?.('洪水重现期 GeoJSON 降级源请求失败，地图暂不显示该叠加层。')
       })
     return () => controller.abort()
-  }, [activeMetadata, degradedFallback, fallbackBbox, metadataState, onUnavailableReason, runId, validTime])
+  }, [activeMetadata, degradedFallback, directMetadataBlocked, fallbackBbox, metadataState, onUnavailableReason, runId, validTime])
 
   const hoverLayer: LayerProps = {
     id: FLOOD_TILE_HOVER_LAYER_ID,
@@ -174,8 +208,10 @@ export function FloodReturnPeriodLayer({
   }
 
   if (activeMetadata) {
+    const sourceKey = floodMvtSourceKey(activeMetadata, runId, validTime)
     return (
       <Source
+        key={sourceKey}
         id={FLOOD_TILE_SOURCE_ID}
         type="vector"
         tiles={[floodMvtTileUrlTemplate(activeMetadata, runId, validTime)]}

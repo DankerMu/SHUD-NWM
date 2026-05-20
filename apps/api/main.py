@@ -2,12 +2,14 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from apps.api.errors import register_error_handlers
 from apps.api.routes.best_available import router as best_available_router
 from apps.api.routes.data_sources import router as data_sources_router
+from apps.api.routes.flood_alerts import TILE_X_DESCRIPTION, TILE_Y_DESCRIPTION
 from apps.api.routes.flood_alerts import router as flood_alerts_router
 from apps.api.routes.forecast import router as forecast_router
 from apps.api.routes.hindcast import router as hindcast_router
@@ -15,6 +17,7 @@ from apps.api.routes.models import router as models_router
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
 from services.slurm_gateway.routes import router as slurm_router
+from services.tiles.mvt import MVT_MAX_TILE_COORDINATE, MVT_MAX_ZOOM
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST_DIR = REPO_ROOT / "apps" / "frontend" / "dist"
@@ -36,6 +39,43 @@ app.include_router(state_snapshots_router)
 app.include_router(pipeline_router)
 app.include_router(flood_alerts_router)
 app.include_router(slurm_router)
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    mvt_paths = (
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    )
+    for path in mvt_paths:
+        operation = schema.get("paths", {}).get(path, {}).get("get", {})
+        for parameter in operation.get("parameters", []):
+            name = parameter.get("name")
+            if name == "z":
+                parameter["description"] = "Web Mercator XYZ zoom level."
+                parameter.setdefault("schema", {})["minimum"] = 0
+                parameter["schema"]["maximum"] = MVT_MAX_ZOOM
+            if name == "x":
+                parameter["description"] = TILE_X_DESCRIPTION
+                parameter.setdefault("schema", {})["minimum"] = 0
+                parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
+            if name == "y":
+                parameter["description"] = TILE_Y_DESCRIPTION
+                parameter.setdefault("schema", {})["minimum"] = 0
+                parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 
 @app.get("/health")

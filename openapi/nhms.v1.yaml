@@ -1627,17 +1627,21 @@ components:
     TileX:
       name: x
       in: path
+      description: Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z.
       required: true
       schema:
         type: integer
         minimum: 0
+        maximum: 16383
     TileY:
       name: y
       in: path
+      description: Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z.
       required: true
       schema:
         type: integer
         minimum: 0
+        maximum: 16383
     TileZ:
       name: z
       in: path
@@ -3249,6 +3253,14 @@ components:
         property_schema_version:
           type: string
           nullable: true
+        schema_version:
+          type: string
+          nullable: true
+          description: MVT tile property schema version included in X-MVT-Schema-Version and cache identity.
+        encoder_version:
+          type: string
+          nullable: true
+          description: Deterministic MVT encoder version included in cache identity.
         property_schema:
           type: object
           nullable: true

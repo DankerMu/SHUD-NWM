@@ -208,6 +208,11 @@ const floodMvtMetadata: NonNullable<LayerState['metadata']> = {
   fallback_available: true,
   release_blocking: false,
   required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
+  source_refs: { run_id: 'run-gfs', source_version: 'rnv-v1', basin_version_id: 'basin-v1', duration: '1h' },
+  cache_version: 'flood-cache-v1',
+  cache_etag: 'flood-etag-v1',
+  schema_version: 'schema-v1',
+  encoder_version: 'encoder-v1',
 }
 
 const dischargeMvtMetadata: NonNullable<LayerState['metadata']> = {
@@ -220,6 +225,11 @@ const dischargeMvtMetadata: NonNullable<LayerState['metadata']> = {
   fallback_available: false,
   release_blocking: false,
   required_placeholders: ['run_id', 'valid_time', 'z', 'x', 'y'],
+  source_refs: { run_id: 'run-gfs', source_version: 'rnv-v1', basin_version_id: 'basin-v1' },
+  cache_version: 'discharge-cache-v1',
+  cache_etag: 'discharge-etag-v1',
+  schema_version: 'schema-v1',
+  encoder_version: 'encoder-v1',
 }
 
 const waterLevelMvtMetadata: NonNullable<LayerState['metadata']> = {
@@ -232,6 +242,11 @@ const waterLevelMvtMetadata: NonNullable<LayerState['metadata']> = {
   fallback_available: false,
   release_blocking: false,
   required_placeholders: ['run_id', 'valid_time', 'z', 'x', 'y'],
+  source_refs: { run_id: 'run-gfs', source_version: 'rnv-v1', basin_version_id: 'basin-v1' },
+  cache_version: 'water-level-cache-v1',
+  cache_etag: 'water-level-etag-v1',
+  schema_version: 'schema-v1',
+  encoder_version: 'encoder-v1',
 }
 
 const layers: LayerState[] = [
@@ -610,6 +625,78 @@ describe('M11 visual foundation shell', () => {
     expect(paint).not.toEqual(dischargePaint)
     expect(paint).not.toContain('warning_level')
     expect(paint).not.toContain('return_period')
+  })
+
+  it('changes M11 vector source identity across tile-defining metadata and route inputs', () => {
+    const floodOverlay = buildM11RegisteredOverlay(
+      { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
+      layers.map((layer) =>
+        layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+      ),
+    )
+    const warningOverlay = buildM11RegisteredOverlay(
+      { ...state, layer: 'warning-level', validTime: '2026-05-18T06:00:00.000Z' },
+      [
+        ...layers,
+        {
+          ...layers[1],
+          layerId: 'warning-level',
+          displayName: 'Warning level',
+          validTimes: ['2026-05-18T06:00:00.000Z'],
+          currentValidTime: '2026-05-18T06:00:00.000Z',
+          metadata: {
+            ...floodMvtMetadata,
+            layer_id: 'warning-level',
+            alias_of: 'flood-return-period',
+            canonical_route_layer_id: 'flood-return-period',
+          },
+        },
+      ],
+    )
+    const dischargeOverlay = buildM11RegisteredOverlay(
+      state,
+      layers.map((layer) => (layer.layerId === 'discharge' ? { ...layer, metadata: dischargeMvtMetadata } : layer)),
+    )
+    const waterLevelOverlay = buildM11RegisteredOverlay(
+      { ...state, layer: 'water-level' },
+      layers.map((layer) =>
+        layer.layerId === 'water-level'
+          ? {
+              ...layer,
+              available: true,
+              validTimes: ['2026-05-18T00:00:00.000Z'],
+              currentValidTime: '2026-05-18T00:00:00.000Z',
+              disabledReason: null,
+              metadata: waterLevelMvtMetadata,
+              freshness: { ...layer.freshness, runId: 'run-gfs', validTime: '2026-05-18T00:00:00.000Z' },
+            }
+          : layer,
+      ),
+    )
+    const floodRunChanged = buildM11RegisteredOverlay(
+      { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
+      layers.map((layer) =>
+        layer.layerId === 'flood-return-period'
+          ? { ...layer, metadata: floodMvtMetadata, freshness: { ...layer.freshness, runId: 'run-gfs-2' } }
+          : layer,
+      ),
+    )
+    const floodCacheChanged = buildM11RegisteredOverlay(
+      { ...state, layer: 'flood-return-period', validTime: '2026-05-18T06:00:00.000Z' },
+      layers.map((layer) =>
+        layer.layerId === 'flood-return-period'
+          ? { ...layer, metadata: { ...floodMvtMetadata, cache_version: 'flood-cache-v2', cache_etag: 'flood-etag-v2' } }
+          : layer,
+      ),
+    )
+
+    expect(floodOverlay?.sourceKey).toContain('flood-cache-v1')
+    expect(floodOverlay?.sourceKey).not.toEqual(dischargeOverlay?.sourceKey)
+    expect(dischargeOverlay?.sourceKey).not.toEqual(waterLevelOverlay?.sourceKey)
+    expect(floodOverlay?.sourceKey).not.toEqual(floodRunChanged?.sourceKey)
+    expect(floodOverlay?.sourceKey).not.toEqual(floodCacheChanged?.sourceKey)
+    expect(warningOverlay?.source.tiles).toEqual(floodOverlay?.source.tiles)
+    expect(warningOverlay?.sourceKey).not.toEqual(floodOverlay?.sourceKey)
   })
 
   it('does not create unbounded GeoJSON national source when MVT metadata is missing', async () => {

@@ -12,6 +12,7 @@ import {
 } from '@/components/flood/FloodReturnPeriodLayer'
 import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
 import type { MvtLayerMetadata } from '@/lib/mvtLayerMetadata'
+import { FLOOD_TILE_SOURCE_ID } from '@/components/flood/alertLevels'
 
 vi.mock('@/api/base', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/base')>()
@@ -37,7 +38,7 @@ vi.mock('react-map-gl/maplibre', () => ({
     useImperativeHandle(ref, () => ({ flyTo: vi.fn() }))
     return <div data-testid="map">{children}</div>
   }),
-  Source: ({ children, ...props }: { children: ReactNode }) => {
+  Source: ({ children, ...props }: { children: ReactNode; key?: string }) => {
     sourceProps.push(props)
     return <div data-testid="source">{children}</div>
   },
@@ -61,6 +62,12 @@ describe('FloodReturnPeriodLayer', () => {
     release_blocking: false,
     required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
     valid_times: ['2026-05-03T06:00:00Z'],
+    source_refs: { run_id: 'run-1', source_version: 'rnv_v1', basin_version_id: 'basin_v1', duration: '1h' },
+    cache_version: 'cache-v1',
+    cache_etag: 'etag-v1',
+    property_schema_version: 'schema-v1',
+    schema_version: 'schema-v1',
+    encoder_version: 'encoder-v1',
   }
 
   function mvtLayerCatalogResponse() {
@@ -120,6 +127,69 @@ describe('FloodReturnPeriodLayer', () => {
     })
     expect(floodReturnPeriodLayer(null, 'flood_return_period')).toMatchObject({ 'source-layer': 'flood_return_period' })
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+  })
+
+  it('recreates the vector source when route or metadata identity changes', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    vi.stubGlobal('fetch', vi.fn())
+    const { rerender } = render(
+      <FloodReturnPeriodLayer runId="run-1" validTime="2026-05-03T06:00:00Z" metadata={mvtMetadata} />,
+    )
+
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
+    const initialSource = sourceProps.at(-1)
+
+    rerender(<FloodReturnPeriodLayer runId="run-2" validTime="2026-05-03T06:00:00Z" metadata={mvtMetadata} />)
+    await waitFor(() => expect(sourceProps.at(-1)).not.toBe(initialSource))
+    expect(sourceProps.at(-1)).toMatchObject({
+      tiles: [
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-2/1h/2026-05-03T06%3A00%3A00Z/{z}/{x}/{y}.pbf',
+      ],
+    })
+    const runChangedSource = sourceProps.at(-1)
+
+    rerender(<FloodReturnPeriodLayer runId="run-2" validTime="2026-05-03T12:00:00Z" metadata={mvtMetadata} />)
+    await waitFor(() => expect(sourceProps.at(-1)).not.toBe(runChangedSource))
+    expect(sourceProps.at(-1)).toMatchObject({
+      tiles: [
+        'https://api.example.test/api/v1/tiles/flood-return-period/run-2/1h/2026-05-03T12%3A00%3A00Z/{z}/{x}/{y}.pbf',
+      ],
+    })
+    const timeChangedSource = sourceProps.at(-1)
+
+    rerender(
+      <FloodReturnPeriodLayer
+        runId="run-2"
+        validTime="2026-05-03T12:00:00Z"
+        metadata={{ ...mvtMetadata, cache_version: 'cache-v2', cache_etag: 'etag-v2' }}
+      />,
+    )
+    await waitFor(() => expect(sourceProps.at(-1)).not.toBe(timeChangedSource))
+    expect(sourceProps.at(-1)).toMatchObject({ id: FLOOD_TILE_SOURCE_ID, type: 'vector' })
+  })
+
+  it('blocks direct release-blocking metadata without GeoJSON fallback', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal('fetch', vi.fn())
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-1"
+        validTime="2026-05-03T06:00:00Z"
+        metadata={{ ...mvtMetadata, release_blocking: true }}
+        fallbackBbox={{ minLon: 100, minLat: 30, maxLon: 101, maxLat: 31 }}
+        degradedFallback
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('release-blocking')))
+    expect(sourceProps).toHaveLength(0)
+    expect(layerProps).toHaveLength(0)
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('renders map MVT tiles with the API-resolved sample tail instead of run end time fallback', async () => {

@@ -66,6 +66,7 @@ interface M11MapLibreSurfaceProps {
 interface M11RegisteredOverlay {
   layerId: M11Layer
   sourceId: string
+  sourceKey: string
   layer: LayerProps
   source:
     | { type: 'vector'; tiles: string[]; sourceLayer: string; minzoom: number; maxzoom: number; metadata: MvtLayerMetadata }
@@ -443,6 +444,13 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
     return {
       layerId: state.layer,
       sourceId,
+      sourceKey: m11VectorSourceKey({
+        layerId: selectedLayer.layerId,
+        runId,
+        validTime,
+        variable,
+        metadata: selectedLayer.metadata,
+      }),
       source: {
         type: 'vector',
         tiles,
@@ -462,6 +470,36 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   }
 
   return null
+}
+
+function m11VectorSourceKey({
+  layerId,
+  runId,
+  validTime,
+  variable,
+  metadata,
+}: {
+  layerId: string
+  runId: string
+  validTime: string
+  variable: string
+  metadata: NonNullable<LayerState['metadata']>
+}): string {
+  return JSON.stringify({
+    basin_version_id: metadata.source_refs?.basin_version_id ?? null,
+    cache_etag: metadata.cache_etag ?? null,
+    cache_version: metadata.cache_version ?? null,
+    canonical_route_layer_id: metadata.canonical_route_layer_id ?? metadata.layer_id,
+    duration: layerId === 'flood-return-period' || layerId === 'warning-level' ? DEFAULT_FLOOD_RETURN_PERIOD_DURATION : null,
+    encoder_version: metadata.encoder_version ?? null,
+    layer_id: layerId,
+    maplibre_source_layer: metadata.maplibre_source_layer,
+    run_id: runId,
+    schema_version: metadata.schema_version ?? metadata.property_schema_version ?? null,
+    source_refs: metadata.source_refs ?? null,
+    valid_time: validTime,
+    variable,
+  })
 }
 
 function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
@@ -556,6 +594,7 @@ function M11OverlayPrimitive({
   if (overlay.source.type === 'vector') {
     return (
       <Source
+        key={overlay.sourceKey}
         id={overlay.sourceId}
         type="vector"
         tiles={overlay.source.tiles}

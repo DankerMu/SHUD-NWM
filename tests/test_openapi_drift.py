@@ -3,13 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes.flood_alerts import RankingItem
-from services.tiles.mvt import MVT_MAX_ZOOM
+from services.tiles.mvt import MVT_MAX_TILE_COORDINATE, MVT_MAX_ZOOM
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 RouteKey = tuple[str, str]
@@ -213,6 +214,35 @@ def test_mvt_tile_z_openapi_maximum_matches_runtime_contract() -> None:
         assert z_param["schema"]["maximum"] == MVT_MAX_ZOOM
 
 
+def test_mvt_tile_xy_openapi_bounds_match_runtime_contract() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+    mvt_paths = (
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    )
+    expected_descriptions = {
+        "x": f"Web Mercator XYZ tile column. Global schema bounds are 0..{MVT_MAX_TILE_COORDINATE} "
+        f"for max zoom {MVT_MAX_ZOOM}; each request also enforces 0 <= x < 2^z.",
+        "y": f"Web Mercator XYZ tile row. Global schema bounds are 0..{MVT_MAX_TILE_COORDINATE} "
+        f"for max zoom {MVT_MAX_ZOOM}; each request also enforces 0 <= y < 2^z.",
+    }
+
+    for param_name in ("TileX", "TileY"):
+        schema = static_spec["components"]["parameters"][param_name]["schema"]
+        assert schema["minimum"] == 0
+        assert schema["maximum"] == MVT_MAX_TILE_COORDINATE
+
+    for spec in (static_spec, fastapi_spec):
+        for path in mvt_paths:
+            for name, description in expected_descriptions.items():
+                param = _operation_parameter(spec, path, "get", "path", name)
+                assert param["description"] == description
+                assert param["schema"]["minimum"] == 0
+                assert param["schema"]["maximum"] == MVT_MAX_TILE_COORDINATE
+
+
 def test_mvt_pbf_response_contract_matches_runtime_and_static_openapi() -> None:
     static_spec = _openapi_spec()
     fastapi_spec: dict[str, Any] = app.openapi()
@@ -338,6 +368,39 @@ def test_mvt_tile_z_above_documented_max_returns_runtime_validation_error() -> N
     body = response.json()
     assert body["error"]["code"] == "TILE_XYZ_INVALID"
     assert body["error"]["details"]["max_z"] == MVT_MAX_ZOOM
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/tiles/river-network/basin_v1/0/1/0.pbf",
+        "/api/v1/tiles/river-network/basin_v1/0/0/1.pbf",
+    ],
+)
+def test_mvt_low_zoom_tile_xy_matrix_overflow_returns_runtime_validation_error(path: str) -> None:
+    class FakeDialect:
+        name = "sqlite"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get(path)
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert body["error"]["code"] == "TILE_XYZ_INVALID"
+    assert body["error"]["details"]["z"] == 0
+    assert body["error"]["details"]["max_exclusive"] == 1
 
 
 def test_river_segment_collection_413_contract_matches_runtime_and_static_openapi() -> None:
