@@ -434,7 +434,10 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   if (
     isMvtLayerMetadata(selectedLayer.metadata) &&
     !selectedLayer.metadata.release_blocking &&
-    metadataMatchesRun(selectedLayer.metadata, runId)
+    metadataMatchesRun(selectedLayer.metadata, runId, {
+      basin_version_id: selectedLayer.freshness.basinVersionId,
+      river_network_version_id: selectedLayer.freshness.riverNetworkVersionId,
+    })
   ) {
     const variable = selectedLayer.layerId === 'water-level' ? 'water_level' : 'q_down'
     const tiles = [

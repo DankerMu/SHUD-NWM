@@ -411,6 +411,7 @@ def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:
     assert metadata_schema["properties"]["valid_time_observed_count"]["type"] == "integer"
     assert metadata_schema["properties"]["valid_times_truncated"]["type"] == "boolean"
     assert "basin_version_id" in metadata_schema["properties"]["source_refs"]["description"]
+    assert "river_network_version_id" in metadata_schema["properties"]["source_refs"]["description"]
 
 
 @pytest.mark.parametrize(

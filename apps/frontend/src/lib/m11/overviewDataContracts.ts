@@ -141,6 +141,8 @@ export interface FreshnessMetadata {
   cycleTime: string | null
   validTime: string | null
   runId: string | null
+  basinVersionId: string | null
+  riverNetworkVersionId: string | null
   source: M11ResolvedSource | null
   isStale: boolean
   staleAfterHours: number
@@ -363,6 +365,8 @@ export function createFreshnessMetadata(input: Partial<FreshnessMetadata> = {}):
     cycleTime: normalizeIsoString(input.cycleTime),
     validTime: normalizeIsoString(input.validTime),
     runId: normalizeString(input.runId),
+    basinVersionId: normalizeString(input.basinVersionId),
+    riverNetworkVersionId: normalizeString(input.riverNetworkVersionId),
     source: input.source ?? null,
     isStale: isStale(reference, staleAfterHours),
     staleAfterHours,
@@ -534,6 +538,8 @@ export function normalizeOverviewSummary(input: {
       cycleTime: input.latestRun?.cycle_time ?? input.pipeline?.cycle_time ?? input.query.cycle,
       validTime: input.query.validTime,
       runId: input.floodSummary?.run_id ?? input.latestRun?.run_id ?? null,
+      basinVersionId: input.latestRun?.basin_version_id ?? null,
+      riverNetworkVersionId: input.latestRun?.river_network_version_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: latestUpdate ? null : 'No freshness metadata is available.',
     }),
@@ -587,6 +593,8 @@ export function normalizeLayerStates(input: {
         cycleTime: input.resolvedRun?.cycle_time ?? input.query.cycle,
         validTime: currentValidTime,
         runId: input.resolvedRun?.run_id ?? null,
+        basinVersionId: input.resolvedRun?.basin_version_id ?? null,
+        riverNetworkVersionId: input.resolvedRun?.river_network_version_id ?? null,
         source: sourceSelection.resolvedSource,
         unavailableReason: currentValidTime ? null : 'No valid-time metadata is available.',
       }),
@@ -638,6 +646,8 @@ export function normalizeBasinDetail(input: {
       cycleTime: input.latestRun?.cycle_time ?? input.query.cycle,
       validTime: input.query.validTime,
       runId: input.latestRun?.run_id ?? null,
+      basinVersionId: input.latestRun?.basin_version_id ?? null,
+      riverNetworkVersionId: input.latestRun?.river_network_version_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: input.latestRun ? null : 'No latest run is available for this basin/source.',
     }),
@@ -802,6 +812,8 @@ export function normalizeSelectedSegmentDetail(input: {
       cycleTime: input.resolvedRun?.cycle_time ?? selectionQuery.cycle,
       validTime: effectiveValidTime,
       runId: input.floodTimeline?.run_id ?? input.resolvedRun?.run_id ?? null,
+      basinVersionId: input.resolvedRun?.basin_version_id ?? null,
+      riverNetworkVersionId: input.floodTimeline?.river_network_version_id ?? input.resolvedRun?.river_network_version_id ?? null,
       source: sourceSelection.resolvedSource,
       unavailableReason: forecastSeries.length > 0 || alert ? null : 'No forecast or flood-alert values are available.',
     }),

@@ -23,6 +23,7 @@ import {
   isMvtLayerMetadata,
   isRunMismatchMetadata,
   metadataMatchesRun,
+  type RunSourceIdentity,
   type MvtLayerMetadata,
 } from '@/lib/mvtLayerMetadata'
 import { DEFAULT_FLOOD_RETURN_PERIOD_DURATION } from '@/lib/floodReturnPeriodDuration'
@@ -37,6 +38,7 @@ interface FloodReturnPeriodLayerProps {
   selectedFeatureId?: string | null
   onUnavailableReason?: (reason: string | null) => void
   metadata?: MvtLayerMetadata | null
+  runIdentity?: RunSourceIdentity | null
   fallbackBbox?: FloodReturnPeriodGeoJsonBbox | null
   degradedFallback?: boolean
 }
@@ -94,29 +96,37 @@ export function FloodReturnPeriodLayer({
   selectedFeatureId,
   onUnavailableReason,
   metadata,
+  runIdentity = null,
   fallbackBbox,
   degradedFallback = false,
 }: FloodReturnPeriodLayerProps) {
   const [data, setData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
   const [catalogMetadata, setCatalogMetadata] = useState<MvtLayerMetadata | null>(() =>
-    isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId) ? metadata : null,
+    isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId, runIdentity)
+      ? metadata
+      : null,
   )
   const [metadataState, setMetadataState] = useState<'ready' | 'loading' | 'unavailable'>(
     metadata === undefined
       ? 'loading'
-      : isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId)
+      : isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId, runIdentity)
         ? 'ready'
         : 'unavailable',
   )
   const directMetadata =
-    isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId) ? metadata : null
+    isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId, runIdentity)
+      ? metadata
+      : null
   const directMetadataBlocked = metadata !== undefined && !directMetadata
   const activeMetadata = directMetadata ?? catalogMetadata
   const metadataRunMismatch = isRunMismatchMetadata(metadata, runId)
 
   useEffect(() => {
     if (metadata !== undefined) {
-      const usable = isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId) ? metadata : null
+      const usable =
+        isMvtLayerMetadata(metadata) && !metadata.release_blocking && metadataMatchesRun(metadata, runId, runIdentity)
+          ? metadata
+          : null
       setCatalogMetadata(usable)
       setMetadataState(usable ? 'ready' : 'unavailable')
       return
@@ -132,7 +142,12 @@ export function FloodReturnPeriodLayer({
           setMetadataState('unavailable')
           return
         }
-        const discovered = isMvtLayerMetadata(layer?.metadata) && !layer.metadata.release_blocking ? layer.metadata : null
+        const discovered =
+          isMvtLayerMetadata(layer?.metadata) &&
+          !layer.metadata.release_blocking &&
+          metadataMatchesRun(layer.metadata, runId, runIdentity)
+            ? layer.metadata
+            : null
         setCatalogMetadata(discovered)
         setMetadataState(discovered ? 'ready' : 'unavailable')
       })
@@ -141,7 +156,7 @@ export function FloodReturnPeriodLayer({
         setMetadataState('unavailable')
       })
     return () => controller.abort()
-  }, [metadata, runId])
+  }, [metadata, runId, runIdentity])
 
   useEffect(() => {
     if (activeMetadata) {

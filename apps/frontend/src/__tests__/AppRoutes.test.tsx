@@ -201,6 +201,8 @@ const m11LayerFreshness = {
   cycleTime: '2026-05-18T00:00:00.000Z',
   validTime: '2026-05-18T06:00:00.000Z',
   runId: 'run-gfs',
+  basinVersionId: 'bv-001',
+  riverNetworkVersionId: 'rn-v1',
   source: 'GFS' as const,
   isStale: false,
   staleAfterHours: 6,
@@ -217,6 +219,13 @@ const m11FloodMvtMetadata: NonNullable<LayerState['metadata']> = {
   fallback_available: true,
   release_blocking: false,
   required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
+  source_refs: {
+    run_id: 'run-gfs',
+    source_version: 'rnv-v1',
+    basin_version_id: 'bv-001',
+    river_network_version_id: 'rn-v1',
+    duration: '1h',
+  },
 }
 
 const m11Layers: LayerState[] = [
@@ -963,10 +972,9 @@ describe('App route state', () => {
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
     expect(tileFetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
     expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute('data-source-type', 'vector')
-    expect(screen.getAllByTestId('mock-m11-map-source').at(-1)).toHaveAttribute(
-      'data-source-tiles',
-      '/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf',
-    )
+    const sourceTiles = screen.getAllByTestId('mock-m11-map-source').at(-1)?.getAttribute('data-source-tiles')
+    expect(sourceTiles).toContain('/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf')
+    expect(sourceTiles).toContain('_mvt_cache_version=')
 
     await userEvent.setup().hover(screen.getByTestId('mock-m11-maplibre-map'))
     await userEvent.setup().click(screen.getByTestId('mock-m11-maplibre-map'))

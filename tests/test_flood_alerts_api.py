@@ -898,6 +898,8 @@ def test_flood_mvt_live_postgis_returns_raw_bytes_and_binds_requested_xyz(monkey
                 assert parameters["run_id"] == RUN_ID
                 assert parameters["duration"] == "1h"
                 assert parameters["valid_time"] == VALID_TIME_1
+                assert parameters["basin_version_id"] == "basin_v1"
+                assert parameters["river_network_version_id"] == "rnv_v1"
                 assert (parameters["z"], parameters["x"], parameters["y"]) == (6, 12, 24)
                 return FakeRowResult({"tile": b"live-tile", "source_identity_count": 1, "source_feature_count": 1})
             if "information_schema.tables" in sql:
@@ -1761,13 +1763,15 @@ def test_hydro_mvt_cache_identity_changes_when_run_updated_at_changes(
 
 def test_layer_metadata_cache_identity_changes_when_run_updated_at_changes() -> None:
     with _store() as session:
+        source_version = flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID))
         old_metadata = {
             layer.layer_id: layer.metadata or {}
             for layer in flood_alert_routes._default_layer_catalog(
                 session,
                 run_id=RUN_ID,
-                source_version=flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID)),
+                source_version=source_version,
                 basin_version_id="basin_v1",
+                river_network_version_id="rnv_v1",
             )
         }
         session.execute(
@@ -1775,18 +1779,22 @@ def test_layer_metadata_cache_identity_changes_when_run_updated_at_changes() -> 
             {"run_id": RUN_ID, "updated_at": datetime(2026, 5, 3, 4, tzinfo=UTC)},
         )
         session.commit()
+        source_version = flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID))
         new_metadata = {
             layer.layer_id: layer.metadata or {}
             for layer in flood_alert_routes._default_layer_catalog(
                 session,
                 run_id=RUN_ID,
-                source_version=flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, RUN_ID)),
+                source_version=source_version,
                 basin_version_id="basin_v1",
+                river_network_version_id="rnv_v1",
             )
         }
 
     for layer_id in ("discharge", "water-level", "flood-return-period", "warning-level"):
         assert old_metadata[layer_id]["source_refs"]["run_id"] == RUN_ID
+        assert old_metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
+        assert old_metadata[layer_id]["source_refs"]["river_network_version_id"] == "rnv_v1"
         assert (
             old_metadata[layer_id]["source_refs"]["source_version"]
             != new_metadata[layer_id]["source_refs"]["source_version"]
@@ -1857,13 +1865,25 @@ def test_live_mvt_cache_write_failure_returns_tile_with_bypass_status(monkeypatc
             f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
             "flood-return-period",
             "flood-return-period",
-            {"run_id": RUN_ID, "duration": "1h", "valid_time": VALID_TIME_1},
+            {
+                "run_id": RUN_ID,
+                "duration": "1h",
+                "valid_time": VALID_TIME_1,
+                "basin_version_id": "basin_v1",
+                "river_network_version_id": "rnv_v1",
+            },
         ),
         (
             f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
             "discharge",
             "hydro",
-            {"run_id": RUN_ID, "variable": "q_down", "valid_time": VALID_TIME_1},
+            {
+                "run_id": RUN_ID,
+                "variable": "q_down",
+                "valid_time": VALID_TIME_1,
+                "basin_version_id": "basin_v1",
+                "river_network_version_id": "rnv_v1",
+            },
         ),
         (
             "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
@@ -1910,11 +1930,15 @@ def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(
                 assert parameters["run_id"] == RUN_ID
                 assert parameters["variable"] == "q_down"
                 assert parameters["valid_time"] == VALID_TIME_1
+                assert parameters["basin_version_id"] == "basin_v1"
+                assert parameters["river_network_version_id"] == "rnv_v1"
                 return FakeRowResult({"exists": 1})
             if "FROM flood.return_period_result" in sql and "LIMIT 1" in sql:
                 assert parameters["run_id"] == RUN_ID
                 assert parameters["duration"] == "1h"
                 assert parameters["valid_time"] == VALID_TIME_1
+                assert parameters["basin_version_id"] == "basin_v1"
+                assert parameters["river_network_version_id"] == "rnv_v1"
                 return FakeRowResult({"exists": 1})
             if "ST_TileEnvelope(:z, :x, :y)" in sql:
                 assert f"'{expected_sql_layer.replace('-', '_')}'" in sql or expected_sql_layer == "hydro"
@@ -2292,6 +2316,8 @@ def test_hydro_and_river_network_mvt_routes_return_unavailable_without_live_post
                 "run_id": RECOMPUTE_MOVED_PEAK_RUN_ID,
                 "variable": "q_down",
                 "valid_time": VALID_TIME_1,
+                "basin_version_id": "basin_v1",
+                "river_network_version_id": "rnv_v1",
                 "z": 4,
                 "x": 12,
                 "y": 6,
@@ -2589,13 +2615,23 @@ def test_mvt_source_identity_preflight_sql_uses_index_friendly_public_route_keys
     hydro_session = CapturingSession()
     with pytest.raises(flood_alert_routes.ApiError):
         flood_alert_routes._require_hydro_mvt_source_identity(
-            hydro_session, run_id=RUN_ID, variable="q_down", valid_time=VALID_TIME_1
+            hydro_session,
+            run_id=RUN_ID,
+            variable="q_down",
+            valid_time=VALID_TIME_1,
+            basin_version_id="basin_v1",
+            river_network_version_id="rnv_v1",
         )
 
     flood_session = CapturingSession()
     with pytest.raises(flood_alert_routes.ApiError):
         flood_alert_routes._require_flood_mvt_source_identity(
-            flood_session, run_id=RUN_ID, duration="1h", valid_time=VALID_TIME_1
+            flood_session,
+            run_id=RUN_ID,
+            duration="1h",
+            valid_time=VALID_TIME_1,
+            basin_version_id="basin_v1",
+            river_network_version_id="rnv_v1",
         )
 
     river_session = CapturingSession()
@@ -2605,22 +2641,145 @@ def test_mvt_source_identity_preflight_sql_uses_index_friendly_public_route_keys
     hydro_sql, hydro_params = hydro_session.calls[0]
     flood_sql, flood_params = flood_session.calls[0]
     river_sql, river_params = river_session.calls[0]
-    assert (
-        "FROM hydro.river_timeseries WHERE run_id = :run_id "
-        "AND variable = :variable AND valid_time = :valid_time"
-    ) in hydro_sql
+    assert "FROM hydro.river_timeseries WHERE run_id = :run_id" in hydro_sql
+    assert "AND basin_version_id = :basin_version_id" in hydro_sql
+    assert "AND river_network_version_id = :river_network_version_id" in hydro_sql
+    assert "AND variable = :variable AND valid_time = :valid_time" in hydro_sql
     assert "LIMIT 1" in hydro_sql
-    assert hydro_params == {"run_id": RUN_ID, "variable": "q_down", "valid_time": VALID_TIME_1}
-    assert (
-        "FROM flood.return_period_result WHERE run_id = :run_id AND duration = :duration "
-        "AND max_over_window = false AND valid_time = :valid_time"
-    ) in flood_sql
+    assert hydro_params == {
+        "run_id": RUN_ID,
+        "variable": "q_down",
+        "valid_time": VALID_TIME_1,
+        "basin_version_id": "basin_v1",
+        "river_network_version_id": "rnv_v1",
+    }
+    assert "FROM flood.return_period_result WHERE run_id = :run_id" in flood_sql
+    assert "AND basin_version_id = :basin_version_id" in flood_sql
+    assert "AND river_network_version_id = :river_network_version_id" in flood_sql
+    assert "AND duration = :duration AND max_over_window = false AND valid_time = :valid_time" in flood_sql
     assert "LIMIT 1" in flood_sql
-    assert flood_params == {"run_id": RUN_ID, "duration": "1h", "valid_time": VALID_TIME_1}
+    assert flood_params == {
+        "run_id": RUN_ID,
+        "duration": "1h",
+        "valid_time": VALID_TIME_1,
+        "basin_version_id": "basin_v1",
+        "river_network_version_id": "rnv_v1",
+    }
     assert "FROM core.river_network_version WHERE basin_version_id = :basin_version_id" in river_sql
     assert "ORDER BY river_network_version_id" in river_sql
     assert "core.model_instance" not in river_sql
     assert river_params == {"basin_version_id": "basin_missing"}
+
+
+@pytest.mark.parametrize(
+    ("path", "fetch_name", "table_name", "seed_sql"),
+    [
+        (
+            f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_hydro_mvt_tile_bytes",
+            "hydro.river_timeseries",
+            """
+            DELETE FROM hydro.river_timeseries
+            WHERE run_id = :run_id
+              AND variable = 'q_down'
+              AND valid_time = :valid_time
+            """,
+        ),
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "_fetch_flood_mvt_tile_bytes",
+            "flood.return_period_result",
+            """
+            DELETE FROM flood.return_period_result
+            WHERE run_id = :run_id
+              AND duration = '1h'
+              AND max_over_window = false
+              AND valid_time = :valid_time
+            """,
+        ),
+    ],
+)
+def test_run_scoped_mvt_rejects_sibling_only_source_identity_before_cache_or_live_sql(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    fetch_name: str,
+    table_name: str,
+    seed_sql: str,
+) -> None:
+    with _store() as session:
+        seed_tile = (
+            flood_alert_routes.TileInput(
+                layer_id="discharge",
+                source_id=RUN_ID,
+                source_version="sibling-source-version",
+                valid_time=VALID_TIME_1_ISO,
+                z=6,
+                x=12,
+                y=24,
+                variant_id="variable:q_down",
+            )
+            if table_name == "hydro.river_timeseries"
+            else flood_alert_routes.TileInput(
+                layer_id="flood-return-period",
+                source_id=RUN_ID,
+                source_version="sibling-source-version",
+                valid_time=VALID_TIME_1_ISO,
+                z=6,
+                x=12,
+                y=24,
+                variant_id="duration:1h",
+            )
+        )
+        flood_alert_routes.build_raw_tile_response(session, seed_tile, b"sibling-cache")
+        session.execute(text(seed_sql), {"run_id": RUN_ID, "valid_time": VALID_TIME_1})
+        if table_name == "hydro.river_timeseries":
+            session.execute(
+                text(
+                    """
+                    INSERT INTO hydro.river_timeseries (
+                        run_id, basin_version_id, river_network_version_id, river_segment_id,
+                        valid_time, variable, value, unit
+                    )
+                    VALUES (:run_id, 'basin_v2', 'rnv_v2', 'seg_004', :valid_time, 'q_down', 999.0, 'm3/s')
+                    """
+                ),
+                {"run_id": RUN_ID, "valid_time": VALID_TIME_1},
+            )
+        else:
+            _insert_result(
+                session,
+                "seg_004",
+                "basin_v2",
+                "rnv_v2",
+                VALID_TIME_1,
+                999.0,
+                99.0,
+                "severe",
+                False,
+            )
+        session.commit()
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "read_cached_tile_response",
+            lambda *_args, **_kwargs: pytest.fail("cache read should not run for sibling-only source identity"),
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            fetch_name,
+            lambda *_args, **_kwargs: pytest.fail("live SQL should not run for sibling-only source identity"),
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(path)
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"]["code"] == "MVT_SOURCE_IDENTITY_NOT_FOUND"
+    assert body["error"]["details"]["basin_version_id"] == "basin_v1"
+    assert body["error"]["details"]["river_network_version_id"] == "rnv_v1"
 
 
 @pytest.mark.parametrize(
@@ -3083,6 +3242,10 @@ def test_layer_metadata_endpoint_scopes_cache_identity_to_explicit_run_id() -> N
     for layer_id in ("discharge", "flood-return-period", "warning-level"):
         assert scoped_metadata[layer_id]["source_refs"]["run_id"] == old_run_id
         assert unscoped_metadata[layer_id]["source_refs"]["run_id"] == new_run_id
+        assert scoped_metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
+        assert scoped_metadata[layer_id]["source_refs"]["river_network_version_id"] == "rnv_v1"
+        assert unscoped_metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
+        assert unscoped_metadata[layer_id]["source_refs"]["river_network_version_id"] == "rnv_v1"
         assert scoped_metadata[layer_id]["cache_version"] != unscoped_metadata[layer_id]["cache_version"]
         assert scoped_metadata[layer_id]["source_refs"]["source_version"] != unscoped_metadata[layer_id]["source_refs"][
             "source_version"
@@ -3199,6 +3362,9 @@ def test_layer_metadata_required_placeholders_resolve_from_source_refs_or_route_
     metadata = {layer["layer_id"]: layer["metadata"] for layer in response.json()["data"]}
     assert metadata["flood-return-period"]["source_refs"]["duration"] == "1h"
     assert metadata["warning-level"]["source_refs"]["duration"] == "1h"
+    for layer_id in ("discharge", "water-level", "flood-return-period", "warning-level", "river-network"):
+        assert metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
+        assert metadata[layer_id]["source_refs"]["river_network_version_id"] == "rnv_v1"
     assert (
         river_network["url_template"]
         .replace("{basin_version_id}", river_network["source_refs"]["basin_version_id"])
@@ -3277,6 +3443,7 @@ def test_layer_metadata_cache_identity_changes_with_latest_source_refs_and_valid
                     run_id=run_id,
                     source_version="rnv_v1",
                     basin_version_id="basin_v1",
+                    river_network_version_id="rnv_v1",
                 )
             }
 
@@ -3289,6 +3456,10 @@ def test_layer_metadata_cache_identity_changes_with_latest_source_refs_and_valid
         assert old_metadata["source_refs"]["source_version"] == new_metadata["source_refs"]["source_version"]
         assert old_metadata["source_refs"]["run_id"] == old_run_id
         assert new_metadata["source_refs"]["run_id"] == new_run_id
+        assert old_metadata["source_refs"]["basin_version_id"] == "basin_v1"
+        assert new_metadata["source_refs"]["basin_version_id"] == "basin_v1"
+        assert old_metadata["source_refs"]["river_network_version_id"] == "rnv_v1"
+        assert new_metadata["source_refs"]["river_network_version_id"] == "rnv_v1"
         assert old_metadata["valid_times"] != new_metadata["valid_times"]
         assert old_metadata["cache_version"] != new_metadata["cache_version"]
         assert old_metadata["cache_etag"] != new_metadata["cache_etag"]
@@ -3533,6 +3704,81 @@ def test_mvt_postgis_sql_projects_source_time_identity_through_public_allowlist(
     assert "run_id" in flood_tile_projection
     assert "duration" in flood_tile_projection
     assert flood_tile_projection.index("run_id") < flood_tile_projection.index("valid_time")
+
+
+def test_mvt_postgis_sql_filters_run_scoped_sources_by_selected_basin_and_network_identity() -> None:
+    hydro = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("hydro"))
+    flood = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("flood-return-period"))
+
+    hydro_source_cte = hydro[hydro.index("source_rows AS") : hydro.index("bounded_rows AS")]
+    flood_source_cte = flood[flood.index("source_rows AS") : flood.index("bounded_rows AS")]
+    assert "WHERE ts.run_id = :run_id" in hydro_source_cte
+    assert "AND ts.basin_version_id = :basin_version_id" in hydro_source_cte
+    assert "AND ts.river_network_version_id = :river_network_version_id" in hydro_source_cte
+    assert hydro_source_cte.index("ts.basin_version_id = :basin_version_id") < hydro_source_cte.index(
+        "ts.variable = :variable"
+    )
+    assert "WHERE r.run_id = :run_id" in flood_source_cte
+    assert "AND r.basin_version_id = :basin_version_id" in flood_source_cte
+    assert "AND r.river_network_version_id = :river_network_version_id" in flood_source_cte
+    assert flood_source_cte.index("r.basin_version_id = :basin_version_id") < flood_source_cte.index(
+        "r.duration = :duration"
+    )
+
+
+def test_run_source_version_includes_same_basin_and_network_identity_as_preflight_and_sql_params() -> None:
+    with _store() as session:
+        run = flood_alert_routes._require_frequency_ready(session, RUN_ID)
+        source_version = flood_alert_routes._run_source_version(run)
+        basin_version_id, river_network_version_id = flood_alert_routes._require_run_source_identity(
+            run, layer_id="discharge"
+        )
+        flood_alert_routes._require_hydro_mvt_source_identity(
+            session,
+            run_id=RUN_ID,
+            variable="q_down",
+            valid_time=VALID_TIME_1,
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+        )
+        flood_alert_routes._require_flood_mvt_source_identity(
+            session,
+            run_id=RUN_ID,
+            duration="1h",
+            valid_time=VALID_TIME_1,
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+        )
+        hydro_params = flood_alert_routes._postgis_tile_params(
+            {
+                "run_id": RUN_ID,
+                "variable": "q_down",
+                "valid_time": VALID_TIME_1,
+                "basin_version_id": basin_version_id,
+                "river_network_version_id": river_network_version_id,
+            },
+            z=6,
+            x=12,
+            y=24,
+        )
+        flood_params = flood_alert_routes._postgis_tile_params(
+            {
+                "run_id": RUN_ID,
+                "duration": "1h",
+                "valid_time": VALID_TIME_1,
+                "basin_version_id": basin_version_id,
+                "river_network_version_id": river_network_version_id,
+            },
+            z=6,
+            x=12,
+            y=24,
+        )
+
+    assert basin_version_id == run["basin_version_id"] == "basin_v1"
+    assert river_network_version_id == run["river_network_version_id"] == "rnv_v1"
+    assert source_version.startswith("rnv_v1;run-revision:")
+    assert hydro_params["basin_version_id"] == flood_params["basin_version_id"] == "basin_v1"
+    assert hydro_params["river_network_version_id"] == flood_params["river_network_version_id"] == "rnv_v1"
 
 
 def test_layer_metadata_property_schema_declares_public_source_time_identity() -> None:

@@ -21,6 +21,7 @@ import { FloodReturnPeriodLayer } from '@/components/flood/FloodReturnPeriodLaye
 import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
 import { floodReturnPeriodFeatureId, type FloodReturnPeriodGeoJsonBbox } from '@/lib/floodReturnPeriodGeoJson'
+import type { RunSourceIdentity } from '@/lib/mvtLayerMetadata'
 import type { FloodAlertRankingItem } from '@/stores/floodAlert'
 
 const BASE_MAP_STYLE: MapStyle = {
@@ -68,6 +69,7 @@ interface FloodAlertMapProps {
   className?: string
   fallbackBbox?: FloodReturnPeriodGeoJsonBbox | null
   degradedFallback?: boolean
+  runIdentity?: RunSourceIdentity | null
 }
 
 function numberOrNull(value: unknown) {
@@ -114,6 +116,7 @@ export function FloodAlertMap({
   className,
   fallbackBbox = null,
   degradedFallback = false,
+  runIdentity = null,
 }: FloodAlertMapProps) {
   const toast = useToast((state) => state.toast)
   const mapRef = useRef<MapRef | null>(null)
@@ -272,6 +275,7 @@ export function FloodAlertMap({
             onUnavailableReason={setReturnPeriodUnavailableReason}
             fallbackBbox={fallbackBbox}
             degradedFallback={degradedFallback}
+            runIdentity={runIdentity}
           />
         ) : null}
       </Map>

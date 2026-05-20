@@ -284,7 +284,17 @@ def _layer_metadata_schema() -> dict:
             "valid_time_limit": {"type": "integer"},
             "valid_time_observed_count": {"type": "integer"},
             "valid_times_truncated": {"type": "boolean"},
-            "source_refs": _nullable({"type": "object", "additionalProperties": True}),
+            "source_refs": _nullable(
+                {
+                    "type": "object",
+                    "description": (
+                        "Concrete source identity used to resolve non-XYZ route placeholders, including "
+                        "run_id, basin_version_id, river_network_version_id, and bounded source_version/run "
+                        "revision when advertised by required_placeholders."
+                    ),
+                    "additionalProperties": True,
+                }
+            ),
             "cache_layer_id": _nullable({"type": "string"}),
             "route_variable": _nullable({"type": "string"}),
             "legacy_layer_ids": string_array,

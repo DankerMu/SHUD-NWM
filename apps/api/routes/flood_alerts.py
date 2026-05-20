@@ -316,6 +316,9 @@ def list_layers(
             return _ok(request, [])
     resolved_run_id = str(run["run_id"]) if run else None
     basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
+    river_network_version_id = (
+        str(run["river_network_version_id"]) if run and run.get("river_network_version_id") else None
+    )
     source_version = _run_source_version(run) if run else None
     river_network_source_version = (
         _river_network_source_version(session, basin_version_id) if basin_version_id is not None else source_version
@@ -326,6 +329,7 @@ def list_layers(
         source_version=source_version,
         river_network_source_version=river_network_source_version,
         basin_version_id=basin_version_id,
+        river_network_version_id=river_network_version_id,
     )
     return _ok(request, [layer.model_dump() for layer in layers[offset : offset + limit]])
 
@@ -822,7 +826,15 @@ def flood_return_period_mvt_tile(
     _validate_supported_flood_duration(duration)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
-    _require_flood_mvt_source_identity(session, run_id=run_id, duration=duration, valid_time=valid_time)
+    basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="flood-return-period")
+    _require_flood_mvt_source_identity(
+        session,
+        run_id=run_id,
+        duration=duration,
+        valid_time=valid_time,
+        basin_version_id=basin_version_id,
+        river_network_version_id=river_network_version_id,
+    )
     source_version = _run_source_version(run)
     tile_input = TileInput(
         layer_id="flood-return-period",
@@ -843,6 +855,8 @@ def flood_return_period_mvt_tile(
         run_id=run_id,
         duration=duration,
         valid_time=valid_time,
+        basin_version_id=basin_version_id,
+        river_network_version_id=river_network_version_id,
         z=z,
         x=x,
         y=y,
@@ -869,7 +883,18 @@ def hydro_mvt_tile(
     _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
-    _require_hydro_mvt_source_identity(session, run_id=run_id, variable=variable, valid_time=valid_time)
+    basin_version_id, river_network_version_id = _require_run_source_identity(
+        run,
+        layer_id=public_hydro_layer_id(variable),
+    )
+    _require_hydro_mvt_source_identity(
+        session,
+        run_id=run_id,
+        variable=variable,
+        valid_time=valid_time,
+        basin_version_id=basin_version_id,
+        river_network_version_id=river_network_version_id,
+    )
     source_version = _run_source_version(run)
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
@@ -890,6 +915,8 @@ def hydro_mvt_tile(
         run_id=run_id,
         variable=variable,
         valid_time=valid_time,
+        basin_version_id=basin_version_id,
+        river_network_version_id=river_network_version_id,
         z=z,
         x=x,
         y=y,
@@ -1077,6 +1104,8 @@ def _fetch_flood_mvt_tile_bytes(
     run_id: str,
     duration: str,
     valid_time: datetime,
+    basin_version_id: str,
+    river_network_version_id: str,
     z: int,
     x: int,
     y: int,
@@ -1084,7 +1113,13 @@ def _fetch_flood_mvt_tile_bytes(
     return _fetch_postgis_tile_bytes(
         session,
         "flood-return-period",
-        {"run_id": run_id, "duration": duration, "valid_time": valid_time},
+        {
+            "run_id": run_id,
+            "duration": duration,
+            "valid_time": valid_time,
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
+        },
         z=z,
         x=x,
         y=y,
@@ -1097,6 +1132,8 @@ def _fetch_hydro_mvt_tile_bytes(
     run_id: str,
     variable: str,
     valid_time: datetime,
+    basin_version_id: str,
+    river_network_version_id: str,
     z: int,
     x: int,
     y: int,
@@ -1104,7 +1141,13 @@ def _fetch_hydro_mvt_tile_bytes(
     return _fetch_postgis_tile_bytes(
         session,
         "hydro",
-        {"run_id": run_id, "variable": variable, "valid_time": valid_time},
+        {
+            "run_id": run_id,
+            "variable": variable,
+            "valid_time": valid_time,
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
+        },
         z=z,
         x=x,
         y=y,
@@ -1160,6 +1203,8 @@ def _require_hydro_mvt_source_identity(
     run_id: str,
     variable: str,
     valid_time: datetime,
+    basin_version_id: str,
+    river_network_version_id: str,
 ) -> None:
     row = session.execute(
         text(
@@ -1167,12 +1212,20 @@ def _require_hydro_mvt_source_identity(
             SELECT 1
             FROM hydro.river_timeseries
             WHERE run_id = :run_id
+              AND basin_version_id = :basin_version_id
+              AND river_network_version_id = :river_network_version_id
               AND variable = :variable
               AND valid_time = :valid_time
             LIMIT 1
             """
         ),
-        {"run_id": run_id, "variable": variable, "valid_time": valid_time},
+        {
+            "run_id": run_id,
+            "variable": variable,
+            "valid_time": valid_time,
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
+        },
     ).first()
     if row is not None:
         return
@@ -1185,6 +1238,8 @@ def _require_hydro_mvt_source_identity(
             "run_id": run_id,
             "variable": variable,
             "valid_time": _format_time(valid_time),
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
         },
     )
 
@@ -1195,6 +1250,8 @@ def _require_flood_mvt_source_identity(
     run_id: str,
     duration: str,
     valid_time: datetime,
+    basin_version_id: str,
+    river_network_version_id: str,
 ) -> None:
     row = session.execute(
         text(
@@ -1202,13 +1259,21 @@ def _require_flood_mvt_source_identity(
             SELECT 1
             FROM flood.return_period_result
             WHERE run_id = :run_id
+              AND basin_version_id = :basin_version_id
+              AND river_network_version_id = :river_network_version_id
               AND duration = :duration
               AND max_over_window = false
               AND valid_time = :valid_time
             LIMIT 1
             """
         ),
-        {"run_id": run_id, "duration": duration, "valid_time": valid_time},
+        {
+            "run_id": run_id,
+            "duration": duration,
+            "valid_time": valid_time,
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
+        },
     ).first()
     if row is not None:
         return
@@ -1222,6 +1287,26 @@ def _require_flood_mvt_source_identity(
             "duration": duration,
             "max_over_window": False,
             "valid_time": _format_time(valid_time),
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
+        },
+    )
+
+
+def _require_run_source_identity(run: dict[str, Any] | Any, *, layer_id: str) -> tuple[str, str]:
+    basin_version_id = run.get("basin_version_id")
+    river_network_version_id = run.get("river_network_version_id")
+    if basin_version_id and river_network_version_id:
+        return str(basin_version_id), str(river_network_version_id)
+    raise ApiError(
+        status_code=404,
+        code="MVT_SOURCE_IDENTITY_NOT_FOUND",
+        message="Run-scoped MVT source identity was not found for the selected ready run.",
+        details={
+            "layer_id": layer_id,
+            "run_id": run.get("run_id"),
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
         },
     )
 
@@ -1320,6 +1405,7 @@ def _default_layer_catalog(
     run_id: str | None,
     source_version: str | None,
     basin_version_id: str | None,
+    river_network_version_id: str | None = None,
     river_network_source_version: str | None = None,
 ) -> list[Layer]:
     definitions = [
@@ -1349,6 +1435,7 @@ def _default_layer_catalog(
                     valid_times_truncated=valid_time_sample.truncated,
                     source_version=river_network_source_version if layer_id == "river-network" else source_version,
                     basin_version_id=basin_version_id,
+                    river_network_version_id=river_network_version_id,
                     release_blocking=not _mvt_live_postgis_enabled(session),
                 ),
             )

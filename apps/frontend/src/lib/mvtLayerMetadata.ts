@@ -7,6 +7,12 @@ export type MvtLayerMetadata = components['schemas']['LayerMetadata'] & {
   maplibre_source_layer: string
 }
 
+export interface RunSourceIdentity {
+  run_id?: string | null
+  basin_version_id?: string | null
+  river_network_version_id?: string | null
+}
+
 export function isMvtLayerMetadata(value: unknown): value is MvtLayerMetadata {
   if (!isRecord(value)) return false
   return (
@@ -45,9 +51,26 @@ export async function fetchLayerCatalogMetadata(
   return body.data.filter(isLayerRecord)
 }
 
-export function metadataMatchesRun(metadata: MvtLayerMetadata, runId: string): boolean {
+export function metadataMatchesRun(metadata: MvtLayerMetadata, runId: string, identity?: RunSourceIdentity | null): boolean {
   const metadataRunId = metadata.source_refs?.run_id
-  return typeof metadataRunId !== 'string' || metadataRunId === runId
+  if (typeof metadataRunId === 'string' && metadataRunId !== runId) return false
+  const metadataBasinVersionId = metadata.source_refs?.basin_version_id
+  if (
+    identity?.basin_version_id &&
+    typeof metadataBasinVersionId === 'string' &&
+    metadataBasinVersionId !== identity.basin_version_id
+  ) {
+    return false
+  }
+  const metadataRiverNetworkVersionId = metadata.source_refs?.river_network_version_id
+  if (
+    identity?.river_network_version_id &&
+    typeof metadataRiverNetworkVersionId === 'string' &&
+    metadataRiverNetworkVersionId !== identity.river_network_version_id
+  ) {
+    return false
+  }
+  return true
 }
 
 export function isRunMismatchMetadata(metadata: unknown, runId: string): boolean {

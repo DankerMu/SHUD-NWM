@@ -198,6 +198,7 @@ export function FloodAlertPage() {
               className="h-full"
               fallbackBbox={fallbackBbox}
               degradedFallback={fallbackBbox !== null}
+              runIdentity={latestRun}
             />
           </div>
           <AlertTimeline

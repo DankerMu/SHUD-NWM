@@ -1372,7 +1372,7 @@ export interface components {
             valid_time_observed_count?: number;
             /** @description True when the bounded catalog sample omitted at least one additional distinct valid_time. */
             valid_times_truncated?: boolean;
-            /** @description Concrete source identity used to resolve non-XYZ route placeholders, including run_id, basin_version_id, and bounded source_version/run revision when advertised by required_placeholders. */
+            /** @description Concrete source identity used to resolve non-XYZ route placeholders, including run_id, basin_version_id, river_network_version_id, and bounded source_version/run revision when advertised by required_placeholders. */
             source_refs?: {
                 [key: string]: unknown;
             } | null;

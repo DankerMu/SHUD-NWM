@@ -62,7 +62,13 @@ describe('FloodReturnPeriodLayer', () => {
     release_blocking: false,
     required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
     valid_times: ['2026-05-03T06:00:00Z'],
-    source_refs: { run_id: 'run-1', source_version: 'rnv_v1', basin_version_id: 'basin_v1', duration: '1h' },
+    source_refs: {
+      run_id: 'run-1',
+      source_version: 'rnv_v1',
+      basin_version_id: 'basin_v1',
+      river_network_version_id: 'rnv_v1',
+      duration: '1h',
+    },
     cache_version: 'cache-v1',
     cache_etag: 'etag-v1',
     property_schema_version: 'schema-v1',
@@ -174,6 +180,32 @@ describe('FloodReturnPeriodLayer', () => {
         'https://api.example.test/api/v1/tiles/flood-return-period/run-2/1h/2026-05-03T12%3A00%3A00Z/{z}/{x}/{y}.pbf?_mvt_cache_version=cache-v2',
       ],
     })
+  })
+
+  it('rejects metadata with sibling basin or river-network identity for the selected run', async () => {
+    sourceProps.length = 0
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal('fetch', vi.fn())
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-1"
+        validTime="2026-05-03T06:00:00Z"
+        metadata={{
+          ...mvtMetadata,
+          source_refs: {
+            ...mvtMetadata.source_refs,
+            basin_version_id: 'basin_sibling',
+            river_network_version_id: 'rnv_sibling',
+          },
+        }}
+        runIdentity={{ basin_version_id: 'basin_v1', river_network_version_id: 'rnv_v1' }}
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenCalledWith(expect.stringContaining('运行批次不匹配')))
+    expect(sourceProps).toHaveLength(0)
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('blocks direct release-blocking metadata without GeoJSON fallback', async () => {

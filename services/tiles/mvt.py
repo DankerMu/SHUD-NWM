@@ -338,6 +338,8 @@ def postgis_tile_sql(layer: str) -> str:
               ON rs.river_segment_id = ts.river_segment_id
              AND rs.river_network_version_id = ts.river_network_version_id
             WHERE ts.run_id = :run_id
+              AND ts.basin_version_id = :basin_version_id
+              AND ts.river_network_version_id = :river_network_version_id
               AND ts.variable = :variable
               AND ts.valid_time = :valid_time
         """
@@ -377,6 +379,8 @@ def postgis_tile_sql(layer: str) -> str:
               ON rs.river_segment_id = r.river_segment_id
              AND rs.river_network_version_id = r.river_network_version_id
             WHERE r.run_id = :run_id
+              AND r.basin_version_id = :basin_version_id
+              AND r.river_network_version_id = :river_network_version_id
               AND r.duration = :duration
               AND r.valid_time = :valid_time
               AND r.max_over_window = false
@@ -553,6 +557,7 @@ def layer_metadata(
     valid_times_truncated: bool = False,
     source_version: str | None = None,
     basin_version_id: str | None = None,
+    river_network_version_id: str | None = None,
     release_blocking: bool = False,
 ) -> dict[str, Any]:
     metadata_by_layer = {
@@ -654,6 +659,7 @@ def layer_metadata(
         run_id=run_id,
         source_version=source_version,
         basin_version_id=basin_version_id,
+        river_network_version_id=river_network_version_id,
     )
     source_ref_constants = {"z", "x", "y", "valid_time"}
     if any(
@@ -753,6 +759,7 @@ def _layer_source_refs(
     run_id: str | None,
     source_version: str | None,
     basin_version_id: str | None,
+    river_network_version_id: str | None,
 ) -> dict[str, str | None]:
     refs = {
         key: value
@@ -760,6 +767,7 @@ def _layer_source_refs(
             "run_id": run_id if layer_id != "river-network" else None,
             "source_version": source_version,
             "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
         }.items()
         if value is not None
     }
