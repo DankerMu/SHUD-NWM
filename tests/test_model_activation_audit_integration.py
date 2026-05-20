@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -18,17 +19,32 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     apply_migrations_from_zero(integration_database_url)
     ids = _seed_issue_137_models(integration_database_url)
     app.dependency_overrides[get_model_registry_store] = lambda: PsycopgModelRegistryStore(integration_database_url)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
     try:
         with TestClient(app) as client:
+            headers = {"X-User-Role": "model_admin"}
             default_before = client.get("/api/v1/models")
             inactive_before = client.get("/api/v1/models", params={"active": "false"})
             all_before = client.get("/api/v1/models", params={"active": "all"})
-            activation = client.put(f"/api/v1/models/{ids['basins_model_id']}/active", json={"active": True})
-            duplicate = client.put(f"/api/v1/models/{ids['basins_model_id']}/active", json={"active": True})
-            missing = client.put("/api/v1/models/it137_missing_model/active", json={"active": True})
+            activation = client.put(
+                f"/api/v1/models/{ids['basins_model_id']}/active",
+                json={"active": True},
+                headers=headers,
+            )
+            duplicate = client.put(
+                f"/api/v1/models/{ids['basins_model_id']}/active",
+                json={"active": True},
+                headers=headers,
+            )
+            missing = client.put("/api/v1/models/it137_missing_model/active", json={"active": True}, headers=headers)
             default_after = client.get("/api/v1/models")
             inactive_after = client.get("/api/v1/models", params={"active": "false"})
     finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
         app.dependency_overrides.pop(get_model_registry_store, None)
 
     for response in (default_before, inactive_before, all_before, activation, default_after, inactive_after):

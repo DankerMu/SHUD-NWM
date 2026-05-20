@@ -20,7 +20,8 @@ vi.mock('@/stores/auth', async (importOriginal) => {
     ...actual,
     useAuthStore: (selector: (state: { role: AuthRole; setRole: (role: AuthRole) => void }) => unknown) =>
       selector({ role: mocks.authState.role, setRole: vi.fn() }),
-    canUseDevRoleActions: (role: AuthRole) => mocks.authState.canUseActions && role !== 'viewer',
+    canUseDevRoleActions: (role: AuthRole) =>
+      mocks.authState.canUseActions && ['operator', 'model_admin', 'sys_admin'].includes(role),
   }
 })
 
@@ -92,6 +93,16 @@ describe('JobsTable RBAC action boundary', () => {
     render(<JobsTable />)
 
     expect(screen.getByRole('row', { name: /run-failed/ })).toBeVisible()
+    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+  })
+
+  it('does not show retry or cancel actions for analyst even when dev override is enabled', () => {
+    mocks.authState.role = 'analyst'
+    mocks.authState.canUseActions = true
+
+    render(<JobsTable />)
+
     expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
   })

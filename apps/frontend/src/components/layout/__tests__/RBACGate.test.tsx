@@ -19,7 +19,8 @@ describe('RBACGate', () => {
     useAuthStore.setState({ role: 'viewer' })
   })
 
-  it('blocks viewer role', () => {
+  it.each(['viewer', 'analyst'] satisfies AuthRole[])('blocks %s role', (role) => {
+    useAuthStore.setState({ role })
     renderGate()
 
     expect(screen.getByText('权限不足')).toBeInTheDocument()

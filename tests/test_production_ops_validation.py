@@ -50,7 +50,7 @@ def test_validate_ops_default_lane_writes_required_release_blocked_evidence(tmp_
 
     preflight = _read_json(lane_dir / "preflight.json")
     assert preflight["auth_mode"] == "fallback_release_gated"
-    assert set(preflight["required_roles"]) >= {"operator", "model_admin", "source_admin", "tile_admin"}
+    assert set(preflight["required_roles"]) >= {"viewer", "analyst", "operator", "model_admin", "sys_admin"}
     assert preflight["alert_target"] == "dry-run://ops-validation"
     assert preflight["deployment_config_source"] == "generated_deterministic_templates"
     assert preflight["rollback_drill_scope"] == "simulated_drills"
@@ -108,14 +108,22 @@ def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path
     audit = _read_json(lane_dir / "audit_redaction.json")
 
     expected_actions = {
-        "model_activation",
-        "rerun",
-        "cancel",
-        "qc_override",
-        "source_config_change",
-        "tile_republish",
+        "pipeline.retry_run",
+        "pipeline.cancel_run",
+        "pipeline.rerun_cycle",
+        "qc.override_result",
+        "tiles.republish",
+        "sources.update_config",
+        "models.activate",
+        "models.deactivate",
+        "models.switch_version",
+        "models.rollback_version",
+        "models.supersede",
+        "users.manage",
     }
-    assert {item["action"] for item in auth["action_decisions"]} == expected_actions
+    assert set(auth["canonical_action_ids"]) == expected_actions
+    assert set(auth["canonical_roles"]) == {"viewer", "analyst", "operator", "model_admin", "sys_admin"}
+    assert {item["action_id"] for item in auth["action_decisions"]} == expected_actions
     assert {item["decision"] for item in auth["action_decisions"]} == {
         "allowed",
         "denied",
@@ -128,16 +136,18 @@ def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path
         "release_blocked_actions_mutated_state": False,
     }
     for decision in auth["action_decisions"]:
-        if decision["decision"] in {"denied", "release_blocked"}:
+        if decision["decision"] in {"denied", "deny", "release_blocked"}:
             assert decision["previous_state"] == decision["new_state"]
             assert decision["state_mutated"] is False
+            assert decision["no_mutation_expected"] is True
             assert decision["error_code"] in {
+                "PRODUCTION_OPS_AUTH_REQUIRED",
                 "PRODUCTION_OPS_RBAC_FORBIDDEN",
                 "PRODUCTION_OPS_BACKEND_AUTH_RELEASE_BLOCKED",
             }
 
     assert blockers["status"] == "release_blocked"
-    assert {item["action"] for item in blockers["blockers"]} == expected_actions
+    assert {item["action_id"] for item in blockers["blockers"]} == expected_actions
     assert all(item["residual_risk"] and item["removal_criteria"] for item in blockers["blockers"])
 
     assert audit["status"] == "ready"
@@ -153,10 +163,22 @@ def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path
         "frontend_output",
     }
     first_row = audit["audit_rows"][0]
-    assert {"actor", "role", "target", "previous_state", "new_state", "decision", "reason", "lineage"} <= set(
-        first_row
-    )
-    assert {row["decision"] for row in audit["audit_rows"]} == {"allowed", "denied", "release_blocked"}
+    assert {
+        "actor",
+        "actor_id",
+        "roles",
+        "action",
+        "action_id",
+        "target",
+        "previous_state",
+        "new_state",
+        "decision",
+        "reason",
+        "reason_code",
+        "execution_mode",
+        "lineage",
+    } <= set(first_row)
+    assert {row["decision"] for row in audit["audit_rows"]} == {"allow", "deny", "release_blocked"}
     represented_surfaces = {
         "config": "config",
         "logs": "log_output",
@@ -1590,7 +1612,7 @@ def test_validate_ops_live_ready_config_knobs_do_not_claim_live_execution(tmp_pa
     alerts = _read_json(lane_dir / "monitoring_alerts.json")
     assert summary["live_backend_auth_executed"] is False
     assert summary["live_alert_sink_delivered"] is False
-    assert auth["model_activation_boundary"]["backend_enforcement_available"] is False
+    assert auth["model_activation_boundary"]["backend_enforcement_available"] is True
     assert auth["model_activation_boundary"]["requested_auth_mode"] == "backend_route_executed"
     assert alerts["status"] == "release_blocked"
     assert {alert["execution_mode"] for alert in alerts["alerts"]} == {"not_executed"}

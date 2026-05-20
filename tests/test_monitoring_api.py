@@ -278,7 +278,9 @@ def test_retry_rbac() -> None:
         assert allowed.status_code == 200
         assert allowed.json()["data"]["status"] == "submitted"
         assert denied.status_code == 403
-        assert denied.json()["error"]["code"] == "FORBIDDEN"
+        assert denied.json()["error"]["code"] == "RBAC_FORBIDDEN"
+        assert denied.json()["error"]["details"]["policy_decision"]["action_id"] == "pipeline.retry_run"
+        assert denied.json()["error"]["details"]["policy_decision"]["roles"] == ["viewer"]
 
 
 def test_retry_no_role_header() -> None:
@@ -287,9 +289,9 @@ def test_retry_no_role_header() -> None:
         with _client(store) as client:
             response = client.post("/api/v1/runs/run_retry_no_role/retry")
 
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "FORBIDDEN"
-        assert response.json()["error"]["message"] == "Operator role required."
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "AUTH_REQUIRED"
+        assert response.json()["error"]["details"]["policy_decision"]["no_mutation_expected"] is True
 
 
 def test_retry_denies_spoofed_role_header_by_default() -> None:
@@ -298,8 +300,8 @@ def test_retry_denies_spoofed_role_header_by_default() -> None:
         with _client(store) as client:
             response = client.post("/api/v1/runs/run_retry_prod/retry", headers={"X-User-Role": "operator"})
 
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "AUTH_REQUIRED"
         assert store.get_job("job_retry_prod").status == "failed"
 
 
@@ -332,7 +334,7 @@ def test_cancel_rbac() -> None:
             response = client.post("/api/v1/runs/run_cancel_denied/cancel", headers={"X-User-Role": "viewer"})
 
         assert response.status_code == 403
-        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert response.json()["error"]["code"] == "RBAC_FORBIDDEN"
         assert gateway.cancelled == []
         assert store.get_job("job_cancel_denied").status == "running"
 
@@ -344,9 +346,8 @@ def test_cancel_no_role_header() -> None:
         with _client(store, gateway) as client:
             response = client.post("/api/v1/runs/run_cancel_no_role/cancel")
 
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "FORBIDDEN"
-        assert response.json()["error"]["message"] == "Operator role required."
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "AUTH_REQUIRED"
         assert gateway.cancelled == []
         assert store.get_job("job_cancel_no_role").status == "running"
 
@@ -364,10 +365,31 @@ def test_cancel_denies_spoofed_role_header_by_default() -> None:
         with _client(store, gateway) as client:
             response = client.post("/api/v1/runs/run_cancel_prod/cancel", headers={"X-User-Role": "operator"})
 
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "AUTH_REQUIRED"
         assert gateway.cancelled == []
         assert store.get_job("job_cancel_prod").status == "running"
+
+
+def test_release_blocked_auth_does_not_mutate(monkeypatch: Any) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.delenv("NHMS_LIVE_AUTH_PROOF_ACCEPTED", raising=False)
+    with _store() as store:
+        gateway = _MockGateway()
+        _create_job(store, job_id="job_release_blocked", run_id="run_release_blocked", status="running")
+        with _client(store, gateway, allow_dev_role_header=True) as client:
+            response = client.post(
+                "/api/v1/runs/run_release_blocked/cancel",
+                headers={"X-User-Role": "operator"},
+            )
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body["error"]["code"] == "RELEASE_BLOCKED"
+        assert body["error"]["details"]["policy_decision"]["execution_mode"] == "release_blocked"
+        assert body["error"]["details"]["policy_decision"]["no_mutation_expected"] is True
+        assert gateway.cancelled == []
+        assert store.get_job("job_release_blocked").status == "running"
 
 
 def test_metrics_stage_duration() -> None:

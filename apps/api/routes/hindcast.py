@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from apps.api.auth import require_action
 from apps.api.errors import ApiError
 from apps.api.routes.pipeline import _ok
 from workers.flood_frequency.config import HindcastConfig
@@ -24,7 +25,6 @@ from workers.flood_frequency.hindcast import (
 )
 
 router = APIRouter(prefix="/api/v1", tags=["hindcast"])
-_OPERATOR_ROLES = {"operator", "model_admin", "sys_admin"}
 
 
 class HindcastSubmitRequest(BaseModel):
@@ -63,7 +63,7 @@ def submit_hindcast_api(
     session: Session = Depends(get_hindcast_session),
     config: HindcastConfig = Depends(get_hindcast_config),
 ) -> dict[str, Any]:
-    _require_operator_role(request)
+    require_action(request, "pipeline.rerun_cycle", target_type="hindcast", target_id=body.model_id)
     if body.source_id.upper() != "ERA5":
         raise ApiError(
             status_code=400,
@@ -120,17 +120,6 @@ def submit_hindcast_api(
             "active_years": result.active_years,
             "slurm_job_array_id": slurm.slurm_job_array_id if slurm is not None else None,
         },
-    )
-
-
-def _require_operator_role(request: Request) -> None:
-    role = request.headers.get("X-User-Role")
-    if role is not None and role.strip().lower() in _OPERATOR_ROLES:
-        return
-    raise ApiError(
-        status_code=403,
-        code="PERMISSION_DENIED",
-        message="Operator or model_admin role required.",
     )
 
 

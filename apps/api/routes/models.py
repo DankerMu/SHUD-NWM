@@ -9,6 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
+from apps.api.auth import require_action
 from apps.api.errors import ApiError
 from packages.common.model_registry import (
     RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
@@ -380,6 +381,14 @@ def set_model_active(
     payload: ActiveFlagPayload,
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
+    action_id = "models.activate" if payload.active else "models.deactivate"
+    require_action(
+        request,
+        action_id,
+        target_type="model_instance",
+        target_id=model_id,
+        payload={"model_id": model_id, "active": payload.active},
+    )
     try:
         return _ok(request, store.set_model_active(model_id, payload.active))
     except (ModelRegistryError, ModelPackageValidationError) as error:

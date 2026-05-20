@@ -734,14 +734,21 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   traversal, backslash separators, encoded separators, and credential
   assignments. The checked-in service config template is
   `docs/runbooks/production-service-config.md`.
-- `auth_rbac.json` and `auth_release_blockers.json`: model activation, rerun,
-  cancel, QC override, source config change, and tile republish decisions for
-  allowed, denied, and release-blocked cases, with required roles, stable error
-  codes, execution modes, live-auth flags, no denied/release-blocked mutation,
-  residual risk, and removal criteria.
+- `auth_rbac.json` and `auth_release_blockers.json`: canonical M17 action ids
+  (`pipeline.retry_run`, `pipeline.cancel_run`, `pipeline.rerun_cycle`,
+  `qc.override_result`, `tiles.republish`, `sources.update_config`,
+  `models.activate`, `models.deactivate`, `models.switch_version`,
+  `models.rollback_version`, `models.supersede`, and `users.manage`) evaluated
+  against the shared `viewer`/`analyst`/`operator`/`model_admin`/`sys_admin`
+  matrix. Evidence separates deterministic `policy_simulated`,
+  route-backed `backend_route_executed`, opt-in `live_proof`, and
+  `release_blocked` modes. Fast validation never executes live IdP calls and
+  cannot satisfy final production auth readiness without accepted live proof.
 - `audit_redaction.json`: allowed/denied/release-blocked audit rows with actor,
-  role, target, previous/new state, decision, reason, lineage, and redacted
-  secret-shaped fields across config/log/manifest/API/alert/PR/frontend shapes.
+  roles, action id, target, previous/new state, decision, reason, reason code,
+  execution mode, lineage, and redacted credential, URI, local path, log,
+  checksum, and lineage-shaped fields across config/log/manifest/API/alert/PR
+  and frontend shapes.
 - `monitoring_alerts.json`: source latency, Slurm backlog, failed basin retries,
   object-store failure, stale analysis state, tile error, and API p95 alert
   evidence with metric, severity, observed value, threshold, dry-run or

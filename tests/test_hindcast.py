@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -229,7 +230,7 @@ def test_hindcast_submit_permission_denied_for_viewer_and_analyst() -> None:
 
         assert viewer.status_code == 403
         assert analyst.status_code == 403
-        assert viewer.json()["error"]["code"] == "PERMISSION_DENIED"
+        assert viewer.json()["error"]["code"] == "RBAC_FORBIDDEN"
 
 
 def test_data_isolation_forecast_series_default_excludes_hindcast() -> None:
@@ -674,10 +675,16 @@ def _api_client(session: Session) -> Iterator[TestClient]:
     app.dependency_overrides[hindcast_routes.get_hindcast_session] = lambda: session
     app.dependency_overrides[hindcast_routes.get_hindcast_config] = lambda: config
     app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: PipelineStore(session)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
     try:
         with TestClient(app) as client:
             yield client
     finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
         app.dependency_overrides.pop(hindcast_routes.get_hindcast_session, None)
         app.dependency_overrides.pop(hindcast_routes.get_hindcast_config, None)
         app.dependency_overrides.pop(pipeline_routes.get_pipeline_store, None)

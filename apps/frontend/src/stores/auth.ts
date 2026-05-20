@@ -1,9 +1,9 @@
 import { create } from 'zustand'
 
-export type AuthRole = 'viewer' | 'operator' | 'model_admin' | 'sys_admin'
-export type OperatorRole = Exclude<AuthRole, 'viewer'>
+export type AuthRole = 'viewer' | 'analyst' | 'operator' | 'model_admin' | 'sys_admin'
+export type OperatorRole = Extract<AuthRole, 'operator' | 'model_admin' | 'sys_admin'>
 
-const authRoles: AuthRole[] = ['viewer', 'operator', 'model_admin', 'sys_admin']
+const authRoles: AuthRole[] = ['viewer', 'analyst', 'operator', 'model_admin', 'sys_admin']
 const operatorRoles: OperatorRole[] = ['operator', 'model_admin', 'sys_admin']
 export const isRoleOverrideEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_ROLE_OVERRIDE === 'true'
 

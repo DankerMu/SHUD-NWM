@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -456,8 +457,18 @@ def fake_store() -> FakeModelRegistryStore:
 
 @pytest.fixture(autouse=True)
 def clear_overrides() -> None:
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
     yield
+    if previous_allow_dev_role_header is None:
+        os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+    else:
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
     app.dependency_overrides.clear()
+
+
+def _model_admin_headers() -> dict[str, str]:
+    return {"X-User-Role": "model_admin"}
 
 
 @pytest.mark.asyncio
@@ -790,8 +801,16 @@ async def test_model_listing_active_filter_vectors(fake_store: FakeModelRegistry
 async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeModelRegistryStore) -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        active_response = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
-        conflict_response = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
+        active_response = await client.put(
+            "/api/v1/models/inactive_model/active",
+            json={"active": True},
+            headers=_model_admin_headers(),
+        )
+        conflict_response = await client.put(
+            "/api/v1/models/inactive_model/active",
+            json={"active": True},
+            headers=_model_admin_headers(),
+        )
 
     assert fake_store.models["inactive_model"]["active_flag"] is True
     assert active_response.status_code == 200
@@ -814,7 +833,11 @@ async def test_basins_inactive_model_listing_then_explicit_activation(fake_store
         default_before = await client.get("/api/v1/models")
         inactive_before = await client.get("/api/v1/models", params={"active": "false"})
         all_before = await client.get("/api/v1/models", params={"active": "all"})
-        activation = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
+        activation = await client.put(
+            "/api/v1/models/inactive_model/active",
+            json={"active": True},
+            headers=_model_admin_headers(),
+        )
         default_after = await client.get("/api/v1/models")
         inactive_after = await client.get("/api/v1/models", params={"active": "false"})
 
@@ -968,8 +991,9 @@ async def test_model_registry_error_envelope_vectors(
     caplog.set_level(logging.ERROR, logger="apps.api.routes.models")
 
     transport = ASGITransport(app=app)
+    headers = _model_admin_headers() if path.endswith("/active") else None
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await getattr(client, request_method)(path, json=payload)
+        response = await getattr(client, request_method)(path, json=payload, headers=headers)
 
     assert fake_store is not None
     assert response.status_code == expected_status

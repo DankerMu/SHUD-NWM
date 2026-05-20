@@ -13,9 +13,16 @@ import sys
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
+from apps.api.auth import (
+    ACTION_MATRIX,
+    ROLE_VOCABULARY,
+    audit_record,
+    simulated_decisions_for_action,
+)
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
 
@@ -28,7 +35,7 @@ SENSITIVE_PREFIX_ASSIGNMENT_RE = re.compile(
 )
 
 DEFAULT_AUTH_MODE = "fallback_release_gated"
-DEFAULT_REQUIRED_ROLES = ("operator", "model_admin", "source_admin", "tile_admin", "security_admin")
+DEFAULT_REQUIRED_ROLES = ROLE_VOCABULARY
 DEFAULT_ALERT_TARGET = "dry-run://ops-validation"
 DEFAULT_DEPLOYMENT_CONFIG_SOURCE = "generated_deterministic_templates"
 DEFAULT_ROLLBACK_SCOPE = "simulated_drills"
@@ -49,14 +56,6 @@ SERVICE_CONFIGS = {
     "object_store": ("OBJECT_STORE_ROOT", "OBJECT_STORE_PREFIX", "OBJECT_STORE_CREDENTIAL_SOURCE"),
     "source_adapters": ("GFS_CONFIG", "IFS_CONFIG", "ERA5_CONFIG", "CLDAS_RESTRICTED_REASON"),
     "workspace_roots": ("RUN_WORKSPACE_ROOT", "SHARED_LOG_ROOT", "ARTIFACT_RETENTION_POLICY"),
-}
-ACTION_MATRIX = {
-    "model_activation": "model_admin",
-    "rerun": "operator",
-    "cancel": "operator",
-    "qc_override": "model_admin",
-    "source_config_change": "source_admin",
-    "tile_republish": "tile_admin",
 }
 MONITORING_ALERTS = {
     "source_latency": {
@@ -555,65 +554,25 @@ def _production_config_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
 
 def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     live_backend_auth_executed = False
-    model_activation = {
-        "active_model_version": "previous-production-version",
-        "qc_override_state": "not_overridden",
-        "source_config_version": "previous-source-config",
-        "tile_publication_version": "previous-tile-version",
-        "pipeline_job_state": "unchanged",
-    }
     decisions = []
-    for action, required_role in ACTION_MATRIX.items():
+    state = _auth_fixture_state()
+    for action in ACTION_MATRIX:
         target = f"{action}:{config.run_id}"
-        decisions.extend(
-            [
-                _action_decision(
-                    config,
-                    action,
-                    required_role,
-                    actor="ops-authorized",
-                    role=required_role,
-                    target=target,
-                    decision="allowed",
-                    reason="Policy simulation shows the configured role is sufficient.",
-                    execution_mode="policy_simulated",
-                    state=model_activation,
-                ),
-                _action_decision(
-                    config,
-                    action,
-                    required_role,
-                    actor="ops-viewer",
-                    role="viewer",
-                    target=target,
-                    decision="denied",
-                    reason="Actor role does not satisfy the required production role.",
-                    execution_mode="policy_simulated",
-                    error_code="PRODUCTION_OPS_RBAC_FORBIDDEN",
-                    state=model_activation,
-                ),
-                _action_decision(
-                    config,
-                    action,
-                    required_role,
-                    actor="ops-release-gate",
-                    role=required_role,
-                    target=target,
-                    decision="release_blocked",
-                    reason="Full backend identity-provider enforcement was not executed in this deterministic lane.",
-                    execution_mode="release_blocked",
-                    error_code="PRODUCTION_OPS_BACKEND_AUTH_RELEASE_BLOCKED",
-                    state=model_activation,
-                ),
-            ]
-        )
+        for decision in simulated_decisions_for_action(
+            action,
+            target_id=target,
+            target_type=_target_type_for_action(action),
+        ):
+            decisions.append(_action_decision(config, decision, state=state))
     return {
         "schema": "nhms.production_closure.ops.auth_rbac.v1",
         "run_id": config.run_id,
         "status": "release_blocked",
         "auth_mode": config.auth_mode,
+        "canonical_roles": list(ROLE_VOCABULARY),
+        "canonical_action_ids": list(ACTION_MATRIX),
         "model_activation_boundary": {
-            "backend_enforcement_available": False,
+            "backend_enforcement_available": True,
             "requested_auth_mode": config.auth_mode,
             "fallback_release_gate": True,
             "frontend_only_rbac_accepted_for_production": False,
@@ -637,8 +596,8 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                     "enforcement."
                 ),
                 "removal_criteria": (
-                    "Execute backend_route_executed evidence with a real identity provider and persisted audit "
-                    "decisions."
+                    "Run opt-in live_proof evidence with a real identity provider, role mapping, and persisted "
+                    "audit decisions."
                 ),
             }
         ],
@@ -647,37 +606,40 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
 
 def _action_decision(
     config: ProductionOpsConfig,
-    action: str,
-    required_role: str,
+    policy_decision: Any,
     *,
-    actor: str,
-    role: str,
-    target: str,
-    decision: str,
-    reason: str,
-    execution_mode: str,
     state: Mapping[str, Any],
-    error_code: str | None = None,
 ) -> dict[str, Any]:
-    mutated = decision == "allowed" and execution_mode == "backend_route_executed"
+    decision = policy_decision.decision
+    normalized_decision = {"allow": "allowed", "deny": "denied"}.get(decision, decision)
+    mutated = decision == "allow" and policy_decision.execution_mode == "backend_route_executed"
     return {
-        "action": action,
-        "actor": actor,
-        "role": role,
-        "target": target,
-        "required_roles": [required_role],
-        "decision": decision,
-        "reason": reason,
-        "error_code": error_code,
-        "execution_mode": execution_mode,
-        "live_backend_auth_executed": False,
+        "action": policy_decision.action_id,
+        "action_id": policy_decision.action_id,
+        "actor": policy_decision.actor_id,
+        "actor_id": policy_decision.actor_id,
+        "role": policy_decision.roles[0] if policy_decision.roles else "anonymous",
+        "roles": list(policy_decision.roles),
+        "target": policy_decision.target_id,
+        "target_type": policy_decision.target_type,
+        "target_id": policy_decision.target_id,
+        "required_roles": list(policy_decision.required_roles),
+        "matched_roles": list(policy_decision.matched_roles),
+        "decision": normalized_decision,
+        "reason": policy_decision.reason,
+        "reason_code": policy_decision.reason_code,
+        "error_code": _ops_error_code(policy_decision.reason_code),
+        "execution_mode": policy_decision.execution_mode,
+        "auth_mode": policy_decision.auth_mode,
+        "live_backend_auth_executed": policy_decision.live_backend_auth_executed,
+        "no_mutation_expected": policy_decision.no_mutation_expected,
         "previous_state": dict(state),
-        "new_state": _new_state_for_action(state, action) if mutated else dict(state),
+        "new_state": _new_state_for_action(state, policy_decision.action_id) if mutated else dict(state),
         "state_mutated": mutated,
         "lineage": {
             "run_id": config.run_id,
             "auth_mode": config.auth_mode,
-            "audit_correlation_id": f"{config.run_id}-{action}-{decision}",
+            "audit_correlation_id": f"{config.run_id}-{policy_decision.action_id}-{normalized_decision}",
             "credential_hint": "token=deterministic-secret-for-redaction-test",
         },
     }
@@ -685,18 +647,19 @@ def _action_decision(
 
 def _auth_release_blockers(config: ProductionOpsConfig, auth_rbac: Mapping[str, Any]) -> dict[str, Any]:
     blockers = []
-    for action, required_role in ACTION_MATRIX.items():
+    for action, required_roles in ACTION_MATRIX.items():
         blockers.append(
             {
                 "action": action,
-                "required_roles": [required_role],
+                "action_id": action,
+                "required_roles": list(required_roles),
                 "current_fallback": config.auth_mode,
                 "residual_risk": (
                     "Production-impacting mutation is not proven against live backend identity and authorization."
                 ),
                 "removal_criteria": (
-                    "Run backend_route_executed evidence for allowed and denied attempts with persisted audit rows "
-                    "and no mutation for rejected attempts."
+                    "Run opt-in live_proof evidence for allowed and denied attempts with persisted audit rows and "
+                    "no mutation for rejected attempts."
                 ),
                 "linked_decision_ids": [
                     item["lineage"]["audit_correlation_id"]
@@ -717,21 +680,22 @@ def _audit_redaction_evidence(config: ProductionOpsConfig, auth_rbac: Mapping[st
     audit_rows = []
     for decision in auth_rbac["action_decisions"]:
         audit_rows.append(
-            {
-                "actor": decision["actor"],
-                "role": decision["role"],
-                "target": decision["target"],
-                "previous_state": decision["previous_state"],
-                "new_state": decision["new_state"],
-                "decision": decision["decision"],
-                "reason": decision["reason"],
-                "lineage": {
+            audit_record(
+                _decision_mapping_for_audit(decision),
+                request_id=decision["lineage"]["audit_correlation_id"],
+                previous_state=decision["previous_state"],
+                new_state=decision["new_state"],
+                payload={
                     **decision["lineage"],
                     "config": "api_key=deterministic-secret-for-redaction-test",
-                    "log_output": "worker log password=deterministic-secret-for-redaction-test",
+                    "log_output": (
+                        "worker log password=deterministic-secret-for-redaction-test at /srv/nhms/logs/job.log"
+                    ),
                     "manifest_payload": {
-                        "object_store_uri": "s3://bucket/path?token=deterministic-secret-for-redaction-test",
+                        "object_store_uri": "s3://user:pass@bucket/path?token=deterministic-secret-for-redaction-test#frag",
                         "manifest_token": "deterministic-secret-for-redaction-test",
+                        "lineage_path": "/volume/data/nwm/Basins/qhh",
+                        "checksum": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
                     },
                     "api_payload": "password=deterministic-secret-for-redaction-test",
                     "alert_payload": (
@@ -741,7 +705,7 @@ def _audit_redaction_evidence(config: ProductionOpsConfig, auth_rbac: Mapping[st
                     "frontend_output": "session_key=deterministic-secret-for-redaction-test",
                     "pr_evidence": "signature=deterministic-secret-for-redaction-test",
                 },
-            }
+            )
         )
     return {
         "schema": "nhms.production_closure.ops.audit_redaction.v1",
@@ -760,6 +724,23 @@ def _audit_redaction_evidence(config: ProductionOpsConfig, auth_rbac: Mapping[st
         "secret_shaped_values_redacted": True,
         "audit_rows": audit_rows,
     }
+
+
+def _decision_mapping_for_audit(decision: Mapping[str, Any]) -> Any:
+    return SimpleNamespace(
+        action_id=decision["action_id"],
+        actor_id=decision["actor_id"],
+        roles=tuple(decision["roles"]),
+        target_type=decision["target_type"],
+        target_id=decision["target_id"],
+        decision={"allowed": "allow", "denied": "deny"}.get(decision["decision"], decision["decision"]),
+        reason=decision["reason"],
+        reason_code=decision["reason_code"],
+        execution_mode=decision["execution_mode"],
+        auth_mode=decision["auth_mode"],
+        live_backend_auth_executed=decision["live_backend_auth_executed"],
+        no_mutation_expected=decision["no_mutation_expected"],
+    )
 
 
 def _monitoring_alert_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
@@ -1873,19 +1854,62 @@ def _is_unsafe_setting(service: str, setting: str, value: str) -> bool:
 
 def _new_state_for_action(state: Mapping[str, Any], action: str) -> dict[str, Any]:
     updated = dict(state)
-    if action == "model_activation":
+    if action in {"models.activate", "models.switch_version", "models.rollback_version"}:
         updated["active_model_version"] = "new-production-version"
-    elif action == "rerun":
+    elif action == "models.deactivate":
+        updated["active_model_version"] = "deactivated-production-version"
+    elif action == "models.supersede":
+        updated["active_model_version"] = "superseded-production-version"
+    elif action == "pipeline.rerun_cycle":
         updated["pipeline_job_state"] = "rerun_requested"
-    elif action == "cancel":
+    elif action == "pipeline.retry_run":
+        updated["pipeline_job_state"] = "retry_requested"
+    elif action == "pipeline.cancel_run":
         updated["pipeline_job_state"] = "cancel_requested"
-    elif action == "qc_override":
+    elif action == "qc.override_result":
         updated["qc_override_state"] = "override_requested"
-    elif action == "source_config_change":
+    elif action == "sources.update_config":
         updated["source_config_version"] = "new-source-config"
-    elif action == "tile_republish":
+    elif action == "tiles.republish":
         updated["tile_publication_version"] = "republish_requested"
+    elif action == "users.manage":
+        updated["user_management_state"] = "user_change_requested"
     return updated
+
+
+def _auth_fixture_state() -> dict[str, str]:
+    return {
+        "active_model_version": "previous-production-version",
+        "qc_override_state": "not_overridden",
+        "source_config_version": "previous-source-config",
+        "tile_publication_version": "previous-tile-version",
+        "pipeline_job_state": "unchanged",
+        "user_management_state": "unchanged",
+    }
+
+
+def _target_type_for_action(action: str) -> str:
+    if action.startswith("pipeline."):
+        return "pipeline_run"
+    if action.startswith("models."):
+        return "model_instance"
+    if action.startswith("sources."):
+        return "source_config"
+    if action.startswith("tiles."):
+        return "tile_layer"
+    if action.startswith("qc."):
+        return "qc_result"
+    return "user"
+
+
+def _ops_error_code(reason_code: str) -> str | None:
+    if reason_code == "RBAC_FORBIDDEN":
+        return "PRODUCTION_OPS_RBAC_FORBIDDEN"
+    if reason_code == "AUTH_REQUIRED":
+        return "PRODUCTION_OPS_AUTH_REQUIRED"
+    if reason_code == "RELEASE_BLOCKED":
+        return "PRODUCTION_OPS_BACKEND_AUTH_RELEASE_BLOCKED"
+    return None
 
 
 def _validate_config(config: ProductionOpsConfig) -> None:
@@ -1897,7 +1921,8 @@ def _validate_config(config: ProductionOpsConfig) -> None:
             _dependency_status_from_explicit(status)
     for role in config.required_roles:
         _validate_identifier(role, "required_role")
-    missing_roles = sorted(set(ACTION_MATRIX.values()) - set(config.required_roles))
+    action_roles = {role for roles in ACTION_MATRIX.values() for role in roles}
+    missing_roles = sorted(action_roles - set(config.required_roles))
     if missing_roles:
         raise ProductionOpsValidationError(
             "PRODUCTION_OPS_REQUIRED_ROLES_INCOMPLETE",

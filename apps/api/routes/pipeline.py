@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from apps.api.auth import require_action
 from apps.api.errors import ApiError
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineJob, PipelineStore
@@ -26,7 +27,6 @@ from workers.data_adapters.base import format_cycle_time, parse_cycle_time
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
-_OPERATOR_ROLES = {"operator", "model_admin", "sys_admin"}
 _ACTIVE_JOB_STATUSES = {"pending", "submitted", "running"}
 _FAILED_JOB_STATUSES = {"failed", "submission_failed", "permanently_failed", "cancelled"}
 _TERMINAL_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "failed", "cancelled", "superseded"}
@@ -46,10 +46,6 @@ _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "frequenc
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024
 LOG_ROOT = Path(os.getenv("LOG_ROOT", "workspace"))
-
-
-def _allow_dev_role_header() -> bool:
-    return os.getenv("ALLOW_DEV_ROLE_HEADER", "").strip().lower() == "true"
 
 
 @lru_cache
@@ -244,7 +240,7 @@ def retry_run(
     service: RetryService = Depends(get_retry_service),
     gateway: SlurmGateway = Depends(get_slurm_gateway),
 ) -> dict[str, Any]:
-    _require_operator_role(request)
+    require_action(request, "pipeline.retry_run", target_type="pipeline_run", target_id=run_id)
     if not _SAFE_RUN_ID_RE.fullmatch(run_id):
         raise ApiError(
             status_code=400,
@@ -306,7 +302,7 @@ def cancel_run(
     store: PipelineStore = Depends(get_pipeline_store),
     gateway: SlurmGateway = Depends(get_slurm_gateway),
 ) -> dict[str, Any]:
-    _require_operator_role(request)
+    require_action(request, "pipeline.cancel_run", target_type="pipeline_run", target_id=run_id)
     if not _SAFE_RUN_ID_RE.fullmatch(run_id):
         raise ApiError(
             status_code=400,
@@ -685,17 +681,6 @@ def _ok(request: Request, data: Any) -> dict[str, Any]:
         "status": "ok",
         "data": data,
     }
-
-
-def _require_operator_role(request: Request) -> None:
-    role = request.headers.get("X-User-Role")
-    if _allow_dev_role_header() and role is not None and role.strip().lower() in _OPERATOR_ROLES:
-        return
-    raise ApiError(
-        status_code=403,
-        code="FORBIDDEN",
-        message="Operator role required.",
-    )
 
 
 def _cycle_id_prefix_for_source(source: str) -> str:

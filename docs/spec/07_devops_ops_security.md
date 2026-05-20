@@ -162,6 +162,12 @@ checks_json 示例：
 | model_admin | 注册模型版本、切换 active model。 |
 | sys_admin | 管理数据源、用户、系统配置。 |
 
+M17 后端授权以同一份 canonical auth context 和 action matrix 为准：缺失或无效认证返回
+`401 AUTH_REQUIRED`，已认证但角色不满足矩阵返回 `403 RBAC_FORBIDDEN`，配置了 live IdP
+但未完成 opt-in live proof 时返回 `503 RELEASE_BLOCKED`。前端 dev/test role override 只用于
+本地确定性验证，不构成生产认证；生产 readiness 证据必须区分 `policy_simulated`、
+`backend_route_executed`、`live_proof` 和 `release_blocked`，且 fast CI 不调用 live IdP。
+
 ## 8. 安全边界
 
 - 下载器只能访问白名单外部域和路径。
