@@ -255,6 +255,40 @@ def test_hindcast_submit_permission_denied_for_viewer_and_analyst() -> None:
         assert viewer.json()["error"]["code"] == "RBAC_FORBIDDEN"
 
 
+def test_hindcast_submit_missing_auth_wins_over_domain_validation() -> None:
+    with _store() as session, _api_client(session) as client:
+        response = client.post(
+            "/api/v1/hindcast/submit",
+            json={
+                **_submit_body(),
+                "source_id": "GFS",
+                "start_time": "2024-01-01T00:00:00Z",
+                "end_time": "2023-01-01T00:00:00Z",
+            },
+        )
+
+        assert response.status_code == 401
+        body = response.json()
+        assert body["error"]["code"] == "AUTH_REQUIRED"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["action_id"] == "pipeline.rerun_cycle"
+        assert decision["no_mutation_expected"] is True
+        assert list(session.scalars(select(PipelineJob))) == []
+
+
+def test_hindcast_submit_allowed_invalid_source_returns_domain_validation_error() -> None:
+    with _store() as session, _api_client(session) as client:
+        response = client.post(
+            "/api/v1/hindcast/submit",
+            json={**_submit_body(), "source_id": "GFS"},
+            headers={"X-User-Role": "operator"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "INVALID_SOURCE_ID"
+        assert list(session.scalars(select(PipelineJob))) == []
+
+
 def test_data_isolation_forecast_series_default_excludes_hindcast() -> None:
     store = _ForecastIsolationStore()
     app.dependency_overrides[forecast_routes.get_forecast_store] = lambda: store

@@ -959,11 +959,12 @@ class PsycopgModelRegistryStore:
                 entity_id,
                 details
             )
-            VALUES (%s, %s, 'model_instance.active.set', 'model_instance', %s, %s)
+            VALUES (%s, %s, %s, 'model_instance', %s, %s)
             """,
             (
                 policy_decision.actor_id,
                 ",".join(policy_decision.roles),
+                policy_decision.action_id,
                 updated["model_id"],
                 self._json(details),
             ),

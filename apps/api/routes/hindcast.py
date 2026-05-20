@@ -57,6 +57,7 @@ def get_hindcast_config() -> HindcastConfig:
 
 
 def require_hindcast_submit_action(body: HindcastSubmitRequest, request: Request) -> PolicyDecision:
+    decision = require_action(request, "pipeline.rerun_cycle", target_type="hindcast", target_id=body.model_id)
     if body.source_id.upper() != "ERA5":
         raise ApiError(
             status_code=400,
@@ -65,7 +66,7 @@ def require_hindcast_submit_action(body: HindcastSubmitRequest, request: Request
             details={"source_id": body.source_id},
         )
     _validate_time_range(body.start_time, body.end_time)
-    return require_action(request, "pipeline.rerun_cycle", target_type="hindcast", target_id=body.model_id)
+    return decision
 
 
 @router.post("/hindcast/submit")

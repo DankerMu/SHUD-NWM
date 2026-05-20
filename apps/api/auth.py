@@ -143,38 +143,33 @@ def evaluate_request_action(
 
 
 def auth_context_from_request(request: Request) -> AuthContext | None:
-    if _live_auth_release_blocked():
-        return AuthContext(
-            actor_id="release-blocked",
-            roles=(),
-            auth_mode="live_idp",
-            live_backend_auth_executed=False,
-        )
-
-    if _trusted_live_auth_proof_enabled() and _internal_live_proof_token_matches(request):
+    if _live_auth_requested():
+        if not _internal_live_proof_token_matches(request):
+            return _release_blocked_auth_context()
         live_actor = request.headers.get("X-Live-User-ID", "").strip()
         raw_roles = _raw_roles(request.headers.get("X-Live-User-Roles", ""))
         mapped_roles = _parse_roles(request.headers.get("X-Live-User-Roles", ""))
         provider = request.headers.get("X-Live-Provider", "").strip() or "test-internal-live-proof"
-        if live_actor:
-            return AuthContext(
-                actor_id=live_actor,
-                roles=mapped_roles,
-                auth_mode="live_idp",
-                live_backend_auth_executed=True,
-                provider_metadata={
-                    "provider": provider,
-                    "contract": "test_internal_trusted_live_proof",
-                    "credential_header": REDACTION_MARKER,
-                },
-                role_mapping_result={
-                    "raw_roles_present": bool(raw_roles),
-                    "raw_roles": raw_roles,
-                    "mapped_roles": mapped_roles,
-                    "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
-                    "mapping_status": "mapped" if mapped_roles else "unmapped",
-                },
-            )
+        if not live_actor:
+            return _release_blocked_auth_context()
+        return AuthContext(
+            actor_id=live_actor,
+            roles=mapped_roles,
+            auth_mode="live_idp",
+            live_backend_auth_executed=True,
+            provider_metadata={
+                "provider": provider,
+                "contract": "test_internal_trusted_live_proof",
+                "credential_header": REDACTION_MARKER,
+            },
+            role_mapping_result={
+                "raw_roles_present": bool(raw_roles),
+                "raw_roles": raw_roles,
+                "mapped_roles": mapped_roles,
+                "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
+                "mapping_status": "mapped" if mapped_roles else "unmapped",
+            },
+        )
 
     if _allow_dev_role_header() and not _production_mode():
         roles = _parse_roles(request.headers.get("X-User-Role", ""))
@@ -490,11 +485,23 @@ def _production_mode() -> bool:
     return os.getenv("NHMS_AUTH_MODE", "").strip().lower() in {"production", "live", "live_idp"}
 
 
-def _live_auth_release_blocked() -> bool:
+def _live_auth_requested() -> bool:
     auth_backend = os.getenv("AUTH_BACKEND", "").strip().lower()
     auth_mode = os.getenv("NHMS_AUTH_MODE", "").strip().lower()
-    live_requested = auth_backend in {"live", "live_idp", "oidc", "saml"} or auth_mode in {"live", "live_idp"}
-    return live_requested and not _trusted_live_auth_proof_available()
+    return auth_backend in {"live", "live_idp", "oidc", "saml"} or auth_mode in {"live", "live_idp"}
+
+
+def _live_auth_release_blocked() -> bool:
+    return _live_auth_requested() and not _trusted_live_auth_proof_available()
+
+
+def _release_blocked_auth_context() -> AuthContext:
+    return AuthContext(
+        actor_id="release-blocked",
+        roles=(),
+        auth_mode="live_idp",
+        live_backend_auth_executed=False,
+    )
 
 
 def _trusted_live_auth_proof_enabled() -> bool:

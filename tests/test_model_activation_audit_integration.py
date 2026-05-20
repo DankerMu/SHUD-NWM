@@ -92,7 +92,7 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     audit = audit_rows[0]
     assert audit["actor"] == "dev-test:model_admin"
     assert audit["actor_role"] == "model_admin"
-    assert audit["action"] == "model_instance.active.set"
+    assert audit["action"] == "models.activate"
     assert audit["entity_type"] == "model_instance"
     assert audit["entity_id"] == ids["basins_model_id"]
     assert _has_no_sensitive_uri_parts(audit["details"]["model_package_uri"])

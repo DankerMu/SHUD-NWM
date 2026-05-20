@@ -462,14 +462,16 @@ def _preflight_payload(config: ProductionOpsConfig) -> dict[str, Any]:
         "rollback_drill_scope": config.rollback_scope,
         "dependency_evidence": {
             name: {
-                "root": str(config.dependency_roots.get(name)) if config.dependency_roots.get(name) else None,
+                "root": _path_for_evidence(config.dependency_roots.get(name), config=config)
+                if config.dependency_roots.get(name)
+                else None,
                 "explicit_status": config.dependency_statuses.get(name),
                 "expected_issue": contract["issue"],
                 "expected_schema": contract["schema"],
             }
             for name, contract in DEPENDENCY_CONTRACTS.items()
         },
-        "evidence_root": str(config.evidence_root),
+        "evidence_root": _path_for_evidence(config.evidence_root, config=config),
         "evidence_dir": _relative_evidence_dir(config),
         "execution_policy": {
             "default_fast_path": "deterministic_fixture",
@@ -500,7 +502,7 @@ def _production_config_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 value = _default_setting_value(config, service, setting)
                 source = "generated_default"
             _validate_config_value_safe(value, service, setting)
-            settings[setting] = value
+            settings[setting] = _setting_value_for_evidence(value, service=service, setting=setting, config=config)
             setting_source_metadata.append(
                 {
                     "setting": setting,
@@ -837,7 +839,12 @@ def _dependency_closure_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     dependencies = []
     blockers = []
     for name in DEPENDENCY_CONTRACTS:
-        dependency = _read_dependency(name, config.dependency_roots.get(name), config.dependency_statuses.get(name))
+        dependency = _read_dependency(
+            name,
+            config.dependency_roots.get(name),
+            config.dependency_statuses.get(name),
+            config=config,
+        )
         dependencies.append(dependency)
         if dependency["status"] != "accepted":
             blockers.append(
@@ -949,7 +956,7 @@ def _environment_payload(config: ProductionOpsConfig) -> dict[str, Any]:
         "captured_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "python_version": sys.version.split()[0],
         "platform": platform.platform(),
-        "cwd": str(Path.cwd()),
+        "cwd": _path_for_evidence(Path.cwd(), config=config),
         "env": {
             key: _environment_value_for_evidence(key, os.getenv(key, ""))
             for key in env_keys
@@ -963,7 +970,13 @@ def _environment_payload(config: ProductionOpsConfig) -> dict[str, Any]:
     }
 
 
-def _read_dependency(name: str, root: Path | None, explicit_status: str | None) -> dict[str, Any]:
+def _read_dependency(
+    name: str,
+    root: Path | None,
+    explicit_status: str | None,
+    *,
+    config: ProductionOpsConfig,
+) -> dict[str, Any]:
     contract = DEPENDENCY_CONTRACTS[name]
     if explicit_status:
         status = _dependency_status_from_explicit(explicit_status)
@@ -994,7 +1007,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
     try:
         summary_evidence = _dependency_summary_path(root, name)
     except ProductionOpsValidationError as error:
-        return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code)
+        return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code, config=config)
     if summary_evidence is None:
         return _invalid_dependency(
             name,
@@ -1002,12 +1015,20 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             "not_executed",
             "Dependency evidence root has no summary.json.",
             error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_MISSING",
+            config=config,
         )
     summary_path = summary_evidence.path
     try:
         summary, summary_sha256 = _read_dependency_summary_json(summary_evidence)
     except ProductionOpsValidationError as error:
-        return _invalid_dependency(name, summary_path, "blocked", error.message, error_code=error.error_code)
+        return _invalid_dependency(
+            name,
+            summary_path,
+            "blocked",
+            error.message,
+            error_code=error.error_code,
+            config=config,
+        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         return _invalid_dependency(
             name,
@@ -1015,6 +1036,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             "blocked",
             f"Dependency summary could not be read: {error}",
             error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+            config=config,
         )
     if not isinstance(summary, Mapping):
         return _invalid_dependency(
@@ -1023,11 +1045,19 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             "blocked",
             "Dependency summary JSON must be an object.",
             error_code="PRODUCTION_OPS_DEPENDENCY_SUMMARY_INVALID",
+            config=config,
         )
     try:
         _validate_dependency_summary_complexity(summary)
     except ProductionOpsValidationError as error:
-        return _invalid_dependency(name, summary_path, "blocked", error.message, error_code=error.error_code)
+        return _invalid_dependency(
+            name,
+            summary_path,
+            "blocked",
+            error.message,
+            error_code=error.error_code,
+            config=config,
+        )
     schema_matches = summary.get("schema") == contract["schema"]
     issue_matches = summary.get("issue") == contract["issue"]
     summary_status = str(summary.get("status", "unknown"))
@@ -1042,6 +1072,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             ),
             summary=summary,
             error_code="PRODUCTION_OPS_DEPENDENCY_CONTRACT_MISMATCH",
+            config=config,
         )
     if summary_status in EXPLICIT_BLOCKED_DEPENDENCY_STATUSES:
         status = summary_status if summary_status in {"blocked", "not_executed"} else "blocked"
@@ -1056,6 +1087,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             final_production_readiness_claimed=False,
             error_code="PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
             reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
+            config=config,
         )
     if summary_status not in contract["allowed_statuses"]:
         return _dependency_from_summary(
@@ -1069,11 +1101,12 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             final_production_readiness_claimed=False,
             error_code="PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
             reason=f"Dependency summary status {summary_status!r} is not accepted for final ops readiness.",
+            config=config,
         )
     try:
         receipt_evidence = _dependency_acceptance_receipt_path(summary_evidence, name)
     except ProductionOpsValidationError as error:
-        return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code)
+        return _invalid_dependency(name, root, "blocked", error.message, error_code=error.error_code, config=config)
     if receipt_evidence is None:
         accepted = False
         reason = (
@@ -1086,7 +1119,14 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
         try:
             receipt = _read_dependency_receipt_json(receipt_evidence)
         except ProductionOpsValidationError as error:
-            return _invalid_dependency(name, receipt_path, "blocked", error.message, error_code=error.error_code)
+            return _invalid_dependency(
+                name,
+                receipt_path,
+                "blocked",
+                error.message,
+                error_code=error.error_code,
+                config=config,
+            )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             return _invalid_dependency(
                 name,
@@ -1094,6 +1134,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
                 "blocked",
                 f"Dependency acceptance receipt could not be read: {error}",
                 error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID",
+                config=config,
             )
         if not isinstance(receipt, Mapping):
             return _invalid_dependency(
@@ -1102,11 +1143,19 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
                 "blocked",
                 "Dependency acceptance receipt JSON must be an object.",
                 error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_INVALID",
+                config=config,
             )
         try:
             _validate_dependency_receipt_complexity(receipt)
         except ProductionOpsValidationError as error:
-            return _invalid_dependency(name, receipt_path, "blocked", error.message, error_code=error.error_code)
+            return _invalid_dependency(
+                name,
+                receipt_path,
+                "blocked",
+                error.message,
+                error_code=error.error_code,
+                config=config,
+            )
         accepted, reason = _has_accepted_dependency_evidence(
             name,
             contract,
@@ -1116,7 +1165,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             summary_sha256=summary_sha256,
             receipt_path=receipt_path,
         )
-        receipt = {**receipt, "receipt_path": str(receipt_path)}
+        receipt = {**receipt, "receipt_path": _path_for_evidence(receipt_path, config=config)}
     if not accepted:
         deterministic_fixture = _summary_has_deterministic_evidence(summary, dependency=name)
         return _dependency_from_summary(
@@ -1130,6 +1179,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
             final_production_readiness_claimed=False,
             error_code="PRODUCTION_OPS_DEPENDENCY_ACCEPTED_EVIDENCE_MISSING",
             reason=reason,
+            config=config,
         )
     release_blockers = _accepted_dependency_live_proof_blockers(name, summary)
     return _dependency_from_summary(
@@ -1147,6 +1197,7 @@ def _read_dependency(name: str, root: Path | None, explicit_status: str | None) 
         ),
         receipt=receipt,
         release_blockers=release_blockers,
+        config=config,
     )
 
 
@@ -1164,6 +1215,7 @@ def _dependency_from_summary(
     error_code: str | None = None,
     receipt: Mapping[str, Any] | None = None,
     release_blockers: Sequence[Mapping[str, Any]] = (),
+    config: ProductionOpsConfig,
 ) -> dict[str, Any]:
     payload = {
         "dependency": name,
@@ -1171,10 +1223,10 @@ def _dependency_from_summary(
         "schema": summary.get("schema"),
         "status": status,
         "execution_mode": execution_mode,
-        "summary_path": str(summary_path),
+        "summary_path": _path_for_evidence(summary_path, config=config),
         "summary_status": str(summary.get("status", "unknown")),
         "run_id": summary.get("run_id"),
-        "evidence_dir": summary.get("evidence_dir"),
+        "evidence_dir": _redact_evidence_paths(summary.get("evidence_dir"), config=config),
         "deterministic_fixture": deterministic_fixture,
         "summary_deterministic_fixture": bool(summary.get("deterministic_fixture", False)),
         "final_production_readiness_claimed": final_production_readiness_claimed,
@@ -1443,6 +1495,7 @@ def _invalid_dependency(
     *,
     summary: Mapping[str, Any] | None = None,
     error_code: str = "PRODUCTION_OPS_DEPENDENCY_NOT_ACCEPTED",
+    config: ProductionOpsConfig,
 ) -> dict[str, Any]:
     contract = DEPENDENCY_CONTRACTS[name]
     return {
@@ -1451,7 +1504,7 @@ def _invalid_dependency(
         "expected_schema": contract["schema"],
         "status": status,
         "execution_mode": "not_executed",
-        "summary_path": str(path),
+        "summary_path": _path_for_evidence(path, config=config),
         "summary_status": summary.get("status", "unknown") if summary else "unknown",
         "error_code": error_code,
         "deterministic_fixture": False,
@@ -1571,7 +1624,7 @@ def _dependency_artifact_references(config: ProductionOpsConfig, drill: str) -> 
                     {
                         "dependency": name,
                         "drill": drill,
-                        "summary": str(root),
+                        "summary": _path_for_evidence(root, config=config),
                         "error_code": error.error_code,
                         "status": "blocked",
                     }
@@ -1581,7 +1634,10 @@ def _dependency_artifact_references(config: ProductionOpsConfig, drill: str) -> 
                     {
                         "dependency": name,
                         "drill": drill,
-                        "summary": str(summary.path if summary is not None else root / "summary.json"),
+                        "summary": _path_for_evidence(
+                            summary.path if summary is not None else root / "summary.json",
+                            config=config,
+                        ),
                     }
                 )
     if not references:
@@ -1848,6 +1904,19 @@ def _default_setting_value(config: ProductionOpsConfig, service: str, setting: s
     return f"deterministic-{service}-{setting.lower()}"
 
 
+def _setting_value_for_evidence(
+    value: str,
+    *,
+    service: str,
+    setting: str,
+    config: ProductionOpsConfig,
+) -> str:
+    del service
+    if "ROOT" in setting or "PATH" in setting:
+        return _path_for_evidence(Path(value), config=config) or value
+    return value
+
+
 def _is_unsafe_setting(service: str, setting: str, value: str) -> bool:
     return value.startswith("deterministic://") or "deterministic-" in value or (
         service == "frontend" and setting == "VITE_AUTH_MODE"
@@ -1895,6 +1964,34 @@ def _relative_evidence_dir(config: ProductionOpsConfig) -> str:
         return str(config.lane_dir.relative_to(config.evidence_root))
     except ValueError:
         return str(redact_audit_payload(str(config.lane_dir)))
+
+
+def _path_for_evidence(path: Path | None, *, config: ProductionOpsConfig) -> str | None:
+    if path is None:
+        return None
+    resolved = path.expanduser().resolve(strict=False)
+    for base, prefix in ((config.evidence_root, "evidence-root"), (Path.cwd(), "workspace")):
+        try:
+            relative = resolved.relative_to(base.expanduser().resolve(strict=False))
+        except ValueError:
+            continue
+        return prefix if str(relative) == "." else f"{prefix}/{relative.as_posix()}"
+    return str(redact_audit_payload(str(resolved)))
+
+
+def _redact_evidence_paths(value: Any, *, config: ProductionOpsConfig) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _redact_evidence_paths(nested, config=config) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_redact_evidence_paths(item, config=config) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_evidence_paths(item, config=config) for item in value)
+    if isinstance(value, str):
+        if value.startswith("/") or value.startswith("~") or re.match(r"^[A-Za-z]:\\", value):
+            return _path_for_evidence(Path(value), config=config)
+        if str(config.evidence_root) in value or str(Path.cwd()) in value:
+            return redact_audit_payload(value)
+    return value
 
 
 def _target_type_for_action(action: str) -> str:

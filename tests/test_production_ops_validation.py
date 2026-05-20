@@ -207,14 +207,45 @@ def test_validate_ops_summary_redacts_absolute_evidence_path(tmp_path: Path) -> 
     validate_ops(ProductionOpsConfig.from_env(evidence_root=evidence_root, run_id="redacted_path"))
 
     lane_dir = evidence_root / "redacted_path" / "ops"
-    summary = _read_json(lane_dir / "summary.json")
-    environment = _read_json(lane_dir / "environment.json")
-    auth = _read_json(lane_dir / "auth_rbac.json")
-    rendered = json.dumps({"summary": summary, "environment": environment, "auth": auth})
+    artifacts = {
+        path.name: _read_json(path)
+        for path in lane_dir.glob("*.json")
+    }
+    summary = artifacts["summary.json"]
+    rendered = json.dumps(artifacts)
 
     assert summary["evidence_dir"] == "redacted_path/ops"
+    assert str(tmp_path) not in rendered
     assert str(evidence_root) not in rendered
     assert str(lane_dir) not in rendered
+    assert str(Path.cwd()) not in rendered
+
+
+def test_validate_ops_dependency_paths_are_redacted_from_json_artifacts(tmp_path: Path) -> None:
+    dependency_root = tmp_path / "slurm-dependency-root"
+    dependency_root.mkdir()
+    _write_dependency_summary(
+        dependency_root / "summary.json",
+        "slurm",
+        147,
+        "nhms.production_closure.slurm.v1",
+        "submitted",
+        accepted=True,
+    )
+
+    validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="dependency_paths",
+            slurm_evidence_root=dependency_root,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "dependency_paths" / "ops"
+    rendered = json.dumps({path.name: _read_json(path) for path in lane_dir.glob("*.json")})
+    assert str(tmp_path) not in rendered
+    assert str(dependency_root) not in rendered
+    assert str(Path.cwd()) not in rendered
 
 
 def test_validate_ops_monitoring_alerts_and_rollback_drills_cover_required_surfaces(tmp_path: Path) -> None:
@@ -355,9 +386,8 @@ def test_validate_ops_dependency_closure_requires_external_acceptance_receipt_fo
     assert accepted_slurm["accepted_dependency_evidence"]["summary_sha256"] == hashlib.sha256(
         summary_path.read_bytes()
     ).hexdigest()
-    assert accepted_slurm["accepted_dependency_evidence"]["receipt_path"] == str(
-        root / "accepted_dependency_evidence.json"
-    )
+    assert accepted_slurm["accepted_dependency_evidence"]["receipt_path"] == "[redacted]"
+    assert str(root) not in json.dumps(accepted_slurm)
 
 
 def test_validate_ops_accepts_object_store_fast_summary_with_live_proof_blocker(tmp_path: Path) -> None:
@@ -1584,14 +1614,15 @@ def test_validate_ops_resolves_dependency_summary_shapes_in_rollback_references(
 
     rollback = _read_json(tmp_path / "artifacts" / "dep_shapes" / "ops" / "rollback_drills.json")
     first_drill_refs = rollback["drills"][0]["dependency_artifact_references"]
-    assert {"dependency": "slurm", "drill": "bad_model_activation", "summary": str(slurm_root / "summary.json")} in (
+    assert {"dependency": "slurm", "drill": "bad_model_activation", "summary": "[redacted]"} in (
         first_drill_refs
     )
     assert {
         "dependency": "object_store",
         "drill": "bad_model_activation",
-        "summary": str(object_store_root / "summary.json"),
+        "summary": "[redacted]",
     } in first_drill_refs
+    assert str(run_root) not in json.dumps(first_drill_refs)
 
 
 def test_validate_ops_live_drill_scope_remains_release_blocked_without_receipts(tmp_path: Path) -> None:

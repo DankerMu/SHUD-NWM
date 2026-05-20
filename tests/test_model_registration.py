@@ -35,6 +35,7 @@ from workers.model_registry.validator import (
 
 class FakeModelRegistryStore:
     def __init__(self) -> None:
+        self.write_calls: list[str] = []
         self.models: dict[str, dict[str, Any]] = {
             "inactive_model": {
                 "model_id": "inactive_model",
@@ -91,6 +92,7 @@ class FakeModelRegistryStore:
         }
 
     def create_basin_with_version(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_basin_with_version")
         if payload["basin_id"] == "dupe":
             raise DuplicateResourceError("basin_id already exists: dupe")
         return {
@@ -99,11 +101,13 @@ class FakeModelRegistryStore:
         }
 
     def create_basin_version(self, basin_id: str, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_basin_version")
         if basin_id == "missing":
             raise MissingResourceError("basin_id not found: missing")
         return {"basin_id": basin_id, "basin_version_id": payload.get("basin_version_id") or f"{basin_id}_v01"}
 
     def create_river_network(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_river_network")
         if payload["basin_version_id"] == "missing":
             raise InvalidReferenceError("basin_version_id does not exist: missing")
         return {"river_network_version": {"river_network_version_id": "basin_rivnet_v01"}, "segment_count": 1}
@@ -173,11 +177,13 @@ class FakeModelRegistryStore:
         }
 
     def create_mesh_version(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_mesh_version")
         if payload["version_label"] == "":
             raise InvalidPayloadError("version_label must contain at least one alphanumeric character.")
         return {"mesh_version_id": payload.get("mesh_version_id") or "basin_mesh_v01"}
 
     def create_model(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_model")
         if payload["model_id"] == "registry_error":
             raise ModelRegistryError(
                 "DATABASE_URL=postgresql://nhms:secret@localhost:5432/nhms failed in /srv/nhms/registry.py"
@@ -190,6 +196,7 @@ class FakeModelRegistryStore:
         return record
 
     def set_model_active(self, model_id: str, active: bool, **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("set_model_active")
         if model_id not in self.models:
             raise MissingResourceError(f"model_id not found: {model_id}")
         model = self.models[model_id]
@@ -219,6 +226,7 @@ class FakeModelRegistryStore:
         return dict(self.models[model_id])
 
     def create_crosswalk_entries(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_crosswalk_entries")
         return {"count": len(payload["entries"]), "items": payload["entries"]}
 
 
@@ -530,6 +538,113 @@ async def test_river_network_invalid_reference_returns_422(fake_store: FakeModel
         message_contains="basin_version_id",
         error_type="InvalidReferenceError",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "payload", "headers", "expected_status", "expected_code"),
+    [
+        (
+            "/api/v1/river-networks",
+            {
+                "basin_version_id": "basin_v01",
+                "version_label": "v01",
+                "segments": [
+                    {
+                        "river_segment_id": f"seg_{index}",
+                        "geom": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+                    }
+                    for index in range(1500)
+                ],
+            },
+            {},
+            401,
+            "AUTH_REQUIRED",
+        ),
+        (
+            "/api/v1/river-segment-crosswalks",
+            {
+                "river_network_version_id": "basin_rivnet_v01",
+                "entries": [
+                    {"river_segment_id": f"seg_{index}", "source": "nwm", "external_id": str(index)}
+                    for index in range(1500)
+                ],
+            },
+            {"X-User-Role": "viewer"},
+            403,
+            "RBAC_FORBIDDEN",
+        ),
+        (
+            "/api/v1/models",
+            {
+                "model_id": "large_model",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/large_model/package/",
+                "resource_profile": {
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[90 + index / 1000, 25 + index / 1000] for index in range(3000)],
+                    }
+                },
+            },
+            {},
+            401,
+            "AUTH_REQUIRED",
+        ),
+    ],
+)
+async def test_protected_model_mutation_body_routes_auth_before_large_payload_work(
+    fake_store: FakeModelRegistryStore,
+    path: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(path, json=payload, headers=headers)
+
+    assert response.status_code == expected_status
+    body = response.json()
+    assert body["error"]["code"] == expected_code
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["no_mutation_expected"] is True
+    assert fake_store.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_model_registry_admin_write_success_exposes_allowed_policy_evidence(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/mesh-versions",
+            headers={"X-User-Role": "model_admin", "X-User-ID": "alice"},
+            json={
+                "basin_version_id": "basin_v01",
+                "version_label": "v02",
+                "mesh_uri": "s3://nhms/mesh.sp",
+            },
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "ok"
+    decision = body["auth_policy_decisions"][0]
+    assert decision["decision"] == "allow"
+    assert decision["action_id"] == "models.switch_version"
+    assert decision["actor_id"] == "alice"
+    assert decision["roles"] == ["model_admin"]
+    assert decision["target"] == {"type": "model_registry", "id": "mesh-versions"}
+    assert decision["reason_code"] == "RBAC_ALLOWED"
+    assert decision["execution_mode"] == "backend_route_executed"
+    assert fake_store.write_calls == ["create_mesh_version"]
 
 
 @pytest.mark.asyncio
@@ -1607,8 +1722,8 @@ def test_set_model_active_writes_audit_details_after_successful_update(
     assert result["resource_profile"]["manifest_uri"] == "s3://nhms/models/basins_model/v1/manifest.json"
     assert sum("INSERT INTO ops.audit_log" in statement for statement in cursor.statements) == 1
     audit_parameters = cursor.parameters[-1]
-    assert audit_parameters[:3] == ("trusted-internal:model-registry", "sys_admin", "basins_model")
-    details = audit_parameters[3]
+    assert audit_parameters[:4] == ("trusted-internal:model-registry", "sys_admin", "models.activate", "basins_model")
+    details = audit_parameters[4]
     assert "other" not in str(details)
     assert "token=" not in str(details)
     assert "user:pass@" not in str(details)

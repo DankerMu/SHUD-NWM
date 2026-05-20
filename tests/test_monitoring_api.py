@@ -496,6 +496,56 @@ def test_release_blocked_auth_does_not_mutate(monkeypatch: Any) -> None:
         assert store.get_job("job_release_blocked").status == "running"
 
 
+def test_live_auth_requested_with_configured_proof_but_missing_proof_release_blocks(monkeypatch: Any) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    with _store() as store:
+        gateway = _MockGateway()
+        _create_job(store, job_id="job_missing_proof", run_id="run_missing_proof", status="running")
+        with _client(store, gateway, allow_dev_role_header=True) as client:
+            response = client.post(
+                "/api/v1/runs/run_missing_proof/cancel",
+                headers={"X-User-Role": "operator"},
+            )
+
+        body = response.json()
+        assert response.status_code == 503
+        assert body["error"]["code"] == "RELEASE_BLOCKED"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["execution_mode"] == "release_blocked"
+        assert decision["no_mutation_expected"] is True
+        assert decision["auth_mode"] == "live_idp"
+        assert decision["execution_mode"] != "backend_route_executed"
+        assert gateway.cancelled == []
+        assert store.get_job("job_missing_proof").status == "running"
+
+
+def test_live_auth_requested_with_wrong_proof_release_blocks(monkeypatch: Any) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    with _store() as store:
+        gateway = _MockGateway()
+        _create_job(store, job_id="job_wrong_proof", run_id="run_wrong_proof", status="running")
+        with _client(store, gateway, allow_dev_role_header=True) as client:
+            response = client.post(
+                "/api/v1/runs/run_wrong_proof/cancel",
+                headers={"X-User-Role": "operator", "X-NHMS-Internal-Live-Proof": "wrong-token"},
+            )
+
+        body = response.json()
+        assert response.status_code == 503
+        assert body["error"]["code"] == "RELEASE_BLOCKED"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["execution_mode"] == "release_blocked"
+        assert decision["no_mutation_expected"] is True
+        assert decision["auth_mode"] == "live_idp"
+        assert decision["execution_mode"] != "backend_route_executed"
+        assert gateway.cancelled == []
+        assert store.get_job("job_wrong_proof").status == "running"
+
+
 def test_retry_service_direct_call_requires_policy_evidence() -> None:
     with _store() as store:
         _create_job(store, job_id="job_direct_retry", run_id="run_direct_retry", status="failed")

@@ -1,12 +1,14 @@
 import os
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from apps.api.errors import register_error_handlers
+from apps.api.auth import audit_record, evaluate_request_action
+from apps.api.errors import error_response, register_error_handlers
 from apps.api.routes.best_available import router as best_available_router
 from apps.api.routes.data_sources import router as data_sources_router
 from apps.api.routes.flood_alerts import TILE_X_DESCRIPTION, TILE_Y_DESCRIPTION
@@ -36,6 +38,75 @@ app = FastAPI(
 )
 
 register_error_handlers(app)
+
+
+_PRE_BODY_PROTECTED_MUTATIONS: dict[tuple[str, str], tuple[str, str, str]] = {
+    ("POST", "/api/v1/basins"): ("models.switch_version", "model_registry", "basins"),
+    ("POST", "/api/v1/river-networks"): ("models.switch_version", "model_registry", "river-networks"),
+    ("POST", "/api/v1/mesh-versions"): ("models.switch_version", "model_registry", "mesh-versions"),
+    ("POST", "/api/v1/models"): ("models.switch_version", "model_registry", "models"),
+    (
+        "POST",
+        "/api/v1/river-segment-crosswalks",
+    ): ("models.switch_version", "model_registry", "river-segment-crosswalks"),
+    ("POST", "/api/v1/hindcast/submit"): ("pipeline.rerun_cycle", "hindcast", "pre-body"),
+}
+
+
+@app.middleware("http")
+async def protected_mutation_auth_guard(request: Any, call_next: Any) -> Any:
+    path_policy = _protected_mutation_policy(request.method, request.url.path)
+    if path_policy is None:
+        return await call_next(request)
+
+    action_id, target_type, target_id = path_policy
+    decision = evaluate_request_action(request, action_id, target_type=target_type, target_id=target_id)
+    if decision.decision == "allow":
+        return await call_next(request)
+
+    audit = audit_record(decision, request_id=getattr(request.state, "request_id", None))
+    details = {"policy_decision": decision.to_dict(), "audit_record": audit}
+    if decision.decision == "release_blocked":
+        details["removal_criteria"] = "Configure and prove live backend identity-provider role mapping."
+        return error_response(
+            request,
+            status_code=503,
+            code="RELEASE_BLOCKED",
+            message=decision.reason,
+            details=details,
+        )
+    if decision.reason_code == "AUTH_REQUIRED":
+        return error_response(
+            request,
+            status_code=401,
+            code="AUTH_REQUIRED",
+            message=decision.reason,
+            details=details,
+        )
+    return error_response(
+        request,
+        status_code=403,
+        code="RBAC_FORBIDDEN",
+        message=decision.reason,
+        details=details,
+    )
+
+
+def _protected_mutation_policy(method: str, path: str) -> tuple[str, str, str] | None:
+    policy = _PRE_BODY_PROTECTED_MUTATIONS.get((method.upper(), path))
+    if policy is not None:
+        return policy
+    if method.upper() == "POST" and path.startswith("/api/v1/basins/") and path.endswith("/versions"):
+        basin_id = path.removeprefix("/api/v1/basins/").removesuffix("/versions")
+        if basin_id and "/" not in basin_id:
+            return ("models.switch_version", "model_registry", basin_id)
+    if method.upper() == "PUT" and path.startswith("/api/v1/models/") and path.endswith("/active"):
+        model_id = path.removeprefix("/api/v1/models/").removesuffix("/active")
+        if model_id and "/" not in model_id:
+            return ("models.activate", "model_instance", model_id)
+    return None
+
+
 app.include_router(models_router)
 app.include_router(forecast_router)
 app.include_router(hindcast_router)
