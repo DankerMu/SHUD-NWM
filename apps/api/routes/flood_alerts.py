@@ -315,10 +315,7 @@ def list_layers(
         if run is None:
             return _ok(request, [])
     resolved_run_id = str(run["run_id"]) if run else None
-    basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
-    river_network_version_id = (
-        str(run["river_network_version_id"]) if run and run.get("river_network_version_id") else None
-    )
+    basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="layers")
     source_version = _run_source_version(run) if run else None
     river_network_source_version = (
         _river_network_source_version(session, basin_version_id) if basin_version_id is not None else source_version
@@ -360,10 +357,7 @@ def list_layer_valid_times(
         if run is None:
             return _ok(request, _empty_valid_times().model_dump())
         run_id = str(run["run_id"]) if run else None
-    basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
-    river_network_version_id = (
-        str(run["river_network_version_id"]) if run and run.get("river_network_version_id") else None
-    )
+    basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id=layer_id)
     if duration is not None:
         validate_identifier(duration, "duration")
     if layer_id in {"flood-return-period", "warning-level"}:
@@ -1419,6 +1413,18 @@ def _default_layer_catalog(
     river_network_version_id: str | None = None,
     river_network_source_version: str | None = None,
 ) -> list[Layer]:
+    if run_id is not None and (basin_version_id is None or river_network_version_id is None):
+        raise ApiError(
+            status_code=404,
+            code="MVT_SOURCE_IDENTITY_NOT_FOUND",
+            message="Run-scoped MVT source identity was not found for the selected ready run.",
+            details={
+                "layer_id": "layers",
+                "run_id": run_id,
+                "basin_version_id": basin_version_id,
+                "river_network_version_id": river_network_version_id,
+            },
+        )
     definitions = [
         ("discharge", "Discharge", "hydrology", ["q_down"]),
         ("water-level", "Water level", "hydrology", ["water_level"]),

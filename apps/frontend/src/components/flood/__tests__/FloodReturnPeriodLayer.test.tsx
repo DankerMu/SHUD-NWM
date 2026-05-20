@@ -135,6 +135,44 @@ describe('FloodReturnPeriodLayer', () => {
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
   })
 
+  it('does not register a vector source when MVT metadata has no advertised valid times', async () => {
+    sourceProps.length = 0
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal('fetch', vi.fn())
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-1"
+        validTime="2026-05-03T06:00:00Z"
+        metadata={{ ...mvtMetadata, valid_times: [] }}
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenCalledWith(expect.stringContaining('未提供当前 valid_time')))
+    expect(sourceProps).toHaveLength(0)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('does not register a vector source when requested valid time is not advertised by MVT metadata', async () => {
+    sourceProps.length = 0
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal('fetch', vi.fn())
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-1"
+        validTime="2026-05-03T12:00:00Z"
+        metadata={mvtMetadata}
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenCalledWith(expect.stringContaining('未提供当前 valid_time')))
+    expect(sourceProps).toHaveLength(0)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('recreates the vector source when route or metadata identity changes', async () => {
     sourceProps.length = 0
     layerProps.length = 0
@@ -146,7 +184,11 @@ describe('FloodReturnPeriodLayer', () => {
     await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'vector' }))
     const initialSource = sourceProps.at(-1)
 
-    const run2Metadata = { ...mvtMetadata, source_refs: { ...mvtMetadata.source_refs, run_id: 'run-2' } }
+    const run2Metadata = {
+      ...mvtMetadata,
+      valid_times: ['2026-05-03T06:00:00Z', '2026-05-03T12:00:00Z'],
+      source_refs: { ...mvtMetadata.source_refs, run_id: 'run-2' },
+    }
     rerender(<FloodReturnPeriodLayer runId="run-2" validTime="2026-05-03T06:00:00Z" metadata={run2Metadata} />)
     await waitFor(() => expect(sourceProps.at(-1)).not.toBe(initialSource))
     expect(sourceProps.at(-1)).toMatchObject({
@@ -237,7 +279,7 @@ describe('FloodReturnPeriodLayer', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValueOnce(
-        mvtLayerCatalogResponse(),
+        mvtLayerCatalogResponse({ ...mvtMetadata, valid_times: ['2026-05-03T07:17:00.000Z'] }),
       ),
     )
 

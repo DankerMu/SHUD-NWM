@@ -262,22 +262,6 @@ function normalizeLayerValidTimesResponse(value: ApiLayerValidTimes | string[]):
   return normalizeValidTimes(Array.isArray(value) ? value : value?.valid_times)
 }
 
-function buildValidTimes(run: ApiHydroRun | null) {
-  if (!run) return []
-  const start = Date.parse(run.start_time)
-  const end = Date.parse(run.end_time)
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return []
-
-  const hours = Math.max(1, Math.round((end - start) / 3_600_000))
-  const stepHours = hours > 96 ? 6 : hours > 48 ? 3 : 1
-  const values: string[] = []
-  for (let time = start; time <= end && values.length < 128; time += stepHours * 3_600_000) {
-    values.push(new Date(time).toISOString())
-  }
-  if (values.at(-1) !== new Date(end).toISOString()) values.push(new Date(end).toISOString())
-  return values
-}
-
 async function fetchLayerValidTimes(layerId: string, runId: string): Promise<string[]> {
   return fetchJson<ApiLayerValidTimes | string[]>(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times`, {
     run_id: runId,
@@ -442,8 +426,7 @@ export const useFloodAlertStore = create<FloodAlertState>((set, get) => ({
       const nextRunId = latestRun?.run_id ?? null
       const runChanged = previousRunId !== nextRunId
       const requestedValidTime = normalizeIso(context?.validTime)
-      let validTimes = latestRun ? await fetchLayerValidTimes('flood-return-period', latestRun.run_id) : []
-      if (latestRun && validTimes.length === 0) validTimes = buildValidTimes(latestRun)
+      const validTimes = latestRun ? await fetchLayerValidTimes('flood-return-period', latestRun.run_id) : []
       const contextMissReason = latestRun ? null : explicitContextMissReason(context)
       if (requestId !== latestRunRequestId) return
       set({

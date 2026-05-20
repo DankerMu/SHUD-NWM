@@ -3113,6 +3113,151 @@ def test_layer_catalog_unscoped_no_ready_run_returns_empty_without_discovery(
     assert response.json()["data"] == []
 
 
+def test_layer_catalog_explicit_missing_run_source_identity_returns_stable_error_without_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "ready_missing_identity_catalog"
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "valid_times_for_layer",
+        lambda *_args, **_kwargs: pytest.fail("valid_times_for_layer called before source identity preflight"),
+    )
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_without_identity', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": VALID_TIME_1,
+                "start_time": VALID_TIME_1,
+                "end_time": VALID_TIME_2,
+            },
+        )
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(f"/api/v1/layers?run_id={run_id}")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "MVT_SOURCE_IDENTITY_NOT_FOUND"
+    assert body["error"]["details"]["run_id"] == run_id
+    assert body["error"]["details"]["basin_version_id"] == "basin_v1"
+    assert body["error"]["details"]["river_network_version_id"] is None
+
+
+@pytest.mark.parametrize("layer_id", ["flood-return-period", "warning-level", "discharge", "water-level"])
+def test_layer_valid_times_explicit_missing_run_source_identity_returns_stable_error_without_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    layer_id: str,
+) -> None:
+    run_id = f"ready_missing_identity_{layer_id.replace('-', '_')}"
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "valid_times_for_layer",
+        lambda *_args, **_kwargs: pytest.fail("valid_times_for_layer called before source identity preflight"),
+    )
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_without_identity', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": VALID_TIME_1,
+                "start_time": VALID_TIME_1,
+                "end_time": VALID_TIME_2,
+            },
+        )
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(f"/api/v1/layers/{layer_id}/valid-times?run_id={run_id}")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "MVT_SOURCE_IDENTITY_NOT_FOUND"
+    assert body["error"]["details"]["layer_id"] == layer_id
+    assert body["error"]["details"]["run_id"] == run_id
+    assert body["error"]["details"]["river_network_version_id"] is None
+
+
+def test_layer_catalog_unscoped_latest_ready_missing_source_identity_returns_stable_error_without_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "zz_ready_missing_identity_latest"
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "valid_times_for_layer",
+        lambda *_args, **_kwargs: pytest.fail("valid_times_for_layer called before source identity preflight"),
+    )
+    with _store() as session:
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_without_identity', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": VALID_TIME_2,
+                "start_time": VALID_TIME_1,
+                "end_time": VALID_TIME_2,
+            },
+        )
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                catalog_response = client.get("/api/v1/layers")
+                valid_times_response = client.get("/api/v1/layers/flood-return-period/valid-times")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    for response in (catalog_response, valid_times_response):
+        assert response.status_code == 404
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["error"]["code"] == "MVT_SOURCE_IDENTITY_NOT_FOUND"
+        assert body["error"]["details"]["run_id"] == run_id
+        assert body["error"]["details"]["river_network_version_id"] is None
+
+
 @pytest.mark.parametrize(
     ("layer_id", "expected_table", "expected_identity"),
     [

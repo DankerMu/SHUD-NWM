@@ -547,6 +547,39 @@ describe('useFloodAlertStore', () => {
     ])
   })
 
+  it('keeps empty MVT valid-time discovery empty without run-window fallback', async () => {
+    vi.mocked(client.GET).mockResolvedValue({
+      data: success({
+        items: [
+          {
+            ...latestRun,
+            start_time: '2026-05-12T00:00:00Z',
+            end_time: '2026-05-12T03:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+      error: undefined,
+    } as never)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(floodResponse({ valid_times: [], items: [], limit: 100, observed_count: 0, truncated: false })),
+    )
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun({
+      validTime: '2026-05-12T03:00:00.000Z',
+    })
+
+    expect(fetch).toHaveBeenCalledWith(`${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-1&duration=1h`)
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: 'run-1',
+      validTimes: [],
+      selectedValidTime: null,
+    })
+  })
+
   it('does not fall back to an unrelated latest run when explicit overview context is absent', async () => {
     vi.mocked(client.GET).mockResolvedValue({
       data: success({
@@ -1108,7 +1141,7 @@ describe('useFloodAlertStore', () => {
 
     expect(useFloodAlertStore.getState()).toMatchObject({
       selectedRunId: 'run-ifs',
-      selectedValidTime: '2026-05-13T03:00:00.000Z',
+      selectedValidTime: null,
       loading: false,
     })
 
@@ -1134,7 +1167,7 @@ describe('useFloodAlertStore', () => {
 
     expect(useFloodAlertStore.getState()).toMatchObject({
       selectedRunId: 'run-ifs',
-      selectedValidTime: '2026-05-13T03:00:00.000Z',
+      selectedValidTime: null,
       loading: false,
     })
   })
@@ -1203,15 +1236,10 @@ describe('useFloodAlertStore', () => {
     expect(useFloodAlertStore.getState()).toMatchObject({
       selectedRunId: 'run-ifs',
       latestRun: expect.objectContaining({ run_id: 'run-ifs' }),
-      selectedValidTime: '2026-05-13T03:00:00.000Z',
+      selectedValidTime: null,
       loading: false,
       error: null,
     })
-    expect(useFloodAlertStore.getState().validTimes).toEqual([
-      '2026-05-13T00:00:00.000Z',
-      '2026-05-13T01:00:00.000Z',
-      '2026-05-13T02:00:00.000Z',
-      '2026-05-13T03:00:00.000Z',
-    ])
+    expect(useFloodAlertStore.getState().validTimes).toEqual([])
   })
 })

@@ -59,6 +59,18 @@ function metadataIdentity(metadata: MvtLayerMetadata): string {
   })
 }
 
+function metadataHasValidTime(metadata: MvtLayerMetadata, validTime: string): boolean {
+  const selected = normalizeMvtValidTime(validTime)
+  if (!selected || !Array.isArray(metadata.valid_times)) return false
+  return metadata.valid_times.some((metadataValidTime) => normalizeMvtValidTime(metadataValidTime) === selected)
+}
+
+function normalizeMvtValidTime(value: string | null | undefined): string | null {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
+}
+
 export function floodMvtSourceKey(metadata: MvtLayerMetadata, runId: string, validTime: string): string {
   return JSON.stringify({
     layer_id: metadata.layer_id,
@@ -119,6 +131,7 @@ export function FloodReturnPeriodLayer({
       : null
   const directMetadataBlocked = metadata !== undefined && !directMetadata
   const activeMetadata = directMetadata ?? catalogMetadata
+  const activeMetadataValidTimeAvailable = activeMetadata ? metadataHasValidTime(activeMetadata, validTime) : false
   const metadataRunMismatch = isRunMismatchMetadata(metadata, runId)
 
   useEffect(() => {
@@ -161,7 +174,11 @@ export function FloodReturnPeriodLayer({
   useEffect(() => {
     if (activeMetadata) {
       setData(null)
-      onUnavailableReason?.(null)
+      onUnavailableReason?.(
+        activeMetadataValidTimeAvailable
+          ? null
+          : '洪水重现期 MVT 元数据未提供当前 valid_time，地图暂不注册全国矢量瓦片源。',
+      )
       return
     }
     setData(null)
@@ -213,7 +230,17 @@ export function FloodReturnPeriodLayer({
         onUnavailableReason?.('洪水重现期 GeoJSON 降级源请求失败，地图暂不显示该叠加层。')
       })
     return () => controller.abort()
-  }, [activeMetadata, degradedFallback, directMetadataBlocked, fallbackBbox, metadataState, onUnavailableReason, runId, validTime])
+  }, [
+    activeMetadata,
+    activeMetadataValidTimeAvailable,
+    degradedFallback,
+    directMetadataBlocked,
+    fallbackBbox,
+    metadataState,
+    onUnavailableReason,
+    runId,
+    validTime,
+  ])
 
   const hoverLayer: LayerProps = {
     id: FLOOD_TILE_HOVER_LAYER_ID,
@@ -239,7 +266,7 @@ export function FloodReturnPeriodLayer({
     },
   }
 
-  if (activeMetadata) {
+  if (activeMetadata && activeMetadataValidTimeAvailable) {
     const sourceKey = floodMvtSourceKey(activeMetadata, runId, validTime)
     return (
       <Source
