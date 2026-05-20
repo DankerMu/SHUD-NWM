@@ -19,7 +19,7 @@ from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import PsycopgForecastStore
-from services.tiles.mvt import MVT_MAX_BYTES, cache_key
+from services.tiles.mvt import MVT_MAX_BYTES, MVT_VALID_TIME_SAMPLE_LIMIT, cache_key
 from workers.flood_frequency.return_period import compute_return_periods
 
 RUN_ID = "fcst_gfs_2026050300_all"
@@ -1908,8 +1908,99 @@ def test_layer_metadata_discovery_exposes_mvt_contract() -> None:
     assert metadata["cache_etag"].startswith('W/"metadata-')
     assert metadata["fallback_available"] is True
     assert metadata["production_mvt_readiness_claimed"] is False
+    assert metadata["valid_time_limit"] == MVT_VALID_TIME_SAMPLE_LIMIT
+    assert metadata["valid_time_observed_count"] <= MVT_VALID_TIME_SAMPLE_LIMIT + 1
+    assert metadata["valid_times_truncated"] is False
     assert valid_times.status_code == 200
-    assert _iso(VALID_TIME_1) in valid_times.json()["data"]
+    valid_time_data = valid_times.json()["data"]
+    assert _iso(VALID_TIME_1) in valid_time_data["valid_times"]
+    assert valid_time_data["items"] == valid_time_data["valid_times"]
+    assert valid_time_data["limit"] == MVT_VALID_TIME_SAMPLE_LIMIT
+    assert valid_time_data["observed_count"] <= MVT_VALID_TIME_SAMPLE_LIMIT + 1
+    assert valid_time_data["truncated"] is False
+
+
+def test_layer_valid_times_budget_caps_catalog_and_endpoint() -> None:
+    run_id = "zz_valid_time_budget"
+    first_valid_time = datetime(2026, 5, 20, tzinfo=UTC)
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": first_valid_time,
+                "start_time": first_valid_time,
+                "end_time": first_valid_time + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT + 5),
+            },
+        )
+        for offset in range(MVT_VALID_TIME_SAMPLE_LIMIT + 5):
+            valid_time = first_valid_time + timedelta(hours=offset)
+            _insert_result(
+                session,
+                "seg_001",
+                "basin_v1",
+                "rnv_v1",
+                valid_time,
+                100.0 + offset,
+                2.0,
+                "normal",
+                False,
+                run_id=run_id,
+            )
+            _insert_timeseries_result(session, "seg_001", run_id, valid_time, 100.0 + offset)
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                layers_response = client.get("/api/v1/layers")
+                flood_valid_times_response = client.get("/api/v1/layers/flood-return-period/valid-times")
+                discharge_valid_times_response = client.get("/api/v1/layers/discharge/valid-times")
+                unsupported_valid_times_response = client.get("/api/v1/layers/river-network/valid-times")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert layers_response.status_code == 200
+    metadata_by_layer = {layer["layer_id"]: layer["metadata"] for layer in layers_response.json()["data"]}
+    for layer_id in ("flood-return-period", "warning-level", "discharge"):
+        metadata = metadata_by_layer[layer_id]
+        assert len(metadata["valid_times"]) == MVT_VALID_TIME_SAMPLE_LIMIT
+        assert metadata["valid_time_limit"] == MVT_VALID_TIME_SAMPLE_LIMIT
+        assert metadata["valid_time_observed_count"] == MVT_VALID_TIME_SAMPLE_LIMIT + 1
+        assert metadata["valid_times_truncated"] is True
+        assert metadata["valid_times"][0] == _iso(first_valid_time)
+        assert metadata["valid_times"][-1] == _iso(first_valid_time + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT - 1))
+
+    for response in (flood_valid_times_response, discharge_valid_times_response):
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert len(data["valid_times"]) == MVT_VALID_TIME_SAMPLE_LIMIT
+        assert data["items"] == data["valid_times"]
+        assert data["limit"] == MVT_VALID_TIME_SAMPLE_LIMIT
+        assert data["observed_count"] == MVT_VALID_TIME_SAMPLE_LIMIT + 1
+        assert data["truncated"] is True
+        assert data["valid_times"][0] == _iso(first_valid_time)
+        assert data["valid_times"][-1] == _iso(first_valid_time + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT - 1))
+
+    assert unsupported_valid_times_response.status_code == 200
+    unsupported = unsupported_valid_times_response.json()["data"]
+    assert unsupported == {
+        "valid_times": [],
+        "items": [],
+        "limit": MVT_VALID_TIME_SAMPLE_LIMIT,
+        "observed_count": 0,
+        "truncated": False,
+    }
 
 
 def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases() -> None:

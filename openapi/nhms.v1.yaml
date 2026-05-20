@@ -1395,7 +1395,8 @@ paths:
   /api/v1/layers/{layer_id}/valid-times:
     get:
       operationId: listLayerValidTimes
-      summary: List valid times for a map layer
+      summary: List bounded valid times for a map layer
+      description: Returns at most the server configured valid-time sample limit. A true truncated flag means more distinct times were observed than are included in valid_times/items.
       tags: [layers]
       parameters:
         - name: layer_id
@@ -1415,10 +1416,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        type: array
-                        items:
-                          type: string
-                          format: date-time
+                        $ref: "#/components/schemas/LayerValidTimes"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -3250,9 +3248,19 @@ components:
             type: number
         valid_times:
           type: array
+          description: Bounded valid-time sample for catalog display. See valid_time_limit and valid_times_truncated before treating it as complete.
           items:
             type: string
             format: date-time
+        valid_time_limit:
+          type: integer
+          description: Maximum number of valid_times included in this metadata record.
+        valid_time_observed_count:
+          type: integer
+          description: Number of distinct valid times observed by the capped limit-plus-one discovery query; this is not a full total count when valid_times_truncated is true.
+        valid_times_truncated:
+          type: boolean
+          description: True when the bounded catalog sample omitted at least one additional distinct valid_time.
         source_refs:
           type: object
           nullable: true
@@ -3298,3 +3306,28 @@ components:
         production_mvt_readiness_claimed:
           type: boolean
           nullable: true
+    LayerValidTimes:
+      type: object
+      required: [valid_times, items, limit, observed_count, truncated]
+      properties:
+        valid_times:
+          type: array
+          description: Bounded valid-time sample. This aliases items for compatibility with layer metadata naming.
+          items:
+            type: string
+            format: date-time
+        items:
+          type: array
+          description: Bounded valid-time sample, duplicated from valid_times for endpoint envelope consumers.
+          items:
+            type: string
+            format: date-time
+        limit:
+          type: integer
+          description: Maximum number of valid times returned by this endpoint.
+        observed_count:
+          type: integer
+          description: Number of distinct valid times observed by the capped limit-plus-one query; this is not a full total count when truncated is true.
+        truncated:
+          type: boolean
+          description: True when at least one additional distinct valid_time exists beyond the returned sample.

@@ -732,16 +732,27 @@ async function fetchLayerValidTimes(layerId: string) {
   return cached(
     cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId }),
     () =>
-      getApi<string[]>(
+      getApi<components['schemas']['LayerValidTimes'] | string[]>(
         '/api/v1/layers/{layer_id}/valid-times',
         { params: { path: { layer_id: layerId } } },
         '获取图层有效时间失败',
-      ).catch(async () => {
-        const response = await apiFetch(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times`)
-        if (!response.ok) throw new Error('获取图层有效时间失败')
-        return unwrapApiData<string[]>(await response.json(), '获取图层有效时间失败')
-      }),
+      )
+        .then(normalizeLayerValidTimesResponse)
+        .catch(async () => {
+          const response = await apiFetch(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times`)
+          if (!response.ok) throw new Error('获取图层有效时间失败')
+          return normalizeLayerValidTimesResponse(
+            unwrapApiData<components['schemas']['LayerValidTimes'] | string[]>(
+              await response.json(),
+              '获取图层有效时间失败',
+            ),
+          )
+        }),
   )
+}
+
+function normalizeLayerValidTimesResponse(value: components['schemas']['LayerValidTimes'] | string[]): string[] {
+  return Array.isArray(value) ? value : value.valid_times
 }
 
 async function fetchRiverSegmentsPage(

@@ -669,7 +669,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List valid times for a map layer */
+        /**
+         * List bounded valid times for a map layer
+         * @description Returns at most the server configured valid-time sample limit. A true truncated flag means more distinct times were observed than are included in valid_times/items.
+         */
         get: operations["listLayerValidTimes"];
         put?: never;
         post?: never;
@@ -1356,7 +1359,14 @@ export interface components {
             bounds_crs?: string | null;
             bounds?: number[] | null;
             wgs84_bounds?: number[] | null;
+            /** @description Bounded valid-time sample for catalog display. See valid_time_limit and valid_times_truncated before treating it as complete. */
             valid_times?: string[];
+            /** @description Maximum number of valid_times included in this metadata record. */
+            valid_time_limit?: number;
+            /** @description Number of distinct valid times observed by the capped limit-plus-one discovery query; this is not a full total count when valid_times_truncated is true. */
+            valid_time_observed_count?: number;
+            /** @description True when the bounded catalog sample omitted at least one additional distinct valid_time. */
+            valid_times_truncated?: boolean;
             source_refs?: {
                 [key: string]: unknown;
             } | null;
@@ -1378,6 +1388,18 @@ export interface components {
             fallback_endpoint?: string | null;
             release_blocking: boolean;
             production_mvt_readiness_claimed?: boolean | null;
+        };
+        LayerValidTimes: {
+            /** @description Bounded valid-time sample. This aliases items for compatibility with layer metadata naming. */
+            valid_times: string[];
+            /** @description Bounded valid-time sample, duplicated from valid_times for endpoint envelope consumers. */
+            items: string[];
+            /** @description Maximum number of valid times returned by this endpoint. */
+            limit: number;
+            /** @description Number of distinct valid times observed by the capped limit-plus-one query; this is not a full total count when truncated is true. */
+            observed_count: number;
+            /** @description True when at least one additional distinct valid_time exists beyond the returned sample. */
+            truncated: boolean;
         };
     };
     responses: {
@@ -2578,7 +2600,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: string[];
+                        data: components["schemas"]["LayerValidTimes"];
                     };
                 };
             };

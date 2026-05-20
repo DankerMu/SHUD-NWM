@@ -22,6 +22,7 @@ MVT_MAX_ZOOM = 14
 MVT_MAX_FEATURES = 10_000
 MVT_MAX_COORDINATES = 50_000
 MVT_MAX_BYTES = 5_000_000
+MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
@@ -54,6 +55,23 @@ class TileResponse:
     cache_key: str
     cache_status: str
     layer_id: str
+
+
+@dataclass(frozen=True)
+class ValidTimeDiscovery:
+    valid_times: list[str]
+    limit: int
+    observed_count: int
+    truncated: bool
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "valid_times": self.valid_times,
+            "items": self.valid_times,
+            "limit": self.limit,
+            "observed_count": self.observed_count,
+            "truncated": self.truncated,
+        }
 
 
 def validate_identifier(value: str, field_name: str) -> None:
@@ -447,6 +465,9 @@ def layer_metadata(
     *,
     run_id: str | None = None,
     valid_times: list[str] | None = None,
+    valid_time_limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
+    valid_time_observed_count: int = 0,
+    valid_times_truncated: bool = False,
     source_version: str | None = None,
     release_blocking: bool = False,
 ) -> dict[str, Any]:
@@ -537,6 +558,9 @@ def layer_metadata(
         "bounds": WEB_MERCATOR_BOUNDS,
         "wgs84_bounds": CHINA_WGS84_BOUNDS,
         "valid_times": valid_times or [],
+        "valid_time_limit": valid_time_limit,
+        "valid_time_observed_count": valid_time_observed_count,
+        "valid_times_truncated": valid_times_truncated,
         "source_refs": {"run_id": run_id, "source_version": source_version},
         "cache_layer_id": cache_layer_id,
         "route_variable": (
@@ -586,7 +610,15 @@ def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-def valid_times_for_layer(session: Session, layer_id: str, *, run_id: str | None = None) -> list[str]:
+def valid_times_for_layer(
+    session: Session,
+    layer_id: str,
+    *,
+    run_id: str | None = None,
+    limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
+) -> ValidTimeDiscovery:
+    sample_limit = max(0, limit)
+    query_limit = sample_limit + 1
     if layer_id in {"flood-return-period", "warning-level"}:
         sql = """
             SELECT DISTINCT valid_time
@@ -594,6 +626,7 @@ def valid_times_for_layer(session: Session, layer_id: str, *, run_id: str | None
             WHERE max_over_window = false
               AND (:run_id IS NULL OR run_id = :run_id)
             ORDER BY valid_time
+            LIMIT :limit
         """
     elif layer_id in {"discharge", "water-level"}:
         variable = "q_down" if layer_id == "discharge" else "water_level"
@@ -603,13 +636,30 @@ def valid_times_for_layer(session: Session, layer_id: str, *, run_id: str | None
             WHERE variable = :variable
               AND (:run_id IS NULL OR run_id = :run_id)
             ORDER BY valid_time
+            LIMIT :limit
         """
-        rows = session.execute(text(sql), {"run_id": run_id, "variable": variable}).mappings().all()
-        return [_format_time(row["valid_time"]) for row in rows]
+        rows = (
+            session.execute(text(sql), {"run_id": run_id, "variable": variable, "limit": query_limit})
+            .mappings()
+            .all()
+        )
+        return _valid_time_discovery(rows, sample_limit)
     else:
-        return []
-    rows = session.execute(text(sql), {"run_id": run_id}).mappings().all()
-    return [_format_time(row["valid_time"]) for row in rows]
+        return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+    rows = session.execute(text(sql), {"run_id": run_id, "limit": query_limit}).mappings().all()
+    return _valid_time_discovery(rows, sample_limit)
+
+
+def _valid_time_discovery(rows: Iterable[Mapping[str, Any]], limit: int) -> ValidTimeDiscovery:
+    formatted = [_format_time(row["valid_time"]) for row in rows]
+    truncated = len(formatted) > limit
+    valid_times = formatted[:limit]
+    return ValidTimeDiscovery(
+        valid_times=valid_times,
+        limit=limit,
+        observed_count=len(formatted),
+        truncated=truncated,
+    )
 
 
 def _source_layer_id(layer: str) -> str:

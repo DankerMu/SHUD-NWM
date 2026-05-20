@@ -213,6 +213,27 @@ def test_mvt_tile_z_openapi_maximum_matches_runtime_contract() -> None:
         assert z_param["schema"]["maximum"] == MVT_MAX_ZOOM
 
 
+def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:
+    spec = _openapi_spec()
+    response_schema = spec["paths"]["/api/v1/layers/{layer_id}/valid-times"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    data_schema = response_schema["allOf"][1]["properties"]["data"]
+    envelope_schema = spec["components"]["schemas"]["LayerValidTimes"]
+    metadata_schema = spec["components"]["schemas"]["LayerMetadata"]
+
+    assert data_schema["$ref"] == "#/components/schemas/LayerValidTimes"
+    assert envelope_schema["required"] == ["valid_times", "items", "limit", "observed_count", "truncated"]
+    assert envelope_schema["properties"]["valid_times"]["type"] == "array"
+    assert envelope_schema["properties"]["items"]["type"] == "array"
+    assert envelope_schema["properties"]["limit"]["type"] == "integer"
+    assert envelope_schema["properties"]["observed_count"]["type"] == "integer"
+    assert envelope_schema["properties"]["truncated"]["type"] == "boolean"
+    assert metadata_schema["properties"]["valid_time_limit"]["type"] == "integer"
+    assert metadata_schema["properties"]["valid_time_observed_count"]["type"] == "integer"
+    assert metadata_schema["properties"]["valid_times_truncated"]["type"] == "boolean"
+
+
 def test_mvt_tile_z_above_documented_max_returns_runtime_validation_error() -> None:
     class FakeDialect:
         name = "sqlite"

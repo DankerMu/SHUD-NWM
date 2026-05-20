@@ -216,7 +216,7 @@ def list_layer_valid_times(
     validate_identifier(layer_id, "layer_id")
     run = latest_ready_run(session)
     run_id = str(run["run_id"]) if run else None
-    return _ok(request, valid_times_for_layer(session, layer_id, run_id=run_id))
+    return _ok(request, valid_times_for_layer(session, layer_id, run_id=run_id).model_dump())
 
 
 @router.get("/api/v1/flood-alerts/summary", response_model=dict[str, Any])
@@ -1033,22 +1033,28 @@ def _default_layer_catalog(session: Session, *, run_id: str | None, source_versi
         ("warning-level", "Warning level", "hydrology", ["warning_level"]),
         ("river-network", "River network", "base", ["geometry"]),
     ]
-    return [
-        Layer(
-            layer_id=layer_id,
-            layer_name=name,
-            layer_type=layer_type,
-            variables=variables,
-            metadata=layer_metadata(
-                layer_id,
-                run_id=run_id,
-                valid_times=valid_times_for_layer(session, layer_id, run_id=run_id),
-                source_version=source_version,
-                release_blocking=not _mvt_live_postgis_enabled(session),
-            ),
+    layers = []
+    for layer_id, name, layer_type, variables in definitions:
+        valid_time_sample = valid_times_for_layer(session, layer_id, run_id=run_id)
+        layers.append(
+            Layer(
+                layer_id=layer_id,
+                layer_name=name,
+                layer_type=layer_type,
+                variables=variables,
+                metadata=layer_metadata(
+                    layer_id,
+                    run_id=run_id,
+                    valid_times=valid_time_sample.valid_times,
+                    valid_time_limit=valid_time_sample.limit,
+                    valid_time_observed_count=valid_time_sample.observed_count,
+                    valid_times_truncated=valid_time_sample.truncated,
+                    source_version=source_version,
+                    release_blocking=not _mvt_live_postgis_enabled(session),
+                ),
+            )
         )
-        for layer_id, name, layer_type, variables in definitions
-    ]
+    return layers
 
 
 def _postgis_tile_params(params: dict[str, Any], *, z: int, x: int, y: int) -> dict[str, Any]:
