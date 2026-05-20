@@ -893,7 +893,7 @@ def test_flood_mvt_live_postgis_returns_raw_bytes_and_binds_requested_xyz(monkey
                 assert parameters["duration"] == "1h"
                 assert parameters["valid_time"] == VALID_TIME_1
                 assert (parameters["z"], parameters["x"], parameters["y"]) == (6, 12, 24)
-                return FakeRowResult({"tile": b"live-tile", "source_feature_count": 1})
+                return FakeRowResult({"tile": b"live-tile", "source_identity_count": 1, "source_feature_count": 1})
             if "information_schema.tables" in sql:
                 return FakeRowResult(None)
             raise AssertionError(f"Unexpected SQL in live PostGIS tile test: {sql}")
@@ -1842,7 +1842,138 @@ def test_live_mvt_cache_write_failure_returns_tile_with_bypass_status(monkeypatc
     assert tile.cache_status == "bypass"
 
 
-def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("path", "expected_layer_id", "expected_sql_layer", "expected_params"),
+    [
+        (
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "flood-return-period",
+            "flood-return-period",
+            {"run_id": RUN_ID, "duration": "1h", "valid_time": VALID_TIME_1},
+        ),
+        (
+            f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf",
+            "discharge",
+            "hydro",
+            {"run_id": RUN_ID, "variable": "q_down", "valid_time": VALID_TIME_1},
+        ),
+        (
+            "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
+            "river-network",
+            "river-network",
+            {"basin_version_id": "basin_v1"},
+        ),
+    ],
+)
+def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    expected_layer_id: str,
+    expected_sql_layer: str,
+    expected_params: dict[str, Any],
+) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRowResult:
+        def __init__(self, row: dict[str, Any] | None, rows: list[dict[str, Any]] | None = None) -> None:
+            self.row = row
+            self.rows = rows if rows is not None else ([row] if row is not None else [])
+
+        def mappings(self) -> FakeRowResult:
+            return self
+
+        def first(self) -> dict[str, Any] | None:
+            return self.row
+
+        def all(self) -> list[dict[str, Any]]:
+            return self.rows
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRowResult:
+            sql = str(statement)
+            if "ST_TileEnvelope(:z, :x, :y)" in sql:
+                assert f"'{expected_sql_layer.replace('-', '_')}'" in sql or expected_sql_layer == "hydro"
+                for key, value in expected_params.items():
+                    assert parameters[key] == value
+                return FakeRowResult(
+                    {
+                        "tile": b"",
+                        "source_identity_count": 1,
+                        "source_feature_count": 0,
+                        "feature_count": 0,
+                        "coordinate_count": 0,
+                        "feature_coordinate_overflow_count": 0,
+                        "feature_coordinate_count": 0,
+                        "coordinate_dimension_overflow_count": 0,
+                        "coordinate_dimension_count": 0,
+                        "invalid_property_count": 0,
+                        "invalid_properties": "",
+                    }
+                )
+            if "SELECT DISTINCT river_network_version_id" in sql:
+                assert parameters["basin_version_id"] == "basin_v1"
+                return FakeRowResult(
+                    {"river_network_version_id": "rnv_v1"},
+                    [{"river_network_version_id": "rnv_v1"}],
+                )
+            if "information_schema.tables" in sql:
+                return FakeRowResult(None)
+            raise AssertionError(f"Unexpected SQL in live PostGIS zero-feature test: {sql}")
+
+        def rollback(self) -> None:
+            return None
+
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_run",
+        lambda _session, _run_id: {
+            "run_id": RUN_ID,
+            "status": "completed",
+            "river_network_version_id": "rnv_v1",
+            "basin_version_id": "basin_v1",
+            "source_id": "GFS",
+            "cycle_time": datetime(2026, 5, 3, tzinfo=UTC),
+            "updated_at": datetime(2026, 5, 3, 1, tzinfo=UTC),
+        },
+    )
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "_require_frequency_ready",
+        lambda _session, _run_id: {
+            "run_id": RUN_ID,
+            "status": "frequency_done",
+            "river_network_version_id": "rnv_v1",
+            "basin_version_id": "basin_v1",
+            "source_id": "GFS",
+            "cycle_time": datetime(2026, 5, 3, tzinfo=UTC),
+            "updated_at": datetime(2026, 5, 3, 1, tzinfo=UTC),
+        },
+    )
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get(path)
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].split(";")[0] == flood_alert_routes.MVT_MEDIA_TYPE
+    assert response.headers["cache-control"] == "public, max-age=300"
+    assert response.headers["x-tile-layer-id"] == expected_layer_id
+    assert response.headers["x-tile-cache"] == "bypass"
+    assert response.headers["x-mvt-schema-version"] == flood_alert_routes.MVT_SCHEMA_VERSION
+    assert response.content == b""
+
+
+def test_live_mvt_missing_source_identity_returns_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeDialect:
         name = "postgresql"
 
@@ -1866,10 +1997,11 @@ def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(monkeypatch: p
         def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRowResult:
             sql = str(statement)
             if "ST_TileEnvelope(:z, :x, :y)" in sql:
-                assert parameters["variable"] == "q_down"
+                assert parameters["run_id"] == RUN_ID
                 return FakeRowResult(
                     {
                         "tile": b"",
+                        "source_identity_count": 0,
                         "source_feature_count": 1,
                         "feature_count": 0,
                         "coordinate_count": 0,
@@ -1883,7 +2015,7 @@ def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(monkeypatch: p
                 )
             if "information_schema.tables" in sql:
                 return FakeRowResult(None)
-            raise AssertionError(f"Unexpected SQL in live PostGIS zero-feature test: {sql}")
+            raise AssertionError(f"Unexpected SQL in live PostGIS missing-identity test: {sql}")
 
         def rollback(self) -> None:
             return None
@@ -1903,13 +2035,10 @@ def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(monkeypatch: p
     finally:
         app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
 
-    assert response.status_code == 200
-    assert response.headers["content-type"].split(";")[0] == flood_alert_routes.MVT_MEDIA_TYPE
-    assert response.headers["cache-control"] == "public, max-age=300"
-    assert response.headers["x-tile-layer-id"] == "discharge"
-    assert response.headers["x-tile-cache"] == "bypass"
-    assert response.headers["x-mvt-schema-version"] == flood_alert_routes.MVT_SCHEMA_VERSION
-    assert response.content == b""
+    assert response.status_code == 424
+    body = response.json()
+    assert body["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    assert body["error"]["details"]["layer_id"] == "discharge"
 
 
 def test_live_mvt_over_budget_stats_return_413_without_pbf(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2182,7 +2311,7 @@ def test_hydro_and_river_network_live_postgis_bind_requested_xyz(
                 assert f"'{expected_layer.replace('-', '_')}'" in sql or expected_layer == "hydro"
                 for key, value in expected_params.items():
                     assert parameters[key] == value
-                return FakeRowResult({"tile": b"live-tile", "source_feature_count": 1})
+                return FakeRowResult({"tile": b"live-tile", "source_identity_count": 1, "source_feature_count": 1})
             if "SELECT DISTINCT river_network_version_id" in sql:
                 assert parameters["basin_version_id"] == "basin_v1"
                 return FakeRowResult(None, [{"river_network_version_id": "rnv_v1"}])
@@ -2937,8 +3066,9 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
     assert "budget_gate AS" in statement
     assert "CROSS JOIN budget_gate" in statement
     assert "bounded_rows AS" in statement
+    assert "source_identity_stats AS" in statement
     assert "source_stats AS" in statement
-    assert "FROM source_stats, budget_stats, prefilter_stats" in statement
+    assert "FROM source_identity_stats, source_stats, budget_stats, prefilter_stats" in statement
 
 
 def test_mvt_postgis_sql_shape_simplifies_all_production_layers_before_encoding() -> None:
@@ -2983,14 +3113,21 @@ def test_mvt_postgis_sql_bounds_source_rows_before_reusable_aggregates() -> None
         prefilter_cte = sql[sql.index("prefilter_stats AS") : sql.index("budget_stats AS")]
 
         assert "source_rows AS NOT MATERIALIZED" in sql
+        assert "source_identity_stats AS" in sql
+        assert "source_identity_count" in sql
         assert "FROM source_rows, bounds" in bounded_cte
         assert "source_rows.geom && ST_Transform(bounds.geom_3857, 4490)" in bounded_cte
+        assert sql.index("source_identity_stats AS") < sql.index("bounded_rows AS")
         assert sql.index("bounded_rows AS") < sql.index("source_stats AS") < sql.index("budget_stats AS")
+        assert "EXISTS (SELECT 1 FROM source_rows)" in sql[
+            sql.index("source_identity_stats AS") : sql.index("bounded_rows AS")
+        ]
+        assert "EXISTS (SELECT 1 FROM bounded_rows)" in source_stats_cte
         assert "FROM bounded_rows" in source_stats_cte
         assert "FROM bounded_rows" in prefilter_cte
         assert "FROM source_rows" not in source_stats_cte
         assert "FROM source_rows" not in prefilter_cte
-        assert sql.count("FROM source_rows") == 1
+        assert sql.count("FROM source_rows") == 2
         assert sql.index("source_rows.geom && ST_Transform(bounds.geom_3857, 4490)") < sql.index("source_stats AS")
         assert sql.index("bounded_rows AS") < sql.index("ST_MakeValid")
 

@@ -925,7 +925,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
     feature_count = int(row.get("feature_count") or 0) if row else 0
     coordinate_count = int(row.get("coordinate_count") or 0) if row else 0
     feature_coordinate_overflow_count = int(row.get("feature_coordinate_overflow_count") or 0) if row else 0
-    source_feature_count = int(row.get("source_feature_count") or 0) if row else 0
+    source_identity_count = int(row.get("source_identity_count") or 0) if row else 0
     feature_coordinate_count = int(row.get("feature_coordinate_count") or 0) if row else 0
     coordinate_dimension_overflow_count = int(row.get("coordinate_dimension_overflow_count") or 0) if row else 0
     coordinate_dimension_count = int(row.get("coordinate_dimension_count") or 0) if row else 0
@@ -997,7 +997,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
             },
         )
     data = bytes(row["tile"] or b"") if row and row.get("tile") is not None else b""
-    if not row or source_feature_count <= 0:
+    if not row or source_identity_count <= 0:
         raise ApiError(
             status_code=424,
             code="MVT_LIVE_POSTGIS_UNAVAILABLE",

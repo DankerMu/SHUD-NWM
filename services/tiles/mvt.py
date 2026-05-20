@@ -398,6 +398,9 @@ def postgis_tile_sql(layer: str) -> str:
         source_rows AS NOT MATERIALIZED (
             {source_cte}
         ),
+        source_identity_stats AS (
+            SELECT CASE WHEN EXISTS (SELECT 1 FROM source_rows) THEN 1 ELSE 0 END AS source_identity_count
+        ),
         bounded_rows AS (
             SELECT source_rows.*,
                    ST_NPoints(source_rows.geom) AS source_coordinate_count,
@@ -482,6 +485,7 @@ def postgis_tile_sql(layer: str) -> str:
                 ORDER BY river_network_version_id, river_segment_id
             ) AS tile_rows
         ) AS tile,
+        (SELECT source_identity_count FROM source_identity_stats) AS source_identity_count,
         (SELECT source_feature_count FROM source_stats) AS source_feature_count,
         (SELECT feature_count FROM budget_stats) AS feature_count,
         (SELECT coordinate_count FROM budget_stats) AS coordinate_count,
@@ -491,7 +495,7 @@ def postgis_tile_sql(layer: str) -> str:
         (SELECT coordinate_dimension_count FROM prefilter_stats) AS coordinate_dimension_count,
         (SELECT invalid_property_count FROM prefilter_stats) AS invalid_property_count,
         (SELECT invalid_properties FROM prefilter_stats) AS invalid_properties
-        FROM source_stats, budget_stats, prefilter_stats
+        FROM source_identity_stats, source_stats, budget_stats, prefilter_stats
     """
 
 
