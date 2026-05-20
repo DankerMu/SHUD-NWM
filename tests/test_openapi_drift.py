@@ -10,7 +10,13 @@ from fastapi.testclient import TestClient
 from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes.flood_alerts import RankingItem
-from services.tiles.mvt import MVT_MAX_TILE_COORDINATE, MVT_MAX_ZOOM
+from services.tiles.mvt import (
+    DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
+    MVT_MAX_TILE_COORDINATE,
+    MVT_MAX_ZOOM,
+    SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS,
+    SUPPORTED_HYDRO_MVT_VARIABLES,
+)
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 RouteKey = tuple[str, str]
@@ -365,14 +371,53 @@ def test_mvt_route_variant_openapi_enums_match_runtime_contract() -> None:
         spec, "/api/v1/layers/{layer_id}/valid-times", "get", "query", "duration"
     )["schema"]
 
-    assert hydro_variable == ["q_down", "water_level"]
+    assert hydro_variable == list(SUPPORTED_HYDRO_MVT_VARIABLES)
     assert hydro_path_variable == hydro_variable
     assert met_path_variable["type"] == "string"
     assert "enum" not in met_path_variable
-    assert flood_map_duration == ["1h", "3h", "6h", "24h", "72h", "7d"]
+    assert flood_map_duration == list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS)
     assert flood_mvt_duration == flood_map_duration
-    assert valid_times_duration["default"] == "1h"
+    assert valid_times_duration["nullable"] is True
+    assert "default" not in valid_times_duration
     assert valid_times_duration["enum"] == flood_map_duration
+
+
+def test_mvt_route_variant_runtime_openapi_matches_static_enums_and_defaults() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    runtime_spec: dict[str, Any] = app.openapi()
+
+    parameter_cases = [
+        (
+            "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+            "path",
+            "variable",
+        ),
+        (
+            "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+            "path",
+            "duration",
+        ),
+        ("/api/v1/tiles/flood-return-period", "query", "duration"),
+        ("/api/v1/layers/{layer_id}/valid-times", "query", "duration"),
+    ]
+
+    for path, location, name in parameter_cases:
+        static_param = _operation_parameter(static_spec, path, "get", location, name)
+        runtime_param = _operation_parameter(runtime_spec, path, "get", location, name)
+
+        assert runtime_param["required"] == static_param["required"]
+        assert runtime_param["schema"] == static_param["schema"]
+
+    flood_duration = _operation_parameter(
+        runtime_spec,
+        "/api/v1/tiles/flood-return-period",
+        "get",
+        "query",
+        "duration",
+    )["schema"]
+    assert flood_duration["default"] == DEFAULT_FLOOD_RETURN_PERIOD_DURATION
+    assert flood_duration["enum"] == list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS)
 
 
 def test_mvt_tile_z_above_documented_max_returns_runtime_validation_error() -> None:

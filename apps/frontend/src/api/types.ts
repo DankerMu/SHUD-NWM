@@ -2607,7 +2607,7 @@ export interface operations {
                 /** @description Optional concrete hydro_run.run_id/source reference used to scope valid-time discovery. */
                 run_id?: string;
                 /** @description Optional flood return-period duration for flood-return-period and warning-level discovery; defaults to the current UI route identity of 1h. */
-                duration?: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
+                duration?: "1h" | "3h" | "6h" | "24h" | "72h" | "7d" | null;
             };
             header?: never;
             path: {

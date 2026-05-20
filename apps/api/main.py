@@ -17,7 +17,13 @@ from apps.api.routes.models import router as models_router
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
 from services.slurm_gateway.routes import router as slurm_router
-from services.tiles.mvt import MVT_MAX_TILE_COORDINATE, MVT_MAX_ZOOM
+from services.tiles.mvt import (
+    DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
+    MVT_MAX_TILE_COORDINATE,
+    MVT_MAX_ZOOM,
+    SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS,
+    SUPPORTED_HYDRO_MVT_VARIABLES,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST_DIR = REPO_ROOT / "apps" / "frontend" / "dist"
@@ -59,6 +65,13 @@ def custom_openapi():
         operation = schema.get("paths", {}).get(path, {}).get("get", {})
         for parameter in operation.get("parameters", []):
             name = parameter.get("name")
+            if path == "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf" and name == "variable":
+                parameter["schema"] = {"type": "string", "enum": list(SUPPORTED_HYDRO_MVT_VARIABLES)}
+            if (
+                path == "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf"
+                and name == "duration"
+            ):
+                parameter["schema"] = {"type": "string", "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS)}
             if name == "z":
                 parameter["description"] = "Web Mercator XYZ zoom level."
                 parameter.setdefault("schema", {})["minimum"] = 0
@@ -71,12 +84,42 @@ def custom_openapi():
                 parameter["description"] = TILE_Y_DESCRIPTION
                 parameter.setdefault("schema", {})["minimum"] = 0
                 parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
+    _patch_flood_duration_openapi(schema)
     _patch_layer_metadata_openapi(schema)
     app.openapi_schema = schema
     return app.openapi_schema
 
 
 app.openapi = custom_openapi
+
+
+def _patch_flood_duration_openapi(schema: dict) -> None:
+    duration_schema = {
+        "type": "string",
+        "default": DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
+        "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS),
+    }
+    flood_map_duration = _operation_parameter(
+        schema,
+        "/api/v1/tiles/flood-return-period",
+        name="duration",
+        location="query",
+    )
+    if flood_map_duration is not None:
+        flood_map_duration["schema"] = dict(duration_schema)
+
+    valid_times_duration = _operation_parameter(
+        schema,
+        "/api/v1/layers/{layer_id}/valid-times",
+        name="duration",
+        location="query",
+    )
+    if valid_times_duration is not None:
+        valid_times_duration["schema"] = {
+            "type": "string",
+            "nullable": True,
+            "enum": list(SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS),
+        }
 
 
 def _patch_layer_metadata_openapi(schema: dict) -> None:
@@ -103,6 +146,14 @@ def _patch_layer_metadata_openapi(schema: dict) -> None:
     if layer_valid_times_response is not None:
         layer_valid_times_response = _success_response_schema({"$ref": "#/components/schemas/LayerValidTimes"})
         _set_operation_response_schema(schema, "/api/v1/layers/{layer_id}/valid-times", layer_valid_times_response)
+
+
+def _operation_parameter(schema: dict, path: str, *, name: str, location: str) -> dict | None:
+    operation = schema.get("paths", {}).get(path, {}).get("get", {})
+    for parameter in operation.get("parameters", []):
+        if parameter.get("name") == name and parameter.get("in") == location:
+            return parameter
+    return None
 
 
 def _success_response_schema(data_schema: dict) -> dict:

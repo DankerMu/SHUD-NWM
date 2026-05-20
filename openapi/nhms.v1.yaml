@@ -1426,7 +1426,7 @@ paths:
           required: false
           schema:
             type: string
-            default: 1h
+            nullable: true
             enum: [1h, 3h, 6h, 24h, 72h, 7d]
           description: Optional flood return-period duration for flood-return-period and warning-level discovery; defaults to the current UI route identity of 1h.
       responses:

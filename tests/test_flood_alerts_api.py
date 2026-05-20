@@ -2025,7 +2025,7 @@ def test_live_mvt_missing_source_identity_returns_unavailable(monkeypatch: pytes
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     monkeypatch.setattr(
         flood_alert_routes,
-        "_require_run",
+        "_require_frequency_ready",
         lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
     )
     app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
@@ -2222,7 +2222,7 @@ def test_live_mvt_invalid_required_properties_return_json_error(monkeypatch: pyt
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     monkeypatch.setattr(
         flood_alert_routes,
-        "_require_run",
+        "_require_frequency_ready",
         lambda _session, _run_id: {"river_network_version_id": "rnv_v1", "basin_version_id": "basin_v1"},
     )
     app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
@@ -2245,11 +2245,16 @@ def test_live_mvt_invalid_required_properties_return_json_error(monkeypatch: pyt
 
 def test_hydro_and_river_network_mvt_routes_return_unavailable_without_live_postgis() -> None:
     with _client() as client:
-        hydro = client.get(f"/api/v1/tiles/hydro/{RECOMPUTE_MOVED_PEAK_RUN_ID}/q_down/{_iso(VALID_TIME_1)}/4/12/6.pbf")
+        hydro = client.get(f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{_iso(VALID_TIME_1)}/4/12/6.pbf")
+        non_ready_hydro = client.get(
+            f"/api/v1/tiles/hydro/{RECOMPUTE_MOVED_PEAK_RUN_ID}/q_down/{_iso(VALID_TIME_1)}/4/12/6.pbf"
+        )
         river = client.get("/api/v1/tiles/river-network/basin_v1/4/12/6.pbf")
 
     assert hydro.status_code == 424
     assert hydro.json()["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    assert non_ready_hydro.status_code == 409
+    assert non_ready_hydro.json()["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
     assert river.status_code == 424
     assert river.json()["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
 
@@ -2431,6 +2436,62 @@ def test_unsupported_mvt_route_variants_fail_before_live_cache_or_sql(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_hydro_mvt_rejects_non_ready_run_before_cache_lookup_or_live_sql(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_cache_lookup(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("hydro MVT cache lookup should not run for non-ready runs")
+
+    def fail_live_fetch(*_args: Any, **_kwargs: Any) -> bytes:
+        raise AssertionError("hydro MVT live SQL should not run for non-ready runs")
+
+    monkeypatch.setattr(flood_alert_routes, "read_cached_tile_response", fail_cache_lookup)
+    monkeypatch.setattr(flood_alert_routes, "_fetch_hydro_mvt_tile_bytes", fail_live_fetch)
+
+    with _client() as client:
+        response = client.get(f"/api/v1/tiles/hydro/run_pending/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf")
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
+    assert body["error"]["details"]["status"] == "parsed"
+
+
+def test_hydro_mvt_rejects_non_ready_run_even_when_matching_cache_row_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        seed_tile = flood_alert_routes.TileInput(
+            layer_id="discharge",
+            source_id="run_pending",
+            source_version=flood_alert_routes._run_source_version(
+                flood_alert_routes._require_run(session, "run_pending")
+            ),
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="variable:q_down",
+        )
+        flood_alert_routes.build_raw_tile_response(session, seed_tile, b"stale-non-ready-cache")
+
+        def fail_cache_lookup(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("hydro MVT cache lookup should not run for non-ready runs")
+
+        def fail_live_fetch(*_args: Any, **_kwargs: Any) -> bytes:
+            raise AssertionError("hydro MVT live SQL should not run for non-ready runs")
+
+        monkeypatch.setattr(flood_alert_routes, "read_cached_tile_response", fail_cache_lookup)
+        monkeypatch.setattr(flood_alert_routes, "_fetch_hydro_mvt_tile_bytes", fail_live_fetch)
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(f"/api/v1/tiles/hydro/run_pending/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
 
 
 @pytest.mark.parametrize(

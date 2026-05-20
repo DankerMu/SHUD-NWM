@@ -813,7 +813,7 @@ def hydro_mvt_tile(
     validate_identifier(variable, "variable")
     _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
-    run = _require_run(session, run_id)
+    run = _require_frequency_ready(session, run_id)
     source_version = _run_source_version(run)
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
