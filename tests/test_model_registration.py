@@ -618,6 +618,104 @@ async def test_protected_model_mutation_body_routes_auth_before_large_payload_wo
 
 
 @pytest.mark.asyncio
+async def test_pre_body_static_denial_preserves_request_id_correlation(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    request_id = "req-static-pre-body-401"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models",
+            headers={"X-Request-ID": request_id},
+            json={
+                "model_id": "large_model",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/large_model/package/",
+            },
+        )
+
+    assert response.status_code == 401
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="AUTH_REQUIRED",
+        action_id="models.switch_version",
+        decision="deny",
+        target={"type": "model_registry", "id": "models"},
+    )
+    assert fake_store.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pre_body_dynamic_denial_preserves_request_id_and_neutral_active_action(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    request_id = "req-dynamic-pre-body-403"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/api/v1/models/active_model/active",
+            headers={"X-Request-ID": request_id, "X-User-Role": "viewer"},
+            json={"active": False},
+        )
+
+    assert response.status_code == 403
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="RBAC_FORBIDDEN",
+        action_id="models.switch_version",
+        decision="deny",
+        target={"type": "model_registry", "id": "active_model"},
+    )
+    body = response.json()
+    assert body["error"]["details"]["policy_decision"]["action_id"] != "models.activate"
+    assert body["error"]["details"]["audit_record"]["action_id"] != "models.activate"
+    assert fake_store.write_calls == []
+    assert fake_store.models["active_model"]["active_flag"] is True
+
+
+@pytest.mark.asyncio
+async def test_pre_body_live_release_block_preserves_request_id_correlation(
+    fake_store: FakeModelRegistryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    request_id = "req-pre-body-503"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/mesh-versions",
+            headers={"X-Request-ID": request_id, "X-User-Role": "model_admin"},
+            json={
+                "basin_version_id": "basin_v01",
+                "version_label": "v02",
+                "mesh_uri": "s3://nhms/mesh.sp",
+            },
+        )
+
+    assert response.status_code == 503
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="RELEASE_BLOCKED",
+        action_id="models.switch_version",
+        decision="release_blocked",
+        target={"type": "model_registry", "id": "mesh-versions"},
+    )
+    details = response.json()["error"]["details"]
+    assert details["policy_decision"]["execution_mode"] == "release_blocked"
+    assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
+    assert fake_store.write_calls == []
+
+
+@pytest.mark.asyncio
 async def test_model_registry_admin_write_success_exposes_allowed_policy_evidence(
     fake_store: FakeModelRegistryStore,
 ) -> None:
@@ -2460,6 +2558,34 @@ def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected
 
 def _model_ids(body: dict[str, Any]) -> set[str]:
     return {item["model_id"] for item in body["data"]["items"]}
+
+
+def _assert_pre_body_policy_error(
+    response: Any,
+    *,
+    request_id: str,
+    code: str,
+    action_id: str,
+    decision: str,
+    target: dict[str, str],
+) -> None:
+    body = response.json()
+    assert response.headers["X-Request-ID"] == request_id
+    assert body["request_id"] == request_id
+    assert body["status"] == "error"
+    assert body["error"]["code"] == code
+    details = body["error"]["details"]
+    policy_decision = details["policy_decision"]
+    audit = details["audit_record"]
+    assert policy_decision["action_id"] == action_id
+    assert policy_decision["decision"] == decision
+    assert policy_decision["target_type"] == target["type"]
+    assert policy_decision["target_id"] == target["id"]
+    assert policy_decision["no_mutation_expected"] is True
+    assert audit["request_id"] == request_id
+    assert audit["action_id"] == action_id
+    assert audit["decision"] == decision
+    assert audit["target"] == target
 
 
 def _assert_error_envelope(

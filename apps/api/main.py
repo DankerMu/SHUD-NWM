@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.utils import get_openapi
@@ -59,12 +60,13 @@ async def protected_mutation_auth_guard(request: Any, call_next: Any) -> Any:
     if path_policy is None:
         return await call_next(request)
 
+    request_id = _ensure_request_id(request)
     action_id, target_type, target_id = path_policy
     decision = evaluate_request_action(request, action_id, target_type=target_type, target_id=target_id)
     if decision.decision == "allow":
         return await call_next(request)
 
-    audit = audit_record(decision, request_id=getattr(request.state, "request_id", None))
+    audit = audit_record(decision, request_id=request_id)
     details = {"policy_decision": decision.to_dict(), "audit_record": audit}
     if decision.decision == "release_blocked":
         details["removal_criteria"] = "Configure and prove live backend identity-provider role mapping."
@@ -103,8 +105,17 @@ def _protected_mutation_policy(method: str, path: str) -> tuple[str, str, str] |
     if method.upper() == "PUT" and path.startswith("/api/v1/models/") and path.endswith("/active"):
         model_id = path.removeprefix("/api/v1/models/").removesuffix("/active")
         if model_id and "/" not in model_id:
-            return ("models.activate", "model_instance", model_id)
+            return ("models.switch_version", "model_registry", model_id)
     return None
+
+
+def _ensure_request_id(request: Any) -> str:
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        return request_id
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    request.state.request_id = request_id
+    return request_id
 
 
 app.include_router(models_router)
