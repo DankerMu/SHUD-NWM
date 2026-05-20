@@ -20,7 +20,7 @@ import {
 import { FloodReturnPeriodLayer } from '@/components/flood/FloodReturnPeriodLayer'
 import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
-import { floodReturnPeriodFeatureId } from '@/lib/floodReturnPeriodGeoJson'
+import { floodReturnPeriodFeatureId, type FloodReturnPeriodGeoJsonBbox } from '@/lib/floodReturnPeriodGeoJson'
 import type { FloodAlertRankingItem } from '@/stores/floodAlert'
 
 const BASE_MAP_STYLE: MapStyle = {
@@ -66,6 +66,8 @@ interface FloodAlertMapProps {
   selectedSegment?: FloodAlertRankingItem | null
   onSegmentSelect: (segment: FloodAlertRankingItem) => void
   className?: string
+  fallbackBbox?: FloodReturnPeriodGeoJsonBbox | null
+  degradedFallback?: boolean
 }
 
 function numberOrNull(value: unknown) {
@@ -110,6 +112,8 @@ export function FloodAlertMap({
   selectedSegment,
   onSegmentSelect,
   className,
+  fallbackBbox = null,
+  degradedFallback = false,
 }: FloodAlertMapProps) {
   const toast = useToast((state) => state.toast)
   const mapRef = useRef<MapRef | null>(null)
@@ -266,6 +270,8 @@ export function FloodAlertMap({
             hoveredFeatureId={hoveredFeatureId}
             selectedFeatureId={selectedFeatureId}
             onUnavailableReason={setReturnPeriodUnavailableReason}
+            fallbackBbox={fallbackBbox}
+            degradedFallback={degradedFallback}
           />
         ) : null}
       </Map>

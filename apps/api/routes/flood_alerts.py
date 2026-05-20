@@ -31,6 +31,7 @@ from services.tiles.mvt import (
     postgis_tile_sql,
     public_hydro_layer_id,
     read_cached_tile_response,
+    simplification_tolerance_m,
     valid_times_for_layer,
     validate_identifier,
     validate_xyz,
@@ -1057,6 +1058,7 @@ def _postgis_tile_params(params: dict[str, Any], *, z: int, x: int, y: int) -> d
         "max_coordinate_dimensions": FLOOD_RETURN_PERIOD_MAP_MAX_COORDINATE_DIMENSIONS,
         "extent": MVT_EXTENT,
         "buffer": MVT_BUFFER,
+        "simplification_tolerance_m": simplification_tolerance_m(z),
         "encoder_version": MVT_ENCODER_VERSION,
     }
 

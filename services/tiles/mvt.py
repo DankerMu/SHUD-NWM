@@ -22,6 +22,8 @@ MVT_MAX_ZOOM = 14
 MVT_MAX_FEATURES = 10_000
 MVT_MAX_COORDINATES = 50_000
 MVT_MAX_BYTES = 5_000_000
+MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
+MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
 )
@@ -109,6 +111,13 @@ def stable_etag(data: bytes) -> str:
 
 def public_hydro_layer_id(variable: str) -> str:
     return {"q_down": "discharge", "water_level": "water-level"}.get(variable, f"hydro:{variable}")
+
+
+def simplification_tolerance_m(z: int) -> float:
+    validate_xyz(z, 0, 0)
+    tile_width_m = (WEB_MERCATOR_BOUNDS[2] - WEB_MERCATOR_BOUNDS[0]) / float(1 << z)
+    pixel_width_m = tile_width_m / float(MVT_EXTENT)
+    return min(MVT_MAX_SIMPLIFICATION_TOLERANCE_M, max(MVT_MIN_SIMPLIFICATION_TOLERANCE_M, pixel_width_m / 2.0))
 
 
 def build_tile_response(
@@ -362,6 +371,14 @@ def postgis_tile_sql(layer: str) -> str:
             WHERE source_rows.geom IS NOT NULL
               AND source_rows.geom && ST_Transform(bounds.geom_3857, 4490)
         ),
+        simplified AS (
+            SELECT intersecting.*,
+                   ST_SimplifyPreserveTopology(
+                       ST_MakeValid(ST_Transform(intersecting.geom, 3857)),
+                       :simplification_tolerance_m
+                   ) AS geom_3857
+            FROM intersecting
+        ),
         prefilter_stats AS (
             SELECT COUNT(*) AS intersecting_feature_count,
                    COALESCE(SUM(source_coordinate_count), 0) AS intersecting_coordinate_count,
@@ -380,17 +397,17 @@ def postgis_tile_sql(layer: str) -> str:
             FROM intersecting
         ),
         clipped AS (
-            SELECT intersecting.*,
+            SELECT simplified.*,
                    ST_AsMVTGeom(
-                       ST_Transform(intersecting.geom, 3857),
+                       simplified.geom_3857,
                        bounds.geom_3857,
                        extent => {MVT_EXTENT},
                        buffer => {MVT_BUFFER},
                        clip_geom => true
                    ) AS mvt_geom
-            FROM intersecting, bounds
-            WHERE intersecting.source_coordinate_count <= :feature_coordinate_limit
-              AND intersecting.source_coordinate_dimensions <= :max_coordinate_dimensions
+            FROM simplified, bounds
+            WHERE simplified.source_coordinate_count <= :feature_coordinate_limit
+              AND simplified.source_coordinate_dimensions <= :max_coordinate_dimensions
         ),
         budgeted AS (
             SELECT *, COUNT(*) OVER () AS feature_count, SUM(ST_NPoints(geom)) OVER () AS coordinate_count
@@ -501,6 +518,8 @@ def layer_metadata(
             "fallback_available": True,
             "release_blocking": release_blocking,
         }
+    cache_layer_id = "flood-return-period" if layer_id == "warning-level" else layer_id
+    is_warning_alias = layer_id == "warning-level"
     version = _stable_json_hash({"layer_id": layer_id, "source_version": source_version, "schema": MVT_SCHEMA_VERSION})
     return {
         "layer_id": layer_id,
@@ -519,7 +538,7 @@ def layer_metadata(
         "wgs84_bounds": CHINA_WGS84_BOUNDS,
         "valid_times": valid_times or [],
         "source_refs": {"run_id": run_id, "source_version": source_version},
-        "cache_layer_id": layer_id,
+        "cache_layer_id": cache_layer_id,
         "route_variable": (
             "q_down"
             if layer_id == "discharge"
@@ -529,10 +548,15 @@ def layer_metadata(
             if layer_id in {"flood-return-period", "warning-level"}
             else None
         ),
+        "alias_of": "flood-return-period" if is_warning_alias else None,
+        "alias_semantic": "style_layer" if is_warning_alias else None,
+        "canonical_route_layer_id": cache_layer_id,
         "legacy_layer_ids": [f"hydro:{'q_down' if layer_id == 'discharge' else 'water_level'}"]
         if layer_id in {"discharge", "water-level"}
         else ["flood_return_period_{run_id}"]
         if layer_id == "flood-return-period"
+        else ["flood-return-period", "flood_return_period_{run_id}"]
+        if is_warning_alias
         else [],
         "cache_etag": f'W/"metadata-{version}"',
         "cache_version": version,

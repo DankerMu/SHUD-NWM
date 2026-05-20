@@ -12,6 +12,9 @@ import {
 } from '@/components/flood/alertLevels'
 import {
   buildFloodReturnPeriodGeoJsonUrl,
+  fetchFloodReturnPeriodFeatureCollection,
+  floodReturnPeriodGeoJsonBudget,
+  type FloodReturnPeriodGeoJsonBbox,
   type FloodReturnPeriodFeatureCollection,
 } from '@/lib/floodReturnPeriodGeoJson'
 import {
@@ -31,14 +34,16 @@ interface FloodReturnPeriodLayerProps {
   selectedFeatureId?: string | null
   onUnavailableReason?: (reason: string | null) => void
   metadata?: MvtLayerMetadata | null
+  fallbackBbox?: FloodReturnPeriodGeoJsonBbox | null
+  degradedFallback?: boolean
 }
 
 function featureFilter(featureId?: string | null): FilterSpecification {
   return ['==', ['get', FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY], featureId ?? ''] as FilterSpecification
 }
 
-export function floodTileUrl(runId: string, validTime: string) {
-  return buildFloodReturnPeriodGeoJsonUrl(runId, validTime)
+export function floodTileUrl(runId: string, validTime: string, bbox?: FloodReturnPeriodGeoJsonBbox) {
+  return buildFloodReturnPeriodGeoJsonUrl(runId, validTime, bbox ? { bbox, limit: floodReturnPeriodGeoJsonBudget.maxFallbackFeatures } : {})
 }
 
 export function floodMvtTileUrlTemplate(metadata: MvtLayerMetadata, runId: string, validTime: string) {
@@ -63,6 +68,8 @@ export function FloodReturnPeriodLayer({
   selectedFeatureId,
   onUnavailableReason,
   metadata,
+  fallbackBbox,
+  degradedFallback = false,
 }: FloodReturnPeriodLayerProps) {
   const [data, setData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
   const [catalogMetadata, setCatalogMetadata] = useState<MvtLayerMetadata | null>(metadata ?? null)
@@ -103,8 +110,43 @@ export function FloodReturnPeriodLayer({
       onUnavailableReason?.('洪水重现期 MVT 元数据正在加载，暂不请求 GeoJSON 兼容端点。')
       return
     }
-    onUnavailableReason?.('洪水重现期全国 MVT 尚不可用，已阻止无边界 GeoJSON 兼容请求。')
-  }, [activeMetadata, metadataState, onUnavailableReason])
+    if (!degradedFallback || !fallbackBbox) {
+      onUnavailableReason?.('洪水重现期全国 MVT 尚不可用，已阻止无边界 GeoJSON 兼容请求。')
+      return
+    }
+    const controller = new AbortController()
+    onUnavailableReason?.('洪水重现期 MVT 不可用，正在使用 bbox 限定的 GeoJSON 降级源。')
+    fetchFloodReturnPeriodFeatureCollection(
+      buildFloodReturnPeriodGeoJsonUrl(runId, validTime, {
+        bbox: fallbackBbox,
+        limit: floodReturnPeriodGeoJsonBudget.maxFallbackFeatures,
+      }),
+      {
+        signal: controller.signal,
+        budget: {
+          maxFeatures: floodReturnPeriodGeoJsonBudget.maxFallbackFeatures,
+          maxCoordinates: floodReturnPeriodGeoJsonBudget.maxCoordinates,
+          maxCoordinateDimensions: floodReturnPeriodGeoJsonBudget.maxCoordinateDimensions,
+          maxSerializedBytes: floodReturnPeriodGeoJsonBudget.maxSerializedBytes,
+        },
+      },
+    )
+      .then((result) => {
+        if (!result.ok) {
+          setData(null)
+          onUnavailableReason?.(result.reason)
+          return
+        }
+        setData(result.data)
+        onUnavailableReason?.('洪水重现期 MVT 不可用，已使用 bbox 限定的 GeoJSON 降级源。')
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        setData(null)
+        onUnavailableReason?.('洪水重现期 GeoJSON 降级源请求失败，地图暂不显示该叠加层。')
+      })
+    return () => controller.abort()
+  }, [activeMetadata, degradedFallback, fallbackBbox, metadataState, onUnavailableReason, runId, validTime])
 
   const hoverLayer: LayerProps = {
     id: FLOOD_TILE_HOVER_LAYER_ID,

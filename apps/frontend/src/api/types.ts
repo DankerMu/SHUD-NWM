@@ -1364,6 +1364,12 @@ export interface components {
             route_variable?: string | null;
             /** @description Backward-compatible publisher or internal layer IDs that alias this public layer. */
             legacy_layer_ids?: string[];
+            /** @description Canonical advertised layer ID when this metadata record is a style or semantic alias. */
+            alias_of?: string | null;
+            /** @description Alias behavior such as style_layer when route/cache identity is intentionally shared. */
+            alias_semantic?: string | null;
+            /** @description Layer ID used by the canonical tile route, response header, and cache rows. */
+            canonical_route_layer_id?: string | null;
             cache_etag?: string | null;
             cache_version?: string | null;
             fallback_available: boolean;

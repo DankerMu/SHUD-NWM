@@ -79,12 +79,18 @@ describe('FloodReturnPeriodLayer', () => {
   }
 
   it('builds the bounded GeoJSON compatibility endpoint without z/x/y or pbf semantics', () => {
-    const url = floodTileUrl('run 1', '2026-05-03T06:00:00Z')
+    const url = floodTileUrl('run 1', '2026-05-03T06:00:00Z', {
+      minLon: 100,
+      minLat: 30,
+      maxLon: 101,
+      maxLat: 31,
+    })
 
     expect(url).toContain('https://api.example.test/api/v1/tiles/flood-return-period?')
     expect(url).toContain('run_id=run+1')
     expect(url).toContain('duration=1h')
-    expect(url).toContain('limit=10000')
+    expect(url).toContain('limit=500')
+    expect(url).toContain('bbox=100%2C30%2C101%2C31')
     expect(url).not.toContain('{z}')
     expect(url).not.toContain('.pbf')
   })
@@ -157,6 +163,71 @@ describe('FloodReturnPeriodLayer', () => {
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
     expect(sourceProps).toHaveLength(0)
     expect(layerProps).toHaveLength(0)
+  })
+
+  it('uses bounded GeoJSON fallback for degraded small bbox views when metadata is missing', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    const onUnavailableReason = vi.fn()
+    const featureCollection = {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: {
+            feature_id: 'rnv_v1::seg-1',
+            river_network_version_id: 'rnv_v1',
+            segment_id: 'seg-1',
+            warning_level: 'watch',
+          },
+          geometry: { type: 'LineString', coordinates: [[100, 30], [100.1, 30.1]] },
+        },
+      ],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(emptyLayerCatalogResponse())
+        .mockResolvedValueOnce(geoJsonResponse(featureCollection)),
+    )
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-small"
+        validTime="2026-05-03T06:00:00Z"
+        fallbackBbox={{ minLon: 100, minLat: 30, maxLon: 101, maxLat: 31 }}
+        degradedFallback
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(sourceProps.at(-1)).toMatchObject({ type: 'geojson' }))
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('bbox=100%2C30%2C101%2C31'), expect.anything())
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('limit=500'), expect.anything())
+    expect(sourceProps.at(-1)).toMatchObject({ data: featureCollection, promoteId: FLOOD_RETURN_PERIOD_FEATURE_ID_PROPERTY })
+    expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('bbox 限定的 GeoJSON 降级源'))
+  })
+
+  it('blocks degraded GeoJSON fallback when no bbox is supplied', async () => {
+    sourceProps.length = 0
+    layerProps.length = 0
+    const onUnavailableReason = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(emptyLayerCatalogResponse()))
+
+    render(
+      <FloodReturnPeriodLayer
+        runId="run-national"
+        validTime="2026-05-03T06:00:00Z"
+        degradedFallback
+        onUnavailableReason={onUnavailableReason}
+      />,
+    )
+
+    await waitFor(() => expect(onUnavailableReason).toHaveBeenLastCalledWith(expect.stringContaining('已阻止无边界 GeoJSON')))
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+    expect(sourceProps).toHaveLength(0)
   })
 
   it('keeps vector feature identity filters when metadata is discovered from the catalog', async () => {

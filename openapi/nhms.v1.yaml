@@ -3261,6 +3261,18 @@ components:
           description: Backward-compatible publisher or internal layer IDs that alias this public layer.
           items:
             type: string
+        alias_of:
+          type: string
+          nullable: true
+          description: Canonical advertised layer ID when this metadata record is a style or semantic alias.
+        alias_semantic:
+          type: string
+          nullable: true
+          description: Alias behavior such as style_layer when route/cache identity is intentionally shared.
+        canonical_route_layer_id:
+          type: string
+          nullable: true
+          description: Layer ID used by the canonical tile route, response header, and cache rows.
         cache_etag:
           type: string
           nullable: true

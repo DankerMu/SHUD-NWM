@@ -606,7 +606,12 @@ Useful knobs:
   production MVT readiness. This expectation alone does not create measured MVT
   evidence; provide `NHMS_PRODUCTION_SCALE_MVT_CONTRACT_ARTIFACT` or
   `--mvt-contract-artifact` with a measured JSON artifact to satisfy the
-  deterministic MVT contract path.
+  deterministic MVT contract path. The supplied artifact path is authoritative:
+  the validator rejects oversized or malformed artifacts, requires explicit
+  `application/x-protobuf`, raw-byte observation, SQL shape/query plan hashes,
+  finite `payload_bytes`, `p95_ms`, tile/feature/coordinate counts, browser
+  timing, and records only the supplied path plus SHA-256 in the release
+  evidence.
 - `NHMS_PRODUCTION_SCALE_FRONTEND_BREAKPOINTS`: comma-separated values such as
   `desktop:1440x900,mobile:390x844`.
 - `NHMS_PRODUCTION_SCALE_API_BASE_URL` and

@@ -22,6 +22,25 @@ from services.production_closure.scale_validation import (
 )
 
 
+def _write_mvt_contract_artifact(path: Path, **overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "observed_content_type": "application/x-protobuf",
+        "raw_tile_bytes_observed": True,
+        "sql_shape_hash": "shape-hash",
+        "query_plan_hash": "plan-hash",
+        "artifact_paths": [str(path)],
+        "payload_bytes": 684000,
+        "p95_ms": 178.6,
+        "tile_count": 96,
+        "feature_count": 18500,
+        "coordinate_count": 37000,
+        "browser_timing_ms": 214.0,
+    }
+    payload.update(overrides)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
 def test_validate_scale_default_lane_writes_required_ready_evidence(tmp_path: Path) -> None:
     summary = validate_scale(ProductionScaleConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="m10_151"))
 
@@ -116,24 +135,7 @@ def test_validate_scale_mvt_expectation_creates_explicit_release_blocker(tmp_pat
 
 def test_validate_scale_mvt_expectation_with_measured_artifact_records_deterministic_pass(tmp_path: Path) -> None:
     artifact = tmp_path / "measured-mvt-contract.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "observed_content_type": "application/x-protobuf",
-                "raw_tile_bytes_observed": True,
-                "sql_shape_hash": "shape-hash",
-                "query_plan_hash": "plan-hash",
-                "artifact_paths": [str(artifact)],
-                "payload_bytes": 684000,
-                "p95_ms": 178.6,
-                "tile_count": 96,
-                "feature_count": 18500,
-                "coordinate_count": 37000,
-                "browser_timing_ms": {"first_tile": 214.0},
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_mvt_contract_artifact(artifact)
     summary = validate_scale(
         ProductionScaleConfig.from_env(
             evidence_root=tmp_path / "artifacts",
@@ -151,8 +153,94 @@ def test_validate_scale_mvt_expectation_with_measured_artifact_records_determini
     assert tile["observed_content_type"] == "application/x-protobuf"
     assert tile["mvt_deterministic_metrics"]["artifact_path"] == str(artifact)
     assert tile["mvt_deterministic_metrics"]["artifact_sha256"]
+    assert tile["mvt_deterministic_contract"]["artifact_paths"] == [str(artifact)]
     assert tile["layer_metadata"]["tile_format"] == "mvt"
     assert {blocker["error_code"] for blocker in tile["blockers"]} == {"PRODUCTION_SCALE_MVT_DELIVERY_BLOCKED"}
+
+
+def test_validate_scale_mvt_artifact_rejects_oversized_padded_json(tmp_path: Path) -> None:
+    artifact = tmp_path / "oversized-mvt-contract.json"
+    payload = json.dumps(_write_mvt_contract_artifact(artifact))
+    artifact.write_bytes(payload.encode("utf-8") + (b" " * (MAX_EVIDENCE_PAYLOAD_BYTES + 1 - len(payload))))
+
+    validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="mvt_oversized",
+            tile_content_type_expectation="application/x-protobuf",
+            mvt_contract_artifact=artifact,
+        )
+    )
+    tile = _read_json(tmp_path / "artifacts" / "mvt_oversized" / "scale" / "tile_evidence.json")
+
+    assert tile["deterministic_mvt_passed"] is False
+    assert tile["mvt_deterministic_contract"]["artifact_source"] == "oversized_mvt_contract_artifact"
+    assert "exceeds configured limit" in tile["mvt_deterministic_metrics"]["message"]
+
+
+def test_validate_scale_mvt_artifact_blocks_incomplete_schema(tmp_path: Path) -> None:
+    artifact = tmp_path / "incomplete-mvt-contract.json"
+    _write_mvt_contract_artifact(artifact)
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    payload.pop("p95_ms")
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+    validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="mvt_incomplete",
+            tile_content_type_expectation="application/x-protobuf",
+            mvt_contract_artifact=artifact,
+        )
+    )
+    tile = _read_json(tmp_path / "artifacts" / "mvt_incomplete" / "scale" / "tile_evidence.json")
+
+    assert tile["deterministic_mvt_passed"] is False
+    assert tile["mvt_deterministic_contract"]["status"] == "blocked"
+    assert "missing required fields: p95_ms" in tile["mvt_deterministic_metrics"]["message"]
+
+
+@pytest.mark.parametrize("field,value", [("payload_bytes", "bad"), ("p95_ms", float("inf"))])
+def test_validate_scale_mvt_artifact_blocks_bad_numeric_without_raising(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    artifact = tmp_path / f"bad-{field}-mvt-contract.json"
+    _write_mvt_contract_artifact(artifact, **{field: value})
+
+    validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id=f"mvt_bad_{field}",
+            tile_content_type_expectation="application/x-protobuf",
+            mvt_contract_artifact=artifact,
+        )
+    )
+    tile = _read_json(tmp_path / "artifacts" / f"mvt_bad_{field}" / "scale" / "tile_evidence.json")
+
+    assert tile["deterministic_mvt_passed"] is False
+    assert tile["mvt_deterministic_contract"]["status"] == "blocked"
+    assert f"field {field} must be finite numeric evidence" in tile["mvt_deterministic_metrics"]["message"]
+
+
+def test_validate_scale_mvt_artifact_normalizes_stale_embedded_artifact_paths(tmp_path: Path) -> None:
+    artifact = tmp_path / "current-mvt-contract.json"
+    _write_mvt_contract_artifact(artifact, artifact_paths=["/tmp/old-run/tile_evidence.json"])
+
+    validate_scale(
+        ProductionScaleConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="mvt_stale_paths",
+            tile_content_type_expectation="application/x-protobuf",
+            mvt_contract_artifact=artifact,
+        )
+    )
+    tile = _read_json(tmp_path / "artifacts" / "mvt_stale_paths" / "scale" / "tile_evidence.json")
+
+    assert tile["deterministic_mvt_passed"] is True
+    assert tile["mvt_deterministic_contract"]["artifact_paths"] == [str(artifact)]
+    assert tile["mvt_deterministic_metrics"]["artifact_paths"] == [str(artifact)]
 
 
 def test_validate_scale_threshold_and_count_failures_block_readiness(tmp_path: Path) -> None:

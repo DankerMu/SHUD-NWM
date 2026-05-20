@@ -2,10 +2,18 @@ import { apiFetch, buildApiUrl } from '@/api/base'
 
 export const floodReturnPeriodGeoJsonBudget = {
   maxFeatures: 10_000,
+  maxFallbackFeatures: 500,
   maxCoordinates: 100_000,
   maxCoordinateDimensions: 3,
   maxSerializedBytes: 2_000_000,
 } as const
+
+export interface FloodReturnPeriodGeoJsonBbox {
+  minLon: number
+  minLat: number
+  maxLon: number
+  maxLat: number
+}
 
 type FloodGeometryType =
   | 'Point'
@@ -86,13 +94,21 @@ type BoundedBodyReadResult =
   | { ok: true; body: string; serializedBytes: number }
   | { ok: false; code: FloodReturnPeriodRejectionCode; reason: string; serializedBytes: number }
 
-export function buildFloodReturnPeriodGeoJsonUrl(runId: string, validTime: string) {
+export function buildFloodReturnPeriodGeoJsonUrl(
+  runId: string,
+  validTime: string,
+  options: { bbox?: FloodReturnPeriodGeoJsonBbox; limit?: number } = {},
+) {
+  const limit = options.limit ?? floodReturnPeriodGeoJsonBudget.maxFeatures
   const params = new URLSearchParams({
     run_id: runId,
     duration: '1h',
     valid_time: validTime,
-    limit: String(floodReturnPeriodGeoJsonBudget.maxFeatures),
+    limit: String(limit),
   })
+  if (options.bbox) {
+    params.set('bbox', `${options.bbox.minLon},${options.bbox.minLat},${options.bbox.maxLon},${options.bbox.maxLat}`)
+  }
   return buildApiUrl(`/api/v1/tiles/flood-return-period?${params.toString()}`)
 }
 

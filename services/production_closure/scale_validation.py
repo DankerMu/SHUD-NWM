@@ -50,6 +50,14 @@ MVT_MISSING_IMPLEMENTATION_WORK = [
     "Opt-in live PostGIS/national-data execution evidence from the target environment",
     "Browser proof against real national MVT tiles rather than deterministic fixture metadata",
 ]
+MVT_CONTRACT_NUMERIC_FIELDS = (
+    "payload_bytes",
+    "p95_ms",
+    "tile_count",
+    "feature_count",
+    "coordinate_count",
+    "browser_timing_ms",
+)
 
 QUERY_TARGETS = {
     "model_listing": {
@@ -817,6 +825,17 @@ def _deterministic_mvt_contract_record(
     _refuse_symlink_components(artifact_path)
     try:
         content = read_bytes_limited_no_follow(artifact_path, max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES)
+        if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
+            return _blocked_mvt_contract_record(
+                config,
+                status="blocked",
+                artifact_source="oversized_mvt_contract_artifact",
+                message=(
+                    "Measured deterministic MVT artifact exceeds configured limit "
+                    f"of {MAX_EVIDENCE_PAYLOAD_BYTES} bytes."
+                ),
+                artifact_paths=[str(artifact_path)],
+            )
         measured = json.loads(content.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, SafeFilesystemError) as error:
         return _blocked_mvt_contract_record(
@@ -834,31 +853,113 @@ def _deterministic_mvt_contract_record(
             message="Measured deterministic MVT artifact must contain a JSON object.",
             artifact_paths=[str(artifact_path)],
         )
-    measured = dict(measured)
-    measured["artifact_path"] = str(artifact_path)
-    measured["artifact_sha256"] = hashlib.sha256(content).hexdigest()
-    measured.setdefault("thresholds", {"payload_bytes": config.thresholds.max_tile_bytes})
-    measured.setdefault("artifact_paths", [str(artifact_path)])
-    observed_content_type = str(measured.get("observed_content_type") or "not_measured")
-    raw_tile_bytes_observed = bool(measured.get("raw_tile_bytes_observed"))
-    payload_bytes = int(measured.get("payload_bytes") or 0)
-    passed = (
-        observed_content_type == "application/x-protobuf"
-        and raw_tile_bytes_observed
-        and bool(measured.get("sql_shape_hash"))
-        and bool(measured.get("query_plan_hash"))
-        and bool(measured.get("artifact_sha256"))
-        and payload_bytes <= config.thresholds.max_tile_bytes
+    artifact_sha256 = hashlib.sha256(content).hexdigest()
+    normalized = _validated_mvt_contract_metrics(
+        measured,
+        config=config,
+        artifact_path=artifact_path,
+        artifact_sha256=artifact_sha256,
     )
+    if not normalized["ok"]:
+        return _blocked_mvt_contract_record(
+            config,
+            status="blocked",
+            artifact_source="invalid_mvt_contract_artifact",
+            message=str(normalized["message"]),
+            artifact_paths=[str(artifact_path)],
+            artifact_sha256=artifact_sha256,
+        )
+    metrics = normalized["metrics"]
     return {
-        "status": "passed" if passed else "blocked",
-        "passed": passed,
-        "observed_content_type": observed_content_type,
-        "payload_bytes": payload_bytes,
+        "status": "passed",
+        "passed": True,
+        "observed_content_type": "application/x-protobuf",
+        "payload_bytes": metrics["payload_bytes"],
         "artifact_source": "measured_mvt_contract_artifact",
-        "artifact_paths": [str(item) for item in measured.get("artifact_paths", [str(artifact_path)])],
-        "metrics": measured,
+        "artifact_paths": [str(artifact_path)],
+        "metrics": metrics,
     }
+
+
+def _validated_mvt_contract_metrics(
+    measured: Mapping[str, Any],
+    *,
+    config: ProductionScaleConfig,
+    artifact_path: Path,
+    artifact_sha256: str,
+) -> dict[str, Any]:
+    metrics = dict(measured)
+    required_fields = {
+        "observed_content_type",
+        "raw_tile_bytes_observed",
+        "sql_shape_hash",
+        "query_plan_hash",
+        *MVT_CONTRACT_NUMERIC_FIELDS,
+    }
+    missing = sorted(field for field in required_fields if field not in metrics)
+    if missing:
+        return {
+            "ok": False,
+            "message": f"Measured deterministic MVT artifact is missing required fields: {', '.join(missing)}.",
+        }
+    if metrics["observed_content_type"] != "application/x-protobuf":
+        return {"ok": False, "message": "Measured deterministic MVT artifact did not observe application/x-protobuf."}
+    if metrics["raw_tile_bytes_observed"] is not True:
+        return {
+            "ok": False,
+            "message": "Measured deterministic MVT artifact must confirm raw tile bytes were observed.",
+        }
+    for field_name in ("sql_shape_hash", "query_plan_hash"):
+        if not isinstance(metrics[field_name], str) or not metrics[field_name]:
+            return {
+                "ok": False,
+                "message": f"Measured deterministic MVT artifact field {field_name} must be a non-empty string.",
+            }
+
+    parsed_numbers: dict[str, int | float] = {}
+    for field_name in MVT_CONTRACT_NUMERIC_FIELDS:
+        parsed = _mvt_contract_finite_number(metrics[field_name], field_name)
+        if parsed is None:
+            return {
+                "ok": False,
+                "message": f"Measured deterministic MVT artifact field {field_name} must be finite numeric evidence.",
+            }
+        parsed_numbers[field_name] = parsed
+    if parsed_numbers["payload_bytes"] > config.thresholds.max_tile_bytes:
+        return {
+            "ok": False,
+            "message": (
+                "Measured deterministic MVT artifact payload_bytes exceeds configured threshold "
+                f"{config.thresholds.max_tile_bytes}."
+            ),
+        }
+
+    normalized = {
+        **metrics,
+        **parsed_numbers,
+        "observed_content_type": "application/x-protobuf",
+        "raw_tile_bytes_observed": True,
+        "artifact_path": str(artifact_path),
+        "artifact_sha256": artifact_sha256,
+        "artifact_paths": [str(artifact_path)],
+        "thresholds": {"payload_bytes": config.thresholds.max_tile_bytes},
+    }
+    return {"ok": True, "metrics": normalized}
+
+
+def _mvt_contract_finite_number(value: Any, field_name: str) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, int | float):
+        return None
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        return None
+    if field_name in {"payload_bytes", "tile_count", "feature_count", "coordinate_count"}:
+        if not parsed.is_integer():
+            return None
+        return int(parsed)
+    return parsed
 
 
 def _blocked_mvt_contract_record(
@@ -868,7 +969,19 @@ def _blocked_mvt_contract_record(
     artifact_source: str,
     message: str,
     artifact_paths: list[str] | None = None,
+    artifact_sha256: str | None = None,
 ) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "status": status,
+        "payload_bytes": 0,
+        "thresholds": {"payload_bytes": config.thresholds.max_tile_bytes},
+        "message": message,
+    }
+    if artifact_paths:
+        metrics["artifact_paths"] = artifact_paths
+        metrics["artifact_path"] = artifact_paths[0]
+    if artifact_sha256:
+        metrics["artifact_sha256"] = artifact_sha256
     return {
         "status": status,
         "passed": False,
@@ -876,12 +989,7 @@ def _blocked_mvt_contract_record(
         "payload_bytes": 0,
         "artifact_source": artifact_source,
         "artifact_paths": artifact_paths or [],
-        "metrics": {
-            "status": status,
-            "payload_bytes": 0,
-            "thresholds": {"payload_bytes": config.thresholds.max_tile_bytes},
-            "message": message,
-        },
+        "metrics": metrics,
     }
 
 

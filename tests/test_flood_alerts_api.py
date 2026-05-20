@@ -1798,12 +1798,112 @@ def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases(
     assert water_level["legacy_layer_ids"] == ["hydro:water_level"]
 
 
+def test_warning_level_metadata_declares_flood_return_period_alias_identity() -> None:
+    with _client() as client:
+        response = client.get("/api/v1/layers")
+
+    assert response.status_code == 200
+    metadata = {layer["layer_id"]: layer["metadata"] for layer in response.json()["data"]}
+    warning = metadata["warning-level"]
+    canonical = metadata["flood-return-period"]
+    assert warning["cache_layer_id"] == "flood-return-period"
+    assert warning["canonical_route_layer_id"] == "flood-return-period"
+    assert warning["alias_of"] == "flood-return-period"
+    assert warning["alias_semantic"] == "style_layer"
+    assert warning["route_variable"] == "return_period"
+    assert warning["url_template"] == canonical["url_template"]
+    assert warning["maplibre_source_layer"] == canonical["maplibre_source_layer"]
+
+
+def test_advertised_mvt_layer_cache_identity_matches_route_or_declared_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_inputs = {
+        "flood-return-period": flood_alert_routes.TileInput(
+            layer_id="flood-return-period",
+            source_id=RUN_ID,
+            source_version="rnv_v1",
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="duration:1h",
+        ),
+        "warning-level": flood_alert_routes.TileInput(
+            layer_id="flood-return-period",
+            source_id=RUN_ID,
+            source_version="rnv_v1",
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="duration:1h",
+        ),
+        "discharge": flood_alert_routes.TileInput(
+            layer_id="discharge",
+            source_id=RUN_ID,
+            source_version="rnv_v1",
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="variable:q_down",
+        ),
+        "water-level": flood_alert_routes.TileInput(
+            layer_id="water-level",
+            source_id=RUN_ID,
+            source_version="rnv_v1",
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="variable:water_level",
+        ),
+        "river-network": flood_alert_routes.TileInput(
+            layer_id="river-network",
+            source_id="basin_v1",
+            source_version="basin_v1",
+            valid_time=None,
+            z=6,
+            x=12,
+            y=24,
+        ),
+    }
+    with _store() as session:
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        with TestClient(app) as client:
+            app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+            try:
+                response = client.get("/api/v1/layers")
+            finally:
+                app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+        layers = {layer["layer_id"]: layer["metadata"] for layer in response.json()["data"]}
+        for layer_id, tile_input in route_inputs.items():
+            receipt = flood_alert_routes.build_raw_tile_response(session, tile_input, f"{layer_id}-tile".encode())
+            metadata = layers[layer_id]
+            expected_layer_id = metadata["cache_layer_id"]
+            assert receipt.layer_id == expected_layer_id
+            assert session.execute(
+                text("SELECT COUNT(*) FROM map.tile_layer WHERE layer_id = :layer_id"),
+                {"layer_id": expected_layer_id},
+            ).scalar_one() == 1
+            assert session.execute(
+                text("SELECT COUNT(*) FROM map.tile_cache WHERE layer_id = :layer_id"),
+                {"layer_id": expected_layer_id},
+            ).scalar_one() >= 1
+            if metadata.get("alias_of"):
+                assert metadata["alias_of"] == expected_layer_id
+
+
 def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() -> None:
     statement = flood_alert_routes.postgis_tile_sql("flood-return-period")
 
     assert "ST_TileEnvelope(:z, :x, :y)" in statement
     assert "ST_Transform(intersecting.geom, 3857)" in statement
     assert "ST_AsMVTGeom" in statement
+    assert statement.index("ST_SimplifyPreserveTopology") < statement.index("ST_AsMVTGeom")
+    assert "ST_MakeValid(ST_Transform(intersecting.geom, 3857))" in statement
+    assert ":simplification_tolerance_m" in statement
     assert "extent => 4096" in statement
     assert "buffer => 64" in statement
     assert "clip_geom => true" in statement
@@ -1812,6 +1912,25 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
     assert "coordinate_count <= :collection_coordinate_limit" in statement
     assert "source_stats AS" in statement
     assert "FROM source_stats, budget_stats, prefilter_stats" in statement
+
+
+def test_mvt_postgis_sql_shape_simplifies_all_production_layers_before_encoding() -> None:
+    for layer in ("flood-return-period", "hydro", "river-network"):
+        statement = flood_alert_routes.postgis_tile_sql(layer)
+        assert "simplified AS" in statement
+        assert "ST_SimplifyPreserveTopology" in statement
+        assert "ST_MakeValid(ST_Transform(intersecting.geom, 3857))" in statement
+        assert "simplified.geom_3857" in statement
+        assert statement.index("simplified AS") < statement.index("clipped AS") < statement.index("ST_AsMVTGeom")
+        assert ":simplification_tolerance_m" in statement
+
+
+def test_mvt_postgis_tile_params_bind_zoom_safe_simplification_tolerance() -> None:
+    low_zoom = flood_alert_routes._postgis_tile_params({}, z=0, x=0, y=0)["simplification_tolerance_m"]
+    high_zoom = flood_alert_routes._postgis_tile_params({}, z=14, x=0, y=0)["simplification_tolerance_m"]
+
+    assert low_zoom == 256.0
+    assert high_zoom == 0.5
 
 
 def test_mvt_postgis_sql_shape_projects_metadata_properties_and_bindable_casts() -> None:
