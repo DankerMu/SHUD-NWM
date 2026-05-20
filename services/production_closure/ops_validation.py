@@ -578,8 +578,13 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 target_type=_target_type_for_action(action),
             ):
                 decisions.append(_action_decision(config, decision, state=state))
+    subject_blockers = _auth_live_proof_subject_blockers(live_proof, decisions) if live_backend_auth_executed else []
     coverage_blockers = _auth_live_proof_coverage_blockers(config, decisions) if live_backend_auth_executed else []
-    status = "ready" if live_backend_auth_executed and not coverage_blockers else "release_blocked"
+    status = (
+        "ready"
+        if live_backend_auth_executed and not subject_blockers and not coverage_blockers
+        else "release_blocked"
+    )
     blockers = []
     if not live_backend_auth_executed:
         blockers.append(
@@ -598,6 +603,7 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
                 ),
             }
         )
+    blockers.extend(subject_blockers)
     blockers.extend(coverage_blockers)
     return {
         "schema": "nhms.production_closure.ops.auth_rbac.v1",
@@ -730,6 +736,67 @@ def _auth_live_proof_action_decisions(
             )
             decisions.append(_action_decision(config, policy_decision, state=state))
     return decisions
+
+
+def _auth_live_proof_subject_blockers(
+    live_proof: Mapping[str, Any] | None,
+    decisions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if live_proof is None:
+        return []
+    subjects = live_proof.get("subjects", {})
+    if not isinstance(subjects, Mapping):
+        return []
+    allowed_subject = subjects.get("allowed")
+    denied_subject = subjects.get("denied")
+    if not isinstance(allowed_subject, Mapping) or not isinstance(denied_subject, Mapping):
+        return []
+
+    allowed_actor = str(allowed_subject.get("actor_id") or "")
+    denied_actor = str(denied_subject.get("actor_id") or "")
+    if not allowed_actor or allowed_actor != denied_actor:
+        return []
+
+    allowed_role_evidence = _auth_live_proof_role_evidence(allowed_subject)
+    denied_role_evidence = _auth_live_proof_role_evidence(denied_subject)
+    if allowed_role_evidence == denied_role_evidence:
+        return []
+
+    linked_decision_ids = [
+        decision["lineage"]["audit_correlation_id"]
+        for decision in decisions
+        if decision.get("actor_id") == allowed_actor and "lineage" in decision
+    ]
+    return [
+        {
+            "error_code": "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_IDENTITY_INCONSISTENT",
+            "message": "Inconsistent live-proof subject identity/role mapping across allowed and denied proof.",
+            "actor_id": allowed_actor,
+            "allowed_role_evidence": allowed_role_evidence,
+            "denied_role_evidence": denied_role_evidence,
+            "residual_risk": (
+                "Production auth readiness could be proven by contradictory role mappings for one live actor "
+                "instead of independent allowed and denied identity evidence."
+            ),
+            "removal_criteria": (
+                "Supply distinct allowed and denied live_proof subjects, or identical subject role mapping evidence "
+                "when the same actor is intentionally reused."
+            ),
+            "linked_decision_ids": linked_decision_ids,
+        }
+    ]
+
+
+def _auth_live_proof_role_evidence(subject: Mapping[str, Any]) -> dict[str, Any]:
+    role_mapping = subject.get("role_mapping_result", {})
+    if not isinstance(role_mapping, Mapping):
+        role_mapping = {}
+    return {
+        "raw_roles": sorted({str(role) for role in role_mapping.get("raw_roles", ()) if str(role)}),
+        "mapped_roles": sorted({str(role) for role in role_mapping.get("mapped_roles", ()) if str(role)}),
+        "unmapped_roles": sorted({str(role) for role in role_mapping.get("unmapped_roles", ()) if str(role)}),
+        "mapping_status": str(role_mapping.get("mapping_status") or ""),
+    }
 
 
 def _action_decision(

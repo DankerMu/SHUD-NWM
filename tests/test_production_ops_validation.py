@@ -1812,6 +1812,58 @@ def test_validate_ops_auth_live_proof_partial_action_coverage_remains_blocked(tm
     )
 
 
+def test_validate_ops_auth_live_proof_inconsistent_same_actor_roles_remains_blocked(tmp_path: Path) -> None:
+    proof = {
+        "execution_mode": "live_proof",
+        "live_backend_auth_executed": True,
+        "provider": "oidc-prod",
+        "allowed_subject": {
+            "actor_id": "live-user",
+            "raw_roles": ["sys_admin"],
+            "mapped_roles": ["sys_admin"],
+        },
+        "denied_subject": {
+            "actor_id": "live-user",
+            "raw_roles": ["viewer"],
+            "mapped_roles": ["viewer"],
+        },
+    }
+
+    summary = validate_ops(
+        ProductionOpsConfig.from_env(
+            evidence_root=tmp_path / "artifacts",
+            run_id="inconsistent_live_proof_auth",
+            auth_mode="backend_route_executed",
+            auth_live_proof=proof,
+        )
+    )
+
+    lane_dir = tmp_path / "artifacts" / "inconsistent_live_proof_auth" / "ops"
+    auth = _read_json(lane_dir / "auth_rbac.json")
+    blockers = _read_json(lane_dir / "auth_release_blockers.json")
+
+    assert auth["status"] == "release_blocked"
+    assert blockers["status"] == "release_blocked"
+    assert not any(
+        blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
+        for blocker in blockers["blockers"]
+    )
+
+    auth_blocker = next(
+        blocker
+        for blocker in blockers["blockers"]
+        if blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_IDENTITY_INCONSISTENT"
+    )
+    assert auth_blocker["actor_id"] == "live-user"
+    assert auth_blocker["allowed_role_evidence"]["mapped_roles"] == ["sys_admin"]
+    assert auth_blocker["denied_role_evidence"]["mapped_roles"] == ["viewer"]
+    assert "Inconsistent live-proof subject identity/role mapping" in auth_blocker["message"]
+    assert any(
+        blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_IDENTITY_INCONSISTENT"
+        for blocker in summary["release_blockers"]
+    )
+
+
 def test_validate_ops_env_supplied_config_values_are_not_marked_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

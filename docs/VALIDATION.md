@@ -752,7 +752,9 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   allowed live decision for every canonical action, and the denied subject must
   produce a denied no-mutation live decision for every canonical action. Denied
   live-proof rows are emitted only from the supplied denied subject and do not
-  reuse the allowed actor's raw role mapping evidence. Token, credential, URI,
+  reuse the allowed actor's raw role mapping evidence. The subjects must be
+  distinct identities or carry non-contradictory raw-role and mapped-role
+  evidence when the same actor is intentionally reused. Token, credential, URI,
   and checksum-shaped proof fields are redacted from emitted evidence.
 - `audit_redaction.json`: allowed/denied/release-blocked audit rows with actor,
   roles, action id, target, previous/new state, decision, reason, reason code,
