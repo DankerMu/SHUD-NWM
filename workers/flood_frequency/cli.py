@@ -33,7 +33,7 @@ def _session_from_env() -> Session:
 
 def _hindcast_submit(model_id: str, source_id: str, start_time: str, end_time: str, purpose: str) -> dict[str, object]:
     with _session_from_env() as session:
-        result = submit_hindcast(model_id, source_id, start_time, end_time, purpose, session)
+        result = submit_hindcast(model_id, source_id, start_time, end_time, purpose, session, trusted_internal=True)
         years = _years_from_run_ids(result.run_ids)
         config = HindcastConfig.from_env()
         try:

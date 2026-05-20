@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { JobsTable } from '@/components/monitoring/JobsTable'
+import { useToast } from '@/hooks/useToast'
 import type { AuthRole } from '@/stores/auth'
 import { useMonitoringStore } from '@/stores/monitoring'
 
@@ -84,6 +85,7 @@ describe('JobsTable RBAC action boundary', () => {
       fetchJobs: vi.fn().mockResolvedValue(undefined),
       fetchAll: vi.fn().mockResolvedValue(undefined),
     })
+    useToast.setState({ toasts: [] })
   })
 
   it('does not show retry or cancel actions for a configured production operator without dev override', () => {
@@ -112,6 +114,7 @@ describe('JobsTable RBAC action boundary', () => {
     mocks.authState.canUseActions = true
 
     render(<JobsTable />)
+    await waitFor(() => expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1))
 
     await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ }))
     await userEvent.click(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ }))
@@ -137,5 +140,28 @@ describe('JobsTable RBAC action boundary', () => {
         },
       }),
     )
+  })
+
+  it('renders backend forbidden action failures without refreshing monitoring state', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    mocks.postMock.mockResolvedValueOnce({
+      data: undefined,
+      error: { error: { code: 'RBAC_FORBIDDEN', message: 'Actor roles are not authorized.' } },
+    })
+
+    render(<JobsTable />)
+
+    await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ }))
+
+    await waitFor(() =>
+      expect(useToast.getState().toasts.at(-1)).toMatchObject({
+        title: '重试失败',
+        description: 'Actor roles are not authorized.',
+        variant: 'destructive',
+      }),
+    )
+    expect(useMonitoringStore.getState().fetchAll).not.toHaveBeenCalled()
+    expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1)
   })
 })

@@ -58,6 +58,7 @@ def test_idempotent_skip_already_succeeded_year() -> None:
             "1994-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         assert result.total_runs == 1
@@ -77,6 +78,7 @@ def test_idempotent_skip_already_parsed_year() -> None:
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         assert result.total_runs == 0
@@ -100,6 +102,7 @@ def test_submit_hindcast_skips_active_years_without_resetting() -> None:
             "1995-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         assert result.total_runs == 1
@@ -112,6 +115,23 @@ def test_submit_hindcast_skips_active_years_without_resetting() -> None:
         assert _hydro_run(session, submitted_id)["error_code"] == "KEEP_SUBMITTED"
 
 
+def test_submit_hindcast_direct_call_requires_policy_evidence() -> None:
+    with _store() as session:
+        with pytest.raises(HindcastError) as exc_info:
+            submit_hindcast(
+                "yangtze_shud_v12",
+                "ERA5",
+                "1993-01-01T00:00:00Z",
+                "1993-12-31T23:00:00Z",
+                "flood_frequency_sample",
+                session,
+            )
+
+        assert exc_info.value.error_code == "AUTH_REQUIRED"
+        assert exc_info.value.details["no_mutation_expected"] is True
+        assert _hydro_run_optional(session, run_id_for_year("yangtze_shud_v12", 1993)) is None
+
+
 def test_single_year_full_flow_forcing_shud_parse_and_river_timeseries(monkeypatch: pytest.MonkeyPatch) -> None:
     with _store() as session:
         submit_hindcast(
@@ -121,6 +141,7 @@ def test_single_year_full_flow_forcing_shud_parse_and_river_timeseries(monkeypat
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
         _insert_era5_hours(session, 1993, 24 * 365)
 
@@ -170,6 +191,7 @@ def test_forcing_incomplete_failure_marks_run_failed() -> None:
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
         _insert_era5_hours(session, 1993, int(24 * 365 * 0.5))
 
@@ -214,7 +236,7 @@ def test_failure_retry_resets_failed_hindcast_run() -> None:
         gateway = _RecordingGateway(job_id="slurm_retry")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry(run_id, gateway=gateway)
+        retry = service.attempt_manual_retry(run_id, gateway=gateway, trusted_internal=True)
 
         assert retry.status == "submitted"
         assert retry.job_type == "hindcast"
@@ -306,6 +328,7 @@ def test_hindcast_runs_do_not_create_state_snapshot(monkeypatch: pytest.MonkeyPa
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         def fake_forcing(*_args: Any) -> HindcastForcingResult:
@@ -575,6 +598,7 @@ def test_metadata_only_hindcast_forcing_cannot_enter_runtime(
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         with pytest.raises(HindcastError) as exc_info:
@@ -597,6 +621,7 @@ def test_hindcast_run_uris_use_plain_object_keys() -> None:
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         run = _hydro_run(session, run_id)
@@ -989,6 +1014,15 @@ def _hydro_run(session: Session, run_id: str) -> dict[str, Any]:
         .mappings()
         .one()
     )
+
+
+def _hydro_run_optional(session: Session, run_id: str) -> dict[str, Any] | None:
+    row = (
+        session.execute(text("SELECT * FROM hydro.hydro_run WHERE run_id = :run_id"), {"run_id": run_id})
+        .mappings()
+        .first()
+    )
+    return dict(row) if row is not None else None
 
 
 class _RecordingGateway:

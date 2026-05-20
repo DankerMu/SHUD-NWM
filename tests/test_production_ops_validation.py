@@ -29,6 +29,7 @@ def test_validate_ops_default_lane_writes_required_release_blocked_evidence(tmp_
     assert summary["schema"] == "nhms.production_closure.ops.v1"
     assert summary["status"] == "release_blocked"
     assert summary["final_production_readiness_claimed"] is False
+    assert summary["evidence_dir"] == "m10_152/ops"
     assert summary["live_backend_auth_executed"] is False
     assert summary["live_alert_sink_delivered"] is False
     assert summary["live_rollback_executed"] is False
@@ -54,7 +55,7 @@ def test_validate_ops_default_lane_writes_required_release_blocked_evidence(tmp_
     assert preflight["alert_target"] == "dry-run://ops-validation"
     assert preflight["deployment_config_source"] == "generated_deterministic_templates"
     assert preflight["rollback_drill_scope"] == "simulated_drills"
-    assert preflight["evidence_dir"] == str(lane_dir)
+    assert preflight["evidence_dir"] == "m10_152/ops"
     assert set(preflight["dependency_evidence"]) == {"slurm", "object_store", "met", "e2e", "scale"}
     assert preflight["execution_policy"] == {
         "default_fast_path": "deterministic_fixture",
@@ -125,8 +126,8 @@ def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path
     assert set(auth["canonical_roles"]) == {"viewer", "analyst", "operator", "model_admin", "sys_admin"}
     assert {item["action_id"] for item in auth["action_decisions"]} == expected_actions
     assert {item["decision"] for item in auth["action_decisions"]} == {
-        "allowed",
-        "denied",
+        "allow",
+        "deny",
         "release_blocked",
     }
     assert set(auth["execution_modes"]) == {"policy_simulated", "release_blocked"}
@@ -199,6 +200,21 @@ def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path
             assert "[redacted]" in json.dumps(first_lineage[field])
     assert "deterministic-secret-for-redaction-test" not in audit_text
     assert "deterministic-secret" not in audit_text
+
+
+def test_validate_ops_summary_redacts_absolute_evidence_path(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "absolute-evidence-root"
+    validate_ops(ProductionOpsConfig.from_env(evidence_root=evidence_root, run_id="redacted_path"))
+
+    lane_dir = evidence_root / "redacted_path" / "ops"
+    summary = _read_json(lane_dir / "summary.json")
+    environment = _read_json(lane_dir / "environment.json")
+    auth = _read_json(lane_dir / "auth_rbac.json")
+    rendered = json.dumps({"summary": summary, "environment": environment, "auth": auth})
+
+    assert summary["evidence_dir"] == "redacted_path/ops"
+    assert str(evidence_root) not in rendered
+    assert str(lane_dir) not in rendered
 
 
 def test_validate_ops_monitoring_alerts_and_rollback_drills_cover_required_surfaces(tmp_path: Path) -> None:

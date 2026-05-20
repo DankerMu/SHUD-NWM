@@ -10,6 +10,7 @@ from uuid import uuid4
 from sqlalchemy import inspect, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
+from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
@@ -190,7 +191,38 @@ class RetryService:
         )
         return job
 
-    def attempt_manual_retry(self, run_id: str, gateway: RetrySubmitter | None = None) -> PipelineJob:
+    def attempt_manual_retry(
+        self,
+        run_id: str,
+        gateway: RetrySubmitter | None = None,
+        *,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+    ) -> PipelineJob:
+        if trusted_internal:
+            policy_decision = trusted_internal_policy_decision(
+                "pipeline.retry_run",
+                target_type="pipeline_run",
+                target_id=run_id,
+                actor_id="trusted-internal:retry-service",
+                roles=("sys_admin",),
+            )
+        decision = require_policy_evidence(
+            policy_decision,
+            action_id="pipeline.retry_run",
+            target_type="pipeline_run",
+            target_id=run_id,
+        )
+        if decision.decision != "allow":
+            raise RetryError(
+                decision.reason_code,
+                decision.reason,
+                {
+                    "run_id": run_id,
+                    "policy_decision": decision.to_dict(),
+                    "no_mutation_expected": True,
+                },
+            )
         if gateway is None:
             raise RetryError(
                 "RETRY_EXECUTION_UNAVAILABLE",

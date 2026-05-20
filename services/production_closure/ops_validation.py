@@ -21,6 +21,7 @@ from apps.api.auth import (
     ACTION_MATRIX,
     ROLE_VOCABULARY,
     audit_record,
+    redact_audit_payload,
     simulated_decisions_for_action,
 )
 from packages.common.redaction import redact_payload, redact_text
@@ -469,7 +470,7 @@ def _preflight_payload(config: ProductionOpsConfig) -> dict[str, Any]:
             for name, contract in DEPENDENCY_CONTRACTS.items()
         },
         "evidence_root": str(config.evidence_root),
-        "evidence_dir": str(config.lane_dir),
+        "evidence_dir": _relative_evidence_dir(config),
         "execution_policy": {
             "default_fast_path": "deterministic_fixture",
             "real_identity_provider_required": False,
@@ -611,7 +612,6 @@ def _action_decision(
     state: Mapping[str, Any],
 ) -> dict[str, Any]:
     decision = policy_decision.decision
-    normalized_decision = {"allow": "allowed", "deny": "denied"}.get(decision, decision)
     mutated = decision == "allow" and policy_decision.execution_mode == "backend_route_executed"
     return {
         "action": policy_decision.action_id,
@@ -625,7 +625,7 @@ def _action_decision(
         "target_id": policy_decision.target_id,
         "required_roles": list(policy_decision.required_roles),
         "matched_roles": list(policy_decision.matched_roles),
-        "decision": normalized_decision,
+        "decision": decision,
         "reason": policy_decision.reason,
         "reason_code": policy_decision.reason_code,
         "error_code": _ops_error_code(policy_decision.reason_code),
@@ -639,7 +639,7 @@ def _action_decision(
         "lineage": {
             "run_id": config.run_id,
             "auth_mode": config.auth_mode,
-            "audit_correlation_id": f"{config.run_id}-{policy_decision.action_id}-{normalized_decision}",
+            "audit_correlation_id": f"{config.run_id}-{policy_decision.action_id}-{decision}",
             "credential_hint": "token=deterministic-secret-for-redaction-test",
         },
     }
@@ -733,13 +733,15 @@ def _decision_mapping_for_audit(decision: Mapping[str, Any]) -> Any:
         roles=tuple(decision["roles"]),
         target_type=decision["target_type"],
         target_id=decision["target_id"],
-        decision={"allowed": "allow", "denied": "deny"}.get(decision["decision"], decision["decision"]),
+        decision=decision["decision"],
         reason=decision["reason"],
         reason_code=decision["reason_code"],
         execution_mode=decision["execution_mode"],
         auth_mode=decision["auth_mode"],
         live_backend_auth_executed=decision["live_backend_auth_executed"],
         no_mutation_expected=decision["no_mutation_expected"],
+        provider_metadata=decision.get("provider_metadata", {}),
+        role_mapping_result=decision.get("role_mapping_result", {}),
     )
 
 
@@ -890,7 +892,7 @@ def _summary(
         "issue": 152,
         "run_id": config.run_id,
         "status": "ready" if final_ready else "release_blocked",
-        "evidence_dir": str(config.lane_dir),
+        "evidence_dir": _relative_evidence_dir(config),
         "auth_mode": config.auth_mode,
         "required_roles": list(config.required_roles),
         "final_production_readiness_claimed": final_ready,
@@ -1888,6 +1890,13 @@ def _auth_fixture_state() -> dict[str, str]:
     }
 
 
+def _relative_evidence_dir(config: ProductionOpsConfig) -> str:
+    try:
+        return str(config.lane_dir.relative_to(config.evidence_root))
+    except ValueError:
+        return str(redact_audit_payload(str(config.lane_dir)))
+
+
 def _target_type_for_action(action: str) -> str:
     if action.startswith("pipeline."):
         return "pipeline_run"
@@ -1909,6 +1918,8 @@ def _ops_error_code(reason_code: str) -> str | None:
         return "PRODUCTION_OPS_AUTH_REQUIRED"
     if reason_code == "RELEASE_BLOCKED":
         return "PRODUCTION_OPS_BACKEND_AUTH_RELEASE_BLOCKED"
+    if reason_code == "POLICY_ACTION_UNKNOWN":
+        return "PRODUCTION_OPS_POLICY_CONFIG_ERROR"
     return None
 
 

@@ -16,7 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from apps.api.auth import require_action
+from apps.api.auth import PolicyDecision, require_action
 from apps.api.errors import ApiError
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineJob, PipelineStore
@@ -76,6 +76,26 @@ def get_slurm_gateway() -> SlurmGateway:
     from services.slurm_gateway.routes import slurm_gateway
 
     return slurm_gateway
+
+
+def require_retry_action(run_id: str, request: Request) -> PolicyDecision:
+    if not _SAFE_RUN_ID_RE.fullmatch(run_id):
+        raise ApiError(
+            status_code=400,
+            code="INVALID_RUN_ID",
+            message="Invalid run identifier.",
+        )
+    return require_action(request, "pipeline.retry_run", target_type="pipeline_run", target_id=run_id)
+
+
+def require_cancel_action(run_id: str, request: Request) -> PolicyDecision:
+    if not _SAFE_RUN_ID_RE.fullmatch(run_id):
+        raise ApiError(
+            status_code=400,
+            code="INVALID_RUN_ID",
+            message="Invalid run identifier.",
+        )
+    return require_action(request, "pipeline.cancel_run", target_type="pipeline_run", target_id=run_id)
 
 
 @router.get("/pipeline/status")
@@ -237,10 +257,10 @@ def job_logs(
 def retry_run(
     run_id: str,
     request: Request,
+    policy_decision: PolicyDecision = Depends(require_retry_action),
     service: RetryService = Depends(get_retry_service),
     gateway: SlurmGateway = Depends(get_slurm_gateway),
 ) -> dict[str, Any]:
-    require_action(request, "pipeline.retry_run", target_type="pipeline_run", target_id=run_id)
     if not _SAFE_RUN_ID_RE.fullmatch(run_id):
         raise ApiError(
             status_code=400,
@@ -257,7 +277,7 @@ def retry_run(
                 message="Retry execution path unavailable.",
                 details={"run_id": run_id},
             )
-        job = service.attempt_manual_retry(run_id, gateway=retry_gateway)
+        job = service.attempt_manual_retry(run_id, gateway=retry_gateway, policy_decision=policy_decision)
     except RetryConflictError as error:
         raise _api_error(error) from error
     except RetryNotFoundError as error:
@@ -299,10 +319,10 @@ def retry_run(
 def cancel_run(
     run_id: str,
     request: Request,
+    _policy_decision: PolicyDecision = Depends(require_cancel_action),
     store: PipelineStore = Depends(get_pipeline_store),
     gateway: SlurmGateway = Depends(get_slurm_gateway),
 ) -> dict[str, Any]:
-    require_action(request, "pipeline.cancel_run", target_type="pipeline_run", target_id=run_id)
     if not _SAFE_RUN_ID_RE.fullmatch(run_id):
         raise ApiError(
             status_code=400,
@@ -676,11 +696,15 @@ def _table_columns(store: PipelineStore, table_name: str, schema: str) -> set[st
 
 
 def _ok(request: Request, data: Any) -> dict[str, Any]:
-    return {
+    body = {
         "request_id": getattr(request.state, "request_id", None) or str(uuid4()),
         "status": "ok",
         "data": data,
     }
+    decisions = getattr(request.state, "auth_policy_decisions", None)
+    if decisions:
+        body["auth_policy_decisions"] = decisions
+    return body
 
 
 def _cycle_id_prefix_for_source(source: str) -> str:

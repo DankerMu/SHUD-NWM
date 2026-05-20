@@ -90,14 +90,14 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
 
     assert len(audit_rows) == 1
     audit = audit_rows[0]
-    assert audit["actor"] == "nhms-api"
-    assert audit["actor_role"] == "model-registry"
+    assert audit["actor"] == "dev-test:model_admin"
+    assert audit["actor_role"] == "model_admin"
     assert audit["action"] == "model_instance.active.set"
     assert audit["entity_type"] == "model_instance"
     assert audit["entity_id"] == ids["basins_model_id"]
     assert _has_no_sensitive_uri_parts(audit["details"]["model_package_uri"])
     assert _has_no_sensitive_uri_parts(audit["details"]["basins_lineage"]["manifest_uri"])
-    assert audit["details"] == {
+    assert {
         "previous_active": False,
         "active": True,
         "basin_version_id": ids["basin_version_id"],
@@ -111,7 +111,10 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
             "package_checksum": "package-sha-it137",
             "source_inventory_checksum": "inventory-sha-it137",
         },
-    }
+    }.items() <= audit["details"].items()
+    assert audit["details"]["action_id"] == "models.activate"
+    assert audit["details"]["decision"] == "allow"
+    assert audit["details"]["roles"] == ["model_admin"]
     assert missing_audit_count == 0
 
 

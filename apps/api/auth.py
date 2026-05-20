@@ -17,6 +17,8 @@ ExecutionMode = Literal["policy_simulated", "backend_route_executed", "live_proo
 AUTH_REQUIRED = "AUTH_REQUIRED"
 RBAC_FORBIDDEN = "RBAC_FORBIDDEN"
 RELEASE_BLOCKED = "RELEASE_BLOCKED"
+POLICY_CONFIG_ERROR = "POLICY_CONFIG_ERROR"
+POLICY_ACTION_UNKNOWN = "POLICY_ACTION_UNKNOWN"
 
 ROLE_VOCABULARY: tuple[AuthRole, ...] = ("viewer", "analyst", "operator", "model_admin", "sys_admin")
 
@@ -47,6 +49,8 @@ class AuthContext:
     roles: tuple[AuthRole, ...]
     auth_mode: str
     live_backend_auth_executed: bool
+    provider_metadata: Mapping[str, Any] | None = None
+    role_mapping_result: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,8 @@ class PolicyDecision:
     no_mutation_expected: bool
     auth_mode: str
     live_backend_auth_executed: bool
+    provider_metadata: Mapping[str, Any] | None = None
+    role_mapping_result: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +88,8 @@ class PolicyDecision:
             "no_mutation_expected": self.no_mutation_expected,
             "auth_mode": self.auth_mode,
             "live_backend_auth_executed": self.live_backend_auth_executed,
+            "provider_metadata": redact_audit_payload(dict(self.provider_metadata or {})),
+            "role_mapping_result": redact_audit_payload(dict(self.role_mapping_result or {})),
         }
 
 
@@ -118,6 +126,8 @@ def require_action(
         )
     if decision.reason_code == AUTH_REQUIRED:
         raise ApiError(status_code=401, code=AUTH_REQUIRED, message=decision.reason, details=details)
+    if decision.reason_code == POLICY_ACTION_UNKNOWN:
+        raise ApiError(status_code=403, code=POLICY_CONFIG_ERROR, message=decision.reason, details=details)
     raise ApiError(status_code=403, code=RBAC_FORBIDDEN, message=decision.reason, details=details)
 
 
@@ -141,15 +151,29 @@ def auth_context_from_request(request: Request) -> AuthContext | None:
             live_backend_auth_executed=False,
         )
 
-    if _live_auth_proof_enabled():
+    if _trusted_live_auth_proof_enabled() and _internal_live_proof_token_matches(request):
         live_actor = request.headers.get("X-Live-User-ID", "").strip()
-        live_roles = _parse_roles(request.headers.get("X-Live-User-Roles", ""))
-        if live_actor and live_roles:
+        raw_roles = _raw_roles(request.headers.get("X-Live-User-Roles", ""))
+        mapped_roles = _parse_roles(request.headers.get("X-Live-User-Roles", ""))
+        provider = request.headers.get("X-Live-Provider", "").strip() or "test-internal-live-proof"
+        if live_actor:
             return AuthContext(
                 actor_id=live_actor,
-                roles=live_roles,
+                roles=mapped_roles,
                 auth_mode="live_idp",
                 live_backend_auth_executed=True,
+                provider_metadata={
+                    "provider": provider,
+                    "contract": "test_internal_trusted_live_proof",
+                    "credential_header": REDACTION_MARKER,
+                },
+                role_mapping_result={
+                    "raw_roles_present": bool(raw_roles),
+                    "raw_roles": raw_roles,
+                    "mapped_roles": mapped_roles,
+                    "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
+                    "mapping_status": "mapped" if mapped_roles else "unmapped",
+                },
             )
 
     if _allow_dev_role_header() and not _production_mode():
@@ -181,7 +205,26 @@ def evaluate_policy(
     target_id: str,
     execution_mode: ExecutionMode | None = None,
 ) -> PolicyDecision:
-    required_roles = ACTION_MATRIX[action_id]
+    required_roles = ACTION_MATRIX.get(action_id)
+    if required_roles is None:
+        return PolicyDecision(
+            action_id=action_id,
+            decision="deny",
+            required_roles=(),
+            matched_roles=(),
+            actor_id=context.actor_id if context is not None else "anonymous",
+            target_type=target_type,
+            target_id=target_id,
+            reason="Protected action is not registered in the canonical RBAC matrix.",
+            reason_code=POLICY_ACTION_UNKNOWN,
+            roles=context.roles if context is not None else (),
+            execution_mode=execution_mode or "backend_route_executed",
+            no_mutation_expected=True,
+            auth_mode=context.auth_mode if context is not None else "none",
+            live_backend_auth_executed=context.live_backend_auth_executed if context is not None else False,
+            provider_metadata=context.provider_metadata if context is not None else None,
+            role_mapping_result=context.role_mapping_result if context is not None else None,
+        )
     if context is not None and context.auth_mode == "live_idp" and not context.live_backend_auth_executed:
         return PolicyDecision(
             action_id=action_id,
@@ -198,6 +241,8 @@ def evaluate_policy(
             no_mutation_expected=True,
             auth_mode=context.auth_mode,
             live_backend_auth_executed=False,
+            provider_metadata=context.provider_metadata,
+            role_mapping_result=context.role_mapping_result,
         )
     if context is None:
         return PolicyDecision(
@@ -215,6 +260,8 @@ def evaluate_policy(
             no_mutation_expected=True,
             auth_mode="none",
             live_backend_auth_executed=False,
+            provider_metadata=None,
+            role_mapping_result=None,
         )
     matched_roles = tuple(role for role in context.roles if role in required_roles)
     if not matched_roles:
@@ -234,6 +281,8 @@ def evaluate_policy(
             no_mutation_expected=True,
             auth_mode=context.auth_mode,
             live_backend_auth_executed=context.live_backend_auth_executed,
+            provider_metadata=context.provider_metadata,
+            role_mapping_result=context.role_mapping_result,
         )
     return PolicyDecision(
         action_id=action_id,
@@ -251,6 +300,8 @@ def evaluate_policy(
         no_mutation_expected=False,
         auth_mode=context.auth_mode,
         live_backend_auth_executed=context.live_backend_auth_executed,
+        provider_metadata=context.provider_metadata,
+        role_mapping_result=context.role_mapping_result,
     )
 
 
@@ -277,6 +328,8 @@ def audit_record(
             "execution_mode": decision.execution_mode,
             "auth_mode": decision.auth_mode,
             "live_backend_auth_executed": decision.live_backend_auth_executed,
+            "provider_metadata": dict(getattr(decision, "provider_metadata", None) or {}),
+            "role_mapping_result": dict(getattr(decision, "role_mapping_result", None) or {}),
             "no_mutation_expected": decision.no_mutation_expected,
             "previous_state": previous_state or {},
             "new_state": new_state or {},
@@ -312,6 +365,59 @@ def simulated_decisions_for_action(
         evaluate_policy(context, action_id, target_type=target_type, target_id=target_id, execution_mode=mode)
         for context, mode in zip(state, modes, strict=True)
     ]
+
+
+def trusted_internal_policy_decision(
+    action_id: str,
+    *,
+    target_type: str,
+    target_id: str,
+    actor_id: str = "trusted-internal",
+    roles: tuple[AuthRole, ...] = ("sys_admin",),
+) -> PolicyDecision:
+    context = AuthContext(
+        actor_id=actor_id,
+        roles=roles,
+        auth_mode="trusted_internal",
+        live_backend_auth_executed=False,
+    )
+    return evaluate_policy(context, action_id, target_type=target_type, target_id=target_id)
+
+
+def require_policy_evidence(
+    decision: PolicyDecision | None,
+    *,
+    action_id: str,
+    target_type: str,
+    target_id: str,
+) -> PolicyDecision:
+    if decision is None:
+        return evaluate_policy(None, action_id, target_type=target_type, target_id=target_id)
+    if (
+        decision.action_id != action_id
+        or decision.target_type != target_type
+        or decision.target_id != target_id
+        or decision.decision != "allow"
+    ):
+        return PolicyDecision(
+            action_id=action_id,
+            decision="deny",
+            required_roles=ACTION_MATRIX.get(action_id, ()),
+            matched_roles=(),
+            actor_id=decision.actor_id,
+            target_type=target_type,
+            target_id=target_id,
+            reason="Policy evidence does not authorize this protected mutation.",
+            reason_code=RBAC_FORBIDDEN,
+            roles=decision.roles,
+            execution_mode=decision.execution_mode,
+            no_mutation_expected=True,
+            auth_mode=decision.auth_mode,
+            live_backend_auth_executed=decision.live_backend_auth_executed,
+            provider_metadata=decision.provider_metadata,
+            role_mapping_result=decision.role_mapping_result,
+        )
+    return decision
 
 
 def redact_audit_payload(value: Any) -> Any:
@@ -368,6 +474,14 @@ def _parse_roles(value: str) -> tuple[AuthRole, ...]:
     return tuple(roles)
 
 
+def _raw_roles(value: str) -> tuple[str, ...]:
+    roles: list[str] = []
+    for item in re.split(r"[, ]+", value.strip().lower()):
+        if item and item not in roles:
+            roles.append(item)
+    return tuple(roles)
+
+
 def _allow_dev_role_header() -> bool:
     return os.getenv("ALLOW_DEV_ROLE_HEADER", "").strip().lower() in _TRUTHY
 
@@ -376,12 +490,24 @@ def _production_mode() -> bool:
     return os.getenv("NHMS_AUTH_MODE", "").strip().lower() in {"production", "live", "live_idp"}
 
 
-def _live_auth_proof_enabled() -> bool:
-    return os.getenv("NHMS_LIVE_AUTH_PROOF_ACCEPTED", "").strip().lower() in _TRUTHY
-
-
 def _live_auth_release_blocked() -> bool:
     auth_backend = os.getenv("AUTH_BACKEND", "").strip().lower()
     auth_mode = os.getenv("NHMS_AUTH_MODE", "").strip().lower()
     live_requested = auth_backend in {"live", "live_idp", "oidc", "saml"} or auth_mode in {"live", "live_idp"}
-    return live_requested and not _live_auth_proof_enabled()
+    return live_requested and not _trusted_live_auth_proof_available()
+
+
+def _trusted_live_auth_proof_enabled() -> bool:
+    return os.getenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "").strip().lower() == "test_internal"
+
+
+def _trusted_live_auth_proof_available() -> bool:
+    token = os.getenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "").strip()
+    return _trusted_live_auth_proof_enabled() and bool(token) and not _production_mode()
+
+
+def _internal_live_proof_token_matches(request: Request) -> bool:
+    if not _trusted_live_auth_proof_available():
+        return False
+    configured_token = os.getenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "").strip()
+    return request.headers.get("X-NHMS-Internal-Live-Proof", "") == configured_token

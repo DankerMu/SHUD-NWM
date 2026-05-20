@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
-from apps.api.auth import require_action
+from apps.api.auth import PolicyDecision, require_action
 from apps.api.errors import ApiError
 from packages.common.model_registry import (
     RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
@@ -147,6 +147,59 @@ def get_model_registry_store() -> PsycopgModelRegistryStore:
         raise _handle_registry_error(error) from error
 
 
+def require_model_admin_action(
+    request: Request,
+    target_id: str,
+    payload: dict[str, Any] | None = None,
+) -> PolicyDecision:
+    return require_action(
+        request,
+        "models.switch_version",
+        target_type="model_registry",
+        target_id=target_id,
+        payload=payload,
+    )
+
+
+def require_create_basin_action(request: Request) -> PolicyDecision:
+    return require_model_admin_action(request, "basins")
+
+
+def require_create_basin_version_action(basin_id: str, request: Request) -> PolicyDecision:
+    return require_model_admin_action(request, basin_id)
+
+
+def require_create_river_network_action(request: Request) -> PolicyDecision:
+    return require_model_admin_action(request, "river-networks")
+
+
+def require_create_mesh_version_action(request: Request) -> PolicyDecision:
+    return require_model_admin_action(request, "mesh-versions")
+
+
+def require_create_model_action(request: Request) -> PolicyDecision:
+    return require_model_admin_action(request, "models")
+
+
+def require_create_crosswalk_action(request: Request) -> PolicyDecision:
+    return require_model_admin_action(request, "river-segment-crosswalks")
+
+
+def require_model_active_action(
+    request: Request,
+    model_id: str,
+    payload: ActiveFlagPayload,
+) -> PolicyDecision:
+    action_id = "models.activate" if payload.active else "models.deactivate"
+    return require_action(
+        request,
+        action_id,
+        target_type="model_instance",
+        target_id=model_id,
+        payload={"model_id": model_id, "active": payload.active},
+    )
+
+
 def _handle_registry_error(error: Exception) -> ApiError:
     if isinstance(error, DuplicateResourceError):
         return ApiError(
@@ -225,10 +278,11 @@ def _handle_registry_error(error: Exception) -> ApiError:
 @router.post("/basins", status_code=status.HTTP_201_CREATED)
 def create_basin(
     payload: BasinCreatePayload,
+    policy_decision: PolicyDecision = Depends(require_create_basin_action),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return store.create_basin_with_version(payload.model_dump())
+        return store.create_basin_with_version(payload.model_dump(), policy_decision=policy_decision)
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
@@ -239,10 +293,11 @@ def create_basin(
 def create_basin_version(
     basin_id: str,
     payload: BasinVersionPayload,
+    policy_decision: PolicyDecision = Depends(require_create_basin_version_action),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return store.create_basin_version(basin_id, payload.model_dump())
+        return store.create_basin_version(basin_id, payload.model_dump(), policy_decision=policy_decision)
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
@@ -252,10 +307,11 @@ def create_basin_version(
 @router.post("/river-networks", status_code=status.HTTP_201_CREATED)
 def create_river_network(
     payload: RiverNetworkCreatePayload,
+    policy_decision: PolicyDecision = Depends(require_create_river_network_action),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return store.create_river_network(payload.model_dump())
+        return store.create_river_network(payload.model_dump(), policy_decision=policy_decision)
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
@@ -350,10 +406,11 @@ def _enforce_river_segment_response_budget(payload: dict[str, Any], *, max_bytes
 @router.post("/mesh-versions", status_code=status.HTTP_201_CREATED)
 def create_mesh_version(
     payload: MeshVersionCreatePayload,
+    policy_decision: PolicyDecision = Depends(require_create_mesh_version_action),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return store.create_mesh_version(payload.model_dump())
+        return store.create_mesh_version(payload.model_dump(), policy_decision=policy_decision)
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
@@ -363,11 +420,12 @@ def create_mesh_version(
 @router.post("/models", status_code=status.HTTP_201_CREATED)
 def create_model(
     payload: ModelCreatePayload,
+    policy_decision: PolicyDecision = Depends(require_create_model_action),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
         validate_model_package_uri(payload.model_package_uri)
-        return store.create_model(payload.model_dump())
+        return store.create_model(payload.model_dump(), policy_decision=policy_decision)
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
@@ -379,18 +437,11 @@ def set_model_active(
     request: Request,
     model_id: str,
     payload: ActiveFlagPayload,
+    policy_decision: PolicyDecision = Depends(require_model_active_action),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
-    action_id = "models.activate" if payload.active else "models.deactivate"
-    require_action(
-        request,
-        action_id,
-        target_type="model_instance",
-        target_id=model_id,
-        payload={"model_id": model_id, "active": payload.active},
-    )
     try:
-        return _ok(request, store.set_model_active(model_id, payload.active))
+        return _ok(request, store.set_model_active(model_id, payload.active, policy_decision=policy_decision))
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
@@ -449,10 +500,11 @@ def get_model(
 @router.post("/river-segment-crosswalks", status_code=status.HTTP_201_CREATED)
 def create_river_segment_crosswalks(
     payload: CrosswalkCreatePayload,
+    policy_decision: PolicyDecision = Depends(require_create_crosswalk_action),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return store.create_crosswalk_entries(payload.model_dump())
+        return store.create_crosswalk_entries(payload.model_dump(), policy_decision=policy_decision)
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
@@ -460,8 +512,12 @@ def create_river_segment_crosswalks(
 
 
 def _ok(request: Request, data: Any) -> dict[str, Any]:
-    return {
+    body = {
         "request_id": getattr(request.state, "request_id", None) or str(uuid4()),
         "status": "ok",
         "data": data,
     }
+    decisions = getattr(request.state, "auth_policy_decisions", None)
+    if decisions:
+        body["auth_policy_decisions"] = decisions
+    return body

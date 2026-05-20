@@ -655,7 +655,7 @@ def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> Non
 
 
 def _assert_success_envelope(body: dict[str, Any]) -> Any:
-    assert set(body) == {"request_id", "status", "data"}
+    assert {"request_id", "status", "data"} <= set(body)
     assert body["request_id"]
     assert body["status"] == "ok"
     return body["data"]
@@ -816,7 +816,7 @@ class _ModelRegistryStore:
             },
         ]
 
-    def set_model_active(self, model_id: str, active: bool) -> dict[str, Any]:
+    def set_model_active(self, model_id: str, active: bool, **_kwargs: Any) -> dict[str, Any]:
         self.calls.append((model_id, active))
         return {
             "model_id": model_id,

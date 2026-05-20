@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
+from services.orchestrator.retry import RetryConfig, RetryService
 from workers.data_adapters.base import cycle_id_for
 
 
@@ -283,6 +284,30 @@ def test_retry_rbac() -> None:
         assert denied.json()["error"]["details"]["policy_decision"]["roles"] == ["viewer"]
 
 
+def test_allowed_retry_records_canonical_audit_evidence() -> None:
+    with _store() as store:
+        _create_job(
+            store,
+            job_id="job_retry_audit",
+            run_id="run_retry_audit",
+            status="failed",
+            error_code="SLURM_TIMEOUT",
+        )
+        with _client(store, allow_dev_role_header=True) as client:
+            response = client.post(
+                "/api/v1/runs/run_retry_audit/retry",
+                headers={"X-User-Role": "operator", "X-Request-ID": "req-retry-audit"},
+            )
+
+        assert response.status_code == 200
+        auth_audit = response.json()["auth_policy_decisions"]
+        assert auth_audit[0]["request_id"] == "req-retry-audit"
+        assert auth_audit[0]["action_id"] == "pipeline.retry_run"
+        assert auth_audit[0]["decision"] == "allow"
+        assert auth_audit[0]["roles"] == ["operator"]
+        assert auth_audit[0]["execution_mode"] == "backend_route_executed"
+
+
 def test_retry_no_role_header() -> None:
     with _store() as store:
         _create_job(store, job_id="job_retry_no_role", run_id="run_retry_no_role", status="failed")
@@ -303,6 +328,85 @@ def test_retry_denies_spoofed_role_header_by_default() -> None:
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "AUTH_REQUIRED"
         assert store.get_job("job_retry_prod").status == "failed"
+
+
+def test_retry_auth_runs_before_mutation_dependencies(monkeypatch: Any) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with _client_without_store() as client:
+        response = client.post("/api/v1/runs/run_missing_auth/retry")
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "AUTH_REQUIRED"
+
+
+def test_spoofed_live_headers_do_not_authorize_retry(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_LIVE_AUTH_PROOF_ACCEPTED", "true")
+    monkeypatch.delenv("NHMS_TRUSTED_LIVE_PROOF_MODE", raising=False)
+    monkeypatch.delenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", raising=False)
+    with _store() as store:
+        _create_job(store, job_id="job_spoofed_live", run_id="run_spoofed_live", status="failed")
+        with _client(store) as client:
+            response = client.post(
+                "/api/v1/runs/run_spoofed_live/retry",
+                headers={"X-Live-User-ID": "attacker", "X-Live-User-Roles": "sys_admin"},
+            )
+
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "AUTH_REQUIRED"
+        assert store.get_job("job_spoofed_live").status == "failed"
+
+
+def test_trusted_test_live_proof_allows_retry_with_provider_metadata(monkeypatch: Any) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    with _store() as store:
+        _create_job(store, job_id="job_trusted_live", run_id="run_trusted_live", status="failed")
+        with _client(store) as client:
+            response = client.post(
+                "/api/v1/runs/run_trusted_live/retry",
+                headers={
+                    "X-NHMS-Internal-Live-Proof": "proof-token",
+                    "X-Live-User-ID": "alice",
+                    "X-Live-User-Roles": "operator",
+                    "X-Live-Provider": "test-oidc",
+                },
+            )
+
+        assert response.status_code == 200
+        audit = response.json()["auth_policy_decisions"][0]
+        assert audit["execution_mode"] == "live_proof"
+        assert audit["provider_metadata"]["provider"] == "test-oidc"
+        assert audit["provider_metadata"]["credential_header"] == "[redacted]"
+        assert audit["role_mapping_result"]["mapped_roles"] == ["operator"]
+
+
+def test_trusted_live_actor_with_unmapped_roles_is_forbidden(monkeypatch: Any) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    with _store() as store:
+        _create_job(store, job_id="job_unmapped_live", run_id="run_unmapped_live", status="failed")
+        with _client(store) as client:
+            response = client.post(
+                "/api/v1/runs/run_unmapped_live/retry",
+                headers={
+                    "X-NHMS-Internal-Live-Proof": "proof-token",
+                    "X-Live-User-ID": "bob",
+                    "X-Live-User-Roles": "external_admin",
+                },
+            )
+
+        body = response.json()
+        assert response.status_code == 403
+        assert body["error"]["code"] == "RBAC_FORBIDDEN"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["actor_id"] == "bob"
+        assert decision["reason_code"] == "RBAC_FORBIDDEN"
+        assert decision["execution_mode"] == "live_proof"
+        assert decision["role_mapping_result"]["mapping_status"] == "unmapped"
+        assert decision["role_mapping_result"]["unmapped_roles"] == ["external_admin"]
+        assert store.get_job("job_unmapped_live").status == "failed"
 
 
 def test_cancel_endpoint() -> None:
@@ -390,6 +494,24 @@ def test_release_blocked_auth_does_not_mutate(monkeypatch: Any) -> None:
         assert body["error"]["details"]["policy_decision"]["no_mutation_expected"] is True
         assert gateway.cancelled == []
         assert store.get_job("job_release_blocked").status == "running"
+
+
+def test_retry_service_direct_call_requires_policy_evidence() -> None:
+    with _store() as store:
+        _create_job(store, job_id="job_direct_retry", run_id="run_direct_retry", status="failed")
+        service = RetryService(store, RetryConfig(max_retries=3))
+        gateway = _MockGateway()
+
+        try:
+            service.attempt_manual_retry("run_direct_retry", gateway=gateway)
+        except Exception as error:
+            assert getattr(error, "code") == "AUTH_REQUIRED"
+            assert getattr(error, "details")["no_mutation_expected"] is True
+        else:
+            raise AssertionError("direct retry without policy evidence should fail")
+
+        assert gateway.submissions == []
+        assert [job.job_id for job in store.query_jobs_by_run("run_direct_retry")] == ["job_direct_retry"]
 
 
 def test_metrics_stage_duration() -> None:
@@ -760,6 +882,17 @@ class _client:
                 os.environ["ALLOW_DEV_ROLE_HEADER"] = self.previous_allow_dev_role_header
         if self.client is not None:
             self.client.close()
+
+
+class _client_without_store:
+    def __enter__(self) -> TestClient:
+        self.client = TestClient(app)
+        return self.client
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        app.dependency_overrides.pop(pipeline_routes.get_pipeline_store, None)
+        app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
+        self.client.close()
 
 
 def _cycle_time() -> datetime:
