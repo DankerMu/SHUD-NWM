@@ -172,8 +172,10 @@ def auth_context_from_request(request: Request) -> AuthContext | None:
             },
         )
 
-    if _allow_dev_role_header() and not _production_mode():
-        roles = _parse_roles(request.headers.get("X-User-Role", ""))
+    if _allow_dev_role_header() and not _production_mode() and "X-User-Role" in request.headers:
+        raw_role_text = request.headers.get("X-User-Role", "")
+        roles = _parse_roles(raw_role_text)
+        raw_roles = _raw_roles(raw_role_text)
         if roles:
             actor = request.headers.get("X-User-ID", "").strip() or f"dev-test:{roles[0]}"
             return AuthContext(
@@ -181,14 +183,32 @@ def auth_context_from_request(request: Request) -> AuthContext | None:
                 roles=roles,
                 auth_mode="dev_test",
                 live_backend_auth_executed=False,
+                role_mapping_result=_role_mapping_result(raw_roles, mapped_roles=roles, input_present=True),
             )
+        actor = request.headers.get("X-User-ID", "").strip() or "dev-test:unmapped-role"
+        return AuthContext(
+            actor_id=actor,
+            roles=(),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+            role_mapping_result=_role_mapping_result(raw_roles, mapped_roles=(), input_present=True),
+        )
 
     configured_token = os.getenv("NHMS_DEV_AUTH_TOKEN", "").strip()
     authorization = request.headers.get("Authorization", "")
     if configured_token and authorization == f"Bearer {configured_token}" and not _production_mode():
-        roles = _parse_roles(request.headers.get("X-User-Role", "operator")) or ("operator",)
+        role_header_present = "X-User-Role" in request.headers
+        raw_role_text = request.headers.get("X-User-Role", "") if role_header_present else "operator"
+        roles = _parse_roles(raw_role_text)
+        raw_roles = _raw_roles(raw_role_text)
         actor = request.headers.get("X-User-ID", "").strip() or "dev-test:token"
-        return AuthContext(actor_id=actor, roles=roles, auth_mode="dev_test", live_backend_auth_executed=False)
+        return AuthContext(
+            actor_id=actor,
+            roles=roles,
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+            role_mapping_result=_role_mapping_result(raw_roles, mapped_roles=roles, input_present=role_header_present),
+        )
 
     return None
 
@@ -385,6 +405,33 @@ def cli_policy_decision_from_evidence(
     raw_roles_text = ",".join(raw_role_values)
     mapped_roles = _parse_roles(raw_roles_text)
     raw_roles = _raw_roles(raw_roles_text)
+    role_mapping_result = _role_mapping_result(
+        raw_roles,
+        mapped_roles=mapped_roles,
+        input_present=bool(raw_role_values),
+    )
+    blocked_auth_mode = _cli_dev_test_blocking_auth_mode(source_env)
+    if blocked_auth_mode is not None:
+        return PolicyDecision(
+            action_id=action_id,
+            decision="release_blocked",
+            required_roles=ACTION_MATRIX.get(action_id, ()),
+            matched_roles=(),
+            actor_id=raw_actor or "cli:missing-actor",
+            target_type=target_type,
+            target_id=target_id,
+            reason=(
+                "Deterministic CLI dev/test policy evidence is blocked while production/live auth mode is configured."
+            ),
+            reason_code=RELEASE_BLOCKED,
+            roles=mapped_roles,
+            execution_mode="release_blocked",
+            no_mutation_expected=True,
+            auth_mode=f"cli_dev_test_blocked_by_{blocked_auth_mode}",
+            live_backend_auth_executed=False,
+            provider_metadata=None,
+            role_mapping_result=role_mapping_result,
+        )
     if not raw_actor or not mapped_roles:
         return PolicyDecision(
             action_id=action_id,
@@ -402,26 +449,14 @@ def cli_policy_decision_from_evidence(
             auth_mode="cli_dev_test",
             live_backend_auth_executed=False,
             provider_metadata=None,
-            role_mapping_result={
-                "raw_roles_present": bool(raw_roles),
-                "raw_roles": raw_roles,
-                "mapped_roles": mapped_roles,
-                "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
-                "mapping_status": "mapped" if mapped_roles else "unmapped",
-            },
+            role_mapping_result=role_mapping_result,
         )
     context = AuthContext(
         actor_id=raw_actor or "cli:missing-actor",
         roles=mapped_roles,
         auth_mode="cli_dev_test",
         live_backend_auth_executed=False,
-        role_mapping_result={
-            "raw_roles_present": bool(raw_roles),
-            "raw_roles": raw_roles,
-            "mapped_roles": mapped_roles,
-            "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
-            "mapping_status": "mapped" if mapped_roles else "unmapped",
-        },
+        role_mapping_result=role_mapping_result,
     )
     return evaluate_policy(context, action_id, target_type=target_type, target_id=target_id)
 
@@ -456,7 +491,6 @@ def require_policy_evidence(
         decision.action_id != action_id
         or decision.target_type != target_type
         or decision.target_id != target_id
-        or decision.decision != "allow"
     ):
         return PolicyDecision(
             action_id=action_id,
@@ -541,12 +575,38 @@ def _raw_roles(value: str) -> tuple[str, ...]:
     return tuple(roles)
 
 
+def _role_mapping_result(
+    raw_roles: tuple[str, ...],
+    *,
+    mapped_roles: tuple[AuthRole, ...],
+    input_present: bool,
+) -> dict[str, Any]:
+    return {
+        "raw_roles_present": bool(raw_roles),
+        "raw_roles_input_present": input_present,
+        "raw_roles": raw_roles,
+        "mapped_roles": mapped_roles,
+        "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
+        "mapping_status": "mapped" if mapped_roles else "unmapped",
+    }
+
+
 def _allow_dev_role_header() -> bool:
     return os.getenv("ALLOW_DEV_ROLE_HEADER", "").strip().lower() in _TRUTHY
 
 
 def _production_mode() -> bool:
     return os.getenv("NHMS_AUTH_MODE", "").strip().lower() in {"production", "live", "live_idp"}
+
+
+def _cli_dev_test_blocking_auth_mode(env: Mapping[str, str]) -> str | None:
+    auth_mode = env.get("NHMS_AUTH_MODE", "").strip().lower()
+    if auth_mode in {"production", "live", "live_idp"}:
+        return auth_mode
+    auth_backend = env.get("AUTH_BACKEND", "").strip().lower()
+    if auth_backend in {"oidc", "live", "live_idp"}:
+        return f"auth_backend_{auth_backend}"
+    return None
 
 
 def _live_auth_requested() -> bool:

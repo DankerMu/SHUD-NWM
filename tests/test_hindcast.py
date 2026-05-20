@@ -563,9 +563,52 @@ def test_argparse_hindcast_submit_with_cli_operator_policy_succeeds(
         )
 
         output = json.loads(capsys.readouterr().out)
+        decision = output["auth_policy_decision"]
         assert exit_code == 0
         assert output["run_ids"] == [run_id_for_year("yangtze_shud_v12", 1993)]
+        assert decision["action_id"] == "pipeline.rerun_cycle"
+        assert decision["actor_id"] == "cli-operator"
+        assert decision["roles"] == ["operator"]
+        assert decision["target_type"] == "hindcast"
+        assert decision["target_id"] == "yangtze_shud_v12"
+        assert decision["decision"] == "allow"
+        assert decision["execution_mode"] == "backend_route_executed"
+        assert decision["auth_mode"] == "cli_dev_test"
         assert _hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993))["status"] == "created"
+
+
+def test_argparse_hindcast_submit_production_mode_blocks_cli_flag_auth_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_AUTH_MODE", "production")
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "submit_hindcast_slurm", _fail_slurm_submission)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "hindcast-submit",
+                "--model-id",
+                "yangtze_shud_v12",
+                "--source-id",
+                "ERA5",
+                "--start-time",
+                "1993-01-01T00:00:00Z",
+                "--end-time",
+                "1993-12-31T23:00:00Z",
+                "--auth-actor-id",
+                "cli-operator",
+                "--auth-role",
+                "operator",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "RELEASE_BLOCKED" in captured.err
+        assert _count(session, "hydro.hydro_run") == 0
 
 
 def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path) -> None:

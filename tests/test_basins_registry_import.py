@@ -974,6 +974,51 @@ def test_argparse_import_basins_registry_with_cli_model_admin_policy_imports_and
     assert decision["execution_mode"] == "backend_route_executed"
 
 
+@pytest.mark.integration
+def test_argparse_import_basins_registry_production_mode_blocks_cli_auth_without_report_or_rows(
+    tmp_path: Path,
+    integration_database_url: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_AUTH_MODE", "production")
+    apply_migrations_from_zero(integration_database_url)
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(
+        tmp_path,
+        basin_slug="basin-a-prod-cli-blocked",
+    )
+    report_path = tmp_path / "import-report.json"
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            integration_database_url,
+            "--output",
+            str(report_path),
+            "--auth-actor-id",
+            "cli-model-admin",
+            "--auth-role",
+            "model_admin",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "RELEASE_BLOCKED"
+    assert error["policy_decision"]["target_id"] == model_id
+    assert error["policy_decision"]["decision"] == "release_blocked"
+    assert error["policy_decision"]["no_mutation_expected"] is True
+    assert not report_path.exists()
+    _assert_registry_fixture_rows_absent(integration_database_url, inventory_path, model_id)
+
+
 def test_prepare_import_sources_does_not_need_data_basins_default(tmp_path: Path) -> None:
     _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
 

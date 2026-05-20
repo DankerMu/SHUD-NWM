@@ -375,12 +375,91 @@ def test_argparse_cli_supersede_with_cli_model_admin_policy_succeeds(
         )
 
         output = json.loads(capsys.readouterr().out)
+        decision = output["auth_policy_decision"]
         assert exit_code == 0
         assert output["succeeded"] == 1
+        assert decision["action_id"] == "models.supersede"
+        assert decision["actor_id"] == "cli-model-admin"
+        assert decision["roles"] == ["model_admin"]
+        assert decision["target_type"] == "model_instance"
+        assert decision["target_id"] == "model_v1"
+        assert decision["decision"] == "allow"
+        assert decision["execution_mode"] == "backend_route_executed"
+        assert decision["auth_mode"] == "cli_dev_test"
         assert _curve_flags(session) == {
             "model_v1": "superseded_by_model_upgrade",
             "model_v2": "ok",
         }
+
+
+def test_argparse_cli_supersede_live_backend_blocks_cli_flag_auth_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        session.commit()
+        _patch_fit_samples(monkeypatch)
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "fit-curves",
+                "--model-id",
+                "model_v2",
+                "--segment-id",
+                "seg_001",
+                "--duration",
+                "1h",
+                "--supersede-model-id",
+                "model_v1",
+                "--auth-actor-id",
+                "cli-model-admin",
+                "--auth-role",
+                "model_admin",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "RELEASE_BLOCKED" in captured.err
+        assert _curve_flags(session) == {"model_v1": "ok"}
+
+
+def test_argparse_cli_supersede_production_mode_blocks_env_auth_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_AUTH_MODE", "production")
+    monkeypatch.setenv("NHMS_CLI_AUTH_ACTOR_ID", "cli-model-admin")
+    monkeypatch.setenv("NHMS_CLI_AUTH_ROLES", "model_admin")
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        session.commit()
+        _patch_fit_samples(monkeypatch)
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "fit-curves",
+                "--model-id",
+                "model_v2",
+                "--segment-id",
+                "seg_001",
+                "--duration",
+                "1h",
+                "--supersede-model-id",
+                "model_v1",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "RELEASE_BLOCKED" in captured.err
+        assert _curve_flags(session) == {"model_v1": "ok"}
 
 
 def test_duration_1h_direct_extraction_vs_24h_sliding_window() -> None:

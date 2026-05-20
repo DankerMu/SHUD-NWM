@@ -284,6 +284,65 @@ def test_retry_rbac() -> None:
         assert denied.json()["error"]["details"]["policy_decision"]["roles"] == ["viewer"]
 
 
+def test_retry_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
+    with _store() as store:
+        _create_job(store, job_id="job_retry_dev_token", run_id="run_retry_dev_token", status="failed")
+        with _client(store) as client:
+            response = client.post(
+                "/api/v1/runs/run_retry_dev_token/retry",
+                headers={"Authorization": "Bearer dev-token"},
+            )
+
+        assert response.status_code == 200
+        decision = response.json()["auth_policy_decisions"][0]
+        assert decision["decision"] == "allow"
+        assert decision["roles"] == ["operator"]
+        assert decision["role_mapping_result"]["raw_roles_input_present"] is False
+
+
+def test_retry_dev_token_rejects_unmapped_role_header_without_operator_promotion(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
+    with _store() as store:
+        _create_job(store, job_id="job_retry_external_admin", run_id="run_retry_external_admin", status="failed")
+        with _client(store) as client:
+            response = client.post(
+                "/api/v1/runs/run_retry_external_admin/retry",
+                headers={"Authorization": "Bearer dev-token", "X-User-Role": "external_admin"},
+            )
+
+        assert response.status_code == 403
+        body = response.json()
+        assert body["error"]["code"] == "RBAC_FORBIDDEN"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["roles"] == []
+        assert decision["no_mutation_expected"] is True
+        assert decision["role_mapping_result"]["raw_roles_input_present"] is True
+        assert decision["role_mapping_result"]["raw_roles"] == ["external_admin"]
+        assert decision["role_mapping_result"]["unmapped_roles"] == ["external_admin"]
+        assert store.get_job("job_retry_external_admin").status == "failed"
+
+
+def test_retry_dev_token_rejects_blank_role_header_without_operator_promotion(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
+    with _store() as store:
+        _create_job(store, job_id="job_retry_blank_role", run_id="run_retry_blank_role", status="failed")
+        with _client(store) as client:
+            response = client.post(
+                "/api/v1/runs/run_retry_blank_role/retry",
+                headers={"Authorization": "Bearer dev-token", "X-User-Role": "   "},
+            )
+
+        assert response.status_code == 403
+        body = response.json()
+        assert body["error"]["code"] == "RBAC_FORBIDDEN"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["roles"] == []
+        assert decision["role_mapping_result"]["raw_roles_input_present"] is True
+        assert decision["role_mapping_result"]["raw_roles"] == []
+        assert store.get_job("job_retry_blank_role").status == "failed"
+
+
 def test_allowed_retry_records_canonical_audit_evidence() -> None:
     with _store() as store:
         _create_job(

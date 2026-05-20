@@ -72,13 +72,16 @@ def _hindcast_submit(
             if error.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE:
                 mark_hindcast_runs_failed(session, result.run_ids, error.error_code, error.message)
             raise
-        return {
+        output: dict[str, object] = {
             "total_runs": result.total_runs,
             "run_ids": result.run_ids,
             "skipped_years": result.skipped_years,
             "active_years": result.active_years,
             "slurm_job_array_id": slurm.slurm_job_array_id,
         }
+        if policy_decision is not None:
+            output["auth_policy_decision"] = policy_decision.to_dict()
+        return output
 
 
 def _hindcast_year(model_id: str, source_id: str, year: int) -> dict[str, object]:
@@ -127,6 +130,8 @@ def _fit_curves(
         }
         if verbose or result.total_segments <= 20:
             output["items"] = result.items
+        if policy_decision is not None:
+            output["auth_policy_decision"] = policy_decision.to_dict()
         return output
 
 
