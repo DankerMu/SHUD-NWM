@@ -1445,8 +1445,13 @@ export interface components {
         StationId: string;
         StationIdQuery: string;
         /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-        TileX: number;
+        MvtTileX: number;
         /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+        MvtTileY: number;
+        MvtTileZ: number;
+        /** @description Web Mercator XYZ tile column. */
+        TileX: number;
+        /** @description Web Mercator XYZ tile row. */
         TileY: number;
         TileZ: number;
         ToTime: string;
@@ -1997,11 +2002,11 @@ export interface operations {
             header?: never;
             path: {
                 basin_version_id: components["parameters"]["BasinVersionId"];
-                z: components["parameters"]["TileZ"];
+                z: components["parameters"]["MvtTileZ"];
                 /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-                x: components["parameters"]["TileX"];
+                x: components["parameters"]["MvtTileX"];
                 /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-                y: components["parameters"]["TileY"];
+                y: components["parameters"]["MvtTileY"];
             };
             cookie?: never;
         };
@@ -2035,11 +2040,11 @@ export interface operations {
                 run_id: components["parameters"]["RunId"];
                 variable: components["parameters"]["HydroMvtVariable"];
                 valid_time: components["parameters"]["ValidTimePath"];
-                z: components["parameters"]["TileZ"];
+                z: components["parameters"]["MvtTileZ"];
                 /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-                x: components["parameters"]["TileX"];
+                x: components["parameters"]["MvtTileX"];
                 /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-                y: components["parameters"]["TileY"];
+                y: components["parameters"]["MvtTileY"];
             };
             cookie?: never;
         };
@@ -2108,11 +2113,11 @@ export interface operations {
                 /** @description Supported return-period aggregation duration. */
                 duration: "1h" | "3h" | "6h" | "24h" | "72h" | "7d";
                 valid_time: components["parameters"]["ValidTimePath"];
-                z: components["parameters"]["TileZ"];
+                z: components["parameters"]["MvtTileZ"];
                 /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-                x: components["parameters"]["TileX"];
+                x: components["parameters"]["MvtTileX"];
                 /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-                y: components["parameters"]["TileY"];
+                y: components["parameters"]["MvtTileY"];
             };
             cookie?: never;
         };
@@ -2147,9 +2152,9 @@ export interface operations {
                 variable: components["parameters"]["MetTileVariable"];
                 valid_time: components["parameters"]["ValidTimePath"];
                 z: components["parameters"]["TileZ"];
-                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                /** @description Web Mercator XYZ tile column. */
                 x: components["parameters"]["TileX"];
-                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                /** @description Web Mercator XYZ tile row. */
                 y: components["parameters"]["TileY"];
             };
             cookie?: never;

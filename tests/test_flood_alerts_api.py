@@ -2737,6 +2737,60 @@ def test_layer_valid_times_endpoint_scopes_to_explicit_run_id_latest_window() ->
     assert unscoped_data["valid_times"][0] != scoped_data["valid_times"][0]
 
 
+@pytest.mark.parametrize(
+    "layer_id",
+    ["flood-return-period", "warning-level", "discharge", "water-level"],
+)
+def test_layer_valid_times_explicit_non_ready_run_requires_frequency_ready_before_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    layer_id: str,
+) -> None:
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "valid_times_for_layer",
+        lambda *_args, **_kwargs: pytest.fail("valid_times_for_layer called for non-ready run"),
+    )
+
+    with _client() as client:
+        response = client.get(f"/api/v1/layers/{layer_id}/valid-times?run_id=run_pending")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
+
+
+@pytest.mark.parametrize(
+    "layer_id",
+    ["flood-return-period", "warning-level", "discharge", "water-level"],
+)
+def test_layer_valid_times_unscoped_no_ready_run_returns_empty_without_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    layer_id: str,
+) -> None:
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "valid_times_for_layer",
+        lambda *_args, **_kwargs: pytest.fail("valid_times_for_layer called without a ready run"),
+    )
+    with _store() as session:
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(f"/api/v1/layers/{layer_id}/valid-times")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "valid_times": [],
+        "items": [],
+        "limit": MVT_VALID_TIME_SAMPLE_LIMIT,
+        "observed_count": 0,
+        "truncated": False,
+    }
+
+
 def test_layer_metadata_endpoint_scopes_cache_identity_to_explicit_run_id() -> None:
     old_run_id = "aa_metadata_endpoint_old"
     new_run_id = "zz_metadata_endpoint_new"

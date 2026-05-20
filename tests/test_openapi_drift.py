@@ -7,7 +7,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from apps.api.main import app
+from apps.api.main import _patch_mvt_tile_openapi, app
 from apps.api.routes import flood_alerts as flood_alert_routes
 from apps.api.routes.flood_alerts import RankingItem
 from services.tiles.mvt import (
@@ -207,17 +207,29 @@ def test_flood_return_period_feature_properties_document_stable_identity() -> No
 
 
 def test_mvt_tile_z_openapi_maximum_matches_runtime_contract() -> None:
-    spec = _openapi_spec()
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
     mvt_paths = (
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
     )
 
-    assert spec["components"]["parameters"]["TileZ"]["schema"]["maximum"] == MVT_MAX_ZOOM
-    for path in mvt_paths:
-        z_param = _operation_parameter(spec, path, "get", "path", "z")
-        assert z_param["schema"]["maximum"] == MVT_MAX_ZOOM
+    assert static_spec["components"]["parameters"]["MvtTileZ"]["schema"]["maximum"] == MVT_MAX_ZOOM
+    assert static_spec["components"]["parameters"]["TileZ"]["schema"]["maximum"] == 24
+    for spec in (static_spec, fastapi_spec):
+        for path in mvt_paths:
+            z_param = _operation_parameter(spec, path, "get", "path", "z")
+            assert z_param["schema"]["maximum"] == MVT_MAX_ZOOM
+
+    met_z_param = _operation_parameter(
+        static_spec,
+        "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png",
+        "get",
+        "path",
+        "z",
+    )
+    assert met_z_param["schema"]["maximum"] == 24
 
 
 def test_mvt_tile_xy_openapi_bounds_match_runtime_contract() -> None:
@@ -235,7 +247,7 @@ def test_mvt_tile_xy_openapi_bounds_match_runtime_contract() -> None:
         f"for max zoom {MVT_MAX_ZOOM}; each request also enforces 0 <= y < 2^z.",
     }
 
-    for param_name in ("TileX", "TileY"):
+    for param_name in ("MvtTileX", "MvtTileY"):
         schema = static_spec["components"]["parameters"][param_name]["schema"]
         assert schema["minimum"] == 0
         assert schema["maximum"] == MVT_MAX_TILE_COORDINATE
@@ -247,6 +259,66 @@ def test_mvt_tile_xy_openapi_bounds_match_runtime_contract() -> None:
                 assert param["description"] == description
                 assert param["schema"]["minimum"] == 0
                 assert param["schema"]["maximum"] == MVT_MAX_TILE_COORDINATE
+
+
+def test_met_png_tile_openapi_keeps_legacy_bounds_not_mvt_limits() -> None:
+    static_spec = _openapi_spec()
+    path = "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png"
+
+    z_param = _operation_parameter(static_spec, path, "get", "path", "z")
+    x_param = _operation_parameter(static_spec, path, "get", "path", "x")
+    y_param = _operation_parameter(static_spec, path, "get", "path", "y")
+
+    assert z_param["schema"]["maximum"] == 24
+    for param in (x_param, y_param):
+        assert param["schema"]["minimum"] == 0
+        assert param["schema"]["maximum"] == 16777215
+        assert "max zoom 14" not in param.get("description", "")
+
+
+def test_runtime_mvt_openapi_patch_does_not_narrow_met_png_route() -> None:
+    schema: dict[str, Any] = {
+        "paths": {
+            "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf": {
+                "get": {
+                    "parameters": [
+                        {"name": "z", "in": "path", "schema": {"type": "integer"}},
+                        {"name": "x", "in": "path", "schema": {"type": "integer"}},
+                        {"name": "y", "in": "path", "schema": {"type": "integer"}},
+                    ]
+                }
+            },
+            "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png": {
+                "get": {
+                    "parameters": [
+                        {"name": "z", "in": "path", "schema": {"type": "integer", "maximum": 24}},
+                        {"name": "x", "in": "path", "schema": {"type": "integer", "maximum": 16777215}},
+                        {"name": "y", "in": "path", "schema": {"type": "integer", "maximum": 16777215}},
+                    ]
+                }
+            },
+        }
+    }
+
+    _patch_mvt_tile_openapi(schema)
+
+    mvt_z = _operation_parameter(
+        schema, "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf", "get", "path", "z"
+    )
+    met_z = _operation_parameter(
+        schema, "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png", "get", "path", "z"
+    )
+    met_x = _operation_parameter(
+        schema, "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png", "get", "path", "x"
+    )
+    met_y = _operation_parameter(
+        schema, "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png", "get", "path", "y"
+    )
+
+    assert mvt_z["schema"]["maximum"] == MVT_MAX_ZOOM
+    assert met_z["schema"]["maximum"] == 24
+    assert met_x["schema"]["maximum"] == 16777215
+    assert met_y["schema"]["maximum"] == 16777215
 
 
 def test_mvt_pbf_response_contract_matches_runtime_and_static_openapi() -> None:

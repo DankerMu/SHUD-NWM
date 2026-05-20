@@ -56,6 +56,14 @@ def custom_openapi():
         description=app.description,
         routes=app.routes,
     )
+    _patch_mvt_tile_openapi(schema)
+    _patch_flood_duration_openapi(schema)
+    _patch_layer_metadata_openapi(schema)
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+def _patch_mvt_tile_openapi(schema: dict) -> None:
     mvt_paths = (
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
@@ -84,10 +92,6 @@ def custom_openapi():
                 parameter["description"] = TILE_Y_DESCRIPTION
                 parameter.setdefault("schema", {})["minimum"] = 0
                 parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
-    _patch_flood_duration_openapi(schema)
-    _patch_layer_metadata_openapi(schema)
-    app.openapi_schema = schema
-    return app.openapi_schema
 
 
 app.openapi = custom_openapi

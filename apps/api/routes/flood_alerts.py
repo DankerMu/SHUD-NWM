@@ -27,9 +27,11 @@ from services.tiles.mvt import (
     MVT_MAX_ZOOM,
     MVT_MEDIA_TYPE,
     MVT_SCHEMA_VERSION,
+    MVT_VALID_TIME_SAMPLE_LIMIT,
     SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS,
     SUPPORTED_HYDRO_MVT_VARIABLES,
     TileInput,
+    ValidTimeDiscovery,
     build_raw_tile_response,
     build_tile_response,
     canonical_mvt_time,
@@ -299,8 +301,11 @@ def list_layer_valid_times(
     validate_identifier(layer_id, "layer_id")
     if run_id is not None:
         validate_identifier(run_id, "run_id")
+        _require_frequency_ready(session, run_id)
     else:
         run = latest_ready_run(session)
+        if run is None:
+            return _ok(request, _empty_valid_times().model_dump())
         run_id = str(run["run_id"]) if run else None
     if duration is not None:
         validate_identifier(duration, "duration")
@@ -1198,7 +1203,9 @@ def _default_layer_catalog(
     ]
     layers = []
     for layer_id, name, layer_type, variables in definitions:
-        valid_time_sample = valid_times_for_layer(session, layer_id, run_id=run_id)
+        valid_time_sample = (
+            valid_times_for_layer(session, layer_id, run_id=run_id) if run_id is not None else _empty_valid_times()
+        )
         layers.append(
             Layer(
                 layer_id=layer_id,
@@ -1219,6 +1226,10 @@ def _default_layer_catalog(
             )
         )
     return layers
+
+
+def _empty_valid_times(limit: int = MVT_VALID_TIME_SAMPLE_LIMIT) -> ValidTimeDiscovery:
+    return ValidTimeDiscovery(valid_times=[], limit=limit, observed_count=0, truncated=False)
 
 
 def _validate_supported_hydro_variable(variable: str) -> None:

@@ -641,9 +641,9 @@ paths:
       tags: [tiles]
       parameters:
         - $ref: "#/components/parameters/BasinVersionId"
-        - $ref: "#/components/parameters/TileZ"
-        - $ref: "#/components/parameters/TileX"
-        - $ref: "#/components/parameters/TileY"
+        - $ref: "#/components/parameters/MvtTileZ"
+        - $ref: "#/components/parameters/MvtTileX"
+        - $ref: "#/components/parameters/MvtTileY"
       responses:
         "200":
           description: Raw Mapbox vector tile
@@ -693,9 +693,9 @@ paths:
         - $ref: "#/components/parameters/RunId"
         - $ref: "#/components/parameters/HydroMvtVariable"
         - $ref: "#/components/parameters/ValidTimePath"
-        - $ref: "#/components/parameters/TileZ"
-        - $ref: "#/components/parameters/TileX"
-        - $ref: "#/components/parameters/TileY"
+        - $ref: "#/components/parameters/MvtTileZ"
+        - $ref: "#/components/parameters/MvtTileX"
+        - $ref: "#/components/parameters/MvtTileY"
       responses:
         "200":
           description: Raw Mapbox vector tile
@@ -812,9 +812,9 @@ paths:
             enum: [1h, 3h, 6h, 24h, 72h, 7d]
           description: Supported return-period aggregation duration.
         - $ref: "#/components/parameters/ValidTimePath"
-        - $ref: "#/components/parameters/TileZ"
-        - $ref: "#/components/parameters/TileX"
-        - $ref: "#/components/parameters/TileY"
+        - $ref: "#/components/parameters/MvtTileZ"
+        - $ref: "#/components/parameters/MvtTileX"
+        - $ref: "#/components/parameters/MvtTileY"
       responses:
         "200":
           description: Raw Mapbox vector tile
@@ -1630,7 +1630,7 @@ components:
       required: true
       schema:
         type: string
-    TileX:
+    MvtTileX:
       name: x
       in: path
       description: Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z.
@@ -1639,7 +1639,7 @@ components:
         type: integer
         minimum: 0
         maximum: 16383
-    TileY:
+    MvtTileY:
       name: y
       in: path
       description: Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z.
@@ -1648,7 +1648,7 @@ components:
         type: integer
         minimum: 0
         maximum: 16383
-    TileZ:
+    MvtTileZ:
       name: z
       in: path
       required: true
@@ -1656,6 +1656,32 @@ components:
         type: integer
         minimum: 0
         maximum: 14
+    TileX:
+      name: x
+      in: path
+      description: Web Mercator XYZ tile column.
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 16777215
+    TileY:
+      name: y
+      in: path
+      description: Web Mercator XYZ tile row.
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 16777215
+    TileZ:
+      name: z
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 24
     ToTime:
       name: to
       in: query
