@@ -1,5 +1,7 @@
 import type { ExpressionSpecification, LineLayerSpecification } from 'maplibre-gl'
 
+import { m11VisualTokens } from '@/lib/m11/visualTokens'
+
 export type AlertLevel =
   | 'normal'
   | 'elevated'
@@ -23,13 +25,13 @@ export const ALERT_LEVEL_META: Record<
   AlertLevel,
   { label: string; range: string; color: string; minReturnPeriod: number }
 > = {
-  normal: { label: '正常', range: 'T<2', color: '#808080', minReturnPeriod: 0 },
-  elevated: { label: '偏高', range: '2≤T<5', color: '#4A90D9', minReturnPeriod: 2 },
-  watch: { label: '关注', range: '5≤T<10', color: '#FFD700', minReturnPeriod: 5 },
-  warning: { label: '警戒', range: '10≤T<20', color: '#FF8C00', minReturnPeriod: 10 },
-  high_risk: { label: '高风险', range: '20≤T<50', color: '#FF4500', minReturnPeriod: 20 },
-  severe: { label: '严重', range: '50≤T<100', color: '#DC143C', minReturnPeriod: 50 },
-  extreme: { label: '极端', range: 'T≥100', color: '#800080', minReturnPeriod: 100 },
+  normal: { label: '正常', range: 'T<2', color: m11VisualTokens.warningLevels.normal, minReturnPeriod: 0 },
+  elevated: { label: '偏高', range: '2≤T<5', color: m11VisualTokens.warningLevels.elevated, minReturnPeriod: 2 },
+  watch: { label: '关注', range: '5≤T<10', color: m11VisualTokens.warningLevels.watch, minReturnPeriod: 5 },
+  warning: { label: '警戒', range: '10≤T<20', color: m11VisualTokens.warningLevels.warning, minReturnPeriod: 10 },
+  high_risk: { label: '高风险', range: '20≤T<50', color: m11VisualTokens.warningLevels.high_risk, minReturnPeriod: 20 },
+  severe: { label: '严重', range: '50≤T<100', color: m11VisualTokens.warningLevels.severe, minReturnPeriod: 50 },
+  extreme: { label: '极端', range: 'T≥100', color: m11VisualTokens.warningLevels.extreme, minReturnPeriod: 100 },
 }
 
 export const SUPER_WARNING_LEVELS = new Set<AlertLevel>(['warning', 'high_risk', 'severe', 'extreme'])
@@ -49,7 +51,7 @@ export function alertLevelLabel(level: string | null | undefined) {
 }
 
 export function alertLevelColor(level: string | null | undefined) {
-  return isAlertLevel(level) ? ALERT_LEVEL_META[level].color : '#CCCCCC'
+  return isAlertLevel(level) ? ALERT_LEVEL_META[level].color : m11VisualTokens.warningLevels.unavailable
 }
 
 export const floodLineColorExpression: ExpressionSpecification = [
@@ -69,7 +71,7 @@ export const floodLineColorExpression: ExpressionSpecification = [
   ALERT_LEVEL_META.severe.color,
   'extreme',
   ALERT_LEVEL_META.extreme.color,
-  '#CCCCCC',
+  m11VisualTokens.warningLevels.unavailable,
 ]
 
 export const floodLineWidthExpression: ExpressionSpecification = [

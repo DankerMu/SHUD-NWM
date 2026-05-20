@@ -221,7 +221,7 @@ const m11Layers: LayerState[] = [
     validTimeSource: 'api',
     disabledReason: null,
     freshness: m11LayerFreshness,
-    legend: [{ label: 'warning', color: '#FF8C00', min: 10, max: 20 }],
+    legend: [{ label: 'warning', color: '#FFB74D', min: 10, max: 20 }],
   },
 ]
 

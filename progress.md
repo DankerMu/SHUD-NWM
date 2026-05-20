@@ -181,12 +181,20 @@ uv run nhms-production validate-ops \
 
 1. **M12 后续数据合同**：为 `/segments/:segmentId` 补 station/forcing/weather/frequency-curve/run lineage 合同后接入真实 PRCP/TEMP/RH/wind/Press、forcing 小图、完整频率曲线和 lineage；继续禁止伪造未接入数据。
 2. **效果图 5/6：气象数据产品页**：把 M13 前端合同夹具升级为后端 API/OpenAPI 合同和真实 tile/query/area-stat/station-series 数据源；继续禁止伪造未接入图层。
-3. **效果图 7 后续**：在 readonly 页面基础上补截图视觉 QA 和后续经审计的 mutating workflow；创建/编辑/删除/发布、active model switching 仍需单独 OpenSpec/backend auth/audit 设计。
-4. **M11 视觉收敛**：基于 06B 和效果图做 overview/basin/flood/monitoring 的截图审查、布局密度、色彩、间距、控件和响应式打磨。
-5. **真实 MVT 与全国规模性能**：从 GeoJSON 兼容路径升级到 PostGIS tile clipping + MVT 编码，并补全国真实数据压测。
-6. **真实生产验证**：在目标环境跑 live auth、alert sink、rollback、真实 Slurm、真实对象存储、真实气象下载。
-7. **CLDAS 接入**：实现 adapter、授权数据质量检查、best_available 生产路径。
-8. **生产身份认证/授权**：把当前 dev/test override 和前端 gate 推进到完整 backend auth/RBAC 系统。
+3. **效果图 7 后续**：在 readonly 页面基础上补后续经审计的 mutating workflow；创建/编辑/删除/发布、active model switching 仍需单独 OpenSpec/backend auth/audit 设计。
+4. **真实 MVT 与全国规模性能**：从 GeoJSON 兼容路径升级到 PostGIS tile clipping + MVT 编码，并补全国真实数据压测。
+5. **真实生产验证**：在目标环境跑 live auth、alert sink、rollback、真实 Slurm、真实对象存储、真实气象下载。
+6. **CLDAS 接入**：实现 adapter、授权数据质量检查、best_available 生产路径。
+7. **生产身份认证/授权**：把当前 dev/test override 和前端 gate 推进到完整 backend auth/RBAC 系统。
+
+## M15 前端视觉收敛状态
+
+- GitHub issue #176 / OpenSpec `m15-frontend-visual-conformance` 已实现机械视觉证据：`/overview`、`/basins/basin-demo?...segmentId=seg-009`、`/flood-alerts`、`/monitoring` 在 `1920x1080`、`1440x900`、`1280x900` 均由 deterministic Playwright 夹具截图并校验。
+- 扩展证据已覆盖 `/segments/seg-009?...`、气象 grid/stations 两条 URL、`/system/model-assets?modelId=model-demo`；非 happy-state 证据在 canonical `1440x900` 覆盖 overview loading/partial/error、basin empty/partial/error、flood empty/warning/error、monitoring empty/failed/RBAC denied、segment missing/chart error、meteorology grid unavailable/restricted、stations empty/detail unavailable、model-assets denied/loading/redacted error。
+- 证据命令：`cd apps/frontend && corepack pnpm run test:e2e:m15-visual`。Manifest：`.codex/evidence/issue-176/manifest.json`；截图：`.codex/evidence/issue-176/screenshots/`。Manifest SHA 始终等于运行时 checked-out `git rev-parse HEAD`；CI 通过 `M15_EVIDENCE_SHA` 声明证据 commit，PR 事件设置为 pull request head SHA 并 checkout 同一 SHA，push/non-PR 设置为 `github.sha`。任何 `M15_EVIDENCE_SHA` / PR head / `GITHUB_SHA` / `CI_COMMIT_SHA` 与 `HEAD` 不一致都会阻断截图生成；PR 证据必须在 final commit/frozen PR head 后重新生成，禁止 `local-uncommitted` 等 placeholder。
+- M15 证据 lane 阻断未知 non-local network；OpenTopoMap、Esri、OpenStreetMap 等已知地图 tile/style/font 请求使用 deterministic neutral stubs，不依赖 live 外部瓦片服务。
+- 治理文档：`apps/frontend/e2e/m15-visual-evidence.md` 记录 review checklist、acceptable deltas、no-overlap criteria 和 blocking criteria。截图二进制仍为本地 volatile evidence，不纳入仓库。
+- 已收敛共享根：06B/M15 CSS token aliases、focus ring、shared card/button/badge/select/tabs/dialog/toast radius/shadow/spacing/control-height/z-index、M11 nav/panel/timeline tokens、warning/status palette。未改变 backend/OpenAPI contract、生产 time-series semantics、RBAC 数据边界、M14 redaction/model-assets sanitization。
 
 ## 注意事项
 

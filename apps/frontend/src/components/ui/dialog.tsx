@@ -15,7 +15,7 @@ export const DialogOverlay = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Overlay
     ref={ref}
-    className={cn('fixed inset-0 z-50 bg-black/40 data-[state=open]:animate-in', className)}
+    className={cn('fixed inset-0 z-[var(--z-overlay)] bg-black/40 data-[state=open]:animate-in', className)}
     {...props}
   />
 ))
@@ -30,13 +30,13 @@ export const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'fixed left-1/2 top-1/2 z-50 grid w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-border bg-panel p-6 shadow-lg',
+        'fixed left-1/2 top-1/2 z-[var(--z-overlay)] grid w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-[var(--space-4)] rounded-[var(--radius-md)] border border-border bg-panel p-[var(--space-6)] shadow-[var(--shadow-lg)]',
         className,
       )}
       {...props}
     >
       {children}
-      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent">
+      <DialogPrimitive.Close className="absolute right-[var(--space-4)] top-[var(--space-4)] rounded-[var(--radius-sm)] opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-primary-500">
         <X className="size-4" />
         <span className="sr-only">Close</span>
       </DialogPrimitive.Close>
@@ -46,11 +46,11 @@ export const DialogContent = React.forwardRef<
 DialogContent.displayName = DialogPrimitive.Content.displayName
 
 export function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex flex-col space-y-1.5 text-left', className)} {...props} />
+  return <div className={cn('flex flex-col gap-[var(--space-1)] text-left', className)} {...props} />
 }
 
 export function DialogFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)} {...props} />
+  return <div className={cn('flex flex-col-reverse gap-[var(--space-2)] sm:flex-row sm:justify-end', className)} {...props} />
 }
 
 export const DialogTitle = React.forwardRef<

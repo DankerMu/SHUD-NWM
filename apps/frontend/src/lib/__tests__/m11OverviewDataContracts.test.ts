@@ -222,8 +222,8 @@ describe('M11 overview data contracts', () => {
         unavailable_count: 2,
         quality_note: '2 curves unavailable',
         levels: [
-          { level: 'normal', count: 5, color: '#808080' },
-          { level: 'severe', count: 3, color: '#DC143C' },
+          { level: 'normal', count: 5, color: '#4FC3F7' },
+          { level: 'severe', count: 3, color: '#E57373' },
         ],
       },
       pipeline: {
@@ -276,8 +276,8 @@ describe('M11 overview data contracts', () => {
         unavailable_count: 0,
         quality_note: null,
         levels: [
-          { level: 'normal', count: 4, color: '#808080' },
-          { level: 'watch', count: 3, color: '#FFD700' },
+          { level: 'normal', count: 4, color: '#4FC3F7' },
+          { level: 'watch', count: 3, color: '#FFD54F' },
         ],
       },
       latestRun: run,

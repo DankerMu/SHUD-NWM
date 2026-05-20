@@ -4,6 +4,9 @@ Use the browser automation tool outside unit tests after starting the frontend d
 Issue #165 screenshot evidence was captured on 2026-05-19 Asia/Shanghai and stored in local
 issue-scoped paths under `.codex/screenshots/issue-165/`. Those PNG files are local review
 evidence and are not committed.
+M11 evidence predates the M15 deterministic Playwright capture lane. For any refreshed PR evidence,
+prefer `apps/frontend/e2e/m15-visual-conformance.spec.ts`, which blocks unexpected non-local
+network traffic and fulfills known external map tile/style hosts with deterministic stubs.
 
 ```bash
 cd apps/frontend

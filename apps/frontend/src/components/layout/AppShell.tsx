@@ -61,7 +61,7 @@ export function AppShell({ children }: AppShellProps) {
             ) : null}
           </div>
         </header>
-        <main className="w-full px-4 py-4 sm:px-6 lg:px-8">{children}</main>
+        <main className="w-full max-w-[100vw] overflow-x-hidden px-4 py-4 sm:px-6 lg:px-8">{children}</main>
       </div>
       {toasts.map((toast) => (
         <Toast

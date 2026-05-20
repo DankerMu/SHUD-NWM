@@ -104,6 +104,10 @@ function forecastResponse(segmentId: string) {
   return { ...forecastPayload, segment_id: segmentId }
 }
 
+function forecastSegmentIdFromPath(pathname: string) {
+  return pathname.split('/river-segments/')[1]?.split('/')[0] ?? ''
+}
+
 const firstRiverSegmentPage = {
   type: 'FeatureCollection',
   total: 501,
@@ -187,7 +191,7 @@ async function mockForecastApi(page: Page) {
 
     if (url.pathname.endsWith('/forecast-series')) {
       expect(url.pathname).toMatch(/\/api\/v1\/basin-versions\/backend-basin-v1\/river-segments\/backend-seg-[78]\//)
-      return fulfill(route, forecastPayload)
+      return fulfill(route, forecastResponse(forecastSegmentIdFromPath(url.pathname)))
     }
 
     throw new Error(`Unhandled mocked API route: ${url.pathname}`)
@@ -276,7 +280,7 @@ test.describe('forecast page', () => {
         expect(url.searchParams.get('offset')).toBe('0')
         return fulfill(route, riverSegments)
       }
-      if (url.pathname.endsWith('/forecast-series')) return fulfill(route, forecastPayload)
+      if (url.pathname.endsWith('/forecast-series')) return fulfill(route, forecastResponse(forecastSegmentIdFromPath(url.pathname)))
       throw new Error(`Unhandled mocked API route: ${url.pathname}`)
     })
 
@@ -340,7 +344,7 @@ test.describe('forecast page', () => {
           scenarios: url.searchParams.get('scenarios'),
           riverNetworkVersionId: url.searchParams.get('river_network_version_id'),
         })
-        return fulfill(route, forecastPayload)
+        return fulfill(route, forecastResponse(forecastSegmentIdFromPath(url.pathname)))
       }
       throw new Error(`Unhandled mocked API route: ${url.pathname}`)
     })
@@ -391,7 +395,7 @@ test.describe('forecast page', () => {
       if (url.pathname === '/api/v1/basin-versions/backend-basin-v1/river-segments') return fulfill(route, adjacentOnlyRiverSegments)
       if (url.pathname.endsWith('/forecast-series')) {
         forecastQueries.push({
-          segmentId: url.pathname.split('/river-segments/')[1]?.split('/')[0] ?? null,
+          segmentId: forecastSegmentIdFromPath(url.pathname) || null,
           issueTime: url.searchParams.get('issue_time'),
           scenarios: url.searchParams.get('scenarios'),
           riverNetworkVersionId: url.searchParams.get('river_network_version_id'),
@@ -399,7 +403,7 @@ test.describe('forecast page', () => {
         if (forecastQueries.length === 1) {
           return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'temporary forecast failure' }) })
         }
-        return fulfill(route, forecastResponse(url.pathname.split('/river-segments/')[1]?.split('/')[0] ?? 'backend-seg-7'))
+        return fulfill(route, forecastResponse(forecastSegmentIdFromPath(url.pathname) || 'backend-seg-7'))
       }
       throw new Error(`Unhandled mocked API route: ${url.pathname}`)
     })
@@ -478,7 +482,7 @@ test.describe('forecast page', () => {
 
       if (url.pathname.endsWith('/forecast-series')) {
         forecastRequests.push(url.pathname)
-        return fulfill(route, forecastPayload)
+        return fulfill(route, forecastResponse(forecastSegmentIdFromPath(url.pathname)))
       }
 
       throw new Error(`Unhandled mocked API route: ${url.pathname}`)

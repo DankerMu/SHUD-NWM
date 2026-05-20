@@ -2,6 +2,7 @@ import type { components } from '@/api/types'
 import { ALERT_LEVEL_META } from '@/components/flood/alertLevels'
 import { m11QueryHref } from '@/lib/m11/queryState'
 import type { M11Layer, M11QueryState, M11Source } from '@/lib/m11/queryState'
+import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
 export type ApiBasin = components['schemas']['Basin']
 export type ApiBasinVersion = components['schemas']['BasinVersion']
@@ -1249,7 +1250,7 @@ export function m11DischargeColor(value: number | null) {
 }
 
 export function m11ReturnPeriodColor(value: number | null) {
-  if (value === null) return '#CCCCCC'
+  if (value === null) return m11VisualTokens.warningLevels.unavailable
   if (value >= 100) return ALERT_LEVEL_META.extreme.color
   if (value >= 50) return ALERT_LEVEL_META.severe.color
   if (value >= 20) return ALERT_LEVEL_META.high_risk.color
@@ -1267,7 +1268,7 @@ export function m11WarningLevelColor(level: M11WarningLevel) {
   if (level === 'watch') return ALERT_LEVEL_META.watch.color
   if (level === 'elevated') return ALERT_LEVEL_META.elevated.color
   if (level === 'normal') return ALERT_LEVEL_META.normal.color
-  return '#CCCCCC'
+  return m11VisualTokens.warningLevels.unavailable
 }
 
 function versionedSegmentKey(basinVersionId: string, riverNetworkVersionId: string, segmentId: string): string {

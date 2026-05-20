@@ -67,7 +67,7 @@ export function M11Layout({
   return (
     <div
       className={cn(
-        'grid h-[calc(100vh-88px)] min-h-[42rem] gap-0 overflow-hidden rounded-md border border-neutral-300 bg-white shadow-md min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]',
+        'grid h-[calc(100vh-var(--m11-nav-height)-32px)] min-h-[42rem] gap-0 overflow-hidden rounded-[var(--radius-md)] border border-neutral-300 bg-white shadow-[var(--shadow-md)] min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]',
         leftCollapsed && rightCollapsed
           ? 'min-[1200px]:grid-cols-[2.75rem_minmax(0,1fr)_2.75rem]'
           : leftCollapsed
@@ -84,6 +84,7 @@ export function M11Layout({
         '--m11-left-panel-width': m11VisualTokens.leftPanelWidth,
         '--m11-right-panel-width': m11VisualTokens.rightPanelWidth,
         '--m11-timeline-height': m11VisualTokens.timelineHeight,
+        '--m11-nav-height': m11VisualTokens.navHeight,
       } as CSSProperties}
     >
       <aside className="min-h-0 overflow-hidden border-b border-neutral-300 bg-white min-[1200px]:border-b-0 min-[1200px]:border-r" aria-label="M11 左侧面板">
