@@ -7,7 +7,7 @@ import re
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -80,10 +80,11 @@ def import_basins_registry(
     database_url: str | None = None,
     output_path: str | Path | None = None,
     policy_decision: PolicyDecision | None = None,
+    preflight_policy_decision: PolicyDecision | None = None,
     trusted_internal: bool = False,
 ) -> dict[str, Any]:
     _require_public_import_preflight_policy(
-        policy_decision=policy_decision,
+        policy_decision=preflight_policy_decision if preflight_policy_decision is not None else policy_decision,
         trusted_internal=trusted_internal,
     )
     manifest = _read_json_object(
@@ -327,17 +328,11 @@ def _require_public_import_preflight_policy(
 ) -> None:
     if trusted_internal:
         return
-    if policy_decision is not None and policy_decision.decision == "allow":
-        return
-    decision = (
-        require_policy_evidence(
-            None,
-            action_id="models.switch_version",
-            target_type="model_registry",
-            target_id=PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID,
-        )
-        if policy_decision is None
-        else replace(policy_decision, target_id=PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID)
+    decision = require_policy_evidence(
+        policy_decision,
+        action_id="models.switch_version",
+        target_type="model_registry",
+        target_id=PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID,
     )
     if decision.decision != "allow":
         raise BasinsRegistryImportError(

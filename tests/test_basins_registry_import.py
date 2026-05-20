@@ -1079,6 +1079,59 @@ def test_import_basins_registry_release_blocked_rejects_before_manifest_read(
     assert exc_info.value.details["policy_decision"]["decision"] == "release_blocked"
 
 
+@pytest.mark.parametrize(
+    ("action_id", "target_type", "target_id"),
+    [
+        ("models.activate", "model_registry", _PUBLIC_IMPORT_UNKNOWN_TARGET_ID),
+        ("models.switch_version", "model_instance", _PUBLIC_IMPORT_UNKNOWN_TARGET_ID),
+        ("models.switch_version", "model_registry", "basins-other-model"),
+    ],
+)
+def test_import_basins_registry_misbound_allow_rejects_before_manifest_read(
+    action_id: str,
+    target_type: str,
+    target_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path = tmp_path / "inventory.json"
+    manifest_path = tmp_path / "attacker-manifest.json"
+    policy_decision = cli_policy_decision_from_evidence(
+        action_id,
+        target_type=target_type,
+        target_id=target_id,
+        actor_id="cli-model-admin",
+        roles=("model_admin",),
+    )
+
+    def fail_read_manifest(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("service manifest reader must not run before misbound auth is denied")
+
+    def fail_prepare(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("_prepare_sources must not run before misbound auth is denied")
+
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._read_json_object", fail_read_manifest)
+    monkeypatch.setattr("workers.model_registry.basins_registry_import._prepare_sources", fail_prepare)
+
+    with pytest.raises(BasinsRegistryImportError) as exc_info:
+        import_basins_registry(
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+            database_url="postgresql://nhms:nhms@localhost:1/nhms",
+            policy_decision=policy_decision,
+        )
+
+    assert policy_decision is not None
+    assert policy_decision.decision == "allow"
+    assert exc_info.value.error_code == "RBAC_FORBIDDEN"
+    assert exc_info.value.model_id == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert exc_info.value.details["no_mutation_expected"] is True
+    assert exc_info.value.details["policy_decision"]["action_id"] == "models.switch_version"
+    assert exc_info.value.details["policy_decision"]["target_type"] == "model_registry"
+    assert exc_info.value.details["policy_decision"]["target_id"] == _PUBLIC_IMPORT_UNKNOWN_TARGET_ID
+    assert exc_info.value.details["policy_decision"]["decision"] == "deny"
+
+
 @pytest.mark.integration
 def test_argparse_import_basins_registry_without_cli_auth_rejects_without_report_or_rows(
     tmp_path: Path,

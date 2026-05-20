@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from typing import Sequence
 
 from apps.api.auth import PolicyDecision, cli_policy_decision_from_evidence
@@ -14,6 +15,12 @@ from .validator import ModelPackageValidationError, validate_model_package_path
 
 DEFAULT_BASINS_MIGRATION_SOURCE_URI = "/volume/data/nwm/Basins"
 PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID = "unknown"
+
+
+@dataclass(frozen=True)
+class RegistryImportPolicyDecisions:
+    preflight: PolicyDecision | None
+    manifest: PolicyDecision | None
 
 
 def _validate_package(package_path: str) -> dict[str, object]:
@@ -61,18 +68,21 @@ def _registry_import_policy_decision(
     *,
     auth_actor_id: str | None,
     auth_roles: Sequence[str] | None,
-) -> PolicyDecision | None:
+) -> RegistryImportPolicyDecisions:
     decision = _import_policy_decision(
         PUBLIC_REGISTRY_IMPORT_UNKNOWN_TARGET_ID,
         auth_actor_id=auth_actor_id,
         auth_roles=auth_roles,
     )
     if decision is None or decision.decision != "allow":
-        return decision
-    return _import_policy_decision(
-        _model_id_from_manifest(package_manifest_path),
-        auth_actor_id=auth_actor_id,
-        auth_roles=auth_roles,
+        return RegistryImportPolicyDecisions(preflight=decision, manifest=decision)
+    return RegistryImportPolicyDecisions(
+        preflight=decision,
+        manifest=_import_policy_decision(
+            _model_id_from_manifest(package_manifest_path),
+            auth_actor_id=auth_actor_id,
+            auth_roles=auth_roles,
+        ),
     )
 
 
@@ -196,16 +206,18 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         auth_role: tuple[str, ...],
     ) -> None:
         try:
+            policy_decisions = _registry_import_policy_decision(
+                package_manifest,
+                auth_actor_id=auth_actor_id,
+                auth_roles=auth_role,
+            )
             result = import_basins_registry(
                 inventory_path=inventory,
                 package_manifest_path=package_manifest,
                 database_url=database_url,
                 output_path=output,
-                policy_decision=_registry_import_policy_decision(
-                    package_manifest,
-                    auth_actor_id=auth_actor_id,
-                    auth_roles=auth_role,
-                ),
+                policy_decision=policy_decisions.manifest,
+                preflight_policy_decision=policy_decisions.preflight,
             )
         except BasinsRegistryImportError as error:
             click.echo(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), err=True)
@@ -312,16 +324,18 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "import-basins-registry":
         try:
+            policy_decisions = _registry_import_policy_decision(
+                args.package_manifest,
+                auth_actor_id=args.auth_actor_id,
+                auth_roles=args.auth_role,
+            )
             result = import_basins_registry(
                 inventory_path=args.inventory,
                 package_manifest_path=args.package_manifest,
                 database_url=args.database_url,
                 output_path=args.output,
-                policy_decision=_registry_import_policy_decision(
-                    args.package_manifest,
-                    auth_actor_id=args.auth_actor_id,
-                    auth_roles=args.auth_role,
-                ),
+                policy_decision=policy_decisions.manifest,
+                preflight_policy_decision=policy_decisions.preflight,
             )
         except BasinsRegistryImportError as error:
             print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
