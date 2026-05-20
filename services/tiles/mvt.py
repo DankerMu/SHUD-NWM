@@ -798,17 +798,29 @@ def valid_times_for_layer(
     layer_id: str,
     *,
     run_id: str | None = None,
+    basin_version_id: str | None = None,
+    river_network_version_id: str | None = None,
     duration: str = DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
     limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
 ) -> ValidTimeDiscovery:
     sample_limit = max(0, limit)
     query_limit = sample_limit + 1
+    selected_identity_params = {
+        "run_id": run_id,
+        "basin_version_id": basin_version_id,
+        "river_network_version_id": river_network_version_id,
+        "limit": query_limit,
+    }
     if layer_id in {"flood-return-period", "warning-level"}:
+        if run_id is not None and (basin_version_id is None or river_network_version_id is None):
+            raise ValueError("Concrete flood valid-time discovery requires selected basin and river-network identity.")
         sql = (
             """
                 SELECT DISTINCT valid_time
                 FROM flood.return_period_result
                 WHERE run_id = :run_id
+                  AND basin_version_id = :basin_version_id
+                  AND river_network_version_id = :river_network_version_id
                   AND duration = :duration
                   AND max_over_window = false
                 ORDER BY valid_time DESC
@@ -825,12 +837,16 @@ def valid_times_for_layer(
             """
         )
     elif layer_id in {"discharge", "water-level"}:
+        if run_id is not None and (basin_version_id is None or river_network_version_id is None):
+            raise ValueError("Concrete hydro valid-time discovery requires selected basin and river-network identity.")
         variable = "q_down" if layer_id == "discharge" else "water_level"
         sql = (
             """
                 SELECT DISTINCT valid_time
                 FROM hydro.river_timeseries
                 WHERE run_id = :run_id
+                  AND basin_version_id = :basin_version_id
+                  AND river_network_version_id = :river_network_version_id
                   AND variable = :variable
                 ORDER BY valid_time DESC
                 LIMIT :limit
@@ -845,14 +861,14 @@ def valid_times_for_layer(
             """
         )
         rows = (
-            session.execute(text(sql), {"run_id": run_id, "variable": variable, "limit": query_limit})
+            session.execute(text(sql), {**selected_identity_params, "variable": variable})
             .mappings()
             .all()
         )
         return _valid_time_discovery(rows, sample_limit)
     else:
         return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
-    rows = session.execute(text(sql), {"run_id": run_id, "duration": duration, "limit": query_limit}).mappings().all()
+    rows = session.execute(text(sql), {**selected_identity_params, "duration": duration}).mappings().all()
     return _valid_time_discovery(rows, sample_limit)
 
 

@@ -354,12 +354,16 @@ def list_layer_valid_times(
     validate_identifier(layer_id, "layer_id")
     if run_id is not None:
         validate_identifier(run_id, "run_id")
-        _require_frequency_ready(session, run_id)
+        run = _require_frequency_ready(session, run_id)
     else:
         run = latest_ready_run(session)
         if run is None:
             return _ok(request, _empty_valid_times().model_dump())
         run_id = str(run["run_id"]) if run else None
+    basin_version_id = str(run["basin_version_id"]) if run and run.get("basin_version_id") else None
+    river_network_version_id = (
+        str(run["river_network_version_id"]) if run and run.get("river_network_version_id") else None
+    )
     if duration is not None:
         validate_identifier(duration, "duration")
     if layer_id in {"flood-return-period", "warning-level"}:
@@ -374,7 +378,14 @@ def list_layer_valid_times(
         )
     else:
         resolved_duration = DEFAULT_FLOOD_RETURN_PERIOD_DURATION
-    valid_time_sample = valid_times_for_layer(session, layer_id, run_id=run_id, duration=resolved_duration)
+    valid_time_sample = valid_times_for_layer(
+        session,
+        layer_id,
+        run_id=run_id,
+        basin_version_id=basin_version_id,
+        river_network_version_id=river_network_version_id,
+        duration=resolved_duration,
+    )
     return _ok(request, valid_time_sample.model_dump())
 
 
@@ -1418,7 +1429,15 @@ def _default_layer_catalog(
     layers = []
     for layer_id, name, layer_type, variables in definitions:
         valid_time_sample = (
-            valid_times_for_layer(session, layer_id, run_id=run_id) if run_id is not None else _empty_valid_times()
+            valid_times_for_layer(
+                session,
+                layer_id,
+                run_id=run_id,
+                basin_version_id=basin_version_id,
+                river_network_version_id=river_network_version_id,
+            )
+            if run_id is not None
+            else _empty_valid_times()
         )
         layers.append(
             Layer(

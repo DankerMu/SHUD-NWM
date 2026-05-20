@@ -3116,10 +3116,46 @@ def test_layer_catalog_unscoped_no_ready_run_returns_empty_without_discovery(
 @pytest.mark.parametrize(
     ("layer_id", "expected_table", "expected_identity"),
     [
-        ("flood-return-period", "flood.return_period_result", ("run_id = :run_id", "duration = :duration")),
-        ("warning-level", "flood.return_period_result", ("run_id = :run_id", "duration = :duration")),
-        ("discharge", "hydro.river_timeseries", ("run_id = :run_id", "variable = :variable")),
-        ("water-level", "hydro.river_timeseries", ("run_id = :run_id", "variable = :variable")),
+        (
+            "flood-return-period",
+            "flood.return_period_result",
+            (
+                "run_id = :run_id",
+                "basin_version_id = :basin_version_id",
+                "river_network_version_id = :river_network_version_id",
+                "duration = :duration",
+            ),
+        ),
+        (
+            "warning-level",
+            "flood.return_period_result",
+            (
+                "run_id = :run_id",
+                "basin_version_id = :basin_version_id",
+                "river_network_version_id = :river_network_version_id",
+                "duration = :duration",
+            ),
+        ),
+        (
+            "discharge",
+            "hydro.river_timeseries",
+            (
+                "run_id = :run_id",
+                "basin_version_id = :basin_version_id",
+                "river_network_version_id = :river_network_version_id",
+                "variable = :variable",
+            ),
+        ),
+        (
+            "water-level",
+            "hydro.river_timeseries",
+            (
+                "run_id = :run_id",
+                "basin_version_id = :basin_version_id",
+                "river_network_version_id = :river_network_version_id",
+                "variable = :variable",
+            ),
+        ),
     ],
 )
 def test_valid_times_for_layer_concrete_run_uses_direct_index_friendly_predicate(
@@ -3145,7 +3181,14 @@ def test_valid_times_for_layer_concrete_run_uses_direct_index_friendly_predicate
 
     session = FakeSession()
 
-    result = valid_times_for_layer(session, layer_id, run_id=RUN_ID, duration="1h")
+    result = valid_times_for_layer(
+        session,
+        layer_id,
+        run_id=RUN_ID,
+        basin_version_id="basin_v1",
+        river_network_version_id="rnv_v1",
+        duration="1h",
+    )
 
     sql = re.sub(r"\s+", " ", session.statement)
     assert result.valid_times == [_iso(VALID_TIME_1)]
@@ -3154,9 +3197,27 @@ def test_valid_times_for_layer_concrete_run_uses_direct_index_friendly_predicate
         assert predicate in sql
     assert "(:run_id IS NULL OR run_id = :run_id)" not in sql
     assert "OR run_id = :run_id" not in sql
+    assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in sql
+    assert "OR basin_version_id = :basin_version_id" not in sql
+    assert (
+        "(:river_network_version_id IS NULL OR river_network_version_id = :river_network_version_id)" not in sql
+    )
+    assert "OR river_network_version_id = :river_network_version_id" not in sql
     assert "ORDER BY valid_time DESC LIMIT :limit" in sql
     assert session.parameters["run_id"] == RUN_ID
+    assert session.parameters["basin_version_id"] == "basin_v1"
+    assert session.parameters["river_network_version_id"] == "rnv_v1"
     assert session.parameters["limit"] == MVT_VALID_TIME_SAMPLE_LIMIT + 1
+
+
+@pytest.mark.parametrize("layer_id", ["flood-return-period", "warning-level", "discharge", "water-level"])
+def test_valid_times_for_layer_concrete_run_requires_selected_identity(layer_id: str) -> None:
+    class FakeSession:
+        def execute(self, *_args: Any, **_kwargs: Any) -> None:
+            pytest.fail("valid-time discovery should fail before SQL without selected identity")
+
+    with pytest.raises(ValueError, match="requires selected basin and river-network identity"):
+        valid_times_for_layer(FakeSession(), layer_id, run_id=RUN_ID)
 
 
 def test_valid_times_for_layer_internal_unscoped_discovery_keeps_no_nullable_run_or() -> None:
@@ -3321,6 +3382,139 @@ def test_flood_layer_valid_times_default_to_one_hour_duration_identity() -> None
     assert default_warning.json()["data"]["valid_times"] == [_iso(latest_1h)]
     assert explicit_24h.status_code == 200
     assert explicit_24h.json()["data"]["valid_times"] == [_iso(later_24h)]
+
+
+@pytest.mark.parametrize("layer_id", ["discharge", "water-level"])
+def test_hydro_valid_time_discovery_excludes_sibling_only_selected_identity(
+    layer_id: str,
+) -> None:
+    run_id = "valid_time_hydro_identity_run"
+    selected_time = datetime(2026, 5, 23, 6, tzinfo=UTC)
+    sibling_only_time = datetime(2026, 5, 23, 12, tzinfo=UTC)
+    variable = "water_level" if layer_id == "water-level" else "q_down"
+    value = 1.5 if layer_id == "water-level" else 150.0
+    unit = "m" if layer_id == "water-level" else "m3/s"
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": selected_time,
+                "start_time": selected_time,
+                "end_time": sibling_only_time,
+            },
+        )
+        _insert_timeseries_result(session, "seg_001", run_id, selected_time, value, variable=variable, unit=unit)
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.river_timeseries (
+                    run_id, basin_version_id, river_network_version_id, river_segment_id,
+                    valid_time, variable, value, unit
+                )
+                VALUES (
+                    :run_id, 'basin_v2', 'rnv_v2', 'seg_004',
+                    :valid_time, :variable, 999.0, :unit
+                )
+                """
+            ),
+            {"run_id": run_id, "valid_time": sibling_only_time, "variable": variable, "unit": unit},
+        )
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                valid_times_response = client.get(f"/api/v1/layers/{layer_id}/valid-times?run_id={run_id}")
+                catalog_response = client.get(f"/api/v1/layers?run_id={run_id}")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert valid_times_response.status_code == 200
+    assert valid_times_response.json()["data"]["valid_times"] == [_iso(selected_time)]
+    assert catalog_response.status_code == 200
+    metadata = {layer["layer_id"]: layer["metadata"] for layer in catalog_response.json()["data"]}
+    assert metadata[layer_id]["valid_times"] == [_iso(selected_time)]
+    assert _iso(sibling_only_time) not in metadata[layer_id]["valid_times"]
+
+
+@pytest.mark.parametrize("layer_id", ["flood-return-period", "warning-level"])
+def test_flood_valid_time_discovery_excludes_sibling_only_selected_identity(
+    layer_id: str,
+) -> None:
+    run_id = "valid_time_flood_identity_run"
+    selected_time = datetime(2026, 5, 24, 6, tzinfo=UTC)
+    sibling_only_time = datetime(2026, 5, 24, 12, tzinfo=UTC)
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": selected_time,
+                "start_time": selected_time,
+                "end_time": sibling_only_time,
+            },
+        )
+        _insert_result(
+            session,
+            "seg_001",
+            "basin_v1",
+            "rnv_v1",
+            selected_time,
+            100.0,
+            2.0,
+            "normal",
+            False,
+            run_id=run_id,
+        )
+        _insert_result(
+            session,
+            "seg_004",
+            "basin_v2",
+            "rnv_v2",
+            sibling_only_time,
+            999.0,
+            99.0,
+            "severe",
+            False,
+            run_id=run_id,
+        )
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                valid_times_response = client.get(f"/api/v1/layers/{layer_id}/valid-times?run_id={run_id}")
+                catalog_response = client.get(f"/api/v1/layers?run_id={run_id}")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert valid_times_response.status_code == 200
+    assert valid_times_response.json()["data"]["valid_times"] == [_iso(selected_time)]
+    assert catalog_response.status_code == 200
+    metadata = {layer["layer_id"]: layer["metadata"] for layer in catalog_response.json()["data"]}
+    assert metadata[layer_id]["valid_times"] == [_iso(selected_time)]
+    assert _iso(sibling_only_time) not in metadata[layer_id]["valid_times"]
 
 
 def test_hydro_layer_metadata_declares_public_cache_identity_and_legacy_aliases() -> None:

@@ -372,6 +372,53 @@ def test_selected_run_mvt_identity_migration_matches_strict_preflight_predicates
     assert "max_over_window = false" in flood_preflight
 
 
+def test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates() -> None:
+    migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
+    mvt_source = (Path(__file__).resolve().parents[1] / "services" / "tiles" / "mvt.py").read_text(
+        encoding="utf-8"
+    )
+    valid_time_source = mvt_source[
+        mvt_source.index("def valid_times_for_layer") : mvt_source.index("def _valid_time_discovery")
+    ]
+    hydro_columns = _index_columns_by_name(
+        migration,
+        "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+    )
+    flood_columns = _index_columns_by_name(
+        migration,
+        "return_period_result_mvt_selected_identity_valid_time_discovery_idx",
+    )
+
+    assert hydro_columns == (
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "variable",
+        "valid_time DESC",
+    )
+    assert flood_columns == (
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "duration",
+        "max_over_window",
+        "valid_time DESC",
+    )
+    for expected in (
+        "run_id = :run_id",
+        "basin_version_id = :basin_version_id",
+        "river_network_version_id = :river_network_version_id",
+    ):
+        assert expected in valid_time_source
+    assert "variable = :variable" in valid_time_source
+    assert "duration = :duration" in valid_time_source
+    assert "max_over_window = false" in valid_time_source
+    assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in valid_time_source
+    assert "(:river_network_version_id IS NULL OR river_network_version_id = :river_network_version_id)" not in (
+        valid_time_source
+    )
+
+
 def test_fresh_tile_cache_schema_requires_non_null_cache_key_identity() -> None:
     migration = dict(_migration_sql())["000008_map.sql"]
     tile_cache = migration[migration.index("CREATE TABLE IF NOT EXISTS map.tile_cache") :]
