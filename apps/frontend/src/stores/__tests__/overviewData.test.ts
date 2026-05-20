@@ -319,6 +319,51 @@ describe('useOverviewDataStore', () => {
     expect(calls).toContain('/api/v1/basins/{basin_id}/versions')
   })
 
+  it('defaults no-query layer state to the newest item from a truncated latest-window valid-time envelope', async () => {
+    const noValidTimeQuery = { ...query, validTime: null }
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') {
+        return success([
+          { layer_id: 'flood-return-period', layer_name: 'Flood return period', layer_type: 'hydrology', variables: [] },
+        ]) as never
+      }
+      if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+      if (path === '/api/v1/pipeline/status') return success(pipelineStatus) as never
+      if (path === '/api/v1/flood-alerts/summary') {
+        return success({ run_id: run.run_id, total_segments: 1, usable_curves: 1, unavailable_count: 0, levels: [] }) as never
+      }
+      if (path === '/api/v1/flood-alerts/ranking') return success({ items: [], total: 0, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') {
+        return success({
+          valid_times: ['2026-05-21T00:00:00Z', '2026-05-21T06:00:00Z', '2026-05-21T12:00:00Z'],
+          items: ['2026-05-21T00:00:00Z', '2026-05-21T06:00:00Z', '2026-05-21T12:00:00Z'],
+          limit: 3,
+          observed_count: 4,
+          truncated: true,
+        }) as never
+      }
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadOverview(noValidTimeQuery)
+
+    expect(snapshot.layers.find((layer) => layer.layerId === 'flood-return-period')).toMatchObject({
+      available: true,
+      validTimeSource: 'api',
+      validTimes: ['2026-05-21T00:00:00.000Z', '2026-05-21T06:00:00.000Z', '2026-05-21T12:00:00.000Z'],
+      currentValidTime: '2026-05-21T12:00:00.000Z',
+      freshness: {
+        validTime: '2026-05-21T12:00:00.000Z',
+      },
+    })
+  })
+
   it('selects published-only ready runs for overview flood surfaces', async () => {
     const publishedRun = { ...run, run_id: 'run-gfs-published', status: 'published', updated_at: '2026-05-18T01:30:00Z' }
     const calls: Array<{ path: string; query?: Record<string, unknown> }> = []

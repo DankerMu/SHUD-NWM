@@ -1972,14 +1972,17 @@ def test_layer_valid_times_budget_caps_catalog_and_endpoint() -> None:
 
     assert layers_response.status_code == 200
     metadata_by_layer = {layer["layer_id"]: layer["metadata"] for layer in layers_response.json()["data"]}
+    latest_window_start = first_valid_time + timedelta(hours=5)
+    newest_valid_time = first_valid_time + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT + 4)
     for layer_id in ("flood-return-period", "warning-level", "discharge"):
         metadata = metadata_by_layer[layer_id]
         assert len(metadata["valid_times"]) == MVT_VALID_TIME_SAMPLE_LIMIT
         assert metadata["valid_time_limit"] == MVT_VALID_TIME_SAMPLE_LIMIT
         assert metadata["valid_time_observed_count"] == MVT_VALID_TIME_SAMPLE_LIMIT + 1
         assert metadata["valid_times_truncated"] is True
-        assert metadata["valid_times"][0] == _iso(first_valid_time)
-        assert metadata["valid_times"][-1] == _iso(first_valid_time + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT - 1))
+        assert metadata["valid_times"] == sorted(metadata["valid_times"])
+        assert metadata["valid_times"][0] == _iso(latest_window_start)
+        assert metadata["valid_times"][-1] == _iso(newest_valid_time)
 
     for response in (flood_valid_times_response, discharge_valid_times_response):
         assert response.status_code == 200
@@ -1989,8 +1992,9 @@ def test_layer_valid_times_budget_caps_catalog_and_endpoint() -> None:
         assert data["limit"] == MVT_VALID_TIME_SAMPLE_LIMIT
         assert data["observed_count"] == MVT_VALID_TIME_SAMPLE_LIMIT + 1
         assert data["truncated"] is True
-        assert data["valid_times"][0] == _iso(first_valid_time)
-        assert data["valid_times"][-1] == _iso(first_valid_time + timedelta(hours=MVT_VALID_TIME_SAMPLE_LIMIT - 1))
+        assert data["valid_times"] == sorted(data["valid_times"])
+        assert data["valid_times"][0] == _iso(latest_window_start)
+        assert data["valid_times"][-1] == _iso(newest_valid_time)
 
     assert unsupported_valid_times_response.status_code == 200
     unsupported = unsupported_valid_times_response.json()["data"]

@@ -1396,7 +1396,7 @@ paths:
     get:
       operationId: listLayerValidTimes
       summary: List bounded valid times for a map layer
-      description: Returns at most the server configured valid-time sample limit. A true truncated flag means more distinct times were observed than are included in valid_times/items.
+      description: Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. A true truncated flag means more distinct times were observed than are included in valid_times/items.
       tags: [layers]
       parameters:
         - name: layer_id
@@ -3248,7 +3248,7 @@ components:
             type: number
         valid_times:
           type: array
-          description: Bounded valid-time sample for catalog display. See valid_time_limit and valid_times_truncated before treating it as complete.
+          description: Bounded newest-window valid-time sample for catalog display, sorted ascending so the final item is the newest sampled valid_time. See valid_time_limit and valid_times_truncated before treating it as complete.
           items:
             type: string
             format: date-time
@@ -3312,13 +3312,13 @@ components:
       properties:
         valid_times:
           type: array
-          description: Bounded valid-time sample. This aliases items for compatibility with layer metadata naming.
+          description: Bounded newest-window valid-time sample sorted ascending so the final item is the newest sampled valid_time. This aliases items for compatibility with layer metadata naming.
           items:
             type: string
             format: date-time
         items:
           type: array
-          description: Bounded valid-time sample, duplicated from valid_times for endpoint envelope consumers.
+          description: Bounded newest-window valid-time sample, duplicated from valid_times for endpoint envelope consumers.
           items:
             type: string
             format: date-time

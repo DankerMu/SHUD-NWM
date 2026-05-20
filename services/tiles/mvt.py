@@ -625,7 +625,7 @@ def valid_times_for_layer(
             FROM flood.return_period_result
             WHERE max_over_window = false
               AND (:run_id IS NULL OR run_id = :run_id)
-            ORDER BY valid_time
+            ORDER BY valid_time DESC
             LIMIT :limit
         """
     elif layer_id in {"discharge", "water-level"}:
@@ -635,7 +635,7 @@ def valid_times_for_layer(
             FROM hydro.river_timeseries
             WHERE variable = :variable
               AND (:run_id IS NULL OR run_id = :run_id)
-            ORDER BY valid_time
+            ORDER BY valid_time DESC
             LIMIT :limit
         """
         rows = (
@@ -653,7 +653,7 @@ def valid_times_for_layer(
 def _valid_time_discovery(rows: Iterable[Mapping[str, Any]], limit: int) -> ValidTimeDiscovery:
     formatted = [_format_time(row["valid_time"]) for row in rows]
     truncated = len(formatted) > limit
-    valid_times = formatted[:limit]
+    valid_times = sorted(formatted[:limit])
     return ValidTimeDiscovery(
         valid_times=valid_times,
         limit=limit,

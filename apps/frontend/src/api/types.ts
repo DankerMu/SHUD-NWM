@@ -671,7 +671,7 @@ export interface paths {
         };
         /**
          * List bounded valid times for a map layer
-         * @description Returns at most the server configured valid-time sample limit. A true truncated flag means more distinct times were observed than are included in valid_times/items.
+         * @description Returns the newest valid-time window up to the server configured sample limit, sorted ascending for timeline controls. A true truncated flag means more distinct times were observed than are included in valid_times/items.
          */
         get: operations["listLayerValidTimes"];
         put?: never;
@@ -1359,7 +1359,7 @@ export interface components {
             bounds_crs?: string | null;
             bounds?: number[] | null;
             wgs84_bounds?: number[] | null;
-            /** @description Bounded valid-time sample for catalog display. See valid_time_limit and valid_times_truncated before treating it as complete. */
+            /** @description Bounded newest-window valid-time sample for catalog display, sorted ascending so the final item is the newest sampled valid_time. See valid_time_limit and valid_times_truncated before treating it as complete. */
             valid_times?: string[];
             /** @description Maximum number of valid_times included in this metadata record. */
             valid_time_limit?: number;
@@ -1390,9 +1390,9 @@ export interface components {
             production_mvt_readiness_claimed?: boolean | null;
         };
         LayerValidTimes: {
-            /** @description Bounded valid-time sample. This aliases items for compatibility with layer metadata naming. */
+            /** @description Bounded newest-window valid-time sample sorted ascending so the final item is the newest sampled valid_time. This aliases items for compatibility with layer metadata naming. */
             valid_times: string[];
-            /** @description Bounded valid-time sample, duplicated from valid_times for endpoint envelope consumers. */
+            /** @description Bounded newest-window valid-time sample, duplicated from valid_times for endpoint envelope consumers. */
             items: string[];
             /** @description Maximum number of valid times returned by this endpoint. */
             limit: number;
