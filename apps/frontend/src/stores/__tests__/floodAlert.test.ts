@@ -189,6 +189,7 @@ describe('useFloodAlertStore', () => {
                     warning_level: 'warning',
                     duration: '1h',
                     valid_time: '2026-05-12T03:00:00Z',
+                    geom_centroid: { type: 'Point', coordinates: ['101.5', 31.25] },
                   },
                 ],
                 total: 1,
@@ -252,8 +253,88 @@ describe('useFloodAlertStore', () => {
       riverSegmentId: 'seg-1',
       riverNetworkVersionId: 'rivnet-v1',
       validTime: '2026-05-12T03:00:00Z',
+      geomCentroid: { type: 'Point', coordinates: [101.5, 31.25] },
     })
     expect(useFloodAlertStore.getState().timelineData?.segmentId).toBe('seg-1')
+  })
+
+  it('normalizes ranking geom_centroid only when it is a valid GeoJSON Point', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        floodResponse({
+          items: [
+            {
+              rank: 1,
+              river_segment_id: 'seg-valid',
+              segment_id: 'seg-valid',
+              segment_name: 'Valid Segment',
+              basin_version_id: 'basin-v1',
+              river_network_version_id: 'rivnet-v1',
+              q_value: 100,
+              q_unit: 'm3/s',
+              return_period: 20,
+              warning_level: 'warning',
+              duration: '1h',
+              valid_time: '2026-05-12T03:00:00Z',
+              geom_centroid: { type: 'Point', coordinates: ['101.5', 31.25] },
+            },
+            {
+              rank: 2,
+              river_segment_id: 'seg-missing',
+              segment_id: 'seg-missing',
+              basin_version_id: 'basin-v1',
+              q_value: 90,
+              q_unit: 'm3/s',
+              return_period: 10,
+              warning_level: 'watch',
+              duration: '1h',
+              valid_time: '2026-05-12T03:00:00Z',
+              geom_centroid: null,
+            },
+            {
+              rank: 3,
+              river_segment_id: 'seg-linestring',
+              segment_id: 'seg-linestring',
+              basin_version_id: 'basin-v1',
+              q_value: 80,
+              q_unit: 'm3/s',
+              return_period: 5,
+              warning_level: 'elevated',
+              duration: '1h',
+              valid_time: '2026-05-12T03:00:00Z',
+              geom_centroid: { type: 'LineString', coordinates: [[101, 31], [102, 32]] },
+            },
+            {
+              rank: 4,
+              river_segment_id: 'seg-invalid',
+              segment_id: 'seg-invalid',
+              basin_version_id: 'basin-v1',
+              q_value: 70,
+              q_unit: 'm3/s',
+              return_period: 2,
+              warning_level: 'normal',
+              duration: '1h',
+              valid_time: '2026-05-12T03:00:00Z',
+              geom_centroid: { type: 'Point', coordinates: [101, 'bad'] },
+            },
+          ],
+          total: 4,
+          limit: 20,
+          offset: 0,
+        }),
+      ),
+    )
+
+    await useFloodAlertStore.getState().fetchRanking()
+
+    const items = useFloodAlertStore.getState().rankingData?.items ?? []
+    expect(items.map((item) => item.geomCentroid)).toEqual([
+      { type: 'Point', coordinates: [101.5, 31.25] },
+      null,
+      null,
+      null,
+    ])
   })
 
   it('normalizes legacy warning aliases in summary, ranking, and timeline payloads', async () => {

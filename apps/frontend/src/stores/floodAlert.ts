@@ -150,6 +150,16 @@ function normalizeLevel(value: string | null | undefined): AlertLevel | null {
   return isAlertLevel(value) ? value : null
 }
 
+function normalizeGeoPoint(value: unknown): { type: 'Point'; coordinates: [number, number] } | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as { type?: unknown; coordinates?: unknown }
+  if (record.type !== 'Point' || !Array.isArray(record.coordinates) || record.coordinates.length < 2) return null
+  const lon = Number(record.coordinates[0])
+  const lat = Number(record.coordinates[1])
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null
+  return { type: 'Point', coordinates: [lon, lat] }
+}
+
 function normalizeSummary(payload: ApiFloodAlertSummary): FloodAlertSummary {
   return {
     runId: payload.run_id,
@@ -184,7 +194,7 @@ function normalizeRankingItem(item: ApiFloodAlertRankingItem, index: number): Fl
     warningLevel: normalizeLevel(item.warning_level),
     duration: stringOrNull(item.duration),
     validTime: stringOrNull(item.valid_time),
-    geomCentroid: null,
+    geomCentroid: normalizeGeoPoint(item.geom_centroid),
   }
 }
 

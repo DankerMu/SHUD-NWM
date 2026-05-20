@@ -93,6 +93,7 @@ class RankingItem(BaseModel):
     warning_level: str | None = None
     duration: str
     valid_time: str
+    geom_centroid: GeoPoint | None = None
 
 
 class RankingResponse(BaseModel):
@@ -278,6 +279,7 @@ def flood_alert_ranking(
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     _require_frequency_ready(session, run_id)
+    geom_sql, centroid_sql = _geometry_select_sql(session)
     where_sql, params = _ranking_filters(run_id=run_id, basin_id=basin_id, valid_time=valid_time)
     count_statement = text(f"SELECT COUNT(*) AS count FROM flood.return_period_result r {where_sql}").bindparams(
         bindparam("usable_flags", expanding=True)
@@ -294,7 +296,9 @@ def flood_alert_ranking(
         text(
             f"""
             SELECT r.river_segment_id, r.basin_version_id, r.q_value, r.q_unit, r.return_period,
-                   r.warning_level, r.duration, r.valid_time, r.river_network_version_id, rs.properties_json
+                   r.warning_level, r.duration, r.valid_time, r.river_network_version_id, rs.properties_json,
+                   {centroid_sql} AS geom_centroid,
+                   {geom_sql} AS geom_json
             FROM flood.return_period_result r
             LEFT JOIN core.river_segment rs
               ON rs.river_segment_id = r.river_segment_id
@@ -321,6 +325,7 @@ def flood_alert_ranking(
             warning_level=_optional_str(row["warning_level"]),
             duration=str(row["duration"]),
             valid_time=_format_time(row["valid_time"]),
+            geom_centroid=_centroid_payload(row.get("geom_centroid") or row.get("geom_json")),
         )
         for index, row in enumerate(rows, start=1)
     ]

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from apps.api.main import app
 from apps.api.routes import flood_alerts as flood_alert_routes
+from apps.api.routes.flood_alerts import RankingItem
 from services.tiles.mvt import MVT_MAX_ZOOM
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
@@ -158,6 +159,18 @@ def test_flood_alert_ranking_limit_contract_matches_runtime_and_static_openapi()
         assert param["schema"]["default"] == 10
         assert param["schema"]["maximum"] == 200
         assert param["schema"]["minimum"] == 1
+
+    static_item = static_spec["components"]["schemas"]["FloodAlertRankingItem"]
+    runtime_item_schema = RankingItem.model_json_schema()
+    assert "geom_centroid" in static_item["required"]
+    assert static_item["properties"]["geom_centroid"] == {
+        "type": "object",
+        "nullable": True,
+        "allOf": [{"$ref": "#/components/schemas/GeoJSONPoint"}],
+        "description": "GeoJSON point centroid, or null",
+    }
+    assert runtime_item_schema["properties"]["geom_centroid"]["anyOf"][0]["$ref"] == "#/$defs/GeoPoint"
+    assert runtime_item_schema["properties"]["geom_centroid"]["default"] is None
 
 
 def test_flood_alert_timeline_max_points_contract_matches_runtime_and_static_openapi() -> None:

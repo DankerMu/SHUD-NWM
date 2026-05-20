@@ -2859,6 +2859,7 @@ components:
         - warning_level
         - duration
         - valid_time
+        - geom_centroid
       properties:
         rank:
           type: integer
@@ -2889,6 +2890,12 @@ components:
         valid_time:
           type: string
           format: date-time
+        geom_centroid:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/GeoJSONPoint"
+          description: "GeoJSON point centroid, or null"
     FloodAlertRanking:
       type: object
       required: [items, total, limit, offset]
@@ -2945,8 +2952,10 @@ components:
           type: string
           format: date-time
         geom_centroid:
-          nullable: true
           type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/GeoJSONPoint"
           description: "GeoJSON point centroid, or null"
     FloodAlertSegmentList:
       type: object

@@ -1213,6 +1213,8 @@ export interface components {
             duration: string;
             /** Format: date-time */
             valid_time: string;
+            /** @description GeoJSON point centroid, or null */
+            geom_centroid: components["schemas"]["GeoJSONPoint"] | null;
         };
         FloodAlertRanking: {
             items: components["schemas"]["FloodAlertRankingItem"][];
@@ -1232,7 +1234,7 @@ export interface components {
             /** Format: date-time */
             valid_time: string;
             /** @description GeoJSON point centroid, or null */
-            geom_centroid: Record<string, never> | null;
+            geom_centroid: components["schemas"]["GeoJSONPoint"] | null;
         };
         FloodAlertSegmentList: {
             segments: components["schemas"]["FloodAlertSegment"][];

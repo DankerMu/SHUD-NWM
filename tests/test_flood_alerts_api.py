@@ -160,6 +160,7 @@ def test_ranking_pagination_basin_filter_and_valid_time() -> None:
         assert data["total"] == 4
         assert [item["river_segment_id"] for item in data["items"]] == ["seg_004", "seg_002"]
         assert [item["rank"] for item in data["items"]] == [2, 3]
+        assert data["items"][0]["geom_centroid"] == {"type": "Point", "coordinates": [113.25, 33.25]}
 
         response = client.get(f"/api/v1/flood-alerts/ranking?run_id={RUN_ID}&basin_id=yangtze")
         assert response.status_code == 200
@@ -171,6 +172,7 @@ def test_ranking_pagination_basin_filter_and_valid_time() -> None:
         assert response.status_code == 200
         valid_time_data = response.json()["data"]
         assert [item["river_segment_id"] for item in valid_time_data["items"]] == ["seg_002", "seg_001"]
+        assert valid_time_data["items"][0]["geom_centroid"] == {"type": "Point", "coordinates": [111.25, 31.25]}
 
 
 def test_ranking_pagination_orders_duplicate_segment_ties_by_network_version() -> None:
