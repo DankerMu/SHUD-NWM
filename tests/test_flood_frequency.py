@@ -282,6 +282,69 @@ def test_argparse_cli_dry_run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Ca
         assert output["skipped"] == 12
 
 
+def test_argparse_cli_supersede_without_policy_evidence_rejects_and_does_not_mutate(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        session.commit()
+        _patch_fit_samples(monkeypatch)
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "fit-curves",
+                "--model-id",
+                "model_v2",
+                "--segment-id",
+                "seg_001",
+                "--duration",
+                "1h",
+                "--supersede-model-id",
+                "model_v1",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "AUTH_REQUIRED" in captured.err
+        assert _curve_flags(session) == {"model_v1": "ok"}
+
+
+def test_main_cli_supersede_without_policy_evidence_rejects_and_does_not_mutate(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        save_frequency_curve(_curve_data(quality_flag="ok"), session)
+        _insert_model_v2(session)
+        session.commit()
+        _patch_fit_samples(monkeypatch)
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+
+        with pytest.raises(SystemExit) as exc_info:
+            flood_cli.main(
+                [
+                    "fit-curves",
+                    "--model-id",
+                    "model_v2",
+                    "--segment-id",
+                    "seg_001",
+                    "--duration",
+                    "1h",
+                    "--supersede-model-id",
+                    "model_v1",
+                ]
+            )
+
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 1
+        assert "AUTH_REQUIRED" in captured.err
+        assert _curve_flags(session) == {"model_v1": "ok"}
+
+
 def test_duration_1h_direct_extraction_vs_24h_sliding_window() -> None:
     with _store() as session:
         _insert_hindcast_hourly_year(session, year=2001)
