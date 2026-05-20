@@ -860,8 +860,14 @@ def test_flood_mvt_canonical_route_returns_protobuf_and_cache_headers() -> None:
         )
 
     assert response.status_code == 424
+    documented_schema = app.openapi()["components"]["responses"]["MvtLivePostgisUnavailable"]["content"][
+        "application/json"
+    ]["schema"]
     body = response.json()
+    assert set(documented_schema["required"]) <= body.keys()
+    assert body["status"] in documented_schema["properties"]["status"]["enum"]
     assert body["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    assert body["error"]["code"] in documented_schema["properties"]["error"]["properties"]["code"]["enum"]
     assert body["error"]["details"]["layer_id"] == "flood-return-period"
 
 
@@ -912,6 +918,7 @@ def test_flood_mvt_live_postgis_returns_raw_bytes_and_binds_requested_xyz(monkey
             "updated_at": datetime(2026, 5, 3, 1, tzinfo=UTC),
         },
     )
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_mvt_source_identity", lambda *_args, **_kwargs: None)
     app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
     try:
         with TestClient(app) as client:
@@ -1898,6 +1905,16 @@ def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(
 
         def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRowResult:
             sql = str(statement)
+            if "FROM hydro.river_timeseries" in sql and "LIMIT 1" in sql:
+                assert parameters["run_id"] == RUN_ID
+                assert parameters["variable"] == "q_down"
+                assert parameters["valid_time"] == VALID_TIME_1
+                return FakeRowResult({"exists": 1})
+            if "FROM flood.return_period_result" in sql and "LIMIT 1" in sql:
+                assert parameters["run_id"] == RUN_ID
+                assert parameters["duration"] == "1h"
+                assert parameters["valid_time"] == VALID_TIME_1
+                return FakeRowResult({"exists": 1})
             if "ST_TileEnvelope(:z, :x, :y)" in sql:
                 assert f"'{expected_sql_layer.replace('-', '_')}'" in sql or expected_sql_layer == "hydro"
                 for key, value in expected_params.items():
@@ -2023,6 +2040,7 @@ def test_live_mvt_missing_source_identity_returns_unavailable(monkeypatch: pytes
             return None
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(flood_alert_routes, "_require_hydro_mvt_source_identity", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_frequency_ready",
@@ -2083,6 +2101,7 @@ def test_live_mvt_over_budget_stats_return_413_without_pbf(monkeypatch: pytest.M
             raise AssertionError(f"Unexpected SQL in live PostGIS budget test: {sql}")
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_mvt_source_identity", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_frequency_ready",
@@ -2153,6 +2172,7 @@ def test_live_mvt_feature_coordinate_overflow_returns_413_without_pbf(monkeypatc
             raise AssertionError(f"Unexpected SQL in live PostGIS budget test: {sql}")
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_mvt_source_identity", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_frequency_ready",
@@ -2220,6 +2240,7 @@ def test_live_mvt_invalid_required_properties_return_json_error(monkeypatch: pyt
             raise AssertionError(f"Unexpected SQL in live PostGIS property test: {sql}")
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(flood_alert_routes, "_require_hydro_mvt_source_identity", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_frequency_ready",
@@ -2327,6 +2348,7 @@ def test_hydro_and_river_network_live_postgis_bind_requested_xyz(
             raise AssertionError(f"Unexpected SQL in live PostGIS tile test: {sql}")
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(flood_alert_routes, "_require_hydro_mvt_source_identity", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_run",
@@ -2495,6 +2517,97 @@ def test_hydro_mvt_rejects_non_ready_run_even_when_matching_cache_row_exists(
 
 
 @pytest.mark.parametrize(
+    ("path", "fetch_name", "unexpected_sql"),
+    [
+        (
+            f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_2_ISO}/6/12/24.pbf",
+            "_fetch_hydro_mvt_tile_bytes",
+            "map.tile_cache",
+        ),
+        (
+            "/api/v1/tiles/flood-return-period/"
+            f"{RUN_ID}/1h/{(VALID_TIME_1 + timedelta(days=30)).isoformat().replace('+00:00', 'Z')}/6/12/24.pbf",
+            "_fetch_flood_mvt_tile_bytes",
+            "map.tile_cache",
+        ),
+        (
+            "/api/v1/tiles/river-network/basin_v2/6/12/24.pbf",
+            "_fetch_river_network_mvt_tile_bytes",
+            "map.tile_cache",
+        ),
+    ],
+)
+def test_absent_mvt_source_identity_fails_before_cache_lookup_or_live_sql(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    fetch_name: str,
+    unexpected_sql: str,
+) -> None:
+    def fail_cache_lookup(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("cache lookup should not run for absent MVT source identity")
+
+    def fail_live_fetch(*_args: Any, **_kwargs: Any) -> bytes:
+        raise AssertionError("live PostGIS fetch should not run for absent MVT source identity")
+
+    monkeypatch.setattr(flood_alert_routes, "read_cached_tile_response", fail_cache_lookup)
+    monkeypatch.setattr(flood_alert_routes, fetch_name, fail_live_fetch)
+    monkeypatch.setattr(
+        flood_alert_routes,
+        "postgis_tile_sql",
+        lambda *_args, **_kwargs: pytest.fail("full tile SQL builder should not run for absent source identity"),
+    )
+
+    with _client() as client:
+        response = client.get(path)
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"]["code"] == "MVT_SOURCE_IDENTITY_NOT_FOUND"
+    assert unexpected_sql not in str(body)
+
+
+def test_mvt_source_identity_preflight_sql_uses_index_friendly_public_route_keys() -> None:
+    class CapturingResult:
+        def first(self) -> None:
+            return None
+
+    class CapturingSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> CapturingResult:
+            self.calls.append((re.sub(r"\s+", " ", str(statement)).strip(), parameters))
+            return CapturingResult()
+
+    hydro_session = CapturingSession()
+    with pytest.raises(flood_alert_routes.ApiError):
+        flood_alert_routes._require_hydro_mvt_source_identity(
+            hydro_session, run_id=RUN_ID, variable="q_down", valid_time=VALID_TIME_1
+        )
+
+    flood_session = CapturingSession()
+    with pytest.raises(flood_alert_routes.ApiError):
+        flood_alert_routes._require_flood_mvt_source_identity(
+            flood_session, run_id=RUN_ID, duration="1h", valid_time=VALID_TIME_1
+        )
+
+    hydro_sql, hydro_params = hydro_session.calls[0]
+    flood_sql, flood_params = flood_session.calls[0]
+    assert (
+        "FROM hydro.river_timeseries WHERE run_id = :run_id "
+        "AND variable = :variable AND valid_time = :valid_time"
+    ) in hydro_sql
+    assert "LIMIT 1" in hydro_sql
+    assert hydro_params == {"run_id": RUN_ID, "variable": "q_down", "valid_time": VALID_TIME_1}
+    assert (
+        "FROM flood.return_period_result WHERE run_id = :run_id AND duration = :duration "
+        "AND max_over_window = false AND valid_time = :valid_time"
+    ) in flood_sql
+    assert "LIMIT 1" in flood_sql
+    assert flood_params == {"run_id": RUN_ID, "duration": "1h", "valid_time": VALID_TIME_1}
+
+
+@pytest.mark.parametrize(
     ("path", "fetch_name"),
     [
         (f"/api/v1/tiles/hydro/{RUN_ID}/q_down/{VALID_TIME_1_ISO}/6/12/24.pbf", "_fetch_hydro_mvt_tile_bytes"),
@@ -2534,6 +2647,8 @@ def test_advertised_mvt_route_variables_are_accepted_by_route_validation(
     fetch_name: str,
 ) -> None:
     monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+    monkeypatch.setattr(flood_alert_routes, "_require_hydro_mvt_source_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_mvt_source_identity", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_run",
@@ -3875,6 +3990,8 @@ def _seed_data(connection: Any) -> None:
     _insert_result(connection, "seg_002", "basin_v1", "rnv_v1", VALID_TIME_2, 260.0, 22.0, "warning", False)
     _insert_timeseries_result(connection, "seg_001", RUN_ID, VALID_TIME_1, 110.0)
     _insert_timeseries_result(connection, "seg_002", RUN_ID, VALID_TIME_1, 210.0)
+    _insert_timeseries_result(connection, "seg_001", RUN_ID, VALID_TIME_1, 1.1, variable="water_level", unit="m")
+    _insert_timeseries_result(connection, "seg_002", RUN_ID, VALID_TIME_1, 2.1, variable="water_level", unit="m")
     _insert_result(
         connection,
         "seg_001",

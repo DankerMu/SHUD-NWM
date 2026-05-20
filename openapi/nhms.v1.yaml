@@ -677,6 +677,8 @@ paths:
                 format: binary
         "4XX":
           $ref: "#/components/responses/Error"
+        "424":
+          $ref: "#/components/responses/MvtLivePostgisUnavailable"
         "5XX":
           $ref: "#/components/responses/Error"
   /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf:
@@ -729,6 +731,8 @@ paths:
                 format: binary
         "4XX":
           $ref: "#/components/responses/Error"
+        "424":
+          $ref: "#/components/responses/MvtLivePostgisUnavailable"
         "5XX":
           $ref: "#/components/responses/Error"
   /api/v1/tiles/flood-return-period:
@@ -848,6 +852,8 @@ paths:
                 format: binary
         "4XX":
           $ref: "#/components/responses/Error"
+        "424":
+          $ref: "#/components/responses/MvtLivePostgisUnavailable"
         "5XX":
           $ref: "#/components/responses/Error"
   /api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png:
@@ -1460,6 +1466,32 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    MvtLivePostgisUnavailable:
+      description: Live PostGIS MVT is unavailable for this canonical tile route.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [request_id, status, error]
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum: [error]
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code:
+                    type: string
+                    enum: [MVT_LIVE_POSTGIS_UNAVAILABLE]
+                  message:
+                    type: string
+                  details:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
   parameters:
     BasinId:
       name: basin_id

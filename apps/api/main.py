@@ -69,8 +69,14 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
     )
+    _ensure_mvt_live_postgis_unavailable_response(schema)
     for path in mvt_paths:
         operation = schema.get("paths", {}).get(path, {}).get("get", {})
+        operation.setdefault("responses", {})["424"] = {
+            "$ref": "#/components/responses/MvtLivePostgisUnavailable"
+        }
+        operation["responses"]["4XX"] = {"$ref": "#/components/responses/Error"}
+        operation["responses"]["5XX"] = {"$ref": "#/components/responses/Error"}
         for parameter in operation.get("parameters", []):
             name = parameter.get("name")
             if path == "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf" and name == "variable":
@@ -95,6 +101,38 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
 
 
 app.openapi = custom_openapi
+
+
+def _ensure_mvt_live_postgis_unavailable_response(schema: dict) -> None:
+    responses = schema.setdefault("components", {}).setdefault("responses", {})
+    responses["MvtLivePostgisUnavailable"] = {
+        "description": "Live PostGIS MVT is unavailable for this canonical tile route.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["request_id", "status", "error"],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "status": {"type": "string", "enum": ["error"]},
+                        "error": {
+                            "type": "object",
+                            "required": ["code", "message"],
+                            "properties": {
+                                "code": {"type": "string", "enum": ["MVT_LIVE_POSTGIS_UNAVAILABLE"]},
+                                "message": {"type": "string"},
+                                "details": {
+                                    "type": "object",
+                                    "nullable": True,
+                                    "additionalProperties": True,
+                                },
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
 
 
 def _patch_flood_duration_openapi(schema: dict) -> None:

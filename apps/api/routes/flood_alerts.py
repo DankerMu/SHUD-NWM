@@ -86,7 +86,54 @@ MVT_ROUTE_RESPONSES = {
         "description": "Raw Mapbox vector tile",
         "headers": MVT_RESPONSE_HEADERS,
         "content": {MVT_MEDIA_TYPE: {"schema": {"type": "string", "format": "binary"}}},
-    }
+    },
+    424: {
+        "description": "Live PostGIS MVT is unavailable for this canonical tile route.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["request_id", "status", "error"],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "status": {"type": "string", "enum": ["error"]},
+                        "error": {
+                            "type": "object",
+                            "required": ["code", "message"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["MVT_LIVE_POSTGIS_UNAVAILABLE"],
+                                },
+                                "message": {"type": "string"},
+                                "details": {
+                                    "type": "object",
+                                    "nullable": True,
+                                    "additionalProperties": True,
+                                },
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    },
+    "4XX": {
+        "description": "Canonical MVT request validation or source-identity error.",
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/ErrorResponse"},
+            }
+        },
+    },
+    "5XX": {
+        "description": "Canonical MVT server error.",
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/ErrorResponse"},
+            }
+        },
+    },
 }
 TILE_X_DESCRIPTION = (
     f"Web Mercator XYZ tile column. Global schema bounds are 0..{MVT_MAX_TILE_COORDINATE} "
@@ -773,6 +820,7 @@ def flood_return_period_mvt_tile(
     _validate_supported_flood_duration(duration)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
+    _require_flood_mvt_source_identity(session, run_id=run_id, duration=duration, valid_time=valid_time)
     source_version = _run_source_version(run)
     tile_input = TileInput(
         layer_id="flood-return-period",
@@ -819,6 +867,7 @@ def hydro_mvt_tile(
     _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
+    _require_hydro_mvt_source_identity(session, run_id=run_id, variable=variable, valid_time=valid_time)
     source_version = _run_source_version(run)
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
@@ -1092,10 +1141,87 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
     ).mappings().all()
     versions = [str(row["river_network_version_id"]) for row in rows if row.get("river_network_version_id") is not None]
     if not versions:
-        return f"river-network-set:{basin_version_id}:empty"
+        raise ApiError(
+            status_code=404,
+            code="MVT_SOURCE_IDENTITY_NOT_FOUND",
+            message="River-network MVT source identity was not found for the requested basin version.",
+            details={"layer_id": "river-network", "basin_version_id": basin_version_id},
+        )
     joined = ",".join(versions)
     digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
     return f"river-network-set:{digest}:{joined}"
+
+
+def _require_hydro_mvt_source_identity(
+    session: Session,
+    *,
+    run_id: str,
+    variable: str,
+    valid_time: datetime,
+) -> None:
+    row = session.execute(
+        text(
+            """
+            SELECT 1
+            FROM hydro.river_timeseries
+            WHERE run_id = :run_id
+              AND variable = :variable
+              AND valid_time = :valid_time
+            LIMIT 1
+            """
+        ),
+        {"run_id": run_id, "variable": variable, "valid_time": valid_time},
+    ).first()
+    if row is not None:
+        return
+    raise ApiError(
+        status_code=404,
+        code="MVT_SOURCE_IDENTITY_NOT_FOUND",
+        message="Hydrological MVT source/time identity was not found for the requested route.",
+        details={
+            "layer_id": public_hydro_layer_id(variable),
+            "run_id": run_id,
+            "variable": variable,
+            "valid_time": _format_time(valid_time),
+        },
+    )
+
+
+def _require_flood_mvt_source_identity(
+    session: Session,
+    *,
+    run_id: str,
+    duration: str,
+    valid_time: datetime,
+) -> None:
+    row = session.execute(
+        text(
+            """
+            SELECT 1
+            FROM flood.return_period_result
+            WHERE run_id = :run_id
+              AND duration = :duration
+              AND max_over_window = false
+              AND valid_time = :valid_time
+            LIMIT 1
+            """
+        ),
+        {"run_id": run_id, "duration": duration, "valid_time": valid_time},
+    ).first()
+    if row is not None:
+        return
+    raise ApiError(
+        status_code=404,
+        code="MVT_SOURCE_IDENTITY_NOT_FOUND",
+        message="Flood return-period MVT source/time identity was not found for the requested route.",
+        details={
+            "layer_id": "flood-return-period",
+            "run_id": run_id,
+            "duration": duration,
+            "max_over_window": False,
+            "valid_time": _format_time(valid_time),
+        },
+    )
 
 
 def _run_source_version(run: dict[str, Any] | Any) -> str:

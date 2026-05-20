@@ -1418,6 +1418,27 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description Live PostGIS MVT is unavailable for this canonical tile route. */
+        MvtLivePostgisUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "MVT_LIVE_POSTGIS_UNAVAILABLE";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
     };
     parameters: {
         BasinId: string;
@@ -2028,6 +2049,7 @@ export interface operations {
                     "application/x-protobuf": string;
                 };
             };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -2066,6 +2088,7 @@ export interface operations {
                     "application/x-protobuf": string;
                 };
             };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -2139,6 +2162,7 @@ export interface operations {
                     "application/x-protobuf": string;
                 };
             };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };

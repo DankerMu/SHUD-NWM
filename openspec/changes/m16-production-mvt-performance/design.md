@@ -110,6 +110,24 @@ Required performance evidence fields:
 - Stale-state/idempotency boundaries: repeated tile requests, cache invalidation, layer version changes, valid_time/source switches, frontend state restore.
 - Unchanged downstream consumers: M10 production-like validation, M11/M15 visual gates, bounded GeoJSON clients, monitoring/docs.
 
+## Public Contract Invariant Matrix
+
+The M16 public contract is a single invariant across runtime routes, metadata,
+OpenAPI, cache identity, SQL/index boundaries, frontend consumers, and
+production evidence. A fix is incomplete unless each row below is explicitly
+covered or marked out of scope with evidence.
+
+| Surface | Invariant | Required evidence |
+|---|---|---|
+| Canonical MVT tile success | Valid river-network, hydro, and flood-return-period `.pbf` requests return `application/x-protobuf`, cache headers, schema version, source-layer identity, and source/run/time properties. Valid empty tiles are successful PBF responses, not dependency failures. | Route tests for non-empty and empty PBF bytes; cache read/write tests; OpenAPI static/runtime/type parity for 200 responses. |
+| Canonical MVT preflight failures | Invalid z/x/y, unsupported variable/duration, non-ready run, absent run/time/source identity, and missing basin/network identity fail before cache read or live PostGIS tile SQL/builders unless an already validated cache hit is explicitly allowed by the contract. | Tests monkeypatch cache/live fetch/PostGIS SQL to fail if called for invalid or absent identities; stable 4xx error envelopes documented in runtime/static OpenAPI. |
+| Live PostGIS release boundary | When live PostGIS MVT is unavailable, canonical `.pbf` routes intentionally return the documented release-boundary error (`MVT_LIVE_POSTGIS_UNAVAILABLE`) on cache miss while cache hits remain identity-validated. | Runtime/static OpenAPI response parity includes the release-boundary error contract; disabled-live route test verifies observed envelope. |
+| Metadata catalog and valid-times | `/api/v1/layers` and `/api/v1/layers/{layer_id}/valid-times` only advertise ready concrete source identities; explicit non-ready runs fail before discovery; no-ready unscoped discovery returns an empty bounded envelope. | API tests for ready, non-ready, and no-ready cases across flood, warning, discharge, and water-level; helper tests prove concrete run predicates and no nullable OR scan path. |
+| SQL and index resource boundaries | Tile SQL uses bounded tile-envelope CTEs before reusable geometry/budget aggregates; metadata valid-time discovery and tile identity checks use indexes whose leading columns match public route identity. | SQL-shape tests; migration tests for hydro identity and valid-time discovery indexes; deterministic/live evidence records plan or SQL-shape hashes. |
+| OpenAPI and generated types | Static YAML, runtime `app.openapi()`, and generated TypeScript agree for MVT params, errors, headers, layer metadata, and valid-times. MVT-specific bounds do not narrow unrelated met PNG tile params. | OpenAPI drift tests for MVT and met sibling routes; `check:api-types`; Redocly lint. |
+| Frontend consumers | National hydrology/flood layers use metadata-driven MVT vector sources only when metadata matches selected run and is not release-blocked; no full-national GeoJSON fallback. | Frontend tests for run mismatch, release-blocking, cache-version source recreation, and bounded/degraded GeoJSON only. |
+| Production evidence | Deterministic evidence and live evidence remain separate; final production readiness is not claimed without live PostGIS/national/browser proof; blockers carry full release contract fields. | Production scale tests for deterministic artifacts, live blockers, byte budgets, redaction/path safety, and summary readiness mapping. |
+
 ## Risk Packs Considered
 
 - Public API / CLI / script entry: selected - public tile endpoints and validation commands are entrypoints.

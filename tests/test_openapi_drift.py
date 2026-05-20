@@ -358,6 +358,37 @@ def test_mvt_pbf_response_contract_matches_runtime_and_static_openapi() -> None:
             assert runtime_200["headers"][header]["schema"] == static_200["headers"][header]["schema"]
 
 
+def test_mvt_pbf_error_responses_match_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    runtime_spec: dict[str, Any] = app.openapi()
+    mvt_paths = (
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
+    )
+    expected_response_keys = {"200", "4XX", "424", "5XX"}
+
+    assert (
+        static_spec["components"]["responses"]["MvtLivePostgisUnavailable"]
+        == runtime_spec["components"]["responses"]["MvtLivePostgisUnavailable"]
+    )
+    documented_424_schema = static_spec["components"]["responses"]["MvtLivePostgisUnavailable"]["content"][
+        "application/json"
+    ]["schema"]
+    assert documented_424_schema["properties"]["error"]["properties"]["code"]["enum"] == [
+        "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    ]
+
+    for path in mvt_paths:
+        static_responses = static_spec["paths"][path]["get"]["responses"]
+        runtime_responses = runtime_spec["paths"][path]["get"]["responses"]
+        assert set(static_responses) == expected_response_keys
+        assert set(runtime_responses) == expected_response_keys
+        for key in ("4XX", "424", "5XX"):
+            assert runtime_responses[key] == static_responses[key]
+
+
 def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:
     spec = _openapi_spec()
     response_schema = spec["paths"]["/api/v1/layers/{layer_id}/valid-times"]["get"]["responses"]["200"]["content"][
