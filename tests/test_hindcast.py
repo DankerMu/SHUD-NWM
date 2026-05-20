@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from apps.api.auth import trusted_internal_policy_decision
 from apps.api.main import app
 from apps.api.routes import forecast as forecast_routes
 from apps.api.routes import hindcast as hindcast_routes
@@ -57,6 +59,7 @@ def test_idempotent_skip_already_succeeded_year() -> None:
             "1994-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         assert result.total_runs == 1
@@ -76,6 +79,7 @@ def test_idempotent_skip_already_parsed_year() -> None:
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         assert result.total_runs == 0
@@ -99,6 +103,7 @@ def test_submit_hindcast_skips_active_years_without_resetting() -> None:
             "1995-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         assert result.total_runs == 1
@@ -111,6 +116,23 @@ def test_submit_hindcast_skips_active_years_without_resetting() -> None:
         assert _hydro_run(session, submitted_id)["error_code"] == "KEEP_SUBMITTED"
 
 
+def test_submit_hindcast_direct_call_requires_policy_evidence() -> None:
+    with _store() as session:
+        with pytest.raises(HindcastError) as exc_info:
+            submit_hindcast(
+                "yangtze_shud_v12",
+                "ERA5",
+                "1993-01-01T00:00:00Z",
+                "1993-12-31T23:00:00Z",
+                "flood_frequency_sample",
+                session,
+            )
+
+        assert exc_info.value.error_code == "AUTH_REQUIRED"
+        assert exc_info.value.details["no_mutation_expected"] is True
+        assert _hydro_run_optional(session, run_id_for_year("yangtze_shud_v12", 1993)) is None
+
+
 def test_single_year_full_flow_forcing_shud_parse_and_river_timeseries(monkeypatch: pytest.MonkeyPatch) -> None:
     with _store() as session:
         submit_hindcast(
@@ -120,6 +142,7 @@ def test_single_year_full_flow_forcing_shud_parse_and_river_timeseries(monkeypat
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
         _insert_era5_hours(session, 1993, 24 * 365)
 
@@ -169,6 +192,7 @@ def test_forcing_incomplete_failure_marks_run_failed() -> None:
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
         _insert_era5_hours(session, 1993, int(24 * 365 * 0.5))
 
@@ -213,7 +237,7 @@ def test_failure_retry_resets_failed_hindcast_run() -> None:
         gateway = _RecordingGateway(job_id="slurm_retry")
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry(run_id, gateway=gateway)
+        retry = service.attempt_manual_retry(run_id, gateway=gateway, trusted_internal=True)
 
         assert retry.status == "submitted"
         assert retry.job_type == "hindcast"
@@ -229,7 +253,41 @@ def test_hindcast_submit_permission_denied_for_viewer_and_analyst() -> None:
 
         assert viewer.status_code == 403
         assert analyst.status_code == 403
-        assert viewer.json()["error"]["code"] == "PERMISSION_DENIED"
+        assert viewer.json()["error"]["code"] == "RBAC_FORBIDDEN"
+
+
+def test_hindcast_submit_missing_auth_wins_over_domain_validation() -> None:
+    with _store() as session, _api_client(session) as client:
+        response = client.post(
+            "/api/v1/hindcast/submit",
+            json={
+                **_submit_body(),
+                "source_id": "GFS",
+                "start_time": "2024-01-01T00:00:00Z",
+                "end_time": "2023-01-01T00:00:00Z",
+            },
+        )
+
+        assert response.status_code == 401
+        body = response.json()
+        assert body["error"]["code"] == "AUTH_REQUIRED"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["action_id"] == "pipeline.rerun_cycle"
+        assert decision["no_mutation_expected"] is True
+        assert list(session.scalars(select(PipelineJob))) == []
+
+
+def test_hindcast_submit_allowed_invalid_source_returns_domain_validation_error() -> None:
+    with _store() as session, _api_client(session) as client:
+        response = client.post(
+            "/api/v1/hindcast/submit",
+            json={**_submit_body(), "source_id": "GFS"},
+            headers={"X-User-Role": "operator"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "INVALID_SOURCE_ID"
+        assert list(session.scalars(select(PipelineJob))) == []
 
 
 def test_data_isolation_forecast_series_default_excludes_hindcast() -> None:
@@ -305,6 +363,7 @@ def test_hindcast_runs_do_not_create_state_snapshot(monkeypatch: pytest.MonkeyPa
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         def fake_forcing(*_args: Any) -> HindcastForcingResult:
@@ -391,6 +450,13 @@ def test_hindcast_submit_cli_marks_created_run_failed_when_forcing_preflight_fai
                 "1993-01-01T00:00:00Z",
                 "1993-12-31T23:00:00Z",
                 "flood_frequency_sample",
+                policy_decision=trusted_internal_policy_decision(
+                    "pipeline.rerun_cycle",
+                    target_type="hindcast",
+                    target_id="yangtze_shud_v12",
+                    actor_id="trusted-internal:test",
+                    roles=("sys_admin",),
+                ),
             )
 
         assert exc_info.value.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
@@ -400,6 +466,279 @@ def test_hindcast_submit_cli_marks_created_run_failed_when_forcing_preflight_fai
         assert run["status"] == "failed"
         assert run["error_code"] == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
         assert run["error_message"] == exc_info.value.message
+
+
+def test_argparse_hindcast_submit_without_policy_rejects_and_does_not_mutate(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "submit_hindcast_slurm", _fail_slurm_submission)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "hindcast-submit",
+                "--model-id",
+                "yangtze_shud_v12",
+                "--source-id",
+                "ERA5",
+                "--start-time",
+                "1993-01-01T00:00:00Z",
+                "--end-time",
+                "1993-12-31T23:00:00Z",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "AUTH_REQUIRED" in captured.err
+        assert _count(session, "hydro.hydro_run") == 0
+
+
+def test_argparse_hindcast_submit_missing_auth_without_database_url_returns_auth_required(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    exit_code = flood_cli._argparse_main(_hindcast_submit_argv())
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "AUTH_REQUIRED" in captured.err
+    assert "DATABASE_URL_MISSING" not in captured.err
+
+
+def test_argparse_hindcast_submit_release_blocked_without_database_url_returns_release_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("AUTH_BACKEND", "saml")
+
+    exit_code = flood_cli._argparse_main(
+        [
+            *_hindcast_submit_argv(),
+            "--auth-actor-id",
+            "cli-operator",
+            "--auth-role",
+            "operator",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "RELEASE_BLOCKED" in captured.err
+    assert "DATABASE_URL_MISSING" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "env", "expected_error"),
+    [
+        ([], {}, "AUTH_REQUIRED"),
+        (["--auth-actor-id", "cli-viewer", "--auth-role", "viewer"], {}, "RBAC_FORBIDDEN"),
+        (["--auth-actor-id", "cli-operator", "--auth-role", "operator"], {"AUTH_BACKEND": "saml"}, "RELEASE_BLOCKED"),
+    ],
+)
+def test_argparse_hindcast_submit_preflight_does_not_reach_session_for_denials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra_args: list[str],
+    env: dict[str, str],
+    expected_error: str,
+) -> None:
+    def fail_session() -> Session:
+        raise AssertionError("_session_from_env must not be reached before auth preflight allow")
+
+    monkeypatch.setattr(flood_cli, "_session_from_env", fail_session)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    exit_code = flood_cli._argparse_main([*_hindcast_submit_argv(), *extra_args])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert expected_error in captured.err
+
+
+def test_main_hindcast_submit_without_policy_rejects_and_does_not_mutate(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "submit_hindcast_slurm", _fail_slurm_submission)
+
+        with pytest.raises(SystemExit) as exc_info:
+            flood_cli.main(
+                [
+                    "hindcast-submit",
+                    "--model-id",
+                    "yangtze_shud_v12",
+                    "--source-id",
+                    "ERA5",
+                    "--start-time",
+                    "1993-01-01T00:00:00Z",
+                    "--end-time",
+                    "1993-12-31T23:00:00Z",
+                ]
+            )
+
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 1
+        assert "AUTH_REQUIRED" in captured.err
+        assert _count(session, "hydro.hydro_run") == 0
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "env", "expected_error"),
+    [
+        ([], {}, "AUTH_REQUIRED"),
+        (["--auth-actor-id", "cli-viewer", "--auth-role", "viewer"], {}, "RBAC_FORBIDDEN"),
+        (["--auth-actor-id", "cli-operator", "--auth-role", "operator"], {"AUTH_BACKEND": "saml"}, "RELEASE_BLOCKED"),
+    ],
+)
+def test_main_hindcast_submit_preflight_does_not_reach_session_for_denials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra_args: list[str],
+    env: dict[str, str],
+    expected_error: str,
+) -> None:
+    def fail_session() -> Session:
+        raise AssertionError("_session_from_env must not be reached before auth preflight allow")
+
+    monkeypatch.setattr(flood_cli, "_session_from_env", fail_session)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(SystemExit) as exc_info:
+        flood_cli.main([*_hindcast_submit_argv(), *extra_args])
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert expected_error in captured.err
+
+
+def test_argparse_hindcast_submit_with_cli_operator_policy_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(
+            HindcastConfig,
+            "from_env",
+            staticmethod(
+                lambda: HindcastConfig(
+                    workspace_root=Path(".").resolve(),
+                    object_store_root=Path(".").resolve(),
+                    slurm_client=_FakeSlurmClient(),
+                )
+            ),
+        )
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "hindcast-submit",
+                "--model-id",
+                "yangtze_shud_v12",
+                "--source-id",
+                "ERA5",
+                "--start-time",
+                "1993-01-01T00:00:00Z",
+                "--end-time",
+                "1993-12-31T23:00:00Z",
+                "--auth-actor-id",
+                "cli-operator",
+                "--auth-role",
+                "operator",
+            ]
+        )
+
+        output = json.loads(capsys.readouterr().out)
+        decision = output["auth_policy_decision"]
+        assert exit_code == 0
+        assert output["run_ids"] == [run_id_for_year("yangtze_shud_v12", 1993)]
+        assert decision["action_id"] == "pipeline.rerun_cycle"
+        assert decision["actor_id"] == "cli-operator"
+        assert decision["roles"] == ["operator"]
+        assert decision["target_type"] == "hindcast"
+        assert decision["target_id"] == "yangtze_shud_v12"
+        assert decision["decision"] == "allow"
+        assert decision["execution_mode"] == "backend_route_executed"
+        assert decision["auth_mode"] == "cli_dev_test"
+        assert _hydro_run(session, run_id_for_year("yangtze_shud_v12", 1993))["status"] == "created"
+
+
+def test_argparse_hindcast_submit_production_mode_blocks_cli_flag_auth_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NHMS_AUTH_MODE", "production")
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "submit_hindcast_slurm", _fail_slurm_submission)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "hindcast-submit",
+                "--model-id",
+                "yangtze_shud_v12",
+                "--source-id",
+                "ERA5",
+                "--start-time",
+                "1993-01-01T00:00:00Z",
+                "--end-time",
+                "1993-12-31T23:00:00Z",
+                "--auth-actor-id",
+                "cli-operator",
+                "--auth-role",
+                "operator",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "RELEASE_BLOCKED" in captured.err
+        assert _count(session, "hydro.hydro_run") == 0
+
+
+def test_argparse_hindcast_submit_saml_blocks_cli_flag_auth_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "saml")
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "submit_hindcast_slurm", _fail_slurm_submission)
+
+        exit_code = flood_cli._argparse_main(
+            [
+                "hindcast-submit",
+                "--model-id",
+                "yangtze_shud_v12",
+                "--source-id",
+                "ERA5",
+                "--start-time",
+                "1993-01-01T00:00:00Z",
+                "--end-time",
+                "1993-12-31T23:00:00Z",
+                "--auth-actor-id",
+                "cli-operator",
+                "--auth-role",
+                "operator",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "RELEASE_BLOCKED" in captured.err
+        assert _count(session, "hydro.hydro_run") == 0
 
 
 def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path) -> None:
@@ -574,6 +913,7 @@ def test_metadata_only_hindcast_forcing_cannot_enter_runtime(
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         with pytest.raises(HindcastError) as exc_info:
@@ -596,6 +936,7 @@ def test_hindcast_run_uris_use_plain_object_keys() -> None:
             "1993-12-31T23:00:00Z",
             "flood_frequency_sample",
             session,
+            trusted_internal=True,
         )
 
         run = _hydro_run(session, run_id)
@@ -631,6 +972,10 @@ class _FakeSlurmClient:
         return {"job_id": "slurm_array_1", "status": "submitted"}
 
 
+def _fail_slurm_submission(*_args: Any, **_kwargs: Any) -> None:
+    raise AssertionError("Slurm submission must not be attempted without policy evidence")
+
+
 class _ForecastIsolationStore:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -664,6 +1009,20 @@ def _submit_body() -> dict[str, str]:
     }
 
 
+def _hindcast_submit_argv() -> list[str]:
+    return [
+        "hindcast-submit",
+        "--model-id",
+        "yangtze_shud_v12",
+        "--source-id",
+        "ERA5",
+        "--start-time",
+        "1993-01-01T00:00:00Z",
+        "--end-time",
+        "1993-12-31T23:00:00Z",
+    ]
+
+
 @contextmanager
 def _api_client(session: Session) -> Iterator[TestClient]:
     config = HindcastConfig(
@@ -674,10 +1033,16 @@ def _api_client(session: Session) -> Iterator[TestClient]:
     app.dependency_overrides[hindcast_routes.get_hindcast_session] = lambda: session
     app.dependency_overrides[hindcast_routes.get_hindcast_config] = lambda: config
     app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: PipelineStore(session)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
     try:
         with TestClient(app) as client:
             yield client
     finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
         app.dependency_overrides.pop(hindcast_routes.get_hindcast_session, None)
         app.dependency_overrides.pop(hindcast_routes.get_hindcast_config, None)
         app.dependency_overrides.pop(pipeline_routes.get_pipeline_store, None)
@@ -982,6 +1347,15 @@ def _hydro_run(session: Session, run_id: str) -> dict[str, Any]:
         .mappings()
         .one()
     )
+
+
+def _hydro_run_optional(session: Session, run_id: str) -> dict[str, Any] | None:
+    row = (
+        session.execute(text("SELECT * FROM hydro.hydro_run WHERE run_id = :run_id"), {"run_id": run_id})
+        .mappings()
+        .first()
+    )
+    return dict(row) if row is not None else None
 
 
 class _RecordingGateway:

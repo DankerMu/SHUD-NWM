@@ -12,6 +12,7 @@ from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import HttpSlurmGatewayClient
 from services.orchestrator.persistence import PipelineStore
@@ -107,8 +108,31 @@ def submit_hindcast(
     end_time: str | datetime,
     purpose: str,
     db_session: Session,
+    *,
+    policy_decision: PolicyDecision | None = None,
+    trusted_internal: bool = False,
 ) -> HindcastSubmitResult:
     _validate_model_id(model_id)
+    if trusted_internal:
+        policy_decision = trusted_internal_policy_decision(
+            "pipeline.rerun_cycle",
+            target_type="hindcast",
+            target_id=model_id,
+            actor_id="trusted-internal:hindcast",
+            roles=("sys_admin",),
+        )
+    decision = require_policy_evidence(
+        policy_decision,
+        action_id="pipeline.rerun_cycle",
+        target_type="hindcast",
+        target_id=model_id,
+    )
+    if decision.decision != "allow":
+        raise HindcastError(
+            decision.reason_code,
+            decision.reason,
+            {"model_id": model_id, "policy_decision": decision.to_dict(), "no_mutation_expected": True},
+        )
     years = calendar_years(start_time, end_time)
     source_id = normalize_source_id(source_id)
     model = _load_model_context(db_session, model_id)

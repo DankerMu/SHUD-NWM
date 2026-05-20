@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 import pytest
@@ -18,17 +20,32 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     apply_migrations_from_zero(integration_database_url)
     ids = _seed_issue_137_models(integration_database_url)
     app.dependency_overrides[get_model_registry_store] = lambda: PsycopgModelRegistryStore(integration_database_url)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
     try:
         with TestClient(app) as client:
+            headers = {"X-User-Role": "model_admin"}
             default_before = client.get("/api/v1/models")
             inactive_before = client.get("/api/v1/models", params={"active": "false"})
             all_before = client.get("/api/v1/models", params={"active": "all"})
-            activation = client.put(f"/api/v1/models/{ids['basins_model_id']}/active", json={"active": True})
-            duplicate = client.put(f"/api/v1/models/{ids['basins_model_id']}/active", json={"active": True})
-            missing = client.put("/api/v1/models/it137_missing_model/active", json={"active": True})
+            activation = client.put(
+                f"/api/v1/models/{ids['basins_model_id']}/active",
+                json={"active": True},
+                headers=headers,
+            )
+            duplicate = client.put(
+                f"/api/v1/models/{ids['basins_model_id']}/active",
+                json={"active": True},
+                headers=headers,
+            )
+            missing = client.put("/api/v1/models/it137_missing_model/active", json={"active": True}, headers=headers)
             default_after = client.get("/api/v1/models")
             inactive_after = client.get("/api/v1/models", params={"active": "false"})
     finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
         app.dependency_overrides.pop(get_model_registry_store, None)
 
     for response in (default_before, inactive_before, all_before, activation, default_after, inactive_after):
@@ -74,28 +91,27 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
 
     assert len(audit_rows) == 1
     audit = audit_rows[0]
-    assert audit["actor"] == "nhms-api"
-    assert audit["actor_role"] == "model-registry"
-    assert audit["action"] == "model_instance.active.set"
+    assert audit["actor"] == "dev-test:model_admin"
+    assert audit["actor_role"] == "model_admin"
+    assert audit["action"] == "models.activate"
     assert audit["entity_type"] == "model_instance"
     assert audit["entity_id"] == ids["basins_model_id"]
-    assert _has_no_sensitive_uri_parts(audit["details"]["model_package_uri"])
-    assert _has_no_sensitive_uri_parts(audit["details"]["basins_lineage"]["manifest_uri"])
-    assert audit["details"] == {
+    assert {
         "previous_active": False,
         "active": True,
         "basin_version_id": ids["basin_version_id"],
         "river_network_version_id": ids["river_network_version_id"],
         "mesh_version_id": ids["mesh_version_id"],
-        "model_package_uri": "s3://nhms/models/it137_basins_model/package/",
-        "basins_lineage": {
-            "basin_slug": "it137-basin",
-            "shud_input_name": "it137_basin",
-            "manifest_uri": "s3://nhms/models/it137_basins_model/v1/manifest.json",
-            "package_checksum": "package-sha-it137",
-            "source_inventory_checksum": "inventory-sha-it137",
-        },
-    }
+    }.items() <= audit["details"].items()
+    assert audit["details"]["action_id"] == "models.activate"
+    assert audit["details"]["decision"] == "allow"
+    assert audit["details"]["roles"] == ["model_admin"]
+    assert audit["details"]["target"] == {"type": "model_instance", "id": ids["basins_model_id"]}
+    assert audit["details"].get("model_package_uri") in (None, "[redacted]")
+    assert "package-sha-it137" not in json.dumps(audit["details"])
+    assert "inventory-sha-it137" not in json.dumps(audit["details"])
+    assert "token=secret" not in json.dumps(audit["details"])
+    assert "user:pass@" not in json.dumps(audit["details"])
     assert missing_audit_count == 0
 
 

@@ -20,14 +20,40 @@ uv run nhms-model import-basins-registry \
   --inventory /tmp/basins-inventory.json \
   --package-manifest /tmp/basins-package-manifest.json \
   --database-url postgresql://nhms:nhms_dev@localhost:5432/nhms_scratch \
-  --output /tmp/basins-registry-import-report.json
+  --output /tmp/basins-registry-import-report.json \
+  --auth-actor-id cli-model-admin \
+  --auth-role model_admin
 
 uv run nhms-model basins-migration-report \
   --basins-root /volume/data/nwm/Basins \
   --output /tmp/basins-migration-report.json
 ```
 
-`import-basins-registry` mutates core registry tables. Do not run it against production unless it is an intentional migration with backup, approval, and an explicit production database URL.
+`import-basins-registry` mutates core registry tables and requires explicit CLI auth evidence. The
+`--auth-actor-id` / `--auth-role` flags, or `NHMS_CLI_AUTH_ACTOR_ID` / `NHMS_CLI_AUTH_ROLES`, are
+deterministic dev/test policy evidence only; production live authorization remains through protected API/live
+IdP proof. Do not run it against production unless it is an intentional migration with backup, approval, and an
+explicit production database URL.
+
+Mutating flood CLI commands use the same explicit CLI evidence contract:
+
+```bash
+uv run nhms-flood hindcast-submit \
+  --model-id yangtze_shud_v12 \
+  --source-id ERA5 \
+  --start-time 1993-01-01T00:00:00Z \
+  --end-time 1993-12-31T23:00:00Z \
+  --auth-actor-id cli-operator \
+  --auth-role operator
+
+uv run nhms-flood fit-curves \
+  --model-id model_v2 \
+  --supersede-model-id model_v1 \
+  --auth-actor-id cli-model-admin \
+  --auth-role model_admin
+```
+
+Missing CLI auth evidence fails with `AUTH_REQUIRED`; supplied roles outside the M17 action matrix fail with `RBAC_FORBIDDEN` before protected mutation. `fit-curves --dry-run` remains non-mutating and does not require CLI auth evidence for `--supersede-model-id`.
 
 Production migration evidence must point at a copied Basins directory. A symlink-only `/volume/data/nwm/Basins` target is rejected because Linux production hosts must copy the actual data, not only migrate the development symlink.
 
@@ -734,14 +760,42 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   traversal, backslash separators, encoded separators, and credential
   assignments. The checked-in service config template is
   `docs/runbooks/production-service-config.md`.
-- `auth_rbac.json` and `auth_release_blockers.json`: model activation, rerun,
-  cancel, QC override, source config change, and tile republish decisions for
-  allowed, denied, and release-blocked cases, with required roles, stable error
-  codes, execution modes, live-auth flags, no denied/release-blocked mutation,
-  residual risk, and removal criteria.
+- `auth_rbac.json` and `auth_release_blockers.json`: canonical M17 action ids
+  (`pipeline.retry_run`, `pipeline.cancel_run`, `pipeline.rerun_cycle`,
+  `qc.override_result`, `tiles.republish`, `sources.update_config`,
+  `models.activate`, `models.deactivate`, `models.switch_version`,
+  `models.rollback_version`, `models.supersede`, and `users.manage`) evaluated
+  against the shared `viewer`/`analyst`/`operator`/`model_admin`/`sys_admin`
+  matrix. Evidence separates deterministic `policy_simulated`,
+  route-backed `backend_route_executed`, opt-in `live_proof`, and
+  `release_blocked` modes. Fast validation never executes live IdP calls and
+  cannot satisfy final production auth readiness without accepted live proof.
+  `execution_modes` remains the per-action mode list, while
+  `auth_readiness_execution_mode` is the final machine-readable auth readiness
+  mode emitted in both `auth_rbac.json` and `summary.json`: `release_blocked`
+  when live auth readiness is missing or incomplete, and `live_proof` when
+  accepted live proof satisfies every canonical action.
+  Auth/readiness blockers in `auth_rbac.json`, `auth_release_blockers.json`,
+  and `summary.json` include deterministic non-empty `blocker_id` values so
+  repeated runs can de-duplicate and reference the same release blocker
+  independently of wording changes.
+  The opt-in live-proof path is supplied explicitly with
+  `--auth-live-proof` or `NHMS_PRODUCTION_OPS_AUTH_LIVE_PROOF` JSON containing
+  `execution_mode=live_proof`, `live_backend_auth_executed=true`, provider
+  metadata, and role mapping input. Final auth readiness requires explicit
+  allowed and denied live-proof subjects: the allowed subject must produce an
+  allowed live decision for every canonical action, and the denied subject must
+  produce a denied no-mutation live decision for every canonical action. Denied
+  live-proof rows are emitted only from the supplied denied subject and do not
+  reuse the allowed actor's raw role mapping evidence. The subjects must be
+  distinct identities or carry non-contradictory raw-role and mapped-role
+  evidence when the same actor is intentionally reused. Token, credential, URI,
+  and checksum-shaped proof fields are redacted from emitted evidence.
 - `audit_redaction.json`: allowed/denied/release-blocked audit rows with actor,
-  role, target, previous/new state, decision, reason, lineage, and redacted
-  secret-shaped fields across config/log/manifest/API/alert/PR/frontend shapes.
+  roles, action id, target, previous/new state, decision, reason, reason code,
+  execution mode, lineage, and redacted credential, URI, local path, log,
+  checksum, and lineage-shaped fields across config/log/manifest/API/alert/PR
+  and frontend shapes.
 - `monitoring_alerts.json`: source latency, Slurm backlog, failed basin retries,
   object-store failure, stale analysis state, tile error, and API p95 alert
   evidence with metric, severity, observed value, threshold, dry-run or

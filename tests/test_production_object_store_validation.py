@@ -969,11 +969,15 @@ def test_validate_object_store_live_registry_import_opt_in_records_report(
         package_manifest_path: str | Path,
         database_url: str | None = None,
         output_path: str | Path | None = None,
+        policy_decision: object | None = None,
+        trusted_internal: bool = False,
     ) -> dict[str, object]:
         assert Path(inventory_path).exists()
         manifest = json.loads(Path(package_manifest_path).read_text(encoding="utf-8"))
         assert database_url == "postgresql://user:pass@db.example/nhms"
         assert output_path is None
+        assert policy_decision is None
+        assert trusted_internal is True
         return {
             "schema_version": "basins.registry_import.v1",
             "status": "imported",
@@ -1026,6 +1030,7 @@ def test_validate_object_store_live_registry_import_opt_in_records_report(
     assert consumption["registry"]["updated_total"] == 0
     assert consumption["registry"]["idempotent"] is False
     assert consumption["registry"]["implicit_activation"] is False
+    assert consumption["registry"]["active"] is False
     assert consumption["api"]["api_contract_source"] == "live_registry_import"
     values = [
         consumption["registry"]["model_package_uri"],

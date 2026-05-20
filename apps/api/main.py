@@ -1,12 +1,16 @@
+import json
 import os
 from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from apps.api.errors import register_error_handlers
+from apps.api.auth import audit_record, evaluate_request_action
+from apps.api.errors import error_response, register_error_handlers
 from apps.api.routes.best_available import router as best_available_router
 from apps.api.routes.data_sources import router as data_sources_router
 from apps.api.routes.flood_alerts import TILE_X_DESCRIPTION, TILE_Y_DESCRIPTION
@@ -36,6 +40,181 @@ app = FastAPI(
 )
 
 register_error_handlers(app)
+
+
+_PRE_BODY_PROTECTED_MUTATIONS: dict[tuple[str, str], tuple[str, str, str]] = {
+    ("POST", "/api/v1/basins"): ("models.switch_version", "model_registry", "basins"),
+    ("POST", "/api/v1/river-networks"): ("models.switch_version", "model_registry", "river-networks"),
+    ("POST", "/api/v1/mesh-versions"): ("models.switch_version", "model_registry", "mesh-versions"),
+    ("POST", "/api/v1/models"): ("models.switch_version", "model_registry", "models"),
+    (
+        "POST",
+        "/api/v1/river-segment-crosswalks",
+    ): ("models.switch_version", "model_registry", "river-segment-crosswalks"),
+    ("POST", "/api/v1/hindcast/submit"): ("pipeline.rerun_cycle", "hindcast", "pre-body"),
+}
+_ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES = 4096
+
+
+@app.middleware("http")
+async def protected_mutation_auth_guard(request: Any, call_next: Any) -> Any:
+    path_policy = await _protected_mutation_policy(request)
+    if path_policy is None:
+        return await call_next(request)
+    if isinstance(path_policy, _PreBodyPolicyError):
+        return error_response(
+            request,
+            status_code=path_policy.status_code,
+            code=path_policy.code,
+            message=path_policy.message,
+            details=path_policy.details,
+        )
+
+    request_id = _ensure_request_id(request)
+    action_id, target_type, target_id = path_policy
+    decision = evaluate_request_action(request, action_id, target_type=target_type, target_id=target_id)
+    if decision.decision == "allow":
+        return await call_next(request)
+
+    audit = audit_record(decision, request_id=request_id)
+    details = {"policy_decision": decision.to_dict(), "audit_record": audit}
+    if decision.decision == "release_blocked":
+        details["removal_criteria"] = "Configure and prove live backend identity-provider role mapping."
+        return error_response(
+            request,
+            status_code=503,
+            code="RELEASE_BLOCKED",
+            message=decision.reason,
+            details=details,
+        )
+    if decision.reason_code == "AUTH_REQUIRED":
+        return error_response(
+            request,
+            status_code=401,
+            code="AUTH_REQUIRED",
+            message=decision.reason,
+            details=details,
+        )
+    return error_response(
+        request,
+        status_code=403,
+        code="RBAC_FORBIDDEN",
+        message=decision.reason,
+        details=details,
+    )
+
+
+class _PreBodyPolicyError:
+    def __init__(self, *, status_code: int, code: str, message: str, details: Any | None = None) -> None:
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
+
+
+async def _protected_mutation_policy(request: Any) -> tuple[str, str, str] | _PreBodyPolicyError | None:
+    method = request.method.upper()
+    path = request.url.path
+    policy = _PRE_BODY_PROTECTED_MUTATIONS.get((method.upper(), path))
+    if policy is not None:
+        return policy
+    if method == "POST" and path.startswith("/api/v1/basins/") and path.endswith("/versions"):
+        basin_id = path.removeprefix("/api/v1/basins/").removesuffix("/versions")
+        if basin_id and "/" not in basin_id:
+            return ("models.switch_version", "model_registry", basin_id)
+    if method == "PUT" and path.startswith("/api/v1/models/") and path.endswith("/active"):
+        model_id = path.removeprefix("/api/v1/models/").removesuffix("/active")
+        if model_id and "/" not in model_id:
+            active = await _active_toggle_flag(request)
+            if isinstance(active, _PreBodyPolicyError):
+                return active
+            action_id = "models.activate" if active else "models.deactivate"
+            return (action_id, "model_instance", model_id)
+    return None
+
+
+async def _active_toggle_flag(request: Any) -> bool | _PreBodyPolicyError:
+    request_id = _ensure_request_id(request)
+    content_length = request.headers.get("content-length")
+    try:
+        if content_length is not None and int(content_length) > _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES:
+            return _active_toggle_validation_error(request_id)
+    except ValueError:
+        return _active_toggle_validation_error(request_id)
+
+    body = await _read_bounded_active_toggle_body(request)
+    if body is None:
+        return _active_toggle_validation_error(request_id)
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request._receive = receive
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return _active_toggle_validation_error(request_id)
+    if not isinstance(payload, dict):
+        return _active_toggle_validation_error(request_id)
+    active = payload.get("active", payload.get("active_flag"))
+    if not isinstance(active, bool):
+        return _active_toggle_validation_error(request_id)
+    return active
+
+
+async def _read_bounded_active_toggle_body(request: Any) -> bytes | None:
+    chunks: list[bytes] = []
+    buffered = 0
+    max_with_sentinel = _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES + 1
+
+    while True:
+        message = await request._receive()
+        if message.get("type") == "http.disconnect":
+            return None
+
+        chunk = message.get("body", b"")
+        if chunk:
+            remaining = max_with_sentinel - buffered
+            if remaining > 0:
+                chunks.append(chunk[:remaining])
+                buffered += min(len(chunk), remaining)
+            if buffered > _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES:
+                return None
+
+        if not message.get("more_body", False):
+            break
+
+    return b"".join(chunks)
+
+
+def _active_toggle_validation_error(request_id: str) -> _PreBodyPolicyError:
+    return _PreBodyPolicyError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="Request validation failed.",
+        details=[
+            {
+                "field": "body.active",
+                "rejected_value": None,
+                "reason": (
+                    "Active-toggle requests require a bounded JSON object with boolean active "
+                    "or active_flag before authorization can be evaluated."
+                ),
+                "request_id": request_id,
+            }
+        ],
+    )
+
+
+def _ensure_request_id(request: Any) -> str:
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        return request_id
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    request.state.request_id = request_id
+    return request_id
+
+
 app.include_router(models_router)
 app.include_router(forecast_router)
 app.include_router(hindcast_router)

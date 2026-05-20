@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { JobsTable } from '@/components/monitoring/JobsTable'
+import { useToast } from '@/hooks/useToast'
 import type { AuthRole } from '@/stores/auth'
 import { useMonitoringStore } from '@/stores/monitoring'
 
@@ -20,7 +21,8 @@ vi.mock('@/stores/auth', async (importOriginal) => {
     ...actual,
     useAuthStore: (selector: (state: { role: AuthRole; setRole: (role: AuthRole) => void }) => unknown) =>
       selector({ role: mocks.authState.role, setRole: vi.fn() }),
-    canUseDevRoleActions: (role: AuthRole) => mocks.authState.canUseActions && role !== 'viewer',
+    canUseDevRoleActions: (role: AuthRole) =>
+      mocks.authState.canUseActions && ['operator', 'model_admin', 'sys_admin'].includes(role),
   }
 })
 
@@ -83,6 +85,7 @@ describe('JobsTable RBAC action boundary', () => {
       fetchJobs: vi.fn().mockResolvedValue(undefined),
       fetchAll: vi.fn().mockResolvedValue(undefined),
     })
+    useToast.setState({ toasts: [] })
   })
 
   it('does not show retry or cancel actions for a configured production operator without dev override', () => {
@@ -96,11 +99,22 @@ describe('JobsTable RBAC action boundary', () => {
     expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
   })
 
+  it('does not show retry or cancel actions for analyst even when dev override is enabled', () => {
+    mocks.authState.role = 'analyst'
+    mocks.authState.canUseActions = true
+
+    render(<JobsTable />)
+
+    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+  })
+
   it('shows dev override operator actions and sends the compatible role header', async () => {
     mocks.authState.role = 'operator'
     mocks.authState.canUseActions = true
 
     render(<JobsTable />)
+    await waitFor(() => expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1))
 
     await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ }))
     await userEvent.click(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ }))
@@ -126,5 +140,29 @@ describe('JobsTable RBAC action boundary', () => {
         },
       }),
     )
+  })
+
+  it('renders backend forbidden action failures and refreshes monitoring state without success toast', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    mocks.postMock.mockResolvedValueOnce({
+      data: undefined,
+      error: { error: { code: 'RBAC_FORBIDDEN', message: 'Actor roles are not authorized.' } },
+    })
+
+    render(<JobsTable />)
+
+    await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ }))
+
+    await waitFor(() =>
+      expect(useToast.getState().toasts.at(-1)).toMatchObject({
+        title: '重试失败',
+        description: 'Actor roles are not authorized.',
+        variant: 'destructive',
+      }),
+    )
+    expect(useToast.getState().toasts).not.toContainEqual(expect.objectContaining({ title: '重试已提交' }))
+    expect(useMonitoringStore.getState().fetchAll).toHaveBeenCalledTimes(1)
+    expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(2)
   })
 })

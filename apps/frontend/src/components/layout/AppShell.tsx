@@ -22,6 +22,7 @@ import { useToast } from '@/hooks/useToast'
 
 const roleOptions: Array<{ value: AuthRole; label: string }> = [
   { value: 'viewer', label: 'Viewer' },
+  { value: 'analyst', label: 'Analyst' },
   { value: 'operator', label: 'Operator' },
   { value: 'model_admin', label: 'Model Admin' },
   { value: 'sys_admin', label: 'Sys Admin' },

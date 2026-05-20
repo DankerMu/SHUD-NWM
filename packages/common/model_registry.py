@@ -7,6 +7,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
+
+from apps.api.auth import (
+    PolicyDecision,
+    audit_record,
+    redact_audit_payload,
+    require_policy_evidence,
+    trusted_internal_policy_decision,
+)
 
 
 class ModelRegistryError(RuntimeError):
@@ -137,7 +146,18 @@ class PsycopgModelRegistryStore:
     def from_env(cls) -> PsycopgModelRegistryStore:
         return cls(default_database_url())
 
-    def create_basin_with_version(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_basin_with_version(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+    ) -> dict[str, Any]:
+        self._require_m17_registry_admin_write_policy(
+            target_id="basins",
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+        )
         basin_version = dict(payload["basin_version"])
         basin_version_id = build_versioned_id(
             str(payload["basin_id"]),
@@ -171,7 +191,19 @@ class PsycopgModelRegistryStore:
             )
         return {"basin": basin, "basin_version": basin_version_row}
 
-    def create_basin_version(self, basin_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_basin_version(
+        self,
+        basin_id: str,
+        payload: Mapping[str, Any],
+        *,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+    ) -> dict[str, Any]:
+        self._require_m17_registry_admin_write_policy(
+            target_id=basin_id,
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+        )
         basin_version_id = build_versioned_id(basin_id, payload.get("version_label"), payload.get("basin_version_id"))
         geom_wkt = geometry_to_wkt(payload["geom"], "MultiPolygon")
         with self._transaction() as cursor:
@@ -185,7 +217,18 @@ class PsycopgModelRegistryStore:
                 geom_wkt=geom_wkt,
             )
 
-    def create_river_network(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_river_network(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+    ) -> dict[str, Any]:
+        self._require_m17_registry_admin_write_policy(
+            target_id="river-networks",
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+        )
         segments = list(payload.get("segments") or [])
         segment_count = int(payload.get("segment_count") if payload.get("segment_count") is not None else len(segments))
         if segment_count != len(segments):
@@ -474,7 +517,18 @@ class PsycopgModelRegistryStore:
         )
         return detail
 
-    def create_mesh_version(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_mesh_version(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+    ) -> dict[str, Any]:
+        self._require_m17_registry_admin_write_policy(
+            target_id="mesh-versions",
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+        )
         mesh_version_id = build_versioned_id(
             f"{payload['basin_version_id']}_mesh",
             payload.get("version_label"),
@@ -507,7 +561,18 @@ class PsycopgModelRegistryStore:
             )
             return dict(cursor.fetchone())
 
-    def create_model(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_model(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+    ) -> dict[str, Any]:
+        self._require_m17_registry_admin_write_policy(
+            target_id="models",
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+        )
         with self._transaction() as cursor:
             if not self._exists(cursor, "core.basin_version", "basin_version_id", payload["basin_version_id"]):
                 raise InvalidReferenceError(f"basin_version_id does not exist: {payload['basin_version_id']}")
@@ -576,7 +641,33 @@ class PsycopgModelRegistryStore:
             )
             return dict(cursor.fetchone())
 
-    def set_model_active(self, model_id: str, active: bool) -> dict[str, Any]:
+    def set_model_active(
+        self,
+        model_id: str,
+        active: bool,
+        *,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        action_id = "models.activate" if active else "models.deactivate"
+        if trusted_internal:
+            policy_decision = trusted_internal_policy_decision(
+                action_id,
+                target_type="model_instance",
+                target_id=model_id,
+                actor_id="trusted-internal:model-registry",
+                roles=("sys_admin",),
+            )
+        request_id = request_id or str(uuid4())
+        decision = require_policy_evidence(
+            policy_decision,
+            action_id=action_id,
+            target_type="model_instance",
+            target_id=model_id,
+        )
+        if decision.decision != "allow":
+            raise ModelRegistryError(decision.reason)
         with self._transaction() as cursor:
             current = self._fetch_optional(
                 cursor,
@@ -608,6 +699,8 @@ class PsycopgModelRegistryStore:
                 current=current,
                 updated=updated,
                 active=active,
+                policy_decision=decision,
+                request_id=request_id,
             )
             return _model_public_projection(updated)
 
@@ -675,7 +768,18 @@ class PsycopgModelRegistryStore:
             raise MissingResourceError(f"model_id not found: {model_id}")
         return _model_asset_detail(row)
 
-    def create_crosswalk_entries(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_crosswalk_entries(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+    ) -> dict[str, Any]:
+        self._require_m17_registry_admin_write_policy(
+            target_id="river-segment-crosswalks",
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+        )
         entries = list(payload.get("entries") or [])
         if not entries:
             raise InvalidPayloadError("entries must not be empty.")
@@ -792,6 +896,35 @@ class PsycopgModelRegistryStore:
         result = execute_values(cursor, statement, rows, template=template, page_size=1000, fetch=fetch)
         return list(result or [])
 
+    def _require_m17_registry_admin_write_policy(
+        self,
+        *,
+        target_id: str,
+        policy_decision: PolicyDecision | None,
+        trusted_internal: bool,
+    ) -> PolicyDecision:
+        # M17 has no finer-grained create action ids for registry-admin writes.
+        # Until M18 lifecycle actions land, route and direct writes must present
+        # the canonical models.switch_version decision for their route target.
+        action_id = "models.switch_version"
+        if trusted_internal:
+            policy_decision = trusted_internal_policy_decision(
+                action_id,
+                target_type="model_registry",
+                target_id=target_id,
+                actor_id="trusted-internal:model-registry",
+                roles=("sys_admin",),
+            )
+        decision = require_policy_evidence(
+            policy_decision,
+            action_id=action_id,
+            target_type="model_registry",
+            target_id=target_id,
+        )
+        if decision.decision != "allow":
+            raise ModelRegistryError(decision.reason)
+        return decision
+
     def _insert_model_activation_audit(
         self,
         cursor: Any,
@@ -799,18 +932,35 @@ class PsycopgModelRegistryStore:
         current: Mapping[str, Any],
         updated: Mapping[str, Any],
         active: bool,
+        policy_decision: PolicyDecision,
+        request_id: str | None,
     ) -> None:
-        details = {
+        details = audit_record(
+            policy_decision,
+            request_id=request_id,
+            previous_state={"active": bool(current["active_flag"])},
+            new_state={"active": bool(active)},
+            payload={
+                "basin_version_id": updated["basin_version_id"],
+                "river_network_version_id": updated["river_network_version_id"],
+                "mesh_version_id": updated["mesh_version_id"],
+                "model_package_uri": _sanitize_audit_uri(updated["model_package_uri"]),
+            },
+        )
+        details.update(
+            {
             "previous_active": bool(current["active_flag"]),
             "active": bool(active),
             "basin_version_id": updated["basin_version_id"],
             "river_network_version_id": updated["river_network_version_id"],
             "mesh_version_id": updated["mesh_version_id"],
             "model_package_uri": _sanitize_audit_uri(updated["model_package_uri"]),
-        }
+            }
+        )
         basins_lineage = _basins_lineage_details(updated.get("resource_profile"))
         if basins_lineage:
             details["basins_lineage"] = basins_lineage
+        details = redact_audit_payload(details)
         cursor.execute(
             """
             INSERT INTO ops.audit_log (
@@ -821,11 +971,12 @@ class PsycopgModelRegistryStore:
                 entity_id,
                 details
             )
-            VALUES (%s, %s, 'model_instance.active.set', 'model_instance', %s, %s)
+            VALUES (%s, %s, %s, 'model_instance', %s, %s)
             """,
             (
-                self.audit_actor,
-                self.audit_actor_role,
+                policy_decision.actor_id,
+                ",".join(policy_decision.roles),
+                policy_decision.action_id,
                 updated["model_id"],
                 self._json(details),
             ),

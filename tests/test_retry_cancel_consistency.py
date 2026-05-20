@@ -63,7 +63,7 @@ def test_characterization_manual_retry_writes_pending_to_hydro_run() -> None:
         gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_retry", gateway=gateway)
+        retry = service.attempt_manual_retry("run_retry", gateway=gateway, trusted_internal=True)
 
         assert retry.status == "submitted"
         assert _hydro_status(store, "run_retry") == "pending"
@@ -111,7 +111,7 @@ def test_retry_event_records_trigger_and_previous_error() -> None:
         gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_retry_event", gateway=gateway)
+        retry = service.attempt_manual_retry("run_retry_event", gateway=gateway, trusted_internal=True)
 
         event = _events(store)[0]
         assert event.entity_id == retry.job_id
@@ -272,7 +272,7 @@ def test_retry_status_is_valid_hydro_enum() -> None:
         gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        service.attempt_manual_retry("run_retry_valid_enum", gateway=gateway)
+        service.attempt_manual_retry("run_retry_valid_enum", gateway=gateway, trusted_internal=True)
 
         assert _hydro_status(store, "run_retry_valid_enum") == "pending"
         assert _hydro_status(store, "run_retry_valid_enum") in HYDRO_RUN_STATUS_ENUM
@@ -329,7 +329,7 @@ def test_retry_preserves_terminal_hydro_status() -> None:
         gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_retry_terminal", gateway=gateway)
+        retry = service.attempt_manual_retry("run_retry_terminal", gateway=gateway, trusted_internal=True)
 
         assert retry.status == "submitted"
         assert _hydro_status(store, "run_retry_terminal") == "published"
@@ -361,7 +361,7 @@ def test_retry_nonexistent_run_raises_not_found_without_enum_write() -> None:
         service = RetryService(store, RetryConfig(max_retries=3))
 
         with pytest.raises(RetryNotFoundError):
-            service.attempt_manual_retry("run_missing", gateway=gateway)
+            service.attempt_manual_retry("run_missing", gateway=gateway, trusted_internal=True)
 
         assert _events(store) == []
 

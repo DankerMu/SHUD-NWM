@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.types import Message, Scope
 
+from apps.api.auth import AuthContext, evaluate_policy
 from apps.api.main import app
 from apps.api.routes.models import get_model_registry_store
 from packages.common.model_registry import (
@@ -33,6 +36,7 @@ from workers.model_registry.validator import (
 
 class FakeModelRegistryStore:
     def __init__(self) -> None:
+        self.write_calls: list[str] = []
         self.models: dict[str, dict[str, Any]] = {
             "inactive_model": {
                 "model_id": "inactive_model",
@@ -87,8 +91,10 @@ class FakeModelRegistryStore:
                 "created_at": "2026-05-07T00:00:00Z",
             },
         }
+        self.activation_audit_rows: list[dict[str, Any]] = []
 
-    def create_basin_with_version(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_basin_with_version(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_basin_with_version")
         if payload["basin_id"] == "dupe":
             raise DuplicateResourceError("basin_id already exists: dupe")
         return {
@@ -96,12 +102,14 @@ class FakeModelRegistryStore:
             "basin_version": {"basin_version_id": payload["basin_version"].get("basin_version_id") or "basin_v01"},
         }
 
-    def create_basin_version(self, basin_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_basin_version(self, basin_id: str, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_basin_version")
         if basin_id == "missing":
             raise MissingResourceError("basin_id not found: missing")
         return {"basin_id": basin_id, "basin_version_id": payload.get("basin_version_id") or f"{basin_id}_v01"}
 
-    def create_river_network(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_river_network(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_river_network")
         if payload["basin_version_id"] == "missing":
             raise InvalidReferenceError("basin_version_id does not exist: missing")
         return {"river_network_version": {"river_network_version_id": "basin_rivnet_v01"}, "segment_count": 1}
@@ -170,12 +178,14 @@ class FakeModelRegistryStore:
             "created_at": "2026-05-07T00:00:00Z",
         }
 
-    def create_mesh_version(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_mesh_version(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_mesh_version")
         if payload["version_label"] == "":
             raise InvalidPayloadError("version_label must contain at least one alphanumeric character.")
         return {"mesh_version_id": payload.get("mesh_version_id") or "basin_mesh_v01"}
 
-    def create_model(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_model(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_model")
         if payload["model_id"] == "registry_error":
             raise ModelRegistryError(
                 "DATABASE_URL=postgresql://nhms:secret@localhost:5432/nhms failed in /srv/nhms/registry.py"
@@ -187,13 +197,39 @@ class FakeModelRegistryStore:
         self.models[record["model_id"]] = record
         return record
 
-    def set_model_active(self, model_id: str, active: bool) -> dict[str, Any]:
+    def set_model_active(
+        self,
+        model_id: str,
+        active: bool,
+        *,
+        policy_decision: Any = None,
+        request_id: str | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        self.write_calls.append("set_model_active")
         if model_id not in self.models:
             raise MissingResourceError(f"model_id not found: {model_id}")
         model = self.models[model_id]
         if model["active_flag"] == active:
             raise DuplicateResourceError(f"model_id {model_id} is already active.")
+        previous_active = bool(model["active_flag"])
         model["active_flag"] = active
+        self.activation_audit_rows.append(
+            {
+                "action": "models.activate" if active else "models.deactivate",
+                "entity_type": "model_instance",
+                "entity_id": model_id,
+                "details": {
+                    "request_id": request_id,
+                    "actor": getattr(policy_decision, "actor_id", None),
+                    "roles": list(getattr(policy_decision, "roles", ())),
+                    "action_id": getattr(policy_decision, "action_id", None),
+                    "decision": getattr(policy_decision, "decision", None),
+                    "previous_active": previous_active,
+                    "active": bool(active),
+                },
+            }
+        )
         return dict(model)
 
     def list_models(
@@ -216,7 +252,8 @@ class FakeModelRegistryStore:
             raise MissingResourceError(f"model_id not found: {model_id}")
         return dict(self.models[model_id])
 
-    def create_crosswalk_entries(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_crosswalk_entries(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        self.write_calls.append("create_crosswalk_entries")
         return {"count": len(payload["entries"]), "items": payload["entries"]}
 
 
@@ -456,8 +493,18 @@ def fake_store() -> FakeModelRegistryStore:
 
 @pytest.fixture(autouse=True)
 def clear_overrides() -> None:
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
     yield
+    if previous_allow_dev_role_header is None:
+        os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+    else:
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
     app.dependency_overrides.clear()
+
+
+def _model_admin_headers() -> dict[str, str]:
+    return {"X-User-Role": "model_admin"}
 
 
 @pytest.mark.asyncio
@@ -466,6 +513,7 @@ async def test_create_basin_rejects_duplicate(fake_store: FakeModelRegistryStore
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/v1/basins",
+            headers=_model_admin_headers(),
             json={
                 "basin_id": "dupe",
                 "basin_name": "Duplicate Basin",
@@ -495,6 +543,7 @@ async def test_river_network_invalid_reference_returns_422(fake_store: FakeModel
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/v1/river-networks",
+            headers=_model_admin_headers(),
             json={
                 "basin_version_id": "missing",
                 "version_label": "v01",
@@ -516,6 +565,319 @@ async def test_river_network_invalid_reference_returns_422(fake_store: FakeModel
         message_contains="basin_version_id",
         error_type="InvalidReferenceError",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "payload", "headers", "expected_status", "expected_code"),
+    [
+        (
+            "/api/v1/river-networks",
+            {
+                "basin_version_id": "basin_v01",
+                "version_label": "v01",
+                "segments": [
+                    {
+                        "river_segment_id": f"seg_{index}",
+                        "geom": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
+                    }
+                    for index in range(1500)
+                ],
+            },
+            {},
+            401,
+            "AUTH_REQUIRED",
+        ),
+        (
+            "/api/v1/river-segment-crosswalks",
+            {
+                "river_network_version_id": "basin_rivnet_v01",
+                "entries": [
+                    {"river_segment_id": f"seg_{index}", "source": "nwm", "external_id": str(index)}
+                    for index in range(1500)
+                ],
+            },
+            {"X-User-Role": "viewer"},
+            403,
+            "RBAC_FORBIDDEN",
+        ),
+        (
+            "/api/v1/models",
+            {
+                "model_id": "large_model",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/large_model/package/",
+                "resource_profile": {
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[90 + index / 1000, 25 + index / 1000] for index in range(3000)],
+                    }
+                },
+            },
+            {},
+            401,
+            "AUTH_REQUIRED",
+        ),
+    ],
+)
+async def test_protected_model_mutation_body_routes_auth_before_large_payload_work(
+    fake_store: FakeModelRegistryStore,
+    path: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(path, json=payload, headers=headers)
+
+    assert response.status_code == expected_status
+    body = response.json()
+    assert body["error"]["code"] == expected_code
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["no_mutation_expected"] is True
+    assert fake_store.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pre_body_static_denial_preserves_request_id_correlation(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    request_id = "req-static-pre-body-401"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models",
+            headers={"X-Request-ID": request_id},
+            json={
+                "model_id": "large_model",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/large_model/package/",
+            },
+        )
+
+    assert response.status_code == 401
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="AUTH_REQUIRED",
+        action_id="models.switch_version",
+        decision="deny",
+        target={"type": "model_registry", "id": "models"},
+    )
+    assert fake_store.write_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("active", "expected_action", "expected_active"),
+    [
+        (True, "models.activate", True),
+        (False, "models.deactivate", True),
+    ],
+)
+async def test_pre_body_dynamic_denial_preserves_request_id_and_canonical_active_action(
+    fake_store: FakeModelRegistryStore,
+    active: bool,
+    expected_action: str,
+    expected_active: bool,
+) -> None:
+    request_id = f"req-dynamic-pre-body-403-{str(active).lower()}"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/api/v1/models/active_model/active",
+            headers={"X-Request-ID": request_id, "X-User-Role": "viewer"},
+            json={"active": active},
+        )
+
+    assert response.status_code == 403
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="RBAC_FORBIDDEN",
+        action_id=expected_action,
+        decision="deny",
+        target={"type": "model_instance", "id": "active_model"},
+    )
+    assert fake_store.write_calls == []
+    assert fake_store.models["active_model"]["active_flag"] is expected_active
+
+
+@pytest.mark.asyncio
+async def test_pre_body_active_toggle_without_content_length_uses_hard_read_cap(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    request_id = "req-active-toggle-no-content-length-cap"
+    body = b'{"active": true, "padding":"' + (b"x" * 200_000) + b'"}'
+    chunks = [body[:8192], body[8192:]]
+    reads = 0
+    response_messages: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal reads
+        if reads < len(chunks):
+            chunk = chunks[reads]
+            reads += 1
+            return {"type": "http.request", "body": chunk, "more_body": reads < len(chunks)}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        response_messages.append(message)
+
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "PUT",
+        "scheme": "http",
+        "path": "/api/v1/models/active_model/active",
+        "raw_path": b"/api/v1/models/active_model/active",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"test"),
+            (b"x-request-id", request_id.encode()),
+            (b"x-user-role", b"model_admin"),
+            (b"content-type", b"application/json"),
+        ],
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+    }
+
+    await app(scope, receive, send)
+
+    start = next(message for message in response_messages if message["type"] == "http.response.start")
+    body_bytes = b"".join(
+        message.get("body", b"") for message in response_messages if message["type"] == "http.response.body"
+    )
+    payload = json.loads(body_bytes)
+    assert start["status"] == 422
+    assert payload["status"] == "error"
+    assert payload["request_id"] == request_id
+    assert payload["error"]["code"] == "VALIDATION_ERROR"
+    assert reads == 1
+    assert fake_store.write_calls == []
+    assert fake_store.models["active_model"]["active_flag"] is True
+
+
+@pytest.mark.asyncio
+async def test_pre_body_live_release_block_preserves_request_id_correlation(
+    fake_store: FakeModelRegistryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    request_id = "req-pre-body-503"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/mesh-versions",
+            headers={"X-Request-ID": request_id, "X-User-Role": "model_admin"},
+            json={
+                "basin_version_id": "basin_v01",
+                "version_label": "v02",
+                "mesh_uri": "s3://nhms/mesh.sp",
+            },
+        )
+
+    assert response.status_code == 503
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="RELEASE_BLOCKED",
+        action_id="models.switch_version",
+        decision="release_blocked",
+        target={"type": "model_registry", "id": "mesh-versions"},
+    )
+    details = response.json()["error"]["details"]
+    assert details["policy_decision"]["execution_mode"] == "release_blocked"
+    assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
+    assert fake_store.write_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("active", "expected_action", "expected_model_id", "expected_active"),
+    [
+        (True, "models.activate", "inactive_model", False),
+        (False, "models.deactivate", "active_model", True),
+    ],
+)
+async def test_pre_body_active_toggle_live_release_block_uses_canonical_action(
+    fake_store: FakeModelRegistryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    active: bool,
+    expected_action: str,
+    expected_model_id: str,
+    expected_active: bool,
+) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    request_id = f"req-active-pre-body-503-{str(active).lower()}"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            f"/api/v1/models/{expected_model_id}/active",
+            headers={"X-Request-ID": request_id, "X-User-Role": "model_admin"},
+            json={"active": active},
+        )
+
+    assert response.status_code == 503
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="RELEASE_BLOCKED",
+        action_id=expected_action,
+        decision="release_blocked",
+        target={"type": "model_instance", "id": expected_model_id},
+    )
+    details = response.json()["error"]["details"]
+    assert details["policy_decision"]["execution_mode"] == "release_blocked"
+    assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
+    assert fake_store.write_calls == []
+    assert fake_store.models[expected_model_id]["active_flag"] is expected_active
+
+
+@pytest.mark.asyncio
+async def test_model_registry_admin_write_success_exposes_allowed_policy_evidence(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/mesh-versions",
+            headers={"X-User-Role": "model_admin", "X-User-ID": "alice"},
+            json={
+                "basin_version_id": "basin_v01",
+                "version_label": "v02",
+                "mesh_uri": "s3://nhms/mesh.sp",
+            },
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "ok"
+    decision = body["auth_policy_decisions"][0]
+    assert decision["decision"] == "allow"
+    assert decision["action_id"] == "models.switch_version"
+    assert decision["actor_id"] == "alice"
+    assert decision["roles"] == ["model_admin"]
+    assert decision["target"] == {"type": "model_registry", "id": "mesh-versions"}
+    assert decision["reason_code"] == "RBAC_ALLOWED"
+    assert decision["execution_mode"] == "backend_route_executed"
+    assert fake_store.write_calls == ["create_mesh_version"]
 
 
 @pytest.mark.asyncio
@@ -788,16 +1150,49 @@ async def test_model_listing_active_filter_vectors(fake_store: FakeModelRegistry
 
 @pytest.mark.asyncio
 async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeModelRegistryStore) -> None:
+    request_id = "req-activate"
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        active_response = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
-        conflict_response = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
+        active_response = await client.put(
+            "/api/v1/models/inactive_model/active",
+            json={"active": True},
+            headers={**_model_admin_headers(), "X-Request-ID": request_id},
+        )
+        conflict_response = await client.put(
+            "/api/v1/models/inactive_model/active",
+            json={"active": True},
+            headers=_model_admin_headers(),
+        )
+        missing_response = await client.put(
+            "/api/v1/models/missing_model/active",
+            json={"active": True},
+            headers=_model_admin_headers(),
+        )
 
     assert fake_store.models["inactive_model"]["active_flag"] is True
     assert active_response.status_code == 200
+    assert active_response.headers["X-Request-ID"] == request_id
     active_body = active_response.json()
     assert active_body["status"] == "ok"
+    assert active_body["request_id"] == request_id
     assert active_body["data"]["active_flag"] is True
+    assert active_body["auth_policy_decisions"][0]["request_id"] == request_id
+    assert fake_store.activation_audit_rows == [
+        {
+            "action": "models.activate",
+            "entity_type": "model_instance",
+            "entity_id": "inactive_model",
+            "details": {
+                "request_id": request_id,
+                "actor": "dev-test:model_admin",
+                "roles": ["model_admin"],
+                "action_id": "models.activate",
+                "decision": "allow",
+                "previous_active": False,
+                "active": True,
+            },
+        }
+    ]
     assert conflict_response.status_code == 409
     _assert_error_envelope(
         conflict_response.json(),
@@ -805,6 +1200,48 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
         message_contains="already active",
         error_type="DuplicateResourceError",
     )
+    assert missing_response.status_code == 404
+    _assert_error_envelope(
+        missing_response.json(),
+        code="MODEL_REGISTRY_NOT_FOUND",
+        message_contains="missing_model",
+        error_type="MissingResourceError",
+    )
+    assert len(fake_store.activation_audit_rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_active_toggle_allows_model_admin_activation_and_sys_admin_deactivation(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        activation = await client.put(
+            "/api/v1/models/inactive_model/active",
+            json={"active": True},
+            headers={"X-User-Role": "model_admin", "X-User-ID": "model-admin"},
+        )
+        deactivation = await client.put(
+            "/api/v1/models/active_model/active",
+            json={"active": False},
+            headers={"X-User-Role": "sys_admin", "X-User-ID": "sys-admin"},
+        )
+
+    assert activation.status_code == 200
+    assert deactivation.status_code == 200
+    assert fake_store.models["inactive_model"]["active_flag"] is True
+    assert fake_store.models["active_model"]["active_flag"] is False
+    decisions = [
+        response.json()["auth_policy_decisions"][0]
+        for response in (activation, deactivation)
+    ]
+    assert [
+        (decision["action_id"], decision["target"], decision["decision"])
+        for decision in decisions
+    ] == [
+        ("models.activate", {"type": "model_instance", "id": "inactive_model"}, "allow"),
+        ("models.deactivate", {"type": "model_instance", "id": "active_model"}, "allow"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -814,7 +1251,11 @@ async def test_basins_inactive_model_listing_then_explicit_activation(fake_store
         default_before = await client.get("/api/v1/models")
         inactive_before = await client.get("/api/v1/models", params={"active": "false"})
         all_before = await client.get("/api/v1/models", params={"active": "all"})
-        activation = await client.put("/api/v1/models/inactive_model/active", json={"active": True})
+        activation = await client.put(
+            "/api/v1/models/inactive_model/active",
+            json={"active": True},
+            headers=_model_admin_headers(),
+        )
         default_after = await client.get("/api/v1/models")
         inactive_after = await client.get("/api/v1/models", params={"active": "false"})
 
@@ -968,8 +1409,9 @@ async def test_model_registry_error_envelope_vectors(
     caplog.set_level(logging.ERROR, logger="apps.api.routes.models")
 
     transport = ASGITransport(app=app)
+    headers = _model_admin_headers()
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await getattr(client, request_method)(path, json=payload)
+        response = await getattr(client, request_method)(path, json=payload, headers=headers)
 
     assert fake_store is not None
     assert response.status_code == expected_status
@@ -1017,6 +1459,7 @@ async def test_model_package_validation_error_uses_error_envelope(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/v1/models",
+            headers=_model_admin_headers(),
             json={
                 "model_id": "bad_package",
                 "basin_version_id": "basin_v01",
@@ -1172,15 +1615,340 @@ def test_create_model_rejects_mesh_version_from_different_basin(
                 "calibration_version_id": "cal_v01",
                 "shud_code_version": "2.0",
                 "model_package_uri": "s3://nhms/models/demo/package/",
-            }
+            },
+            trusted_internal=True,
         )
 
     assert not any("INSERT INTO core.model_instance" in statement for statement in cursor.statements)
 
 
+class _RegistryAdminWriteFakeCursor:
+    def __init__(self, rows: list[dict[str, Any] | None]) -> None:
+        self.rows = rows
+        self.statements: list[str] = []
+        self.parameters: list[Any] = []
+
+    def execute(self, statement: str, parameters: Any = ()) -> None:
+        self.statements.append(statement)
+        self.parameters.append(parameters)
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self.rows.pop(0)
+
+
+class _RegistryAdminWriteFakeTransaction:
+    def __init__(self, cursor: _RegistryAdminWriteFakeCursor, enter_count: list[int]) -> None:
+        self.cursor = cursor
+        self.enter_count = enter_count
+
+    def __enter__(self) -> _RegistryAdminWriteFakeCursor:
+        self.enter_count[0] += 1
+        return self.cursor
+
+    def __exit__(self, *_args: object) -> bool:
+        return False
+
+
+def _registry_admin_policy_decision(target_id: str) -> Any:
+    return evaluate_policy(
+        AuthContext(
+            actor_id="dev-test:model-admin",
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.switch_version",
+        target_type="model_registry",
+        target_id=target_id,
+    )
+
+
+_MULTIPOLYGON = {
+    "type": "MultiPolygon",
+    "coordinates": [[[[90.0, 25.0], [91.0, 25.0], [91.0, 26.0], [90.0, 26.0], [90.0, 25.0]]]],
+}
+_LINESTRING = {"type": "LineString", "coordinates": [[90.0, 25.0], [91.0, 26.0]]}
+_REGISTRY_ADMIN_WRITE_CASES = (
+    pytest.param(
+        "create_basin_with_version",
+        "basins",
+        lambda store: store.create_basin_with_version(
+            {
+                "basin_id": "basin_a",
+                "basin_name": "Basin A",
+                "basin_version": {"version_label": "v01", "geom": _MULTIPOLYGON},
+            }
+        ),
+        lambda store, kwargs: store.create_basin_with_version(
+            {
+                "basin_id": "basin_a",
+                "basin_name": "Basin A",
+                "basin_version": {"version_label": "v01", "geom": _MULTIPOLYGON},
+            },
+            **kwargs,
+        ),
+        [
+            None,
+            {"basin_id": "basin_a", "basin_name": "Basin A"},
+            {"basin_version_id": "basin_a_v01", "basin_id": "basin_a", "version_label": "v01"},
+        ],
+        id="create_basin_with_version",
+    ),
+    pytest.param(
+        "create_basin_version",
+        "basin_a",
+        lambda store: store.create_basin_version("basin_a", {"version_label": "v02", "geom": _MULTIPOLYGON}),
+        lambda store, kwargs: store.create_basin_version(
+            "basin_a",
+            {"version_label": "v02", "geom": _MULTIPOLYGON},
+            **kwargs,
+        ),
+        [
+            {"exists": 1},
+            {"basin_version_id": "basin_a_v02", "basin_id": "basin_a", "version_label": "v02"},
+        ],
+        id="create_basin_version",
+    ),
+    pytest.param(
+        "create_river_network",
+        "river-networks",
+        lambda store: store.create_river_network(
+            {
+                "basin_version_id": "basin_a_v01",
+                "version_label": "v01",
+                "segments": [{"river_segment_id": "seg_1", "geom": _LINESTRING}],
+            }
+        ),
+        lambda store, kwargs: store.create_river_network(
+            {
+                "basin_version_id": "basin_a_v01",
+                "version_label": "v01",
+                "segments": [{"river_segment_id": "seg_1", "geom": _LINESTRING}],
+            },
+            **kwargs,
+        ),
+        [
+            {"exists": 1},
+            {"river_network_version_id": "basin_a_v01_rivnet_v01", "basin_version_id": "basin_a_v01"},
+        ],
+        id="create_river_network",
+    ),
+    pytest.param(
+        "create_mesh_version",
+        "mesh-versions",
+        lambda store: store.create_mesh_version(
+            {"basin_version_id": "basin_a_v01", "version_label": "v01", "mesh_uri": "s3://nhms/mesh.sp"}
+        ),
+        lambda store, kwargs: store.create_mesh_version(
+            {"basin_version_id": "basin_a_v01", "version_label": "v01", "mesh_uri": "s3://nhms/mesh.sp"},
+            **kwargs,
+        ),
+        [
+            {"exists": 1},
+            {"mesh_version_id": "basin_a_v01_mesh_v01", "basin_version_id": "basin_a_v01"},
+        ],
+        id="create_mesh_version",
+    ),
+    pytest.param(
+        "create_model",
+        "models",
+        lambda store: store.create_model(
+            {
+                "model_id": "model_a",
+                "basin_version_id": "basin_a_v01",
+                "river_network_version_id": "rivnet_v01",
+                "mesh_version_id": "mesh_v01",
+                "calibration_version_id": "cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/model_a/package/",
+            }
+        ),
+        lambda store, kwargs: store.create_model(
+            {
+                "model_id": "model_a",
+                "basin_version_id": "basin_a_v01",
+                "river_network_version_id": "rivnet_v01",
+                "mesh_version_id": "mesh_v01",
+                "calibration_version_id": "cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/model_a/package/",
+            },
+            **kwargs,
+        ),
+        [
+            {"exists": 1},
+            {"basin_version_id": "basin_a_v01"},
+            {"basin_version_id": "basin_a_v01"},
+            {
+                "model_id": "model_a",
+                "basin_version_id": "basin_a_v01",
+                "river_network_version_id": "rivnet_v01",
+                "mesh_version_id": "mesh_v01",
+                "calibration_version_id": "cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/model_a/package/",
+            },
+        ],
+        id="create_model",
+    ),
+    pytest.param(
+        "create_crosswalk_entries",
+        "river-segment-crosswalks",
+        lambda store: store.create_crosswalk_entries(
+            {
+                "river_network_version_id": "rivnet_v01",
+                "entries": [{"river_segment_id": "seg_1", "source": "nwm", "external_id": "1001"}],
+            }
+        ),
+        lambda store, kwargs: store.create_crosswalk_entries(
+            {
+                "river_network_version_id": "rivnet_v01",
+                "entries": [{"river_segment_id": "seg_1", "source": "nwm", "external_id": "1001"}],
+            },
+            **kwargs,
+        ),
+        [],
+        id="create_crosswalk_entries",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "target_id", "unauthorized_call", "_authorized_call", "_rows"),
+    _REGISTRY_ADMIN_WRITE_CASES,
+)
+def test_m17_registry_admin_write_methods_require_policy_before_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    target_id: str,
+    unauthorized_call: Any,
+    _authorized_call: Any,
+    _rows: list[dict[str, Any] | None],
+) -> None:
+    del method_name, target_id, _authorized_call, _rows
+    entered_transaction = [0]
+    cursor = _RegistryAdminWriteFakeCursor([])
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_transaction",
+        lambda _self: _RegistryAdminWriteFakeTransaction(cursor, entered_transaction),
+    )
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(ModelRegistryError, match="Authentication is required"):
+        unauthorized_call(store)
+
+    assert entered_transaction == [0]
+    assert cursor.statements == []
+
+
+@pytest.mark.parametrize(
+    ("method_name", "target_id", "_unauthorized_call", "authorized_call", "rows"),
+    _REGISTRY_ADMIN_WRITE_CASES,
+)
+def test_m17_registry_admin_write_methods_accept_current_route_policy_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    target_id: str,
+    _unauthorized_call: Any,
+    authorized_call: Any,
+    rows: list[dict[str, Any] | None],
+) -> None:
+    del method_name, _unauthorized_call
+    entered_transaction = [0]
+    cursor = _RegistryAdminWriteFakeCursor(list(rows))
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_transaction",
+        lambda _self: _RegistryAdminWriteFakeTransaction(cursor, entered_transaction),
+    )
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+
+    def fake_execute_values(
+        _self: PsycopgModelRegistryStore,
+        cursor: _RegistryAdminWriteFakeCursor,
+        statement: str,
+        rows: list[tuple[Any, ...]],
+        *,
+        template: str | None = None,
+        fetch: bool = False,
+    ) -> list[dict[str, Any]]:
+        del _self, template
+        cursor.execute(statement, rows)
+        if not fetch:
+            return []
+        return [
+            {
+                "river_network_version_id": row[0],
+                "river_segment_id": row[1],
+                "source": row[2],
+                "external_id": row[3],
+                "properties_json": row[4],
+            }
+            for row in rows
+        ]
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_execute_values", fake_execute_values)
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    result = authorized_call(store, {"policy_decision": _registry_admin_policy_decision(target_id)})
+
+    assert result
+    assert entered_transaction == [1]
+    assert cursor.statements
+
+
+@pytest.mark.parametrize(
+    ("method_name", "_target_id", "_unauthorized_call", "authorized_call", "rows"),
+    _REGISTRY_ADMIN_WRITE_CASES,
+)
+def test_m17_registry_admin_write_methods_accept_explicit_trusted_internal(
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    _target_id: str,
+    _unauthorized_call: Any,
+    authorized_call: Any,
+    rows: list[dict[str, Any] | None],
+) -> None:
+    del method_name, _target_id, _unauthorized_call
+    entered_transaction = [0]
+    cursor = _RegistryAdminWriteFakeCursor(list(rows))
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_transaction",
+        lambda _self: _RegistryAdminWriteFakeTransaction(cursor, entered_transaction),
+    )
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_execute_values",
+        lambda _self, cursor, statement, rows, *, template=None, fetch=False: [
+            {
+                "river_network_version_id": row[0],
+                "river_segment_id": row[1],
+                "source": row[2],
+                "external_id": row[3],
+                "properties_json": row[4],
+            }
+            for row in rows
+        ]
+        if fetch
+        else [],
+    )
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    result = authorized_call(store, {"trusted_internal": True})
+
+    assert result
+    assert entered_transaction == [1]
+
+
 def test_set_model_active_writes_audit_details_after_successful_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    package_checksum = "a" * 64
+    source_inventory_checksum = "b" * 64
+
     class FakeCursor:
         def __init__(self) -> None:
             self.rows: list[dict[str, Any]] = [
@@ -1199,8 +1967,8 @@ def test_set_model_active_writes_audit_details_after_successful_update(
                         "manifest_uri": (
                             "s3://user:pass@nhms/models/basins_model/v1/manifest.json?token=secret#credential"
                         ),
-                        "package_checksum": "package-sha-1",
-                        "source_inventory_checksum": "inventory-sha-1",
+                        "package_checksum": package_checksum,
+                        "source_inventory_checksum": source_inventory_checksum,
                         "other": "kept-out-of-audit-lineage",
                     },
                 },
@@ -1219,8 +1987,8 @@ def test_set_model_active_writes_audit_details_after_successful_update(
                         "manifest_uri": (
                             "s3://user:pass@nhms/models/basins_model/v1/manifest.json?token=secret#credential"
                         ),
-                        "package_checksum": "package-sha-1",
-                        "source_inventory_checksum": "inventory-sha-1",
+                        "package_checksum": package_checksum,
+                        "source_inventory_checksum": source_inventory_checksum,
                         "other": "kept-out-of-audit-lineage",
                     },
                 },
@@ -1250,35 +2018,194 @@ def test_set_model_active_writes_audit_details_after_successful_update(
     monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
     store = PsycopgModelRegistryStore("postgresql://example")
 
-    result = store.set_model_active("basins_model", True)
+    result = store.set_model_active("basins_model", True, trusted_internal=True)
 
     assert result["active_flag"] is True
     assert result["model_package_uri"] == "s3://nhms/models/basins_model/package/"
     assert result["resource_profile"]["manifest_uri"] == "s3://nhms/models/basins_model/v1/manifest.json"
     assert sum("INSERT INTO ops.audit_log" in statement for statement in cursor.statements) == 1
     audit_parameters = cursor.parameters[-1]
-    assert audit_parameters[:3] == ("nhms-api", "model-registry", "basins_model")
-    details = audit_parameters[3]
+    assert audit_parameters[:4] == ("trusted-internal:model-registry", "sys_admin", "models.activate", "basins_model")
+    details = audit_parameters[4]
     assert "other" not in str(details)
     assert "token=" not in str(details)
     assert "user:pass@" not in str(details)
     assert "?" not in details["model_package_uri"]
     assert "#" not in details["model_package_uri"]
-    assert details == {
+    assert {
         "previous_active": False,
         "active": True,
         "basin_version_id": "basin_v01",
         "river_network_version_id": "basin_rivnet_v01",
         "mesh_version_id": "basin_mesh_v01",
-        "model_package_uri": "s3://nhms/models/basins_model/package/",
+        "model_package_uri": "[redacted]",
         "basins_lineage": {
-            "basin_slug": "basin-a",
-            "shud_input_name": "basin_a",
-            "manifest_uri": "s3://nhms/models/basins_model/v1/manifest.json",
-            "package_checksum": "package-sha-1",
-            "source_inventory_checksum": "inventory-sha-1",
+            "basin_slug": "[redacted]",
+            "shud_input_name": "[redacted]",
+            "manifest_uri": "[redacted]",
+            "package_checksum": "[redacted]",
+            "source_inventory_checksum": "[redacted]",
         },
-    }
+    }.items() <= details.items()
+    assert details["action_id"] == "models.activate"
+    assert details["decision"] == "allow"
+    assert details["roles"] == ["sys_admin"]
+    assert details["request_id"]
+    assert package_checksum not in json.dumps(details)
+    assert source_inventory_checksum not in json.dumps(details)
+
+
+def test_set_model_active_writes_explicit_request_id_to_activation_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = [
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": False,
+                    "resource_profile": {},
+                },
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": True,
+                    "resource_profile": {},
+                },
+            ]
+            self.parameters: list[tuple[Any, ...]] = []
+
+        def execute(self, _statement: str, parameters: tuple[Any, ...]) -> None:
+            self.parameters.append(parameters)
+
+        def fetchone(self) -> dict[str, Any]:
+            return self.rows.pop(0)
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    store.set_model_active("basins_model", True, trusted_internal=True, request_id="req-activate")
+
+    details = cursor.parameters[-1][4]
+    assert details["request_id"] == "req-activate"
+
+
+def test_set_model_active_direct_policy_evidence_generates_activation_audit_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = [
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": False,
+                    "resource_profile": {},
+                },
+                {
+                    "model_id": "basins_model",
+                    "basin_version_id": "basin_v01",
+                    "river_network_version_id": "basin_rivnet_v01",
+                    "mesh_version_id": "basin_mesh_v01",
+                    "model_package_uri": "s3://nhms/models/basins_model/package/",
+                    "active_flag": True,
+                    "resource_profile": {},
+                },
+            ]
+            self.parameters: list[tuple[Any, ...]] = []
+
+        def execute(self, _statement: str, parameters: tuple[Any, ...]) -> None:
+            self.parameters.append(parameters)
+
+        def fetchone(self) -> dict[str, Any]:
+            return self.rows.pop(0)
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    store = PsycopgModelRegistryStore("postgresql://example")
+    decision = evaluate_policy(
+        AuthContext(
+            actor_id="external-admin",
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.activate",
+        target_type="model_instance",
+        target_id="basins_model",
+    )
+
+    store.set_model_active("basins_model", True, policy_decision=decision)
+
+    audit_parameters = cursor.parameters[-1]
+    assert audit_parameters[:4] == ("external-admin", "model_admin", "models.activate", "basins_model")
+    details = audit_parameters[4]
+    assert details["request_id"]
+    assert isinstance(details["request_id"], str)
+
+
+def test_set_model_active_direct_call_requires_policy_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            self.statements.append(statement)
+
+        def fetchone(self) -> dict[str, Any] | None:
+            return None
+
+    class FakeTransaction:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor = cursor
+
+        def __enter__(self) -> FakeCursor:
+            return self.cursor
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    cursor = FakeCursor()
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(ModelRegistryError, match="Authentication is required"):
+        store.set_model_active("basins_model", True)
+
+    assert cursor.statements == []
 
 
 def test_set_model_active_duplicate_and_missing_do_not_write_audit(
@@ -1309,13 +2236,13 @@ def test_set_model_active_duplicate_and_missing_do_not_write_audit(
     monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(duplicate_cursor))
     store = PsycopgModelRegistryStore("postgresql://example")
     with pytest.raises(DuplicateResourceError):
-        store.set_model_active("basins_model", True)
+        store.set_model_active("basins_model", True, trusted_internal=True)
     assert not any("INSERT INTO ops.audit_log" in statement for statement in duplicate_cursor.statements)
 
     missing_cursor = FakeCursor(None)
     monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(missing_cursor))
     with pytest.raises(MissingResourceError):
-        store.set_model_active("missing_model", True)
+        store.set_model_active("missing_model", True, trusted_internal=True)
     assert not any("INSERT INTO ops.audit_log" in statement for statement in missing_cursor.statements)
 
 
@@ -1961,6 +2888,34 @@ def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected
 
 def _model_ids(body: dict[str, Any]) -> set[str]:
     return {item["model_id"] for item in body["data"]["items"]}
+
+
+def _assert_pre_body_policy_error(
+    response: Any,
+    *,
+    request_id: str,
+    code: str,
+    action_id: str,
+    decision: str,
+    target: dict[str, str],
+) -> None:
+    body = response.json()
+    assert response.headers["X-Request-ID"] == request_id
+    assert body["request_id"] == request_id
+    assert body["status"] == "error"
+    assert body["error"]["code"] == code
+    details = body["error"]["details"]
+    policy_decision = details["policy_decision"]
+    audit = details["audit_record"]
+    assert policy_decision["action_id"] == action_id
+    assert policy_decision["decision"] == decision
+    assert policy_decision["target_type"] == target["type"]
+    assert policy_decision["target_id"] == target["id"]
+    assert policy_decision["no_mutation_expected"] is True
+    assert audit["request_id"] == request_id
+    assert audit["action_id"] == action_id
+    assert audit["decision"] == decision
+    assert audit["target"] == target
 
 
 def _assert_error_envelope(

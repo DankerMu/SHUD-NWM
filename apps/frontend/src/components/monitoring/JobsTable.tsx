@@ -28,6 +28,7 @@ type SortDirection = 'asc' | 'desc'
 const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
 const retryableStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'partially_failed'])
 const activeStatuses = new Set(['pending', 'submitted', 'running'])
+const policyFailureCodes = new Set(['RBAC_FORBIDDEN', 'AUTH_REQUIRED', 'RELEASE_BLOCKED'])
 
 function statusClass(status: string) {
   if (status === 'succeeded') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -39,6 +40,12 @@ function statusClass(status: string) {
 function SortIcon({ active, direction }: { active: boolean; direction: SortDirection }) {
   if (!active) return <ArrowUpDown className="size-3.5" />
   return direction === 'asc' ? <ArrowUp className="size-3.5" /> : <ArrowDown className="size-3.5" />
+}
+
+function getApiErrorCode(error: unknown) {
+  if (!error || typeof error !== 'object') return null
+  const envelope = error as { error?: { code?: string } }
+  return envelope.error?.code ?? null
 }
 
 export function JobsTable() {
@@ -89,7 +96,21 @@ export function JobsTable() {
           header: { 'X-User-Role': actionRole },
         },
       })
-      if (error) throw new Error(getApiErrorMessage(error, action === 'retry' ? '重试失败' : '取消失败'))
+      if (error) {
+        if (policyFailureCodes.has(getApiErrorCode(error) ?? '')) {
+          toast({
+            title: action === 'retry' ? '重试失败' : '取消失败',
+            description: getApiErrorMessage(error, '操作失败'),
+            variant: 'destructive',
+          })
+          await Promise.all([
+            fetchAll().catch(() => undefined),
+            fetchJobs().catch(() => undefined),
+          ])
+          return
+        }
+        throw new Error(getApiErrorMessage(error, action === 'retry' ? '重试失败' : '取消失败'))
+      }
 
       toast({ title: action === 'retry' ? '重试已提交' : '取消请求已提交' })
       await Promise.all([

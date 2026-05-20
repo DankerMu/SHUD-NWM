@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from apps.api.auth import PolicyDecision, cli_policy_decision_from_evidence, require_policy_evidence
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
@@ -31,9 +32,25 @@ def _session_from_env() -> Session:
     return Session(create_engine(database_url, future=True))
 
 
-def _hindcast_submit(model_id: str, source_id: str, start_time: str, end_time: str, purpose: str) -> dict[str, object]:
+def _hindcast_submit(
+    model_id: str,
+    source_id: str,
+    start_time: str,
+    end_time: str,
+    purpose: str,
+    *,
+    policy_decision: PolicyDecision | None = None,
+) -> dict[str, object]:
     with _session_from_env() as session:
-        result = submit_hindcast(model_id, source_id, start_time, end_time, purpose, session)
+        result = submit_hindcast(
+            model_id,
+            source_id,
+            start_time,
+            end_time,
+            purpose,
+            session,
+            policy_decision=policy_decision,
+        )
         years = _years_from_run_ids(result.run_ids)
         config = HindcastConfig.from_env()
         try:
@@ -55,13 +72,16 @@ def _hindcast_submit(model_id: str, source_id: str, start_time: str, end_time: s
             if error.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE:
                 mark_hindcast_runs_failed(session, result.run_ids, error.error_code, error.message)
             raise
-        return {
+        output: dict[str, object] = {
             "total_runs": result.total_runs,
             "run_ids": result.run_ids,
             "skipped_years": result.skipped_years,
             "active_years": result.active_years,
             "slurm_job_array_id": slurm.slurm_job_array_id,
         }
+        if policy_decision is not None:
+            output["auth_policy_decision"] = policy_decision.to_dict()
+        return output
 
 
 def _hindcast_year(model_id: str, source_id: str, year: int) -> dict[str, object]:
@@ -89,6 +109,7 @@ def _fit_curves(
     dry_run: bool,
     supersede_model_id: str | None = None,
     verbose: bool = False,
+    policy_decision: PolicyDecision | None = None,
 ) -> dict[str, object]:
     with _session_from_env() as session:
         result = fit_curves(
@@ -99,6 +120,7 @@ def _fit_curves(
             method=method,
             dry_run=dry_run,
             supersede_model_id=supersede_model_id,
+            policy_decision=policy_decision,
         )
         output: dict[str, object] = {
             "total_segments": result.total_segments,
@@ -108,6 +130,8 @@ def _fit_curves(
         }
         if verbose or result.total_segments <= 20:
             output["items"] = result.items
+        if policy_decision is not None:
+            output["auth_policy_decision"] = policy_decision.to_dict()
         return output
 
 
@@ -139,6 +163,98 @@ def _resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int
     return run_id
 
 
+def _cli_policy_decision(
+    action_id: str,
+    *,
+    target_type: str,
+    target_id: str,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision | None:
+    return cli_policy_decision_from_evidence(
+        action_id,
+        target_type=target_type,
+        target_id=target_id,
+        actor_id=auth_actor_id,
+        roles=auth_roles,
+    )
+
+
+def _require_cli_policy_decision(
+    action_id: str,
+    *,
+    target_type: str,
+    target_id: str,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision:
+    return require_policy_evidence(
+        _cli_policy_decision(
+            action_id,
+            target_type=target_type,
+            target_id=target_id,
+            auth_actor_id=auth_actor_id,
+            auth_roles=auth_roles,
+        ),
+        action_id=action_id,
+        target_type=target_type,
+        target_id=target_id,
+    )
+
+
+def _require_hindcast_submit_cli_policy(
+    model_id: str,
+    *,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision:
+    decision = _require_cli_policy_decision(
+        "pipeline.rerun_cycle",
+        target_type="hindcast",
+        target_id=model_id,
+        auth_actor_id=auth_actor_id,
+        auth_roles=auth_roles,
+    )
+    if decision.decision != "allow":
+        raise HindcastError(
+            decision.reason_code,
+            decision.reason,
+            {"model_id": model_id, "policy_decision": decision.to_dict(), "no_mutation_expected": True},
+        )
+    return decision
+
+
+def _require_supersede_cli_policy(
+    supersede_model_id: str,
+    *,
+    auth_actor_id: str | None,
+    auth_roles: Sequence[str] | None,
+) -> PolicyDecision:
+    decision = _require_cli_policy_decision(
+        "models.supersede",
+        target_type="model_instance",
+        target_id=supersede_model_id,
+        auth_actor_id=auth_actor_id,
+        auth_roles=auth_roles,
+    )
+    if decision.decision != "allow":
+        raise FrequencyFitError(
+            decision.reason,
+            error_code=decision.reason_code,
+            details={
+                "model_id": supersede_model_id,
+                "policy_decision": decision.to_dict(),
+                "no_mutation_expected": True,
+            },
+        )
+    return decision
+
+
+def _add_argparse_auth_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--auth-actor-id")
+    parser.add_argument("--auth-role", action="append", default=[])
+
+
 def _years_from_run_ids(run_ids: list[str]) -> list[int]:
     years: list[int] = []
     for run_id in run_ids:
@@ -162,9 +278,36 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--start-time", required=True)
     @click.option("--end-time", required=True)
     @click.option("--purpose", default="flood_frequency_sample", show_default=True)
-    def hindcast_submit_command(model_id: str, source_id: str, start_time: str, end_time: str, purpose: str) -> None:
+    @click.option("--auth-actor-id", default=None)
+    @click.option("--auth-role", multiple=True)
+    def hindcast_submit_command(
+        model_id: str,
+        source_id: str,
+        start_time: str,
+        end_time: str,
+        purpose: str,
+        auth_actor_id: str | None,
+        auth_role: tuple[str, ...],
+    ) -> None:
         try:
-            click.echo(json.dumps(_hindcast_submit(model_id, source_id, start_time, end_time, purpose), sort_keys=True))
+            policy_decision = _require_hindcast_submit_cli_policy(
+                model_id,
+                auth_actor_id=auth_actor_id,
+                auth_roles=auth_role,
+            )
+            click.echo(
+                json.dumps(
+                    _hindcast_submit(
+                        model_id,
+                        source_id,
+                        start_time,
+                        end_time,
+                        purpose,
+                        policy_decision=policy_decision,
+                    ),
+                    sort_keys=True,
+                )
+            )
         except HindcastError as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
@@ -197,6 +340,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--dry-run", is_flag=True)
     @click.option("--supersede-model-id")
     @click.option("--verbose", is_flag=True)
+    @click.option("--auth-actor-id", default=None)
+    @click.option("--auth-role", multiple=True)
     def fit_curves_command(
         model_id: str,
         segment_id: str | None,
@@ -205,8 +350,19 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         dry_run: bool,
         supersede_model_id: str | None,
         verbose: bool,
+        auth_actor_id: str | None,
+        auth_role: tuple[str, ...],
     ) -> None:
         try:
+            policy_decision = (
+                _require_supersede_cli_policy(
+                    supersede_model_id,
+                    auth_actor_id=auth_actor_id,
+                    auth_roles=auth_role,
+                )
+                if supersede_model_id and not dry_run
+                else None
+            )
             click.echo(
                 json.dumps(
                     _fit_curves(
@@ -217,6 +373,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                         dry_run,
                         supersede_model_id=supersede_model_id,
                         verbose=verbose,
+                        policy_decision=policy_decision,
                     ),
                     sort_keys=True,
                 )
@@ -260,6 +417,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     submit_parser.add_argument("--start-time", required=True)
     submit_parser.add_argument("--end-time", required=True)
     submit_parser.add_argument("--purpose", default="flood_frequency_sample")
+    _add_argparse_auth_options(submit_parser)
 
     year_parser = subparsers.add_parser("hindcast-year")
     year_parser.add_argument("--model-id", required=True)
@@ -277,6 +435,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     fit_parser.add_argument("--dry-run", action="store_true")
     fit_parser.add_argument("--supersede-model-id")
     fit_parser.add_argument("--verbose", action="store_true")
+    _add_argparse_auth_options(fit_parser)
 
     compute_parser = subparsers.add_parser("compute-return-period")
     compute_parser.add_argument("--run-id")
@@ -286,7 +445,19 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "hindcast-submit":
-            result = _hindcast_submit(args.model_id, args.source_id, args.start_time, args.end_time, args.purpose)
+            policy_decision = _require_hindcast_submit_cli_policy(
+                args.model_id,
+                auth_actor_id=args.auth_actor_id,
+                auth_roles=args.auth_role,
+            )
+            result = _hindcast_submit(
+                args.model_id,
+                args.source_id,
+                args.start_time,
+                args.end_time,
+                args.purpose,
+                policy_decision=policy_decision,
+            )
             print(json.dumps(result))
             return 0
         if args.command == "hindcast-year":
@@ -296,6 +467,15 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(_hindcast_status(args.model_id), default=str))
             return 0
         if args.command == "fit-curves":
+            policy_decision = (
+                _require_supersede_cli_policy(
+                    args.supersede_model_id,
+                    auth_actor_id=args.auth_actor_id,
+                    auth_roles=args.auth_role,
+                )
+                if args.supersede_model_id and not args.dry_run
+                else None
+            )
             result = _fit_curves(
                 args.model_id,
                 args.segment_id,
@@ -304,6 +484,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 args.dry_run,
                 supersede_model_id=args.supersede_model_id,
                 verbose=args.verbose,
+                policy_decision=policy_decision,
             )
             print(json.dumps(result))
             return 0

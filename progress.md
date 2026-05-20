@@ -185,7 +185,7 @@ uv run nhms-production validate-ops \
 4. **真实 MVT 与全国规模性能**：M16 已完成 measured deterministic MVT contract、metadata、frontend vector consumption、bounded GeoJSON compatibility guardrail 和 performance evidence；canonical `.pbf` production success 仍依赖目标环境 live PostGIS。下一步补 live PostGIS/national-data/browser proof，移除 `m16-live-postgis-national-proof` release blocker。
 5. **真实生产验证**：在目标环境跑 live auth、alert sink、rollback、真实 Slurm、真实对象存储、真实气象下载。
 6. **CLDAS 接入**：实现 adapter、授权数据质量检查、best_available 生产路径。
-7. **生产身份认证/授权**：把当前 dev/test override 和前端 gate 推进到完整 backend auth/RBAC 系统。
+7. **生产身份认证/授权**：M17 已建立 backend auth context / RBAC matrix；pipeline retry/cancel、hindcast rerun-cycle、model activate/deactivate 现由后端在 mutation 前统一判定。缺失/无效认证、角色不满足、live IdP 未证明分别稳定为 `401 AUTH_REQUIRED`、`403 RBAC_FORBIDDEN`、`503 RELEASE_BLOCKED`；deterministic/backend/live/readiness evidence 明确区分 `policy_simulated`、`backend_route_executed`、`live_proof`、`release_blocked`。后续仍需在目标环境补 opt-in live IdP proof 并移除 release blocker。
 
 ## M15 前端视觉收敛状态
 

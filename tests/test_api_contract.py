@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -174,11 +175,25 @@ def test_met_stations_contract_uses_success_envelope() -> None:
 def test_model_active_contract_accepts_active_and_active_flag() -> None:
     store = _ModelRegistryStore()
     app.dependency_overrides[get_model_registry_store] = lambda: store
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
     try:
         with TestClient(app) as client:
-            active_response = client.put("/api/v1/models/model_1/active", json={"active": True})
-            active_flag_response = client.put("/api/v1/models/model_1/active", json={"active_flag": False})
+            active_response = client.put(
+                "/api/v1/models/model_1/active",
+                json={"active": True},
+                headers={"X-User-Role": "model_admin"},
+            )
+            active_flag_response = client.put(
+                "/api/v1/models/model_1/active",
+                json={"active_flag": False},
+                headers={"X-User-Role": "model_admin"},
+            )
     finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
         app.dependency_overrides.pop(get_model_registry_store, None)
 
     assert active_response.status_code == 200
@@ -188,6 +203,33 @@ def test_model_active_contract_accepts_active_and_active_flag() -> None:
     assert active_flag_response.json()["status"] == "ok"
     assert active_flag_response.json()["data"]["active_flag"] is False
     assert store.calls == [("model_1", True), ("model_1", False)]
+
+
+def test_model_active_requires_model_admin_before_mutation() -> None:
+    store = _ModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+    try:
+        with TestClient(app) as client:
+            missing = client.put("/api/v1/models/model_1/active", json={"active": True})
+            forbidden = client.put(
+                "/api/v1/models/model_1/active",
+                json={"active": True},
+                headers={"X-User-Role": "operator"},
+            )
+    finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert missing.status_code == 401
+    assert missing.json()["error"]["code"] == "AUTH_REQUIRED"
+    assert forbidden.status_code == 403
+    assert forbidden.json()["error"]["code"] == "RBAC_FORBIDDEN"
+    assert store.calls == []
 
 
 def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
@@ -613,7 +655,7 @@ def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> Non
 
 
 def _assert_success_envelope(body: dict[str, Any]) -> Any:
-    assert set(body) == {"request_id", "status", "data"}
+    assert {"request_id", "status", "data"} <= set(body)
     assert body["request_id"]
     assert body["status"] == "ok"
     return body["data"]
@@ -774,7 +816,7 @@ class _ModelRegistryStore:
             },
         ]
 
-    def set_model_active(self, model_id: str, active: bool) -> dict[str, Any]:
+    def set_model_active(self, model_id: str, active: bool, **_kwargs: Any) -> dict[str, Any]:
         self.calls.append((model_id, active))
         return {
             "model_id": model_id,

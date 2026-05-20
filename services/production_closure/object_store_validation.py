@@ -1086,6 +1086,7 @@ def _registry_import_evidence(
             inventory_path=inventory_path,
             package_manifest_path=package_manifest_raw_path,
             database_url=config.registry_database_url,
+            trusted_internal=True,
         )
     except BasinsRegistryImportError as error:
         return {
