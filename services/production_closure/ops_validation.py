@@ -565,6 +565,35 @@ def _production_config_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     }
 
 
+def _auth_blocker_id(kind: str, *parts: Any) -> str:
+    suffix = ":".join(str(part) for part in parts if str(part))
+    return f"m17-auth:{kind}:{suffix}" if suffix else f"m17-auth:{kind}"
+
+
+def _with_auth_blocker_id(blocker: Mapping[str, Any]) -> dict[str, Any]:
+    copied = dict(blocker)
+    if copied.get("blocker_id"):
+        return copied
+
+    error_code = copied.get("error_code")
+    if error_code == "PRODUCTION_OPS_BACKEND_AUTH_RELEASE_BLOCKED":
+        copied["blocker_id"] = _auth_blocker_id("backend-auth-release-blocked")
+    elif error_code == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING":
+        copied["blocker_id"] = _auth_blocker_id("live-proof-coverage", copied.get("action_id"))
+    elif error_code == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID":
+        copied["blocker_id"] = _auth_blocker_id("live-proof-subject", copied.get("subject"))
+    elif error_code == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_IDENTITY_INCONSISTENT":
+        copied["blocker_id"] = _auth_blocker_id(
+            "live-proof-subject-identity-inconsistent",
+            copied.get("actor_id"),
+        )
+    elif copied.get("action_id"):
+        copied["blocker_id"] = _auth_blocker_id("release", copied.get("action_id"))
+    else:
+        copied["blocker_id"] = _auth_blocker_id("release", error_code or "unknown")
+    return copied
+
+
 def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     live_proof = _auth_live_proof(config)
     live_backend_auth_executed = live_proof is not None
@@ -593,6 +622,7 @@ def _auth_rbac_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     if not live_backend_auth_executed:
         blockers.append(
             {
+                "blocker_id": _auth_blocker_id("backend-auth-release-blocked"),
                 "error_code": "PRODUCTION_OPS_BACKEND_AUTH_RELEASE_BLOCKED",
                 "message": (
                     "Live backend auth/RBAC enforcement was not executed; final production readiness remains gated."
@@ -779,6 +809,7 @@ def _auth_live_proof_subject_blockers(
         explicit_key = f"{subject_name}_subject"
         blockers.append(
             {
+                "blocker_id": _auth_blocker_id("live-proof-subject", explicit_key),
                 "error_code": "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_MISSING_OR_INVALID",
                 "subject": explicit_key,
                 "message": f"Missing or invalid explicit {explicit_key} live-proof subject.",
@@ -817,6 +848,7 @@ def _auth_live_proof_subject_blockers(
     ]
     return [
         {
+            "blocker_id": _auth_blocker_id("live-proof-subject-identity-inconsistent", allowed_actor),
             "error_code": "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_IDENTITY_INCONSISTENT",
             "message": "Inconsistent live-proof subject identity/role mapping across allowed and denied proof.",
             "actor_id": allowed_actor,
@@ -926,6 +958,7 @@ def _auth_live_proof_coverage_blockers(
             missing_coverage.append("denied_no_mutation_live_proof")
         blockers.append(
             {
+                "blocker_id": _auth_blocker_id("live-proof-coverage", action),
                 "error_code": "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING",
                 "action": action,
                 "action_id": action,
@@ -960,12 +993,13 @@ def _auth_release_blockers(config: ProductionOpsConfig, auth_rbac: Mapping[str, 
             "schema": "nhms.production_closure.ops.auth_release_blockers.v1",
             "run_id": config.run_id,
             "status": "release_blocked",
-            "blockers": list(auth_rbac["blockers"]),
+            "blockers": [_with_auth_blocker_id(blocker) for blocker in auth_rbac["blockers"]],
         }
     blockers = []
     for action, required_roles in ACTION_MATRIX.items():
         blockers.append(
             {
+                "blocker_id": _auth_blocker_id("release", action),
                 "action": action,
                 "action_id": action,
                 "required_roles": list(required_roles),
@@ -1265,7 +1299,10 @@ def _unique_blockers(blockers: Sequence[Mapping[str, Any]]) -> list[dict[str, An
 
 
 def _stable_blocker_key(blocker: Mapping[str, Any]) -> dict[str, Any]:
+    if blocker.get("blocker_id"):
+        return {"blocker_id": blocker["blocker_id"]}
     key_fields = (
+        "blocker_id",
         "error_code",
         "action_id",
         "subject",

@@ -142,7 +142,7 @@ describe('JobsTable RBAC action boundary', () => {
     )
   })
 
-  it('renders backend forbidden action failures without refreshing monitoring state', async () => {
+  it('renders backend forbidden action failures and refreshes monitoring state without success toast', async () => {
     mocks.authState.role = 'operator'
     mocks.authState.canUseActions = true
     mocks.postMock.mockResolvedValueOnce({
@@ -161,7 +161,8 @@ describe('JobsTable RBAC action boundary', () => {
         variant: 'destructive',
       }),
     )
-    expect(useMonitoringStore.getState().fetchAll).not.toHaveBeenCalled()
-    expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1)
+    expect(useToast.getState().toasts).not.toContainEqual(expect.objectContaining({ title: '重试已提交' }))
+    expect(useMonitoringStore.getState().fetchAll).toHaveBeenCalledTimes(1)
+    expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(2)
   })
 })

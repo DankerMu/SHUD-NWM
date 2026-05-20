@@ -142,13 +142,14 @@ async def _active_toggle_flag(request: Any) -> bool | _PreBodyPolicyError:
     except ValueError:
         return _active_toggle_validation_error(request_id)
 
-    body = await request.body()
+    body = await _read_bounded_active_toggle_body(request)
+    if body is None:
+        return _active_toggle_validation_error(request_id)
+
     async def receive() -> dict[str, Any]:
         return {"type": "http.request", "body": body, "more_body": False}
 
     request._receive = receive
-    if len(body) > _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES:
-        return _active_toggle_validation_error(request_id)
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
@@ -159,6 +160,31 @@ async def _active_toggle_flag(request: Any) -> bool | _PreBodyPolicyError:
     if not isinstance(active, bool):
         return _active_toggle_validation_error(request_id)
     return active
+
+
+async def _read_bounded_active_toggle_body(request: Any) -> bytes | None:
+    chunks: list[bytes] = []
+    buffered = 0
+    max_with_sentinel = _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES + 1
+
+    while True:
+        message = await request._receive()
+        if message.get("type") == "http.disconnect":
+            return None
+
+        chunk = message.get("body", b"")
+        if chunk:
+            remaining = max_with_sentinel - buffered
+            if remaining > 0:
+                chunks.append(chunk[:remaining])
+                buffered += min(len(chunk), remaining)
+            if buffered > _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES:
+                return None
+
+        if not message.get("more_body", False):
+            break
+
+    return b"".join(chunks)
 
 
 def _active_toggle_validation_error(request_id: str) -> _PreBodyPolicyError:

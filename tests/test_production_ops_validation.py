@@ -5,6 +5,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import pytest
@@ -153,6 +154,7 @@ def test_validate_ops_auth_rbac_audit_and_release_blockers_are_complete(tmp_path
     assert blockers["status"] == "release_blocked"
     assert {item["action_id"] for item in blockers["blockers"]} == expected_actions
     assert all(item["residual_risk"] and item["removal_criteria"] for item in blockers["blockers"])
+    _assert_stable_auth_blocker_ids(auth, blockers, _read_json(lane_dir / "summary.json"))
 
     assert audit["status"] == "ready"
     assert len(audit["audit_rows"]) == len(auth["action_decisions"])
@@ -1887,6 +1889,14 @@ def test_validate_ops_auth_live_proof_partial_action_coverage_remains_blocked(tm
         if blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
     ]
     assert all(count == 1 for count in Counter(summary_coverage_keys).values())
+    summary_coverage_ids = [
+        blocker["blocker_id"]
+        for blocker in summary["release_blockers"]
+        if blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_COVERAGE_MISSING"
+    ]
+    assert all(blocker_id.startswith("m17-auth:live-proof-coverage:") for blocker_id in summary_coverage_ids)
+    assert all(count == 1 for count in Counter(summary_coverage_ids).values())
+    _assert_stable_auth_blocker_ids(auth, blockers, summary)
 
 
 def test_validate_ops_auth_live_proof_requires_explicit_allowed_subject(tmp_path: Path) -> None:
@@ -2100,6 +2110,28 @@ def test_validate_ops_auth_live_proof_inconsistent_same_actor_roles_remains_bloc
         blocker.get("error_code") == "PRODUCTION_OPS_AUTH_LIVE_PROOF_SUBJECT_IDENTITY_INCONSISTENT"
         for blocker in summary["release_blockers"]
     )
+
+
+def _assert_stable_auth_blocker_ids(
+    auth: dict[str, Any],
+    auth_release_blockers: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    auth_blockers = list(auth.get("blockers", []))
+    release_blockers = list(auth_release_blockers.get("blockers", []))
+    summary_auth_blockers = [
+        blocker
+        for blocker in summary.get("release_blockers", [])
+        if blocker.get("blocker_id", "").startswith("m17-auth:")
+    ]
+
+    assert auth_blockers or release_blockers or summary_auth_blockers
+    for blocker in auth_blockers + release_blockers + summary_auth_blockers:
+        blocker_id = blocker.get("blocker_id")
+        assert isinstance(blocker_id, str)
+        assert blocker_id.startswith("m17-auth:")
+        assert blocker_id.strip() == blocker_id
+        assert len(blocker_id) > len("m17-auth:")
 
 
 def test_validate_ops_env_supplied_config_values_are_not_marked_missing(

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.types import Message, Scope
 
 from apps.api.auth import AuthContext, evaluate_policy
 from apps.api.main import app
@@ -710,6 +711,63 @@ async def test_pre_body_dynamic_denial_preserves_request_id_and_canonical_active
     )
     assert fake_store.write_calls == []
     assert fake_store.models["active_model"]["active_flag"] is expected_active
+
+
+@pytest.mark.asyncio
+async def test_pre_body_active_toggle_without_content_length_uses_hard_read_cap(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    request_id = "req-active-toggle-no-content-length-cap"
+    body = b'{"active": true, "padding":"' + (b"x" * 200_000) + b'"}'
+    chunks = [body[:8192], body[8192:]]
+    reads = 0
+    response_messages: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal reads
+        if reads < len(chunks):
+            chunk = chunks[reads]
+            reads += 1
+            return {"type": "http.request", "body": chunk, "more_body": reads < len(chunks)}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        response_messages.append(message)
+
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "PUT",
+        "scheme": "http",
+        "path": "/api/v1/models/active_model/active",
+        "raw_path": b"/api/v1/models/active_model/active",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"test"),
+            (b"x-request-id", request_id.encode()),
+            (b"x-user-role", b"model_admin"),
+            (b"content-type", b"application/json"),
+        ],
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+    }
+
+    await app(scope, receive, send)
+
+    start = next(message for message in response_messages if message["type"] == "http.response.start")
+    body_bytes = b"".join(
+        message.get("body", b"") for message in response_messages if message["type"] == "http.response.body"
+    )
+    payload = json.loads(body_bytes)
+    assert start["status"] == 422
+    assert payload["status"] == "error"
+    assert payload["request_id"] == request_id
+    assert payload["error"]["code"] == "VALIDATION_ERROR"
+    assert reads == 1
+    assert fake_store.write_calls == []
+    assert fake_store.models["active_model"]["active_flag"] is True
 
 
 @pytest.mark.asyncio

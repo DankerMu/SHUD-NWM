@@ -749,6 +749,10 @@ Evidence is written under `artifacts/production-closure/<run_id>/ops/`:
   mode emitted in both `auth_rbac.json` and `summary.json`: `release_blocked`
   when live auth readiness is missing or incomplete, and `live_proof` when
   accepted live proof satisfies every canonical action.
+  Auth/readiness blockers in `auth_rbac.json`, `auth_release_blockers.json`,
+  and `summary.json` include deterministic non-empty `blocker_id` values so
+  repeated runs can de-duplicate and reference the same release blocker
+  independently of wording changes.
   The opt-in live-proof path is supplied explicitly with
   `--auth-live-proof` or `NHMS_PRODUCTION_OPS_AUTH_LIVE_PROOF` JSON containing
   `execution_mode=live_proof`, `live_backend_auth_executed=true`, provider
