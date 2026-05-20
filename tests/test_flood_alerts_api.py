@@ -1998,6 +1998,8 @@ def test_live_mvt_missing_source_identity_returns_unavailable(monkeypatch: pytes
             sql = str(statement)
             if "ST_TileEnvelope(:z, :x, :y)" in sql:
                 assert parameters["run_id"] == RUN_ID
+                assert parameters["variable"] == "q_down"
+                assert parameters["valid_time"] == VALID_TIME_1
                 return FakeRowResult(
                     {
                         "tile": b"",

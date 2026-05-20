@@ -22,6 +22,7 @@ EXPECTED_MIGRATIONS = [
     "000016_river_segment_pagination_indexes.sql",
     "000017_return_period_max_over_window_identity.sql",
     "000018_tile_cache_m16_contract.sql",
+    "000019_hydro_mvt_identity_lookup_idx.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -247,6 +248,34 @@ def test_tile_cache_m16_migration_upgrades_preexisting_cache_contract() -> None:
     assert migration.index("ALTER COLUMN cache_key SET NOT NULL") < migration.index(
         "CREATE UNIQUE INDEX IF NOT EXISTS tile_cache_cache_key_uidx"
     )
+
+
+def test_hydro_mvt_identity_migration_adds_ordered_lookup_index() -> None:
+    migration = dict(_migration_sql())["000019_hydro_mvt_identity_lookup_idx.sql"]
+
+    assert "CREATE INDEX IF NOT EXISTS river_timeseries_mvt_identity_lookup_idx" in migration
+    assert (
+        "ON hydro.river_timeseries (run_id, variable, valid_time, river_network_version_id, river_segment_id)"
+        in migration
+    )
+    assert migration.index("run_id") < migration.index("variable") < migration.index("valid_time")
+
+
+def test_hydro_mvt_identity_index_protects_public_valid_time_lookup_contract() -> None:
+    migration_sql = dict(_migration_sql())
+    initial_schema = migration_sql["000006_hydro.sql"]
+    identity_migration = migration_sql["000019_hydro_mvt_identity_lookup_idx.sql"]
+
+    assert "PRIMARY KEY (run_id, river_network_version_id, river_segment_id, variable, valid_time)" in initial_schema
+    assert "river_ts_segment_time_idx" not in identity_migration
+    assert "river_timeseries_mvt_identity_lookup_idx" in identity_migration
+
+    public_identity_columns = ("run_id", "variable", "valid_time")
+    indexed_columns = re.search(r"ON hydro\.river_timeseries \(([^)]+)\)", identity_migration)
+    assert indexed_columns is not None
+    ordered_columns = tuple(column.strip() for column in indexed_columns.group(1).split(","))
+    assert ordered_columns[:3] == public_identity_columns
+    assert ordered_columns[3:] == ("river_network_version_id", "river_segment_id")
 
 
 def test_fresh_tile_cache_schema_requires_non_null_cache_key_identity() -> None:

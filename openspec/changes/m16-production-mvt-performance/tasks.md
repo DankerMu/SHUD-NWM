@@ -5,7 +5,7 @@
 - [ ] 1.4 Define the frontend layer metadata discovery contract with `layer_id`, `tile_format`, URL template placeholders, MapLibre `source-layer`, property schema/version, min/max zoom, Web Mercator bounds, valid_times/source refs, cache etag/version, and fallback/release-blocking flags.
 
 ## 2. Backend Implementation
-- [ ] 2.1 Implement PostGIS-oriented z/x/y tile envelope clipping and simplification helpers using bounded SQL shapes (`ST_TileEnvelope`, clipping, `ST_AsMVTGeom`, `ST_AsMVT` or an implementation-equivalent abstraction), feature/coordinate/payload budgets, and stable validation errors that fail before expensive SQL.
+- [ ] 2.1 Implement PostGIS-oriented z/x/y tile envelope clipping and simplification helpers using bounded SQL shapes (`ST_TileEnvelope`, clipping, `ST_AsMVTGeom`, `ST_AsMVT` or an implementation-equivalent abstraction), feature/coordinate/payload budgets, stable validation errors that fail before expensive SQL, and a production hydro MVT identity lookup index whose leading columns match `(run_id, variable, valid_time)`.
 - [ ] 2.2 Implement cache read/write/idempotency and invalidation behavior with tests for cache hit, miss, repeat request, layer/version/valid_time invalidation, checksum/etag identity, and cache failure fallback.
 - [ ] 2.3 Add focused unit/integration tests for MVT SQL builder/cache paths and real PostGIS opt-in coverage that is skipped/not_executed when unavailable without claiming readiness.
 - [ ] 2.4 Add oversized tile and non-finite/invalid property handling tests so degraded/error responses do not emit misleading PBF or unbounded FeatureCollections.
