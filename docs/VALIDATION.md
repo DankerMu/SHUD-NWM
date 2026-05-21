@@ -128,6 +128,15 @@ model packages or delete/upload production object-store assets. Production ops
 validation includes deterministic model lifecycle drills for bad activation,
 rollback, blocked deactivation, and idempotent repeat without live credentials.
 
+Focused M19 production-readiness proof checks:
+
+```bash
+openspec validate m19-production-readiness-proof --strict --no-interactive
+uv run pytest -q tests/test_production_readiness_validation.py
+uv run pytest -q tests/test_production_ops_validation.py tests/test_production_object_store_validation.py tests/test_production_slurm_validation.py tests/test_production_met_validation.py tests/test_production_e2e_validation.py tests/test_production_scale_validation.py
+uv run ruff check .
+```
+
 ## Real Slurm Smoke
 
 Use the real cluster smoke only on a host with Slurm CLI access. Keep log paths
@@ -856,6 +865,63 @@ unsafe dependency status inputs fail with stable errors and no secret leakage.
 Dependency summary ingestion rejects symlinked roots/components, symlink summary
 files, summaries outside the supplied root, and summaries larger than the ops
 evidence payload limit.
+
+## M19 Production Readiness Proof
+
+Issue #181 adds a consolidated `nhms-production validate-readiness` lane. It is
+a release-review report generator: default runs are deterministic and ingest
+receipts only. The command does not execute a live IdP, alert sink, backend
+mutation, rollback drill, Slurm workload, object-store operation,
+weather/source download, or real-national-data scan.
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
+  --evidence-root artifacts/production-closure \
+  --run-id local-181-production-readiness
+```
+
+Optional deterministic producer summaries can be supplied with
+`--slurm-evidence-root`, `--object-store-evidence-root`,
+`--source-evidence-root`, `--e2e-evidence-root`, and `--mvt-evidence-root`.
+
+Optional live proof receipts are supplied as JSON strings or files:
+`--auth-proof` / `--auth-proof-file`, `--alert-proof` /
+`--alert-proof-file`, `--rollback-proof` / `--rollback-proof-file`,
+`--slurm-proof` / `--slurm-proof-file`, `--object-store-proof` /
+`--object-store-proof-file`, `--source-proof` / `--source-proof-file`,
+`--e2e-proof` / `--e2e-proof-file`, `--mvt-proof` /
+`--mvt-proof-file`, and `--target-env-proof` /
+`--target-env-proof-file`. Receipt payloads are bounded and redacted before
+writing evidence; malformed or oversized receipts become stable
+`release_blocked` evidence and never print tracebacks or raw secrets.
+
+Evidence is written under
+`artifacts/production-closure/<run_id>/readiness/`:
+
+- `preflight.json`: configured producer summary roots, receipt presence, and
+  the no-live-side-effect fast-CI policy.
+- `live_proof_receipts.json`: redacted, bounded receipt metadata and payloads.
+- `readiness_items.json`: canonical readiness items with `surface`, `status`,
+  `execution_mode`, `required_for_final`, `artifact_refs`, `residual_risk`,
+  `removal_criteria`, `exclusions`, and `live_proof_accepted`.
+- `release_blockers.json`: blocker id, surface, status, owner/action,
+  residual risk, removal criteria, and artifact references.
+- `summary.json`: final interpretation, `final_production_readiness_claimed`,
+  release blockers, and scoped exclusions.
+
+Status values are `passed`, `failed`, `blocked`, `not_executed`, and
+`release_blocked`. Execution modes are `deterministic`, `policy_simulated`,
+`backend_route_executed`, `dry_run_sink`, `simulated_drill`, `live_proof`, and
+`not_executed`. Deterministic items can pass and still leave
+`final_production_readiness_claimed=false`; final readiness is true only when
+every required live proof item is `passed` with `live_proof_accepted=true`.
+Missing live IdP, alert sink, rollback, Slurm/object-store/source/E2E/MVT, or
+target-environment config receipts are release blockers, not deterministic
+failures.
+
+CLDAS and incomplete real national data are explicit M19 scoped exclusions.
+They are recorded as `not_executed` exclusions rather than failed deterministic
+checks and do not satisfy live proof.
 
 ### Fast Regression Commands
 

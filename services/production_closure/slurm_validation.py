@@ -45,6 +45,11 @@ from services.production_closure.ops_validation import (
     ProductionOpsValidationError,
     validate_ops,
 )
+from services.production_closure.readiness_validation import (
+    ProductionReadinessConfig,
+    ProductionReadinessValidationError,
+    validate_readiness,
+)
 from services.production_closure.scale_validation import (
     ProductionScaleConfig,
     ProductionScaleValidationError,
@@ -2103,6 +2108,100 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"PRODUCTION_OPS_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("validate-readiness")
+    @click.option("--evidence-root", type=click.Path(path_type=Path), required=True)
+    @click.option("--run-id")
+    @click.option("--slurm-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--object-store-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--source-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--e2e-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--mvt-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--auth-proof", default=None)
+    @click.option("--auth-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--alert-proof", default=None)
+    @click.option("--alert-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--rollback-proof", default=None)
+    @click.option("--rollback-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--slurm-proof", default=None)
+    @click.option("--slurm-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--object-store-proof", default=None)
+    @click.option("--object-store-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--source-proof", default=None)
+    @click.option("--source-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--e2e-proof", default=None)
+    @click.option("--e2e-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--mvt-proof", default=None)
+    @click.option("--mvt-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--target-env-proof", default=None)
+    @click.option("--target-env-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--force", is_flag=True, default=False)
+    def validate_readiness_command(
+        evidence_root: Path,
+        run_id: str | None,
+        slurm_evidence_root: Path | None,
+        object_store_evidence_root: Path | None,
+        source_evidence_root: Path | None,
+        e2e_evidence_root: Path | None,
+        mvt_evidence_root: Path | None,
+        auth_proof: str | None,
+        auth_proof_file: Path | None,
+        alert_proof: str | None,
+        alert_proof_file: Path | None,
+        rollback_proof: str | None,
+        rollback_proof_file: Path | None,
+        slurm_proof: str | None,
+        slurm_proof_file: Path | None,
+        object_store_proof: str | None,
+        object_store_proof_file: Path | None,
+        source_proof: str | None,
+        source_proof_file: Path | None,
+        e2e_proof: str | None,
+        e2e_proof_file: Path | None,
+        mvt_proof: str | None,
+        mvt_proof_file: Path | None,
+        target_env_proof: str | None,
+        target_env_proof_file: Path | None,
+        force: bool,
+    ) -> None:
+        try:
+            summary = validate_readiness(
+                ProductionReadinessConfig.from_env(
+                    evidence_root=evidence_root,
+                    run_id=run_id,
+                    slurm_evidence_root=slurm_evidence_root,
+                    object_store_evidence_root=object_store_evidence_root,
+                    source_evidence_root=source_evidence_root,
+                    e2e_evidence_root=e2e_evidence_root,
+                    mvt_evidence_root=mvt_evidence_root,
+                    auth_proof=auth_proof,
+                    auth_proof_file=auth_proof_file,
+                    alert_proof=alert_proof,
+                    alert_proof_file=alert_proof_file,
+                    rollback_proof=rollback_proof,
+                    rollback_proof_file=rollback_proof_file,
+                    slurm_proof=slurm_proof,
+                    slurm_proof_file=slurm_proof_file,
+                    object_store_proof=object_store_proof,
+                    object_store_proof_file=object_store_proof_file,
+                    source_proof=source_proof,
+                    source_proof_file=source_proof_file,
+                    e2e_proof=e2e_proof,
+                    e2e_proof_file=e2e_proof_file,
+                    mvt_proof=mvt_proof,
+                    mvt_proof_file=mvt_proof_file,
+                    target_env_proof=target_env_proof,
+                    target_env_proof_file=target_env_proof_file,
+                    force=force,
+                )
+            )
+            click.echo(json.dumps(redact_payload(summary), sort_keys=True))
+        except ProductionReadinessValidationError as error:
+            click.echo(f"{error.error_code}: {redact_text(error.message)}", err=True)
+            raise SystemExit(1) from error
+        except Exception as error:
+            click.echo(f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
+            raise SystemExit(1) from error
+
     try:
         cli.main(args=list(argv) if argv is not None else None, standalone_mode=False)
     except click.ClickException as error:
@@ -2186,6 +2285,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     ops_parser.add_argument("--scale-evidence-root", type=Path, default=None)
     ops_parser.add_argument("--dependency-statuses", default=None)
     ops_parser.add_argument("--force", action="store_true")
+    readiness_parser = subparsers.add_parser("validate-readiness")
+    _add_readiness_argparse_options(readiness_parser)
     args = parser.parse_args(argv)
 
     if args.command == "validate-slurm":
@@ -2378,8 +2479,83 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(f"PRODUCTION_OPS_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
             return 1
         return 0
+    if args.command == "validate-readiness":
+        try:
+            print(
+                json.dumps(
+                    redact_payload(
+                        validate_readiness(
+                            ProductionReadinessConfig.from_env(
+                                evidence_root=args.evidence_root,
+                                run_id=args.run_id,
+                                slurm_evidence_root=args.slurm_evidence_root,
+                                object_store_evidence_root=args.object_store_evidence_root,
+                                source_evidence_root=args.source_evidence_root,
+                                e2e_evidence_root=args.e2e_evidence_root,
+                                mvt_evidence_root=args.mvt_evidence_root,
+                                auth_proof=args.auth_proof,
+                                auth_proof_file=args.auth_proof_file,
+                                alert_proof=args.alert_proof,
+                                alert_proof_file=args.alert_proof_file,
+                                rollback_proof=args.rollback_proof,
+                                rollback_proof_file=args.rollback_proof_file,
+                                slurm_proof=args.slurm_proof,
+                                slurm_proof_file=args.slurm_proof_file,
+                                object_store_proof=args.object_store_proof,
+                                object_store_proof_file=args.object_store_proof_file,
+                                source_proof=args.source_proof,
+                                source_proof_file=args.source_proof_file,
+                                e2e_proof=args.e2e_proof,
+                                e2e_proof_file=args.e2e_proof_file,
+                                mvt_proof=args.mvt_proof,
+                                mvt_proof_file=args.mvt_proof_file,
+                                target_env_proof=args.target_env_proof,
+                                target_env_proof_file=args.target_env_proof_file,
+                                force=args.force,
+                            )
+                        )
+                    ),
+                    sort_keys=True,
+                )
+            )
+        except ProductionReadinessValidationError as error:
+            print(f"{error.error_code}: {redact_text(error.message)}", file=sys.stderr)
+            return 1
+        except Exception as error:
+            print(f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
+            return 1
+        return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2
+
+
+def _add_readiness_argparse_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--evidence-root", type=Path, required=True)
+    parser.add_argument("--run-id")
+    parser.add_argument("--slurm-evidence-root", type=Path, default=None)
+    parser.add_argument("--object-store-evidence-root", type=Path, default=None)
+    parser.add_argument("--source-evidence-root", type=Path, default=None)
+    parser.add_argument("--e2e-evidence-root", type=Path, default=None)
+    parser.add_argument("--mvt-evidence-root", type=Path, default=None)
+    parser.add_argument("--auth-proof", default=None)
+    parser.add_argument("--auth-proof-file", type=Path, default=None)
+    parser.add_argument("--alert-proof", default=None)
+    parser.add_argument("--alert-proof-file", type=Path, default=None)
+    parser.add_argument("--rollback-proof", default=None)
+    parser.add_argument("--rollback-proof-file", type=Path, default=None)
+    parser.add_argument("--slurm-proof", default=None)
+    parser.add_argument("--slurm-proof-file", type=Path, default=None)
+    parser.add_argument("--object-store-proof", default=None)
+    parser.add_argument("--object-store-proof-file", type=Path, default=None)
+    parser.add_argument("--source-proof", default=None)
+    parser.add_argument("--source-proof-file", type=Path, default=None)
+    parser.add_argument("--e2e-proof", default=None)
+    parser.add_argument("--e2e-proof-file", type=Path, default=None)
+    parser.add_argument("--mvt-proof", default=None)
+    parser.add_argument("--mvt-proof-file", type=Path, default=None)
+    parser.add_argument("--target-env-proof", default=None)
+    parser.add_argument("--target-env-proof-file", type=Path, default=None)
+    parser.add_argument("--force", action="store_true")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
