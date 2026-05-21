@@ -899,18 +899,27 @@ Live proof receipt acceptance is intentionally stricter than a placeholder
 `accepted=true` flag. Every accepted receipt must use schema
 `nhms.production_readiness.live_proof.v1`, bind to the expected readiness
 surface, current readiness `run_id`, target environment, and live proof
-execution mode, and include non-empty artifact/evidence references. Auth
-receipts must also include provider metadata, role mapping, and allowed/denied
-coverage for every canonical protected action. Alert receipts must include sink
-and delivery metadata with delivered/passed result. Rollback receipts must
-include preconditions, command or drill metadata, and executed/passed result.
-Slurm/object-store/source/E2E/MVT dependency receipts must name the expected
-dependency surface and include provenance or producer evidence metadata; the
-deterministic producer `summary.json` alone does not satisfy live proof.
-Target-environment receipts must include real target configuration metadata.
-Wrong schema, wrong surface, stale run ID, deterministic mode, missing target,
-missing provenance/artifacts, malformed JSON, over-size JSON, or deeply nested
-JSON remains `release_blocked` with redacted bounded evidence.
+execution mode, and include semantic artifact/evidence references. Empty
+containers, blank strings, `[null]`, and null-only mappings are not evidence.
+Auth receipts must also include provider issuer/provider identity metadata,
+role mapping with at least one role mapped to concrete actions/roles, and
+allowed/denied coverage for every canonical protected action. Alert receipts
+must include sink id/name/url/channel metadata plus delivery id, timestamp, and
+result with delivered/passed status. Rollback receipts must include meaningful
+preconditions, command or drill identity/command metadata, and an executed
+result. Slurm/object-store/source/E2E/MVT dependency receipts must name the
+expected dependency and bind to the producer contract: producer issue, producer
+schema, producer run ID, producer artifact/path/ref, checksum or receipt ID,
+target environment, and live proof mode. When a deterministic producer
+`summary.json` is supplied, the dependency receipt producer run ID, artifact
+ref, and checksum must match that consumed summary. The deterministic producer
+`summary.json` alone does not satisfy live proof. Target-environment receipts
+must include a concrete environment/config identifier and meaningful target
+configuration metadata. Wrong schema, wrong surface, stale run ID,
+deterministic mode, sibling dependency issue/schema/name, missing target,
+missing provenance/artifacts/checksum/ref/run ID, malformed JSON, over-size
+JSON, or deeply nested JSON remains `release_blocked` with redacted bounded
+evidence.
 
 Evidence is written under
 `artifacts/production-closure/<run_id>/readiness/`:

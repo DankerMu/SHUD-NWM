@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -28,6 +29,13 @@ PROOF_SURFACES = {
     "target_env": "target_environment_config_proof",
 }
 DEPENDENCY_PROOFS = {"slurm", "object_store", "source", "e2e", "mvt"}
+DEPENDENCY_CONTRACTS = {
+    "slurm": (147, "nhms.production_closure.slurm.v1"),
+    "object_store": (148, "nhms.production_closure.object_store.v1"),
+    "source": (149, "nhms.production_closure.met.v1"),
+    "e2e": (150, "nhms.production_closure.e2e.v1"),
+    "mvt": (151, "nhms.production_closure.scale.v1"),
+}
 
 
 def _summary(root: Path, run_id: str = "m19") -> dict[str, object]:
@@ -71,14 +79,32 @@ def _bound_proof(proof_key: str, *, run_id: str = "m19", **extra: object) -> str
         "artifact_refs": [f"evidence/{run_id}/{proof_key}/receipt.json"],
     }
     if proof_key in DEPENDENCY_PROOFS:
+        issue, schema = DEPENDENCY_CONTRACTS[proof_key]
         payload |= {
             "dependency_surface": proof_key,
-            "provenance": {"producer_run_id": f"{proof_key}-live-run", "summary_checksum": "sha256:abc123"},
+            "producer_issue": issue,
+            "producer_schema": schema,
+            "producer_run_id": f"{proof_key}-live-run",
+            "producer_artifact_ref": f"{proof_key}:summary.json",
+            "summary_checksum": "sha256:abc123",
+            "provenance": {
+                "dependency": proof_key,
+                "producer_issue": issue,
+                "producer_schema": schema,
+                "producer_run_id": f"{proof_key}-live-run",
+                "producer_artifact_ref": f"{proof_key}:summary.json",
+                "summary_checksum": "sha256:abc123",
+                "receipt_id": f"{proof_key}-receipt-123",
+            },
         }
     elif proof_key == "alert":
         payload |= {
             "sink_metadata": {"sink": "pagerduty-prod", "channel": "release-readiness"},
-            "delivery_metadata": {"message_id": "alert-123", "delivered_at": "2026-05-21T00:00:00Z"},
+            "delivery_metadata": {
+                "message_id": "alert-123",
+                "delivered_at": "2026-05-21T00:00:00Z",
+                "result": "delivered",
+            },
             "delivered": True,
         }
     elif proof_key == "rollback":
@@ -149,6 +175,33 @@ def _all_auth_actions() -> list[str]:
         "models.supersede",
         "users.manage",
     ]
+
+
+def _write_dependency_summary(root: Path, proof_key: str, *, run_id: str | None = None) -> str:
+    issue, schema = DEPENDENCY_CONTRACTS[proof_key]
+    root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": schema,
+        "issue": issue,
+        "run_id": run_id or f"{proof_key}-live-run",
+        "status": "ready",
+        "execution_mode": "deterministic_fixture",
+        "final_production_readiness_claimed": False,
+    }
+    summary_path = root / "summary.json"
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+    return "sha256:" + hashlib.sha256(summary_path.read_bytes()).hexdigest()
+
+
+def _dependency_proof_bound_to_summary(proof_key: str, root: Path, *, run_id: str = "m19", **extra: object) -> str:
+    checksum = _write_dependency_summary(root, proof_key)
+    payload = json.loads(_bound_proof(proof_key, run_id=run_id))
+    payload["summary_checksum"] = checksum
+    payload["producer_checksum"] = checksum
+    payload["provenance"]["summary_checksum"] = checksum
+    payload["provenance"]["producer_checksum"] = checksum
+    payload |= extra
+    return json.dumps(payload)
 
 
 def test_status_execution_mode_truth_table_accepts_allowed_and_rejects_forbidden() -> None:
@@ -393,6 +446,185 @@ def test_embedded_local_paths_are_redacted_from_receipts_and_stdout(
     assert "[redacted-path]" in artifact_text
 
 
+@pytest.mark.parametrize(
+    ("proof_arg", "proof_key", "surface", "override"),
+    [
+        ("auth_proof", "auth", "live_backend_auth", {"artifact_refs": [None]}),
+        ("auth_proof", "auth", "live_backend_auth", {"artifact_refs": []}),
+        ("auth_proof", "auth", "live_backend_auth", {"artifact_refs": ["   "]}),
+        ("auth_proof", "auth", "live_backend_auth", {"provider": {}, "provider_metadata": {}}),
+        ("auth_proof", "auth", "live_backend_auth", {"provider": {"issuer_url": None}}),
+        ("auth_proof", "auth", "live_backend_auth", {"role_mapping": {"operator": []}, "role_mappings": {}}),
+        ("alert_proof", "alert", "live_alert_sink_delivery", {"sink_metadata": {}}),
+        ("alert_proof", "alert", "live_alert_sink_delivery", {"delivery_metadata": {"message_id": None}}),
+        ("rollback_proof", "rollback", "live_rollback_execution", {"preconditions": {"backup": None}}),
+        ("rollback_proof", "rollback", "live_rollback_execution", {"command_metadata": {"command": ""}}),
+        ("target_env_proof", "target_env", "target_environment_config_proof", {"config_metadata": {"cluster": None}}),
+    ],
+)
+def test_vacuous_live_receipt_material_remains_release_blocked(
+    tmp_path: Path,
+    proof_arg: str,
+    proof_key: str,
+    surface: str,
+    override: dict[str, object],
+) -> None:
+    root = tmp_path / "artifacts"
+    actions = _all_auth_actions()
+    receipt = (
+        _auth_proof(allowed=actions, denied=actions, **override)
+        if proof_key == "auth"
+        else _bound_proof(proof_key, **override)
+    )
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", **{proof_arg: receipt}))
+
+    item = next(item for item in _items(root) if item["surface"] == surface)
+    assert item["status"] == "release_blocked"
+    assert item["live_proof_accepted"] is False
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_error"),
+    [
+        ({"dependency_surface": "object_store"}, "dependency_surface_mismatch"),
+        ({"producer_issue": 148}, "producer_issue_mismatch"),
+        ({"producer_schema": "nhms.production_closure.object_store.v1"}, "producer_schema_mismatch"),
+        (
+            {
+                "producer_run_id": "",
+                "provenance": {
+                    "dependency": "slurm",
+                    "producer_issue": 147,
+                    "producer_schema": "nhms.production_closure.slurm.v1",
+                    "producer_artifact_ref": "slurm:summary.json",
+                    "summary_checksum": "sha256:abc123",
+                },
+            },
+            "missing_producer_run_id",
+        ),
+        (
+            {
+                "producer_artifact_ref": "",
+                "provenance": {
+                    "dependency": "slurm",
+                    "producer_issue": 147,
+                    "producer_schema": "nhms.production_closure.slurm.v1",
+                    "producer_run_id": "slurm-live-run",
+                    "summary_checksum": "sha256:abc123",
+                },
+            },
+            "missing_producer_artifact_ref",
+        ),
+        (
+            {
+                "summary_checksum": "",
+                "producer_checksum": "",
+                "provenance": {
+                    "dependency": "slurm",
+                    "producer_issue": 147,
+                    "producer_schema": "nhms.production_closure.slurm.v1",
+                    "producer_run_id": "slurm-live-run",
+                    "producer_artifact_ref": "slurm:summary.json",
+                },
+            },
+            "missing_producer_checksum_or_receipt_id",
+        ),
+        ({"provenance": {"note": "placeholder"}}, "placeholder_provenance"),
+    ],
+)
+def test_dependency_receipts_require_semantic_producer_provenance(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_error: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    receipt = _bound_proof("slurm", **override)
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_proof=receipt))
+
+    item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
+    errors = item["details"]["acceptance_errors"]["errors"]
+    assert item["status"] == "release_blocked"
+    assert item["live_proof_accepted"] is False
+    assert expected_error in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_error"),
+    [
+        ({"producer_run_id": "stale-run"}, "producer_run_id_mismatch"),
+        ({"producer_artifact_ref": "slurm:sibling-summary.json"}, "producer_artifact_ref_mismatch"),
+        ({"summary_checksum": "sha256:stale"}, "producer_checksum_mismatch"),
+        (
+            {
+                "dependency_surface": "object_store",
+                "producer_issue": 148,
+                "producer_schema": "nhms.production_closure.object_store.v1",
+                "producer_run_id": "object_store-live-run",
+                "producer_artifact_ref": "object_store:summary.json",
+                "summary_checksum": "sha256:sibling",
+            },
+            "dependency_surface_mismatch",
+        ),
+    ],
+)
+def test_dependency_receipts_bind_to_consumed_producer_summary(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_error: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    slurm_root = tmp_path / "slurm"
+    receipt = _dependency_proof_bound_to_summary("slurm", slurm_root, **override)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            slurm_evidence_root=slurm_root,
+            slurm_proof=receipt,
+        )
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
+    errors = item["details"]["acceptance_errors"]["errors"]
+    assert item["status"] == "release_blocked"
+    assert item["live_proof_accepted"] is False
+    assert expected_error in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_dependency_summary_missing_root_redacts_paths_from_stdout_and_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "artifacts"
+    private_root = tmp_path / "private" / "slurm-evidence"
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-readiness",
+            "--evidence-root",
+            str(root),
+            "--run-id",
+            "m19",
+            "--slurm-evidence-root",
+            str(private_root),
+        ]
+    )
+
+    assert exit_code == 0
+    artifact_text = capsys.readouterr().out + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").iterdir()
+    )
+    assert str(private_root) not in artifact_text
+    assert "[redacted-path]" in artifact_text
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
 @pytest.mark.parametrize("proof_arg", ["auth_proof", "alert_proof"])
 def test_deep_live_proof_json_is_stable_release_blocker(tmp_path: Path, proof_arg: str) -> None:
     root = tmp_path / "artifacts"
@@ -412,11 +644,29 @@ def test_deep_live_proof_json_is_stable_release_blocker(tmp_path: Path, proof_ar
 
 def test_all_live_receipts_accepted_claims_final_readiness(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
+    slurm_root = tmp_path / "slurm"
+    object_store_root = tmp_path / "object-store"
+    source_root = tmp_path / "source"
+    e2e_root = tmp_path / "e2e"
+    mvt_root = tmp_path / "mvt"
+    proofs = _all_live_proofs()
+    proofs |= {
+        "slurm_proof": _dependency_proof_bound_to_summary("slurm", slurm_root),
+        "object_store_proof": _dependency_proof_bound_to_summary("object_store", object_store_root),
+        "source_proof": _dependency_proof_bound_to_summary("source", source_root),
+        "e2e_proof": _dependency_proof_bound_to_summary("e2e", e2e_root),
+        "mvt_proof": _dependency_proof_bound_to_summary("mvt", mvt_root),
+    }
     validate_readiness(
         ProductionReadinessConfig.from_env(
             evidence_root=root,
             run_id="m19",
-            **_all_live_proofs(),
+            slurm_evidence_root=slurm_root,
+            object_store_evidence_root=object_store_root,
+            source_evidence_root=source_root,
+            e2e_evidence_root=e2e_root,
+            mvt_evidence_root=mvt_root,
+            **proofs,
         )
     )
 
