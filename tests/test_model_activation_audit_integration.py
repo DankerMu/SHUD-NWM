@@ -413,6 +413,16 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
                 json={"operation": "rollback_version", "previous_model_id": ids["candidate_a_model_id"]},
                 headers=headers,
             )
+            stale_preflight = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/preflight",
+                json={"operation": "rollback_version", "previous_model_id": ids["candidate_a_model_id"]},
+                headers=headers,
+            )
+            allowed_preflight = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/preflight",
+                json={"operation": "rollback_version", "previous_model_id": ids["candidate_b_model_id"]},
+                headers=headers,
+            )
             allowed_rollback = client.post(
                 f"/api/v1/models/{ids['active_model_id']}/lifecycle",
                 json={"operation": "rollback_version", "previous_model_id": ids["candidate_b_model_id"]},
@@ -446,6 +456,8 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
         activate_c,
         activate_a,
         stale_rollback,
+        stale_preflight,
+        allowed_preflight,
         allowed_rollback,
         retry_preflight,
         retry_rollback,
@@ -461,6 +473,12 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
     stale_codes = {item["code"] for item in stale_rollback.json()["data"]["preflight"]["blockers"]}
     assert stale_codes >= {"ROLLBACK_CURRENT_STALE"}
     assert stale_rollback.json()["data"]["audit_reference"]["log_id"] is not None
+    assert stale_preflight.json()["data"]["status"] == "blocked"
+    stale_preflight_codes = {item["code"] for item in stale_preflight.json()["data"]["blockers"]}
+    assert stale_preflight_codes >= {"ROLLBACK_CURRENT_STALE"}
+    assert allowed_preflight.json()["data"]["status"] == "ready"
+    assert allowed_preflight.json()["data"]["previous_model_id"] == ids["candidate_b_model_id"]
+    assert allowed_preflight.json()["data"]["restored_model_id"] == ids["candidate_b_model_id"]
 
     with psycopg_connection(integration_database_url) as connection:
         with connection.cursor() as cursor:

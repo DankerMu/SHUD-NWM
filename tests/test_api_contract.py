@@ -571,6 +571,7 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert "resolved_source_path?: string | null;" in generated_types
     assert "source_uri?: string | null;" in generated_types
     assert "source_is_symlink?: boolean | null;" in generated_types
+    assert "restored_model_id?: string | null;" in generated_types
     assert "FloodFrequencyThresholds" in generated_types
     assert "Q2?: number | null;" in generated_types
     assert "Q20?: number | null;" in generated_types

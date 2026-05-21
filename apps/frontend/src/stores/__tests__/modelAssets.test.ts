@@ -882,6 +882,64 @@ describe('useModelAssetsStore', () => {
     expect(useModelAssetsStore.getState().operationPreflight?.status).toBe('ready')
   })
 
+  it('forwards selected rollback previous model id through preflight and lifecycle calls', async () => {
+    const outgoing = makeBasinsModel({ model_id: 'model-a', active_flag: true, lifecycle_state: 'active' })
+    const staleSibling = makeBasinsModel({ model_id: 'model-b', active_flag: false, lifecycle_state: 'superseded' })
+    const selectedPrior = makeBasinsModel({ model_id: 'model-c', active_flag: false, lifecycle_state: 'superseded' })
+    const restored = makeBasinsModel({ ...selectedPrior, active_flag: true, lifecycle_state: 'active' })
+    const demoted = makeBasinsModel({ ...outgoing, active_flag: false, lifecycle_state: 'superseded' })
+    const postedBodies: unknown[] = []
+    const preflight = {
+      schema: 'nhms.model_operation_preflight.v1',
+      operation: 'rollback_version',
+      status: 'ready',
+      model_id: outgoing.model_id,
+      basin_version_id: outgoing.basin_version_id,
+      current_active_model_id: outgoing.model_id,
+      previous_model_id: selectedPrior.model_id,
+      restored_model_id: selectedPrior.model_id,
+      blockers: [],
+      warnings: [],
+      impact: { downstream_surfaces: ['forecast-routing'] },
+    }
+    const result = {
+      status: 'rollback',
+      operation: 'rollback_version',
+      model: restored,
+      previous_model: demoted,
+      preflight,
+      audit_reference: { entity_type: 'model_instance', entity_id: outgoing.model_id, log_id: 11 },
+    }
+    useModelAssetsStore.setState({
+      models: [outgoing, staleSibling, selectedPrior],
+      selectedModel: outgoing,
+    })
+    vi.mocked(client.POST).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const body = (args[1] as { body?: unknown } | undefined)?.body
+      postedBodies.push(body)
+      if (path === '/api/v1/models/{model_id}/preflight') return success(preflight) as never
+      if (path === '/api/v1/models/{model_id}/lifecycle') return success(result) as never
+      throw new Error(`Unexpected POST ${path}`)
+    })
+
+    await useModelAssetsStore.getState().preflightModelOperation(outgoing.model_id, {
+      operation: 'rollback_version',
+      previous_model_id: selectedPrior.model_id,
+    })
+    await useModelAssetsStore.getState().runModelOperation(outgoing.model_id, {
+      operation: 'rollback_version',
+      previous_model_id: selectedPrior.model_id,
+    })
+
+    expect(postedBodies).toEqual([
+      { operation: 'rollback_version', previous_model_id: selectedPrior.model_id },
+      { operation: 'rollback_version', previous_model_id: selectedPrior.model_id },
+    ])
+    expect(JSON.stringify(postedBodies)).not.toContain(staleSibling.model_id)
+    expect(useModelAssetsStore.getState().operationPreflight?.restored_model_id).toBe(selectedPrior.model_id)
+  })
+
   it('merges lifecycle result and previous model after activation', async () => {
     const previous = makeBasinsModel({ model_id: 'model-a', active_flag: true, lifecycle_state: 'active' })
     const candidate = makeBasinsModel({ model_id: 'model-b', active_flag: false, lifecycle_state: 'inactive' })

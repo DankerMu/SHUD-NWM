@@ -26,6 +26,8 @@ from packages.common.model_registry import (
     RiverSegmentGeoJsonBudgetError,
     _is_unsafe_source_value,
     geometry_to_wkt,
+    sanitize_model_detail_payload,
+    sanitize_model_list_payload,
 )
 from workers.model_registry.cli import _argparse_main
 from workers.model_registry.validator import (
@@ -3355,6 +3357,110 @@ def test_get_model_uses_sanitized_mesh_lineage_fallbacks(
     assert detail["resolved_source_path"] == "s3://nhms/resolved-source-path"
     assert detail["source_uri"] == "s3://nhms/source-uri"
     assert detail["source_is_symlink"] is True
+
+
+def _public_projection_payload(resource_profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model_id": "basins_basin_a_shud",
+        "basin_version_id": "basins_basin_a_vbasins",
+        "river_network_version_id": "basins_basin_a_rivnet_vbasins",
+        "mesh_version_id": "basins_basin_a_mesh_vbasins",
+        "calibration_version_id": "basins_basin_a_shud_calib_vbasins",
+        "shud_code_version": "basins-shud",
+        "model_package_uri": "s3://user:pass@nhms/models/volume/data/Basins/package?token=secret#frag",
+        "active_flag": False,
+        "lifecycle_state": "inactive",
+        "resource_profile": resource_profile,
+        "created_at": "2026-05-14T00:00:00Z",
+        "basin_id": "basins_basin_a",
+        "basin_name": "Basin A",
+        "segment_count": 2,
+    }
+
+
+def test_public_model_projection_is_scheme_aware_and_redacts_local_paths() -> None:
+    resource_profile = {
+        "manifest_uri": "s3://user:pass@nhms/archive/volume/data/Basins/model/manifest.json?token=secret#frag",
+        "source_uri": "https://user:pass@objects.example.test/models/data/Basins/source.json?sig=x#frag",
+        "copied_root_uri": "integration://user:pass@adapter/volume/data/Basins/root?token=secret#frag",
+        "memory_uri": "memory://user:pass@cache/data/Basins/model?token=secret#frag",
+        "gs_uri": "gs://user:pass@bucket/volume/data/Basins/model?token=secret#frag",
+        "az_uri": "az://user:pass@container/data/Basins/model?token=secret#frag",
+        "local_path": "/volume/data/nwm/Basins/local-secret",
+        "file_uri": "file:///volume/data/nwm/Basins/file-secret?token=secret#frag",
+        "windows_path": "C:\\nwm\\Basins\\win-secret",
+        "unc_path": "\\\\server\\share\\Basins\\unc-secret",
+        "artifact": {
+            "sha256": "sha-secret",
+            "package_hash": "hash-secret",
+            "inventory_digest": "digest-secret",
+        },
+    }
+    detail = sanitize_model_detail_payload(_public_projection_payload(resource_profile))
+    page = sanitize_model_list_payload(
+        {"items": [_public_projection_payload(resource_profile)], "total": 1, "limit": 10, "offset": 0}
+    )
+    item = page["items"][0]
+
+    for projected in (detail, item):
+        assert projected["model_package_uri"] == "s3://nhms/models/volume/data/Basins/package"
+        profile = projected["resource_profile"]
+        assert profile["manifest_uri"] == "s3://nhms/archive/volume/data/Basins/model/manifest.json"
+        assert profile["source_uri"] == "https://objects.example.test/models/data/Basins/source.json"
+        assert profile["copied_root_uri"] == "integration://adapter/volume/data/Basins/root"
+        assert profile["memory_uri"] == "memory://cache/data/Basins/model"
+        assert profile["gs_uri"] == "gs://bucket/volume/data/Basins/model"
+        assert profile["az_uri"] == "az://container/data/Basins/model"
+        assert profile["local_path"] is None
+        assert profile["file_uri"] is None
+        assert profile["windows_path"] is None
+        assert profile["unc_path"] is None
+        assert profile["artifact"]["sha256"] is None
+        assert profile["artifact"]["package_hash"] is None
+        assert profile["artifact"]["inventory_digest"] is None
+        rendered = json.dumps(projected)
+        for token in (
+            "user:pass@",
+            "token=secret",
+            "#frag",
+            "local-secret",
+            "file-secret",
+            "win-secret",
+            "unc-secret",
+            "sha-secret",
+            "hash-secret",
+            "digest-secret",
+        ):
+            assert token not in rendered
+
+
+def test_public_model_projection_bounds_deep_wide_and_cyclic_metadata() -> None:
+    deep: dict[str, Any] = {"source_path": "/volume/data/nwm/Basins/deep-secret"}
+    for _ in range(80):
+        deep = {"child": deep}
+    cyclic: dict[str, Any] = {"label": "cycle-root"}
+    cyclic["self"] = cyclic
+    resource_profile = {
+        "safe_uri": "s3://user:pass@nhms/volume/data/Basins/safe-object?token=secret#frag",
+        "deep": deep,
+        "wide": {
+            f"path_{index}": f"/volume/data/nwm/Basins/wide-secret-{index}" for index in range(6000)
+        },
+        "cyclic": cyclic,
+    }
+
+    detail = sanitize_model_detail_payload(_public_projection_payload(resource_profile))
+    page = sanitize_model_list_payload(
+        {"items": [_public_projection_payload(resource_profile)], "total": 1, "limit": 10, "offset": 0}
+    )
+
+    for projected in (detail, page["items"][0]):
+        rendered = json.dumps(projected)
+        assert projected["resource_profile"]["safe_uri"] == "s3://nhms/volume/data/Basins/safe-object"
+        assert "deep-secret" not in rendered
+        assert "wide-secret" not in rendered
+        assert "token=secret" not in rendered
+        assert "user:pass@" not in rendered
 
 
 def test_list_models_returns_public_safe_resource_profile(

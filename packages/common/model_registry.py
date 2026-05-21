@@ -1824,6 +1824,8 @@ PUBLIC_SENSITIVE_DIGEST_KEYS = frozenset(
 )
 REDACTED_REASON = "[redacted]"
 SUPPORTED_OBJECT_URI_SCHEMES = frozenset({"s3", "az", "gs", "https", "http", "integration", "memory"})
+PUBLIC_JSON_SANITIZE_MAX_DEPTH = 24
+PUBLIC_JSON_SANITIZE_MAX_NODES = 5000
 
 
 def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1909,10 +1911,26 @@ def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     return detail
 
 
-def _sanitize_public_json_value(value: Any) -> Any:
+def _sanitize_public_json_value(
+    value: Any,
+    *,
+    _depth: int = 0,
+    _state: dict[str, Any] | None = None,
+) -> Any:
+    state = _state or {"nodes": 0, "seen": set()}
+    state["nodes"] += 1
+    if _depth > PUBLIC_JSON_SANITIZE_MAX_DEPTH or state["nodes"] > PUBLIC_JSON_SANITIZE_MAX_NODES:
+        return None
+
     if isinstance(value, Mapping):
+        object_id = id(value)
+        if object_id in state["seen"]:
+            return None
+        state["seen"].add(object_id)
         sanitized: dict[str, Any] = {}
         for key, child in value.items():
+            if state["nodes"] >= PUBLIC_JSON_SANITIZE_MAX_NODES:
+                break
             if _is_sensitive_public_json_key(key):
                 sanitized[key] = None
             elif (
@@ -1922,17 +1940,30 @@ def _sanitize_public_json_value(value: Any) -> Any:
             ):
                 sanitized[key] = None
             else:
-                sanitized[key] = _sanitize_public_json_value(child)
+                sanitized[key] = _sanitize_public_json_value(child, _depth=_depth + 1, _state=state)
+        state["seen"].remove(object_id)
         return sanitized
-    if isinstance(value, list):
-        return [_sanitize_public_json_value(child) for child in value]
-    if isinstance(value, tuple):
-        return [_sanitize_public_json_value(child) for child in value]
+    if isinstance(value, list | tuple):
+        object_id = id(value)
+        if object_id in state["seen"]:
+            return None
+        state["seen"].add(object_id)
+        sanitized_list = []
+        for child in value:
+            if state["nodes"] >= PUBLIC_JSON_SANITIZE_MAX_NODES:
+                break
+            sanitized_list.append(_sanitize_public_json_value(child, _depth=_depth + 1, _state=state))
+        state["seen"].remove(object_id)
+        return sanitized_list
     if isinstance(value, str):
         if _is_public_sensitive_path_or_file_uri(value):
             return None
         if _is_uri_like(value):
             return _sanitize_audit_uri(value)
+        return value
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return None
     return value
 
 
@@ -1955,7 +1986,10 @@ def _is_sensitive_public_path_key(key: str) -> bool:
 
 def _is_public_sensitive_path_or_file_uri(value: str) -> bool:
     parsed = urlsplit(value)
-    if parsed.scheme.lower() == "file":
+    scheme = parsed.scheme.lower()
+    if scheme in SUPPORTED_OBJECT_URI_SCHEMES:
+        return False
+    if scheme == "file":
         return True
     if re.match(r"^[a-zA-Z]:[\\/]", value):
         return True

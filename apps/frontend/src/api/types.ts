@@ -836,6 +836,7 @@ export interface components {
             basin_version_id?: string | null;
             current_active_model_id?: string | null;
             previous_model_id?: string | null;
+            restored_model_id?: string | null;
             prior_audit_log_id?: number | null;
             rollback_history?: {
                 [key: string]: unknown;

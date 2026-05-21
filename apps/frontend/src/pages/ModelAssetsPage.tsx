@@ -71,27 +71,23 @@ function sourcePathValue(model: ModelAsset, profile: Record<string, unknown>, so
   )
 }
 
-function deriveRollbackPreviousModelId(currentModel: ModelAsset, models: ModelAsset[]) {
-  const sameScope = models.filter(
-    (model) => model.model_id !== currentModel.model_id && model.basin_version_id === currentModel.basin_version_id,
-  )
-  return (
-    sameScope.find((model) => model.lifecycle_state === 'superseded')?.model_id ??
-    sameScope.find((model) => model.lifecycle_state === 'inactive')?.model_id ??
-    sameScope.find((model) => !model.active_flag)?.model_id ??
-    null
+function rollbackPreviousCandidates(currentModel: ModelAsset, models: ModelAsset[]) {
+  return models.filter(
+    (model) =>
+      model.model_id !== currentModel.model_id &&
+      model.basin_version_id === currentModel.basin_version_id &&
+      !model.active_flag &&
+      (model.lifecycle_state === 'superseded' || model.lifecycle_state === 'inactive'),
   )
 }
 
 function lifecyclePayload(
-  currentModel: ModelAsset,
-  models: ModelAsset[],
   operation: ModelAssetLifecycleRequest['operation'],
+  previousModelId: string | null = null,
 ): ModelAssetLifecycleRequest {
-  const previousModelId = operation === 'rollback_version' ? deriveRollbackPreviousModelId(currentModel, models) : null
   return {
     operation,
-    ...(previousModelId ? { previous_model_id: previousModelId } : {}),
+    ...(operation === 'rollback_version' && previousModelId ? { previous_model_id: previousModelId } : {}),
   }
 }
 
@@ -154,6 +150,7 @@ export function ModelAssetsPage() {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState<ModelAssetActiveFilter>('all')
   const [pendingOperation, setPendingOperation] = useState<ModelAssetLifecycleRequest['operation'] | null>(null)
+  const [selectedRollbackPreviousModelId, setSelectedRollbackPreviousModelId] = useState<string | null>(null)
   const role = useAuthStore((state) => state.role)
   const models = useModelAssetsStore((state) => state.models)
   const selectedModel = useModelAssetsStore((state) => state.selectedModel)
@@ -197,6 +194,7 @@ export function ModelAssetsPage() {
 
   function selectModel(modelId: string) {
     setPendingOperation(null)
+    setSelectedRollbackPreviousModelId(null)
     setSearchParams((params) => {
       params.set('modelId', modelId)
       return params
@@ -208,14 +206,29 @@ export function ModelAssetsPage() {
   async function requestOperation(operation: ModelAssetLifecycleRequest['operation']) {
     if (!currentSelectedModel) return
     setPendingOperation(operation)
-    await preflightModelOperation(currentSelectedModel.model_id, lifecyclePayload(currentSelectedModel, models, operation)).catch(
+    if (operation === 'rollback_version') {
+      setSelectedRollbackPreviousModelId(null)
+      return
+    }
+    setSelectedRollbackPreviousModelId(null)
+    await preflightModelOperation(currentSelectedModel.model_id, lifecyclePayload(operation)).catch(() => undefined)
+  }
+
+  async function selectRollbackPreviousModel(previousModelId: string) {
+    if (!currentSelectedModel) return
+    setSelectedRollbackPreviousModelId(previousModelId)
+    setPendingOperation('rollback_version')
+    if (!previousModelId) return
+    await preflightModelOperation(currentSelectedModel.model_id, lifecyclePayload('rollback_version', previousModelId)).catch(
       () => undefined,
     )
   }
 
   async function confirmOperation() {
     if (!currentSelectedModel || !pendingOperation) return
-    await runModelOperation(currentSelectedModel.model_id, lifecyclePayload(currentSelectedModel, models, pendingOperation))
+    const payload = lifecyclePayload(pendingOperation, selectedRollbackCandidate)
+    if (pendingOperation === 'rollback_version' && !payload.previous_model_id) return
+    await runModelOperation(currentSelectedModel.model_id, payload)
       .then(async () => {
         await fetchModels({ active: 'all', limit: 50, offset: 0 }).catch(() => undefined)
         await fetchModelDetail(currentSelectedModel.model_id).catch(() => undefined)
@@ -232,7 +245,24 @@ export function ModelAssetsPage() {
   const products = useMemo(() => buildModelAssetProducts(currentSelectedModel), [currentSelectedModel])
   const graph = useMemo(() => buildModelAssetDependencyGraph(currentSelectedModel), [currentSelectedModel])
   const mapProjection = useMemo(() => buildModelAssetMapProjection(currentSelectedModel), [currentSelectedModel])
-  const operationBlocked = operationPreflight?.status === 'blocked'
+  const rollbackCandidates = useMemo(
+    () => (currentSelectedModel ? rollbackPreviousCandidates(currentSelectedModel, models) : []),
+    [currentSelectedModel, models],
+  )
+  const selectedRollbackCandidate =
+    selectedRollbackPreviousModelId && rollbackCandidates.some((model) => model.model_id === selectedRollbackPreviousModelId)
+      ? selectedRollbackPreviousModelId
+      : null
+  const pendingPayload = pendingOperation ? lifecyclePayload(pendingOperation, selectedRollbackCandidate) : null
+  const operationPreflightMatchesPending =
+    !!pendingPayload &&
+    operationPreflight?.operation === pendingPayload.operation &&
+    operationPreflight.model_id === currentSelectedModel?.model_id &&
+    (pendingPayload.operation !== 'rollback_version' ||
+      operationPreflight.previous_model_id === pendingPayload.previous_model_id)
+  const visibleOperationPreflight = operationPreflightMatchesPending ? operationPreflight : null
+  const operationBlocked = visibleOperationPreflight?.status === 'blocked'
+  const rollbackSelectionRequired = pendingOperation === 'rollback_version' && !selectedRollbackCandidate
 
   return (
     <section className="space-y-4" aria-label="模型资产管理">
@@ -398,32 +428,53 @@ export function ModelAssetsPage() {
                   {operationError ? (
                     <div className="rounded-md border border-danger/30 bg-danger/5 p-3 text-sm text-danger">{operationError}</div>
                   ) : null}
-                  {operationPreflight ? (
+                  {pendingOperation === 'rollback_version' ? (
+                    <label className="block max-w-xl text-sm">
+                      <span className="mb-1 block text-muted">回滚目标</span>
+                      <select
+                        className="h-10 w-full rounded-md border border-border bg-white px-3 text-sm outline-none"
+                        value={selectedRollbackCandidate ?? ''}
+                        disabled={!canOperate || operationLoading || rollbackCandidates.length === 0}
+                        onChange={(event) => void selectRollbackPreviousModel(event.target.value)}
+                      >
+                        <option value="">选择上一版模型</option>
+                        {rollbackCandidates.map((model) => (
+                          <option key={model.model_id} value={model.model_id}>
+                            {displayValue(model.model_name ?? model.model_id)} ({model.model_id})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  {pendingOperation === 'rollback_version' && rollbackCandidates.length === 0 ? (
+                    <div className="text-sm text-muted">没有可选的同流域停用模型。</div>
+                  ) : null}
+                  {visibleOperationPreflight ? (
                     <div className="rounded-md border border-border bg-background p-3 text-sm">
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant={operationBlocked ? 'destructive' : 'outline'}>
                           {operationBlocked ? '预检阻断' : '预检通过'}
                         </Badge>
-                        <span className="text-muted">{displayValue(operationPreflight.operation)}</span>
-                        <span className="text-muted">{displayValue(operationPreflight.current_active_model_id)}</span>
+                        <span className="text-muted">{displayValue(visibleOperationPreflight.operation)}</span>
+                        <span className="text-muted">{displayValue(visibleOperationPreflight.current_active_model_id)}</span>
                       </div>
-                      {operationPreflight.blockers.length > 0 ? (
+                      {visibleOperationPreflight.blockers.length > 0 ? (
                         <ul className="mt-2 space-y-1 text-danger">
-                          {operationPreflight.blockers.map((blocker, index) => (
+                          {visibleOperationPreflight.blockers.map((blocker, index) => (
                             <li key={index}>{blockerText(blocker)}</li>
                           ))}
                         </ul>
                       ) : null}
-                      {operationPreflight.warnings.length > 0 ? (
+                      {visibleOperationPreflight.warnings.length > 0 ? (
                         <ul className="mt-2 space-y-1 text-warning">
-                          {operationPreflight.warnings.map((warning, index) => (
+                          {visibleOperationPreflight.warnings.map((warning, index) => (
                             <li key={index}>{blockerText(warning)}</li>
                           ))}
                         </ul>
                       ) : null}
                       <div className="mt-2 text-xs text-muted">
-                        {Array.isArray(operationPreflight.impact.downstream_surfaces)
-                          ? operationPreflight.impact.downstream_surfaces.join(' / ')
+                        {Array.isArray(visibleOperationPreflight.impact.downstream_surfaces)
+                          ? visibleOperationPreflight.impact.downstream_surfaces.join(' / ')
                           : 'forecast-routing / model-assets-api / operator-audit'}
                       </div>
                     </div>
@@ -431,7 +482,13 @@ export function ModelAssetsPage() {
                   {pendingOperation ? (
                     <Button
                       type="button"
-                      disabled={!canOperate || operationLoading || operationBlocked || !operationPreflight}
+                      disabled={
+                        !canOperate ||
+                        operationLoading ||
+                        operationBlocked ||
+                        !visibleOperationPreflight ||
+                        rollbackSelectionRequired
+                      }
                       onClick={() => void confirmOperation()}
                     >
                       <CheckCircle2 className="h-4 w-4" aria-hidden="true" />

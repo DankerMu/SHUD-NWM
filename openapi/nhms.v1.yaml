@@ -2074,6 +2074,9 @@ components:
         previous_model_id:
           type: string
           nullable: true
+        restored_model_id:
+          type: string
+          nullable: true
         prior_audit_log_id:
           type: integer
           nullable: true

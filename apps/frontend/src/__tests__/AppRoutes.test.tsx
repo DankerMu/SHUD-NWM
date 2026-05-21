@@ -4463,32 +4463,49 @@ describe('App route state', () => {
     await waitFor(() => expect(vi.mocked(client.GET).mock.calls.filter(([path]) => path === '/api/v1/models').length).toBeGreaterThan(1))
   })
 
-  it('derives rollback previous model id and sends it through preflight and execution', async () => {
+  it('requires explicit rollback target selection and sends that model id through preflight and execution', async () => {
     useAuthStore.setState({ role: 'model_admin' })
     const outgoing = modelAssetRouteFixture({ active_flag: true, lifecycle_state: 'active' })
+    const staleSibling = modelAssetRouteFixture({
+      model_id: 'basins_qhh_shud_previous_b',
+      model_name: 'QHH previous B',
+      active_flag: false,
+      lifecycle_state: 'superseded',
+      basin_version_id: outgoing.basin_version_id,
+    })
     const restoredBefore = modelAssetRouteFixture({
-      model_id: 'basins_qhh_shud_previous',
+      model_id: 'basins_qhh_shud_previous_c',
+      model_name: 'QHH previous C',
       active_flag: false,
       lifecycle_state: 'superseded',
       basin_version_id: outgoing.basin_version_id,
     })
     const restoredAfter = modelAssetRouteFixture({ ...restoredBefore, active_flag: true, lifecycle_state: 'active' })
     const demoted = modelAssetRouteFixture({ ...outgoing, active_flag: false, lifecycle_state: 'superseded' })
-    const page: ModelAssetPage = { items: [outgoing, restoredBefore], total: 2, limit: 50, offset: 0 }
-    const rolledBackPage: ModelAssetPage = { items: [demoted, restoredAfter], total: 2, limit: 50, offset: 0 }
+    const page: ModelAssetPage = { items: [outgoing, staleSibling, restoredBefore], total: 3, limit: 50, offset: 0 }
+    const rolledBackPage: ModelAssetPage = { items: [demoted, staleSibling, restoredAfter], total: 3, limit: 50, offset: 0 }
     const postedBodies: unknown[] = []
     let rolledBack = false
     vi.mocked(client.GET).mockImplementation(async (path: string, options?: unknown) => {
       if (path === '/api/v1/models') return { data: success(rolledBack ? rolledBackPage : page), error: undefined } as never
       if (path === '/api/v1/models/{model_id}') {
         const modelId = (options as { params?: { path?: { model_id?: string } } })?.params?.path?.model_id
-        return { data: success(modelId === outgoing.model_id ? (rolledBack ? demoted : outgoing) : restoredBefore), error: undefined } as never
+        const model =
+          modelId === outgoing.model_id
+            ? rolledBack
+              ? demoted
+              : outgoing
+            : modelId === staleSibling.model_id
+              ? staleSibling
+              : restoredBefore
+        return { data: success(model), error: undefined } as never
       }
       return { data: success({}), error: undefined } as never
     })
     vi.mocked(client.POST).mockImplementation(async (path: string, options?: unknown) => {
       const body = (options as { body?: unknown })?.body
       postedBodies.push(body)
+      expect(body).toMatchObject({ previous_model_id: restoredBefore.model_id })
       if (path === '/api/v1/models/{model_id}/preflight') {
         return {
           data: success({
@@ -4499,6 +4516,7 @@ describe('App route state', () => {
             basin_version_id: outgoing.basin_version_id,
             current_active_model_id: outgoing.model_id,
             previous_model_id: restoredBefore.model_id,
+            restored_model_id: restoredBefore.model_id,
             blockers: [],
             warnings: [],
             impact: { downstream_surfaces: ['forecast-routing', 'operator-audit'] },
@@ -4520,6 +4538,7 @@ describe('App route state', () => {
               status: 'ready',
               model_id: outgoing.model_id,
               previous_model_id: restoredBefore.model_id,
+              restored_model_id: restoredBefore.model_id,
               blockers: [],
               warnings: [],
               impact: { downstream_surfaces: ['forecast-routing'] },
@@ -4539,6 +4558,10 @@ describe('App route state', () => {
     const lifecycleCard = screen.getByRole('heading', { name: '生命周期操作' }).closest('div')?.parentElement
     expect(lifecycleCard).not.toBeNull()
     await userEvent.click(within(lifecycleCard as HTMLElement).getByRole('button', { name: /回滚/ }))
+    expect(screen.getByRole('combobox', { name: /回滚目标/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /确认执行/ })).toBeDisabled()
+    expect(postedBodies).toEqual([])
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /回滚目标/ }), restoredBefore.model_id)
     expect(await screen.findByText('预检通过')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /确认执行/ }))
     expect(await screen.findByText('审计记录 21')).toBeInTheDocument()
@@ -4546,6 +4569,7 @@ describe('App route state', () => {
       { operation: 'rollback_version', previous_model_id: restoredBefore.model_id },
       { operation: 'rollback_version', previous_model_id: restoredBefore.model_id },
     ])
+    expect(JSON.stringify(postedBodies)).not.toContain(staleSibling.model_id)
   })
 
   it('shows backend lifecycle preflight blockers without executing confirmation', async () => {
