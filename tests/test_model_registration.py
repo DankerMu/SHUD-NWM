@@ -334,7 +334,7 @@ class FakeModelRegistryStore:
                 "operation": operation,
                 "model": dict(model),
                 "preflight": preflight,
-                "audit_reference": None,
+                "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": 1},
             }
         if operation in {"activate", "switch_version"}:
             for item in self.models.values():
@@ -1488,7 +1488,8 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
     active_body = active_response.json()
     assert active_body["status"] == "ok"
     assert active_body["request_id"] == request_id
-    assert active_body["data"]["active_flag"] is True
+    assert active_body["data"]["status"] == "allowed"
+    assert active_body["data"]["model"]["active_flag"] is True
     assert active_body["auth_policy_decisions"][0]["request_id"] == request_id
     assert fake_store.lifecycle_calls == [
         ("inactive_model", "activate"),
@@ -1497,7 +1498,7 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
     ]
     assert fake_store.activation_audit_rows == []
     assert conflict_response.status_code == 200
-    assert conflict_response.json()["data"]["active_flag"] is True
+    assert conflict_response.json()["data"]["model"]["active_flag"] is True
     assert missing_response.status_code == 404
     _assert_error_envelope(
         missing_response.json(),
@@ -1529,7 +1530,7 @@ async def test_active_toggle_allows_model_admin_activation_and_sys_admin_deactiv
     assert deactivation.status_code == 200
     assert fake_store.models["inactive_model"]["active_flag"] is True
     assert fake_store.models["active_model"]["active_flag"] is False
-    assert deactivation.json()["data"]["active_flag"] is False
+    assert deactivation.json()["data"]["model"]["active_flag"] is False
     decisions = [
         response.json()["auth_policy_decisions"][0]
         for response in (activation, deactivation)
@@ -1541,6 +1542,28 @@ async def test_active_toggle_allows_model_admin_activation_and_sys_admin_deactiv
         ("models.activate", {"type": "model_instance", "id": "inactive_model"}, "allow"),
         ("models.deactivate", {"type": "model_instance", "id": "active_model"}, "allow"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_active_toggle_returns_blocked_lifecycle_evidence(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/api/v1/models/active_model/active",
+            json={"active": False},
+            headers={"X-User-Role": "model_admin", "X-User-ID": "model-admin"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "blocked"
+    assert data["operation"] == "deactivate"
+    assert data["model"]["active_flag"] is True
+    assert data["audit_reference"] == {"entity_type": "model_instance", "entity_id": "active_model", "log_id": 1}
+    assert {item["code"] for item in data["preflight"]["blockers"]} == {"MISSING_ACTIVE_RISK"}
+    assert fake_store.models["active_model"]["active_flag"] is True
 
 
 @pytest.mark.asyncio
@@ -1572,7 +1595,7 @@ async def test_basins_inactive_model_listing_then_explicit_activation(fake_store
     assert "inactive_model" in _model_ids(default_after.json())
     assert "inactive_model" not in _model_ids(inactive_after.json())
 
-    activated = activation.json()["data"]
+    activated = activation.json()["data"]["model"]
     assert activated["active_flag"] is True
     assert activated["resource_profile"] == {
         "basin_slug": "basin-a",
@@ -1872,6 +1895,32 @@ def test_model_package_uri_missing_package_error_redacts_local_path(
     assert str(tmp_path) not in str(exc_info.value)
 
 
+@pytest.mark.asyncio
+async def test_create_model_rejects_active_flag_payload_before_store_call(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models",
+            headers=_model_admin_headers(),
+            json={
+                "model_id": "active_create",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "basin_rivnet_v01",
+                "mesh_version_id": "basin_mesh_v01",
+                "calibration_version_id": "basin_cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/active_create/package/",
+                "active_flag": True,
+            },
+        )
+
+    assert response.status_code == 422
+    assert fake_store.write_calls == []
+    assert "active_flag=true is not accepted" in response.text
+
+
 def test_create_model_rejects_mesh_version_from_different_basin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1919,6 +1968,40 @@ def test_create_model_rejects_mesh_version_from_different_basin(
         )
 
     assert not any("INSERT INTO core.model_instance" in statement for statement in cursor.statements)
+
+
+def test_create_model_rejects_active_flag_before_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered_transaction = [0]
+
+    class FakeTransaction:
+        def __enter__(self) -> object:
+            entered_transaction[0] += 1
+            return object()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+
+    with pytest.raises(InvalidPayloadError, match="active_flag=true is not accepted"):
+        store.create_model(
+            {
+                "model_id": "demo_model",
+                "basin_version_id": "basin_v01",
+                "river_network_version_id": "rivnet_v01",
+                "mesh_version_id": "mesh_v01",
+                "calibration_version_id": "cal_v01",
+                "shud_code_version": "2.0",
+                "model_package_uri": "s3://nhms/models/demo/package/",
+                "active_flag": True,
+            },
+            trusted_internal=True,
+        )
+
+    assert entered_transaction == [0]
 
 
 class _RegistryAdminWriteFakeCursor:
@@ -2436,6 +2519,9 @@ def test_preflight_model_operation_uses_policy_roles_for_missing_active_override
     assert {item["code"] for item in model_admin_preflight["blockers"]} == {"OVERRIDE_REQUIRES_SYS_ADMIN"}
     assert sys_admin_preflight["status"] == "ready"
     assert sys_admin_preflight["blockers"] == []
+    assert sys_admin_preflight["action_id"] == "models.deactivate"
+    assert sys_admin_preflight["actor_id"] == "sys-admin"
+    assert sys_admin_preflight["roles"] == ["sys_admin"]
 
 
 def test_set_model_active_missing_does_not_write_legacy_audit(

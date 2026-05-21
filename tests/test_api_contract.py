@@ -198,10 +198,12 @@ def test_model_active_contract_accepts_active_and_active_flag() -> None:
 
     assert active_response.status_code == 200
     assert active_response.json()["status"] == "ok"
-    assert active_response.json()["data"]["active_flag"] is True
+    assert active_response.json()["data"]["status"] == "allowed"
+    assert active_response.json()["data"]["model"]["active_flag"] is True
     assert active_flag_response.status_code == 200
     assert active_flag_response.json()["status"] == "ok"
-    assert active_flag_response.json()["data"]["active_flag"] is False
+    assert active_flag_response.json()["data"]["status"] == "allowed"
+    assert active_flag_response.json()["data"]["model"]["active_flag"] is False
     assert store.calls == [("model_1", True), ("model_1", False)]
 
 

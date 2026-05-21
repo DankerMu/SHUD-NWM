@@ -103,7 +103,10 @@ class ModelCreatePayload(BaseModel):
     autoshud_code_version: str | None = None
     container_image: str | None = None
     model_package_uri: str
-    active_flag: bool = False
+    active_flag: bool = Field(
+        default=False,
+        description="Must be false on creation; activate models through the lifecycle operation endpoint.",
+    )
     resource_profile: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("model_package_uri")
@@ -112,6 +115,13 @@ class ModelCreatePayload(BaseModel):
         if not value.strip():
             raise ValueError("model_package_uri is required")
         return value
+
+    @field_validator("active_flag")
+    @classmethod
+    def _active_flag_must_not_create_active(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("active_flag=true is not accepted when creating models; use lifecycle activate")
+        return False
 
 
 class ActiveFlagPayload(BaseModel):
@@ -484,10 +494,7 @@ def set_model_active(
             policy_decision=policy_decision,
             request_id=getattr(request.state, "request_id", None),
         )
-        return _ok(
-            request,
-            result["model"],
-        )
+        return _ok(request, result)
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:

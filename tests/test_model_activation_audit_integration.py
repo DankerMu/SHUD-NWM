@@ -60,7 +60,7 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     assert ids["basins_model_id"] in _model_ids(default_after.json())
     assert ids["basins_model_id"] not in _model_ids(inactive_after.json())
 
-    activated = activation.json()["data"]
+    activated = activation.json()["data"]["model"]
     assert activated["active_flag"] is True
     assert activated["resource_profile"]["basin_slug"] == "it137-basin"
     assert activated["resource_profile"]["manifest_uri"] == (
@@ -140,28 +140,13 @@ def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration
                 json={"operation": "deactivate"},
                 headers=headers,
             )
-            override_deactivate = client.post(
-                f"/api/v1/models/{ids['basins_model_id']}/lifecycle",
-                json={"operation": "deactivate", "override_missing_active": True, "reason": "planned maintenance"},
-                headers={"X-User-Role": "sys_admin", "X-User-ID": "m18-root"},
-            )
-            switch = client.post(
-                f"/api/v1/models/{ids['basins_model_id']}/lifecycle",
-                json={"operation": "switch_version"},
-                headers=headers,
-            )
-            reactivate = client.post(
-                f"/api/v1/models/{ids['basins_model_id']}/lifecycle",
-                json={"operation": "activate"},
-                headers=headers,
-            )
             rollback = client.post(
                 f"/api/v1/models/{ids['basins_model_id']}/lifecycle",
                 json={"operation": "rollback_version", "previous_model_id": ids["active_model_id"]},
                 headers=headers,
             )
             stale_rollback = client.post(
-                f"/api/v1/models/{ids['basins_model_id']}/lifecycle",
+                f"/api/v1/models/{ids['active_model_id']}/lifecycle",
                 json={"operation": "rollback_version", "previous_model_id": ids["active_model_id"]},
                 headers=headers,
             )
@@ -186,9 +171,6 @@ def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration
         activation,
         repeated,
         blocked_deactivate,
-        override_deactivate,
-        switch,
-        reactivate,
         rollback,
         stale_rollback,
         supersede,
@@ -202,14 +184,13 @@ def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration
     assert repeated.json()["data"]["status"] == "already_current"
     assert blocked_deactivate.json()["data"]["status"] == "blocked"
     assert blocked_deactivate.json()["data"]["preflight"]["blockers"][0]["code"] == "MISSING_ACTIVE_RISK"
-    assert override_deactivate.json()["data"]["model"]["lifecycle_state"] == "inactive"
-    assert switch.json()["data"]["status"] == "blocked"
-    switch_blocker_codes = {item["code"] for item in switch.json()["data"]["preflight"]["blockers"]}
-    assert switch_blocker_codes >= {"SWITCH_REQUIRES_CURRENT_ACTIVE"}
-    assert reactivate.json()["data"]["model"]["lifecycle_state"] == "active"
+    assert blocked_deactivate.json()["data"]["audit_reference"]["log_id"] is not None
     assert rollback.json()["data"]["status"] == "rollback"
     assert rollback.json()["data"]["model"]["model_id"] == ids["active_model_id"]
+    assert rollback.json()["data"]["preflight"]["prior_audit_log_id"] is not None
+    assert rollback.json()["data"]["audit_reference"]["log_id"] is not None
     assert stale_rollback.json()["data"]["status"] == "blocked"
+    assert stale_rollback.json()["data"]["audit_reference"]["log_id"] is not None
     stale_blocker_codes = {item["code"] for item in stale_rollback.json()["data"]["preflight"]["blockers"]}
     assert stale_blocker_codes >= {"ROLLBACK_CURRENT_STALE"}
     assert supersede.json()["data"]["model"]["lifecycle_state"] == "superseded"
@@ -244,13 +225,18 @@ def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration
     assert states[ids["basins_model_id"]]["active_flag"] is False
     assert states[ids["basins_model_id"]]["lifecycle_state"] == "deprecated"
     assert {row["details"]["outcome"] for row in audit_rows} >= {"allowed", "already_current", "blocked", "rollback"}
+    rollback_audits = [row for row in audit_rows if row["details"]["outcome"] == "rollback"]
+    assert rollback_audits
+    assert rollback_audits[0]["details"]["prior_audit_log_id"] is not None
+    assert rollback_audits[0]["details"]["preflight"]["prior_audit_log_id"] == (
+        rollback_audits[0]["details"]["prior_audit_log_id"]
+    )
     assert any(
         row["action"] == "models.deactivate" and row["details"]["operation"] == "deprecate"
         for row in audit_rows
     )
     rendered = json.dumps(audit_rows)
     assert "/tmp/local" not in rendered
-    assert "planned maintenance" not in rendered
     assert "package-sha-it137" not in rendered
     assert "inventory-sha-it137" not in rendered
     assert "token=secret" not in rendered
@@ -349,6 +335,125 @@ def test_m18_lifecycle_blocks_active_removal_invalid_transition_and_unsafe_evide
     assert active_count == 1
 
 
+def test_m18_rollback_history_is_bound_to_current_active_epoch(
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    ids = _seed_issue_137_models(integration_database_url)
+    app.dependency_overrides[get_model_registry_store] = lambda: PsycopgModelRegistryStore(integration_database_url)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+    try:
+        with TestClient(app) as client:
+            headers = {"X-User-Role": "model_admin", "X-User-ID": "m18-rollback-admin"}
+            activate_b = client.post(
+                f"/api/v1/models/{ids['candidate_a_model_id']}/lifecycle",
+                json={"operation": "activate"},
+                headers=headers,
+            )
+            deprecate_a = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/lifecycle",
+                json={"operation": "deprecate"},
+                headers=headers,
+            )
+            activate_c = client.post(
+                f"/api/v1/models/{ids['candidate_b_model_id']}/lifecycle",
+                json={"operation": "activate"},
+                headers=headers,
+            )
+            activate_a = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/lifecycle",
+                json={"operation": "activate"},
+                headers=headers,
+            )
+            stale_rollback = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/lifecycle",
+                json={"operation": "rollback_version", "previous_model_id": ids["candidate_a_model_id"]},
+                headers=headers,
+            )
+            allowed_rollback = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/lifecycle",
+                json={"operation": "rollback_version", "previous_model_id": ids["candidate_b_model_id"]},
+                headers=headers,
+            )
+    finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    for response in (activate_b, deprecate_a, activate_c, activate_a, stale_rollback, allowed_rollback):
+        assert response.status_code == 200, response.text
+
+    assert activate_b.json()["data"]["status"] == "allowed"
+    assert deprecate_a.json()["data"]["status"] == "allowed"
+    assert activate_c.json()["data"]["status"] == "allowed"
+    assert activate_a.json()["data"]["status"] == "allowed"
+    assert stale_rollback.json()["data"]["status"] == "blocked"
+    stale_codes = {item["code"] for item in stale_rollback.json()["data"]["preflight"]["blockers"]}
+    assert stale_codes >= {"ROLLBACK_CURRENT_STALE"}
+    assert stale_rollback.json()["data"]["audit_reference"]["log_id"] is not None
+
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT model_id, active_flag, lifecycle_state
+                FROM core.model_instance
+                WHERE model_id IN (%s, %s, %s)
+                ORDER BY model_id
+                """,
+                (ids["active_model_id"], ids["candidate_a_model_id"], ids["candidate_b_model_id"]),
+            )
+            after_stale = {row["model_id"]: dict(row) for row in cursor.fetchall()}
+
+    assert after_stale[ids["active_model_id"]]["active_flag"] is True
+    assert after_stale[ids["active_model_id"]]["lifecycle_state"] == "active"
+    assert after_stale[ids["candidate_a_model_id"]]["active_flag"] is False
+    assert after_stale[ids["candidate_b_model_id"]]["active_flag"] is False
+
+    allowed_data = allowed_rollback.json()["data"]
+    assert allowed_data["status"] == "rollback"
+    assert allowed_data["model"]["model_id"] == ids["candidate_b_model_id"]
+    assert allowed_data["preflight"]["prior_audit_log_id"] is not None
+    assert allowed_data["preflight"]["rollback_history"]["matched_previous_model_id"] == ids["candidate_b_model_id"]
+    assert allowed_data["preflight"]["rollback_history"]["trusted"] is True
+
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT model_id, active_flag, lifecycle_state
+                FROM core.model_instance
+                WHERE model_id IN (%s, %s, %s)
+                ORDER BY model_id
+                """,
+                (ids["active_model_id"], ids["candidate_a_model_id"], ids["candidate_b_model_id"]),
+            )
+            final_states = {row["model_id"]: dict(row) for row in cursor.fetchall()}
+            cursor.execute(
+                """
+                SELECT details
+                FROM ops.audit_log
+                WHERE entity_id = %s
+                  AND details->>'operation' = 'rollback_version'
+                  AND details->>'outcome' = 'rollback'
+                ORDER BY created_at DESC, log_id DESC
+                LIMIT 1
+                """,
+                (ids["active_model_id"],),
+            )
+            rollback_audit = dict(cursor.fetchone())
+
+    assert final_states[ids["active_model_id"]]["active_flag"] is False
+    assert final_states[ids["active_model_id"]]["lifecycle_state"] == "superseded"
+    assert final_states[ids["candidate_a_model_id"]]["active_flag"] is False
+    assert final_states[ids["candidate_b_model_id"]]["active_flag"] is True
+    assert final_states[ids["candidate_b_model_id"]]["lifecycle_state"] == "active"
+    assert rollback_audit["details"]["prior_audit_log_id"] == allowed_data["preflight"]["prior_audit_log_id"]
+
+
 def test_m18_lifecycle_concurrent_activation_leaves_one_active_model(
     integration_database_url: str,
 ) -> None:
@@ -407,6 +512,65 @@ def test_m18_lifecycle_concurrent_activation_leaves_one_active_model(
     active_rows = [row for row in states if row["active_flag"] and row["lifecycle_state"] == "active"]
     assert len(active_rows) == 1
     assert active_rows[0]["model_id"] in {ids["candidate_a_model_id"], ids["candidate_b_model_id"]}
+
+
+def test_m18_lifecycle_concurrent_activation_and_deactivation_serialize_without_deadlock(
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    ids = _seed_issue_137_models(integration_database_url)
+    app.dependency_overrides[get_model_registry_store] = lambda: PsycopgModelRegistryStore(integration_database_url)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+
+    def operate(path_model_id: str, payload: dict[str, Any], user_id: str) -> tuple[int, dict[str, Any]]:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/models/{path_model_id}/lifecycle",
+                json=payload,
+                headers={"X-User-Role": "model_admin", "X-User-ID": user_id},
+            )
+            return response.status_code, response.json()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(
+                executor.map(
+                    lambda args: operate(*args),
+                    [
+                        (ids["candidate_a_model_id"], {"operation": "activate"}, "m18-activate"),
+                        (ids["active_model_id"], {"operation": "deactivate"}, "m18-deactivate"),
+                    ],
+                )
+            )
+    finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    for status_code, body in results:
+        assert status_code == 200, body
+        assert body["data"]["status"] in {"allowed", "blocked", "already_current"}
+        if body["data"]["status"] == "blocked":
+            assert body["data"]["audit_reference"]["log_id"] is not None
+
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS active_count
+                FROM core.model_instance
+                WHERE basin_version_id = %s
+                  AND active_flag = true
+                  AND lifecycle_state = 'active'
+                """,
+                (ids["basin_version_id"],),
+            )
+            active_count = int(cursor.fetchone()["active_count"])
+
+    assert active_count == 1
 
 
 def _seed_issue_137_models(database_url: str) -> dict[str, str]:

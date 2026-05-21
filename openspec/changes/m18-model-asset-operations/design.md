@@ -25,9 +25,9 @@ Current model registry supports Basins-backed discovery/import and active model 
 
 | Operation | From | To | Notes |
 |---|---|---|---|
-| activate | inactive/deprecated | active | Supersedes the prior active model in the same scope atomically. |
+| activate | inactive/deprecated/superseded | active | Supersedes the prior active model in the same scope atomically. |
 | deactivate | active | inactive | Blocked if the scope requires an active model and no replacement/override is present. |
-| switch_version | inactive/deprecated candidate + active current | candidate active, current superseded | Equivalent to activate with explicit previous-active audit. |
+| switch_version | inactive/deprecated/superseded candidate + active current | candidate active, current superseded | Equivalent to activate with explicit previous-active audit. |
 | rollback_version | current active + prior superseded/inactive | prior active, current superseded | Requires trustworthy prior audit/history. |
 | supersede | active/inactive/deprecated | superseded | Used when replaced by a newer active model; historical queries remain valid. |
 | deprecate | inactive/superseded | deprecated | Marks a model not recommended for future activation without deleting it. |

@@ -595,6 +595,10 @@ class PsycopgModelRegistryStore:
             policy_decision=policy_decision,
             trusted_internal=trusted_internal,
         )
+        if bool(payload.get("active_flag", False)):
+            raise InvalidPayloadError(
+                "active_flag=true is not accepted when creating models; use a lifecycle activate operation."
+            )
         with self._transaction() as cursor:
             if not self._exists(cursor, "core.basin_version", "basin_version_id", payload["basin_version_id"]):
                 raise InvalidReferenceError(f"basin_version_id does not exist: {payload['basin_version_id']}")
@@ -658,8 +662,8 @@ class PsycopgModelRegistryStore:
                     payload.get("autoshud_code_version"),
                     payload.get("container_image"),
                     payload["model_package_uri"],
-                    bool(payload.get("active_flag", False)),
-                    "active" if bool(payload.get("active_flag", False)) else "inactive",
+                    False,
+                    "inactive",
                     self._json(payload.get("resource_profile") or {}),
                 ),
             )
@@ -720,13 +724,15 @@ class PsycopgModelRegistryStore:
                 raise MissingResourceError(f"model_id not found: {previous_model_id}")
             history = self._fetch_trustworthy_rollback_history(
                 cursor,
-                current_model_id=model_id,
+                current_model=model,
                 previous_model_id=previous_model_id,
             )
         return self._build_model_operation_preflight(
             model=model,
             current_active=active,
             operation=operation,
+            action_id=action_id,
+            actor_id=decision.actor_id,
             request_id=request_id,
             previous_model=previous,
             rollback_history=history,
@@ -772,27 +778,55 @@ class PsycopgModelRegistryStore:
             raise ModelRegistryError(decision.reason)
 
         with self._transaction() as cursor:
-            model = self._fetch_model_lifecycle_row(cursor, model_id, for_update=True)
-            if model is None:
+            unlocked_model = self._fetch_model_lifecycle_row(cursor, model_id, for_update=False)
+            if unlocked_model is None:
                 raise MissingResourceError(f"model_id not found: {model_id}")
-            self._lock_basin_version_scope(cursor, str(model["basin_version_id"]))
-            current_active = self._fetch_active_model_for_scope(cursor, str(model["basin_version_id"]), for_update=True)
-            previous = (
-                self._fetch_model_lifecycle_row(cursor, previous_model_id, for_update=True)
+            self._lock_basin_version_scope(cursor, str(unlocked_model["basin_version_id"]))
+            unlocked_current_active = self._fetch_active_model_for_scope(
+                cursor,
+                str(unlocked_model["basin_version_id"]),
+                for_update=False,
+            )
+            unlocked_previous = (
+                self._fetch_model_lifecycle_row(cursor, previous_model_id, for_update=False)
                 if previous_model_id is not None
                 else None
             )
-            if previous_model_id is not None and previous is None:
+            if previous_model_id is not None and unlocked_previous is None:
                 raise MissingResourceError(f"model_id not found: {previous_model_id}")
+            lock_ids = {
+                str(unlocked_model["model_id"]),
+                *(
+                    [str(unlocked_current_active["model_id"])]
+                    if unlocked_current_active is not None
+                    else []
+                ),
+                *([str(unlocked_previous["model_id"])] if unlocked_previous is not None else []),
+            }
+            locked_rows: dict[str, dict[str, Any]] = {}
+            for locked_model_id in sorted(lock_ids):
+                locked = self._fetch_model_lifecycle_row(cursor, locked_model_id, for_update=True)
+                if locked is None:
+                    raise MissingResourceError(f"model_id not found: {locked_model_id}")
+                locked_rows[locked_model_id] = locked
+            model = locked_rows[str(unlocked_model["model_id"])]
+            current_active = (
+                locked_rows.get(str(unlocked_current_active["model_id"]))
+                if unlocked_current_active is not None
+                else None
+            )
+            previous = locked_rows.get(str(unlocked_previous["model_id"])) if unlocked_previous is not None else None
             rollback_history = self._fetch_trustworthy_rollback_history(
                 cursor,
-                current_model_id=model_id,
+                current_model=model,
                 previous_model_id=previous_model_id,
             )
             preflight = self._build_model_operation_preflight(
                 model=model,
                 current_active=current_active,
                 operation=operation,
+                action_id=action_id,
+                actor_id=decision.actor_id,
                 request_id=request_id,
                 previous_model=previous,
                 rollback_history=rollback_history,
@@ -801,7 +835,7 @@ class PsycopgModelRegistryStore:
                 actor_roles=decision.roles,
             )
             if preflight["status"] == "blocked":
-                self._insert_model_lifecycle_audit(
+                audit_id = self._insert_model_lifecycle_audit(
                     cursor,
                     model=model,
                     updated=model,
@@ -818,7 +852,7 @@ class PsycopgModelRegistryStore:
                     "operation": operation,
                     "model": _model_public_projection(model),
                     "preflight": preflight,
-                    "audit_reference": None,
+                    "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
                 }
 
             transition = self._apply_model_lifecycle_transition(
@@ -1147,12 +1181,12 @@ class PsycopgModelRegistryStore:
         self,
         cursor: Any,
         *,
-        current_model_id: str,
+        current_model: Mapping[str, Any],
         previous_model_id: str | None,
     ) -> dict[str, Any] | None:
         if previous_model_id is None:
             return None
-        return self._fetch_optional(
+        row = self._fetch_optional(
             cursor,
             """
             SELECT log_id, action, entity_id, details, created_at
@@ -1160,19 +1194,46 @@ class PsycopgModelRegistryStore:
             WHERE entity_type = 'model_instance'
               AND action IN ('models.activate', 'models.switch_version', 'models.rollback_version')
               AND details->>'operation' IN ('activate', 'switch_version', 'rollback_version')
+              AND details->>'outcome' IN ('allowed', 'rollback')
+              AND details->>'basin_version_id' = %s
               AND (
                 entity_id = %s
-                OR details->'previous_model'->>'model_id' = %s
-              )
-              AND (
-                entity_id = %s
-                OR details->'previous_model'->>'model_id' = %s
+                OR details->'updated_model'->>'model_id' = %s
               )
             ORDER BY created_at DESC, log_id DESC
             LIMIT 1
             """,
-            (current_model_id, current_model_id, previous_model_id, previous_model_id),
+            (
+                str(current_model["basin_version_id"]),
+                str(current_model["model_id"]),
+                str(current_model["model_id"]),
+            ),
         )
+        if row is None:
+            return None
+        details = _json_mapping(row.get("details"))
+        previous_ref = _json_mapping(details.get("previous_model"))
+        new_state = _json_mapping(details.get("new_state"))
+        updated_ref = _json_mapping(details.get("updated_model"))
+        made_current_active = (
+            str(row.get("entity_id")) == str(current_model["model_id"])
+            or str(updated_ref.get("model_id")) == str(current_model["model_id"])
+        )
+        trusted = (
+            made_current_active
+            and str(previous_ref.get("model_id")) == str(previous_model_id)
+            and str(details.get("basin_version_id")) == str(current_model.get("basin_version_id"))
+            and bool(new_state.get("active")) is True
+            and str(new_state.get("lifecycle_state")) == "active"
+            and bool(current_model.get("active_flag")) is True
+            and _canonical_lifecycle_state(current_model) == "active"
+        )
+        row["trusted"] = trusted
+        row["prior_audit_log_id"] = row.get("log_id")
+        row["matched_previous_model_id"] = previous_ref.get("model_id")
+        if not trusted:
+            row["stale_reason"] = "latest_current_epoch_previous_mismatch"
+        return row
 
     def _build_model_operation_preflight(
         self,
@@ -1180,6 +1241,8 @@ class PsycopgModelRegistryStore:
         model: Mapping[str, Any],
         current_active: Mapping[str, Any] | None,
         operation: ModelLifecycleOperation,
+        action_id: str,
+        actor_id: str,
         request_id: str,
         previous_model: Mapping[str, Any] | None,
         rollback_history: Mapping[str, Any] | None,
@@ -1293,18 +1356,30 @@ class PsycopgModelRegistryStore:
                 blockers.append(
                     _preflight_blocker("ROLLBACK_HISTORY_MISSING", "No trustworthy prior active audit history exists.")
                 )
+            elif not bool(rollback_history.get("trusted")):
+                blockers.append(
+                    _preflight_blocker(
+                        "ROLLBACK_CURRENT_STALE",
+                        "Rollback history is stale for the current active epoch.",
+                    )
+                )
 
         status = "blocked" if blockers else "ready"
         return {
             "schema": "nhms.model_operation_preflight.v1",
             "request_id": request_id,
             "operation": operation,
+            "action_id": action_id,
+            "actor_id": actor_id,
+            "roles": list(actor_roles),
             "status": status,
             "basin_id": model.get("basin_id"),
             "basin_version_id": model.get("basin_version_id"),
             "model_id": model.get("model_id"),
             "current_active_model_id": current_active_id,
             "previous_model_id": previous_model.get("model_id") if previous_model else None,
+            "prior_audit_log_id": rollback_history.get("prior_audit_log_id") if rollback_history else None,
+            "rollback_history": _rollback_history_preflight_reference(rollback_history),
             "river_network_version_id": model.get("river_network_version_id"),
             "mesh_version_id": model.get("mesh_version_id"),
             "lineage": redact_audit_payload(
@@ -1356,7 +1431,7 @@ class PsycopgModelRegistryStore:
         if operation in {"activate", "switch_version"}:
             if lifecycle_state == "active" and bool(model.get("active_flag")):
                 return {"outcome": "already_current", "model": dict(model), "previous_model": current_active}
-            if lifecycle_state not in {"inactive", "deprecated"}:
+            if lifecycle_state not in {"inactive", "deprecated", "superseded"}:
                 raise InvalidPayloadError(f"Invalid {operation} transition from {lifecycle_state}.")
             if current_active and current_active["model_id"] != model["model_id"]:
                 self._update_model_lifecycle_state(cursor, str(current_active["model_id"]), "superseded")
@@ -1446,6 +1521,8 @@ class PsycopgModelRegistryStore:
                 "reason": REDACTED_REASON if reason else None,
                 "preflight": preflight,
                 "previous_model": _model_audit_reference(previous_model),
+                "updated_model": _model_audit_reference(updated),
+                "prior_audit_log_id": preflight.get("prior_audit_log_id"),
             },
         )
         details.update(
@@ -1458,6 +1535,8 @@ class PsycopgModelRegistryStore:
                 "mesh_version_id": model.get("mesh_version_id"),
                 "model_package_uri": _sanitize_audit_uri(model.get("model_package_uri")),
                 "previous_model": _model_audit_reference(previous_model),
+                "updated_model": _model_audit_reference(updated),
+                "prior_audit_log_id": preflight.get("prior_audit_log_id"),
                 "preflight": preflight,
                 "reason": REDACTED_REASON if reason else None,
             }
@@ -1759,12 +1838,12 @@ def _transition_blocker(
     if operation == "activate":
         if lifecycle_state == "active" and current_active_id == model_id:
             return None
-        if lifecycle_state not in {"inactive", "deprecated"}:
+        if lifecycle_state not in {"inactive", "deprecated", "superseded"}:
             return _preflight_blocker("INVALID_TRANSITION", f"activate is not allowed from {lifecycle_state}.")
     elif operation == "switch_version":
         if lifecycle_state == "active" and current_active_id == model_id:
             return None
-        if lifecycle_state not in {"inactive", "deprecated"}:
+        if lifecycle_state not in {"inactive", "deprecated", "superseded"}:
             return _preflight_blocker("INVALID_TRANSITION", f"switch_version is not allowed from {lifecycle_state}.")
     elif operation == "deactivate":
         if lifecycle_state not in {"active", "inactive"}:
@@ -1854,6 +1933,19 @@ def _model_audit_reference(model: Mapping[str, Any] | None) -> dict[str, Any] | 
         "basin_version_id": model.get("basin_version_id"),
         "lifecycle_state": model.get("lifecycle_state"),
         "active_flag": bool(model.get("active_flag")),
+    }
+
+
+def _rollback_history_preflight_reference(history: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if history is None:
+        return None
+    return {
+        "prior_audit_log_id": history.get("prior_audit_log_id") or history.get("log_id"),
+        "action": history.get("action"),
+        "entity_id": history.get("entity_id"),
+        "trusted": bool(history.get("trusted")),
+        "matched_previous_model_id": history.get("matched_previous_model_id"),
+        "stale_reason": history.get("stale_reason"),
     }
 
 

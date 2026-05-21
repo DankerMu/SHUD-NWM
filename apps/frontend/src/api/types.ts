@@ -165,7 +165,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set active model flag */
+        /** Set active model flag through lifecycle operation */
         put: operations["setModelActive"];
         post?: never;
         delete?: never;
@@ -826,6 +826,9 @@ export interface components {
             schema: string;
             request_id?: string | null;
             operation: string;
+            action_id?: string | null;
+            actor_id?: string | null;
+            roles?: string[];
             /** @enum {string} */
             status: "ready" | "blocked";
             model_id: string;
@@ -833,6 +836,10 @@ export interface components {
             basin_version_id?: string | null;
             current_active_model_id?: string | null;
             previous_model_id?: string | null;
+            prior_audit_log_id?: number | null;
+            rollback_history?: {
+                [key: string]: unknown;
+            } | null;
             river_network_version_id?: string | null;
             mesh_version_id?: string | null;
             lineage?: {
@@ -1849,14 +1856,14 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Updated model instance */
+            /** @description Lifecycle operation result */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelInstance"];
+                        data: components["schemas"]["ModelLifecycleResult"];
                     };
                 };
             };

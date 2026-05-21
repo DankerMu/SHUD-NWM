@@ -323,7 +323,7 @@ paths:
   /api/v1/models/{model_id}/active:
     put:
       operationId: setModelActive
-      summary: Set active model flag
+      summary: Set active model flag through lifecycle operation
       tags: [models]
       parameters:
         - $ref: "#/components/parameters/ModelId"
@@ -342,7 +342,7 @@ paths:
                     also accepted by the backend for backward compatibility.
       responses:
         "200":
-          description: Updated model instance
+          description: Lifecycle operation result
           content:
             application/json:
               schema:
@@ -352,7 +352,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        $ref: "#/components/schemas/ModelInstance"
+                        $ref: "#/components/schemas/ModelLifecycleResult"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -2046,6 +2046,16 @@ components:
           nullable: true
         operation:
           type: string
+        action_id:
+          type: string
+          nullable: true
+        actor_id:
+          type: string
+          nullable: true
+        roles:
+          type: array
+          items:
+            type: string
         status:
           type: string
           enum: [ready, blocked]
@@ -2063,6 +2073,13 @@ components:
         previous_model_id:
           type: string
           nullable: true
+        prior_audit_log_id:
+          type: integer
+          nullable: true
+        rollback_history:
+          type: object
+          nullable: true
+          additionalProperties: true
         river_network_version_id:
           type: string
           nullable: true
