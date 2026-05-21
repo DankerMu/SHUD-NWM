@@ -910,16 +910,21 @@ preconditions, command or drill identity/command metadata, and an executed
 result. Slurm/object-store/source/E2E/MVT dependency receipts must name the
 expected dependency and bind to the producer contract: producer issue, producer
 schema, producer run ID, producer artifact/path/ref, checksum or receipt ID,
-target environment, and live proof mode. When a deterministic producer
-`summary.json` is supplied, the dependency receipt producer run ID, artifact
-ref, and checksum must match that consumed summary. The deterministic producer
-`summary.json` alone does not satisfy live proof. Target-environment receipts
-must include a concrete environment/config identifier and meaningful target
-configuration metadata. Wrong schema, wrong surface, stale run ID,
-deterministic mode, sibling dependency issue/schema/name, missing target,
-missing provenance/artifacts/checksum/ref/run ID, malformed JSON, over-size
-JSON, or deeply nested JSON remains `release_blocked` with redacted bounded
-evidence.
+target environment, and live proof mode. Top-level producer binding fields and
+nested `provenance` binding fields are validated as one canonical receipt
+contract: when both surfaces provide dependency, producer issue/schema/run ID,
+artifact ref/path/URI, checksum, or receipt ID, they must agree after
+normalization. Sibling or contradictory nested provenance is a release blocker
+even if the top-level fields are otherwise valid. When a deterministic producer
+`summary.json` is supplied, every provided top-level and nested provenance run
+ID, artifact ref, and checksum binding must also match that consumed summary.
+The deterministic producer `summary.json` alone does not satisfy live proof.
+Target-environment receipts must include a concrete environment/config
+identifier and meaningful target configuration metadata. Wrong schema, wrong
+surface, stale run ID, deterministic mode, sibling dependency issue/schema/name,
+contradictory provenance, missing target, missing
+provenance/artifacts/checksum/ref/run ID, malformed JSON, over-size JSON, or
+deeply nested JSON remains `release_blocked` with redacted bounded evidence.
 
 Evidence is written under
 `artifacts/production-closure/<run_id>/readiness/`:

@@ -410,7 +410,7 @@ def test_wrong_surface_target_schema_or_deterministic_mode_blocks_live_receipt(
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
-def test_embedded_local_paths_are_redacted_from_receipts_and_stdout(
+def test_embedded_local_path_values_and_keys_are_redacted_from_receipts_and_stdout(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -419,6 +419,23 @@ def test_embedded_local_paths_are_redacted_from_receipts_and_stdout(
     windows_path = r"C:\Users\release\secret\proof.json"
     unc_path = r"\\prod-share\release\proof.json"
     file_uri = "file:///var/lib/nhms/receipt.json"
+
+    auth_payload = json.loads(_auth_proof(allowed=["models.activate"], denied=[]))
+    auth_payload[unix_path] = "auth key path must be redacted"
+    alert_payload = json.loads(
+        _bound_proof(
+            "alert",
+            accepted=False,
+            status="failed",
+            message=f"failed reading {unix_path} {windows_path} {unc_path} {file_uri}",
+        )
+    )
+    alert_payload[windows_path] = "alert key path must be redacted"
+    slurm_payload = json.loads(_bound_proof("slurm", accepted=False, status="failed"))
+    slurm_payload[unc_path] = "dependency key path must be redacted"
+    target_env_payload = json.loads(_bound_proof("target_env", accepted=False, status="failed"))
+    target_env_payload[file_uri] = "target-env key path must be redacted"
+
     exit_code = slurm_validation.main(
         [
             "validate-readiness",
@@ -426,13 +443,14 @@ def test_embedded_local_paths_are_redacted_from_receipts_and_stdout(
             str(root),
             "--run-id",
             "m19",
+            "--auth-proof",
+            json.dumps(auth_payload),
             "--alert-proof",
-            _bound_proof(
-                "alert",
-                accepted=False,
-                status="failed",
-                message=f"failed reading {unix_path} {windows_path} {unc_path} {file_uri}",
-            ),
+            json.dumps(alert_payload),
+            "--slurm-proof",
+            json.dumps(slurm_payload),
+            "--target-env-proof",
+            json.dumps(target_env_payload),
         ]
     )
 
@@ -444,6 +462,7 @@ def test_embedded_local_paths_are_redacted_from_receipts_and_stdout(
     for raw_path in (unix_path, windows_path, unc_path, file_uri):
         assert raw_path not in artifact_text
     assert "[redacted-path]" in artifact_text
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 @pytest.mark.parametrize(
@@ -594,6 +613,75 @@ def test_dependency_receipts_bind_to_consumed_producer_summary(
     assert item["status"] == "release_blocked"
     assert item["live_proof_accepted"] is False
     assert expected_error in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize("proof_key", sorted(DEPENDENCY_PROOFS))
+def test_dependency_receipts_reject_sibling_nested_provenance(
+    tmp_path: Path,
+    proof_key: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    producer_root = tmp_path / proof_key
+    sibling = "object_store" if proof_key != "object_store" else "slurm"
+    sibling_issue, sibling_schema = DEPENDENCY_CONTRACTS[sibling]
+    proof_arg = f"{proof_key}_proof" if proof_key != "object_store" else "object_store_proof"
+    evidence_root_arg = f"{proof_key}_evidence_root" if proof_key != "object_store" else "object_store_evidence_root"
+    receipt = _dependency_proof_bound_to_summary(
+        proof_key,
+        producer_root,
+        provenance={
+            "dependency": sibling,
+            "producer_issue": sibling_issue,
+            "producer_schema": sibling_schema,
+            "producer_run_id": f"{sibling}-live-run",
+            "producer_artifact_ref": f"{sibling}:summary.json",
+            "summary_checksum": "sha256:sibling",
+            "receipt_id": f"{sibling}-receipt-123",
+        },
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            **{evidence_root_arg: producer_root, proof_arg: receipt},
+        )
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == PROOF_SURFACES[proof_key])
+    errors = item["details"]["acceptance_errors"]["errors"]
+    assert item["status"] == "release_blocked"
+    assert item["live_proof_accepted"] is False
+    assert "provenance_dependency_mismatch" in errors
+    assert "provenance_producer_issue_mismatch" in errors
+    assert "provenance_producer_schema_mismatch" in errors
+    assert "provenance_producer_run_id_mismatch" in errors
+    assert "provenance_producer_artifact_ref_mismatch" in errors
+    assert "provenance_producer_checksum_or_receipt_id_mismatch" in errors
+    assert "provenance_summary_producer_run_id_mismatch" in errors
+    assert "provenance_summary_producer_artifact_ref_mismatch" in errors
+    assert "provenance_summary_producer_checksum_mismatch" in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_dependency_receipt_accepts_agreeing_top_level_provenance_and_summary(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    slurm_root = tmp_path / "slurm"
+    receipt = _dependency_proof_bound_to_summary("slurm", slurm_root)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            slurm_evidence_root=slurm_root,
+            slurm_proof=receipt,
+        )
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
+    assert item["status"] == "passed"
+    assert item["live_proof_accepted"] is True
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 

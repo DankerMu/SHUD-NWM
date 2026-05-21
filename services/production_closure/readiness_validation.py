@@ -1552,51 +1552,42 @@ def _dependency_receipt_errors(
     expected_dependency = str(PROOF_CONTRACTS[proof_key]["dependency"])
     contract = DEPENDENCY_SUMMARY_CONTRACTS[proof_key]
     provenance = payload.get("provenance") if isinstance(payload.get("provenance"), Mapping) else {}
-    dependency = _value_from(payload, ("dependency_surface", "dependency_name", "dependency"), fallback=provenance)
+    top_level_binding = _dependency_producer_binding(payload)
+    provenance_binding = _dependency_producer_binding(provenance)
+    binding_values = {
+        field: _coalesced_binding_value(top_level_binding, provenance_binding, field)
+        for field in (
+            "dependency",
+            "producer_issue",
+            "producer_schema",
+            "producer_run_id",
+            "producer_artifact_ref",
+            "producer_checksum_or_receipt_id",
+        )
+    }
+    errors.extend(_dependency_binding_consistency_errors(top_level_binding, provenance_binding))
+
+    dependency = binding_values["dependency"]
     if dependency != expected_dependency:
         errors.append("dependency_surface_mismatch")
 
-    producer_issue = _value_from(payload, ("producer_issue", "summary_issue"), fallback=provenance)
+    producer_issue = binding_values["producer_issue"]
     if not _issue_matches(producer_issue, contract["issue"]):
         errors.append("producer_issue_mismatch")
 
-    producer_schema = _value_from(payload, ("producer_schema", "summary_schema"), fallback=provenance)
+    producer_schema = binding_values["producer_schema"]
     if producer_schema != contract["schema"]:
         errors.append("producer_schema_mismatch")
 
-    producer_run_id = _value_from(payload, ("producer_run_id", "summary_run_id"), fallback=provenance)
+    producer_run_id = binding_values["producer_run_id"]
     if not _non_empty_string(producer_run_id):
         errors.append("missing_producer_run_id")
 
-    artifact_ref = _value_from(
-        payload,
-        (
-            "producer_artifact_ref",
-            "producer_artifact_path",
-            "producer_artifact_uri",
-            "summary_ref",
-            "summary_path",
-            "artifact_ref",
-            "artifact_path",
-            "artifact_uri",
-        ),
-        fallback=provenance,
-    )
+    artifact_ref = binding_values["producer_artifact_ref"]
     if not _non_empty_string(artifact_ref):
         errors.append("missing_producer_artifact_ref")
 
-    checksum_or_receipt = _value_from(
-        payload,
-        (
-            "summary_checksum",
-            "producer_checksum",
-            "checksum",
-            "digest",
-            "producer_receipt_id",
-            "receipt_id",
-        ),
-        fallback=provenance,
-    )
+    checksum_or_receipt = binding_values["producer_checksum_or_receipt_id"]
     if not _non_empty_string(checksum_or_receipt):
         errors.append("missing_producer_checksum_or_receipt_id")
 
@@ -1613,6 +1604,124 @@ def _dependency_receipt_errors(
             errors.append("producer_artifact_ref_mismatch")
         if checksum_or_receipt != binding.get("summary_checksum"):
             errors.append("producer_checksum_mismatch")
+        errors.extend(_dependency_binding_summary_errors(top_level_binding, binding, source="top_level"))
+        errors.extend(_dependency_binding_summary_errors(provenance_binding, binding, source="provenance"))
+    return errors
+
+
+def _coalesced_binding_value(
+    top_level_binding: Mapping[str, Any],
+    provenance_binding: Mapping[str, Any],
+    field: str,
+) -> Any:
+    top_value = top_level_binding.get(field)
+    if _has_meaningful_value(top_value):
+        return top_value
+    return provenance_binding.get(field)
+
+
+def _dependency_producer_binding(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "dependency": _normalized_binding_value(
+            _value_from(payload, ("dependency_surface", "dependency_name", "dependency")),
+            field="dependency",
+        ),
+        "producer_issue": _normalized_binding_value(
+            _value_from(payload, ("producer_issue", "summary_issue")),
+            field="producer_issue",
+        ),
+        "producer_schema": _normalized_binding_value(
+            _value_from(payload, ("producer_schema", "summary_schema")),
+            field="producer_schema",
+        ),
+        "producer_run_id": _normalized_binding_value(
+            _value_from(payload, ("producer_run_id", "summary_run_id")),
+            field="producer_run_id",
+        ),
+        "producer_artifact_ref": _normalized_binding_value(
+            _value_from(
+                payload,
+                (
+                    "producer_artifact_ref",
+                    "producer_artifact_path",
+                    "producer_artifact_uri",
+                    "summary_ref",
+                    "summary_path",
+                    "artifact_ref",
+                    "artifact_path",
+                    "artifact_uri",
+                ),
+            ),
+            field="producer_artifact_ref",
+        ),
+        "producer_checksum_or_receipt_id": _normalized_binding_value(
+            _value_from(
+                payload,
+                (
+                    "summary_checksum",
+                    "producer_checksum",
+                    "checksum",
+                    "digest",
+                    "producer_receipt_id",
+                    "receipt_id",
+                ),
+            ),
+            field="producer_checksum_or_receipt_id",
+        ),
+    }
+
+
+def _normalized_binding_value(value: Any, *, field: str) -> Any:
+    if value is None:
+        return None
+    if field == "producer_issue":
+        if isinstance(value, str):
+            return value.strip().lstrip("#")
+        return str(value).strip()
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
+def _dependency_binding_consistency_errors(
+    top_level_binding: Mapping[str, Any],
+    provenance_binding: Mapping[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    for binding_field, error in (
+        ("dependency", "provenance_dependency_mismatch"),
+        ("producer_issue", "provenance_producer_issue_mismatch"),
+        ("producer_schema", "provenance_producer_schema_mismatch"),
+        ("producer_run_id", "provenance_producer_run_id_mismatch"),
+        ("producer_artifact_ref", "provenance_producer_artifact_ref_mismatch"),
+        ("producer_checksum_or_receipt_id", "provenance_producer_checksum_or_receipt_id_mismatch"),
+    ):
+        top_value = top_level_binding.get(binding_field)
+        provenance_value = provenance_binding.get(binding_field)
+        if (
+            _has_meaningful_value(top_value)
+            and _has_meaningful_value(provenance_value)
+            and top_value != provenance_value
+        ):
+            errors.append(error)
+    return errors
+
+
+def _dependency_binding_summary_errors(
+    receipt_binding: Mapping[str, Any],
+    summary_binding: Mapping[str, Any],
+    *,
+    source: str,
+) -> list[str]:
+    errors: list[str] = []
+    for binding_field, summary_field, error_suffix in (
+        ("producer_run_id", "summary_run_id", "producer_run_id_mismatch"),
+        ("producer_artifact_ref", "producer_artifact_ref", "producer_artifact_ref_mismatch"),
+        ("producer_checksum_or_receipt_id", "summary_checksum", "producer_checksum_mismatch"),
+    ):
+        value = receipt_binding.get(binding_field)
+        if _has_meaningful_value(value) and value != summary_binding.get(summary_field):
+            errors.append(f"{source}_summary_{error_suffix}")
     return errors
 
 
@@ -1684,6 +1793,13 @@ def _find_summary_path(name: str, root: Path) -> Path:
 def _bounded_redacted_payload(value: Any, *, config: ProductionReadinessConfig) -> Any:
     nodes = 0
 
+    def redacted_key(key: Any) -> str:
+        current = str(key)
+        redacted = _redact_paths(current[:MAX_STRING_LENGTH], config=config)
+        if len(current) > MAX_STRING_LENGTH:
+            return f"{redacted}[truncated]"
+        return redacted
+
     def walk(current: Any, depth: int) -> Any:
         nonlocal nodes
         nodes += 1
@@ -1692,7 +1808,7 @@ def _bounded_redacted_payload(value: Any, *, config: ProductionReadinessConfig) 
         if depth > MAX_JSON_DEPTH:
             return "[truncated:max-depth]"
         if isinstance(current, Mapping):
-            return {str(key): walk(nested, depth + 1) for key, nested in current.items()}
+            return {redacted_key(key): walk(nested, depth + 1) for key, nested in current.items()}
         if isinstance(current, list):
             return [walk(item, depth + 1) for item in current[:MAX_JSON_NODES]]
         if isinstance(current, tuple):
