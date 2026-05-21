@@ -15,6 +15,20 @@ from services.production_closure.readiness_validation import (
     validate_readiness_item,
 )
 
+LIVE_SCHEMA = "nhms.production_readiness.live_proof.v1"
+PROOF_SURFACES = {
+    "auth": "live_backend_auth",
+    "alert": "live_alert_sink_delivery",
+    "rollback": "live_rollback_execution",
+    "slurm": "live_slurm_dependency_proof",
+    "object_store": "live_object_store_dependency_proof",
+    "source": "live_source_weather_dependency_proof",
+    "e2e": "live_e2e_dependency_proof",
+    "mvt": "live_mvt_performance_proof",
+    "target_env": "target_environment_config_proof",
+}
+DEPENDENCY_PROOFS = {"slurm", "object_store", "source", "e2e", "mvt"}
+
 
 def _summary(root: Path, run_id: str = "m19") -> dict[str, object]:
     return json.loads((root / run_id / "readiness" / "summary.json").read_text(encoding="utf-8"))
@@ -44,23 +58,80 @@ def _base_item(status: str, execution_mode: str) -> dict[str, object]:
     }
 
 
-def _proof(**extra: object) -> str:
-    payload = {"accepted": True, "status": "passed", **extra}
+def _bound_proof(proof_key: str, *, run_id: str = "m19", **extra: object) -> str:
+    payload: dict[str, object] = {
+        "schema": LIVE_SCHEMA,
+        "proof_type": "dependency" if proof_key in DEPENDENCY_PROOFS else proof_key,
+        "surface": PROOF_SURFACES[proof_key],
+        "run_id": run_id,
+        "target_environment": "production",
+        "execution_mode": "live_proof",
+        "accepted": True,
+        "status": "passed",
+        "artifact_refs": [f"evidence/{run_id}/{proof_key}/receipt.json"],
+    }
+    if proof_key in DEPENDENCY_PROOFS:
+        payload |= {
+            "dependency_surface": proof_key,
+            "provenance": {"producer_run_id": f"{proof_key}-live-run", "summary_checksum": "sha256:abc123"},
+        }
+    elif proof_key == "alert":
+        payload |= {
+            "sink_metadata": {"sink": "pagerduty-prod", "channel": "release-readiness"},
+            "delivery_metadata": {"message_id": "alert-123", "delivered_at": "2026-05-21T00:00:00Z"},
+            "delivered": True,
+        }
+    elif proof_key == "rollback":
+        payload |= {
+            "preconditions": {"backup_verified": True, "freeze_window": "approved"},
+            "command_metadata": {"command": "nhms-production rollback --dry-run=false", "drill_id": "rb-123"},
+            "executed": True,
+        }
+    elif proof_key == "target_env":
+        payload |= {
+            "config_metadata": {"cluster": "shudhpc", "object_store": "prod", "database": "prod-postgis"},
+            "config_receipt_id": "target-env-123",
+        }
+    payload |= extra
     return json.dumps(payload)
 
 
 def _auth_proof(*, allowed: list[str] | None = None, denied: list[str] | None = None, **extra: object) -> str:
-    payload = {
+    payload: dict[str, object] = {
+        "schema": LIVE_SCHEMA,
+        "proof_type": "auth",
+        "surface": "live_backend_auth",
+        "run_id": "m19",
+        "target_environment": "production",
+        "execution_mode": "live_proof",
+        "artifact_refs": ["evidence/m19/auth/receipt.json"],
+        "status": "passed",
         "accepted": True,
         "provider": {
             "issuer_url": "https://user:pass@idp.example.invalid/auth?token=secret",
             "client_secret": "super-secret",
         },
+        "role_mapping": {"operator": ["pipeline.retry_run"], "model_admin": ["models.activate"]},
         "allowed_actions": allowed or [],
         "denied_actions": denied or [],
         **extra,
     }
     return json.dumps(payload)
+
+
+def _all_live_proofs() -> dict[str, str]:
+    actions = _all_auth_actions()
+    return {
+        "auth_proof": _auth_proof(allowed=actions, denied=actions),
+        "alert_proof": _bound_proof("alert"),
+        "rollback_proof": _bound_proof("rollback"),
+        "slurm_proof": _bound_proof("slurm"),
+        "object_store_proof": _bound_proof("object_store"),
+        "source_proof": _bound_proof("source"),
+        "e2e_proof": _bound_proof("e2e"),
+        "mvt_proof": _bound_proof("mvt"),
+        "target_env_proof": _bound_proof("target_env"),
+    }
 
 
 def _all_auth_actions() -> list[str]:
@@ -215,22 +286,137 @@ def test_malformed_and_oversized_live_proofs_are_bounded_release_blockers(tmp_pa
     assert "Traceback" not in receipts
 
 
+@pytest.mark.parametrize(
+    ("proof_arg", "surface"),
+    [
+        ("alert_proof", "live_alert_sink_delivery"),
+        ("rollback_proof", "live_rollback_execution"),
+        ("slurm_proof", "live_slurm_dependency_proof"),
+        ("object_store_proof", "live_object_store_dependency_proof"),
+        ("source_proof", "live_source_weather_dependency_proof"),
+        ("e2e_proof", "live_e2e_dependency_proof"),
+        ("mvt_proof", "live_mvt_performance_proof"),
+        ("target_env_proof", "target_environment_config_proof"),
+    ],
+)
+@pytest.mark.parametrize("minimal", [{"accepted": True}, {"accepted": True, "status": "passed"}])
+def test_minimal_accepted_live_receipts_remain_release_blocked(
+    tmp_path: Path,
+    proof_arg: str,
+    surface: str,
+    minimal: dict[str, object],
+) -> None:
+    root = tmp_path / "artifacts"
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", **{proof_arg: json.dumps(minimal)})
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == surface)
+    assert item["status"] == "release_blocked"
+    assert item["execution_mode"] == "live_proof"
+    assert item["live_proof_accepted"] is False
+    assert "missing_artifact_or_evidence_refs" in item["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("proof_arg", "proof_key", "surface"),
+    [
+        ("alert_proof", "alert", "live_alert_sink_delivery"),
+        ("slurm_proof", "slurm", "live_slurm_dependency_proof"),
+        ("target_env_proof", "target_env", "target_environment_config_proof"),
+    ],
+)
+def test_wrong_surface_target_schema_or_deterministic_mode_blocks_live_receipt(
+    tmp_path: Path,
+    proof_arg: str,
+    proof_key: str,
+    surface: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    receipt = _bound_proof(
+        proof_key,
+        schema="nhms.production_readiness.live_proof.v0",
+        surface="live_sibling_surface",
+        run_id="stale-run",
+        target_environment="staging",
+        execution_mode="deterministic",
+    )
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", **{proof_arg: receipt}))
+
+    item = next(item for item in _items(root) if item["surface"] == surface)
+    errors = item["details"]["acceptance_errors"]["errors"]
+    assert item["status"] == "release_blocked"
+    assert item["live_proof_accepted"] is False
+    assert "schema_mismatch" in errors
+    assert "surface_mismatch" in errors
+    assert "run_id_mismatch" in errors
+    assert "target_environment_mismatch" in errors
+    assert "execution_mode_not_live_proof" in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_embedded_local_paths_are_redacted_from_receipts_and_stdout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "artifacts"
+    unix_path = "/tmp/nhms/private/proof.json"
+    windows_path = r"C:\Users\release\secret\proof.json"
+    unc_path = r"\\prod-share\release\proof.json"
+    file_uri = "file:///var/lib/nhms/receipt.json"
+    exit_code = slurm_validation.main(
+        [
+            "validate-readiness",
+            "--evidence-root",
+            str(root),
+            "--run-id",
+            "m19",
+            "--alert-proof",
+            _bound_proof(
+                "alert",
+                accepted=False,
+                status="failed",
+                message=f"failed reading {unix_path} {windows_path} {unc_path} {file_uri}",
+            ),
+        ]
+    )
+
+    assert exit_code == 0
+    combined = capsys.readouterr().out
+    artifact_text = combined + "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").iterdir()
+    )
+    for raw_path in (unix_path, windows_path, unc_path, file_uri):
+        assert raw_path not in artifact_text
+    assert "[redacted-path]" in artifact_text
+
+
+@pytest.mark.parametrize("proof_arg", ["auth_proof", "alert_proof"])
+def test_deep_live_proof_json_is_stable_release_blocker(tmp_path: Path, proof_arg: str) -> None:
+    root = tmp_path / "artifacts"
+    deep_json = "[" * 20000 + "0" + "]" * 20000
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", **{proof_arg: deep_json}))
+
+    surface = "live_backend_auth" if proof_arg == "auth_proof" else "live_alert_sink_delivery"
+    item = next(item for item in _items(root) if item["surface"] == surface)
+    assert item["status"] == "release_blocked"
+    assert item["execution_mode"] == "live_proof"
+    assert item["live_proof_accepted"] is False
+    receipts = (root / "m19" / "readiness" / "live_proof_receipts.json").read_text(encoding="utf-8")
+    assert len(receipts) < 20_000
+    assert "Traceback" not in receipts
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
 def test_all_live_receipts_accepted_claims_final_readiness(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
-    actions = _all_auth_actions()
     validate_readiness(
         ProductionReadinessConfig.from_env(
             evidence_root=root,
             run_id="m19",
-            auth_proof=_auth_proof(allowed=actions, denied=actions),
-            alert_proof=_proof(delivered=True),
-            rollback_proof=_proof(executed=True),
-            slurm_proof=_proof(),
-            object_store_proof=_proof(),
-            source_proof=_proof(),
-            e2e_proof=_proof(),
-            mvt_proof=_proof(),
-            target_env_proof=_proof(),
+            **_all_live_proofs(),
         )
     )
 
@@ -243,19 +429,13 @@ def test_all_live_receipts_accepted_claims_final_readiness(tmp_path: Path) -> No
 
 def test_any_required_live_blocker_keeps_final_readiness_false_and_lists_blocker(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
-    actions = _all_auth_actions()
+    proofs = _all_live_proofs()
+    proofs.pop("target_env_proof")
     validate_readiness(
         ProductionReadinessConfig.from_env(
             evidence_root=root,
             run_id="m19",
-            auth_proof=_auth_proof(allowed=actions, denied=actions),
-            alert_proof=_proof(delivered=True),
-            rollback_proof=_proof(executed=True),
-            slurm_proof=_proof(),
-            object_store_proof=_proof(),
-            source_proof=_proof(),
-            e2e_proof=_proof(),
-            mvt_proof=_proof(),
+            **proofs,
         )
     )
 
@@ -314,3 +494,22 @@ def test_consumes_existing_lane_summaries_without_changing_final_live_gate(tmp_p
     assert all(item["status"] == "passed" for item in consumed)
     assert all(item["execution_mode"] == "deterministic" for item in consumed)
     assert all(item["live_proof_accepted"] is False for item in consumed)
+
+
+def test_deep_dependency_summary_json_is_stable_blocked_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    summary_root = tmp_path / "slurm"
+    summary_root.mkdir()
+    (summary_root / "summary.json").write_text("[" * 20000 + "0" + "]" * 20000, encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_evidence_root=summary_root)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "slurm_production_like_evidence")
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["live_proof_accepted"] is False
+    artifacts = "\n".join(path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").iterdir())
+    assert "Traceback" not in artifacts
+    assert _summary(root)["final_production_readiness_claimed"] is False

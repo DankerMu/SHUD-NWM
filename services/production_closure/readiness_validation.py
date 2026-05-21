@@ -59,6 +59,14 @@ MAX_RECEIPT_PREVIEW_BYTES = 2048
 MAX_JSON_DEPTH = 16
 MAX_JSON_NODES = 1200
 MAX_STRING_LENGTH = 2048
+LIVE_PROOF_SCHEMA = "nhms.production_readiness.live_proof.v1"
+EXPECTED_TARGET_ENVIRONMENT = "production"
+PATH_TOKEN_RE = re.compile(
+    r"\bfile://(?:localhost)?/[^\s\"'<>),;]+"
+    r"|\\\\[^\s\"'<>),;]+\\[^\s\"'<>),;]+"
+    r"|\b[A-Za-z]:\\[^\s\"'<>),;]+"
+    r"|(?<![:/\w])/(?:[^\s\"'<>),;]+)"
+)
 
 DEPENDENCY_SUMMARY_CONTRACTS = {
     "slurm": {
@@ -115,6 +123,58 @@ PROOF_FILE_ENV = {
     "e2e": "NHMS_PRODUCTION_READINESS_E2E_PROOF_FILE",
     "mvt": "NHMS_PRODUCTION_READINESS_MVT_PROOF_FILE",
     "target_env": "NHMS_PRODUCTION_READINESS_TARGET_ENV_PROOF_FILE",
+}
+PROOF_CONTRACTS = {
+    "auth": {
+        "proof_type": "auth",
+        "surface": "live_backend_auth",
+        "allowed_statuses": {"passed"},
+    },
+    "alert": {
+        "proof_type": "alert",
+        "surface": "live_alert_sink_delivery",
+        "allowed_statuses": {"passed", "delivered"},
+    },
+    "rollback": {
+        "proof_type": "rollback",
+        "surface": "live_rollback_execution",
+        "allowed_statuses": {"passed", "executed"},
+    },
+    "slurm": {
+        "proof_type": "dependency",
+        "surface": "live_slurm_dependency_proof",
+        "dependency": "slurm",
+        "allowed_statuses": {"passed", "accepted", "ready"},
+    },
+    "object_store": {
+        "proof_type": "dependency",
+        "surface": "live_object_store_dependency_proof",
+        "dependency": "object_store",
+        "allowed_statuses": {"passed", "accepted", "ready"},
+    },
+    "source": {
+        "proof_type": "dependency",
+        "surface": "live_source_weather_dependency_proof",
+        "dependency": "source",
+        "allowed_statuses": {"passed", "accepted", "ready"},
+    },
+    "e2e": {
+        "proof_type": "dependency",
+        "surface": "live_e2e_dependency_proof",
+        "dependency": "e2e",
+        "allowed_statuses": {"passed", "accepted", "ready"},
+    },
+    "mvt": {
+        "proof_type": "dependency",
+        "surface": "live_mvt_performance_proof",
+        "dependency": "mvt",
+        "allowed_statuses": {"passed", "accepted", "ready"},
+    },
+    "target_env": {
+        "proof_type": "target_env",
+        "surface": "target_environment_config_proof",
+        "allowed_statuses": {"passed", "accepted", "ready"},
+    },
 }
 REQUIRED_AUTH_ACTIONS = frozenset(
     {
@@ -566,7 +626,14 @@ def _read_dependency_summary_item(name: str, root: Path, *, config: ProductionRe
                 config=config,
                 reason="Dependency summary JSON must be an object.",
             )
-    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError, SafeFilesystemError) as error:
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        OSError,
+        RecursionError,
+        UnicodeDecodeError,
+        SafeFilesystemError,
+    ) as error:
         return _dependency_summary_blocked(
             name,
             root,
@@ -642,77 +709,81 @@ def _live_proof_items(
 ) -> list[dict[str, Any]]:
     return [
         _auth_live_item(config, receipts["auth"]),
-        _generic_live_item(
+        _surface_live_item(
             config,
             receipts["alert"],
+            proof_key="alert",
             item_id="live-alert-sink",
             surface="live_alert_sink_delivery",
-            accepted_predicate=lambda payload: payload.get("accepted") is True
-            and (payload.get("delivered") is True or str(payload.get("status", "")) in {"passed", "delivered"}),
             missing_risk="Live alert sink delivery has not been proven.",
-            removal="Provide an accepted alert sink receipt with delivered=true or status=delivered.",
+            removal=(
+                "Provide an accepted alert sink receipt bound to this readiness run, target environment, sink, "
+                "delivery result, live mode, and evidence artifacts."
+            ),
         ),
-        _generic_live_item(
+        _surface_live_item(
             config,
             receipts["rollback"],
+            proof_key="rollback",
             item_id="live-rollback-drill",
             surface="live_rollback_execution",
-            accepted_predicate=lambda payload: payload.get("accepted") is True
-            and (payload.get("executed") is True or str(payload.get("status", "")) in {"passed", "executed"}),
             missing_risk="Live rollback execution has not been proven.",
-            removal="Provide an accepted rollback drill receipt with executed=true or status=executed.",
+            removal=(
+                "Provide an accepted rollback drill receipt bound to this readiness run, target environment, "
+                "preconditions, command/drill metadata, execution result, live mode, and evidence artifacts."
+            ),
         ),
-        _generic_live_item(
+        _surface_live_item(
             config,
             receipts["slurm"],
+            proof_key="slurm",
             item_id="live-slurm-dependency",
             surface="live_slurm_dependency_proof",
-            accepted_predicate=_accepted_dependency_proof,
             missing_risk="Live Slurm workload/accounting proof has not been accepted.",
             removal="Provide an accepted Slurm dependency proof receipt from the target environment.",
         ),
-        _generic_live_item(
+        _surface_live_item(
             config,
             receipts["object_store"],
+            proof_key="object_store",
             item_id="live-object-store-dependency",
             surface="live_object_store_dependency_proof",
-            accepted_predicate=_accepted_dependency_proof,
             missing_risk="Live object-store/API proof has not been accepted.",
             removal="Provide an accepted object-store dependency proof receipt from the target environment.",
         ),
-        _generic_live_item(
+        _surface_live_item(
             config,
             receipts["source"],
+            proof_key="source",
             item_id="live-source-dependency",
             surface="live_source_weather_dependency_proof",
-            accepted_predicate=_accepted_dependency_proof,
             missing_risk="Live weather/source credential and ingest proof has not been accepted.",
             removal="Provide an accepted source/weather dependency proof receipt from the target environment.",
         ),
-        _generic_live_item(
+        _surface_live_item(
             config,
             receipts["e2e"],
+            proof_key="e2e",
             item_id="live-e2e-dependency",
             surface="live_e2e_dependency_proof",
-            accepted_predicate=_accepted_dependency_proof,
             missing_risk="Live E2E target-environment proof has not been accepted.",
             removal="Provide an accepted E2E dependency proof receipt from the target environment.",
         ),
-        _generic_live_item(
+        _surface_live_item(
             config,
             receipts["mvt"],
+            proof_key="mvt",
             item_id="live-mvt-performance",
             surface="live_mvt_performance_proof",
-            accepted_predicate=_accepted_dependency_proof,
             missing_risk="Live MVT/performance proof has not been accepted.",
             removal="Provide accepted live PostGIS/national-data/browser or equivalent MVT performance proof.",
         ),
-        _generic_live_item(
+        _surface_live_item(
             config,
             receipts["target_env"],
+            proof_key="target_env",
             item_id="live-target-environment-config",
             surface="target_environment_config_proof",
-            accepted_predicate=_accepted_dependency_proof,
             missing_risk="Real target-environment configuration receipt has not been accepted.",
             removal="Provide an accepted target-environment configuration receipt.",
         ),
@@ -738,7 +809,16 @@ def _auth_live_item(config: ProductionReadinessConfig, receipt: Mapping[str, Any
     denied = _string_set(payload.get("denied_actions") or payload.get("denied_coverage"))
     missing_allowed = sorted(REQUIRED_AUTH_ACTIONS - allowed)
     missing_denied = sorted(REQUIRED_AUTH_ACTIONS - denied)
-    accepted = payload.get("accepted") is True and not missing_allowed and not missing_denied
+    errors = _common_live_receipt_errors(payload, proof_key="auth", config=config)
+    if not _non_empty_mapping(payload.get("provider")) and not _non_empty_mapping(payload.get("provider_metadata")):
+        errors.append("missing_provider_metadata")
+    if not _non_empty_mapping(payload.get("role_mapping")) and not _non_empty_mapping(payload.get("role_mappings")):
+        errors.append("missing_role_mapping")
+    if missing_allowed:
+        errors.append("missing_allowed_actions")
+    if missing_denied:
+        errors.append("missing_denied_actions")
+    accepted = not errors
     if accepted:
         return _item(
             item_id=base["item_id"],
@@ -761,6 +841,7 @@ def _auth_live_item(config: ProductionReadinessConfig, receipt: Mapping[str, Any
             {
                 **receipt,
                 "acceptance_errors": {
+                    "errors": errors,
                     "accepted": payload.get("accepted") is True,
                     "missing_allowed_actions": missing_allowed,
                     "missing_denied_actions": missing_denied,
@@ -771,13 +852,13 @@ def _auth_live_item(config: ProductionReadinessConfig, receipt: Mapping[str, Any
     )
 
 
-def _generic_live_item(
+def _surface_live_item(
     config: ProductionReadinessConfig,
     receipt: Mapping[str, Any],
     *,
+    proof_key: str,
     item_id: str,
     surface: str,
-    accepted_predicate: Any,
     missing_risk: str,
     removal: str,
 ) -> dict[str, Any]:
@@ -792,7 +873,8 @@ def _generic_live_item(
     if receipt["status"] != "parsed":
         return _required_live_blocker(config=config, receipt=receipt, **base)
     payload = receipt["payload"]
-    if accepted_predicate(payload):
+    errors = _surface_live_receipt_errors(payload, proof_key=proof_key, config=config)
+    if not errors:
         return _item(
             item_id=base["item_id"],
             surface=base["surface"],
@@ -810,7 +892,7 @@ def _generic_live_item(
         status="release_blocked",
         execution_mode="live_proof",
         live_proof_accepted=False,
-        details=_receipt_details(receipt, config=config),
+        details=_receipt_details({**receipt, "acceptance_errors": {"errors": errors}}, config=config),
     )
 
 
@@ -1036,7 +1118,7 @@ def _load_proof(
         }
     try:
         parsed = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         return {
             "surface": surface,
             "status": "invalid",
@@ -1056,12 +1138,24 @@ def _load_proof(
             "reason": "Live proof payload must be a JSON object.",
             "raw_preview": _redacted_preview(raw, config=config),
         }
+    try:
+        payload = _bounded_redacted_payload(parsed, config=config)
+    except RecursionError as error:
+        return {
+            "surface": surface,
+            "status": "invalid",
+            "source": source,
+            "source_ref": source_ref,
+            "error_code": "PRODUCTION_READINESS_PROOF_JSON_INVALID",
+            "reason": redact_text(str(error)),
+            "raw_preview": _redacted_preview(raw, config=config),
+        }
     return {
         "surface": surface,
         "status": "parsed",
         "source": source,
         "source_ref": source_ref,
-        "payload": _bounded_redacted_payload(parsed, config=config),
+        "payload": payload,
     }
 
 
@@ -1155,13 +1249,126 @@ def _summary_exclusions(items: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return exclusions
 
 
-def _accepted_dependency_proof(payload: Mapping[str, Any]) -> bool:
-    return payload.get("accepted") is True and str(payload.get("status", "accepted")) in {
-        "accepted",
-        "passed",
-        "ready",
-        "executed",
+def _surface_live_receipt_errors(
+    payload: Mapping[str, Any],
+    *,
+    proof_key: str,
+    config: ProductionReadinessConfig,
+) -> list[str]:
+    errors = _common_live_receipt_errors(payload, proof_key=proof_key, config=config)
+    if proof_key == "alert":
+        if not (_non_empty_mapping(payload.get("sink_metadata")) or _non_empty_string(payload.get("sink"))):
+            errors.append("missing_sink_metadata")
+        if not (
+            payload.get("delivered") is True
+            or _non_empty_mapping(payload.get("delivery_metadata"))
+            or _non_empty_mapping(payload.get("delivery_result"))
+        ):
+            errors.append("missing_delivery_metadata")
+        if payload.get("delivered") is not True and str(payload.get("status", "")) != "delivered":
+            errors.append("delivery_not_confirmed")
+    elif proof_key == "rollback":
+        if not _non_empty_mapping(payload.get("preconditions")):
+            errors.append("missing_preconditions")
+        if not (
+            _non_empty_mapping(payload.get("command_metadata"))
+            or _non_empty_mapping(payload.get("drill_metadata"))
+            or _non_empty_string(payload.get("command"))
+        ):
+            errors.append("missing_command_or_drill_metadata")
+        if payload.get("executed") is not True and str(payload.get("status", "")) != "executed":
+            errors.append("rollback_not_executed")
+    elif proof_key in DEPENDENCY_SUMMARY_CONTRACTS:
+        expected_dependency = str(PROOF_CONTRACTS[proof_key]["dependency"])
+        dependency = payload.get("dependency_surface", payload.get("dependency"))
+        if dependency != expected_dependency:
+            errors.append("dependency_surface_mismatch")
+        if not _non_empty_mapping(payload.get("provenance")) and not _non_empty_string(payload.get("producer_run_id")):
+            errors.append("missing_provenance")
+    elif proof_key == "target_env":
+        if not (
+            _non_empty_mapping(payload.get("config_metadata"))
+            or _non_empty_mapping(payload.get("environment_metadata"))
+            or _non_empty_string(payload.get("config_receipt_id"))
+        ):
+            errors.append("missing_target_environment_config_metadata")
+    return errors
+
+
+def _common_live_receipt_errors(
+    payload: Mapping[str, Any],
+    *,
+    proof_key: str,
+    config: ProductionReadinessConfig,
+) -> list[str]:
+    contract = PROOF_CONTRACTS[proof_key]
+    errors: list[str] = []
+    if payload.get("accepted") is not True:
+        errors.append("accepted_not_true")
+    status = payload.get("status")
+    if not isinstance(status, str) or not status:
+        errors.append("missing_status")
+    elif status not in contract["allowed_statuses"]:
+        errors.append("status_not_allowed")
+    if payload.get("schema") != LIVE_PROOF_SCHEMA:
+        errors.append("schema_mismatch")
+    if payload.get("proof_type", payload.get("receipt_type")) != contract["proof_type"]:
+        errors.append("proof_type_mismatch")
+    if payload.get("surface") != contract["surface"]:
+        errors.append("surface_mismatch")
+    if payload.get("run_id") != config.run_id:
+        errors.append("run_id_mismatch")
+    target_environment = payload.get("target_environment")
+    if not _non_empty_string(target_environment) and not _non_empty_mapping(target_environment):
+        errors.append("missing_target_environment")
+    elif _target_environment_name(target_environment) != EXPECTED_TARGET_ENVIRONMENT:
+        errors.append("target_environment_mismatch")
+    if not _is_live_proof_mode(payload):
+        errors.append("execution_mode_not_live_proof")
+    if not _has_artifact_or_evidence_refs(payload):
+        errors.append("missing_artifact_or_evidence_refs")
+    return errors
+
+
+def _is_live_proof_mode(payload: Mapping[str, Any]) -> bool:
+    values = {
+        str(payload.get("execution_mode", "")),
+        str(payload.get("proof_mode", "")),
+        str(payload.get("mode", "")),
     }
+    return bool(values & {"live_proof", "live_execution", "live"})
+
+
+def _has_artifact_or_evidence_refs(payload: Mapping[str, Any]) -> bool:
+    for key in ("artifact_refs", "evidence_refs", "artifacts", "evidence"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            if any(str(item).strip() for item in value):
+                return True
+        if _non_empty_mapping(value):
+            return True
+    return False
+
+
+def _non_empty_mapping(value: Any) -> bool:
+    return isinstance(value, Mapping) and bool(value)
+
+
+def _non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _target_environment_name(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Mapping):
+        for key in ("name", "environment", "id"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+    return ""
 
 
 def _string_set(value: Any) -> set[str]:
@@ -1247,8 +1454,7 @@ def _redact_paths(value: str, *, config: ProductionReadinessConfig) -> str:
     cwd = str(Path.cwd())
     if cwd in value:
         value = value.replace(cwd, "workspace")
-    if value.startswith("/") or re.match(r"^[A-Za-z]:\\", value):
-        return "[redacted-path]"
+    value = PATH_TOKEN_RE.sub("[redacted-path]", value)
     return redact_text(value)
 
 

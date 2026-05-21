@@ -895,6 +895,23 @@ Optional live proof receipts are supplied as JSON strings or files:
 writing evidence; malformed or oversized receipts become stable
 `release_blocked` evidence and never print tracebacks or raw secrets.
 
+Live proof receipt acceptance is intentionally stricter than a placeholder
+`accepted=true` flag. Every accepted receipt must use schema
+`nhms.production_readiness.live_proof.v1`, bind to the expected readiness
+surface, current readiness `run_id`, target environment, and live proof
+execution mode, and include non-empty artifact/evidence references. Auth
+receipts must also include provider metadata, role mapping, and allowed/denied
+coverage for every canonical protected action. Alert receipts must include sink
+and delivery metadata with delivered/passed result. Rollback receipts must
+include preconditions, command or drill metadata, and executed/passed result.
+Slurm/object-store/source/E2E/MVT dependency receipts must name the expected
+dependency surface and include provenance or producer evidence metadata; the
+deterministic producer `summary.json` alone does not satisfy live proof.
+Target-environment receipts must include real target configuration metadata.
+Wrong schema, wrong surface, stale run ID, deterministic mode, missing target,
+missing provenance/artifacts, malformed JSON, over-size JSON, or deeply nested
+JSON remains `release_blocked` with redacted bounded evidence.
+
 Evidence is written under
 `artifacts/production-closure/<run_id>/readiness/`:
 
