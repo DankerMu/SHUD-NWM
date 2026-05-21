@@ -9,6 +9,10 @@ Required live surfaces for final readiness are live backend auth, live alert sin
 WHEN any required live proof is missing or failed
 THEN the summary lists blocker id, surface, status, residual risk, removal criteria, and linked artifact.
 
+#### Scenario: Deterministic pass but live blockers remain
+WHEN all deterministic checks pass but any required live proof is missing, incomplete, failed, or not accepted
+THEN the summary records `final_production_readiness_claimed=false` and lists the corresponding release blockers.
+
 #### Scenario: No blockers
 WHEN every required deterministic and live item passes
 THEN the summary may mark the corresponding surface ready, but final readiness is claimed only if all required surfaces are ready.
