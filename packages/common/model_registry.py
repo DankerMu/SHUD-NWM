@@ -5,7 +5,8 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from pathlib import PurePosixPath
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -36,6 +37,36 @@ class InvalidReferenceError(ModelRegistryError):
 
 class InvalidPayloadError(ModelRegistryError):
     """Raised when a payload is structurally invalid."""
+
+
+class ModelLifecycleAuditPersistenceError(ModelRegistryError):
+    """Raised when lifecycle audit persistence fails after a prepared mutation."""
+
+    def __init__(self, result: Mapping[str, Any], cause: BaseException) -> None:
+        super().__init__("Model lifecycle audit evidence could not be persisted.")
+        self.result = dict(result)
+        self.__cause__ = cause
+
+
+ModelLifecycleState = Literal["inactive", "active", "deprecated", "superseded"]
+ModelLifecycleOperation = Literal[
+    "activate",
+    "deactivate",
+    "switch_version",
+    "rollback_version",
+    "supersede",
+    "deprecate",
+]
+
+MODEL_LIFECYCLE_STATES: tuple[ModelLifecycleState, ...] = ("inactive", "active", "deprecated", "superseded")
+MODEL_LIFECYCLE_ACTIONS: dict[str, str] = {
+    "activate": "models.activate",
+    "deactivate": "models.deactivate",
+    "switch_version": "models.switch_version",
+    "rollback_version": "models.rollback_version",
+    "supersede": "models.supersede",
+    "deprecate": "models.deactivate",
+}
 
 
 SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES = 10_000
@@ -573,6 +604,10 @@ class PsycopgModelRegistryStore:
             policy_decision=policy_decision,
             trusted_internal=trusted_internal,
         )
+        if bool(payload.get("active_flag", False)):
+            raise InvalidPayloadError(
+                "active_flag=true is not accepted when creating models; use a lifecycle activate operation."
+            )
         with self._transaction() as cursor:
             if not self._exists(cursor, "core.basin_version", "basin_version_id", payload["basin_version_id"]):
                 raise InvalidReferenceError(f"basin_version_id does not exist: {payload['basin_version_id']}")
@@ -619,9 +654,10 @@ class PsycopgModelRegistryStore:
                     container_image,
                     model_package_uri,
                     active_flag,
+                    lifecycle_state,
                     resource_profile
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -635,7 +671,8 @@ class PsycopgModelRegistryStore:
                     payload.get("autoshud_code_version"),
                     payload.get("container_image"),
                     payload["model_package_uri"],
-                    bool(payload.get("active_flag", False)),
+                    False,
+                    "inactive",
                     self._json(payload.get("resource_profile") or {}),
                 ),
             )
@@ -650,7 +687,97 @@ class PsycopgModelRegistryStore:
         trusted_internal: bool = False,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        action_id = "models.activate" if active else "models.deactivate"
+        result = self.model_lifecycle_operation(
+            model_id,
+            operation="activate" if active else "deactivate",
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+            request_id=request_id,
+        )
+        return result["model"]
+
+    def preflight_model_operation(
+        self,
+        model_id: str,
+        *,
+        operation: ModelLifecycleOperation,
+        policy_decision: PolicyDecision | None = None,
+        previous_model_id: str | None = None,
+        override_missing_active: bool = False,
+        reason: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        if operation not in MODEL_LIFECYCLE_ACTIONS:
+            raise InvalidPayloadError(f"Unsupported model lifecycle operation: {operation}")
+        action_id = MODEL_LIFECYCLE_ACTIONS[operation]
+        decision = require_policy_evidence(
+            policy_decision,
+            action_id=action_id,
+            target_type="model_instance",
+            target_id=model_id,
+        )
+        if decision.decision != "allow":
+            raise ModelRegistryError(decision.reason)
+        request_id = request_id or str(uuid4())
+        with self._transaction() as cursor:
+            model = self._fetch_model_lifecycle_row(cursor, model_id, for_update=False)
+            if model is None:
+                raise MissingResourceError(f"model_id not found: {model_id}")
+            active = self._fetch_active_model_for_scope(cursor, str(model["basin_version_id"]), for_update=False)
+            previous = (
+                self._fetch_model_lifecycle_row(cursor, previous_model_id, for_update=False)
+                if previous_model_id is not None
+                else None
+            )
+            if previous_model_id is not None and previous is None:
+                raise MissingResourceError(f"model_id not found: {previous_model_id}")
+            history = self._fetch_trustworthy_rollback_history(
+                cursor,
+                current_model=model,
+                previous_model_id=previous_model_id,
+            )
+            idempotent_rollback_history = (
+                self._fetch_idempotent_rollback_retry_history(
+                    cursor,
+                    model=model,
+                    current_active=active,
+                    previous_model_id=previous_model_id,
+                )
+                if operation == "rollback_version"
+                else None
+            )
+        preflight = self._build_model_operation_preflight(
+            model=model,
+            current_active=active,
+            operation=operation,
+            action_id=action_id,
+            actor_id=decision.actor_id,
+            request_id=request_id,
+            previous_model=previous,
+            rollback_history=history,
+            override_missing_active=override_missing_active,
+            reason=reason,
+            actor_roles=decision.roles,
+        )
+        if idempotent_rollback_history is not None:
+            _apply_idempotent_rollback_preflight(preflight, idempotent_rollback_history)
+        return preflight
+
+    def model_lifecycle_operation(
+        self,
+        model_id: str,
+        *,
+        operation: ModelLifecycleOperation,
+        policy_decision: PolicyDecision | None = None,
+        trusted_internal: bool = False,
+        request_id: str | None = None,
+        previous_model_id: str | None = None,
+        override_missing_active: bool = False,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        if operation not in MODEL_LIFECYCLE_ACTIONS:
+            raise InvalidPayloadError(f"Unsupported model lifecycle operation: {operation}")
+        action_id = MODEL_LIFECYCLE_ACTIONS[operation]
         if trusted_internal:
             policy_decision = trusted_internal_policy_decision(
                 action_id,
@@ -659,6 +786,9 @@ class PsycopgModelRegistryStore:
                 actor_id="trusted-internal:model-registry",
                 roles=("sys_admin",),
             )
+            if operation == "deactivate":
+                override_missing_active = True
+                reason = reason or "trusted internal legacy deactivation"
         request_id = request_id or str(uuid4())
         decision = require_policy_evidence(
             policy_decision,
@@ -668,41 +798,163 @@ class PsycopgModelRegistryStore:
         )
         if decision.decision != "allow":
             raise ModelRegistryError(decision.reason)
-        with self._transaction() as cursor:
-            current = self._fetch_optional(
-                cursor,
-                """
-                SELECT *
-                FROM core.model_instance
-                WHERE model_id = %s
-                FOR UPDATE
-                """,
-                (model_id,),
-            )
-            if current is None:
-                raise MissingResourceError(f"model_id not found: {model_id}")
-            if bool(current["active_flag"]) == active:
-                state = "active" if active else "inactive"
-                raise DuplicateResourceError(f"model_id {model_id} is already {state}.")
-            cursor.execute(
-                """
-                UPDATE core.model_instance
-                SET active_flag = %s
-                WHERE model_id = %s
-                RETURNING *
-                """,
-                (active, model_id),
-            )
-            updated = dict(cursor.fetchone())
-            self._insert_model_activation_audit(
-                cursor,
-                current=current,
-                updated=updated,
-                active=active,
-                policy_decision=decision,
-                request_id=request_id,
-            )
-            return _model_public_projection(updated)
+
+        try:
+            with self._transaction() as cursor:
+                unlocked_model = self._fetch_model_lifecycle_row(cursor, model_id, for_update=False)
+                if unlocked_model is None:
+                    raise MissingResourceError(f"model_id not found: {model_id}")
+                self._lock_basin_version_scope(cursor, str(unlocked_model["basin_version_id"]))
+                unlocked_current_active = self._fetch_active_model_for_scope(
+                    cursor,
+                    str(unlocked_model["basin_version_id"]),
+                    for_update=False,
+                )
+                unlocked_previous = (
+                    self._fetch_model_lifecycle_row(cursor, previous_model_id, for_update=False)
+                    if previous_model_id is not None
+                    else None
+                )
+                if previous_model_id is not None and unlocked_previous is None:
+                    raise MissingResourceError(f"model_id not found: {previous_model_id}")
+                lock_ids = {
+                    str(unlocked_model["model_id"]),
+                    *(
+                        [str(unlocked_current_active["model_id"])]
+                        if unlocked_current_active is not None
+                        else []
+                    ),
+                    *([str(unlocked_previous["model_id"])] if unlocked_previous is not None else []),
+                }
+                locked_rows: dict[str, dict[str, Any]] = {}
+                for locked_model_id in sorted(lock_ids):
+                    locked = self._fetch_model_lifecycle_row(cursor, locked_model_id, for_update=True)
+                    if locked is None:
+                        raise MissingResourceError(f"model_id not found: {locked_model_id}")
+                    locked_rows[locked_model_id] = locked
+                model = locked_rows[str(unlocked_model["model_id"])]
+                current_active = (
+                    locked_rows.get(str(unlocked_current_active["model_id"]))
+                    if unlocked_current_active is not None
+                    else None
+                )
+                previous = (
+                    locked_rows.get(str(unlocked_previous["model_id"])) if unlocked_previous is not None else None
+                )
+                rollback_history = self._fetch_trustworthy_rollback_history(
+                    cursor,
+                    current_model=model,
+                    previous_model_id=previous_model_id,
+                )
+                idempotent_rollback_history = (
+                    self._fetch_idempotent_rollback_retry_history(
+                        cursor,
+                        model=model,
+                        current_active=current_active,
+                        previous_model_id=previous_model_id,
+                    )
+                    if operation == "rollback_version"
+                    else None
+                )
+                preflight = self._build_model_operation_preflight(
+                    model=model,
+                    current_active=current_active,
+                    operation=operation,
+                    action_id=action_id,
+                    actor_id=decision.actor_id,
+                    request_id=request_id,
+                    previous_model=previous,
+                    rollback_history=rollback_history,
+                    override_missing_active=override_missing_active,
+                    reason=reason,
+                    actor_roles=decision.roles,
+                )
+                if idempotent_rollback_history is not None:
+                    _apply_idempotent_rollback_preflight(preflight, idempotent_rollback_history)
+                    return {
+                        "status": "already_current",
+                        "operation": operation,
+                        "model": _model_public_projection(current_active),
+                        "previous_model": _model_public_projection(model),
+                        "preflight": preflight,
+                        "audit_reference": None,
+                    }
+                if preflight["status"] == "blocked":
+                    try:
+                        audit_id = self._insert_model_lifecycle_audit(
+                            cursor,
+                            model=model,
+                            updated=model,
+                            operation=operation,
+                            outcome="blocked",
+                            policy_decision=decision,
+                            request_id=request_id,
+                            preflight=preflight,
+                            previous_model=current_active,
+                            reason=reason,
+                        )
+                    except Exception as audit_error:
+                        raise ModelLifecycleAuditPersistenceError(
+                            _lifecycle_audit_persistence_failure_result(
+                                model=model,
+                                current_active=current_active,
+                                operation=operation,
+                                preflight=preflight,
+                            ),
+                            audit_error,
+                        ) from audit_error
+                    return {
+                        "status": "blocked",
+                        "operation": operation,
+                        "model": _model_public_projection(model),
+                        "preflight": preflight,
+                        "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
+                    }
+
+                transition = self._apply_model_lifecycle_transition(
+                    cursor,
+                    model=model,
+                    current_active=current_active,
+                    operation=operation,
+                    previous_model=previous,
+                )
+                try:
+                    audit_id = self._insert_model_lifecycle_audit(
+                        cursor,
+                        model=model,
+                        updated=transition["model"],
+                        operation=operation,
+                        outcome=transition["outcome"],
+                        policy_decision=decision,
+                        request_id=request_id,
+                        preflight=preflight,
+                        previous_model=transition.get("previous_model"),
+                        reason=reason,
+                    )
+                except Exception as audit_error:
+                    raise ModelLifecycleAuditPersistenceError(
+                        _lifecycle_audit_persistence_failure_result(
+                            model=model,
+                            current_active=current_active,
+                            operation=operation,
+                            preflight=preflight,
+                        ),
+                        audit_error,
+                    ) from audit_error
+                return {
+                    "status": transition["outcome"],
+                    "operation": operation,
+                    "model": _model_public_projection(transition["model"]),
+                    "previous_model": (
+                        _model_public_projection(transition["previous_model"])
+                        if transition.get("previous_model")
+                        else None
+                    ),
+                    "preflight": preflight,
+                    "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
+                }
+        except ModelLifecycleAuditPersistenceError as error:
+            return error.result
 
     def list_models(
         self,
@@ -925,6 +1177,496 @@ class PsycopgModelRegistryStore:
             raise ModelRegistryError(decision.reason)
         return decision
 
+    def _fetch_model_lifecycle_row(self, cursor: Any, model_id: str, *, for_update: bool) -> dict[str, Any] | None:
+        lock_clause = "FOR UPDATE" if for_update else ""
+        return self._fetch_optional(
+            cursor,
+            f"""
+            SELECT
+                mi.*,
+                COALESCE(mi.lifecycle_state, CASE WHEN mi.active_flag THEN 'active' ELSE 'inactive' END)
+                    AS lifecycle_state,
+                b.basin_id,
+                b.basin_name,
+                bv.checksum AS basin_checksum,
+                rnv.segment_count,
+                rnv.checksum AS river_network_checksum,
+                mv.mesh_uri,
+                mv.checksum AS mesh_checksum,
+                mv.properties_json AS mesh_properties_json
+            FROM core.model_instance mi
+            JOIN core.basin_version bv
+              ON bv.basin_version_id = mi.basin_version_id
+            JOIN core.basin b
+              ON b.basin_id = bv.basin_id
+            JOIN core.river_network_version rnv
+              ON rnv.river_network_version_id = mi.river_network_version_id
+            JOIN core.mesh_version mv
+              ON mv.mesh_version_id = mi.mesh_version_id
+            WHERE mi.model_id = %s
+            {lock_clause}
+            """,
+            (model_id,),
+        )
+
+    def _fetch_active_model_for_scope(
+        self,
+        cursor: Any,
+        basin_version_id: str,
+        *,
+        for_update: bool,
+    ) -> dict[str, Any] | None:
+        lock_clause = "FOR UPDATE" if for_update else ""
+        return self._fetch_optional(
+            cursor,
+            f"""
+            SELECT
+                mi.*,
+                COALESCE(mi.lifecycle_state, CASE WHEN mi.active_flag THEN 'active' ELSE 'inactive' END)
+                    AS lifecycle_state
+            FROM core.model_instance mi
+            WHERE mi.basin_version_id = %s
+              AND mi.active_flag = true
+              AND COALESCE(mi.lifecycle_state, 'active') = 'active'
+            ORDER BY mi.created_at DESC, mi.model_id
+            LIMIT 1
+            {lock_clause}
+            """,
+            (basin_version_id,),
+        )
+
+    def _lock_basin_version_scope(self, cursor: Any, basin_version_id: str) -> None:
+        cursor.execute(
+            """
+            SELECT basin_version_id
+            FROM core.basin_version
+            WHERE basin_version_id = %s
+            FOR UPDATE
+            """,
+            (basin_version_id,),
+        )
+        if cursor.fetchone() is None:
+            raise InvalidReferenceError(f"basin_version_id does not exist: {basin_version_id}")
+
+    def _fetch_trustworthy_rollback_history(
+        self,
+        cursor: Any,
+        *,
+        current_model: Mapping[str, Any],
+        previous_model_id: str | None,
+    ) -> dict[str, Any] | None:
+        if previous_model_id is None:
+            return None
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT log_id, action, entity_id, details, created_at
+            FROM ops.audit_log
+            WHERE entity_type = 'model_instance'
+              AND action IN ('models.activate', 'models.switch_version', 'models.rollback_version')
+              AND details->>'operation' IN ('activate', 'switch_version', 'rollback_version')
+              AND details->>'outcome' IN ('allowed', 'rollback')
+              AND details->>'basin_version_id' = %s
+              AND (
+                entity_id = %s
+                OR details->'updated_model'->>'model_id' = %s
+              )
+            ORDER BY created_at DESC, log_id DESC
+            LIMIT 1
+            """,
+            (
+                str(current_model["basin_version_id"]),
+                str(current_model["model_id"]),
+                str(current_model["model_id"]),
+            ),
+        )
+        if row is None:
+            return None
+        details = _json_mapping(row.get("details"))
+        previous_ref = _json_mapping(details.get("previous_model"))
+        new_state = _json_mapping(details.get("new_state"))
+        updated_ref = _json_mapping(details.get("updated_model"))
+        made_current_active = (
+            str(row.get("entity_id")) == str(current_model["model_id"])
+            or str(updated_ref.get("model_id")) == str(current_model["model_id"])
+        )
+        trusted = (
+            made_current_active
+            and str(previous_ref.get("model_id")) == str(previous_model_id)
+            and str(details.get("basin_version_id")) == str(current_model.get("basin_version_id"))
+            and bool(new_state.get("active")) is True
+            and str(new_state.get("lifecycle_state")) == "active"
+            and bool(current_model.get("active_flag")) is True
+            and _canonical_lifecycle_state(current_model) == "active"
+        )
+        row["trusted"] = trusted
+        row["prior_audit_log_id"] = row.get("log_id")
+        row["matched_previous_model_id"] = previous_ref.get("model_id")
+        if not trusted:
+            row["stale_reason"] = "latest_current_epoch_previous_mismatch"
+        return row
+
+    def _fetch_idempotent_rollback_retry_history(
+        self,
+        cursor: Any,
+        *,
+        model: Mapping[str, Any],
+        current_active: Mapping[str, Any] | None,
+        previous_model_id: str | None,
+    ) -> dict[str, Any] | None:
+        if current_active is None or previous_model_id is None:
+            return None
+        if str(current_active.get("model_id")) != str(previous_model_id):
+            return None
+        if str(current_active.get("basin_version_id")) != str(model.get("basin_version_id")):
+            return None
+        if not bool(current_active.get("active_flag")) or _canonical_lifecycle_state(current_active) != "active":
+            return None
+        if bool(model.get("active_flag")) or _canonical_lifecycle_state(model) not in {"inactive", "superseded"}:
+            return None
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT log_id, action, entity_id, details, created_at
+            FROM ops.audit_log
+            WHERE entity_type = 'model_instance'
+              AND entity_id = %s
+              AND action = 'models.rollback_version'
+              AND details->>'operation' = 'rollback_version'
+              AND details->>'outcome' = 'rollback'
+              AND details->>'basin_version_id' = %s
+              AND details->'previous_model'->>'model_id' = %s
+              AND details->'updated_model'->>'model_id' = %s
+            ORDER BY created_at DESC, log_id DESC
+            LIMIT 1
+            """,
+            (
+                str(model["model_id"]),
+                str(model["basin_version_id"]),
+                str(model["model_id"]),
+                str(previous_model_id),
+            ),
+        )
+        if row is None:
+            return None
+        row["trusted"] = True
+        row["prior_audit_log_id"] = row.get("log_id")
+        row["matched_previous_model_id"] = previous_model_id
+        return row
+
+    def _build_model_operation_preflight(
+        self,
+        *,
+        model: Mapping[str, Any],
+        current_active: Mapping[str, Any] | None,
+        operation: ModelLifecycleOperation,
+        action_id: str,
+        actor_id: str,
+        request_id: str,
+        previous_model: Mapping[str, Any] | None,
+        rollback_history: Mapping[str, Any] | None,
+        override_missing_active: bool,
+        reason: str | None,
+        actor_roles: Sequence[str],
+    ) -> dict[str, Any]:
+        restored_model = previous_model if operation == "rollback_version" else model
+        resource_profile = _json_mapping(restored_model.get("resource_profile")) if restored_model else {}
+        mesh_properties = _json_mapping(restored_model.get("mesh_properties_json")) if restored_model else {}
+        blockers: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        lifecycle_state = _canonical_lifecycle_state(model)
+        activation_class_operation = operation in {"activate", "switch_version", "rollback_version"}
+
+        copied_root = "missing"
+        package_checksum = None
+        if restored_model is not None:
+            activation_blockers, activation_warnings, copied_root, package_checksum = _activation_safety_evidence(
+                restored_model,
+                activation_class_operation=activation_class_operation,
+            )
+            blockers.extend(activation_blockers)
+            warnings.extend(activation_warnings)
+
+        current_active_id = str(current_active["model_id"]) if current_active else None
+        if invalid_transition := _transition_blocker(
+            operation=operation,
+            lifecycle_state=lifecycle_state,
+            model_id=str(model["model_id"]),
+            current_active_id=current_active_id,
+        ):
+            blockers.append(invalid_transition)
+        if operation in {"activate", "switch_version"} and current_active_id == model["model_id"]:
+            warnings.append({"code": "ALREADY_CURRENT", "message": "Model is already the active model for this scope."})
+        if operation == "switch_version" and current_active_id is None:
+            blockers.append(
+                _preflight_blocker("SWITCH_REQUIRES_CURRENT_ACTIVE", "Version switch requires current active model.")
+            )
+        removes_current_active = (
+            bool(model.get("active_flag"))
+            and current_active_id == model["model_id"]
+            and operation in {"deactivate", "supersede", "deprecate"}
+        )
+        operation_supports_missing_active_override = operation == "deactivate"
+        if removes_current_active and (not override_missing_active or not operation_supports_missing_active_override):
+            blockers.append(
+                _preflight_blocker(
+                    "MISSING_ACTIVE_RISK",
+                    "Operation would leave this basin version without an active model.",
+                )
+            )
+        if (
+            operation == "deactivate"
+            and removes_current_active
+            and override_missing_active
+            and not str(reason or "").strip()
+        ):
+            blockers.append(_preflight_blocker("OVERRIDE_REASON_REQUIRED", "Override requires a non-empty reason."))
+        if (
+            operation == "deactivate"
+            and removes_current_active
+            and override_missing_active
+            and actor_roles
+            and "sys_admin" not in actor_roles
+        ):
+            blockers.append(
+                _preflight_blocker("OVERRIDE_REQUIRES_SYS_ADMIN", "Missing-active override requires sys_admin.")
+            )
+        if operation == "rollback_version":
+            if current_active_id != model["model_id"]:
+                blockers.append(
+                    _preflight_blocker("ROLLBACK_CURRENT_STALE", "Rollback target is not the current active model.")
+                )
+            if previous_model is None:
+                blockers.append(_preflight_blocker("ROLLBACK_HISTORY_MISSING", "Rollback requires a prior model id."))
+            elif previous_model.get("basin_version_id") != model.get("basin_version_id"):
+                blockers.append(_preflight_blocker("ROLLBACK_SCOPE_MISMATCH", "Rollback model scope does not match."))
+            elif _canonical_lifecycle_state(previous_model) not in {"inactive", "superseded"}:
+                blockers.append(
+                    _preflight_blocker(
+                        "INVALID_TRANSITION",
+                        f"rollback_version is not allowed from previous {_canonical_lifecycle_state(previous_model)}.",
+                    )
+                )
+            if rollback_history is None:
+                blockers.append(
+                    _preflight_blocker("ROLLBACK_HISTORY_MISSING", "No trustworthy prior active audit history exists.")
+                )
+            elif not bool(rollback_history.get("trusted")):
+                blockers.append(
+                    _preflight_blocker(
+                        "ROLLBACK_CURRENT_STALE",
+                        "Rollback history is stale for the current active epoch.",
+                    )
+                )
+
+        status = "blocked" if blockers else "ready"
+        return {
+            "schema": "nhms.model_operation_preflight.v1",
+            "request_id": request_id,
+            "operation": operation,
+            "action_id": action_id,
+            "actor_id": actor_id,
+            "roles": list(actor_roles),
+            "status": status,
+            "basin_id": model.get("basin_id"),
+            "basin_version_id": model.get("basin_version_id"),
+            "model_id": model.get("model_id"),
+            "current_active_model_id": current_active_id,
+            "previous_model_id": previous_model.get("model_id") if previous_model else None,
+            "restored_model_id": restored_model.get("model_id") if restored_model else None,
+            "prior_audit_log_id": rollback_history.get("prior_audit_log_id") if rollback_history else None,
+            "rollback_history": _rollback_history_preflight_reference(rollback_history),
+            "river_network_version_id": restored_model.get("river_network_version_id") if restored_model else None,
+            "mesh_version_id": restored_model.get("mesh_version_id") if restored_model else None,
+            "lineage": redact_audit_payload(
+                {
+                    "package_checksum": _first_non_empty(
+                        resource_profile.get("package_checksum"),
+                        restored_model.get("package_checksum") if restored_model else None,
+                    ),
+                    "source_inventory_checksum": resource_profile.get("source_inventory_checksum"),
+                    "mesh_checksum": restored_model.get("mesh_checksum") if restored_model else None,
+                    "river_network_checksum": restored_model.get("river_network_checksum") if restored_model else None,
+                    "basin_checksum": restored_model.get("basin_checksum") if restored_model else None,
+                    "object_uri": (
+                        _sanitize_audit_uri(restored_model.get("model_package_uri")) if restored_model else None
+                    ),
+                    "manifest_uri": _sanitize_audit_uri(resource_profile.get("manifest_uri"))
+                    if resource_profile.get("manifest_uri")
+                    else None,
+                    "copied_root_status": copied_root,
+                    "mesh_properties": mesh_properties,
+                }
+            ),
+            "object_uri_prefix": {
+                "status": (
+                    _object_uri_prefix_status(restored_model.get("model_package_uri"))
+                    if restored_model
+                    else "missing"
+                ),
+                "uri": _sanitize_audit_uri(restored_model.get("model_package_uri")) if restored_model else None,
+            },
+            "impact": {
+                "downstream_surfaces": ["forecast-routing", "model-assets-api", "operator-audit"],
+                "segment_count": int(model["segment_count"]) if model.get("segment_count") is not None else None,
+                "active_scope": {
+                    "basin_id": model.get("basin_id"),
+                    "basin_version_id": model.get("basin_version_id"),
+                },
+            },
+            "blockers": blockers,
+            "warnings": warnings,
+            "override_missing_active": bool(override_missing_active),
+            "reason": REDACTED_REASON,
+        }
+
+    def _apply_model_lifecycle_transition(
+        self,
+        cursor: Any,
+        *,
+        model: Mapping[str, Any],
+        current_active: Mapping[str, Any] | None,
+        operation: ModelLifecycleOperation,
+        previous_model: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        lifecycle_state = str(model.get("lifecycle_state") or ("active" if model.get("active_flag") else "inactive"))
+        if operation in {"activate", "switch_version"}:
+            if lifecycle_state == "active" and bool(model.get("active_flag")):
+                return {"outcome": "already_current", "model": dict(model), "previous_model": current_active}
+            if lifecycle_state not in {"inactive", "deprecated", "superseded"}:
+                raise InvalidPayloadError(f"Invalid {operation} transition from {lifecycle_state}.")
+            if current_active and current_active["model_id"] != model["model_id"]:
+                self._update_model_lifecycle_state(cursor, str(current_active["model_id"]), "superseded")
+            updated = self._update_model_lifecycle_state(cursor, str(model["model_id"]), "active")
+            return {"outcome": "allowed", "model": updated, "previous_model": current_active}
+        if operation == "deactivate":
+            if lifecycle_state == "inactive" and not bool(model.get("active_flag")):
+                return {"outcome": "already_current", "model": dict(model), "previous_model": current_active}
+            updated = self._update_model_lifecycle_state(cursor, str(model["model_id"]), "inactive")
+            return {"outcome": "allowed", "model": updated, "previous_model": current_active}
+        if operation == "supersede":
+            if lifecycle_state == "superseded" and not bool(model.get("active_flag")):
+                return {"outcome": "already_current", "model": dict(model), "previous_model": current_active}
+            if lifecycle_state not in {"active", "inactive", "deprecated"}:
+                raise InvalidPayloadError(f"Invalid supersede transition from {lifecycle_state}.")
+            updated = self._update_model_lifecycle_state(cursor, str(model["model_id"]), "superseded")
+            return {"outcome": "allowed", "model": updated, "previous_model": current_active}
+        if operation == "deprecate":
+            if lifecycle_state == "deprecated" and not bool(model.get("active_flag")):
+                return {"outcome": "already_current", "model": dict(model), "previous_model": current_active}
+            if lifecycle_state not in {"inactive", "superseded"}:
+                raise InvalidPayloadError(f"Invalid deprecate transition from {lifecycle_state}.")
+            updated = self._update_model_lifecycle_state(cursor, str(model["model_id"]), "deprecated")
+            return {"outcome": "allowed", "model": updated, "previous_model": current_active}
+        if operation == "rollback_version":
+            if previous_model is None:
+                raise InvalidPayloadError("previous_model_id is required for rollback_version.")
+            previous_state = _canonical_lifecycle_state(previous_model)
+            if previous_state not in {"inactive", "superseded"}:
+                raise InvalidPayloadError(f"Invalid rollback_version transition from previous {previous_state}.")
+            self._update_model_lifecycle_state(cursor, str(model["model_id"]), "superseded")
+            updated = self._update_model_lifecycle_state(cursor, str(previous_model["model_id"]), "active")
+            return {"outcome": "rollback", "model": updated, "previous_model": model}
+        raise InvalidPayloadError(f"Unsupported model lifecycle operation: {operation}")
+
+    def _update_model_lifecycle_state(
+        self,
+        cursor: Any,
+        model_id: str,
+        lifecycle_state: ModelLifecycleState,
+    ) -> dict[str, Any]:
+        cursor.execute(
+            """
+            UPDATE core.model_instance
+            SET lifecycle_state = %s,
+                active_flag = %s
+            WHERE model_id = %s
+            RETURNING *
+            """,
+            (lifecycle_state, lifecycle_state == "active", model_id),
+        )
+        return dict(cursor.fetchone())
+
+    def _insert_model_lifecycle_audit(
+        self,
+        cursor: Any,
+        *,
+        model: Mapping[str, Any],
+        updated: Mapping[str, Any],
+        operation: ModelLifecycleOperation,
+        outcome: str,
+        policy_decision: PolicyDecision,
+        request_id: str | None,
+        preflight: Mapping[str, Any],
+        previous_model: Mapping[str, Any] | None,
+        reason: str | None,
+    ) -> int:
+        details = audit_record(
+            policy_decision,
+            request_id=request_id,
+            previous_state={
+                "active": bool(model.get("active_flag")),
+                "lifecycle_state": model.get("lifecycle_state"),
+            },
+            new_state={
+                "active": bool(updated.get("active_flag")),
+                "lifecycle_state": updated.get("lifecycle_state"),
+            },
+            payload={
+                "operation": operation,
+                "outcome": outcome,
+                "basin_id": model.get("basin_id"),
+                "basin_version_id": model.get("basin_version_id"),
+                "river_network_version_id": model.get("river_network_version_id"),
+                "mesh_version_id": model.get("mesh_version_id"),
+                "model_package_uri": _sanitize_audit_uri(model.get("model_package_uri")),
+                "reason": REDACTED_REASON if reason else None,
+                "preflight": preflight,
+                "previous_model": _model_audit_reference(previous_model),
+                "updated_model": _model_audit_reference(updated),
+                "prior_audit_log_id": preflight.get("prior_audit_log_id"),
+            },
+        )
+        details.update(
+            {
+                "operation": operation,
+                "outcome": outcome,
+                "basin_id": model.get("basin_id"),
+                "basin_version_id": model.get("basin_version_id"),
+                "river_network_version_id": model.get("river_network_version_id"),
+                "mesh_version_id": model.get("mesh_version_id"),
+                "model_package_uri": _sanitize_audit_uri(model.get("model_package_uri")),
+                "previous_model": _model_audit_reference(previous_model),
+                "updated_model": _model_audit_reference(updated),
+                "prior_audit_log_id": preflight.get("prior_audit_log_id"),
+                "preflight": preflight,
+                "reason": REDACTED_REASON if reason else None,
+            }
+        )
+        details = redact_audit_payload(details)
+        cursor.execute(
+            """
+            INSERT INTO ops.audit_log (
+                actor,
+                actor_role,
+                action,
+                entity_type,
+                entity_id,
+                details
+            )
+            VALUES (%s, %s, %s, 'model_instance', %s, %s)
+            RETURNING log_id
+            """,
+            (
+                policy_decision.actor_id,
+                ",".join(policy_decision.roles),
+                policy_decision.action_id,
+                model["model_id"],
+                self._json(details),
+            ),
+        )
+        return int(cursor.fetchone()["log_id"])
+
     def _insert_model_activation_audit(
         self,
         cursor: Any,
@@ -986,6 +1728,16 @@ class PsycopgModelRegistryStore:
         return _PsycopgTransaction(self.database_url)
 
 
+def sanitize_model_list_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    result["items"] = [_model_public_projection(item) for item in list(result.get("items") or [])]
+    return result
+
+
+def sanitize_model_detail_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return _model_asset_detail(payload)
+
+
 BASINS_AUDIT_LINEAGE_KEYS = (
     "basin_slug",
     "shud_input_name",
@@ -996,7 +1748,9 @@ BASINS_AUDIT_LINEAGE_KEYS = (
 BASINS_AUDIT_LINEAGE_URI_KEYS = frozenset({"manifest_uri"})
 
 
-def _sanitize_audit_uri(value: Any) -> str:
+def _sanitize_audit_uri(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
     parsed = urlsplit(str(value))
     netloc = parsed.netloc.rsplit("@", 1)[-1]
     return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
@@ -1044,6 +1798,45 @@ MODEL_ASSET_URI_KEYS = frozenset(
     }
 )
 MODEL_ASSET_URI_OR_PATH_KEYS = frozenset({"source_path", "resolved_source_path"})
+PUBLIC_SENSITIVE_PATH_KEYS = frozenset(
+    {
+        "artifact_path",
+        "copied_root",
+        "copied_root_uri",
+        "local_path",
+        "local_root",
+        "package_path",
+        "path",
+        "resolved_source_path",
+        "root",
+        "source_path",
+        "source_root",
+        "source_uri",
+        "uri",
+        "url",
+    }
+)
+PUBLIC_SENSITIVE_DIGEST_KEYS = frozenset(
+    {
+        "checksum",
+        "digest",
+        "hash",
+        "md5",
+        "package_checksum",
+        "sha",
+        "sha1",
+        "sha224",
+        "sha256",
+        "sha384",
+        "sha512",
+        "source_inventory_checksum",
+        "stored_manifest_package_checksum",
+    }
+)
+REDACTED_REASON = "[redacted]"
+SUPPORTED_OBJECT_URI_SCHEMES = frozenset({"s3", "az", "gs", "https", "http", "integration", "memory"})
+PUBLIC_JSON_SANITIZE_MAX_DEPTH = 24
+PUBLIC_JSON_SANITIZE_MAX_NODES = 5000
 
 
 def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1051,23 +1844,36 @@ def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     resource_profile = _json_mapping(detail.get("resource_profile"))
     mesh_properties = _json_mapping(detail.pop("mesh_properties_json", None))
     detail["resource_profile"] = _sanitize_public_json_value(resource_profile)
+    detail["lifecycle_state"] = str(
+        detail.get("lifecycle_state") or ("active" if detail.get("active_flag") else "inactive")
+    )
 
     for key in MODEL_ASSET_LINEAGE_KEYS:
-        detail[key] = _first_non_empty(resource_profile.get(key), mesh_properties.get(key))
+        detail[key] = _first_non_empty(resource_profile.get(key), mesh_properties.get(key), detail.get(key))
     for key in MODEL_ASSET_URI_KEYS:
         if detail.get(key) not in (None, ""):
-            detail[key] = _sanitize_audit_uri(detail[key])
+            detail[key] = _sanitize_public_json_value(detail[key])
     for key in MODEL_ASSET_URI_OR_PATH_KEYS:
-        if detail.get(key) not in (None, "") and _is_uri_like(detail[key]):
-            detail[key] = _sanitize_audit_uri(detail[key])
+        if detail.get(key) not in (None, ""):
+            detail[key] = _sanitize_public_json_value(detail[key])
 
     model_name = _first_non_empty(
         resource_profile.get("model_name"),
         resource_profile.get("shud_input_name"),
+        detail.get("model_name"),
         detail.get("model_id"),
     )
     detail["model_name"] = str(model_name) if model_name is not None else None
     detail["segment_count"] = int(detail["segment_count"]) if detail.get("segment_count") is not None else None
+    for key in (
+        "package_checksum",
+        "source_inventory_checksum",
+        "mesh_checksum",
+        "basin_checksum",
+        "river_network_checksum",
+    ):
+        if key in detail:
+            detail[key] = None
     return detail
 
 
@@ -1095,25 +1901,123 @@ def _enforce_river_segment_serialized_budget(payload: Mapping[str, Any], *, max_
 def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     detail = dict(row)
     detail["resource_profile"] = _sanitize_public_json_value(_json_mapping(detail.get("resource_profile")))
+    detail["lifecycle_state"] = str(
+        detail.get("lifecycle_state") or ("active" if detail.get("active_flag") else "inactive")
+    )
     for key in MODEL_ASSET_URI_KEYS:
         if detail.get(key) not in (None, ""):
-            detail[key] = _sanitize_audit_uri(detail[key])
+            detail[key] = _sanitize_public_json_value(detail[key])
     for key in MODEL_ASSET_URI_OR_PATH_KEYS:
-        if detail.get(key) not in (None, "") and _is_uri_like(detail[key]):
-            detail[key] = _sanitize_audit_uri(detail[key])
+        if detail.get(key) not in (None, ""):
+            detail[key] = _sanitize_public_json_value(detail[key])
+    for key in (
+        "package_checksum",
+        "source_inventory_checksum",
+        "mesh_checksum",
+        "basin_checksum",
+        "river_network_checksum",
+    ):
+        if key in detail:
+            detail[key] = None
     return detail
 
 
-def _sanitize_public_json_value(value: Any) -> Any:
+def _sanitize_public_json_value(
+    value: Any,
+    *,
+    _depth: int = 0,
+    _state: dict[str, Any] | None = None,
+) -> Any:
+    state = _state or {"nodes": 0, "seen": set()}
+    state["nodes"] += 1
+    if _depth > PUBLIC_JSON_SANITIZE_MAX_DEPTH or state["nodes"] > PUBLIC_JSON_SANITIZE_MAX_NODES:
+        return None
+
     if isinstance(value, Mapping):
-        return {key: _sanitize_public_json_value(child) for key, child in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_public_json_value(child) for child in value]
-    if isinstance(value, tuple):
-        return [_sanitize_public_json_value(child) for child in value]
-    if isinstance(value, str) and _is_uri_like(value):
-        return _sanitize_audit_uri(value)
+        object_id = id(value)
+        if object_id in state["seen"]:
+            return None
+        state["seen"].add(object_id)
+        sanitized: dict[str, Any] = {}
+        for key, child in value.items():
+            if state["nodes"] >= PUBLIC_JSON_SANITIZE_MAX_NODES:
+                break
+            if _is_sensitive_public_json_key(key):
+                sanitized[key] = None
+            elif (
+                _is_sensitive_public_path_key(key)
+                and isinstance(child, str)
+                and _is_public_sensitive_path_or_file_uri(child)
+            ):
+                sanitized[key] = None
+            else:
+                sanitized[key] = _sanitize_public_json_value(child, _depth=_depth + 1, _state=state)
+        state["seen"].remove(object_id)
+        return sanitized
+    if isinstance(value, list | tuple):
+        object_id = id(value)
+        if object_id in state["seen"]:
+            return None
+        state["seen"].add(object_id)
+        sanitized_list = []
+        for child in value:
+            if state["nodes"] >= PUBLIC_JSON_SANITIZE_MAX_NODES:
+                break
+            sanitized_list.append(_sanitize_public_json_value(child, _depth=_depth + 1, _state=state))
+        state["seen"].remove(object_id)
+        return sanitized_list
+    if isinstance(value, str):
+        if _is_public_sensitive_path_or_file_uri(value):
+            return None
+        if _is_uri_like(value):
+            return _sanitize_audit_uri(value)
+        return value
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return None
     return value
+
+
+def _is_sensitive_public_json_key(key: str) -> bool:
+    lowered = key.lower()
+    if lowered in PUBLIC_SENSITIVE_DIGEST_KEYS:
+        return True
+    return (
+        lowered.endswith("_checksum")
+        or lowered.endswith("checksum")
+        or lowered.endswith("_hash")
+        or lowered.endswith("_digest")
+    )
+
+
+def _is_sensitive_public_path_key(key: str) -> bool:
+    lowered = key.lower()
+    return lowered in PUBLIC_SENSITIVE_PATH_KEYS or lowered.endswith("_path") or lowered.endswith("_root")
+
+
+def _is_public_sensitive_path_or_file_uri(value: str) -> bool:
+    parsed = urlsplit(value)
+    scheme = parsed.scheme.lower()
+    if scheme in SUPPORTED_OBJECT_URI_SCHEMES:
+        return False
+    if scheme == "file":
+        return True
+    if re.match(r"^[a-zA-Z]:[\\/]", value):
+        return True
+    if value.startswith("\\\\"):
+        return True
+    normalized = (parsed.path if parsed.scheme else value).replace("\\", "/")
+    if not parsed.scheme and not parsed.netloc and normalized.startswith("/"):
+        return True
+    if normalized.startswith("/volume/"):
+        return True
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"/", ""}]
+    for index, part in enumerate(parts):
+        if part == "data" and index + 1 < len(parts) and parts[index + 1] == "Basins":
+            return True
+        if part == "Basins" and index > 0 and parts[index - 1] == "data":
+            return True
+    return False
 
 
 def _json_mapping(value: Any) -> dict[str, Any]:
@@ -1132,6 +2036,262 @@ def _first_non_empty(*values: Any) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def _preflight_blocker(code: str, message: str) -> dict[str, str]:
+    return {"code": code, "message": message}
+
+
+def _lifecycle_audit_persistence_failure_result(
+    *,
+    model: Mapping[str, Any],
+    current_active: Mapping[str, Any] | None,
+    operation: ModelLifecycleOperation,
+    preflight: Mapping[str, Any],
+) -> dict[str, Any]:
+    blocked_preflight = dict(preflight)
+    blocked_preflight["status"] = "blocked"
+    blocked_preflight["blockers"] = [
+        *list(preflight.get("blockers") or []),
+        _preflight_blocker(
+            "LIFECYCLE_AUDIT_PERSISTENCE_FAILED",
+            "Lifecycle audit evidence could not be persisted; mutation was rolled back.",
+        ),
+    ]
+    return {
+        "status": "blocked",
+        "operation": operation,
+        "model": _model_public_projection(model),
+        "previous_model": _model_public_projection(current_active) if current_active is not None else None,
+        "preflight": blocked_preflight,
+        "audit_reference": None,
+    }
+
+
+def _preflight_warning(code: str, message: str) -> dict[str, str]:
+    return {"code": code, "message": message}
+
+
+def _apply_idempotent_rollback_preflight(preflight: dict[str, Any], history: Mapping[str, Any]) -> None:
+    preflight["status"] = "ready"
+    preflight["blockers"] = []
+    preflight["warnings"] = [
+        *list(preflight.get("warnings") or []),
+        {
+            "code": "ROLLBACK_ALREADY_CURRENT",
+            "message": "Rollback retry is already reflected by the current active model.",
+        },
+    ]
+    preflight["prior_audit_log_id"] = history.get("prior_audit_log_id")
+    preflight["rollback_history"] = _rollback_history_preflight_reference(history)
+
+
+def _activation_safety_evidence(
+    model: Mapping[str, Any],
+    *,
+    activation_class_operation: bool,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], str, Any]:
+    resource_profile = _json_mapping(model.get("resource_profile"))
+    blockers: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    if model.get("river_network_version_id") and model.get("basin_version_id") is None:
+        blockers.append(_preflight_blocker("LINEAGE_MISSING_BASIN_VERSION", "Model lineage is missing basin version."))
+    if model.get("mesh_version_id") in (None, ""):
+        blockers.append(_preflight_blocker("LINEAGE_MISSING_MESH_VERSION", "Model lineage is missing mesh version."))
+    if model.get("model_package_uri") in (None, ""):
+        blockers.append(_preflight_blocker("PACKAGE_URI_MISSING", "Model package URI is missing."))
+    package_checksum = _first_non_empty(resource_profile.get("package_checksum"), model.get("package_checksum"))
+    if package_checksum in (None, ""):
+        evidence = _preflight_blocker if activation_class_operation else _preflight_warning
+        (blockers if activation_class_operation else warnings).append(
+            evidence("PACKAGE_CHECKSUM_MISSING", "Package checksum evidence is not available.")
+        )
+    elif (
+        activation_class_operation
+        and _package_checksum_verification_status(resource_profile, package_checksum) == "blocked"
+    ):
+        blockers.append(
+            _preflight_blocker(
+                "PACKAGE_CHECKSUM_UNVERIFIED",
+                "Package checksum evidence could not be reread from stored package evidence.",
+            )
+        )
+    if _object_uri_prefix_status(model.get("model_package_uri")) == "invalid":
+        blockers.append(_preflight_blocker("OBJECT_URI_PREFIX_INVALID", "Model package URI prefix is not supported."))
+    copied_root = _copied_root_status(resource_profile)
+    if copied_root == "unsafe":
+        blockers.append(_preflight_blocker("COPIED_ROOT_UNSAFE", "Copied-root source evidence is unsafe."))
+    elif copied_root == "missing":
+        warnings.append(_preflight_warning("COPIED_ROOT_EVIDENCE_MISSING", "Copied-root evidence is not available."))
+    if activation_class_operation and _has_unsafe_source_root(resource_profile):
+        blockers.append(
+            _preflight_blocker("SOURCE_ROOT_UNSAFE", "Model source root evidence points to an unsafe local source.")
+        )
+    return blockers, warnings, copied_root, package_checksum
+
+
+def _object_uri_prefix_status(value: Any) -> str:
+    if value in (None, ""):
+        return "missing"
+    parsed = urlsplit(str(value))
+    if parsed.scheme in SUPPORTED_OBJECT_URI_SCHEMES:
+        return "valid"
+    return "invalid"
+
+
+def _copied_root_status(resource_profile: Mapping[str, Any]) -> str:
+    copied_root = _first_non_empty(
+        resource_profile.get("copied_root"),
+        resource_profile.get("copied_root_uri"),
+        resource_profile.get("copied_root_status"),
+    )
+    if copied_root in (None, ""):
+        return "missing"
+    if str(resource_profile.get("source_is_symlink", "")).lower() == "true":
+        return "unsafe"
+    text = str(copied_root)
+    if text.lower() in {"unsafe", "symlink", "raw", "local"}:
+        return "unsafe"
+    if text.lower() in {"present", "safe", "copied", "verified"}:
+        return "present"
+    if text.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", text):
+        return "unsafe"
+    return "present"
+
+
+def _canonical_lifecycle_state(model: Mapping[str, Any]) -> ModelLifecycleState:
+    state = str(model.get("lifecycle_state") or ("active" if model.get("active_flag") else "inactive"))
+    if state in MODEL_LIFECYCLE_STATES:
+        return state  # type: ignore[return-value]
+    return "active" if model.get("active_flag") else "inactive"
+
+
+def _transition_blocker(
+    *,
+    operation: ModelLifecycleOperation,
+    lifecycle_state: ModelLifecycleState,
+    model_id: str,
+    current_active_id: str | None,
+) -> dict[str, str] | None:
+    if operation == "activate":
+        if lifecycle_state == "active" and current_active_id == model_id:
+            return None
+        if lifecycle_state not in {"inactive", "deprecated", "superseded"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"activate is not allowed from {lifecycle_state}.")
+    elif operation == "switch_version":
+        if lifecycle_state == "active" and current_active_id == model_id:
+            return None
+        if lifecycle_state not in {"inactive", "deprecated", "superseded"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"switch_version is not allowed from {lifecycle_state}.")
+    elif operation == "deactivate":
+        if lifecycle_state not in {"active", "inactive"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"deactivate is not allowed from {lifecycle_state}.")
+    elif operation == "supersede":
+        if lifecycle_state not in {"active", "inactive", "deprecated", "superseded"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"supersede is not allowed from {lifecycle_state}.")
+    elif operation == "deprecate":
+        if lifecycle_state not in {"inactive", "superseded", "deprecated"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"deprecate is not allowed from {lifecycle_state}.")
+    return None
+
+
+def _package_checksum_verification_status(resource_profile: Mapping[str, Any], package_checksum: Any) -> str:
+    verification_fields = (
+        resource_profile.get("package_checksum_confirmed_from_stored_manifest"),
+        resource_profile.get("package_checksum_verified"),
+        resource_profile.get("checksum_reread_verified"),
+    )
+    if any(value is True for value in verification_fields):
+        return "verified"
+    if any(value is False for value in verification_fields):
+        return "blocked"
+    for key in (
+        "package_checksum_reread_status",
+        "package_checksum_reconstruction_status",
+        "checksum_reread_status",
+    ):
+        value = resource_profile.get(key)
+        if value in (None, ""):
+            continue
+        if str(value).lower() in {"verified", "ready", "ok", "confirmed"}:
+            return "verified"
+        if str(value).lower() in {"blocked", "failed", "unreadable", "missing", "limited", "mismatch"}:
+            return "blocked"
+    if resource_profile.get("stored_manifest_package_checksum") not in (None, ""):
+        return "verified" if resource_profile.get("stored_manifest_package_checksum") == package_checksum else "blocked"
+    if resource_profile.get("manifest_uri") not in (None, ""):
+        return "verified"
+    return "blocked"
+
+
+def _has_unsafe_source_root(resource_profile: Mapping[str, Any]) -> bool:
+    for value in _iter_source_evidence_values(resource_profile):
+        if _is_unsafe_source_value(value):
+            return True
+    return False
+
+
+def _iter_source_evidence_values(value: Any) -> list[Any]:
+    values: list[Any] = []
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if key in {"source_path", "resolved_source_path", "source_uri", "root", "source_root"}:
+                values.append(child)
+            if isinstance(child, (Mapping, list, tuple)):
+                values.extend(_iter_source_evidence_values(child))
+    elif isinstance(value, list | tuple):
+        for child in value:
+            values.extend(_iter_source_evidence_values(child))
+    return values
+
+
+def _is_unsafe_source_value(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    text = str(value)
+    parsed = urlsplit(text)
+    scheme = parsed.scheme.lower()
+    if scheme == "file":
+        return True
+    if scheme in SUPPORTED_OBJECT_URI_SCHEMES:
+        return False
+    path_text = parsed.path if scheme else text
+    normalized = path_text.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
+        return True
+    if normalized.startswith("/volume/"):
+        return True
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"/", ""}]
+    for index, part in enumerate(parts):
+        if part == "data" and index + 1 < len(parts) and parts[index + 1] == "Basins":
+            return True
+        if part == "Basins" and index > 0 and parts[index - 1] == "data":
+            return True
+    return False
+
+
+def _model_audit_reference(model: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if model is None:
+        return None
+    return {
+        "model_id": model.get("model_id"),
+        "basin_version_id": model.get("basin_version_id"),
+        "lifecycle_state": model.get("lifecycle_state"),
+        "active_flag": bool(model.get("active_flag")),
+    }
+
+
+def _rollback_history_preflight_reference(history: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if history is None:
+        return None
+    return {
+        "prior_audit_log_id": history.get("prior_audit_log_id") or history.get("log_id"),
+        "action": history.get("action"),
+        "entity_id": history.get("entity_id"),
+        "trusted": bool(history.get("trusted")),
+        "matched_previous_model_id": history.get("matched_previous_model_id"),
+        "stale_reason": history.get("stale_reason"),
+    }
 
 
 class _PsycopgTransaction:

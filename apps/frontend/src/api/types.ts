@@ -165,9 +165,43 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set active model flag */
+        /** Set active model flag through lifecycle operation */
         put: operations["setModelActive"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{model_id}/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preflight model lifecycle operation */
+        post: operations["preflightModelLifecycle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{model_id}/lifecycle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Execute model lifecycle operation */
+        post: operations["modelLifecycleOperation"];
         delete?: never;
         options?: never;
         head?: never;
@@ -753,8 +787,13 @@ export interface components {
             rshud_code_version?: string | null;
             autoshud_code_version?: string | null;
             active_flag: boolean;
+            /**
+             * @default inactive
+             * @enum {string}
+             */
+            lifecycle_state: "inactive" | "active" | "deprecated" | "superseded";
             container_image?: string | null;
-            model_package_uri: string;
+            model_package_uri: string | null;
             package_checksum?: string | null;
             manifest_uri?: string | null;
             source_inventory_checksum?: string | null;
@@ -775,6 +814,63 @@ export interface components {
             total: number;
             limit: number;
             offset: number;
+        };
+        ModelLifecycleRequest: {
+            /** @enum {string} */
+            operation: "activate" | "deactivate" | "switch_version" | "rollback_version" | "supersede" | "deprecate";
+            previous_model_id?: string | null;
+            override_missing_active?: boolean;
+            reason?: string | null;
+        };
+        ModelOperationPreflight: {
+            schema: string;
+            request_id?: string | null;
+            operation: string;
+            action_id?: string | null;
+            actor_id?: string | null;
+            roles?: string[];
+            /** @enum {string} */
+            status: "ready" | "blocked";
+            model_id: string;
+            basin_id?: string | null;
+            basin_version_id?: string | null;
+            current_active_model_id?: string | null;
+            previous_model_id?: string | null;
+            restored_model_id?: string | null;
+            prior_audit_log_id?: number | null;
+            rollback_history?: {
+                [key: string]: unknown;
+            } | null;
+            river_network_version_id?: string | null;
+            mesh_version_id?: string | null;
+            lineage?: {
+                [key: string]: unknown;
+            };
+            object_uri_prefix?: {
+                [key: string]: unknown;
+            };
+            impact: {
+                [key: string]: unknown;
+            };
+            blockers: {
+                [key: string]: unknown;
+            }[];
+            warnings: {
+                [key: string]: unknown;
+            }[];
+            override_missing_active?: boolean;
+            reason?: string | null;
+        };
+        ModelLifecycleResult: {
+            /** @enum {string} */
+            status: "allowed" | "blocked" | "already_current" | "rollback";
+            operation: string;
+            model: components["schemas"]["ModelInstance"];
+            previous_model?: components["schemas"]["ModelInstance"] | null;
+            preflight: components["schemas"]["ModelOperationPreflight"];
+            audit_reference?: {
+                [key: string]: unknown;
+            } | null;
         };
         RiverSegment: {
             river_segment_id: string;
@@ -1761,14 +1857,74 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Updated model instance */
+            /** @description Lifecycle operation result */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["ModelInstance"];
+                        data: components["schemas"]["ModelLifecycleResult"];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    preflightModelLifecycle: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: components["parameters"]["ModelId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Model lifecycle preflight summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ModelOperationPreflight"];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    modelLifecycleOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: components["parameters"]["ModelId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Model lifecycle operation result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ModelLifecycleResult"];
                     };
                 };
             };

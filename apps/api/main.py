@@ -130,6 +130,26 @@ async def _protected_mutation_policy(request: Any) -> tuple[str, str, str] | _Pr
                 return active
             action_id = "models.activate" if active else "models.deactivate"
             return (action_id, "model_instance", model_id)
+    if (
+        method == "POST"
+        and path.startswith("/api/v1/models/")
+        and (path.endswith("/lifecycle") or path.endswith("/preflight"))
+    ):
+        suffix = "/lifecycle" if path.endswith("/lifecycle") else "/preflight"
+        model_id = path.removeprefix("/api/v1/models/").removesuffix(suffix)
+        if model_id and "/" not in model_id:
+            operation = await _model_lifecycle_operation_flag(request)
+            if isinstance(operation, _PreBodyPolicyError):
+                return operation
+            action_id = {
+                "activate": "models.activate",
+                "deactivate": "models.deactivate",
+                "switch_version": "models.switch_version",
+                "rollback_version": "models.rollback_version",
+                "supersede": "models.supersede",
+                "deprecate": "models.deactivate",
+            }[operation]
+            return (action_id, "model_instance", model_id)
     return None
 
 
@@ -200,6 +220,51 @@ def _active_toggle_validation_error(request_id: str) -> _PreBodyPolicyError:
                     "Active-toggle requests require a bounded JSON object with boolean active "
                     "or active_flag before authorization can be evaluated."
                 ),
+                "request_id": request_id,
+            }
+        ],
+    )
+
+
+async def _model_lifecycle_operation_flag(request: Any) -> str | _PreBodyPolicyError:
+    request_id = _ensure_request_id(request)
+    content_length = request.headers.get("content-length")
+    try:
+        if content_length is not None and int(content_length) > _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES:
+            return _model_lifecycle_validation_error(request_id)
+    except ValueError:
+        return _model_lifecycle_validation_error(request_id)
+
+    body = await _read_bounded_active_toggle_body(request)
+    if body is None:
+        return _model_lifecycle_validation_error(request_id)
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request._receive = receive
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return _model_lifecycle_validation_error(request_id)
+    if not isinstance(payload, dict):
+        return _model_lifecycle_validation_error(request_id)
+    operation = payload.get("operation")
+    if operation not in {"activate", "deactivate", "switch_version", "rollback_version", "supersede", "deprecate"}:
+        return _model_lifecycle_validation_error(request_id)
+    return str(operation)
+
+
+def _model_lifecycle_validation_error(request_id: str) -> _PreBodyPolicyError:
+    return _PreBodyPolicyError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="Request validation failed.",
+        details=[
+            {
+                "field": "body.operation",
+                "rejected_value": None,
+                "reason": "Model lifecycle requests require a bounded JSON object with a supported operation.",
                 "request_id": request_id,
             }
         ],

@@ -323,7 +323,7 @@ paths:
   /api/v1/models/{model_id}/active:
     put:
       operationId: setModelActive
-      summary: Set active model flag
+      summary: Set active model flag through lifecycle operation
       tags: [models]
       parameters:
         - $ref: "#/components/parameters/ModelId"
@@ -342,7 +342,7 @@ paths:
                     also accepted by the backend for backward compatibility.
       responses:
         "200":
-          description: Updated model instance
+          description: Lifecycle operation result
           content:
             application/json:
               schema:
@@ -352,7 +352,67 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        $ref: "#/components/schemas/ModelInstance"
+                        $ref: "#/components/schemas/ModelLifecycleResult"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/models/{model_id}/preflight:
+    post:
+      operationId: preflightModelLifecycle
+      summary: Preflight model lifecycle operation
+      tags: [models]
+      parameters:
+        - $ref: "#/components/parameters/ModelId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelLifecycleRequest"
+      responses:
+        "200":
+          description: Model lifecycle preflight summary
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ModelOperationPreflight"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/models/{model_id}/lifecycle:
+    post:
+      operationId: modelLifecycleOperation
+      summary: Execute model lifecycle operation
+      tags: [models]
+      parameters:
+        - $ref: "#/components/parameters/ModelId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelLifecycleRequest"
+      responses:
+        "200":
+          description: Model lifecycle operation result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ModelLifecycleResult"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1900,11 +1960,16 @@ components:
           nullable: true
         active_flag:
           type: boolean
+        lifecycle_state:
+          type: string
+          enum: [inactive, active, deprecated, superseded]
+          default: inactive
         container_image:
           type: string
           nullable: true
         model_package_uri:
           type: string
+          nullable: true
         package_checksum:
           type: string
           nullable: true
@@ -1956,6 +2021,121 @@ components:
         offset:
           type: integer
           minimum: 0
+    ModelLifecycleRequest:
+      type: object
+      required: [operation]
+      properties:
+        operation:
+          type: string
+          enum: [activate, deactivate, switch_version, rollback_version, supersede, deprecate]
+        previous_model_id:
+          type: string
+          nullable: true
+        override_missing_active:
+          type: boolean
+        reason:
+          type: string
+          nullable: true
+    ModelOperationPreflight:
+      type: object
+      required: [schema, operation, status, model_id, blockers, warnings, impact]
+      properties:
+        schema:
+          type: string
+        request_id:
+          type: string
+          nullable: true
+        operation:
+          type: string
+        action_id:
+          type: string
+          nullable: true
+        actor_id:
+          type: string
+          nullable: true
+        roles:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [ready, blocked]
+        model_id:
+          type: string
+        basin_id:
+          type: string
+          nullable: true
+        basin_version_id:
+          type: string
+          nullable: true
+        current_active_model_id:
+          type: string
+          nullable: true
+        previous_model_id:
+          type: string
+          nullable: true
+        restored_model_id:
+          type: string
+          nullable: true
+        prior_audit_log_id:
+          type: integer
+          nullable: true
+        rollback_history:
+          type: object
+          nullable: true
+          additionalProperties: true
+        river_network_version_id:
+          type: string
+          nullable: true
+        mesh_version_id:
+          type: string
+          nullable: true
+        lineage:
+          type: object
+          additionalProperties: true
+        object_uri_prefix:
+          type: object
+          additionalProperties: true
+        impact:
+          type: object
+          additionalProperties: true
+        blockers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        override_missing_active:
+          type: boolean
+        reason:
+          type: string
+          nullable: true
+    ModelLifecycleResult:
+      type: object
+      required: [status, operation, model, preflight]
+      properties:
+        status:
+          type: string
+          enum: [allowed, blocked, already_current, rollback]
+        operation:
+          type: string
+        model:
+          $ref: "#/components/schemas/ModelInstance"
+        previous_model:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/ModelInstance"
+        preflight:
+          $ref: "#/components/schemas/ModelOperationPreflight"
+        audit_reference:
+          type: object
+          nullable: true
+          additionalProperties: true
     RiverSegment:
       type: object
       required: [river_segment_id, river_network_version_id, geom, properties_json, created_at]

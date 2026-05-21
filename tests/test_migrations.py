@@ -25,6 +25,7 @@ EXPECTED_MIGRATIONS = [
     "000019_hydro_mvt_identity_lookup_idx.sql",
     "000020_valid_time_discovery_indexes.sql",
     "000021_latest_ready_run_discovery_idx.sql",
+    "000022_model_asset_lifecycle.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -307,6 +308,17 @@ def test_valid_time_discovery_migration_adds_dedicated_ordered_indexes() -> None
     assert flood_columns == ("run_id", "duration", "max_over_window", "valid_time DESC")
     assert "CREATE INDEX IF NOT EXISTS river_timeseries_valid_time_discovery_idx" in migration
     assert hydro_columns == ("run_id", "variable", "valid_time DESC")
+
+
+def test_model_asset_lifecycle_migration_prevents_active_state_drift() -> None:
+    migration = dict(_migration_sql())["000022_model_asset_lifecycle.sql"]
+
+    assert "model_instance_active_lifecycle_consistency_chk" in migration
+    assert "active_flag = true AND lifecycle_state <> 'active'" in migration
+    assert "lifecycle_state = 'active' AND active_flag <> true" in migration
+    assert "active_flag = true AND lifecycle_state = 'active'" in migration
+    assert "active_flag = false AND lifecycle_state <> 'active'" in migration
+    assert "WHERE active_flag = true AND lifecycle_state = 'active'" in migration
 
 
 def test_latest_ready_run_discovery_migration_matches_query_predicate_and_order() -> None:

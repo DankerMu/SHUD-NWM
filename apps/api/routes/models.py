@@ -18,9 +18,13 @@ from packages.common.model_registry import (
     InvalidPayloadError,
     InvalidReferenceError,
     MissingResourceError,
+    ModelLifecycleAuditPersistenceError,
+    ModelLifecycleOperation,
     ModelRegistryError,
     PsycopgModelRegistryStore,
     RiverSegmentGeoJsonBudgetError,
+    sanitize_model_detail_payload,
+    sanitize_model_list_payload,
 )
 from workers.model_registry.validator import ModelPackageValidationError, validate_model_package_uri
 
@@ -102,7 +106,10 @@ class ModelCreatePayload(BaseModel):
     autoshud_code_version: str | None = None
     container_image: str | None = None
     model_package_uri: str
-    active_flag: bool = False
+    active_flag: bool = Field(
+        default=False,
+        description="Must be false on creation; activate models through the lifecycle operation endpoint.",
+    )
     resource_profile: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("model_package_uri")
@@ -112,6 +119,13 @@ class ModelCreatePayload(BaseModel):
             raise ValueError("model_package_uri is required")
         return value
 
+    @field_validator("active_flag")
+    @classmethod
+    def _active_flag_must_not_create_active(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("active_flag=true is not accepted when creating models; use lifecycle activate")
+        return False
+
 
 class ActiveFlagPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -120,6 +134,15 @@ class ActiveFlagPayload(BaseModel):
         validation_alias=AliasChoices("active", "active_flag"),
         description="Canonical active flag. The legacy active_flag key is accepted for compatibility.",
     )
+
+
+class ModelLifecyclePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: ModelLifecycleOperation
+    previous_model_id: str | None = None
+    override_missing_active: bool = False
+    reason: str | None = None
 
 
 class CrosswalkEntryPayload(BaseModel):
@@ -200,7 +223,36 @@ def require_model_active_action(
     )
 
 
+def require_model_lifecycle_action(
+    request: Request,
+    model_id: str,
+    payload: ModelLifecyclePayload,
+) -> PolicyDecision:
+    action_id = {
+        "activate": "models.activate",
+        "deactivate": "models.deactivate",
+        "switch_version": "models.switch_version",
+        "rollback_version": "models.rollback_version",
+        "supersede": "models.supersede",
+        "deprecate": "models.deactivate",
+    }[payload.operation]
+    return require_action(
+        request,
+        action_id,
+        target_type="model_instance",
+        target_id=model_id,
+        payload=payload.model_dump(),
+    )
+
+
 def _handle_registry_error(error: Exception) -> ApiError:
+    if isinstance(error, ModelLifecycleAuditPersistenceError):
+        return ApiError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="MODEL_LIFECYCLE_AUDIT_PERSISTENCE_FAILED",
+            message="Model lifecycle audit evidence could not be persisted.",
+            details=error.result,
+        )
     if isinstance(error, DuplicateResourceError):
         return ApiError(
             status_code=status.HTTP_409_CONFLICT,
@@ -446,13 +498,65 @@ def set_model_active(
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
+        result = store.model_lifecycle_operation(
+            model_id,
+            operation="activate" if payload.active else "deactivate",
+            policy_decision=policy_decision,
+            request_id=getattr(request.state, "request_id", None),
+        )
+        return _ok(request, result)
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
+@router.post("/models/{model_id}/preflight")
+def preflight_model_lifecycle(
+    request: Request,
+    model_id: str,
+    payload: ModelLifecyclePayload,
+    policy_decision: PolicyDecision = Depends(require_model_lifecycle_action),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
         return _ok(
             request,
-            store.set_model_active(
+            store.preflight_model_operation(
                 model_id,
-                payload.active,
+                operation=payload.operation,
+                policy_decision=policy_decision,
+                previous_model_id=payload.previous_model_id,
+                override_missing_active=payload.override_missing_active,
+                reason=payload.reason,
+                request_id=getattr(request.state, "request_id", None),
+            ),
+        )
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
+@router.post("/models/{model_id}/lifecycle")
+def model_lifecycle_operation(
+    request: Request,
+    model_id: str,
+    payload: ModelLifecyclePayload,
+    policy_decision: PolicyDecision = Depends(require_model_lifecycle_action),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            request,
+            store.model_lifecycle_operation(
+                model_id,
+                operation=payload.operation,
                 policy_decision=policy_decision,
                 request_id=getattr(request.state, "request_id", None),
+                previous_model_id=payload.previous_model_id,
+                override_missing_active=payload.override_missing_active,
+                reason=payload.reason,
             ),
         )
     except (ModelRegistryError, ModelPackageValidationError) as error:
@@ -483,12 +587,12 @@ def list_models(
     try:
         return _ok(
             request,
-            store.list_models(
+            sanitize_model_list_payload(store.list_models(
                 basin_version_id=basin_version_id,
                 active=active_filter,
                 limit=limit,
                 offset=offset,
-            ),
+            )),
         )
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
@@ -503,7 +607,7 @@ def get_model(
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return _ok(request, store.get_model(model_id))
+        return _ok(request, sanitize_model_detail_payload(store.get_model(model_id)))
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:

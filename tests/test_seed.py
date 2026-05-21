@@ -38,6 +38,13 @@ def test_seed_sql_strings_contain_expected_tables() -> None:
     assert missing_tables == []
 
 
+def test_seed_active_model_sets_lifecycle_state_active() -> None:
+    source = Path(seed_demo.__file__).read_text(encoding="utf-8")
+
+    assert "lifecycle_state" in source
+    assert "'active'" in source
+
+
 def test_seed_ids_follow_convention() -> None:
     assert seed_demo.BASIN_ID == "yangtze"
     assert re.fullmatch(r"yangtze_v\d{4}_\d{2}", seed_demo.BASIN_VERSION_ID)

@@ -36,6 +36,8 @@ def test_validate_ops_default_lane_writes_required_release_blocked_evidence(tmp_
     assert summary["auth_readiness_execution_mode"] == "release_blocked"
     assert summary["live_alert_sink_delivered"] is False
     assert summary["live_rollback_executed"] is False
+    assert summary["model_lifecycle_drill_status"] == "ready"
+    assert summary["model_lifecycle_live_object_store_mutation"] is False
     assert summary["dependency_status"] == "release_blocked"
     assert summary["files"] == [
         "preflight.json",
@@ -43,6 +45,7 @@ def test_validate_ops_default_lane_writes_required_release_blocked_evidence(tmp_
         "auth_rbac.json",
         "auth_release_blockers.json",
         "audit_redaction.json",
+        "model_lifecycle_drills.json",
         "monitoring_alerts.json",
         "rollback_drills.json",
         "dependency_closure.json",
@@ -301,6 +304,32 @@ def test_validate_ops_monitoring_alerts_and_rollback_drills_cover_required_surfa
         assert drill["residual_risk"]
         assert drill["dependency_artifact_references"]
         assert Path(drill["runbook_link"]).is_file()
+
+
+def test_validate_ops_model_lifecycle_drill_is_deterministic_without_live_object_store(tmp_path: Path) -> None:
+    validate_ops(ProductionOpsConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="model_lifecycle"))
+    lifecycle = _read_json(tmp_path / "artifacts" / "model_lifecycle" / "ops" / "model_lifecycle_drills.json")
+
+    assert lifecycle["schema"] == "nhms.production_closure.ops.model_lifecycle_drills.v1"
+    assert lifecycle["status"] == "ready"
+    assert lifecycle["execution_mode"] == "deterministic_fixture"
+    assert lifecycle["live_object_store_mutation"] is False
+    assert lifecycle["live_external_material_required"] is False
+    assert {item["drill"] for item in lifecycle["drills"]} == {
+        "bad_activation_preflight",
+        "rollback_to_previous_active",
+        "blocked_deactivation_missing_active",
+        "idempotent_repeat_activation",
+    }
+    bad_activation = next(item for item in lifecycle["drills"] if item["drill"] == "bad_activation_preflight")
+    assert bad_activation["status"] == "blocked"
+    assert bad_activation["blockers"] == [{"code": "OBJECT_URI_PREFIX_INVALID"}]
+    assert all(item["object_store_mutated"] is False for item in lifecycle["drills"])
+    assert set(lifecycle["non_goals"]) == {
+        "arbitrary_model_package_upload",
+        "production_object_store_delete",
+        "production_object_store_upload",
+    }
 
 
 def test_validate_ops_dependency_closure_accepts_real_summaries_but_keeps_live_control_gate(

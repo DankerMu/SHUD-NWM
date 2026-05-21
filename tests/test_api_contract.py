@@ -198,11 +198,51 @@ def test_model_active_contract_accepts_active_and_active_flag() -> None:
 
     assert active_response.status_code == 200
     assert active_response.json()["status"] == "ok"
-    assert active_response.json()["data"]["active_flag"] is True
+    assert active_response.json()["data"]["status"] == "allowed"
+    assert active_response.json()["data"]["model"]["active_flag"] is True
     assert active_flag_response.status_code == 200
     assert active_flag_response.json()["status"] == "ok"
-    assert active_flag_response.json()["data"]["active_flag"] is False
+    assert active_flag_response.json()["data"]["status"] == "allowed"
+    assert active_flag_response.json()["data"]["model"]["active_flag"] is False
     assert store.calls == [("model_1", True), ("model_1", False)]
+
+
+def test_model_lifecycle_contract_returns_preflight_audit_and_lifecycle_state() -> None:
+    store = _ModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+    try:
+        with TestClient(app) as client:
+            preflight = client.post(
+                "/api/v1/models/inactive_model/preflight",
+                json={"operation": "activate"},
+                headers={"X-User-Role": "model_admin"},
+            )
+            lifecycle = client.post(
+                "/api/v1/models/inactive_model/lifecycle",
+                json={"operation": "activate"},
+                headers={"X-User-Role": "model_admin"},
+            )
+    finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert preflight.status_code == 200
+    preflight_data = _assert_success_envelope(preflight.json())
+    assert preflight_data["schema"] == "nhms.model_operation_preflight.v1"
+    assert preflight_data["operation"] == "activate"
+    assert preflight_data["status"] == "ready"
+    assert lifecycle.status_code == 200
+    data = _assert_success_envelope(lifecycle.json())
+    assert data["status"] == "allowed"
+    assert data["operation"] == "activate"
+    assert data["model"]["lifecycle_state"] == "active"
+    assert data["preflight"]["status"] == "ready"
+    assert data["audit_reference"]["entity_type"] == "model_instance"
 
 
 def test_model_active_requires_model_admin_before_mutation() -> None:
@@ -251,10 +291,19 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
     assert {item["model_id"] for item in data["items"]} == {"active_model", "inactive_model"}
     inactive_item = next(item for item in data["items"] if item["model_id"] == "inactive_model")
     assert inactive_item["resource_profile"]["manifest_uri"] == "s3://nhms/models/inactive_model/vbasins/manifest.json"
-    public_listing_profile_json = json.dumps(inactive_item["resource_profile"])
-    assert "token=secret" not in public_listing_profile_json
-    assert "user:pass@" not in public_listing_profile_json
-    assert "#frag" not in public_listing_profile_json
+    public_listing_json = json.dumps(inactive_item)
+    for token in (
+        "/volume/data",
+        "C:\\",
+        "file://",
+        "token=secret",
+        "user:pass@",
+        "#frag",
+        "package-sha-1",
+        "inventory-sha-1",
+        "mesh-sha-1",
+    ):
+        assert token not in public_listing_json
 
     spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
     list_models = spec["paths"]["/api/v1/models"]["get"]
@@ -293,30 +342,39 @@ def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
         "calibration_version_id": "calibration_v1",
         "segment_count": 2,
         "mesh_uri": "s3://nhms/models/inactive_model/vbasins/package/alias-a.sp.mesh",
-        "mesh_checksum": "mesh-sha-1",
         "model_package_uri": "s3://nhms/models/inactive_model/package/",
-        "package_checksum": "package-sha-1",
         "active_flag": False,
         "manifest_uri": "s3://nhms/models/inactive_model/vbasins/manifest.json",
-        "source_inventory_checksum": "inventory-sha-1",
         "basin_slug": "basin-a",
         "shud_input_name": "alias-a",
-        "source_path": "/volume/data/nwm/Basins/basin-a",
-        "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
         "source_uri": "s3://nhms/sources/basin-a",
         "source_is_symlink": False,
     }.items() <= data.items()
+    assert data["mesh_checksum"] is None
+    assert data["package_checksum"] is None
+    assert data["source_inventory_checksum"] is None
+    assert data["source_path"] is None
+    assert data["resolved_source_path"] is None
     assert data["resource_profile"]["manifest_uri"] == "s3://nhms/models/inactive_model/vbasins/manifest.json"
     assert data["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
     assert data["resource_profile"]["lineage"]["source_uris"] == [
         "s3://nhms/sources/nested",
-        "/volume/data/nwm/Basins/local-source",
+        None,
     ]
     assert data["resource_profile"]["lineage"]["note"] == "s3 label only"
-    public_profile_json = json.dumps(data["resource_profile"])
-    assert "token=secret" not in public_profile_json
-    assert "user:pass@" not in public_profile_json
-    assert "#frag" not in public_profile_json
+    public_detail_json = json.dumps(data)
+    for token in (
+        "/volume/data",
+        "C:\\",
+        "file://",
+        "token=secret",
+        "user:pass@",
+        "#frag",
+        "package-sha-1",
+        "inventory-sha-1",
+        "mesh-sha-1",
+    ):
+        assert token not in public_detail_json
 
     assert missing_response.status_code == 404
     assert missing_response.json()["error"]["code"] == "MODEL_REGISTRY_NOT_FOUND"
@@ -513,6 +571,7 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert "resolved_source_path?: string | null;" in generated_types
     assert "source_uri?: string | null;" in generated_types
     assert "source_is_symlink?: boolean | null;" in generated_types
+    assert "restored_model_id?: string | null;" in generated_types
     assert "FloodFrequencyThresholds" in generated_types
     assert "Q2?: number | null;" in generated_types
     assert "Q20?: number | null;" in generated_types
@@ -774,6 +833,7 @@ class _ModelRegistryStore:
                 "source_uri": None,
                 "source_is_symlink": None,
                 "active_flag": True,
+                "lifecycle_state": "active",
                 "resource_profile": {},
                 "created_at": "2026-05-14T00:00:00Z",
             },
@@ -801,6 +861,7 @@ class _ModelRegistryStore:
                 "source_uri": "s3://nhms/sources/basin-a",
                 "source_is_symlink": False,
                 "active_flag": False,
+                "lifecycle_state": "inactive",
                 "resource_profile": {
                     "manifest_uri": "s3://nhms/models/inactive_model/vbasins/manifest.json",
                     "source_uri": "s3://nhms/sources/basin-a",
@@ -827,8 +888,32 @@ class _ModelRegistryStore:
             "shud_code_version": "2.0",
             "model_package_uri": "s3://nhms/models/model_1/package/",
             "active_flag": active,
+            "lifecycle_state": "active" if active else "inactive",
             "resource_profile": {},
             "created_at": "2026-05-14T00:00:00Z",
+        }
+
+    def preflight_model_operation(self, model_id: str, *, operation: str, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema": "nhms.model_operation_preflight.v1",
+            "request_id": "contract",
+            "operation": operation,
+            "status": "ready",
+            "model_id": model_id,
+            "basin_version_id": "basin_v1",
+            "blockers": [],
+            "warnings": [],
+            "impact": {"downstream_surfaces": ["forecast-routing"]},
+        }
+
+    def model_lifecycle_operation(self, model_id: str, *, operation: str, **_kwargs: Any) -> dict[str, Any]:
+        model = self.set_model_active(model_id, operation in {"activate", "switch_version", "rollback_version"})
+        return {
+            "status": "allowed",
+            "operation": operation,
+            "model": model,
+            "preflight": self.preflight_model_operation(model_id, operation=operation),
+            "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": 7},
         }
 
     def list_models(
