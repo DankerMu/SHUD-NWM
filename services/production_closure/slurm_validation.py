@@ -48,6 +48,7 @@ from services.production_closure.ops_validation import (
 from services.production_closure.readiness_validation import (
     ProductionReadinessConfig,
     ProductionReadinessValidationError,
+    redact_readiness_public_error,
     validate_readiness,
 )
 from services.production_closure.scale_validation import (
@@ -2196,10 +2197,13 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             )
             click.echo(json.dumps(redact_payload(summary), sort_keys=True))
         except ProductionReadinessValidationError as error:
-            click.echo(f"{error.error_code}: {redact_text(error.message)}", err=True)
+            click.echo(f"{error.error_code}: {redact_readiness_public_error(error.message)}", err=True)
             raise SystemExit(1) from error
         except Exception as error:
-            click.echo(f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
+            click.echo(
+                f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_readiness_public_error(error)}",
+                err=True,
+            )
             raise SystemExit(1) from error
 
     try:
@@ -2519,10 +2523,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         except ProductionReadinessValidationError as error:
-            print(f"{error.error_code}: {redact_text(error.message)}", file=sys.stderr)
+            print(f"{error.error_code}: {redact_readiness_public_error(error.message)}", file=sys.stderr)
             return 1
         except Exception as error:
-            print(f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
+            print(f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_readiness_public_error(error)}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")

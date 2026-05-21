@@ -125,6 +125,38 @@ PROOF_FILE_ENV = {
     "mvt": "NHMS_PRODUCTION_READINESS_MVT_PROOF_FILE",
     "target_env": "NHMS_PRODUCTION_READINESS_TARGET_ENV_PROOF_FILE",
 }
+DEPENDENCY_BINDING_ALIAS_GROUPS: Mapping[str, tuple[str, ...]] = {
+    "dependency": ("dependency_surface", "dependency_name", "dependency"),
+    "producer_issue": ("producer_issue", "summary_issue"),
+    "producer_schema": ("producer_schema", "summary_schema"),
+    "producer_run_id": ("producer_run_id", "summary_run_id"),
+    "producer_artifact_ref": (
+        "producer_artifact_ref",
+        "producer_artifact_path",
+        "producer_artifact_uri",
+        "summary_ref",
+        "summary_path",
+        "artifact_ref",
+        "artifact_path",
+        "artifact_uri",
+    ),
+    "producer_checksum_or_receipt_id": (
+        "summary_checksum",
+        "producer_checksum",
+        "checksum",
+        "digest",
+        "producer_receipt_id",
+        "receipt_id",
+    ),
+}
+DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES = {
+    "dependency": "dependency_alias_mismatch",
+    "producer_issue": "producer_issue_alias_mismatch",
+    "producer_schema": "producer_schema_alias_mismatch",
+    "producer_run_id": "producer_run_id_alias_mismatch",
+    "producer_artifact_ref": "producer_artifact_ref_alias_mismatch",
+    "producer_checksum_or_receipt_id": "producer_checksum_or_receipt_id_alias_mismatch",
+}
 PROOF_CONTRACTS = {
     "auth": {
         "proof_type": "auth",
@@ -1556,15 +1588,10 @@ def _dependency_receipt_errors(
     provenance_binding = _dependency_producer_binding(provenance)
     binding_values = {
         field: _coalesced_binding_value(top_level_binding, provenance_binding, field)
-        for field in (
-            "dependency",
-            "producer_issue",
-            "producer_schema",
-            "producer_run_id",
-            "producer_artifact_ref",
-            "producer_checksum_or_receipt_id",
-        )
+        for field in DEPENDENCY_BINDING_ALIAS_GROUPS
     }
+    errors.extend(_dependency_binding_alias_errors(top_level_binding, source="top_level"))
+    errors.extend(_dependency_binding_alias_errors(provenance_binding, source="provenance"))
     errors.extend(_dependency_binding_consistency_errors(top_level_binding, provenance_binding))
 
     dependency = binding_values["dependency"]
@@ -1614,61 +1641,35 @@ def _coalesced_binding_value(
     provenance_binding: Mapping[str, Any],
     field: str,
 ) -> Any:
-    top_value = top_level_binding.get(field)
+    top_value = _binding_canonical_value(top_level_binding, field)
     if _has_meaningful_value(top_value):
         return top_value
-    return provenance_binding.get(field)
+    return _binding_canonical_value(provenance_binding, field)
 
 
-def _dependency_producer_binding(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _dependency_producer_binding(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return {
-        "dependency": _normalized_binding_value(
-            _value_from(payload, ("dependency_surface", "dependency_name", "dependency")),
-            field="dependency",
-        ),
-        "producer_issue": _normalized_binding_value(
-            _value_from(payload, ("producer_issue", "summary_issue")),
-            field="producer_issue",
-        ),
-        "producer_schema": _normalized_binding_value(
-            _value_from(payload, ("producer_schema", "summary_schema")),
-            field="producer_schema",
-        ),
-        "producer_run_id": _normalized_binding_value(
-            _value_from(payload, ("producer_run_id", "summary_run_id")),
-            field="producer_run_id",
-        ),
-        "producer_artifact_ref": _normalized_binding_value(
-            _value_from(
-                payload,
-                (
-                    "producer_artifact_ref",
-                    "producer_artifact_path",
-                    "producer_artifact_uri",
-                    "summary_ref",
-                    "summary_path",
-                    "artifact_ref",
-                    "artifact_path",
-                    "artifact_uri",
-                ),
-            ),
-            field="producer_artifact_ref",
-        ),
-        "producer_checksum_or_receipt_id": _normalized_binding_value(
-            _value_from(
-                payload,
-                (
-                    "summary_checksum",
-                    "producer_checksum",
-                    "checksum",
-                    "digest",
-                    "producer_receipt_id",
-                    "receipt_id",
-                ),
-            ),
-            field="producer_checksum_or_receipt_id",
-        ),
+        field: {
+            key: _normalized_binding_value(payload.get(key), field=field)
+            for key in aliases
+            if _has_meaningful_value(payload.get(key))
+        }
+        for field, aliases in DEPENDENCY_BINDING_ALIAS_GROUPS.items()
     }
+
+
+def _binding_values(receipt_binding: Mapping[str, Any], field: str) -> dict[str, Any]:
+    values = receipt_binding.get(field)
+    return values if isinstance(values, dict) else {}
+
+
+def _binding_canonical_value(receipt_binding: Mapping[str, Any], field: str) -> Any:
+    values = _binding_values(receipt_binding, field)
+    for alias in DEPENDENCY_BINDING_ALIAS_GROUPS[field]:
+        value = values.get(alias)
+        if _has_meaningful_value(value):
+            return value
+    return None
 
 
 def _normalized_binding_value(value: Any, *, field: str) -> Any:
@@ -1681,6 +1682,15 @@ def _normalized_binding_value(value: Any, *, field: str) -> Any:
     if isinstance(value, str):
         return value.strip()
     return value
+
+
+def _dependency_binding_alias_errors(receipt_binding: Mapping[str, Any], *, source: str) -> list[str]:
+    errors: list[str] = []
+    for binding_field, suffix in DEPENDENCY_BINDING_ALIAS_ERROR_SUFFIXES.items():
+        values = list(_binding_values(receipt_binding, binding_field).values())
+        if values and any(value != values[0] for value in values[1:]):
+            errors.append(f"{source}_{suffix}")
+    return errors
 
 
 def _dependency_binding_consistency_errors(
@@ -1696,12 +1706,10 @@ def _dependency_binding_consistency_errors(
         ("producer_artifact_ref", "provenance_producer_artifact_ref_mismatch"),
         ("producer_checksum_or_receipt_id", "provenance_producer_checksum_or_receipt_id_mismatch"),
     ):
-        top_value = top_level_binding.get(binding_field)
-        provenance_value = provenance_binding.get(binding_field)
-        if (
-            _has_meaningful_value(top_value)
-            and _has_meaningful_value(provenance_value)
-            and top_value != provenance_value
+        top_values = list(_binding_values(top_level_binding, binding_field).values())
+        provenance_values = list(_binding_values(provenance_binding, binding_field).values())
+        if top_values and provenance_values and any(
+            top_value != provenance_value for top_value in top_values for provenance_value in provenance_values
         ):
             errors.append(error)
     return errors
@@ -1719,8 +1727,9 @@ def _dependency_binding_summary_errors(
         ("producer_artifact_ref", "producer_artifact_ref", "producer_artifact_ref_mismatch"),
         ("producer_checksum_or_receipt_id", "summary_checksum", "producer_checksum_mismatch"),
     ):
-        value = receipt_binding.get(binding_field)
-        if _has_meaningful_value(value) and value != summary_binding.get(summary_field):
+        summary_value = summary_binding.get(summary_field)
+        values = list(_binding_values(receipt_binding, binding_field).values())
+        if values and any(value != summary_value for value in values):
             errors.append(f"{source}_summary_{error_suffix}")
     return errors
 
@@ -1856,6 +1865,10 @@ def _redact_paths(value: str, *, config: ProductionReadinessConfig) -> str:
     return redact_text(value)
 
 
+def redact_readiness_public_error(value: object) -> str:
+    return redact_text(PATH_TOKEN_RE.sub("[redacted-path]", str(value)))
+
+
 def _path_from_env(env_name: str, explicit: Path | None) -> Path | None:
     if explicit is not None:
         return explicit.expanduser()
@@ -1920,10 +1933,13 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             summary = validate_readiness(ProductionReadinessConfig.from_env(**kwargs))
             click.echo(json.dumps(redact_payload(summary), sort_keys=True))
         except ProductionReadinessValidationError as error:
-            click.echo(f"{error.error_code}: {redact_text(error.message)}", err=True)
+            click.echo(f"{error.error_code}: {redact_readiness_public_error(error.message)}", err=True)
             raise SystemExit(1) from error
         except Exception as error:
-            click.echo(f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_text(str(error))}", err=True)
+            click.echo(
+                f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_readiness_public_error(error)}",
+                err=True,
+            )
             raise SystemExit(1) from error
 
     try:
@@ -1982,10 +1998,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             )
         )
     except ProductionReadinessValidationError as error:
-        print(f"{error.error_code}: {redact_text(error.message)}", file=sys.stderr)
+        print(f"{error.error_code}: {redact_readiness_public_error(error.message)}", file=sys.stderr)
         return 1
     except Exception as error:
-        print(f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_text(str(error))}", file=sys.stderr)
+        print(f"PRODUCTION_READINESS_VALIDATION_FAILED: {redact_readiness_public_error(error)}", file=sys.stderr)
         return 1
     return 0
 

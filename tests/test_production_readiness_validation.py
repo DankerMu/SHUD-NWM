@@ -94,7 +94,7 @@ def _bound_proof(proof_key: str, *, run_id: str = "m19", **extra: object) -> str
                 "producer_run_id": f"{proof_key}-live-run",
                 "producer_artifact_ref": f"{proof_key}:summary.json",
                 "summary_checksum": "sha256:abc123",
-                "receipt_id": f"{proof_key}-receipt-123",
+                "receipt_id": "sha256:abc123",
             },
         }
     elif proof_key == "alert":
@@ -200,6 +200,7 @@ def _dependency_proof_bound_to_summary(proof_key: str, root: Path, *, run_id: st
     payload["producer_checksum"] = checksum
     payload["provenance"]["summary_checksum"] = checksum
     payload["provenance"]["producer_checksum"] = checksum
+    payload["provenance"]["receipt_id"] = checksum
     payload |= extra
     return json.dumps(payload)
 
@@ -637,7 +638,7 @@ def test_dependency_receipts_reject_sibling_nested_provenance(
             "producer_run_id": f"{sibling}-live-run",
             "producer_artifact_ref": f"{sibling}:summary.json",
             "summary_checksum": "sha256:sibling",
-            "receipt_id": f"{sibling}-receipt-123",
+            "receipt_id": "sha256:sibling",
         },
     )
 
@@ -665,6 +666,97 @@ def test_dependency_receipts_reject_sibling_nested_provenance(
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
+@pytest.mark.parametrize(
+    ("override", "expected_error"),
+    [
+        ({"dependency_surface": "slurm", "dependency_name": "object_store"}, "top_level_dependency_alias_mismatch"),
+        ({"producer_issue": 147, "summary_issue": 148}, "top_level_producer_issue_alias_mismatch"),
+        (
+            {
+                "producer_schema": "nhms.production_closure.slurm.v1",
+                "summary_schema": "nhms.production_closure.object_store.v1",
+            },
+            "top_level_producer_schema_alias_mismatch",
+        ),
+        (
+            {"producer_run_id": "slurm-live-run", "summary_run_id": "object_store-live-run"},
+            "top_level_producer_run_id_alias_mismatch",
+        ),
+        (
+            {"producer_artifact_ref": "slurm:summary.json", "summary_ref": "object_store:summary.json"},
+            "top_level_producer_artifact_ref_alias_mismatch",
+        ),
+        (
+            {"summary_checksum": "sha256:abc123", "producer_checksum": "sha256:object-store-sibling"},
+            "top_level_producer_checksum_or_receipt_id_alias_mismatch",
+        ),
+    ],
+)
+def test_dependency_receipts_reject_contradictory_lower_priority_top_level_aliases(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_error: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    receipt = _bound_proof("slurm", **override)
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_proof=receipt))
+
+    item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
+    errors = item["details"]["acceptance_errors"]["errors"]
+    assert item["status"] == "release_blocked"
+    assert item["live_proof_accepted"] is False
+    assert expected_error in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("provenance_override", "expected_error"),
+    [
+        ({"dependency": "slurm", "dependency_name": "object_store"}, "provenance_dependency_alias_mismatch"),
+        ({"producer_issue": 147, "summary_issue": 148}, "provenance_producer_issue_alias_mismatch"),
+        (
+            {
+                "producer_schema": "nhms.production_closure.slurm.v1",
+                "summary_schema": "nhms.production_closure.object_store.v1",
+            },
+            "provenance_producer_schema_alias_mismatch",
+        ),
+        (
+            {"producer_run_id": "slurm-live-run", "summary_run_id": "object_store-live-run"},
+            "provenance_producer_run_id_alias_mismatch",
+        ),
+        (
+            {"producer_artifact_ref": "slurm:summary.json", "summary_ref": "object_store:summary.json"},
+            "provenance_producer_artifact_ref_alias_mismatch",
+        ),
+        (
+            {"summary_checksum": "sha256:abc123", "producer_checksum": "sha256:object-store-sibling"},
+            "provenance_producer_checksum_or_receipt_id_alias_mismatch",
+        ),
+    ],
+)
+def test_dependency_receipts_reject_contradictory_lower_priority_provenance_aliases(
+    tmp_path: Path,
+    provenance_override: dict[str, object],
+    expected_error: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    payload = json.loads(_bound_proof("slurm"))
+    payload["provenance"] |= provenance_override
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", slurm_proof=json.dumps(payload))
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
+    errors = item["details"]["acceptance_errors"]["errors"]
+    assert item["status"] == "release_blocked"
+    assert item["live_proof_accepted"] is False
+    assert expected_error in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
 def test_dependency_receipt_accepts_agreeing_top_level_provenance_and_summary(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
     slurm_root = tmp_path / "slurm"
@@ -683,6 +775,53 @@ def test_dependency_receipt_accepts_agreeing_top_level_provenance_and_summary(tm
     assert item["status"] == "passed"
     assert item["live_proof_accepted"] is True
     assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_dependency_receipt_accepts_all_agreeing_aliases(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    slurm_root = tmp_path / "slurm"
+    checksum = _write_dependency_summary(slurm_root, "slurm")
+    payload = json.loads(_bound_proof("slurm"))
+    aliases = {
+        "dependency_surface": "slurm",
+        "dependency_name": "slurm",
+        "dependency": "slurm",
+        "producer_issue": 147,
+        "summary_issue": "#147",
+        "producer_schema": "nhms.production_closure.slurm.v1",
+        "summary_schema": "nhms.production_closure.slurm.v1",
+        "producer_run_id": "slurm-live-run",
+        "summary_run_id": "slurm-live-run",
+        "producer_artifact_ref": "slurm:summary.json",
+        "producer_artifact_path": "slurm:summary.json",
+        "producer_artifact_uri": "slurm:summary.json",
+        "summary_ref": "slurm:summary.json",
+        "summary_path": "slurm:summary.json",
+        "artifact_ref": "slurm:summary.json",
+        "artifact_path": "slurm:summary.json",
+        "artifact_uri": "slurm:summary.json",
+        "summary_checksum": checksum,
+        "producer_checksum": checksum,
+        "checksum": checksum,
+        "digest": checksum,
+        "producer_receipt_id": checksum,
+        "receipt_id": checksum,
+    }
+    payload |= aliases
+    payload["provenance"] = dict(aliases)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            slurm_evidence_root=slurm_root,
+            slurm_proof=json.dumps(payload),
+        )
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
+    assert item["status"] == "passed"
+    assert item["live_proof_accepted"] is True
 
 
 def test_dependency_summary_missing_root_redacts_paths_from_stdout_and_artifacts(
@@ -711,6 +850,47 @@ def test_dependency_summary_missing_root_redacts_paths_from_stdout_and_artifacts
     assert str(private_root) not in artifact_text
     assert "[redacted-path]" in artifact_text
     assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_readiness_cli_existing_lane_error_redacts_absolute_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "private" / "artifacts"
+    lane = root / "m19" / "readiness"
+    lane.mkdir(parents=True)
+    (lane / "existing.txt").write_text("existing", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        slurm_validation.main(["validate-readiness", "--evidence-root", str(root), "--run-id", "m19"])
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert str(root) not in rendered
+    assert str(lane) not in rendered
+    assert "PRODUCTION_READINESS_EVIDENCE_EXISTS" in rendered
+    assert "[redacted-path]" in rendered
+
+
+def test_readiness_cli_symlink_evidence_component_error_redacts_absolute_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real_root = tmp_path / "real-artifacts"
+    real_root.mkdir()
+    symlink_root = tmp_path / "private-symlink-artifacts"
+    symlink_root.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        slurm_validation.main(["validate-readiness", "--evidence-root", str(symlink_root), "--run-id", "m19"])
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert str(symlink_root) not in rendered
+    assert "PRODUCTION_READINESS_EVIDENCE_SYMLINK" in rendered
+    assert "[redacted-path]" in rendered
 
 
 @pytest.mark.parametrize("proof_arg", ["auth_proof", "alert_proof"])

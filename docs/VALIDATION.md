@@ -914,10 +914,15 @@ target environment, and live proof mode. Top-level producer binding fields and
 nested `provenance` binding fields are validated as one canonical receipt
 contract: when both surfaces provide dependency, producer issue/schema/run ID,
 artifact ref/path/URI, checksum, or receipt ID, they must agree after
-normalization. Sibling or contradictory nested provenance is a release blocker
-even if the top-level fields are otherwise valid. When a deterministic producer
-`summary.json` is supplied, every provided top-level and nested provenance run
-ID, artifact ref, and checksum binding must also match that consumed summary.
+normalization. Within either surface, every supplied alias in a binding group is
+also validated; for example, `producer_artifact_ref`, `summary_ref`,
+`artifact_path`, and `artifact_uri` must all normalize to the same artifact
+binding when more than one is present. The checksum/receipt-id alias group is
+treated the same way. Sibling or contradictory nested provenance is a release
+blocker even if a higher-priority top-level field is otherwise valid. When a
+deterministic producer `summary.json` is supplied, every provided top-level and
+nested provenance run ID, artifact ref, and checksum binding must also match
+that consumed summary.
 The deterministic producer `summary.json` alone does not satisfy live proof.
 Target-environment receipts must include a concrete environment/config
 identifier and meaningful target configuration metadata. Wrong schema, wrong
