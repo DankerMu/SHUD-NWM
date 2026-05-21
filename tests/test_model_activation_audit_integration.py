@@ -484,7 +484,8 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
     assert stale_rollback.json()["data"]["status"] == "blocked"
     stale_codes = {item["code"] for item in stale_rollback.json()["data"]["preflight"]["blockers"]}
     assert stale_codes >= {"ROLLBACK_CURRENT_STALE"}
-    assert stale_rollback.json()["data"]["audit_reference"]["log_id"] is not None
+    stale_rollback_audit_log_id = stale_rollback.json()["data"]["audit_reference"]["log_id"]
+    assert stale_rollback_audit_log_id is not None
     assert stale_preflight.json()["data"]["status"] == "blocked"
     stale_preflight_codes = {item["code"] for item in stale_preflight.json()["data"]["blockers"]}
     assert stale_preflight_codes >= {"ROLLBACK_CURRENT_STALE"}
@@ -536,7 +537,7 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
             final_states = {row["model_id"]: dict(row) for row in cursor.fetchall()}
             cursor.execute(
                 """
-                SELECT details
+                SELECT log_id, details
                 FROM ops.audit_log
                 WHERE entity_id = %s
                   AND details->>'operation' = 'rollback_version'
@@ -554,7 +555,19 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
     assert final_states[ids["candidate_b_model_id"]]["lifecycle_state"] == "active"
     rollback_audit = next(row for row in rollback_audit_rows if row["details"]["outcome"] == "rollback")
     assert rollback_audit["details"]["prior_audit_log_id"] == allowed_data["preflight"]["prior_audit_log_id"]
-    assert not any(row["details"]["outcome"] == "blocked" for row in rollback_audit_rows)
+    assert rollback_audit["details"]["preflight"]["prior_audit_log_id"] == (
+        allowed_data["preflight"]["prior_audit_log_id"]
+    )
+    blocked_rollback_audit = next(
+        row for row in rollback_audit_rows if row["log_id"] == stale_rollback_audit_log_id
+    )
+    assert blocked_rollback_audit["details"]["outcome"] == "blocked"
+    assert blocked_rollback_audit["details"]["previous_model"]["model_id"] == ids["active_model_id"]
+    assert blocked_rollback_audit["details"]["updated_model"]["model_id"] == ids["active_model_id"]
+    assert blocked_rollback_audit["details"]["preflight"]["previous_model_id"] == ids["candidate_a_model_id"]
+    assert {item["code"] for item in blocked_rollback_audit["details"]["preflight"]["blockers"]} >= {
+        "ROLLBACK_CURRENT_STALE"
+    }
 
 
 def test_m18_rollback_blocks_when_restored_model_safety_evidence_is_unsafe(
