@@ -128,6 +128,15 @@ model packages or delete/upload production object-store assets. Production ops
 validation includes deterministic model lifecycle drills for bad activation,
 rollback, blocked deactivation, and idempotent repeat without live credentials.
 
+Focused M19 production-readiness proof checks:
+
+```bash
+openspec validate m19-production-readiness-proof --strict --no-interactive
+uv run pytest -q tests/test_production_readiness_validation.py
+uv run pytest -q tests/test_production_ops_validation.py tests/test_production_object_store_validation.py tests/test_production_slurm_validation.py tests/test_production_met_validation.py tests/test_production_e2e_validation.py tests/test_production_scale_validation.py
+uv run ruff check .
+```
+
 ## Real Slurm Smoke
 
 Use the real cluster smoke only on a host with Slurm CLI access. Keep log paths
@@ -856,6 +865,103 @@ unsafe dependency status inputs fail with stable errors and no secret leakage.
 Dependency summary ingestion rejects symlinked roots/components, symlink summary
 files, summaries outside the supplied root, and summaries larger than the ops
 evidence payload limit.
+
+## M19 Production Readiness Proof
+
+Issue #181 adds a consolidated `nhms-production validate-readiness` lane. It is
+a release-review report generator: default runs are deterministic and ingest
+receipts only. The command does not execute a live IdP, alert sink, backend
+mutation, rollback drill, Slurm workload, object-store operation,
+weather/source download, or real-national-data scan.
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
+  --evidence-root artifacts/production-closure \
+  --run-id local-181-production-readiness
+```
+
+Optional deterministic producer summaries can be supplied with
+`--slurm-evidence-root`, `--object-store-evidence-root`,
+`--source-evidence-root`, `--e2e-evidence-root`, and `--mvt-evidence-root`.
+
+Optional live proof receipts are supplied as JSON strings or files:
+`--auth-proof` / `--auth-proof-file`, `--alert-proof` /
+`--alert-proof-file`, `--rollback-proof` / `--rollback-proof-file`,
+`--slurm-proof` / `--slurm-proof-file`, `--object-store-proof` /
+`--object-store-proof-file`, `--source-proof` / `--source-proof-file`,
+`--e2e-proof` / `--e2e-proof-file`, `--mvt-proof` /
+`--mvt-proof-file`, and `--target-env-proof` /
+`--target-env-proof-file`. Receipt payloads are normalized into bounded raw
+validation data before path/secret redaction, then redacted before writing
+evidence; malformed or oversized receipts become stable `release_blocked`
+evidence and never print tracebacks or raw secrets.
+
+Live proof receipt acceptance is intentionally stricter than a placeholder
+`accepted=true` flag. Every accepted receipt must use schema
+`nhms.production_readiness.live_proof.v1`, bind to the expected readiness
+surface, current readiness `run_id`, target environment, and live proof
+execution mode, and include semantic artifact/evidence references. Empty
+containers, blank strings, `[null]`, and null-only mappings are not evidence.
+Auth receipts must also include provider issuer/provider identity metadata,
+role mapping with at least one role mapped to concrete actions/roles, and
+allowed/denied coverage for every canonical protected action. Alert receipts
+must include sink id/name/url/channel metadata plus delivery id, timestamp, and
+result with delivered/passed status. Rollback receipts must include meaningful
+preconditions, command or drill identity/command metadata, and an executed
+result. Slurm/object-store/source/E2E/MVT dependency receipts must name the
+expected dependency and bind to the producer contract: producer issue, producer
+schema, producer run ID, producer artifact/path/ref, checksum or receipt ID,
+target environment, and live proof mode. Top-level producer binding fields and
+nested `provenance` binding fields are validated as one canonical receipt
+contract: when both surfaces provide dependency, producer issue/schema/run ID,
+artifact ref/path/URI, checksum, or receipt ID, they must agree after bounded
+raw normalization and before public redaction, so distinct path-like aliases
+cannot be collapsed into the same redacted token. Within either surface, every
+supplied alias in a binding group is also validated; for example,
+`producer_artifact_ref`, `summary_ref`,
+`artifact_path`, and `artifact_uri` must all normalize to the same artifact
+binding when more than one is present. The checksum/receipt-id alias group is
+treated the same way. Sibling or contradictory nested provenance is a release
+blocker even if a higher-priority top-level field is otherwise valid. When a
+deterministic producer `summary.json` is supplied, every provided top-level and
+nested provenance run ID, artifact ref, and checksum binding must also match
+that consumed summary.
+The deterministic producer `summary.json` alone does not satisfy live proof.
+Target-environment receipts must include a concrete environment/config
+identifier and meaningful target configuration metadata. Wrong schema, wrong
+surface, stale run ID, deterministic mode, sibling dependency issue/schema/name,
+contradictory provenance, missing target, missing
+provenance/artifacts/checksum/ref/run ID, malformed JSON, over-size JSON, or
+deeply nested JSON remains `release_blocked` with redacted bounded evidence.
+
+Evidence is written under
+`artifacts/production-closure/<run_id>/readiness/`:
+
+- `preflight.json`: configured producer summary roots, receipt presence, and
+  the no-live-side-effect fast-CI policy.
+- `live_proof_receipts.json`: redacted, bounded receipt metadata and payloads.
+- `readiness_items.json`: canonical readiness items with `surface`, `status`,
+  `execution_mode`, `required_for_final`, `artifact_refs`, `residual_risk`,
+  `removal_criteria`, `exclusions`, and `live_proof_accepted`.
+- `release_blockers.json`: blocker id, surface, status, owner/action,
+  residual risk, removal criteria, and artifact references.
+- `environment.json`: redacted command environment and runtime metadata.
+- `summary.json`: final interpretation, `final_production_readiness_claimed`,
+  release blockers, and scoped exclusions.
+
+Status values are `passed`, `failed`, `blocked`, `not_executed`, and
+`release_blocked`. Execution modes are `deterministic`, `policy_simulated`,
+`backend_route_executed`, `dry_run_sink`, `simulated_drill`, `live_proof`, and
+`not_executed`. Deterministic items can pass and still leave
+`final_production_readiness_claimed=false`; final readiness is true only when
+every required live proof item is `passed` with `live_proof_accepted=true`.
+Missing live IdP, alert sink, rollback, Slurm/object-store/source/E2E/MVT, or
+target-environment config receipts are release blockers, not deterministic
+failures.
+
+CLDAS and incomplete real national data are explicit M19 scoped exclusions.
+They are recorded as `not_executed` exclusions rather than failed deterministic
+checks and do not satisfy live proof.
 
 ### Fast Regression Commands
 

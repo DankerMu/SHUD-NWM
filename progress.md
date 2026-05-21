@@ -1,6 +1,6 @@
 # 项目进度
 
-最后更新：2026-05-19，测试环境。
+最后更新：2026-05-21，测试环境。
 
 用途：作为跨 session 继承的项目真实进度索引。本文只保留“当前能做什么、已完成哪些闭环、还剩哪些明确方向”，避免把历史 review 细节继续堆进进度页。
 
@@ -8,7 +8,7 @@
 
 M11 全国总览与流域钻取 Epic #159 已完成并关闭。#160-#165 全部关闭，最后 PR #171 已合并到 `master`，merge commit 为 `da26dc331453988612ce4d4d5818948309d117ef`。
 
-项目已经具备一套可重复运行的 production-like 证据链：Slurm、对象存储/Basins、气象源/QC、staging E2E、全国规模性能、生产运维安全与 runbook readiness 都有 opt-in validation lane、结构化 evidence、fast regression test 和文档入口。
+项目已经具备一套可重复运行的 production-like 证据链：Slurm、对象存储/Basins、气象源/QC、staging E2E、全国规模性能、生产运维安全与 runbook readiness 都有 opt-in validation lane、结构化 evidence、fast regression test 和文档入口。M19 新增 `nhms-production validate-readiness` 汇总 lane，用统一 truth table 把 deterministic evidence、opt-in live proof、release blockers 和 scoped exclusions 分开，不会把 fast evidence 误宣称为最终生产就绪。
 
 前端入口已经从旧的单一预报地图推进到 M11 map-first 产品骨架，并开始补齐 M12 河段详情：`/` 和 `/overview` 为全国总览，`/basins/:basinId` 为流域钻取，`/segments/:segmentId` 为可恢复的河段预报详情，`/forecast`、`/flood-alerts`、`/monitoring` 保持可访问。
 
@@ -35,6 +35,7 @@ M10 对应 OpenSpec change：`openspec/changes/m10-production-closure/`。
 | #150 Staging E2E forecast/analysis closure | 完成 | `nhms-production validate-e2e`，source -> canonical -> forcing -> Slurm -> parse -> frequency -> tile -> API/frontend 的 deterministic stage evidence bundle |
 | #151 National-scale MVT/performance closure | 完成 | `nhms-production validate-scale`，large fixture、thresholds、query plan/hash/p95、GeoJSON/MVT blocker、frontend timing、resource bounds |
 | #152 Production ops/security/runbook readiness | 完成 | `nhms-production validate-ops`，preflight、config validation、auth/RBAC matrix、audit/redaction、alerts、rollback drills、dependency closure、summary evidence |
+| #181 M19 production readiness proof | 完成 | `nhms-production validate-readiness`，readiness item schema/truth table、deterministic summary ingestion、opt-in live receipt ingestion/redaction、release blocker summary、CLDAS/real-national-data scoped exclusions |
 
 M10 最终 CI 状态：PR #158 最新 head 的 Markdown Lint、OpenAPI Validate、JSON Schema Validate、SQL Migration Dry Run、Unit Tests、Frontend Build 全部通过。最终 cross-review round 27 clean，Phase 7 independent final review clean。
 
@@ -186,6 +187,14 @@ uv run nhms-production validate-ops \
 5. **真实生产验证**：在目标环境跑 live auth、alert sink、rollback、真实 Slurm、真实对象存储、真实气象下载。
 6. **CLDAS 接入**：实现 adapter、授权数据质量检查、best_available 生产路径。
 7. **生产身份认证/授权**：M17 已建立 backend auth context / RBAC matrix；pipeline retry/cancel、hindcast rerun-cycle、model activate/deactivate 现由后端在 mutation 前统一判定。缺失/无效认证、角色不满足、live IdP 未证明分别稳定为 `401 AUTH_REQUIRED`、`403 RBAC_FORBIDDEN`、`503 RELEASE_BLOCKED`；deterministic/backend/live/readiness evidence 明确区分 `policy_simulated`、`backend_route_executed`、`live_proof`、`release_blocked`。后续仍需在目标环境补 opt-in live IdP proof 并移除 release blocker。
+
+## M19 生产就绪证明状态
+
+- 新入口：`uv run nhms-production validate-readiness --evidence-root artifacts/production-closure --run-id <run_id>`。
+- 默认 fast 路径只生成/汇总证据，不执行 live IdP、alert sink、backend mutation、rollback、Slurm、object store、weather/source 或 real-national-data 操作。
+- 输出位于 `<evidence-root>/<run_id>/readiness/`：`preflight.json`、`live_proof_receipts.json`、`readiness_items.json`、`release_blockers.json`、`environment.json`、`summary.json`。
+- `final_production_readiness_claimed` 只有在所有 required live proof receipt 被接受时才会为 `true`；当前缺少 live backend auth、live alert sink、live rollback、Slurm/object-store/source/E2E/MVT 和 target-env config receipts 时均保持 `false`。
+- CLDAS 和 incomplete real national data 是本阶段 scoped exclusions，记录为 `not_executed`，不是 deterministic failure，也不满足 live proof。
 
 ## M15 前端视觉收敛状态
 
