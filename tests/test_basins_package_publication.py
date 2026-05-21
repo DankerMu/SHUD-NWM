@@ -57,6 +57,9 @@ def test_publish_basins_writes_manifest_package_and_success_payload(
     assert manifest["manifest_uri"] == f"s3://nhms/models/{model_id}/vbasins-test/manifest.json"
     assert (object_root / "models" / model_id / "vbasins-test" / "manifest.json").is_file()
     assert (object_root / "models" / model_id / "vbasins-test" / "package" / "alias-a.cfg.para").is_file()
+    assert (object_root / "models" / model_id / "vbasins-test" / "package" / "alias-a.lake.sp").is_file()
+    assert (object_root / "models" / model_id / "vbasins-test" / "package" / "alias-a.lake.bathy").is_file()
+    assert (object_root / "models" / model_id / "vbasins-test" / "package" / "alias-a.lake.ic").is_file()
     assert (object_root / "models" / model_id / "vbasins-test" / "package" / "gis" / "domain.shp").is_file()
     assert (object_root / "models" / model_id / "vbasins-test" / "package" / "CALIB" / "top01.calib").is_file()
     assert {
@@ -2777,6 +2780,8 @@ def _make_valid_model(
         "sp.riv",
         "sp.rivseg",
         "sp.att",
+        "lake.bathy",
+        "lake.ic",
         "para.soil",
         "para.geol",
         "para.lc",
@@ -2785,6 +2790,7 @@ def _make_valid_model(
         "tsd.mf",
     ):
         (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
+    (input_dir / f"{input_name}.lake.sp").write_text("lake.sp\n", encoding="utf-8")
     if include_tsd_rl:
         (input_dir / f"{input_name}.tsd.rl").write_text("radiation\n", encoding="utf-8")
 

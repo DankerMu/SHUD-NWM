@@ -181,6 +181,26 @@ def test_idw_weights_are_normalized_for_station() -> None:
     assert all(weight.weight >= 0.0 for weight in weights)
 
 
+def test_idw_neighbor_selection_preserves_latitude_scaled_distance_semantics() -> None:
+    station = MetStation("station_1", "basin_v1", 0.0, 80.0, 10.0, "forcing_proxy")
+    grid_points = (
+        GridPoint("east", 10.0, 80.0),
+        GridPoint("north", 0.0, 82.0),
+    )
+
+    weights = compute_idw_weights(
+        stations=(station,),
+        grid_points=grid_points,
+        variables=("PRCP",),
+        source_id="gfs",
+        grid_id="grid_high_lat",
+        model_id="demo_model",
+        neighbors=1,
+    )
+
+    assert [weight.grid_cell_id for weight in weights] == ["east"]
+
+
 def test_wind_speed_uses_square_root_of_component_squares() -> None:
     assert wind_speed(3.0, 4.0) == pytest.approx(5.0)
 
@@ -200,6 +220,56 @@ def test_produce_writes_tsd_forc_with_header_columns_and_rows(tmp_path: Path) ->
     assert store.read_bytes(result.file_uris["csv_debug"]).decode("utf-8").splitlines()[0] == (
         "valid_time,station_id,variable,value,unit"
     )
+
+
+def test_produce_writes_standard_shud_forcing_package_for_all_stations(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    stations = (
+        MetStation(
+            "qhh_forc_002",
+            "basin_v1",
+            101.05,
+            36.25,
+            0.0,
+            "forcing_grid",
+            properties_json={
+                "shud_forcing_index": 2,
+                "forcing_filename": "X101.05Y36.25.csv",
+                "x": 2,
+                "y": 3,
+                "z": -9999,
+            },
+        ),
+        MetStation(
+            "qhh_forc_001",
+            "basin_v1",
+            100.95,
+            36.25,
+            3657.0,
+            "forcing_grid",
+            properties_json={
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100.95Y36.25.csv",
+                "x": 1,
+                "y": 2,
+                "z": 3657,
+            },
+        ),
+    )
+    repository = FakeForcingRepository(stations=stations, products=_write_canonical_products(store))
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    package_root = tmp_path / result.forcing_package_uri.strip("/")
+    tsd_forc = (package_root / "shud" / "qhh.tsd.forc").read_text(encoding="utf-8").splitlines()
+    assert tsd_forc[0] == "2 20260507"
+    assert tsd_forc[2] == "ID\tLon\tLat\tX\tY\tZ\tFilename"
+    assert tsd_forc[3].split()[-1] == "X100.95Y36.25.csv"
+    assert tsd_forc[4].split()[-1] == "X101.05Y36.25.csv"
+    assert (package_root / "shud" / "X100.95Y36.25.csv").exists()
+    assert (package_root / "shud" / "X101.05Y36.25.csv").exists()
+    assert result.station_count == 2
 
 
 def test_forcing_timeseries_long_table_rows_have_composite_pk_shape(tmp_path: Path) -> None:
@@ -431,6 +501,21 @@ def test_nonfinite_field_values_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ForcingProductionError, match="non-finite field value"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+
+def test_streaming_field_read_retains_only_required_interpolation_cells(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+    product = next(product for product in repository.products if product.variable == "prcp_rate_or_amount")
+
+    field = producer._read_canonical_field(
+        product,
+        required_grid_cell_ids=frozenset({"1"}),
+        retain_grid_points=False,
+    )
+
+    assert field.grid_points == ()
+    assert field.values_by_grid_cell_id == {"1": pytest.approx(2.0)}
 
 
 def test_nonfinite_interp_weights_are_rejected(tmp_path: Path) -> None:

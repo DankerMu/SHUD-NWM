@@ -147,7 +147,7 @@ class CanonicalConverterConfig:
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
     converter_version: str = "m1.0"
     grid_id: str = "gfs_0p25"
-    grid_definition_uri: str = "grids/gfs_0p25.json"
+    grid_definition_uri: str = "canonical/gfs/grid/gfs_0p25/grid.json"
     native_time_resolution: str = "3h"
     native_spatial_resolution: str = "0.25deg"
     variable_mapping: Mapping[str, str] = field(default_factory=lambda: dict(VARIABLE_MAPPING))
@@ -165,7 +165,7 @@ class ERA5CanonicalConverterConfig(CanonicalConverterConfig):
     source_id: str = "ERA5"
     converter_version: str = "m2.0"
     grid_id: str = "era5_0p25"
-    grid_definition_uri: str = "grids/era5_0p25.json"
+    grid_definition_uri: str = "canonical/ERA5/grid/era5_0p25/grid.json"
     native_time_resolution: str = "1h"
     native_spatial_resolution: str = "0.25deg"
     variable_mapping: Mapping[str, str] = field(default_factory=lambda: dict(ERA5_VARIABLE_MAPPING))
@@ -179,7 +179,7 @@ class IFSCanonicalConverterConfig(CanonicalConverterConfig):
     source_id: str = "IFS"
     converter_version: str = "m4.0"
     grid_id: str = "ifs_0p25"
-    grid_definition_uri: str = "grids/ifs_0p25.json"
+    grid_definition_uri: str = "canonical/IFS/grid/ifs_0p25/grid.json"
     native_time_resolution: str = "3h"
     native_spatial_resolution: str = "0.25deg"
     variable_mapping: Mapping[str, str] = field(default_factory=lambda: dict(IFS_VARIABLE_MAPPING))
@@ -194,6 +194,9 @@ class RawRecord:
     native_variable: str
     forecast_hour: int
     values: tuple[float, ...]
+    longitudes: tuple[float, ...] = ()
+    latitudes: tuple[float, ...] = ()
+    shape: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -251,6 +254,14 @@ def format_cycle_time(value: str | datetime) -> str:
 
 def map_variable(native_variable: str, mapping: Mapping[str, str] | None = None) -> str | None:
     return dict(mapping or VARIABLE_MAPPING).get(native_variable)
+
+
+def _coord_values_by_name(dataset: Any, names: tuple[str, ...]) -> tuple[float, ...]:
+    for name in names:
+        if name in dataset.coords:
+            values = dataset[name].values.ravel().tolist()
+            return tuple(float(value) for value in values)
+    return ()
 
 
 def unit_for_standard_variable(standard_variable: str) -> str:
@@ -495,10 +506,42 @@ def convert_ifs_radiation_values(
     return values, step_hours
 
 
+def convert_ifs_shortwave_down_values(
+    ssr_values: tuple[float, ...] | list[float],
+    previous_ssr_values: tuple[float, ...] | list[float] | None = None,
+    *,
+    forecast_hour: int | None = None,
+    previous_forecast_hour: int | None = None,
+) -> tuple[tuple[float, ...], float]:
+    ssr = tuple(float(value) for value in ssr_values)
+    previous_ssr = (
+        tuple(float(value) for value in previous_ssr_values) if previous_ssr_values is not None else (0.0,) * len(ssr)
+    )
+    if len(ssr) != len(previous_ssr):
+        raise CanonicalConversionError("IFS shortwave radiation arrays must have the same length.")
+
+    step_hours = _ifs_step_hours(forecast_hour, previous_forecast_hour)
+    step_seconds = step_hours * 3600.0
+    values = tuple(
+        max(0.0, (current_ssr - prior_ssr) / step_seconds)
+        for current_ssr, prior_ssr in zip(ssr, previous_ssr)
+    )
+    return values, step_hours
+
+
 def _step_hours(forecast_hour: int | None, previous_forecast_hour: int | None) -> float:
     if forecast_hour is None or previous_forecast_hour is None:
         return 1.0
     return float(max(1, forecast_hour - previous_forecast_hour))
+
+
+def _normalize_longitude(longitude: float) -> float:
+    value = float(longitude)
+    while value > 180.0:
+        value -= 360.0
+    while value < -180.0:
+        value += 360.0
+    return value
 
 
 def _ifs_step_hours(forecast_hour: int | None, previous_forecast_hour: int | None) -> float:
@@ -636,12 +679,16 @@ class CanonicalConverter:
                 dataset = xr.open_dataset(file_path, engine="netcdf4")
             expected_native_variable = str(entry["variable"])
             data_variable = self._select_data_variable(dataset, expected_native_variable, local_key)
-            values = tuple(float(value) for value in dataset[data_variable].values.ravel().tolist())
+            data_array = dataset[data_variable]
+            values = tuple(float(value) for value in data_array.values.ravel().tolist())
             return RawRecord(
                 source_file=self.object_store.uri_for_key(local_key),
                 native_variable=expected_native_variable,
                 forecast_hour=int(entry["forecast_hour"]),
                 values=values,
+                longitudes=_coord_values_by_name(dataset, ("lon", "longitude")),
+                latitudes=_coord_values_by_name(dataset, ("lat", "latitude")),
+                shape=tuple(int(size) for size in getattr(data_array.values, "shape", ())),
             )
         except Exception as error:
             detail = f"Failed to parse raw file {local_key}: {error}"
@@ -836,6 +883,7 @@ class CanonicalConverter:
             "conversion_params": conversion_params,
             "converter_version": self.config.converter_version,
         }
+        self._ensure_grid_definition(record)
         content = self._serialize_product(
             variable=standard_variable,
             values=conversion.values,
@@ -894,6 +942,45 @@ class CanonicalConverter:
             status="updated" if existing else "created",
             quality_flag=conversion.quality_flag,
         )
+
+    def _ensure_grid_definition(self, record: RawRecord) -> None:
+        if not record.longitudes or not record.latitudes:
+            return
+        payload: dict[str, Any]
+        if len(record.shape) == 2:
+            y_count, x_count = record.shape
+            if len(record.longitudes) != x_count or len(record.latitudes) != y_count:
+                return
+            payload = {
+                "schema_version": "nhms.grid_definition.v1",
+                "grid_id": self.config.grid_id,
+                "layout": "rectilinear",
+                "axis_order": ["latitude", "longitude"],
+                "shape": [y_count, x_count],
+                "longitudes": [_normalize_longitude(longitude) for longitude in record.longitudes],
+                "latitudes": list(record.latitudes),
+            }
+        elif len(record.longitudes) == len(record.values) and len(record.latitudes) == len(record.values):
+            payload = {
+                "schema_version": "nhms.grid_definition.v1",
+                "grid_id": self.config.grid_id,
+                "cells": [
+                    {"id": index, "lon": _normalize_longitude(longitude), "lat": latitude}
+                    for index, (longitude, latitude) in enumerate(zip(record.longitudes, record.latitudes, strict=True))
+                ],
+            }
+        else:
+            return
+        try:
+            if self.object_store.exists(self.config.grid_definition_uri):
+                return
+            self.object_store.write_bytes_atomic(
+                self.config.grid_definition_uri,
+                json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+            )
+        except (OSError, ObjectStoreError, ValueError) as error:
+            message = f"Failed to write grid definition {self.config.grid_definition_uri}: {error}"
+            raise CanonicalConversionError(message) from error
 
     def _serialize_product(
         self,
@@ -1028,6 +1115,7 @@ class ERA5CanonicalConverter(CanonicalConverter):
             if missing_pairs:
                 self._record_missing_products(source_id, cycle_time, missing_pairs)
                 raise CanonicalConversionError(self._missing_pairs_message(missing_pairs))
+            self._ensure_grid_definition_from_records(raw_records)
 
             records_by_hour = self._records_by_hour_and_variable(raw_records)
             forecast_hours = self._configured_forecast_hours(manifest, entries)
@@ -1215,6 +1303,12 @@ class ERA5CanonicalConverter(CanonicalConverter):
             grouped.setdefault(record.forecast_hour, {})[record.native_variable] = record
         return grouped
 
+    def _ensure_grid_definition_from_records(self, records: list[RawRecord]) -> None:
+        for record in records:
+            if record.longitudes and record.latitudes:
+                self._ensure_grid_definition(record)
+                return
+
     def _write_product(
         self,
         *,
@@ -1398,6 +1492,7 @@ class IFSCanonicalConverter(CanonicalConverter):
             if missing_pairs:
                 self._record_missing_products(source_id, cycle_time, missing_pairs)
                 raise CanonicalConversionError(self._missing_pairs_message(missing_pairs))
+            self._ensure_grid_definition_from_records(raw_records)
 
             records_by_hour = self._records_by_hour_and_variable(raw_records)
             forecast_hours = self._configured_forecast_hours(manifest, entries)
@@ -1549,6 +1644,32 @@ class IFSCanonicalConverter(CanonicalConverter):
                         ssr.source_file,
                         str_.source_file,
                     ]
+                shortwave_values, shortwave_step_hours = convert_ifs_shortwave_down_values(
+                    ssr.values,
+                    previous_ssr.values if previous_ssr is not None else None,
+                    forecast_hour=forecast_hour,
+                    previous_forecast_hour=previous_ssr.forecast_hour if previous_ssr is not None else None,
+                )
+                shortwave_sources = [ssr.source_file]
+                if previous_ssr is not None:
+                    shortwave_sources.insert(0, previous_ssr.source_file)
+                products.append(
+                    self._write_product(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        standard_variable="shortwave_down",
+                        forecast_hour=forecast_hour,
+                        values=shortwave_values,
+                        unit=self._unit_for_standard_variable("shortwave_down"),
+                        source_files=shortwave_sources,
+                        conversion_params={
+                            "native_variable": ssr.native_variable,
+                            "operation": "cumulative_j_m2_to_w_m2_downward_shortwave",
+                            "accumulation_type": "since_cycle",
+                            "step_hours": shortwave_step_hours,
+                        },
+                    )
+                )
                 products.append(
                     self._write_product(
                         source_id=source_id,
@@ -1593,6 +1714,30 @@ class IFSCanonicalConverter(CanonicalConverter):
         for record in records:
             grouped.setdefault(record.forecast_hour, {})[record.native_variable] = record
         return grouped
+
+    def _missing_required_pairs(
+        self,
+        manifest: Any,
+        entries: list[dict[str, Any]],
+        records: list[RawRecord],
+    ) -> tuple[MissingForecastVariable, ...]:
+        pairs = list(super()._missing_required_pairs(manifest, entries, records))
+        shortwave_pairs = [
+            MissingForecastVariable(
+                native_variable=pair.native_variable,
+                standard_variable="shortwave_down",
+                forecast_hour=pair.forecast_hour,
+            )
+            for pair in pairs
+            if pair.native_variable == "ssr"
+        ]
+        return tuple([*pairs, *shortwave_pairs])
+
+    def _ensure_grid_definition_from_records(self, records: list[RawRecord]) -> None:
+        for record in records:
+            if record.longitudes and record.latitudes:
+                self._ensure_grid_definition(record)
+                return
 
     def _write_product(
         self,

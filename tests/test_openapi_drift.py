@@ -26,10 +26,6 @@ RouteKey = tuple[str, str]
 # legacy tile backing stores. Each entry carries a narrow reason so future drift
 # cannot hide behind a broad allowlist.
 DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
-    ("GET", "/api/v1/basins"): "issue-123 future registry read surface; backing read store is out of scope",
-    ("GET", "/api/v1/basins/{basin_id}/versions"): (
-        "issue-123 future registry read surface; backing read store is out of scope"
-    ),
     (
         "GET",
         "/api/v1/models/{model_id}/flood-frequency-curves",

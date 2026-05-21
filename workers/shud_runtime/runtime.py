@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -31,6 +32,7 @@ class SHUDRuntimeConfig:
     object_store_root: Path | str
     object_store_prefix: str = ""
     shud_executable: str = "shud_omp"
+    command_style: str = "cfg"
     output_interval_minutes: int = 1440
     timeout_seconds: int = 3600
     upload_retries: int = 3
@@ -51,6 +53,7 @@ class SHUDRuntimeConfig:
             object_store_root=os.getenv("OBJECT_STORE_ROOT", workspace_root),
             object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
             shud_executable=os.getenv("SHUD_EXECUTABLE", "shud_omp"),
+            command_style=os.getenv("SHUD_COMMAND_STYLE", "cfg"),
             output_interval_minutes=int(os.getenv("MODEL_OUTPUT_INTERVAL", "1440")),
             timeout_seconds=int(os.getenv("SHUD_TIMEOUT_SECONDS", "3600")),
             dry_run=dry_run,
@@ -320,16 +323,22 @@ class SHUDRuntime:
             raise runtime_error from error
 
     def prepare_workspace(self, manifest: dict[str, Any], input_dir: Path) -> None:
-        self._stage_artifact(manifest["model"]["model_package_uri"], input_dir)
-        self._stage_artifact(manifest["forcing"]["forcing_uri"], input_dir)
-        self._stage_initial_state(manifest, input_dir)
+        model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
+        model_input_dir.mkdir(parents=True, exist_ok=True)
+        self._stage_artifact(manifest["model"]["model_package_uri"], model_input_dir)
+        self._stage_artifact(manifest["forcing"]["forcing_uri"], model_input_dir)
+        self._stage_initial_state(manifest, model_input_dir)
+        if _is_shud_project_mode(manifest, self.config.command_style):
+            self._prepare_shud_project_forcing(manifest, model_input_dir)
 
         for suffix in (".mesh", ".para", ".calib", ".tsd.forc"):
-            matches = [path for path in input_dir.rglob(f"*{suffix}") if path.is_file() and path.stat().st_size > 0]
+            matches = [
+                path for path in model_input_dir.rglob(f"*{suffix}") if path.is_file() and path.stat().st_size > 0
+            ]
             if not matches:
                 raise SHUDRuntimeError("WORKSPACE_INCOMPLETE", f"Missing required staged file: *{suffix}")
         if _initial_state_uri(manifest):
-            matches = [path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0]
+            matches = [path for path in model_input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0]
             if not matches:
                 raise SHUDRuntimeError(
                     "INIT_STATE_INCOMPLETE",
@@ -337,25 +346,37 @@ class SHUDRuntime:
                 )
 
     def generate_cfg_para(self, manifest: dict[str, Any], input_dir: Path, output_dir: Path) -> Path:
-        template_path = _first_file(input_dir, "*.cfg.para") or _first_file(input_dir, "*.para")
+        model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
+        template_path = _first_file(model_input_dir, "*.cfg.para") or _first_file(model_input_dir, "*.para")
         if template_path is None:
             raise SHUDRuntimeError("CFG_TEMPLATE_MISSING", "No .para template found in staged model package.")
 
-        output_path = input_dir / f"{_project_name(manifest)}.cfg.para"
+        output_path = model_input_dir / f"{_project_name(manifest)}.cfg.para"
         content = template_path.read_text(encoding="utf-8")
-        content = "\n".join(line for line in content.splitlines() if ".cfg.ic" not in line)
 
         init_mode = _init_mode(manifest)
-        replacements = {
-            "START_TIME": _format_time(_parse_time(manifest["start_time"])),
-            "END_TIME": _format_time(_parse_time(manifest["end_time"])),
-            "OUTPUT_DIR": str(output_dir),
-            "MODEL_OUTPUT_INTERVAL": str(_output_interval_minutes(manifest, self.config.output_interval_minutes)),
-            "INIT_MODE": init_mode,
-            "SEGMENT_COUNT": str(_segment_count(manifest)),
-        }
+        replacements = _cfg_replacements(manifest, output_dir, init_mode, self.config.output_interval_minutes)
+        if _is_shud_project_mode(manifest, self.config.command_style):
+            content = "\n".join(line for line in content.splitlines() if "BINARY_OUTPUT" not in line)
+            replacements.update(
+                {
+                    "START": str(_shud_start_day(manifest)),
+                    "END": str(_shud_end_day(manifest)),
+                    "ASCII_OUTPUT": "1",
+                    "BINARY_OUTPUT": "0",
+                    "DT_QR_DOWN": str(_output_interval_minutes(manifest, self.config.output_interval_minutes)),
+                    "SCR_INTV": str(_output_interval_minutes(manifest, self.config.output_interval_minutes)),
+                }
+            )
+        else:
+            content = "\n".join(line for line in content.splitlines() if ".cfg.ic" not in line)
         for key, value in replacements.items():
-            content = _replace_or_append(content, key, value)
+            content = _replace_or_append(
+                content,
+                key,
+                value,
+                separator="\t" if _is_shud_project_mode(manifest, self.config.command_style) else " = ",
+            )
         output_path.write_text(content.rstrip() + "\n", encoding="utf-8")
         return output_path
 
@@ -367,7 +388,14 @@ class SHUDRuntime:
         output_dir: Path,
         log_dir: Path,
     ) -> None:
-        command = _runtime_command(self.config.shud_executable, cfg_path)
+        command = _runtime_command(
+            self.config.shud_executable,
+            cfg_path,
+            manifest=manifest,
+            output_dir=output_dir,
+            command_style=self.config.command_style,
+            output_interval_minutes=self.config.output_interval_minutes,
+        )
         try:
             completed = subprocess.run(
                 command,
@@ -380,7 +408,7 @@ class SHUDRuntime:
         except subprocess.TimeoutExpired as error:
             (log_dir / "shud_stdout.log").write_text(_subprocess_output_text(error.stdout), encoding="utf-8")
             (log_dir / "shud_stderr.log").write_text(_subprocess_output_text(error.stderr), encoding="utf-8")
-            message = f"shud_omp timed out after {self.config.timeout_seconds}s"
+            message = f"SHUD executable timed out after {self.config.timeout_seconds}s"
             raise SHUDRuntimeError("SHUD_TIMEOUT", message) from error
 
         (log_dir / "shud_stdout.log").write_text(completed.stdout or "", encoding="utf-8")
@@ -389,9 +417,70 @@ class SHUDRuntime:
             detail = _last_lines(completed.stderr or "", 50)
             raise SHUDRuntimeError(
                 f"SHUD_EXIT_{completed.returncode}",
-                f"shud_omp exited with code {completed.returncode}: {detail}",
+                f"SHUD executable exited with code {completed.returncode}: {detail}",
             )
         output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _prepare_shud_project_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
+        if self._stage_standard_shud_forcing(manifest, model_input_dir):
+            return
+        source = model_input_dir / "forcing_debug.csv"
+        if not source.exists():
+            source = model_input_dir / "forcing.tsd.forc"
+        if not source.exists():
+            raise SHUDRuntimeError(
+                "FORCING_DEBUG_MISSING",
+                "SHUD project mode requires forcing_debug.csv or internal forcing.tsd.forc in the forcing package.",
+            )
+        rows = _read_internal_forcing_rows(source)
+        if not rows:
+            raise SHUDRuntimeError("FORCING_EMPTY", f"No forcing rows found in {source}.")
+        station = _shud_forcing_station(manifest)
+        _write_shud_forcing_files(
+            model_input_dir,
+            rows,
+            station=station,
+            project_name=_project_name(manifest),
+        )
+
+    def _stage_standard_shud_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> bool:
+        shud_dir = model_input_dir / "shud"
+        source_tsd = shud_dir / "qhh.tsd.forc"
+        if not source_tsd.exists():
+            return False
+        rows = _read_shud_forcing_station_rows(source_tsd)
+        if not rows:
+            raise SHUDRuntimeError("SHUD_FORCING_STATIONS_EMPTY", f"No stations found in {source_tsd}.")
+        first_csv = shud_dir / str(rows[0]["filename"])
+        first_time = _first_shud_forcing_time(first_csv)
+        _shift_project_time_inputs(model_input_dir, _project_name(manifest), first_time)
+        start_date = first_time.strftime("%Y%m%d")
+        target_tsd = model_input_dir / f"{_project_name(manifest)}.tsd.forc"
+        with target_tsd.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(f"{len(rows)} {start_date}\n")
+            handle.write(f"{model_input_dir}\n")
+            handle.write("ID\tLon\tLat\tX\tY\tZ\tFilename\n")
+            for row in rows:
+                filename = str(row["filename"])
+                source_csv = shud_dir / filename
+                if not source_csv.exists():
+                    raise SHUDRuntimeError("SHUD_FORCING_CSV_MISSING", f"Missing SHUD forcing CSV: {source_csv}")
+                shutil.copy2(source_csv, model_input_dir / filename)
+                handle.write(
+                    "\t".join(
+                        [
+                            str(row["id"]),
+                            _format_float(float(row["longitude"])),
+                            _format_float(float(row["latitude"])),
+                            _format_float(float(row["x"])),
+                            _format_float(float(row["y"])),
+                            _format_float(float(row["z"])),
+                            filename,
+                        ]
+                    )
+                    + "\n"
+                )
+        return True
 
     def verify_output(self, manifest: dict[str, Any], output_dir: Path) -> Path:
         files = sorted([*output_dir.glob("*.rivqdown"), *output_dir.glob("*.rivqdown.csv")])
@@ -406,16 +495,14 @@ class SHUDRuntime:
             raise SHUDRuntimeError("OUTPUT_EMPTY", "Output verification failed: .rivqdown file is empty")
 
         expected_columns = _segment_count(manifest) + 1
-        header_tokens = _split_row(lines[0])
-        has_header = any(not _is_number(token) for token in header_tokens)
-        data_lines = lines[1:] if has_header else lines
+        data_lines = _rivqdown_data_lines(lines)
         expected_timesteps = _expected_timesteps(manifest, self.config.output_interval_minutes)
         if len(data_lines) != expected_timesteps:
             raise SHUDRuntimeError(
                 "OUTPUT_ROW_COUNT_MISMATCH",
                 f"Output verification failed: expected {expected_timesteps} data rows, found {len(data_lines)}",
             )
-        for line_number, line in enumerate(data_lines, start=2 if has_header else 1):
+        for line_number, line in enumerate(data_lines, start=1):
             column_count = len(_split_row(line))
             if column_count != expected_columns:
                 raise SHUDRuntimeError(
@@ -447,9 +534,39 @@ class SHUDRuntime:
 
     def _stage_initial_state(self, manifest: dict[str, Any], input_dir: Path) -> None:
         if not _initial_state_id(manifest) and not _initial_state_uri(manifest):
+            if str(manifest.get("runtime", {}).get("init_mode", "")) == "3":
+                packaged_states = sorted(
+                    path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0
+                )
+                if packaged_states:
+                    manifest["initial_state"] = {
+                        "state_id": manifest.get("runtime", {}).get("packaged_init_state_id", "packaged_initial_state"),
+                        "ic_file_uri": None,
+                        "valid_time": manifest.get("start_time"),
+                        "checksum": sha256_bytes(packaged_states[0].read_bytes()),
+                        "quality": _initial_state_quality(manifest) or "packaged_calibrated_state",
+                    }
+                    _set_runtime_init_mode(manifest, 3)
+                    self._sync_init_state_id(manifest)
+                    return
             _set_cold_start_initial_state(manifest, quality=_initial_state_quality(manifest) or "cold_start_no_state")
             self._sync_init_state_id(manifest)
             return
+        if str(manifest.get("runtime", {}).get("init_mode", "")) == "3" and not _initial_state_uri(manifest):
+            packaged_states = sorted(
+                path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0
+            )
+            if packaged_states:
+                manifest["initial_state"] = {
+                    "state_id": _initial_state_id(manifest) or "packaged_initial_state",
+                    "ic_file_uri": None,
+                    "valid_time": manifest.get("start_time"),
+                    "checksum": sha256_bytes(packaged_states[0].read_bytes()),
+                    "quality": _initial_state_quality(manifest) or "packaged_calibrated_state",
+                }
+                _set_runtime_init_mode(manifest, 3)
+                self._sync_init_state_id(manifest)
+                return
 
         rejected_state_ids: set[str] = set()
         before_time = _parse_time(manifest.get("cycle_time") or manifest["start_time"])
@@ -672,15 +789,281 @@ def _validate_manifest_path_components(manifest: dict[str, Any]) -> None:
         _safe_path_component(model["project_name"])
 
 
-def _runtime_command(shud_executable: str, cfg_path: Path) -> list[str]:
+def _runtime_command(
+    shud_executable: str,
+    cfg_path: Path,
+    *,
+    manifest: dict[str, Any] | None = None,
+    output_dir: Path | None = None,
+    command_style: str = "cfg",
+    output_interval_minutes: int = 1440,
+) -> list[str]:
     executable = str(shud_executable)
-    args = [str(cfg_path)]
+    if _is_shud_project_mode(manifest or {}, command_style):
+        runtime = (manifest or {}).get("runtime") or {}
+        threads = int(runtime.get("threads") or runtime.get("num_threads") or 1)
+        args = ["-o", str(output_dir or cfg_path.parent), "-n", str(threads), _project_name(manifest or {})]
+    else:
+        args = [str(cfg_path)]
     if executable.endswith(".py"):
         return [sys.executable, executable, *args]
     return [executable, *args]
 
 
-def _replace_or_append(content: str, key: str, value: str) -> str:
+def _is_shud_project_mode(manifest: dict[str, Any], command_style: str) -> bool:
+    style = str((manifest.get("runtime") or {}).get("command_style") or command_style or "cfg")
+    return style in {"shud_project", "project", "native_shud"}
+
+
+def _model_input_dir(manifest: dict[str, Any], input_dir: Path, command_style: str) -> Path:
+    if _is_shud_project_mode(manifest, command_style):
+        return input_dir / _project_name(manifest)
+    return input_dir
+
+
+def _cfg_replacements(
+    manifest: dict[str, Any],
+    output_dir: Path,
+    init_mode: str,
+    default_interval_minutes: int,
+) -> dict[str, str]:
+    return {
+        "START_TIME": _format_time(_parse_time(manifest["start_time"])),
+        "END_TIME": _format_time(_parse_time(manifest["end_time"])),
+        "OUTPUT_DIR": str(output_dir),
+        "MODEL_OUTPUT_INTERVAL": str(_output_interval_minutes(manifest, default_interval_minutes)),
+        "INIT_MODE": init_mode,
+        "SEGMENT_COUNT": str(_segment_count(manifest)),
+    }
+
+
+def _shud_start_day(manifest: dict[str, Any]) -> float:
+    runtime = manifest.get("runtime") or {}
+    if runtime.get("shud_start_day") is not None:
+        return float(runtime["shud_start_day"])
+    return _shud_start_minute(manifest) / 1440.0
+
+
+def _shud_end_day(manifest: dict[str, Any]) -> float:
+    runtime = manifest.get("runtime") or {}
+    if runtime.get("shud_end_day") is not None:
+        return float(runtime["shud_end_day"])
+    duration_days = (_parse_time(manifest["end_time"]) - _parse_time(manifest["start_time"])).total_seconds() / 86_400.0
+    return _shud_start_day(manifest) + duration_days
+
+
+def _shud_start_minute(manifest: dict[str, Any]) -> float:
+    runtime = manifest.get("runtime") or {}
+    if runtime.get("shud_start_minute") is not None:
+        return float(runtime["shud_start_minute"])
+    return _parse_time(manifest["start_time"]).timestamp() / 60.0
+
+
+def _read_internal_forcing_rows(path: Path) -> list[dict[str, Any]]:
+    buckets: dict[datetime, dict[str, float]] = {}
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            return []
+        if {"valid_time", "variable", "value"}.issubset(set(reader.fieldnames)):
+            for row in reader:
+                valid_time = _parse_time(str(row["valid_time"]))
+                variable = str(row["variable"])
+                buckets.setdefault(valid_time, {})[variable] = float(row["value"])
+        elif "valid_time" in reader.fieldnames and "variable" in reader.fieldnames:
+            station_columns = [name for name in reader.fieldnames if name not in {"valid_time", "variable"}]
+            if not station_columns:
+                raise SHUDRuntimeError("FORCING_FORMAT_UNSUPPORTED", f"No station value column found in {path}.")
+            value_column = station_columns[0]
+            for row in reader:
+                valid_time = _parse_time(str(row["valid_time"]))
+                variable = str(row["variable"])
+                buckets.setdefault(valid_time, {})[variable] = float(row[value_column])
+        else:
+            raise SHUDRuntimeError(
+                "FORCING_FORMAT_UNSUPPORTED",
+                f"Unsupported forcing CSV columns in {path}: {reader.fieldnames}",
+            )
+    return [{"valid_time": time_value, **values} for time_value, values in sorted(buckets.items())]
+
+
+def _write_shud_forcing_files(
+    model_input_dir: Path,
+    rows: list[dict[str, Any]],
+    *,
+    station: dict[str, Any],
+    project_name: str,
+) -> None:
+    first_time = _ensure_utc(rows[0]["valid_time"])
+    start_minute = first_time.timestamp() / 60.0
+    _shift_cfg_ic_time(model_input_dir / f"{project_name}.cfg.ic", first_time)
+    _shift_tsd_time_axis(model_input_dir / f"{project_name}.tsd.lai", first_time, start_minute=start_minute)
+    _shift_tsd_time_axis(model_input_dir / f"{project_name}.tsd.mf", first_time, start_minute=start_minute)
+    _shift_tsd_time_axis(model_input_dir / f"{project_name}.tsd.rl", first_time, start_minute=start_minute)
+    _remap_sp_att_forcing(model_input_dir / f"{project_name}.sp.att", forcing_index=1)
+    start_date = first_time.strftime("%Y%m%d")
+    last_time = _ensure_utc(rows[-1]["valid_time"])
+    end_date = last_time.strftime("%Y%m%d")
+    forcing_csv = model_input_dir / "forcing.csv"
+    with forcing_csv.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(f"{len(rows)}\t6\t{start_date}\t{end_date}\n")
+        handle.write("Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n")
+        for row in rows:
+            valid_time = _ensure_utc(row["valid_time"])
+            time_days = start_minute / 1440.0 + (valid_time - first_time).total_seconds() / 86_400.0
+            handle.write(
+                "\t".join(
+                    [
+                        _format_float(time_days),
+                        _format_float(float(row.get("PRCP", 0.0))),
+                        _format_float(float(row.get("TEMP", 0.0))),
+                        _format_float(float(row.get("RH", 0.0))),
+                        _format_float(float(row.get("wind", 0.0))),
+                        _format_float(float(row.get("Rn", 0.0))),
+                    ]
+                )
+                + "\n"
+            )
+
+    tsd_forc = model_input_dir / f"{project_name}.tsd.forc"
+    with tsd_forc.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(f"1 {start_date}\n")
+        handle.write(f"{model_input_dir}\n")
+        handle.write("ID\tLon\tLat\tX\tY\tZ\tFilename\n")
+        handle.write(
+            "1\t"
+            f"{_format_float(float(station.get('longitude', 0.0)))}\t"
+            f"{_format_float(float(station.get('latitude', 0.0)))}\t"
+            f"{_format_float(float(station.get('x', 0.0)))}\t"
+            f"{_format_float(float(station.get('y', 0.0)))}\t"
+            f"{_format_float(float(station.get('z', 0.0)))}\t"
+            "forcing.csv\n"
+        )
+
+
+def _shift_project_time_inputs(model_input_dir: Path, project_name: str, first_time: datetime) -> None:
+    start_minute = first_time.timestamp() / 60.0
+    _shift_cfg_ic_time(model_input_dir / f"{project_name}.cfg.ic", first_time)
+    _shift_tsd_time_axis(model_input_dir / f"{project_name}.tsd.lai", first_time, start_minute=start_minute)
+    _shift_tsd_time_axis(model_input_dir / f"{project_name}.tsd.mf", first_time, start_minute=start_minute)
+    _shift_tsd_time_axis(model_input_dir / f"{project_name}.tsd.rl", first_time, start_minute=start_minute)
+
+
+def _read_shud_forcing_station_rows(path: Path) -> list[dict[str, Any]]:
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) < 4:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines[3:]:
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        rows.append(
+            {
+                "id": int(float(parts[0])),
+                "longitude": float(parts[1]),
+                "latitude": float(parts[2]),
+                "x": float(parts[3]),
+                "y": float(parts[4]),
+                "z": float(parts[5]),
+                "filename": Path(parts[6]).name,
+            }
+        )
+    return rows
+
+
+def _first_shud_forcing_time(path: Path) -> datetime:
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) < 3:
+        raise SHUDRuntimeError("SHUD_FORCING_CSV_EMPTY", f"Invalid SHUD forcing CSV: {path}")
+    header = lines[0].split()
+    if len(header) < 3:
+        raise SHUDRuntimeError("SHUD_FORCING_CSV_HEADER_INVALID", f"Invalid SHUD forcing CSV header: {path}")
+    start_date = datetime.strptime(header[2], "%Y%m%d").replace(tzinfo=UTC)
+    first_value = lines[2].split()[0]
+    try:
+        time_day = float(first_value)
+    except ValueError as error:
+        raise SHUDRuntimeError("SHUD_FORCING_CSV_TIME_INVALID", f"Invalid SHUD forcing time in {path}") from error
+    # SHUD/rSHUD forcing files may use either absolute Unix-day-like Time_Day values
+    # or days relative to the header date. The generated operational forcing uses
+    # absolute values so SHUD output can be mapped back to real valid_time.
+    if time_day > 10_000:
+        return datetime.fromtimestamp(time_day * 86_400.0, tz=UTC)
+    return start_date + timedelta(days=time_day)
+
+
+def _remap_sp_att_forcing(path: Path, *, forcing_index: int) -> None:
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) < 3:
+        return
+    header_tokens = lines[1].split()
+    try:
+        forcing_column = next(index for index, token in enumerate(header_tokens) if token.upper() == "FORC")
+    except StopIteration:
+        forcing_column = 4
+    for index in range(2, len(lines)):
+        parts = lines[index].split()
+        if len(parts) <= forcing_column:
+            continue
+        parts[forcing_column] = str(forcing_index)
+        lines[index] = "\t".join(parts)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _shift_tsd_time_axis(path: Path, start_time: datetime, *, start_minute: float) -> None:
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return
+    header = lines[0].split()
+    if len(header) >= 3:
+        header[2] = _ensure_utc(start_time).strftime("%Y%m%d")
+        if len(header) >= 4:
+            header[3] = (_ensure_utc(start_time) + timedelta(days=366)).strftime("%Y%m%d")
+        lines[0] = "\t".join(header)
+        for index in range(2, len(lines)):
+            parts = lines[index].split()
+            if not parts:
+                continue
+            try:
+                original_day = float(parts[0])
+            except ValueError:
+                continue
+            parts[0] = _format_float(start_minute / 1440.0 + original_day)
+            lines[index] = "\t".join(parts)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return
+    header = lines[0].split()
+    if len(header) >= 3:
+        header[2] = f"{_ensure_utc(start_time).timestamp() / 60.0:.6f}"
+        lines[0] = "\t".join(header)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _shud_forcing_station(manifest: dict[str, Any]) -> dict[str, Any]:
+    forcing = manifest.get("forcing") or {}
+    station = forcing.get("shud_station") or forcing.get("station") or {}
+    if station:
+        return dict(station)
+    return {"longitude": 0.0, "latitude": 0.0, "x": 0.0, "y": 0.0, "z": 0.0}
+
+
+def _format_float(value: float) -> str:
+    return f"{value:.10g}"
+
+
+def _replace_or_append(content: str, key: str, value: str, *, separator: str = " = ") -> str:
     patterns = (
         f"{{{{{key}}}}}",
         f"${{{key}}}",
@@ -691,14 +1074,17 @@ def _replace_or_append(content: str, key: str, value: str) -> str:
 
     lines = content.splitlines()
     replaced = False
-    prefix = f"{key} ="
     for index, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith(prefix) or stripped.startswith(f"{key}="):
-            lines[index] = f"{key} = {value}"
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split(maxsplit=1)
+        first_token = parts[0].split("=", 1)[0]
+        if first_token == key:
+            lines[index] = f"{key}{separator}{value}"
             replaced = True
     if not replaced:
-        lines.append(f"{key} = {value}")
+        lines.append(f"{key}{separator}{value}")
     return "\n".join(lines)
 
 
@@ -721,6 +1107,12 @@ def _parse_time_or_none(value: str | datetime | None) -> datetime | None:
 
 def _format_time(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _expected_timesteps(manifest: dict[str, Any], default_interval_minutes: int) -> int:
@@ -847,6 +1239,40 @@ def _split_row(line: str) -> list[str]:
     if "," in line:
         return [token.strip() for token in line.split(",") if token.strip()]
     return line.split()
+
+
+def _rivqdown_data_lines(lines: list[str]) -> list[str]:
+    candidate_lines = [line for line in lines if not line.lstrip().startswith("#")]
+    if candidate_lines:
+        header_tokens = _split_row(candidate_lines[0])
+        has_header = any(not _is_number(token) for token in header_tokens)
+        if has_header:
+            return candidate_lines[1:]
+    data_lines: list[str] = []
+    start_index = 0
+    if len(candidate_lines) >= 2:
+        first_tokens = _split_row(candidate_lines[0])
+        second_tokens = _split_row(candidate_lines[1])
+        if first_tokens and all(_is_number(token) for token in first_tokens) and any(
+            not _is_number(token) for token in second_tokens
+        ):
+            start_index = 2
+    for line in candidate_lines[start_index:]:
+        tokens = _split_row(line)
+        if len(tokens) < 2:
+            continue
+        if _looks_like_shud_metadata_row(tokens):
+            continue
+        if not _is_number(tokens[0]):
+            continue
+        if any(not _is_number(token) for token in tokens[1:]):
+            continue
+        data_lines.append(line)
+    return data_lines
+
+
+def _looks_like_shud_metadata_row(tokens: list[str]) -> bool:
+    return len(tokens) == 3 and tokens[0] == "0" and tokens[2].isdigit() and len(tokens[2]) == 8
 
 
 def _is_number(value: str) -> bool:

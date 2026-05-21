@@ -248,6 +248,45 @@ class PsycopgModelRegistryStore:
                 geom_wkt=geom_wkt,
             )
 
+    def list_basins(self, *, limit: int, offset: int) -> list[dict[str, Any]]:
+        with self._transaction() as cursor:
+            cursor.execute(
+                """
+                SELECT basin_id, basin_name, basin_group, description, created_at
+                FROM core.basin
+                ORDER BY basin_name, basin_id
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def list_basin_versions(self, *, basin_id: str, limit: int, offset: int) -> list[dict[str, Any]]:
+        with self._transaction() as cursor:
+            if not self._exists(cursor, "core.basin", "basin_id", basin_id):
+                raise MissingResourceError(f"basin_id not found: {basin_id}")
+            cursor.execute(
+                """
+                SELECT
+                    basin_version_id,
+                    basin_id,
+                    version_label,
+                    ST_AsGeoJSON(geom)::json AS geom,
+                    active_flag,
+                    valid_from,
+                    valid_to,
+                    source_uri,
+                    checksum,
+                    created_at
+                FROM core.basin_version
+                WHERE basin_id = %s
+                ORDER BY active_flag DESC, created_at DESC, basin_version_id
+                LIMIT %s OFFSET %s
+                """,
+                (basin_id, limit, offset),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def create_river_network(
         self,
         payload: Mapping[str, Any],
@@ -348,7 +387,14 @@ class PsycopgModelRegistryStore:
             cursor.execute(
                 f"""
                 WITH matching AS (
-                    SELECT rs.river_segment_id, rs.segment_order, rs.geom
+                    SELECT
+                        rs.river_segment_id,
+                        rs.segment_order,
+                        rs.geom,
+                        CASE
+                            WHEN COALESCE(rs.properties_json->>'shud_output_river', 'false') = 'true' THEN 0
+                            ELSE 1
+                        END AS display_priority
                     FROM core.river_segment rs
                     JOIN core.river_network_version rnv
                       ON rnv.river_network_version_id = rs.river_network_version_id
@@ -358,7 +404,7 @@ class PsycopgModelRegistryStore:
                     SELECT
                         river_segment_id,
                         SUM(ST_NPoints(geom)) OVER (
-                            ORDER BY COALESCE(segment_order, 2147483647), river_segment_id
+                            ORDER BY display_priority, COALESCE(segment_order, 2147483647), river_segment_id
                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                         ) AS running_coordinate_count
                     FROM matching
@@ -393,9 +439,19 @@ class PsycopgModelRegistryStore:
                         rs.length_m,
                         rs.properties_json,
                         rs.geom,
+                        CASE
+                            WHEN COALESCE(rs.properties_json->>'shud_output_river', 'false') = 'true' THEN 0
+                            ELSE 1
+                        END AS display_priority,
                         ST_NPoints(rs.geom) AS coordinate_count,
                         SUM(ST_NPoints(rs.geom)) OVER (
-                            ORDER BY COALESCE(rs.segment_order, 2147483647), rs.river_segment_id
+                            ORDER BY
+                                CASE
+                                    WHEN COALESCE(rs.properties_json->>'shud_output_river', 'false') = 'true' THEN 0
+                                    ELSE 1
+                                END,
+                                COALESCE(rs.segment_order, 2147483647),
+                                rs.river_segment_id
                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                         ) AS running_coordinate_count
                     FROM core.river_segment rs
@@ -421,7 +477,7 @@ class PsycopgModelRegistryStore:
                     properties_json,
                     ST_AsGeoJSON(geom)::json AS geometry
                 FROM renderable
-                ORDER BY COALESCE(segment_order, 2147483647), river_segment_id
+                ORDER BY display_priority, COALESCE(segment_order, 2147483647), river_segment_id
                 LIMIT %s OFFSET %s
                 """,
                 tuple([

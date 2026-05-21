@@ -103,7 +103,11 @@ def write_test_netcdf4(
 
     ds = xr.Dataset(
         {short_name: (["point"], values)},
-        coords={"point": list(range(len(values)))},
+        coords={
+            "point": list(range(len(values))),
+            "latitude": ("point", [0.0] * len(values)),
+            "longitude": ("point", [0.0] * len(values)),
+        },
         attrs={
             "source": source,
             "variable": variable,

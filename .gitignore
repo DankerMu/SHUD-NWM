@@ -30,6 +30,18 @@ Thumbs.db
 pgdata/
 minio-data/
 
+# Local project runtime/data products
+.nhms-runs/
+.nhms-workspace/
+.nhms-object-store/
+.pgdata/
+.pglogs/
+.pgsocket/
+.conda-pkgs/
+.conda-postgres-runtime/
+data/
+.codex/
+
 # Coverage
 htmlcov/
 .coverage

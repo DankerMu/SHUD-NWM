@@ -99,6 +99,15 @@ def build_converter(tmp_path: Path, repository: FakeCanonicalRepository | None =
     )
 
 
+def _netcdf_dataset_bytes(dataset: Any) -> bytes:
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".nc") as temp_file:
+        dataset.to_netcdf(temp_file.name, engine="netcdf4", format="NETCDF4")
+        temp_file.seek(0)
+        return temp_file.read()
+
+
 def test_variable_mapping_covers_required_gfs_variables() -> None:
     assert map_variable("tmp2m") == "air_temperature_2m"
     assert map_variable("apcp") == "prcp_rate_or_amount"
@@ -141,6 +150,47 @@ def test_conversion_writes_lineage_json_with_required_keys(tmp_path: Path) -> No
     assert set(lineage) >= {"source_files", "source_cycle_id", "conversion_params", "converter_version"}
     assert len(lineage["source_files"]) == 2
     assert lineage["conversion_params"]["operation"] == "cumulative_to_period"
+
+
+def test_conversion_writes_rectilinear_grid_definition(tmp_path: Path) -> None:
+    _, manifest = build_raw_manifest(tmp_path)
+    converter = build_converter(tmp_path)
+
+    converter.convert_manifest(manifest)
+
+    definition = converter.object_store.read_bytes("canonical/gfs/grid/gfs_0p25/grid.json").decode("utf-8")
+    assert '"cells":[{"id":0,"lat":0.0,"lon":0.0}]' in definition
+
+
+def test_conversion_normalizes_point_grid_definition_longitudes(tmp_path: Path) -> None:
+    store, manifest = build_raw_manifest(tmp_path)
+    import xarray as xr
+
+    for entry in manifest["entries"]:
+        dataset = xr.open_dataset(store.resolve_path(entry["local_key"]), engine="netcdf4")
+        try:
+            variable = next(iter(dataset.data_vars))
+            rewritten = xr.Dataset(
+                data_vars={variable: ("point", dataset[variable].values.tolist())},
+                coords={
+                    "point": [0],
+                    "longitude": ("point", [350.0]),
+                    "latitude": ("point", [35.0]),
+                },
+            )
+            try:
+                store.write_bytes_atomic(entry["local_key"], _netcdf_dataset_bytes(rewritten))
+            finally:
+                rewritten.close()
+        finally:
+            dataset.close()
+    converter = build_converter(tmp_path)
+
+    converter.convert_manifest(manifest)
+
+    definition = converter.object_store.read_bytes("canonical/gfs/grid/gfs_0p25/grid.json").decode("utf-8")
+    assert '"lon":-10.0' in definition
+    assert '"lon":350.0' not in definition
 
 
 def test_unmapped_variable_is_skipped(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

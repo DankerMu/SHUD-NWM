@@ -358,6 +358,37 @@ def create_basin_version(
         raise _handle_registry_error(error) from error
 
 
+@router.get("/basins")
+def list_basins(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(request, store.list_basins(limit=limit, offset=offset))
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
+@router.get("/basins/{basin_id}/versions")
+def list_basin_versions(
+    request: Request,
+    basin_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(request, store.list_basin_versions(basin_id=basin_id, limit=limit, offset=offset))
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
 @router.post("/river-networks", status_code=status.HTTP_201_CREATED)
 def create_river_network(
     request: Request,

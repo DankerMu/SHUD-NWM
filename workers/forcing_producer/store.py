@@ -49,7 +49,8 @@ class PsycopgForcingRepository:
                 ST_X(geom) AS longitude,
                 ST_Y(geom) AS latitude,
                 elevation_m,
-                station_role
+                station_role,
+                properties_json
             FROM met.met_station
             WHERE basin_version_id = %s
               AND active_flag = true
@@ -66,6 +67,7 @@ class PsycopgForcingRepository:
                 latitude=float(row["latitude"]),
                 elevation_m=float(row["elevation_m"]),
                 station_role=str(row["station_role"]),
+                properties_json=row.get("properties_json") or {},
             )
             for row in rows
             if row["elevation_m"] is not None

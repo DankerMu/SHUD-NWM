@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import AbstractSet, Any, Protocol
 
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
@@ -44,7 +44,7 @@ IFS_REQUIRED_CANONICAL_VARIABLES: tuple[str, ...] = (
     "wind_u_10m",
     "wind_v_10m",
     "surface_pressure",
-    "net_radiation",
+    "shortwave_down",
 )
 FORCING_VARIABLES: tuple[str, ...] = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 OUTPUT_UNITS: dict[str, str] = {
@@ -73,7 +73,7 @@ IFS_CANONICAL_TO_FORCING: dict[str, str] = {
     "prcp_rate_or_amount": "PRCP",
     "air_temperature_2m": "TEMP",
     "relative_humidity_2m": "RH",
-    "net_radiation": "Rn",
+    "shortwave_down": "Rn",
     "surface_pressure": "Press",
 }
 ERA5_FALLBACK_SOURCE_ID = "gfs"
@@ -93,6 +93,7 @@ class MetStation:
     elevation_m: float
     station_role: str
     station_name: str | None = None
+    properties_json: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -332,6 +333,11 @@ class ForcingProducer:
                 cycle_time=parsed_cycle_time,
                 max_lead_hours=max_lead_hours,
             )
+            products_by_variable = _limit_products_by_min_lead_hours(
+                products_by_variable,
+                cycle_time=parsed_cycle_time,
+                min_lead_hours=_min_lead_hours_from_env(),
+            )
             fallback_lineage = self._apply_era5_latency_fallback(
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
@@ -343,8 +349,7 @@ class ForcingProducer:
                 required_variables=required_variables,
             )
 
-            fields = self._read_fields(products_by_variable)
-            grid_points_by_source_grid = _grid_points_by_source_grid(fields)
+            grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
             grid_ids = tuple(sorted({grid_id for _, grid_id in grid_points_by_source_grid}))
             grid_id = grid_ids[0] if len(grid_ids) == 1 else "mixed"
             weights = self._load_or_create_weights(
@@ -352,17 +357,17 @@ class ForcingProducer:
                 stations=stations,
                 grid_points_by_source_grid=grid_points_by_source_grid,
             )
+            del grid_points_by_source_grid
             forcing_version_id = (
                 str(existing["forcing_version_id"])
                 if existing is not None
                 else _forcing_version_id(resolved_source_id, parsed_cycle_time, model_id)
             )
-            values, components = self._generate_timeseries(
+            values, components = self._generate_timeseries_streaming(
                 source_id=resolved_source_id,
                 forcing_version_id=forcing_version_id,
                 basin_version_id=basin_version_id,
                 products_by_variable=products_by_variable,
-                fields=fields,
                 stations=stations,
                 weights=weights,
                 canonical_to_forcing=canonical_to_forcing,
@@ -583,7 +588,63 @@ class ForcingProducer:
                 fields[variable][valid_time] = self._read_canonical_field(product)
         return fields
 
-    def _read_canonical_field(self, product: CanonicalProduct) -> CanonicalField:
+    def _grid_points_by_source_grid_from_products(
+        self,
+        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    ) -> dict[tuple[str, str], tuple[GridPoint, ...]]:
+        representatives: dict[tuple[str, str], CanonicalProduct] = {}
+        for products_for_variable in products_by_variable.values():
+            for product in products_for_variable.values():
+                representatives.setdefault((product.source_id, product.grid_id), product)
+        if not representatives:
+            raise ForcingProductionError("No canonical products are available for interpolation grid discovery.")
+        return {
+            source_grid: self._read_canonical_grid(product)
+            for source_grid, product in sorted(representatives.items(), key=lambda item: item[0])
+        }
+
+    def _read_canonical_grid(self, product: CanonicalProduct) -> tuple[GridPoint, ...]:
+        try:
+            import xarray as xr
+        except ImportError as error:
+            raise ForcingProductionError("Reading canonical NetCDF4 products requires xarray.") from error
+
+        dataset = None
+        try:
+            path = self.object_store.resolve_path(product.object_uri)
+            dataset = xr.open_dataset(path)
+            data_variable = _select_data_variable(dataset, product.variable)
+            data_array = dataset[data_variable]
+            expected_count = _data_array_size(data_array)
+            grid_points = self._grid_points_for_dataset(
+                product,
+                dataset,
+                data_array,
+                _data_array_shape(data_array),
+                expected_count,
+            )
+            if len(grid_points) != expected_count:
+                raise ForcingProductionError(
+                    f"Canonical product {product.canonical_product_id} has {expected_count} values but "
+                    f"{len(grid_points)} grid points."
+                )
+            _validate_grid_points(grid_points, product.canonical_product_id)
+            return grid_points
+        except (OSError, ObjectStoreError, TypeError, ValueError) as error:
+            raise ForcingProductionError(
+                f"Failed to read canonical product grid {product.canonical_product_id}: {error}"
+            ) from error
+        finally:
+            if dataset is not None:
+                dataset.close()
+
+    def _read_canonical_field(
+        self,
+        product: CanonicalProduct,
+        *,
+        required_grid_cell_ids: AbstractSet[str] | None = None,
+        retain_grid_points: bool = True,
+    ) -> CanonicalField:
         try:
             import xarray as xr
         except ImportError as error:
@@ -596,21 +657,42 @@ class ForcingProducer:
             data_variable = _select_data_variable(dataset, product.variable)
             data_array = dataset[data_variable]
             raw_values = data_array.values
-            values = tuple(float(value) for value in raw_values.ravel().tolist())
-            grid_points = self._grid_points_for_dataset(product, dataset, data_array, len(values))
-            if len(grid_points) != len(values):
+            flat_values = raw_values.ravel()
+            grid_points = self._grid_points_for_dataset(
+                product,
+                dataset,
+                data_array,
+                _data_array_shape(data_array),
+                len(flat_values),
+            )
+            if len(grid_points) != len(flat_values):
                 raise ForcingProductionError(
-                    f"Canonical product {product.canonical_product_id} has {len(values)} values but "
+                    f"Canonical product {product.canonical_product_id} has {len(flat_values)} values but "
                     f"{len(grid_points)} grid points."
                 )
             _validate_grid_points(grid_points, product.canonical_product_id)
-            _validate_field_values(values, grid_points, product.canonical_product_id)
+            values_by_grid_cell_id: dict[str, float] = {}
+            for point, raw_value in zip(grid_points, flat_values, strict=True):
+                value = float(raw_value)
+                if not math.isfinite(value):
+                    raise ForcingProductionError(
+                        f"Canonical product {product.canonical_product_id} has non-finite field value "
+                        f"for grid cell {point.grid_cell_id}."
+                    )
+                if required_grid_cell_ids is None or point.grid_cell_id in required_grid_cell_ids:
+                    values_by_grid_cell_id[point.grid_cell_id] = value
+            if required_grid_cell_ids is not None:
+                missing = sorted(required_grid_cell_ids.difference(values_by_grid_cell_id))
+                if missing:
+                    sample = ", ".join(missing[:5])
+                    raise ForcingProductionError(
+                        f"Canonical product {product.canonical_product_id} is missing required interpolation "
+                        f"grid cells: {sample}."
+                    )
             return CanonicalField(
                 product=product,
-                grid_points=grid_points,
-                values_by_grid_cell_id={
-                    point.grid_cell_id: value for point, value in zip(grid_points, values, strict=True)
-                },
+                grid_points=grid_points if retain_grid_points else (),
+                values_by_grid_cell_id=values_by_grid_cell_id,
             )
         except (OSError, ObjectStoreError, TypeError, ValueError) as error:
             raise ForcingProductionError(
@@ -625,14 +707,13 @@ class ForcingProducer:
         product: CanonicalProduct,
         dataset: Any,
         data_array: Any,
+        shape: tuple[int, ...],
         expected_count: int,
     ) -> tuple[GridPoint, ...]:
         grid_from_definition = self._grid_points_from_definition(product, expected_count)
         if grid_from_definition:
             return grid_from_definition
 
-        raw_values = data_array.values
-        shape = tuple(int(size) for size in getattr(raw_values, "shape", ()))
         grid_cell_ids = _grid_cell_ids(dataset, expected_count)
         direct_coords = _direct_lon_lat_coords(dataset, expected_count)
         if direct_coords is not None:
@@ -688,16 +769,34 @@ class ForcingProducer:
                     )
                 )
             return tuple(points) if len(points) == expected_count else None
+        if definition.get("layout") == "rectilinear":
+            try:
+                longitudes = tuple(float(value) for value in definition["longitudes"])
+                latitudes = tuple(float(value) for value in definition["latitudes"])
+                y_count, x_count = (int(value) for value in definition["shape"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if len(longitudes) != x_count or len(latitudes) != y_count or x_count * y_count != expected_count:
+                return None
+            return tuple(
+                GridPoint(
+                    grid_cell_id=str(index),
+                    longitude=_normalize_longitude(longitude),
+                    latitude=latitude,
+                )
+                for index, (latitude, longitude) in enumerate(
+                    (lat, lon) for lat in latitudes for lon in longitudes
+                )
+            )
         return None
 
-    def _generate_timeseries(
+    def _generate_timeseries_streaming(
         self,
         *,
         source_id: str,
         forcing_version_id: str,
         basin_version_id: str,
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
-        fields: Mapping[str, Mapping[datetime, CanonicalField]],
         stations: Sequence[MetStation],
         weights: Mapping[tuple[str, str], Sequence[InterpolationWeight]],
         canonical_to_forcing: Mapping[str, str],
@@ -707,11 +806,28 @@ class ForcingProducer:
             source_grid: _weights_by_station_variable(source_grid_weights)
             for source_grid, source_grid_weights in weights.items()
         }
+        required_grid_cell_ids_by_source_grid = _required_grid_cell_ids_by_source_grid(weights)
         rows: list[ForcingTimeseriesRow] = []
         radiation_variable = _canonical_variable_for_forcing("Rn", canonical_to_forcing)
         pressure_variable = _canonical_variable_for_forcing("Press", canonical_to_forcing)
 
         for valid_time in valid_times:
+            field_cache: dict[str, CanonicalField] = {}
+
+            def field_for(variable: str) -> CanonicalField:
+                cached = field_cache.get(variable)
+                if cached is not None:
+                    return cached
+                product = products_by_variable[variable][valid_time]
+                source_grid = (product.source_id, product.grid_id)
+                field = self._read_canonical_field(
+                    product,
+                    required_grid_cell_ids=required_grid_cell_ids_by_source_grid.get(source_grid),
+                    retain_grid_points=False,
+                )
+                field_cache[variable] = field
+                return field
+
             precip_product = products_by_variable["prcp_rate_or_amount"][valid_time]
             precip_factor = (
                 24.0 / _precip_step_hours(precip_product, self.config.ifs_precip_step_hours)
@@ -723,20 +839,20 @@ class ForcingProducer:
                     station_id: value * precip_factor
                     for station_id, value in self._interpolate_forcing_variable(
                         "PRCP",
-                        fields["prcp_rate_or_amount"][valid_time],
+                        field_for("prcp_rate_or_amount"),
                         stations,
                         weights_by_source_grid_station_variable,
                     ).items()
                 },
                 "TEMP": self._interpolate_forcing_variable(
                     "TEMP",
-                    fields["air_temperature_2m"][valid_time],
+                    field_for("air_temperature_2m"),
                     stations,
                     weights_by_source_grid_station_variable,
                 ),
                 "RH": self._interpolate_forcing_variable(
                     "RH",
-                    fields["relative_humidity_2m"][valid_time],
+                    field_for("relative_humidity_2m"),
                     stations,
                     weights_by_source_grid_station_variable,
                 ),
@@ -745,27 +861,27 @@ class ForcingProducer:
                     * (1.0 if radiation_variable == "net_radiation" else self.config.rn_shortwave_factor)
                     for station_id, value in self._interpolate_forcing_variable(
                         "Rn",
-                        fields[radiation_variable][valid_time],
+                        field_for(radiation_variable),
                         stations,
                         weights_by_source_grid_station_variable,
                     ).items()
                 },
                 "Press": self._interpolate_forcing_variable(
                     "Press",
-                    fields[pressure_variable][valid_time],
+                    field_for(pressure_variable),
                     stations,
                     weights_by_source_grid_station_variable,
                 ),
             }
             u_values = self._interpolate_forcing_variable(
                 "wind",
-                fields["wind_u_10m"][valid_time],
+                field_for("wind_u_10m"),
                 stations,
                 weights_by_source_grid_station_variable,
             )
             v_values = self._interpolate_forcing_variable(
                 "wind",
-                fields["wind_v_10m"][valid_time],
+                field_for("wind_v_10m"),
                 stations,
                 weights_by_source_grid_station_variable,
             )
@@ -807,6 +923,7 @@ class ForcingProducer:
                             native_resolution=native_resolution,
                         )
                     )
+            field_cache.clear()
 
         components = tuple(
             ForcingComponent(
@@ -885,6 +1002,19 @@ class ForcingProducer:
         csv_uri = self.object_store.write_bytes_atomic(csv_key, csv_content)
         tsd_checksum = sha256_bytes(tsd_content)
         csv_checksum = sha256_bytes(csv_content)
+        shud_files = format_shud_forcing_package(rows, stations=stations)
+        shud_file_entries: list[dict[str, str]] = []
+        for relative_path, content in shud_files.items():
+            content_bytes = content.encode("utf-8")
+            uri = self.object_store.write_bytes_atomic(f"{prefix}/{relative_path}", content_bytes)
+            shud_file_entries.append(
+                {
+                    "role": "shud_forcing" if relative_path == "shud/qhh.tsd.forc" else "shud_forcing_csv",
+                    "relative_path": relative_path,
+                    "uri": uri,
+                    "checksum": sha256_bytes(content_bytes),
+                }
+            )
 
         package_uri = _directory_uri(self.object_store, prefix)
         lineage_json = {
@@ -925,6 +1055,7 @@ class ForcingProducer:
             "files": [
                 {"role": "tsd_forc", "uri": tsd_uri, "checksum": tsd_checksum},
                 {"role": "csv_debug", "uri": csv_uri, "checksum": csv_checksum},
+                *shud_file_entries,
             ],
             "lineage": lineage_json,
         }
@@ -1027,12 +1158,15 @@ def compute_idw_weights(
 
     weights: list[InterpolationWeight] = []
     neighbor_count = min(neighbors, len(grid_points))
+    indexed_points = tuple(enumerate(grid_points))
     for station in stations:
-        distances = [
-            (_distance_degrees(station.longitude, station.latitude, point.longitude, point.latitude), point)
-            for point in grid_points
-        ]
-        distances.sort(key=lambda item: (item[0], item[1].grid_cell_id))
+        distances = sorted(
+            (
+                (_distance_degrees(station.longitude, station.latitude, point.longitude, point.latitude), point)
+                for _, point in indexed_points
+            ),
+            key=lambda item: (item[0], item[1].grid_cell_id),
+        )[:neighbor_count]
         exact_matches = [point for distance, point in distances if distance <= 1e-12]
         if exact_matches:
             selected = [(exact_matches[0], 1.0)]
@@ -1106,6 +1240,71 @@ def format_debug_csv(rows: Sequence[ForcingTimeseriesRow]) -> str:
     return output.getvalue()
 
 
+def format_shud_forcing_package(
+    rows: Sequence[ForcingTimeseriesRow],
+    *,
+    stations: Sequence[MetStation],
+) -> dict[str, str]:
+    if not rows or not stations:
+        return {}
+    station_order = sorted(stations, key=_station_forcing_sort_key)
+    rows_by_station_time: dict[tuple[str, datetime], dict[str, float]] = {}
+    for row in rows:
+        rows_by_station_time.setdefault((row.station_id, row.valid_time), {})[row.variable] = row.value
+    valid_times = sorted({row.valid_time for row in rows})
+    start_time = _ensure_utc(valid_times[0])
+    end_time = _ensure_utc(valid_times[-1])
+    start_date = start_time.strftime("%Y%m%d")
+    end_date = end_time.strftime("%Y%m%d")
+    start_day = start_time.timestamp() / 86_400.0
+
+    files: dict[str, str] = {}
+    tsd = io.StringIO()
+    tsd.write(f"{len(station_order)} {start_date}\n")
+    tsd.write("shud\n")
+    tsd.write("ID\tLon\tLat\tX\tY\tZ\tFilename\n")
+    for station in station_order:
+        forcing_index = _station_forcing_index(station)
+        filename = _station_forcing_filename(station, forcing_index)
+        props = _station_properties(station)
+        tsd.write(
+            "\t".join(
+                [
+                    str(forcing_index),
+                    _format_number(station.longitude),
+                    _format_number(station.latitude),
+                    _format_number(float(props.get("x", 0.0) or 0.0)),
+                    _format_number(float(props.get("y", 0.0) or 0.0)),
+                    _format_number(float(props.get("z", station.elevation_m) or 0.0)),
+                    filename,
+                ]
+            )
+            + "\n"
+        )
+        csv_buffer = io.StringIO()
+        csv_buffer.write(f"{len(valid_times)}\t6\t{start_date}\t{end_date}\n")
+        csv_buffer.write("Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n")
+        for valid_time in valid_times:
+            values = rows_by_station_time[(station.station_id, valid_time)]
+            time_day = start_day + (_ensure_utc(valid_time) - start_time).total_seconds() / 86_400.0
+            csv_buffer.write(
+                "\t".join(
+                    [
+                        _format_number(time_day),
+                        _format_number(values.get("PRCP", 0.0)),
+                        _format_number(values.get("TEMP", 0.0)),
+                        _format_number(values.get("RH", 0.0)),
+                        _format_number(values.get("wind", 0.0)),
+                        _format_number(values.get("Rn", 0.0)),
+                    ]
+                )
+                + "\n"
+            )
+        files[f"shud/{filename}"] = csv_buffer.getvalue()
+    files["shud/qhh.tsd.forc"] = tsd.getvalue()
+    return files
+
+
 def parse_cycle_time(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
         return _ensure_utc(value)
@@ -1135,6 +1334,32 @@ def _format_number(value: float) -> str:
     return f"{float(value):.10g}"
 
 
+def _station_properties(station: MetStation) -> Mapping[str, Any]:
+    properties = getattr(station, "properties_json", None)
+    return properties if isinstance(properties, Mapping) else {}
+
+
+def _station_forcing_index(station: MetStation) -> int:
+    props = _station_properties(station)
+    value = props.get("shud_forcing_index")
+    if value is not None:
+        return int(value)
+    match = re.search(r"(\d+)$", station.station_id)
+    return int(match.group(1)) if match else 1
+
+
+def _station_forcing_filename(station: MetStation, forcing_index: int) -> str:
+    props = _station_properties(station)
+    filename = str(props.get("forcing_filename") or "").strip()
+    if filename and "/" not in filename and "\\" not in filename and "\x00" not in filename:
+        return filename
+    return f"forcing_{forcing_index:03d}.csv"
+
+
+def _station_forcing_sort_key(station: MetStation) -> tuple[int, str]:
+    return (_station_forcing_index(station), station.station_id)
+
+
 def _json_bytes(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_json_default).encode("utf-8")
 
@@ -1162,6 +1387,12 @@ def _valid_geographic_coordinate(longitude: float, latitude: float) -> bool:
         and -180.0 <= longitude <= 180.0
         and -90.0 <= latitude <= 90.0
     )
+
+
+def _normalize_longitude(longitude: float) -> float:
+    if longitude > 180.0:
+        return longitude - 360.0
+    return longitude
 
 
 def _validate_grid_points(grid_points: Sequence[GridPoint], canonical_product_id: str) -> None:
@@ -1242,6 +1473,33 @@ def _limit_products_by_max_lead_hours(
     }
 
 
+def _limit_products_by_min_lead_hours(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    *,
+    cycle_time: datetime,
+    min_lead_hours: int | None,
+) -> dict[str, dict[datetime, CanonicalProduct]]:
+    if min_lead_hours is None:
+        return {
+            variable: dict(products_for_variable) for variable, products_for_variable in products_by_variable.items()
+        }
+    return {
+        variable: {
+            valid_time: product
+            for valid_time, product in products_for_variable.items()
+            if _product_lead_hours(product, cycle_time) >= min_lead_hours
+        }
+        for variable, products_for_variable in products_by_variable.items()
+    }
+
+
+def _min_lead_hours_from_env() -> int | None:
+    value = os.getenv("FORCING_MIN_LEAD_HOURS")
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
 def _max_product_lead_hours(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
     cycle_time: datetime,
@@ -1316,6 +1574,15 @@ def _grid_points_by_source_grid(
                     "do not share one grid definition."
                 )
     return grid_points_by_source_grid
+
+
+def _required_grid_cell_ids_by_source_grid(
+    weights: Mapping[tuple[str, str], Sequence[InterpolationWeight]],
+) -> dict[tuple[str, str], frozenset[str]]:
+    return {
+        source_grid: frozenset(weight.grid_cell_id for weight in source_grid_weights)
+        for source_grid, source_grid_weights in weights.items()
+    }
 
 
 def _canonical_variable_for_forcing(variable: str, canonical_to_forcing: Mapping[str, str]) -> str:
@@ -1442,6 +1709,22 @@ def _select_data_variable(dataset: Any, expected_variable: str) -> str:
     raise ForcingProductionError(
         f"NetCDF product for {expected_variable} has no matching variable; found {data_variables}."
     )
+
+
+def _data_array_size(data_array: Any) -> int:
+    size = getattr(data_array, "size", None)
+    if size is not None:
+        return int(size)
+    shape = _data_array_shape(data_array)
+    total = 1
+    for dimension in shape:
+        total *= dimension
+    return total
+
+
+def _data_array_shape(data_array: Any) -> tuple[int, ...]:
+    shape = getattr(data_array, "shape", ())
+    return tuple(int(size) for size in shape)
 
 
 def _grid_cell_ids(dataset: Any, expected_count: int) -> tuple[str, ...]:

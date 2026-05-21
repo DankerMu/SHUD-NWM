@@ -149,6 +149,32 @@ def test_build_manifest_uses_cycle_specific_lead_policy_and_custom_hours(tmp_pat
     assert sorted({entry.forecast_hour for entry in custom.entries}) == [0, 3, 6]
 
 
+def test_build_manifest_honors_env_forecast_end_hour_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IFS_FORECAST_END_HOUR", "144")
+    adapter = build_adapter(tmp_path)
+
+    manifest = adapter.build_manifest("2026050100")
+
+    assert len(manifest.entries) == 49 * 8
+    assert manifest.metadata["max_lead_hours"] == 144
+    assert manifest.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f144.str.grib2"
+
+
+def test_build_manifest_honors_env_forecast_start_hour_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IFS_FORECAST_START_HOUR", "3")
+    monkeypatch.setenv("IFS_FORECAST_END_HOUR", "144")
+    adapter = build_adapter(tmp_path)
+
+    manifest = adapter.build_manifest("2026050100")
+
+    assert len(manifest.entries) == 48 * 8
+    assert manifest.entries[0].local_key == "raw/IFS/2026050100/ifs.t00z.f003.2t.grib2"
+    assert manifest.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f144.str.grib2"
+
+
 @pytest.mark.parametrize(
     ("cycle_time", "forecast_hours"),
     [

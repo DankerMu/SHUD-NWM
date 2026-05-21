@@ -143,8 +143,8 @@ class GFSAdapterConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
     cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18)
-    forecast_start_hour: int = 0
-    forecast_end_hour: int = 168
+    forecast_start_hour: int = field(default_factory=lambda: int(os.getenv("GFS_FORECAST_START_HOUR", "0")))
+    forecast_end_hour: int = field(default_factory=lambda: int(os.getenv("GFS_FORECAST_END_HOUR", "168")))
     forecast_step_hours: int = 3
     variables: tuple[str, ...] = GFS_VARIABLES
     poll_interval_seconds: float = 300.0

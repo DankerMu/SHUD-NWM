@@ -135,6 +135,23 @@ def test_ifs_variable_mapping_uses_surface_pressure() -> None:
     assert IFS_VARIABLE_MAPPING["sp"] == "surface_pressure"
 
 
+def test_missing_ssr_records_shortwave_down_fail_product(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_ifs_manifest(tmp_path, forecast_hours=(0,))
+    manifest["entries"] = [entry for entry in manifest["entries"] if entry["variable"] != "ssr"]
+    converter = build_converter(tmp_path, repository=repository)
+
+    with pytest.raises(Exception, match="ssr->net_radiation"):
+        converter.convert_manifest(manifest)
+
+    net_radiation = repository.products["IFS_2026050100_net_radiation_f000"]
+    shortwave = repository.products["IFS_2026050100_shortwave_down_f000"]
+    assert net_radiation["quality_flag"] == "fail"
+    assert shortwave["quality_flag"] == "fail"
+    assert shortwave["lineage_json"]["conversion_params"]["missing_native_variable"] == "ssr"
+    assert shortwave["lineage_json"]["conversion_params"]["missing_standard_variable"] == "shortwave_down"
+
+
 def test_temperature_rh_wind_and_pressure_conversion(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     store, manifest = build_ifs_manifest(
@@ -153,7 +170,7 @@ def test_temperature_rh_wind_and_pressure_conversion(tmp_path: Path) -> None:
     result = converter.convert_manifest(manifest)
 
     assert result.status == "canonical_ready"
-    assert len(result.products) == 7
+    assert len(result.products) == 8
     temperature = repository.products["IFS_2026050100_air_temperature_2m_f000"]
     humidity = repository.products["IFS_2026050100_relative_humidity_2m_f000"]
     wind_u = repository.products["IFS_2026050100_wind_u_10m_f000"]
@@ -229,9 +246,12 @@ def test_radiation_cumulative_diff_to_w_m2(tmp_path: Path) -> None:
     converter.convert_manifest(manifest)
 
     radiation = repository.products["IFS_2026050100_net_radiation_f006"]
+    shortwave = repository.products["IFS_2026050100_shortwave_down_f006"]
     assert read_product_values(store, radiation, "net_radiation") == pytest.approx([50.0])
+    assert read_product_values(store, shortwave, "shortwave_down") == pytest.approx([66.6666667])
     assert radiation["lineage_json"]["radiation_method"] == "direct_net"
     assert radiation["lineage_json"]["components"] == ["ssr", "str"]
+    assert shortwave["lineage_json"]["conversion_params"]["operation"] == "cumulative_j_m2_to_w_m2_downward_shortwave"
 
 
 def test_lineage_json_structure_for_each_variable_type(tmp_path: Path) -> None:
