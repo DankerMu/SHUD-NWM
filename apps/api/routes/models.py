@@ -478,14 +478,15 @@ def set_model_active(
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
+        result = store.model_lifecycle_operation(
+            model_id,
+            operation="activate" if payload.active else "deactivate",
+            policy_decision=policy_decision,
+            request_id=getattr(request.state, "request_id", None),
+        )
         return _ok(
             request,
-            store.set_model_active(
-                model_id,
-                payload.active,
-                policy_decision=policy_decision,
-                request_id=getattr(request.state, "request_id", None),
-            ),
+            result["model"],
         )
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error

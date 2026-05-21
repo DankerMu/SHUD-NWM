@@ -269,6 +269,13 @@ class FakeModelRegistryStore:
                 {"code": "OBJECT_URI_PREFIX_INVALID", "message": "Model package URI prefix is not supported."}
             )
         roles = tuple(getattr(policy_decision, "roles", ()))
+        if operation == "deactivate" and model.get("active_flag") and not override_missing_active:
+            blockers.append(
+                {
+                    "code": "MISSING_ACTIVE_RISK",
+                    "message": "Operation would leave this basin version without an active model.",
+                }
+            )
         if operation == "deactivate" and override_missing_active and roles and "sys_admin" not in roles:
             blockers.append(
                 {"code": "OVERRIDE_REQUIRES_SYS_ADMIN", "message": "Missing-active override requires sys_admin."}
@@ -1483,29 +1490,14 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
     assert active_body["request_id"] == request_id
     assert active_body["data"]["active_flag"] is True
     assert active_body["auth_policy_decisions"][0]["request_id"] == request_id
-    assert fake_store.activation_audit_rows == [
-        {
-            "action": "models.activate",
-            "entity_type": "model_instance",
-            "entity_id": "inactive_model",
-            "details": {
-                "request_id": request_id,
-                "actor": "dev-test:model_admin",
-                "roles": ["model_admin"],
-                "action_id": "models.activate",
-                "decision": "allow",
-                "previous_active": False,
-                "active": True,
-            },
-        }
+    assert fake_store.lifecycle_calls == [
+        ("inactive_model", "activate"),
+        ("inactive_model", "activate"),
+        ("missing_model", "activate"),
     ]
-    assert conflict_response.status_code == 409
-    _assert_error_envelope(
-        conflict_response.json(),
-        code="MODEL_REGISTRY_DUPLICATE",
-        message_contains="already active",
-        error_type="DuplicateResourceError",
-    )
+    assert fake_store.activation_audit_rows == []
+    assert conflict_response.status_code == 200
+    assert conflict_response.json()["data"]["active_flag"] is True
     assert missing_response.status_code == 404
     _assert_error_envelope(
         missing_response.json(),
@@ -1513,7 +1505,7 @@ async def test_active_toggle_uses_success_and_error_envelopes(fake_store: FakeMo
         message_contains="missing_model",
         error_type="MissingResourceError",
     )
-    assert len(fake_store.activation_audit_rows) == 1
+    assert fake_store.activation_audit_rows == []
 
 
 @pytest.mark.asyncio
@@ -1537,6 +1529,7 @@ async def test_active_toggle_allows_model_admin_activation_and_sys_admin_deactiv
     assert deactivation.status_code == 200
     assert fake_store.models["inactive_model"]["active_flag"] is True
     assert fake_store.models["active_model"]["active_flag"] is False
+    assert deactivation.json()["data"]["active_flag"] is False
     decisions = [
         response.json()["auth_policy_decisions"][0]
         for response in (activation, deactivation)
@@ -2249,218 +2242,68 @@ def test_m17_registry_admin_write_methods_accept_explicit_trusted_internal(
     assert entered_transaction == [1]
 
 
-def test_set_model_active_writes_audit_details_after_successful_update(
+def test_set_model_active_delegates_to_lifecycle_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package_checksum = "a" * 64
-    source_inventory_checksum = "b" * 64
+    calls: list[dict[str, Any]] = []
 
-    class FakeCursor:
-        def __init__(self) -> None:
-            self.rows: list[dict[str, Any]] = [
-                {
-                    "model_id": "basins_model",
-                    "basin_version_id": "basin_v01",
-                    "river_network_version_id": "basin_rivnet_v01",
-                    "mesh_version_id": "basin_mesh_v01",
-                    "model_package_uri": (
-                        "s3://user:pass@nhms/models/basins_model/package/?token=secret#credential"
-                    ),
-                    "active_flag": False,
-                    "resource_profile": {
-                        "basin_slug": "basin-a",
-                        "shud_input_name": "basin_a",
-                        "manifest_uri": (
-                            "s3://user:pass@nhms/models/basins_model/v1/manifest.json?token=secret#credential"
-                        ),
-                        "package_checksum": package_checksum,
-                        "source_inventory_checksum": source_inventory_checksum,
-                        "other": "kept-out-of-audit-lineage",
-                    },
-                },
-                {
-                    "model_id": "basins_model",
-                    "basin_version_id": "basin_v01",
-                    "river_network_version_id": "basin_rivnet_v01",
-                    "mesh_version_id": "basin_mesh_v01",
-                    "model_package_uri": (
-                        "s3://user:pass@nhms/models/basins_model/package/?token=secret#credential"
-                    ),
-                    "active_flag": True,
-                    "resource_profile": {
-                        "basin_slug": "basin-a",
-                        "shud_input_name": "basin_a",
-                        "manifest_uri": (
-                            "s3://user:pass@nhms/models/basins_model/v1/manifest.json?token=secret#credential"
-                        ),
-                        "package_checksum": package_checksum,
-                        "source_inventory_checksum": source_inventory_checksum,
-                        "other": "kept-out-of-audit-lineage",
-                    },
-                },
-            ]
-            self.statements: list[str] = []
-            self.parameters: list[tuple[Any, ...]] = []
+    def fake_lifecycle(self: PsycopgModelRegistryStore, model_id: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"model_id": model_id, **kwargs})
+        return {
+            "status": "allowed",
+            "operation": kwargs["operation"],
+            "model": {
+                "model_id": model_id,
+                "active_flag": kwargs["operation"] == "activate",
+                "lifecycle_state": "active" if kwargs["operation"] == "activate" else "inactive",
+                "resource_profile": {},
+            },
+        }
 
-        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
-            self.statements.append(statement)
-            self.parameters.append(parameters)
-
-        def fetchone(self) -> dict[str, Any]:
-            return self.rows.pop(0)
-
-    class FakeTransaction:
-        def __init__(self, cursor: FakeCursor) -> None:
-            self.cursor = cursor
-
-        def __enter__(self) -> FakeCursor:
-            return self.cursor
-
-        def __exit__(self, *_args: object) -> bool:
-            return False
-
-    cursor = FakeCursor()
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "model_lifecycle_operation", fake_lifecycle)
     store = PsycopgModelRegistryStore("postgresql://example")
 
-    result = store.set_model_active("basins_model", True, trusted_internal=True)
+    result = store.set_model_active("basins_model", True, trusted_internal=True, request_id="req-activate")
 
     assert result["active_flag"] is True
-    assert result["model_package_uri"] == "s3://nhms/models/basins_model/package/"
-    assert result["resource_profile"]["manifest_uri"] == "s3://nhms/models/basins_model/v1/manifest.json"
-    assert sum("INSERT INTO ops.audit_log" in statement for statement in cursor.statements) == 1
-    audit_parameters = cursor.parameters[-1]
-    assert audit_parameters[:4] == ("trusted-internal:model-registry", "sys_admin", "models.activate", "basins_model")
-    details = audit_parameters[4]
-    assert "other" not in str(details)
-    assert "token=" not in str(details)
-    assert "user:pass@" not in str(details)
-    assert "?" not in details["model_package_uri"]
-    assert "#" not in details["model_package_uri"]
-    assert {
-        "previous_active": False,
-        "active": True,
-        "basin_version_id": "basin_v01",
-        "river_network_version_id": "basin_rivnet_v01",
-        "mesh_version_id": "basin_mesh_v01",
-        "model_package_uri": "[redacted]",
-        "basins_lineage": {
-            "basin_slug": "[redacted]",
-            "shud_input_name": "[redacted]",
-            "manifest_uri": "[redacted]",
-            "package_checksum": "[redacted]",
-            "source_inventory_checksum": "[redacted]",
-        },
-    }.items() <= details.items()
-    assert details["action_id"] == "models.activate"
-    assert details["decision"] == "allow"
-    assert details["roles"] == ["sys_admin"]
-    assert details["request_id"]
-    assert package_checksum not in json.dumps(details)
-    assert source_inventory_checksum not in json.dumps(details)
+    assert calls == [
+        {
+            "model_id": "basins_model",
+            "operation": "activate",
+            "policy_decision": None,
+            "trusted_internal": True,
+            "request_id": "req-activate",
+        }
+    ]
 
 
 def test_set_model_active_writes_explicit_request_id_to_activation_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeCursor:
-        def __init__(self) -> None:
-            self.rows: list[dict[str, Any]] = [
-                {
-                    "model_id": "basins_model",
-                    "basin_version_id": "basin_v01",
-                    "river_network_version_id": "basin_rivnet_v01",
-                    "mesh_version_id": "basin_mesh_v01",
-                    "model_package_uri": "s3://nhms/models/basins_model/package/",
-                    "active_flag": False,
-                    "resource_profile": {},
-                },
-                {
-                    "model_id": "basins_model",
-                    "basin_version_id": "basin_v01",
-                    "river_network_version_id": "basin_rivnet_v01",
-                    "mesh_version_id": "basin_mesh_v01",
-                    "model_package_uri": "s3://nhms/models/basins_model/package/",
-                    "active_flag": True,
-                    "resource_profile": {},
-                },
-            ]
-            self.parameters: list[tuple[Any, ...]] = []
+    calls: list[dict[str, Any]] = []
 
-        def execute(self, _statement: str, parameters: tuple[Any, ...]) -> None:
-            self.parameters.append(parameters)
+    def fake_lifecycle(self: PsycopgModelRegistryStore, model_id: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"model_id": model_id, **kwargs})
+        return {"status": "allowed", "operation": kwargs["operation"], "model": {"model_id": model_id}}
 
-        def fetchone(self) -> dict[str, Any]:
-            return self.rows.pop(0)
-
-    class FakeTransaction:
-        def __init__(self, cursor: FakeCursor) -> None:
-            self.cursor = cursor
-
-        def __enter__(self) -> FakeCursor:
-            return self.cursor
-
-        def __exit__(self, *_args: object) -> bool:
-            return False
-
-    cursor = FakeCursor()
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "model_lifecycle_operation", fake_lifecycle)
     store = PsycopgModelRegistryStore("postgresql://example")
 
     store.set_model_active("basins_model", True, trusted_internal=True, request_id="req-activate")
 
-    details = cursor.parameters[-1][4]
-    assert details["request_id"] == "req-activate"
+    assert calls[0]["request_id"] == "req-activate"
 
 
 def test_set_model_active_direct_policy_evidence_generates_activation_audit_request_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeCursor:
-        def __init__(self) -> None:
-            self.rows: list[dict[str, Any]] = [
-                {
-                    "model_id": "basins_model",
-                    "basin_version_id": "basin_v01",
-                    "river_network_version_id": "basin_rivnet_v01",
-                    "mesh_version_id": "basin_mesh_v01",
-                    "model_package_uri": "s3://nhms/models/basins_model/package/",
-                    "active_flag": False,
-                    "resource_profile": {},
-                },
-                {
-                    "model_id": "basins_model",
-                    "basin_version_id": "basin_v01",
-                    "river_network_version_id": "basin_rivnet_v01",
-                    "mesh_version_id": "basin_mesh_v01",
-                    "model_package_uri": "s3://nhms/models/basins_model/package/",
-                    "active_flag": True,
-                    "resource_profile": {},
-                },
-            ]
-            self.parameters: list[tuple[Any, ...]] = []
+    calls: list[dict[str, Any]] = []
 
-        def execute(self, _statement: str, parameters: tuple[Any, ...]) -> None:
-            self.parameters.append(parameters)
+    def fake_lifecycle(self: PsycopgModelRegistryStore, model_id: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"model_id": model_id, **kwargs})
+        return {"status": "allowed", "operation": kwargs["operation"], "model": {"model_id": model_id}}
 
-        def fetchone(self) -> dict[str, Any]:
-            return self.rows.pop(0)
-
-    class FakeTransaction:
-        def __init__(self, cursor: FakeCursor) -> None:
-            self.cursor = cursor
-
-        def __enter__(self) -> FakeCursor:
-            return self.cursor
-
-        def __exit__(self, *_args: object) -> bool:
-            return False
-
-    cursor = FakeCursor()
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(cursor))
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_json", lambda _self, value: dict(value))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "model_lifecycle_operation", fake_lifecycle)
     store = PsycopgModelRegistryStore("postgresql://example")
     decision = evaluate_policy(
         AuthContext(
@@ -2476,11 +2319,8 @@ def test_set_model_active_direct_policy_evidence_generates_activation_audit_requ
 
     store.set_model_active("basins_model", True, policy_decision=decision)
 
-    audit_parameters = cursor.parameters[-1]
-    assert audit_parameters[:4] == ("external-admin", "model_admin", "models.activate", "basins_model")
-    details = audit_parameters[4]
-    assert details["request_id"]
-    assert isinstance(details["request_id"], str)
+    assert calls[0]["policy_decision"] is decision
+    assert calls[0]["operation"] == "activate"
 
 
 def test_set_model_active_direct_call_requires_policy_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2598,42 +2438,18 @@ def test_preflight_model_operation_uses_policy_roles_for_missing_active_override
     assert sys_admin_preflight["blockers"] == []
 
 
-def test_set_model_active_duplicate_and_missing_do_not_write_audit(
+def test_set_model_active_missing_does_not_write_legacy_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeCursor:
-        def __init__(self, row: dict[str, Any] | None) -> None:
-            self.row = row
-            self.statements: list[str] = []
+    def fake_lifecycle(self: PsycopgModelRegistryStore, model_id: str, **_kwargs: Any) -> dict[str, Any]:
+        raise MissingResourceError(f"model_id not found: {model_id}")
 
-        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
-            self.statements.append(statement)
-
-        def fetchone(self) -> dict[str, Any] | None:
-            return self.row
-
-    class FakeTransaction:
-        def __init__(self, cursor: FakeCursor) -> None:
-            self.cursor = cursor
-
-        def __enter__(self) -> FakeCursor:
-            return self.cursor
-
-        def __exit__(self, *_args: object) -> bool:
-            return False
-
-    duplicate_cursor = FakeCursor({"active_flag": True})
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(duplicate_cursor))
+    monkeypatch.setattr(PsycopgModelRegistryStore, "model_lifecycle_operation", fake_lifecycle)
     store = PsycopgModelRegistryStore("postgresql://example")
-    with pytest.raises(DuplicateResourceError):
-        store.set_model_active("basins_model", True, trusted_internal=True)
-    assert not any("INSERT INTO ops.audit_log" in statement for statement in duplicate_cursor.statements)
 
-    missing_cursor = FakeCursor(None)
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction(missing_cursor))
     with pytest.raises(MissingResourceError):
         store.set_model_active("missing_model", True, trusted_internal=True)
-    assert not any("INSERT INTO ops.audit_log" in statement for statement in missing_cursor.statements)
+
 
 
 def test_get_model_joins_asset_metadata_and_lineage(

@@ -5,6 +5,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -673,60 +674,14 @@ class PsycopgModelRegistryStore:
         trusted_internal: bool = False,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        action_id = "models.activate" if active else "models.deactivate"
-        if trusted_internal:
-            policy_decision = trusted_internal_policy_decision(
-                action_id,
-                target_type="model_instance",
-                target_id=model_id,
-                actor_id="trusted-internal:model-registry",
-                roles=("sys_admin",),
-            )
-        request_id = request_id or str(uuid4())
-        decision = require_policy_evidence(
-            policy_decision,
-            action_id=action_id,
-            target_type="model_instance",
-            target_id=model_id,
+        result = self.model_lifecycle_operation(
+            model_id,
+            operation="activate" if active else "deactivate",
+            policy_decision=policy_decision,
+            trusted_internal=trusted_internal,
+            request_id=request_id,
         )
-        if decision.decision != "allow":
-            raise ModelRegistryError(decision.reason)
-        with self._transaction() as cursor:
-            current = self._fetch_optional(
-                cursor,
-                """
-                SELECT *
-                FROM core.model_instance
-                WHERE model_id = %s
-                FOR UPDATE
-                """,
-                (model_id,),
-            )
-            if current is None:
-                raise MissingResourceError(f"model_id not found: {model_id}")
-            if bool(current["active_flag"]) == active:
-                state = "active" if active else "inactive"
-                raise DuplicateResourceError(f"model_id {model_id} is already {state}.")
-            cursor.execute(
-                """
-                UPDATE core.model_instance
-                SET active_flag = %s,
-                    lifecycle_state = %s
-                WHERE model_id = %s
-                RETURNING *
-                """,
-                (active, "active" if active else "inactive", model_id),
-            )
-            updated = dict(cursor.fetchone())
-            self._insert_model_activation_audit(
-                cursor,
-                current=current,
-                updated=updated,
-                active=active,
-                policy_decision=decision,
-                request_id=request_id,
-            )
-            return _model_public_projection(updated)
+        return result["model"]
 
     def preflight_model_operation(
         self,
@@ -803,6 +758,9 @@ class PsycopgModelRegistryStore:
                 actor_id="trusted-internal:model-registry",
                 roles=("sys_admin",),
             )
+            if operation == "deactivate":
+                override_missing_active = True
+                reason = reason or "trusted internal legacy deactivation"
         request_id = request_id or str(uuid4())
         decision = require_policy_evidence(
             policy_decision,
@@ -817,6 +775,7 @@ class PsycopgModelRegistryStore:
             model = self._fetch_model_lifecycle_row(cursor, model_id, for_update=True)
             if model is None:
                 raise MissingResourceError(f"model_id not found: {model_id}")
+            self._lock_basin_version_scope(cursor, str(model["basin_version_id"]))
             current_active = self._fetch_active_model_for_scope(cursor, str(model["basin_version_id"]), for_update=True)
             previous = (
                 self._fetch_model_lifecycle_row(cursor, previous_model_id, for_update=True)
@@ -1171,6 +1130,19 @@ class PsycopgModelRegistryStore:
             (basin_version_id,),
         )
 
+    def _lock_basin_version_scope(self, cursor: Any, basin_version_id: str) -> None:
+        cursor.execute(
+            """
+            SELECT basin_version_id
+            FROM core.basin_version
+            WHERE basin_version_id = %s
+            FOR UPDATE
+            """,
+            (basin_version_id,),
+        )
+        if cursor.fetchone() is None:
+            raise InvalidReferenceError(f"basin_version_id does not exist: {basin_version_id}")
+
     def _fetch_trustworthy_rollback_history(
         self,
         cursor: Any,
@@ -1219,6 +1191,8 @@ class PsycopgModelRegistryStore:
         mesh_properties = _json_mapping(model.get("mesh_properties_json"))
         blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
+        lifecycle_state = _canonical_lifecycle_state(model)
+        activation_class_operation = operation in {"activate", "switch_version", "rollback_version"}
 
         if model.get("river_network_version_id") and model.get("basin_version_id") is None:
             blockers.append(
@@ -1230,9 +1204,21 @@ class PsycopgModelRegistryStore:
             )
         if model.get("model_package_uri") in (None, ""):
             blockers.append(_preflight_blocker("PACKAGE_URI_MISSING", "Model package URI is missing."))
-        if _first_non_empty(resource_profile.get("package_checksum"), model.get("package_checksum")) in (None, ""):
-            warnings.append(
-                {"code": "PACKAGE_CHECKSUM_MISSING", "message": "Package checksum evidence is not available."}
+        package_checksum = _first_non_empty(resource_profile.get("package_checksum"), model.get("package_checksum"))
+        if package_checksum in (None, ""):
+            evidence = _preflight_blocker if activation_class_operation else _preflight_warning
+            (blockers if activation_class_operation else warnings).append(
+                evidence("PACKAGE_CHECKSUM_MISSING", "Package checksum evidence is not available.")
+            )
+        elif (
+            activation_class_operation
+            and _package_checksum_verification_status(resource_profile, package_checksum) == "blocked"
+        ):
+            blockers.append(
+                _preflight_blocker(
+                    "PACKAGE_CHECKSUM_UNVERIFIED",
+                    "Package checksum evidence could not be reread from stored package evidence.",
+                )
             )
         if _object_uri_prefix_status(model.get("model_package_uri")) == "invalid":
             blockers.append(
@@ -1245,24 +1231,52 @@ class PsycopgModelRegistryStore:
             warnings.append(
                 {"code": "COPIED_ROOT_EVIDENCE_MISSING", "message": "Copied-root evidence is not available."}
             )
+        if activation_class_operation and _has_unsafe_source_root(resource_profile):
+            blockers.append(
+                _preflight_blocker("SOURCE_ROOT_UNSAFE", "Model source root evidence points to an unsafe local source.")
+            )
 
         current_active_id = str(current_active["model_id"]) if current_active else None
+        if invalid_transition := _transition_blocker(
+            operation=operation,
+            lifecycle_state=lifecycle_state,
+            model_id=str(model["model_id"]),
+            current_active_id=current_active_id,
+        ):
+            blockers.append(invalid_transition)
         if operation in {"activate", "switch_version"} and current_active_id == model["model_id"]:
             warnings.append({"code": "ALREADY_CURRENT", "message": "Model is already the active model for this scope."})
         if operation == "switch_version" and current_active_id is None:
             blockers.append(
                 _preflight_blocker("SWITCH_REQUIRES_CURRENT_ACTIVE", "Version switch requires current active model.")
             )
-        if operation == "deactivate" and bool(model.get("active_flag")) and not override_missing_active:
+        removes_current_active = (
+            bool(model.get("active_flag"))
+            and current_active_id == model["model_id"]
+            and operation in {"deactivate", "supersede", "deprecate"}
+        )
+        operation_supports_missing_active_override = operation == "deactivate"
+        if removes_current_active and (not override_missing_active or not operation_supports_missing_active_override):
             blockers.append(
                 _preflight_blocker(
                     "MISSING_ACTIVE_RISK",
-                    "Deactivation would leave this basin version without an active model.",
+                    "Operation would leave this basin version without an active model.",
                 )
             )
-        if operation == "deactivate" and override_missing_active and not str(reason or "").strip():
+        if (
+            operation == "deactivate"
+            and removes_current_active
+            and override_missing_active
+            and not str(reason or "").strip()
+        ):
             blockers.append(_preflight_blocker("OVERRIDE_REASON_REQUIRED", "Override requires a non-empty reason."))
-        if operation == "deactivate" and override_missing_active and actor_roles and "sys_admin" not in actor_roles:
+        if (
+            operation == "deactivate"
+            and removes_current_active
+            and override_missing_active
+            and actor_roles
+            and "sys_admin" not in actor_roles
+        ):
             blockers.append(
                 _preflight_blocker("OVERRIDE_REQUIRES_SYS_ADMIN", "Missing-active override requires sys_admin.")
             )
@@ -1342,6 +1356,8 @@ class PsycopgModelRegistryStore:
         if operation in {"activate", "switch_version"}:
             if lifecycle_state == "active" and bool(model.get("active_flag")):
                 return {"outcome": "already_current", "model": dict(model), "previous_model": current_active}
+            if lifecycle_state not in {"inactive", "deprecated"}:
+                raise InvalidPayloadError(f"Invalid {operation} transition from {lifecycle_state}.")
             if current_active and current_active["model_id"] != model["model_id"]:
                 self._update_model_lifecycle_state(cursor, str(current_active["model_id"]), "superseded")
             updated = self._update_model_lifecycle_state(cursor, str(model["model_id"]), "active")
@@ -1354,16 +1370,23 @@ class PsycopgModelRegistryStore:
         if operation == "supersede":
             if lifecycle_state == "superseded" and not bool(model.get("active_flag")):
                 return {"outcome": "already_current", "model": dict(model), "previous_model": current_active}
+            if lifecycle_state not in {"active", "inactive", "deprecated"}:
+                raise InvalidPayloadError(f"Invalid supersede transition from {lifecycle_state}.")
             updated = self._update_model_lifecycle_state(cursor, str(model["model_id"]), "superseded")
             return {"outcome": "allowed", "model": updated, "previous_model": current_active}
         if operation == "deprecate":
             if lifecycle_state == "deprecated" and not bool(model.get("active_flag")):
                 return {"outcome": "already_current", "model": dict(model), "previous_model": current_active}
+            if lifecycle_state not in {"inactive", "superseded"}:
+                raise InvalidPayloadError(f"Invalid deprecate transition from {lifecycle_state}.")
             updated = self._update_model_lifecycle_state(cursor, str(model["model_id"]), "deprecated")
             return {"outcome": "allowed", "model": updated, "previous_model": current_active}
         if operation == "rollback_version":
             if previous_model is None:
                 raise InvalidPayloadError("previous_model_id is required for rollback_version.")
+            previous_state = _canonical_lifecycle_state(previous_model)
+            if previous_state not in {"inactive", "superseded"}:
+                raise InvalidPayloadError(f"Invalid rollback_version transition from previous {previous_state}.")
             self._update_model_lifecycle_state(cursor, str(model["model_id"]), "superseded")
             updated = self._update_model_lifecycle_state(cursor, str(previous_model["model_id"]), "active")
             return {"outcome": "rollback", "model": updated, "previous_model": model}
@@ -1686,6 +1709,10 @@ def _preflight_blocker(code: str, message: str) -> dict[str, str]:
     return {"code": code, "message": message}
 
 
+def _preflight_warning(code: str, message: str) -> dict[str, str]:
+    return {"code": code, "message": message}
+
+
 def _object_uri_prefix_status(value: Any) -> str:
     if value in (None, ""):
         return "missing"
@@ -1696,15 +1723,127 @@ def _object_uri_prefix_status(value: Any) -> str:
 
 
 def _copied_root_status(resource_profile: Mapping[str, Any]) -> str:
-    copied_root = _first_non_empty(resource_profile.get("copied_root"), resource_profile.get("copied_root_uri"))
+    copied_root = _first_non_empty(
+        resource_profile.get("copied_root"),
+        resource_profile.get("copied_root_uri"),
+        resource_profile.get("copied_root_status"),
+    )
     if copied_root in (None, ""):
         return "missing"
     if str(resource_profile.get("source_is_symlink", "")).lower() == "true":
         return "unsafe"
     text = str(copied_root)
+    if text.lower() in {"unsafe", "symlink", "raw", "local"}:
+        return "unsafe"
+    if text.lower() in {"present", "safe", "copied", "verified"}:
+        return "present"
     if text.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", text):
         return "unsafe"
     return "present"
+
+
+def _canonical_lifecycle_state(model: Mapping[str, Any]) -> ModelLifecycleState:
+    state = str(model.get("lifecycle_state") or ("active" if model.get("active_flag") else "inactive"))
+    if state in MODEL_LIFECYCLE_STATES:
+        return state  # type: ignore[return-value]
+    return "active" if model.get("active_flag") else "inactive"
+
+
+def _transition_blocker(
+    *,
+    operation: ModelLifecycleOperation,
+    lifecycle_state: ModelLifecycleState,
+    model_id: str,
+    current_active_id: str | None,
+) -> dict[str, str] | None:
+    if operation == "activate":
+        if lifecycle_state == "active" and current_active_id == model_id:
+            return None
+        if lifecycle_state not in {"inactive", "deprecated"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"activate is not allowed from {lifecycle_state}.")
+    elif operation == "switch_version":
+        if lifecycle_state == "active" and current_active_id == model_id:
+            return None
+        if lifecycle_state not in {"inactive", "deprecated"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"switch_version is not allowed from {lifecycle_state}.")
+    elif operation == "deactivate":
+        if lifecycle_state not in {"active", "inactive"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"deactivate is not allowed from {lifecycle_state}.")
+    elif operation == "supersede":
+        if lifecycle_state not in {"active", "inactive", "deprecated", "superseded"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"supersede is not allowed from {lifecycle_state}.")
+    elif operation == "deprecate":
+        if lifecycle_state not in {"inactive", "superseded", "deprecated"}:
+            return _preflight_blocker("INVALID_TRANSITION", f"deprecate is not allowed from {lifecycle_state}.")
+    return None
+
+
+def _package_checksum_verification_status(resource_profile: Mapping[str, Any], package_checksum: Any) -> str:
+    verification_fields = (
+        resource_profile.get("package_checksum_confirmed_from_stored_manifest"),
+        resource_profile.get("package_checksum_verified"),
+        resource_profile.get("checksum_reread_verified"),
+    )
+    if any(value is True for value in verification_fields):
+        return "verified"
+    if any(value is False for value in verification_fields):
+        return "blocked"
+    for key in (
+        "package_checksum_reread_status",
+        "package_checksum_reconstruction_status",
+        "checksum_reread_status",
+    ):
+        value = resource_profile.get(key)
+        if value in (None, ""):
+            continue
+        if str(value).lower() in {"verified", "ready", "ok", "confirmed"}:
+            return "verified"
+        if str(value).lower() in {"blocked", "failed", "unreadable", "missing", "limited", "mismatch"}:
+            return "blocked"
+    if resource_profile.get("stored_manifest_package_checksum") not in (None, ""):
+        return "verified" if resource_profile.get("stored_manifest_package_checksum") == package_checksum else "blocked"
+    if resource_profile.get("manifest_uri") not in (None, ""):
+        return "verified"
+    return "blocked"
+
+
+def _has_unsafe_source_root(resource_profile: Mapping[str, Any]) -> bool:
+    for value in _iter_source_evidence_values(resource_profile):
+        if _is_unsafe_source_value(value):
+            return True
+    return False
+
+
+def _iter_source_evidence_values(value: Any) -> list[Any]:
+    values: list[Any] = []
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if key in {"source_path", "resolved_source_path", "source_uri", "root", "source_root"}:
+                values.append(child)
+            if isinstance(child, (Mapping, list, tuple)):
+                values.extend(_iter_source_evidence_values(child))
+    elif isinstance(value, list | tuple):
+        for child in value:
+            values.extend(_iter_source_evidence_values(child))
+    return values
+
+
+def _is_unsafe_source_value(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    text = str(value)
+    parsed = urlsplit(text)
+    path_text = parsed.path if parsed.scheme else text
+    normalized = path_text.replace("\\", "/")
+    if normalized.startswith("/volume/"):
+        return True
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"/", ""}]
+    for index, part in enumerate(parts):
+        if part == "data" and index + 1 < len(parts) and parts[index + 1] == "Basins":
+            return True
+        if part == "Basins" and index > 0 and parts[index - 1] == "data":
+            return True
+    return False
 
 
 def _model_audit_reference(model: Mapping[str, Any] | None) -> dict[str, Any] | None:

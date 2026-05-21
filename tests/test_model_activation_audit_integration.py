@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -48,9 +49,8 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
             os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
         app.dependency_overrides.pop(get_model_registry_store, None)
 
-    for response in (default_before, inactive_before, all_before, activation, default_after, inactive_after):
+    for response in (default_before, inactive_before, all_before, activation, duplicate, default_after, inactive_after):
         assert response.status_code == 200, response.text
-    assert duplicate.status_code == 409
     assert missing.status_code == 404
 
     assert ids["active_model_id"] in _model_ids(default_before.json())
@@ -89,7 +89,7 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
             )
             missing_audit_count = int(cursor.fetchone()["count"])
 
-    assert len(audit_rows) == 1
+    assert len(audit_rows) == 2
     audit = audit_rows[0]
     assert audit["actor"] == "dev-test:model_admin"
     assert audit["actor_role"] == "model_admin"
@@ -97,8 +97,8 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     assert audit["entity_type"] == "model_instance"
     assert audit["entity_id"] == ids["basins_model_id"]
     assert {
-        "previous_active": False,
-        "active": True,
+        "operation": "activate",
+        "outcome": "allowed",
         "basin_version_id": ids["basin_version_id"],
         "river_network_version_id": ids["river_network_version_id"],
         "mesh_version_id": ids["mesh_version_id"],
@@ -107,6 +107,7 @@ def test_basins_model_activation_listing_and_audit_evidence(integration_database
     assert audit["details"]["decision"] == "allow"
     assert audit["details"]["roles"] == ["model_admin"]
     assert audit["details"]["target"] == {"type": "model_instance", "id": ids["basins_model_id"]}
+    assert audit_rows[1]["details"]["outcome"] == "already_current"
     assert audit["details"].get("model_package_uri") in (None, "[redacted]")
     assert "package-sha-it137" not in json.dumps(audit["details"])
     assert "inventory-sha-it137" not in json.dumps(audit["details"])
@@ -149,6 +150,11 @@ def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration
                 json={"operation": "switch_version"},
                 headers=headers,
             )
+            reactivate = client.post(
+                f"/api/v1/models/{ids['basins_model_id']}/lifecycle",
+                json={"operation": "activate"},
+                headers=headers,
+            )
             rollback = client.post(
                 f"/api/v1/models/{ids['basins_model_id']}/lifecycle",
                 json={"operation": "rollback_version", "previous_model_id": ids["active_model_id"]},
@@ -182,6 +188,7 @@ def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration
         blocked_deactivate,
         override_deactivate,
         switch,
+        reactivate,
         rollback,
         stale_rollback,
         supersede,
@@ -196,7 +203,10 @@ def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration
     assert blocked_deactivate.json()["data"]["status"] == "blocked"
     assert blocked_deactivate.json()["data"]["preflight"]["blockers"][0]["code"] == "MISSING_ACTIVE_RISK"
     assert override_deactivate.json()["data"]["model"]["lifecycle_state"] == "inactive"
-    assert switch.json()["data"]["model"]["lifecycle_state"] == "active"
+    assert switch.json()["data"]["status"] == "blocked"
+    switch_blocker_codes = {item["code"] for item in switch.json()["data"]["preflight"]["blockers"]}
+    assert switch_blocker_codes >= {"SWITCH_REQUIRES_CURRENT_ACTIVE"}
+    assert reactivate.json()["data"]["model"]["lifecycle_state"] == "active"
     assert rollback.json()["data"]["status"] == "rollback"
     assert rollback.json()["data"]["model"]["model_id"] == ids["active_model_id"]
     assert stale_rollback.json()["data"]["status"] == "blocked"
@@ -247,6 +257,158 @@ def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration
     assert "user:pass@" not in rendered
 
 
+
+def test_m18_lifecycle_blocks_active_removal_invalid_transition_and_unsafe_evidence(
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    ids = _seed_issue_137_models(integration_database_url)
+    app.dependency_overrides[get_model_registry_store] = lambda: PsycopgModelRegistryStore(integration_database_url)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+    try:
+        with TestClient(app) as client:
+            headers = {"X-User-Role": "model_admin", "X-User-ID": "m18-admin"}
+            supersede_active = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/lifecycle",
+                json={"operation": "supersede"},
+                headers=headers,
+            )
+            deprecate_active = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/lifecycle",
+                json={"operation": "deprecate"},
+                headers=headers,
+            )
+            activate_superseded = client.post(
+                f"/api/v1/models/{ids['superseded_model_id']}/lifecycle",
+                json={"operation": "activate"},
+                headers=headers,
+            )
+            switch_superseded = client.post(
+                f"/api/v1/models/{ids['superseded_model_id']}/lifecycle",
+                json={"operation": "switch_version"},
+                headers=headers,
+            )
+            unsafe_preflight = client.post(
+                f"/api/v1/models/{ids['unsafe_model_id']}/preflight",
+                json={"operation": "activate", "reason": "/volume/data/nwm/Basins/raw-secret checksum-secret"},
+                headers=headers,
+            )
+    finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    for response in (supersede_active, deprecate_active, activate_superseded, switch_superseded, unsafe_preflight):
+        assert response.status_code == 200, response.text
+
+    assert supersede_active.json()["data"]["status"] == "blocked"
+    supersede_codes = {item["code"] for item in supersede_active.json()["data"]["preflight"]["blockers"]}
+    assert supersede_codes >= {"MISSING_ACTIVE_RISK"}
+    assert deprecate_active.json()["data"]["status"] == "blocked"
+    deprecate_codes = {item["code"] for item in deprecate_active.json()["data"]["preflight"]["blockers"]}
+    assert deprecate_codes >= {"MISSING_ACTIVE_RISK", "INVALID_TRANSITION"}
+    assert activate_superseded.json()["data"]["status"] == "blocked"
+    assert switch_superseded.json()["data"]["status"] == "blocked"
+    unsafe_data = unsafe_preflight.json()["data"]
+    unsafe_codes = {item["code"] for item in unsafe_data["blockers"]}
+    assert unsafe_codes >= {"SOURCE_ROOT_UNSAFE", "PACKAGE_CHECKSUM_UNVERIFIED"}
+    rendered = json.dumps(unsafe_data)
+    assert "/volume/data/nwm/Basins" not in rendered
+    assert "raw-secret" not in rendered
+    assert "checksum-secret" not in rendered
+
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT model_id, active_flag, lifecycle_state
+                FROM core.model_instance
+                WHERE model_id IN (%s, %s, %s)
+                ORDER BY model_id
+                """,
+                (ids["active_model_id"], ids["superseded_model_id"], ids["unsafe_model_id"]),
+            )
+            states = {row["model_id"]: dict(row) for row in cursor.fetchall()}
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS active_count
+                FROM core.model_instance
+                WHERE basin_version_id = %s AND active_flag = true AND lifecycle_state = 'active'
+                """,
+                (ids["basin_version_id"],),
+            )
+            active_count = int(cursor.fetchone()["active_count"])
+
+    assert states[ids["active_model_id"]]["active_flag"] is True
+    assert states[ids["active_model_id"]]["lifecycle_state"] == "active"
+    assert states[ids["superseded_model_id"]]["lifecycle_state"] == "superseded"
+    assert states[ids["unsafe_model_id"]]["lifecycle_state"] == "inactive"
+    assert active_count == 1
+
+
+def test_m18_lifecycle_concurrent_activation_leaves_one_active_model(
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    ids = _seed_issue_137_models(integration_database_url)
+    app.dependency_overrides[get_model_registry_store] = lambda: PsycopgModelRegistryStore(integration_database_url)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+
+    def activate(model_id: str) -> tuple[int, dict[str, Any]]:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/models/{model_id}/lifecycle",
+                json={"operation": "activate"},
+                headers={"X-User-Role": "model_admin", "X-User-ID": f"m18-{model_id}"},
+            )
+            return response.status_code, response.json()
+
+    try:
+        with psycopg_connection(integration_database_url) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE core.model_instance
+                    SET active_flag = false, lifecycle_state = 'inactive'
+                    WHERE model_id IN (%s, %s)
+                    """,
+                    (ids["candidate_a_model_id"], ids["candidate_b_model_id"]),
+                )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(activate, [ids["candidate_a_model_id"], ids["candidate_b_model_id"]]))
+    finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    for status_code, body in results:
+        assert status_code == 200, body
+        assert body["data"]["status"] in {"allowed", "already_current"}
+
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT model_id, active_flag, lifecycle_state
+                FROM core.model_instance
+                WHERE basin_version_id = %s
+                ORDER BY model_id
+                """,
+                (ids["basin_version_id"],),
+            )
+            states = [dict(row) for row in cursor.fetchall()]
+
+    active_rows = [row for row in states if row["active_flag"] and row["lifecycle_state"] == "active"]
+    assert len(active_rows) == 1
+    assert active_rows[0]["model_id"] in {ids["candidate_a_model_id"], ids["candidate_b_model_id"]}
+
+
 def _seed_issue_137_models(database_url: str) -> dict[str, str]:
     ids = {
         "basin_id": "it137_basin",
@@ -255,6 +417,10 @@ def _seed_issue_137_models(database_url: str) -> dict[str, str]:
         "mesh_version_id": "it137_mesh_v1",
         "active_model_id": "it137_active_model",
         "basins_model_id": "it137_basins_model",
+        "superseded_model_id": "it137_superseded_model",
+        "unsafe_model_id": "it137_unsafe_model",
+        "candidate_a_model_id": "it137_candidate_a_model",
+        "candidate_b_model_id": "it137_candidate_b_model",
     }
     with psycopg_connection(database_url) as connection:
         with connection.cursor() as cursor:
@@ -311,6 +477,10 @@ def _seed_issue_137_models(database_url: str) -> dict[str, str]:
                 )
                 VALUES
                     (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, true, %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s),
                     (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s)
                 """,
                 (
@@ -338,7 +508,65 @@ def _seed_issue_137_models(database_url: str) -> dict[str, str]:
                             "source_inventory_checksum": "inventory-sha-it137",
                         }
                     ),
+                    ids["superseded_model_id"],
+                    ids["basin_version_id"],
+                    ids["river_network_version_id"],
+                    ids["mesh_version_id"],
+                    "s3://nhms/models/it137_superseded_model/package/",
+                    Json(
+                        {
+                            "fixture": "issue-137-superseded",
+                            "package_checksum": "package-sha-superseded",
+                            "manifest_uri": "s3://nhms/models/it137_superseded_model/v1/manifest.json",
+                        }
+                    ),
+                    ids["unsafe_model_id"],
+                    ids["basin_version_id"],
+                    ids["river_network_version_id"],
+                    ids["mesh_version_id"],
+                    "s3://nhms/models/it137_unsafe_model/package/",
+                    Json({
+                        "fixture": "issue-137-unsafe",
+                        "package_checksum": "checksum-secret",
+                        "manifest_uri": "s3://nhms/models/it137_unsafe_model/v1/manifest.json",
+                        "package_checksum_confirmed_from_stored_manifest": False,
+                        "source_path": "/volume/data/nwm/Basins/raw-secret",
+                        "resolved_source_path": "/volume/data/nwm/Basins/raw-secret",
+                        "source_is_symlink": False,
+                    }),
+                    ids["candidate_a_model_id"],
+                    ids["basin_version_id"],
+                    ids["river_network_version_id"],
+                    ids["mesh_version_id"],
+                    "s3://nhms/models/it137_candidate_a_model/package/",
+                    Json(
+                        {
+                            "fixture": "issue-137-candidate-a",
+                            "package_checksum": "package-sha-candidate-a",
+                            "manifest_uri": "s3://nhms/models/it137_candidate_a_model/v1/manifest.json",
+                        }
+                    ),
+                    ids["candidate_b_model_id"],
+                    ids["basin_version_id"],
+                    ids["river_network_version_id"],
+                    ids["mesh_version_id"],
+                    "s3://nhms/models/it137_candidate_b_model/package/",
+                    Json(
+                        {
+                            "fixture": "issue-137-candidate-b",
+                            "package_checksum": "package-sha-candidate-b",
+                            "manifest_uri": "s3://nhms/models/it137_candidate_b_model/v1/manifest.json",
+                        }
+                    ),
                 ),
+            )
+            cursor.execute(
+                """
+                UPDATE core.model_instance
+                SET lifecycle_state = 'superseded'
+                WHERE model_id = %s
+                """,
+                (ids["superseded_model_id"],),
             )
     return ids
 

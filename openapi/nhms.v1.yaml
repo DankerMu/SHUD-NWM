@@ -2032,7 +2032,6 @@ components:
           nullable: true
         override_missing_active:
           type: boolean
-          default: false
         reason:
           type: string
           nullable: true
@@ -2106,9 +2105,10 @@ components:
         model:
           $ref: "#/components/schemas/ModelInstance"
         previous_model:
+          type: object
+          nullable: true
           allOf:
             - $ref: "#/components/schemas/ModelInstance"
-          nullable: true
         preflight:
           $ref: "#/components/schemas/ModelOperationPreflight"
         audit_reference:

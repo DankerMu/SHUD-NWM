@@ -819,8 +819,7 @@ export interface components {
             /** @enum {string} */
             operation: "activate" | "deactivate" | "switch_version" | "rollback_version" | "supersede" | "deprecate";
             previous_model_id?: string | null;
-            /** @default false */
-            override_missing_active: boolean;
+            override_missing_active?: boolean;
             reason?: string | null;
         };
         ModelOperationPreflight: {
