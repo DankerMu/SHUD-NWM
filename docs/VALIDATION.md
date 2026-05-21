@@ -945,6 +945,7 @@ Evidence is written under
   `removal_criteria`, `exclusions`, and `live_proof_accepted`.
 - `release_blockers.json`: blocker id, surface, status, owner/action,
   residual risk, removal criteria, and artifact references.
+- `environment.json`: redacted command environment and runtime metadata.
 - `summary.json`: final interpretation, `final_production_readiness_claimed`,
   release blockers, and scoped exclusions.
 
