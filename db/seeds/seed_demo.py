@@ -389,9 +389,10 @@ def seed_core(cursor: Any, json_adapter: Any, execute_values: Any) -> None:
             shud_code_version,
             model_package_uri,
             active_flag,
+            lifecycle_state,
             resource_profile
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
         ON CONFLICT DO NOTHING
         """,
         (

@@ -1969,6 +1969,7 @@ components:
           nullable: true
         model_package_uri:
           type: string
+          nullable: true
         package_checksum:
           type: string
           nullable: true

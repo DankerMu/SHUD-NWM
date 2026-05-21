@@ -26,6 +26,28 @@ ALTER TABLE core.model_instance
 DO $$
 BEGIN
   IF EXISTS (
+    SELECT 1
+    FROM core.model_instance
+    WHERE (active_flag = true AND lifecycle_state <> 'active')
+       OR (lifecycle_state = 'active' AND active_flag <> true)
+  ) THEN
+    RAISE EXCEPTION 'Divergent model_instance active_flag/lifecycle_state rows exist before M18 consistency constraint';
+  END IF;
+END $$;
+
+ALTER TABLE core.model_instance
+  DROP CONSTRAINT IF EXISTS model_instance_active_lifecycle_consistency_chk;
+
+ALTER TABLE core.model_instance
+  ADD CONSTRAINT model_instance_active_lifecycle_consistency_chk
+  CHECK (
+    (active_flag = true AND lifecycle_state = 'active')
+    OR (active_flag = false AND lifecycle_state <> 'active')
+  );
+
+DO $$
+BEGIN
+  IF EXISTS (
     SELECT basin_version_id
     FROM core.model_instance
     WHERE active_flag = true OR lifecycle_state = 'active'

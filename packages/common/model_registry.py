@@ -736,7 +736,17 @@ class PsycopgModelRegistryStore:
                 current_model=model,
                 previous_model_id=previous_model_id,
             )
-        return self._build_model_operation_preflight(
+            idempotent_rollback_history = (
+                self._fetch_idempotent_rollback_retry_history(
+                    cursor,
+                    model=model,
+                    current_active=active,
+                    previous_model_id=previous_model_id,
+                )
+                if operation == "rollback_version"
+                else None
+            )
+        preflight = self._build_model_operation_preflight(
             model=model,
             current_active=active,
             operation=operation,
@@ -749,6 +759,9 @@ class PsycopgModelRegistryStore:
             reason=reason,
             actor_roles=decision.roles,
         )
+        if idempotent_rollback_history is not None:
+            _apply_idempotent_rollback_preflight(preflight, idempotent_rollback_history)
+        return preflight
 
     def model_lifecycle_operation(
         self,
@@ -857,17 +870,7 @@ class PsycopgModelRegistryStore:
                     actor_roles=decision.roles,
                 )
                 if idempotent_rollback_history is not None:
-                    preflight["status"] = "ready"
-                    preflight["blockers"] = []
-                    preflight["warnings"] = [
-                        *list(preflight.get("warnings") or []),
-                        {
-                            "code": "ROLLBACK_ALREADY_CURRENT",
-                            "message": "Rollback retry is already reflected by the current active model.",
-                        },
-                    ]
-                    preflight["prior_audit_log_id"] = idempotent_rollback_history.get("prior_audit_log_id")
-                    preflight["rollback_history"] = _rollback_history_preflight_reference(idempotent_rollback_history)
+                    _apply_idempotent_rollback_preflight(preflight, idempotent_rollback_history)
                     return {
                         "status": "already_current",
                         "operation": operation,
@@ -1355,54 +1358,23 @@ class PsycopgModelRegistryStore:
         reason: str | None,
         actor_roles: Sequence[str],
     ) -> dict[str, Any]:
-        resource_profile = _json_mapping(model.get("resource_profile"))
-        mesh_properties = _json_mapping(model.get("mesh_properties_json"))
+        restored_model = previous_model if operation == "rollback_version" else model
+        resource_profile = _json_mapping(restored_model.get("resource_profile")) if restored_model else {}
+        mesh_properties = _json_mapping(restored_model.get("mesh_properties_json")) if restored_model else {}
         blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         lifecycle_state = _canonical_lifecycle_state(model)
         activation_class_operation = operation in {"activate", "switch_version", "rollback_version"}
 
-        if model.get("river_network_version_id") and model.get("basin_version_id") is None:
-            blockers.append(
-                _preflight_blocker("LINEAGE_MISSING_BASIN_VERSION", "Model lineage is missing basin version.")
+        copied_root = "missing"
+        package_checksum = None
+        if restored_model is not None:
+            activation_blockers, activation_warnings, copied_root, package_checksum = _activation_safety_evidence(
+                restored_model,
+                activation_class_operation=activation_class_operation,
             )
-        if model.get("mesh_version_id") in (None, ""):
-            blockers.append(
-                _preflight_blocker("LINEAGE_MISSING_MESH_VERSION", "Model lineage is missing mesh version.")
-            )
-        if model.get("model_package_uri") in (None, ""):
-            blockers.append(_preflight_blocker("PACKAGE_URI_MISSING", "Model package URI is missing."))
-        package_checksum = _first_non_empty(resource_profile.get("package_checksum"), model.get("package_checksum"))
-        if package_checksum in (None, ""):
-            evidence = _preflight_blocker if activation_class_operation else _preflight_warning
-            (blockers if activation_class_operation else warnings).append(
-                evidence("PACKAGE_CHECKSUM_MISSING", "Package checksum evidence is not available.")
-            )
-        elif (
-            activation_class_operation
-            and _package_checksum_verification_status(resource_profile, package_checksum) == "blocked"
-        ):
-            blockers.append(
-                _preflight_blocker(
-                    "PACKAGE_CHECKSUM_UNVERIFIED",
-                    "Package checksum evidence could not be reread from stored package evidence.",
-                )
-            )
-        if _object_uri_prefix_status(model.get("model_package_uri")) == "invalid":
-            blockers.append(
-                _preflight_blocker("OBJECT_URI_PREFIX_INVALID", "Model package URI prefix is not supported.")
-            )
-        copied_root = _copied_root_status(resource_profile)
-        if copied_root == "unsafe":
-            blockers.append(_preflight_blocker("COPIED_ROOT_UNSAFE", "Copied-root source evidence is unsafe."))
-        elif copied_root == "missing":
-            warnings.append(
-                {"code": "COPIED_ROOT_EVIDENCE_MISSING", "message": "Copied-root evidence is not available."}
-            )
-        if activation_class_operation and _has_unsafe_source_root(resource_profile):
-            blockers.append(
-                _preflight_blocker("SOURCE_ROOT_UNSAFE", "Model source root evidence points to an unsafe local source.")
-            )
+            blockers.extend(activation_blockers)
+            warnings.extend(activation_warnings)
 
         current_active_id = str(current_active["model_id"]) if current_active else None
         if invalid_transition := _transition_blocker(
@@ -1457,6 +1429,13 @@ class PsycopgModelRegistryStore:
                 blockers.append(_preflight_blocker("ROLLBACK_HISTORY_MISSING", "Rollback requires a prior model id."))
             elif previous_model.get("basin_version_id") != model.get("basin_version_id"):
                 blockers.append(_preflight_blocker("ROLLBACK_SCOPE_MISMATCH", "Rollback model scope does not match."))
+            elif _canonical_lifecycle_state(previous_model) not in {"inactive", "superseded"}:
+                blockers.append(
+                    _preflight_blocker(
+                        "INVALID_TRANSITION",
+                        f"rollback_version is not allowed from previous {_canonical_lifecycle_state(previous_model)}.",
+                    )
+                )
             if rollback_history is None:
                 blockers.append(
                     _preflight_blocker("ROLLBACK_HISTORY_MISSING", "No trustworthy prior active audit history exists.")
@@ -1483,21 +1462,24 @@ class PsycopgModelRegistryStore:
             "model_id": model.get("model_id"),
             "current_active_model_id": current_active_id,
             "previous_model_id": previous_model.get("model_id") if previous_model else None,
+            "restored_model_id": restored_model.get("model_id") if restored_model else None,
             "prior_audit_log_id": rollback_history.get("prior_audit_log_id") if rollback_history else None,
             "rollback_history": _rollback_history_preflight_reference(rollback_history),
-            "river_network_version_id": model.get("river_network_version_id"),
-            "mesh_version_id": model.get("mesh_version_id"),
+            "river_network_version_id": restored_model.get("river_network_version_id") if restored_model else None,
+            "mesh_version_id": restored_model.get("mesh_version_id") if restored_model else None,
             "lineage": redact_audit_payload(
                 {
                     "package_checksum": _first_non_empty(
                         resource_profile.get("package_checksum"),
-                        model.get("package_checksum"),
+                        restored_model.get("package_checksum") if restored_model else None,
                     ),
                     "source_inventory_checksum": resource_profile.get("source_inventory_checksum"),
-                    "mesh_checksum": model.get("mesh_checksum"),
-                    "river_network_checksum": model.get("river_network_checksum"),
-                    "basin_checksum": model.get("basin_checksum"),
-                    "object_uri": _sanitize_audit_uri(model.get("model_package_uri")),
+                    "mesh_checksum": restored_model.get("mesh_checksum") if restored_model else None,
+                    "river_network_checksum": restored_model.get("river_network_checksum") if restored_model else None,
+                    "basin_checksum": restored_model.get("basin_checksum") if restored_model else None,
+                    "object_uri": (
+                        _sanitize_audit_uri(restored_model.get("model_package_uri")) if restored_model else None
+                    ),
                     "manifest_uri": _sanitize_audit_uri(resource_profile.get("manifest_uri"))
                     if resource_profile.get("manifest_uri")
                     else None,
@@ -1506,8 +1488,12 @@ class PsycopgModelRegistryStore:
                 }
             ),
             "object_uri_prefix": {
-                "status": _object_uri_prefix_status(model.get("model_package_uri")),
-                "uri": _sanitize_audit_uri(model.get("model_package_uri")),
+                "status": (
+                    _object_uri_prefix_status(restored_model.get("model_package_uri"))
+                    if restored_model
+                    else "missing"
+                ),
+                "uri": _sanitize_audit_uri(restored_model.get("model_package_uri")) if restored_model else None,
             },
             "impact": {
                 "downstream_surfaces": ["forecast-routing", "model-assets-api", "operator-audit"],
@@ -1801,6 +1787,41 @@ MODEL_ASSET_URI_KEYS = frozenset(
     }
 )
 MODEL_ASSET_URI_OR_PATH_KEYS = frozenset({"source_path", "resolved_source_path"})
+PUBLIC_SENSITIVE_PATH_KEYS = frozenset(
+    {
+        "artifact_path",
+        "copied_root",
+        "copied_root_uri",
+        "local_path",
+        "local_root",
+        "package_path",
+        "path",
+        "resolved_source_path",
+        "root",
+        "source_path",
+        "source_root",
+        "source_uri",
+        "uri",
+        "url",
+    }
+)
+PUBLIC_SENSITIVE_DIGEST_KEYS = frozenset(
+    {
+        "checksum",
+        "digest",
+        "hash",
+        "md5",
+        "package_checksum",
+        "sha",
+        "sha1",
+        "sha224",
+        "sha256",
+        "sha384",
+        "sha512",
+        "source_inventory_checksum",
+        "stored_manifest_package_checksum",
+    }
+)
 REDACTED_REASON = "[redacted]"
 SUPPORTED_OBJECT_URI_SCHEMES = frozenset({"s3", "az", "gs", "https", "http", "integration", "memory"})
 
@@ -1894,6 +1915,12 @@ def _sanitize_public_json_value(value: Any) -> Any:
         for key, child in value.items():
             if _is_sensitive_public_json_key(key):
                 sanitized[key] = None
+            elif (
+                _is_sensitive_public_path_key(key)
+                and isinstance(child, str)
+                and _is_public_sensitive_path_or_file_uri(child)
+            ):
+                sanitized[key] = None
             else:
                 sanitized[key] = _sanitize_public_json_value(child)
         return sanitized
@@ -1911,16 +1938,19 @@ def _sanitize_public_json_value(value: Any) -> Any:
 
 def _is_sensitive_public_json_key(key: str) -> bool:
     lowered = key.lower()
-    if lowered in {
-        "package_checksum",
-        "source_inventory_checksum",
-        "mesh_checksum",
-        "basin_checksum",
-        "river_network_checksum",
-        "stored_manifest_package_checksum",
-    }:
+    if lowered in PUBLIC_SENSITIVE_DIGEST_KEYS:
         return True
-    return lowered.endswith("_checksum") or lowered.endswith("checksum")
+    return (
+        lowered.endswith("_checksum")
+        or lowered.endswith("checksum")
+        or lowered.endswith("_hash")
+        or lowered.endswith("_digest")
+    )
+
+
+def _is_sensitive_public_path_key(key: str) -> bool:
+    lowered = key.lower()
+    return lowered in PUBLIC_SENSITIVE_PATH_KEYS or lowered.endswith("_path") or lowered.endswith("_root")
 
 
 def _is_public_sensitive_path_or_file_uri(value: str) -> bool:
@@ -1932,6 +1962,8 @@ def _is_public_sensitive_path_or_file_uri(value: str) -> bool:
     if value.startswith("\\\\"):
         return True
     normalized = (parsed.path if parsed.scheme else value).replace("\\", "/")
+    if not parsed.scheme and not parsed.netloc and normalized.startswith("/"):
+        return True
     if normalized.startswith("/volume/"):
         return True
     parts = [part for part in PurePosixPath(normalized).parts if part not in {"/", ""}]
@@ -1993,6 +2025,64 @@ def _lifecycle_audit_persistence_failure_result(
 
 def _preflight_warning(code: str, message: str) -> dict[str, str]:
     return {"code": code, "message": message}
+
+
+def _apply_idempotent_rollback_preflight(preflight: dict[str, Any], history: Mapping[str, Any]) -> None:
+    preflight["status"] = "ready"
+    preflight["blockers"] = []
+    preflight["warnings"] = [
+        *list(preflight.get("warnings") or []),
+        {
+            "code": "ROLLBACK_ALREADY_CURRENT",
+            "message": "Rollback retry is already reflected by the current active model.",
+        },
+    ]
+    preflight["prior_audit_log_id"] = history.get("prior_audit_log_id")
+    preflight["rollback_history"] = _rollback_history_preflight_reference(history)
+
+
+def _activation_safety_evidence(
+    model: Mapping[str, Any],
+    *,
+    activation_class_operation: bool,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], str, Any]:
+    resource_profile = _json_mapping(model.get("resource_profile"))
+    blockers: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    if model.get("river_network_version_id") and model.get("basin_version_id") is None:
+        blockers.append(_preflight_blocker("LINEAGE_MISSING_BASIN_VERSION", "Model lineage is missing basin version."))
+    if model.get("mesh_version_id") in (None, ""):
+        blockers.append(_preflight_blocker("LINEAGE_MISSING_MESH_VERSION", "Model lineage is missing mesh version."))
+    if model.get("model_package_uri") in (None, ""):
+        blockers.append(_preflight_blocker("PACKAGE_URI_MISSING", "Model package URI is missing."))
+    package_checksum = _first_non_empty(resource_profile.get("package_checksum"), model.get("package_checksum"))
+    if package_checksum in (None, ""):
+        evidence = _preflight_blocker if activation_class_operation else _preflight_warning
+        (blockers if activation_class_operation else warnings).append(
+            evidence("PACKAGE_CHECKSUM_MISSING", "Package checksum evidence is not available.")
+        )
+    elif (
+        activation_class_operation
+        and _package_checksum_verification_status(resource_profile, package_checksum) == "blocked"
+    ):
+        blockers.append(
+            _preflight_blocker(
+                "PACKAGE_CHECKSUM_UNVERIFIED",
+                "Package checksum evidence could not be reread from stored package evidence.",
+            )
+        )
+    if _object_uri_prefix_status(model.get("model_package_uri")) == "invalid":
+        blockers.append(_preflight_blocker("OBJECT_URI_PREFIX_INVALID", "Model package URI prefix is not supported."))
+    copied_root = _copied_root_status(resource_profile)
+    if copied_root == "unsafe":
+        blockers.append(_preflight_blocker("COPIED_ROOT_UNSAFE", "Copied-root source evidence is unsafe."))
+    elif copied_root == "missing":
+        warnings.append(_preflight_warning("COPIED_ROOT_EVIDENCE_MISSING", "Copied-root evidence is not available."))
+    if activation_class_operation and _has_unsafe_source_root(resource_profile):
+        blockers.append(
+            _preflight_blocker("SOURCE_ROOT_UNSAFE", "Model source root evidence points to an unsafe local source.")
+        )
+    return blockers, warnings, copied_root, package_checksum
 
 
 def _object_uri_prefix_status(value: Any) -> str:
@@ -2115,8 +2205,15 @@ def _is_unsafe_source_value(value: Any) -> bool:
         return False
     text = str(value)
     parsed = urlsplit(text)
-    path_text = parsed.path if parsed.scheme else text
+    scheme = parsed.scheme.lower()
+    if scheme == "file":
+        return True
+    if scheme in SUPPORTED_OBJECT_URI_SCHEMES:
+        return False
+    path_text = parsed.path if scheme else text
     normalized = path_text.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
+        return True
     if normalized.startswith("/volume/"):
         return True
     parts = [part for part in PurePosixPath(normalized).parts if part not in {"/", ""}]

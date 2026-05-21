@@ -156,9 +156,10 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                     shud_code_version,
                     model_package_uri,
                     active_flag,
+                    lifecycle_state,
                     resource_profile
                 )
-                VALUES (%s, %s, %s, %s, 'calib-v1', 'shud-v1', 's3://nhms/models/it126/package/', true, %s)
+                VALUES (%s, %s, %s, %s, 'calib-v1', 'shud-v1', 's3://nhms/models/it126/package/', true, 'active', %s)
                 """,
                 (MODEL_ID, BASIN_VERSION_ID, RIVER_NETWORK_VERSION_ID, MESH_VERSION_ID, Json({"partition": "test"})),
             )

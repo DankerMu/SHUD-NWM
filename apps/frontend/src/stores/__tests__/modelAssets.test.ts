@@ -255,6 +255,7 @@ describe('useModelAssetsStore', () => {
 
   it('redacts local absolute paths, file URIs, URI userinfo, query, and fragment', async () => {
     expect(sanitizeModelAssetString('/volume/data/nwm/Basins/qhh')).toBeNull()
+    expect(sanitizeModelAssetString('/tmp/nhms/private/model-root')).toBeNull()
     expect(sanitizeModelAssetString('C:\\nwm\\Basins\\qhh')).toBeNull()
     expect(sanitizeModelAssetString('file:///volume/data/nwm/Basins/qhh')).toBeNull()
     expect(sanitizeModelAssetString('https://user:pass@assets.example.test/pkg?token=abc#frag')).toBe(

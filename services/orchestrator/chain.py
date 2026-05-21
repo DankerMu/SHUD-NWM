@@ -2872,6 +2872,7 @@ class PsycopgOrchestratorRepository:
             SELECT model_id
             FROM core.model_instance
             WHERE active_flag = true
+              AND lifecycle_state = 'active'
             ORDER BY model_id
             """,
             (),

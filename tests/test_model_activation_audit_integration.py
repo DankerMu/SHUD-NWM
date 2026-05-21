@@ -132,6 +132,7 @@ def test_m18_raw_model_read_responses_redact_sensitive_asset_metadata(integratio
     rendered = json.dumps({"listing": listing.json(), "detail": detail.json()})
     for token in (
         "/volume/data",
+        "/tmp/nhms/private/model-root",
         "C:\\",
         "file://",
         "user:pass@",
@@ -141,8 +142,20 @@ def test_m18_raw_model_read_responses_redact_sensitive_asset_metadata(integratio
         "package-sha-it137",
         "inventory-sha-it137",
         "checksum-secret",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "hash-secret",
+        "digest-secret",
     ):
         assert token not in rendered
+
+    unsafe_detail = detail.json()["data"]
+    assert unsafe_detail["model_package_uri"] is not None
+    assert unsafe_detail["resource_profile"]["source_path"] is None
+    assert unsafe_detail["resource_profile"]["artifact"]["sha256"] is None
+    assert unsafe_detail["resource_profile"]["artifact"]["sha1"] is None
+    assert unsafe_detail["resource_profile"]["artifact"]["hash"] is None
+    assert unsafe_detail["resource_profile"]["artifact"]["digest"] is None
 
 
 def test_m18_lifecycle_activation_switch_rollback_and_redacted_audit(integration_database_url: str) -> None:
@@ -405,6 +418,11 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
                 json={"operation": "rollback_version", "previous_model_id": ids["candidate_b_model_id"]},
                 headers=headers,
             )
+            retry_preflight = client.post(
+                f"/api/v1/models/{ids['active_model_id']}/preflight",
+                json={"operation": "rollback_version", "previous_model_id": ids["candidate_b_model_id"]},
+                headers=headers,
+            )
             retry_rollback = client.post(
                 f"/api/v1/models/{ids['active_model_id']}/lifecycle",
                 json={"operation": "rollback_version", "previous_model_id": ids["candidate_b_model_id"]},
@@ -429,6 +447,7 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
         activate_a,
         stale_rollback,
         allowed_rollback,
+        retry_preflight,
         retry_rollback,
         deprecate_rolled_back_from,
     ):
@@ -467,6 +486,11 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
     assert allowed_data["preflight"]["prior_audit_log_id"] is not None
     assert allowed_data["preflight"]["rollback_history"]["matched_previous_model_id"] == ids["candidate_b_model_id"]
     assert allowed_data["preflight"]["rollback_history"]["trusted"] is True
+    retry_preflight_data = retry_preflight.json()["data"]
+    assert retry_preflight_data["status"] == "ready"
+    assert {item["code"] for item in retry_preflight_data["blockers"]} == set()
+    assert {item["code"] for item in retry_preflight_data["warnings"]} >= {"ROLLBACK_ALREADY_CURRENT"}
+    assert retry_preflight_data["rollback_history"]["trusted"] is True
     retry_data = retry_rollback.json()["data"]
     assert retry_data["status"] == "already_current"
     assert retry_data["model"]["model_id"] == ids["candidate_b_model_id"]
@@ -514,6 +538,83 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
     rollback_audit = next(row for row in rollback_audit_rows if row["details"]["outcome"] == "rollback")
     assert rollback_audit["details"]["prior_audit_log_id"] == allowed_data["preflight"]["prior_audit_log_id"]
     assert not any(row["details"]["outcome"] == "blocked" for row in rollback_audit_rows)
+
+
+def test_m18_rollback_blocks_when_restored_model_safety_evidence_is_unsafe(
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    ids = _seed_issue_137_models(integration_database_url)
+    app.dependency_overrides[get_model_registry_store] = lambda: PsycopgModelRegistryStore(integration_database_url)
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+    try:
+        with TestClient(app) as client:
+            headers = {"X-User-Role": "model_admin", "X-User-ID": "m18-rollback-admin"}
+            activate_candidate = client.post(
+                f"/api/v1/models/{ids['candidate_a_model_id']}/lifecycle",
+                json={"operation": "activate"},
+                headers=headers,
+            )
+            with psycopg_connection(integration_database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE core.model_instance
+                        SET model_package_uri = 'ftp://example/private/package',
+                            resource_profile = %s
+                        WHERE model_id = %s
+                        """,
+                        (
+                            Json(
+                                {
+                                    "package_checksum": "unsafe-restored-sha",
+                                    "package_checksum_confirmed_from_stored_manifest": False,
+                                    "source_path": "/tmp/nhms/private/model-root",
+                                }
+                            ),
+                            ids["active_model_id"],
+                        ),
+                    )
+            blocked_rollback = client.post(
+                f"/api/v1/models/{ids['candidate_a_model_id']}/lifecycle",
+                json={"operation": "rollback_version", "previous_model_id": ids["active_model_id"]},
+                headers=headers,
+            )
+    finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert activate_candidate.status_code == 200, activate_candidate.text
+    assert activate_candidate.json()["data"]["status"] == "allowed"
+    assert blocked_rollback.status_code == 200, blocked_rollback.text
+    data = blocked_rollback.json()["data"]
+    assert data["status"] == "blocked"
+    blocker_codes = {item["code"] for item in data["preflight"]["blockers"]}
+    assert blocker_codes >= {"OBJECT_URI_PREFIX_INVALID", "PACKAGE_CHECKSUM_UNVERIFIED", "SOURCE_ROOT_UNSAFE"}
+    assert data["preflight"]["restored_model_id"] == ids["active_model_id"]
+    assert data["audit_reference"]["log_id"] is not None
+
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT model_id, active_flag, lifecycle_state
+                FROM core.model_instance
+                WHERE model_id IN (%s, %s)
+                ORDER BY model_id
+                """,
+                (ids["active_model_id"], ids["candidate_a_model_id"]),
+            )
+            states = {row["model_id"]: dict(row) for row in cursor.fetchall()}
+
+    assert states[ids["candidate_a_model_id"]]["active_flag"] is True
+    assert states[ids["candidate_a_model_id"]]["lifecycle_state"] == "active"
+    assert states[ids["active_model_id"]]["active_flag"] is False
+    assert states[ids["active_model_id"]]["lifecycle_state"] == "superseded"
 
 
 def test_m18_lifecycle_audit_insert_failure_rolls_back_mutation(integration_database_url: str) -> None:
@@ -771,15 +872,16 @@ def _seed_issue_137_models(database_url: str) -> dict[str, str]:
                     shud_code_version,
                     model_package_uri,
                     active_flag,
+                    lifecycle_state,
                     resource_profile
                 )
                 VALUES
-                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, true, %s),
-                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s),
-                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s),
-                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s),
-                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s),
-                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, %s)
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, true, 'active', %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, 'inactive', %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, 'inactive', %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, 'inactive', %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, 'inactive', %s),
+                    (%s, %s, %s, %s, 'calib-v1', 'shud-v1', %s, false, 'inactive', %s)
                 """,
                 (
                     ids["active_model_id"],
@@ -828,8 +930,14 @@ def _seed_issue_137_models(database_url: str) -> dict[str, str]:
                         "package_checksum": "checksum-secret",
                         "manifest_uri": "s3://nhms/models/it137_unsafe_model/v1/manifest.json",
                         "package_checksum_confirmed_from_stored_manifest": False,
-                        "source_path": "/volume/data/nwm/Basins/raw-secret",
+                        "source_path": "/tmp/nhms/private/model-root",
                         "resolved_source_path": "/volume/data/nwm/Basins/raw-secret",
+                        "artifact": {
+                            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "sha1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "hash": "hash-secret",
+                            "digest": "digest-secret",
+                        },
                         "source_is_symlink": False,
                     }),
                     ids["candidate_a_model_id"],

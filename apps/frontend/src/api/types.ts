@@ -793,7 +793,7 @@ export interface components {
              */
             lifecycle_state: "inactive" | "active" | "deprecated" | "superseded";
             container_image?: string | null;
-            model_package_uri: string;
+            model_package_uri: string | null;
             package_checksum?: string | null;
             manifest_uri?: string | null;
             source_inventory_checksum?: string | null;

@@ -24,6 +24,7 @@ from packages.common.model_registry import (
     ModelRegistryError,
     PsycopgModelRegistryStore,
     RiverSegmentGeoJsonBudgetError,
+    _is_unsafe_source_value,
     geometry_to_wkt,
 )
 from workers.model_registry.cli import _argparse_main
@@ -633,6 +634,26 @@ def clear_overrides() -> None:
 
 def _model_admin_headers() -> dict[str, str]:
     return {"X-User-Role": "model_admin"}
+
+
+@pytest.mark.parametrize(
+    ("source_value", "expected_unsafe"),
+    [
+        ("s3://nhms/sources/basin-a", False),
+        ("https://example.test/sources/basin-a", False),
+        ("gs://bucket/sources/basin-a", False),
+        ("/tmp/nhms/model-root", True),
+        ("/volume/data/nwm/Basins/basin-a", True),
+        ("file:///tmp/nhms/model-root", True),
+        ("C:\\nhms\\model-root", True),
+        ("\\\\server\\share\\nhms\\model-root", True),
+    ],
+)
+def test_unsafe_source_value_allows_supported_object_uris_but_blocks_local_paths(
+    source_value: str,
+    expected_unsafe: bool,
+) -> None:
+    assert _is_unsafe_source_value(source_value) is expected_unsafe
 
 
 @pytest.mark.asyncio
@@ -2524,6 +2545,103 @@ def test_preflight_model_operation_uses_policy_roles_for_missing_active_override
     assert sys_admin_preflight["roles"] == ["sys_admin"]
 
 
+def test_rollback_preflight_lineage_uses_restored_model_mesh_properties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTransaction:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    current_model = {
+        "model_id": "current_active",
+        "basin_id": "basin",
+        "basin_name": "Basin",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "current_rivnet_v01",
+        "mesh_version_id": "current_mesh_v01",
+        "model_package_uri": "s3://nhms/models/current_active/package/",
+        "package_checksum": "current-package-sha",
+        "resource_profile": {
+            "package_checksum": "current-package-sha",
+            "manifest_uri": "s3://nhms/models/current_active/manifest.json",
+        },
+        "mesh_properties_json": {"mesh_property_marker": "outgoing-current"},
+        "active_flag": True,
+        "lifecycle_state": "active",
+    }
+    restored_model = {
+        **current_model,
+        "model_id": "previous_model",
+        "river_network_version_id": "restored_rivnet_v01",
+        "mesh_version_id": "restored_mesh_v01",
+        "model_package_uri": "s3://nhms/models/previous_model/package/",
+        "package_checksum": "restored-package-sha",
+        "resource_profile": {
+            "package_checksum": "restored-package-sha",
+            "manifest_uri": "s3://nhms/models/previous_model/manifest.json",
+        },
+        "mesh_properties_json": {"mesh_property_marker": "restored-previous"},
+        "active_flag": False,
+        "lifecycle_state": "superseded",
+    }
+    rows = {
+        current_model["model_id"]: current_model,
+        restored_model["model_id"]: restored_model,
+    }
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_model_lifecycle_row",
+        lambda _self, _cursor, model_id, *, for_update: dict(rows[model_id]) if model_id in rows else None,
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_active_model_for_scope",
+        lambda _self, _cursor, _basin_version_id, *, for_update: dict(current_model),
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_trustworthy_rollback_history",
+        lambda *_args, **_kwargs: {
+            "trusted": True,
+            "prior_audit_log_id": 7,
+            "matched_previous_model_id": restored_model["model_id"],
+        },
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_idempotent_rollback_retry_history",
+        lambda *_args, **_kwargs: None,
+    )
+    store = PsycopgModelRegistryStore("postgresql://example")
+    decision = evaluate_policy(
+        AuthContext(
+            actor_id="model-admin",
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.rollback_version",
+        target_type="model_instance",
+        target_id="current_active",
+    )
+
+    preflight = store.preflight_model_operation(
+        "current_active",
+        operation="rollback_version",
+        policy_decision=decision,
+        previous_model_id="previous_model",
+    )
+
+    assert preflight["restored_model_id"] == "previous_model"
+    assert preflight["mesh_version_id"] == "restored_mesh_v01"
+    assert preflight["lineage"]["mesh_properties"] == {"mesh_property_marker": "restored-previous"}
+
+
 def test_model_lifecycle_non_rollback_ignores_idempotent_rollback_retry_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2704,7 +2822,13 @@ def test_get_model_joins_asset_metadata_and_lineage(
                             "/volume/data/nwm/Basins/local-source",
                         ],
                         "label": "s3 path label, not a URI",
-                        "local_path": "/volume/data/nwm/Basins/ordinary",
+                        "local_path": "/tmp/nhms/private/model-root",
+                        "artifact": {
+                            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "sha1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "hash": "hash-secret",
+                            "digest": "digest-secret",
+                        },
                     },
                 },
                 "created_at": "2026-05-14T00:00:00Z",
@@ -2766,9 +2890,14 @@ def test_get_model_joins_asset_metadata_and_lineage(
     ]
     assert detail["resource_profile"]["source_lineage"]["label"] == "s3 path label, not a URI"
     assert detail["resource_profile"]["source_lineage"]["local_path"] is None
+    assert detail["resource_profile"]["source_lineage"]["artifact"]["sha256"] is None
+    assert detail["resource_profile"]["source_lineage"]["artifact"]["sha1"] is None
+    assert detail["resource_profile"]["source_lineage"]["artifact"]["hash"] is None
+    assert detail["resource_profile"]["source_lineage"]["artifact"]["digest"] is None
     public_detail_json = json.dumps(detail)
     for token in (
         "/volume/data",
+        "/tmp/nhms/private/model-root",
         "C:\\",
         "file://",
         "token=secret",
@@ -2777,6 +2906,10 @@ def test_get_model_joins_asset_metadata_and_lineage(
         "package-sha-1",
         "inventory-sha-1",
         "mesh-sha-1",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "hash-secret",
+        "digest-secret",
     ):
         assert token not in public_detail_json
     assert "mesh_properties_json" not in detail

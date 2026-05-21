@@ -71,6 +71,30 @@ function sourcePathValue(model: ModelAsset, profile: Record<string, unknown>, so
   )
 }
 
+function deriveRollbackPreviousModelId(currentModel: ModelAsset, models: ModelAsset[]) {
+  const sameScope = models.filter(
+    (model) => model.model_id !== currentModel.model_id && model.basin_version_id === currentModel.basin_version_id,
+  )
+  return (
+    sameScope.find((model) => model.lifecycle_state === 'superseded')?.model_id ??
+    sameScope.find((model) => model.lifecycle_state === 'inactive')?.model_id ??
+    sameScope.find((model) => !model.active_flag)?.model_id ??
+    null
+  )
+}
+
+function lifecyclePayload(
+  currentModel: ModelAsset,
+  models: ModelAsset[],
+  operation: ModelAssetLifecycleRequest['operation'],
+): ModelAssetLifecycleRequest {
+  const previousModelId = operation === 'rollback_version' ? deriveRollbackPreviousModelId(currentModel, models) : null
+  return {
+    operation,
+    ...(previousModelId ? { previous_model_id: previousModelId } : {}),
+  }
+}
+
 function MetadataRow({ label, value }: { label: string; value: unknown }) {
   return (
     <div className="grid grid-cols-[7rem_1fr] gap-3 border-b border-border/70 py-2 text-sm last:border-0">
@@ -184,12 +208,14 @@ export function ModelAssetsPage() {
   async function requestOperation(operation: ModelAssetLifecycleRequest['operation']) {
     if (!currentSelectedModel) return
     setPendingOperation(operation)
-    await preflightModelOperation(currentSelectedModel.model_id, { operation }).catch(() => undefined)
+    await preflightModelOperation(currentSelectedModel.model_id, lifecyclePayload(currentSelectedModel, models, operation)).catch(
+      () => undefined,
+    )
   }
 
   async function confirmOperation() {
     if (!currentSelectedModel || !pendingOperation) return
-    await runModelOperation(currentSelectedModel.model_id, { operation: pendingOperation })
+    await runModelOperation(currentSelectedModel.model_id, lifecyclePayload(currentSelectedModel, models, pendingOperation))
       .then(async () => {
         await fetchModels({ active: 'all', limit: 50, offset: 0 }).catch(() => undefined)
         await fetchModelDetail(currentSelectedModel.model_id).catch(() => undefined)
