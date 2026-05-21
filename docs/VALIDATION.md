@@ -891,9 +891,10 @@ Optional live proof receipts are supplied as JSON strings or files:
 `--object-store-proof-file`, `--source-proof` / `--source-proof-file`,
 `--e2e-proof` / `--e2e-proof-file`, `--mvt-proof` /
 `--mvt-proof-file`, and `--target-env-proof` /
-`--target-env-proof-file`. Receipt payloads are bounded and redacted before
-writing evidence; malformed or oversized receipts become stable
-`release_blocked` evidence and never print tracebacks or raw secrets.
+`--target-env-proof-file`. Receipt payloads are normalized into bounded raw
+validation data before path/secret redaction, then redacted before writing
+evidence; malformed or oversized receipts become stable `release_blocked`
+evidence and never print tracebacks or raw secrets.
 
 Live proof receipt acceptance is intentionally stricter than a placeholder
 `accepted=true` flag. Every accepted receipt must use schema
@@ -913,9 +914,11 @@ schema, producer run ID, producer artifact/path/ref, checksum or receipt ID,
 target environment, and live proof mode. Top-level producer binding fields and
 nested `provenance` binding fields are validated as one canonical receipt
 contract: when both surfaces provide dependency, producer issue/schema/run ID,
-artifact ref/path/URI, checksum, or receipt ID, they must agree after
-normalization. Within either surface, every supplied alias in a binding group is
-also validated; for example, `producer_artifact_ref`, `summary_ref`,
+artifact ref/path/URI, checksum, or receipt ID, they must agree after bounded
+raw normalization and before public redaction, so distinct path-like aliases
+cannot be collapsed into the same redacted token. Within either surface, every
+supplied alias in a binding group is also validated; for example,
+`producer_artifact_ref`, `summary_ref`,
 `artifact_path`, and `artifact_uri` must all normalize to the same artifact
 binding when more than one is present. The checksum/receipt-id alias group is
 treated the same way. Sibling or contradictory nested provenance is a release

@@ -205,6 +205,39 @@ def _dependency_proof_bound_to_summary(proof_key: str, root: Path, *, run_id: st
     return json.dumps(payload)
 
 
+def _dependency_proof_with_artifact_paths(
+    proof_key: str,
+    *,
+    top_level_path: str,
+    provenance_path: str,
+) -> str:
+    payload = json.loads(_bound_proof(proof_key))
+    payload.pop("producer_artifact_ref", None)
+    payload["producer_artifact_path"] = top_level_path
+    payload["provenance"].pop("producer_artifact_ref", None)
+    payload["provenance"]["producer_artifact_path"] = provenance_path
+    return json.dumps(payload)
+
+
+def _readiness_cli_args(root: Path, proofs: dict[str, str]) -> list[str]:
+    args = ["validate-readiness", "--evidence-root", str(root), "--run-id", "m19"]
+    proof_options = {
+        "auth_proof": "--auth-proof",
+        "alert_proof": "--alert-proof",
+        "rollback_proof": "--rollback-proof",
+        "slurm_proof": "--slurm-proof",
+        "object_store_proof": "--object-store-proof",
+        "source_proof": "--source-proof",
+        "e2e_proof": "--e2e-proof",
+        "mvt_proof": "--mvt-proof",
+        "target_env_proof": "--target-env-proof",
+    }
+    for key, option in proof_options.items():
+        if key in proofs:
+            args.extend([option, proofs[key]])
+    return args
+
+
 def test_status_execution_mode_truth_table_accepts_allowed_and_rejects_forbidden() -> None:
     for status, modes in ALLOWED_STATUS_EXECUTION_MODES.items():
         for mode in modes:
@@ -822,6 +855,92 @@ def test_dependency_receipt_accepts_all_agreeing_aliases(tmp_path: Path) -> None
     item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
     assert item["status"] == "passed"
     assert item["live_proof_accepted"] is True
+
+
+@pytest.mark.parametrize(
+    ("top_level_path", "provenance_path"),
+    [
+        ("/tmp/private-slurm-alias/summary.json", "/tmp/private-object-store-alias/summary.json"),
+        (r"C:\nhms\private-slurm-alias\summary.json", r"D:\nhms\private-object-store-alias\summary.json"),
+        (r"\\prod-share\private-slurm-alias\summary.json", r"\\prod-share\private-object-store-alias\summary.json"),
+        (
+            "file:///var/lib/nhms/private-slurm-alias/summary.json",
+            "file:///var/lib/nhms/private-object-store-alias/summary.json",
+        ),
+    ],
+)
+def test_dependency_receipts_validate_raw_path_aliases_before_public_redaction(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    top_level_path: str,
+    provenance_path: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    proofs = _all_live_proofs()
+    proofs["slurm_proof"] = _dependency_proof_with_artifact_paths(
+        "slurm",
+        top_level_path=top_level_path,
+        provenance_path=provenance_path,
+    )
+
+    exit_code = slurm_validation.main(_readiness_cli_args(root, proofs))
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    rendered_summary = json.loads(stdout)
+    assert rendered_summary["status"] == "release_blocked"
+    assert rendered_summary["final_production_readiness_claimed"] is False
+
+    item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
+    errors = item["details"]["acceptance_errors"]["errors"]
+    assert item["status"] == "release_blocked"
+    assert item["live_proof_accepted"] is False
+    assert "provenance_producer_artifact_ref_mismatch" in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+    artifact_text = "\n".join(path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json"))
+    for raw_path in (top_level_path, provenance_path):
+        assert raw_path not in stdout
+        assert raw_path not in artifact_text
+    for raw_marker in ("private-slurm-alias", "private-object-store-alias"):
+        assert raw_marker not in stdout
+        assert raw_marker not in artifact_text
+    assert "[redacted-path]" in artifact_text
+    assert "raw_payload" not in artifact_text
+
+
+def test_dependency_receipt_accepts_agreeing_raw_path_aliases_and_redacts_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "artifacts"
+    raw_path = "/tmp/private-slurm-alias/summary.json"
+    proofs = _all_live_proofs()
+    proofs["slurm_proof"] = _dependency_proof_with_artifact_paths(
+        "slurm",
+        top_level_path=raw_path,
+        provenance_path=raw_path,
+    )
+
+    exit_code = slurm_validation.main(_readiness_cli_args(root, proofs))
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    rendered_summary = json.loads(stdout)
+    assert rendered_summary["status"] == "ready"
+    assert rendered_summary["final_production_readiness_claimed"] is True
+
+    item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
+    assert item["status"] == "passed"
+    assert item["live_proof_accepted"] is True
+
+    artifact_text = "\n".join(path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").glob("*.json"))
+    assert raw_path not in stdout
+    assert raw_path not in artifact_text
+    assert "private-slurm-alias" not in stdout
+    assert "private-slurm-alias" not in artifact_text
+    assert "[redacted-path]" in artifact_text
+    assert "raw_payload" not in artifact_text
 
 
 def test_dependency_summary_missing_root_redacts_paths_from_stdout_and_artifacts(

@@ -878,7 +878,7 @@ def _auth_live_item(config: ProductionReadinessConfig, receipt: Mapping[str, Any
     }
     if receipt["status"] != "parsed":
         return _required_live_blocker(config=config, receipt=receipt, **base)
-    payload = receipt["payload"]
+    payload = _receipt_validation_payload(receipt)
     allowed = _string_set(payload.get("allowed_actions") or payload.get("allowed_coverage"))
     denied = _string_set(payload.get("denied_actions") or payload.get("denied_coverage"))
     missing_allowed = sorted(REQUIRED_AUTH_ACTIONS - allowed)
@@ -949,7 +949,7 @@ def _surface_live_item(
     }
     if receipt["status"] != "parsed":
         return _required_live_blocker(config=config, receipt=receipt, **base)
-    payload = receipt["payload"]
+    payload = _receipt_validation_payload(receipt)
     errors = _surface_live_receipt_errors(
         payload,
         proof_key=proof_key,
@@ -1221,6 +1221,7 @@ def _load_proof(
             "raw_preview": _redacted_preview(raw, config=config),
         }
     try:
+        raw_payload = _bounded_payload(parsed)
         payload = _bounded_redacted_payload(parsed, config=config)
     except RecursionError as error:
         return {
@@ -1237,6 +1238,7 @@ def _load_proof(
         "status": "parsed",
         "source": source,
         "source_ref": source_ref,
+        "raw_payload": raw_payload,
         "payload": payload,
     }
 
@@ -1257,10 +1259,15 @@ def _receipt_artifact(config: ProductionReadinessConfig, receipts: Mapping[str, 
 
 def _receipt_details(receipt: Mapping[str, Any], *, config: ProductionReadinessConfig) -> dict[str, Any]:
     return _bounded_redacted_payload(
-        {key: value for key, value in receipt.items() if key != "payload"}
+        {key: value for key, value in receipt.items() if key not in {"payload", "raw_payload"}}
         | ({"payload": receipt.get("payload")} if "payload" in receipt else {}),
         config=config,
     )
+
+
+def _receipt_validation_payload(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload = receipt.get("raw_payload", receipt.get("payload"))
+    return payload if isinstance(payload, Mapping) else {}
 
 
 def _preflight_payload(
@@ -1797,6 +1804,37 @@ def _find_summary_path(name: str, root: Path) -> Path:
                 raise SafeFilesystemError(f"Dependency summary must be a regular file: {candidate}")
             return candidate
     raise FileNotFoundError(f"No summary.json found under {root}")
+
+
+def _bounded_payload(value: Any) -> Any:
+    nodes = 0
+
+    def bounded_key(key: Any) -> str:
+        current = str(key)
+        if len(current) > MAX_STRING_LENGTH:
+            return f"{current[:MAX_STRING_LENGTH]}[truncated]"
+        return current
+
+    def walk(current: Any, depth: int) -> Any:
+        nonlocal nodes
+        nodes += 1
+        if nodes > MAX_JSON_NODES:
+            return "[truncated:max-nodes]"
+        if depth > MAX_JSON_DEPTH:
+            return "[truncated:max-depth]"
+        if isinstance(current, Mapping):
+            return {bounded_key(key): walk(nested, depth + 1) for key, nested in current.items()}
+        if isinstance(current, list):
+            return [walk(item, depth + 1) for item in current[:MAX_JSON_NODES]]
+        if isinstance(current, tuple):
+            return [walk(item, depth + 1) for item in current[:MAX_JSON_NODES]]
+        if isinstance(current, str):
+            if len(current) > MAX_STRING_LENGTH:
+                return f"{current[:MAX_STRING_LENGTH]}[truncated]"
+            return current
+        return current
+
+    return walk(value, 0)
 
 
 def _bounded_redacted_payload(value: Any, *, config: ProductionReadinessConfig) -> Any:
