@@ -880,18 +880,29 @@ class PsycopgModelRegistryStore:
                         "audit_reference": None,
                     }
                 if preflight["status"] == "blocked":
-                    audit_id = self._insert_model_lifecycle_audit(
-                        cursor,
-                        model=model,
-                        updated=model,
-                        operation=operation,
-                        outcome="blocked",
-                        policy_decision=decision,
-                        request_id=request_id,
-                        preflight=preflight,
-                        previous_model=current_active,
-                        reason=reason,
-                    )
+                    try:
+                        audit_id = self._insert_model_lifecycle_audit(
+                            cursor,
+                            model=model,
+                            updated=model,
+                            operation=operation,
+                            outcome="blocked",
+                            policy_decision=decision,
+                            request_id=request_id,
+                            preflight=preflight,
+                            previous_model=current_active,
+                            reason=reason,
+                        )
+                    except Exception as audit_error:
+                        raise ModelLifecycleAuditPersistenceError(
+                            _lifecycle_audit_persistence_failure_result(
+                                model=model,
+                                current_active=current_active,
+                                operation=operation,
+                                preflight=preflight,
+                            ),
+                            audit_error,
+                        ) from audit_error
                     return {
                         "status": "blocked",
                         "operation": operation,
