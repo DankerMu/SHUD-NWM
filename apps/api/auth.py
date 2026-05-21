@@ -41,6 +41,7 @@ ACTION_MATRIX: dict[str, tuple[AuthRole, ...]] = {
 _TRUTHY = {"1", "true", "yes", "on"}
 _LIVE_AUTH_BACKENDS = {"live", "live_idp", "oidc", "saml"}
 _URI_OR_PATH_KEY_RE = re.compile(r"(uri|url|path|log|checksum|lineage|manifest|credential)", re.IGNORECASE)
+_LOG_ID_KEY_RE = re.compile(r"(?:^|_)log_id$", re.IGNORECASE)
 _LOCAL_PATH_RE = re.compile(r"(^|[\s=:])(?:/[A-Za-z0-9_.-][^\s,;]*|[A-Za-z]:\\[^\s,;]*)")
 _CHECKSUM_RE = re.compile(r"\b(?:sha(?:256|1)?[:=_-]?)?[a-f0-9]{32,128}\b", re.IGNORECASE)
 
@@ -519,7 +520,9 @@ def redact_audit_payload(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, nested in value.items():
             key_text = str(key)
-            if is_sensitive_key(key_text) or _URI_OR_PATH_KEY_RE.search(key_text):
+            if _is_numeric_log_id_evidence(key_text, nested):
+                redacted[key_text] = nested
+            elif is_sensitive_key(key_text) or _URI_OR_PATH_KEY_RE.search(key_text):
                 redacted[key_text] = _redact_sensitive_shape(nested)
             else:
                 redacted[key_text] = redact_audit_payload(nested)
@@ -531,6 +534,12 @@ def redact_audit_payload(value: Any) -> Any:
     if isinstance(value, str):
         return _redact_text_shapes(value)
     return value
+
+
+def _is_numeric_log_id_evidence(key: str, value: Any) -> bool:
+    return bool(_LOG_ID_KEY_RE.search(key)) and (
+        value is None or (isinstance(value, int) and not isinstance(value, bool))
+    )
 
 
 def _redact_sensitive_shape(value: Any) -> Any:
