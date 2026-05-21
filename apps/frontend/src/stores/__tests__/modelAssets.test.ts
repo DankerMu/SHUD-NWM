@@ -23,6 +23,7 @@ import {
 vi.mock('@/api/client', () => ({
   client: {
     GET: vi.fn(),
+    POST: vi.fn(),
   },
 }))
 
@@ -836,6 +837,63 @@ describe('useModelAssetsStore', () => {
     expect(buildModelAssetDependencyGraph(normalized).nodes.find((node) => node.id === 'source')).toMatchObject({
       value: MODEL_ASSET_RESTRICTED_SOURCE,
       missing: false,
+    })
+  })
+
+  it('runs lifecycle preflight and successful operation through typed API paths', async () => {
+    const model = makeBasinsModel({ active_flag: false, lifecycle_state: 'inactive' })
+    const activeModel = makeBasinsModel({ active_flag: true, lifecycle_state: 'active' })
+    const preflight = {
+      schema: 'nhms.model_operation_preflight.v1',
+      operation: 'activate',
+      status: 'ready',
+      model_id: BASINS_MODEL_ID,
+      basin_version_id: model.basin_version_id,
+      blockers: [],
+      warnings: [],
+      impact: { downstream_surfaces: ['forecast-routing'] },
+    }
+    const result = {
+      status: 'allowed',
+      operation: 'activate',
+      model: activeModel,
+      preflight,
+      audit_reference: { entity_type: 'model_instance', entity_id: BASINS_MODEL_ID, log_id: 5 },
+    }
+
+    vi.mocked(client.POST).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      if (path === '/api/v1/models/{model_id}/preflight') return success(preflight) as never
+      if (path === '/api/v1/models/{model_id}/lifecycle') return success(result) as never
+      throw new Error(`Unexpected POST ${path}`)
+    })
+
+    const preflightResponse = await useModelAssetsStore.getState().preflightModelOperation(BASINS_MODEL_ID, {
+      operation: 'activate',
+    })
+    const resultResponse = await useModelAssetsStore.getState().runModelOperation(BASINS_MODEL_ID, {
+      operation: 'activate',
+    })
+
+    expect(preflightResponse.status).toBe('ready')
+    expect(resultResponse.audit_reference).toEqual({ entity_type: 'model_instance', entity_id: BASINS_MODEL_ID, log_id: 5 })
+    expect(useModelAssetsStore.getState().operationResult?.status).toBe('allowed')
+    expect(useModelAssetsStore.getState().operationPreflight?.status).toBe('ready')
+  })
+
+  it('keeps backend forbidden lifecycle errors generic and non-successful', async () => {
+    vi.mocked(client.POST).mockResolvedValue(
+      { data: undefined, error: { error: { code: 'RBAC_FORBIDDEN', message: 'Actor roles are not authorized.' } } } as never,
+    )
+
+    await expect(
+      useModelAssetsStore.getState().runModelOperation(BASINS_MODEL_ID, { operation: 'activate' }),
+    ).rejects.toThrow('模型操作执行失败')
+
+    expect(useModelAssetsStore.getState()).toMatchObject({
+      operationLoading: false,
+      operationError: '模型操作执行失败',
+      operationResult: null,
     })
   })
 })

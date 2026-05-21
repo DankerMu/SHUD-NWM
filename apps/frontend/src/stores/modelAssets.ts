@@ -9,6 +9,9 @@ export type ModelAsset = components['schemas']['ModelInstance'] & {
   __truncatedFields?: Record<string, true>
 }
 export type ModelAssetPage = components['schemas']['ModelInstancePage']
+export type ModelAssetLifecycleRequest = components['schemas']['ModelLifecycleRequest']
+export type ModelAssetOperationPreflight = components['schemas']['ModelOperationPreflight']
+export type ModelAssetLifecycleResult = components['schemas']['ModelLifecycleResult']
 export type ModelAssetActiveFilter = 'true' | 'false' | 'all'
 
 export const MODEL_ASSET_PRODUCT_DISPLAY_LIMIT = 12
@@ -21,6 +24,8 @@ export const MODEL_ASSET_MAP_OVER_BUDGET_TEXT = '空间几何超出预览预算'
 export const MODEL_ASSET_MAP_UNAVAILABLE_TEXT = '暂无空间预览'
 const MODEL_ASSET_LIST_LOAD_FAILED = '模型资产列表加载失败'
 const MODEL_ASSET_DETAIL_LOAD_FAILED = '模型资产详情加载失败'
+const MODEL_ASSET_PREFLIGHT_FAILED = '模型操作预检失败'
+const MODEL_ASSET_OPERATION_FAILED = '模型操作执行失败'
 const MODEL_ASSET_DETAIL_IDENTITY_MISMATCH = '模型资产详情与当前选择不匹配'
 const MODEL_ASSET_SANITIZE_MAX_DEPTH = 24
 const MODEL_ASSET_SANITIZE_MAX_NODES = 5000
@@ -109,9 +114,15 @@ interface ModelAssetsState {
   offset: number
   loading: boolean
   detailLoading: boolean
+  operationLoading: boolean
   error: string | null
+  operationError: string | null
+  operationPreflight: ModelAssetOperationPreflight | null
+  operationResult: ModelAssetLifecycleResult | null
   fetchModels: (filters?: ModelAssetListFilters) => Promise<void>
   fetchModelDetail: (modelId: string) => Promise<void>
+  preflightModelOperation: (modelId: string, payload: ModelAssetLifecycleRequest) => Promise<ModelAssetOperationPreflight>
+  runModelOperation: (modelId: string, payload: ModelAssetLifecycleRequest) => Promise<ModelAssetLifecycleResult>
   clearSelectedModel: () => void
 }
 
@@ -140,6 +151,26 @@ async function getModelDetail(modelId: string) {
 
   if (error) throw new Error(getApiErrorMessage(error, MODEL_ASSET_DETAIL_LOAD_FAILED))
   return unwrapApiData<ModelAsset>(data, MODEL_ASSET_DETAIL_LOAD_FAILED)
+}
+
+async function preflightModelLifecycle(modelId: string, payload: ModelAssetLifecycleRequest) {
+  const { data, error } = await client.POST('/api/v1/models/{model_id}/preflight', {
+    params: { path: { model_id: modelId } },
+    body: payload,
+  })
+
+  if (error) throw new Error(getApiErrorMessage(error, MODEL_ASSET_PREFLIGHT_FAILED))
+  return unwrapApiData<ModelAssetOperationPreflight>(data, MODEL_ASSET_PREFLIGHT_FAILED)
+}
+
+async function postModelLifecycle(modelId: string, payload: ModelAssetLifecycleRequest) {
+  const { data, error } = await client.POST('/api/v1/models/{model_id}/lifecycle', {
+    params: { path: { model_id: modelId } },
+    body: payload,
+  })
+
+  if (error) throw new Error(getApiErrorMessage(error, MODEL_ASSET_OPERATION_FAILED))
+  return unwrapApiData<ModelAssetLifecycleResult>(data, MODEL_ASSET_OPERATION_FAILED)
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {
@@ -787,61 +818,97 @@ export const useModelAssetsStore = create<ModelAssetsState>((set) => {
   let detailRequestSeq = 0
 
   return {
-  models: [],
-  selectedModel: null,
-  total: 0,
-  limit: 50,
-  offset: 0,
-  loading: false,
-  detailLoading: false,
-  error: null,
-  fetchModels: async (filters) => {
-    const requestSeq = (listRequestSeq += 1)
-    detailRequestSeq += 1
-    set({ loading: true, selectedModel: null, detailLoading: false, error: null })
+    models: [],
+    selectedModel: null,
+    total: 0,
+    limit: 50,
+    offset: 0,
+    loading: false,
+    detailLoading: false,
+    operationLoading: false,
+    error: null,
+    operationError: null,
+    operationPreflight: null,
+    operationResult: null,
+    fetchModels: async (filters) => {
+      const requestSeq = (listRequestSeq += 1)
+      detailRequestSeq += 1
+      set({ loading: true, selectedModel: null, detailLoading: false, error: null })
 
-    try {
-      const page = await getModelPage(filters)
-      if (requestSeq !== listRequestSeq) return
-      set((state) => ({
-        models: page.items.map(normalizeModelAsset),
-        total: page.total,
-        limit: page.limit,
-        offset: page.offset,
-        loading: false,
-        error: null,
-        selectedModel:
-          state.selectedModel &&
-          page.items.some((model) => model.model_id === state.selectedModel?.model_id)
-            ? state.selectedModel
-            : null,
-      }))
-    } catch (error) {
-      const message = getSafeModelAssetErrorMessage(error, MODEL_ASSET_LIST_LOAD_FAILED)
-      if (requestSeq === listRequestSeq) set({ selectedModel: null, detailLoading: false, loading: false, error: message })
-      throw new Error(message)
-    }
-  },
-  fetchModelDetail: async (modelId) => {
-    const requestSeq = (detailRequestSeq += 1)
-    set({ selectedModel: null, detailLoading: true, error: null })
-
-    try {
-      const model = await getModelDetail(modelId)
-      if (requestSeq !== detailRequestSeq) return
-      if (model.model_id !== modelId) {
-        throw new Error(MODEL_ASSET_DETAIL_IDENTITY_MISMATCH)
+      try {
+        const page = await getModelPage(filters)
+        if (requestSeq !== listRequestSeq) return
+        set((state) => ({
+          models: page.items.map(normalizeModelAsset),
+          total: page.total,
+          limit: page.limit,
+          offset: page.offset,
+          loading: false,
+          error: null,
+          selectedModel:
+            state.selectedModel &&
+            page.items.some((model) => model.model_id === state.selectedModel?.model_id)
+              ? state.selectedModel
+              : null,
+        }))
+      } catch (error) {
+        const message = getSafeModelAssetErrorMessage(error, MODEL_ASSET_LIST_LOAD_FAILED)
+        if (requestSeq === listRequestSeq) set({ selectedModel: null, detailLoading: false, loading: false, error: message })
+        throw new Error(message)
       }
-      set({ selectedModel: normalizeModelAsset(model), detailLoading: false, error: null })
-    } catch (error) {
-      const message = getSafeModelAssetErrorMessage(error, MODEL_ASSET_DETAIL_LOAD_FAILED)
-      if (requestSeq === detailRequestSeq) set({ selectedModel: null, detailLoading: false, error: message })
-      throw new Error(message)
-    }
-  },
-  clearSelectedModel: () => {
-    detailRequestSeq += 1
-    set({ selectedModel: null, detailLoading: false })
-  },
+    },
+    fetchModelDetail: async (modelId) => {
+      const requestSeq = (detailRequestSeq += 1)
+      set({ selectedModel: null, detailLoading: true, error: null })
+
+      try {
+        const model = await getModelDetail(modelId)
+        if (requestSeq !== detailRequestSeq) return
+        if (model.model_id !== modelId) {
+          throw new Error(MODEL_ASSET_DETAIL_IDENTITY_MISMATCH)
+        }
+        set({ selectedModel: normalizeModelAsset(model), detailLoading: false, error: null })
+      } catch (error) {
+        const message = getSafeModelAssetErrorMessage(error, MODEL_ASSET_DETAIL_LOAD_FAILED)
+        if (requestSeq === detailRequestSeq) set({ selectedModel: null, detailLoading: false, error: message })
+        throw new Error(message)
+      }
+    },
+    preflightModelOperation: async (modelId, payload) => {
+      set({ operationLoading: true, operationError: null, operationPreflight: null, operationResult: null })
+      try {
+        const preflight = await preflightModelLifecycle(modelId, payload)
+        set({ operationLoading: false, operationPreflight: preflight, operationError: null })
+        return preflight
+      } catch (error) {
+        const message = getSafeModelAssetErrorMessage(error, MODEL_ASSET_PREFLIGHT_FAILED)
+        set({ operationLoading: false, operationError: message })
+        throw new Error(message)
+      }
+    },
+    runModelOperation: async (modelId, payload) => {
+      set({ operationLoading: true, operationError: null, operationResult: null })
+      try {
+        const result = await postModelLifecycle(modelId, payload)
+        const normalizedModel = normalizeModelAsset(result.model)
+        set((state) => ({
+          operationLoading: false,
+          operationResult: result,
+          operationPreflight: result.preflight,
+          operationError: null,
+          selectedModel: state.selectedModel?.model_id === normalizedModel.model_id ? normalizedModel : state.selectedModel,
+          models: state.models.map((model) => (model.model_id === normalizedModel.model_id ? normalizedModel : model)),
+        }))
+        return result
+      } catch (error) {
+        const message = getSafeModelAssetErrorMessage(error, MODEL_ASSET_OPERATION_FAILED)
+        set({ operationLoading: false, operationError: message })
+        throw new Error(message)
+      }
+    },
+    clearSelectedModel: () => {
+      detailRequestSeq += 1
+      set({ selectedModel: null, detailLoading: false, operationPreflight: null, operationResult: null, operationError: null })
+    },
   }
 })

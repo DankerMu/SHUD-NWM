@@ -58,6 +58,7 @@ class FakeModelRegistryStore:
                 "shud_input_name": "basin_a",
                 "segment_count": 2,
                 "active_flag": False,
+                "lifecycle_state": "inactive",
                 "resource_profile": {
                     "basin_slug": "basin-a",
                     "shud_input_name": "basin_a",
@@ -87,11 +88,14 @@ class FakeModelRegistryStore:
                 "shud_input_name": None,
                 "segment_count": 1,
                 "active_flag": True,
+                "lifecycle_state": "active",
                 "resource_profile": {},
                 "created_at": "2026-05-07T00:00:00Z",
             },
         }
         self.activation_audit_rows: list[dict[str, Any]] = []
+        self.lifecycle_calls: list[tuple[str, str]] = []
+        self.preflight_calls: list[dict[str, Any]] = []
 
     def create_basin_with_version(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
         self.write_calls.append("create_basin_with_version")
@@ -194,6 +198,7 @@ class FakeModelRegistryStore:
             raise RuntimeError("psycopg OperationalError: password leaked in raw driver diagnostics")
         record = dict(payload)
         record.setdefault("active_flag", False)
+        record.setdefault("lifecycle_state", "active" if record["active_flag"] else "inactive")
         self.models[record["model_id"]] = record
         return record
 
@@ -214,6 +219,7 @@ class FakeModelRegistryStore:
             raise DuplicateResourceError(f"model_id {model_id} is already active.")
         previous_active = bool(model["active_flag"])
         model["active_flag"] = active
+        model["lifecycle_state"] = "active" if active else "inactive"
         self.activation_audit_rows.append(
             {
                 "action": "models.activate" if active else "models.deactivate",
@@ -231,6 +237,121 @@ class FakeModelRegistryStore:
             }
         )
         return dict(model)
+
+    def preflight_model_operation(
+        self,
+        model_id: str,
+        *,
+        operation: str,
+        policy_decision: Any = None,
+        previous_model_id: str | None = None,
+        override_missing_active: bool = False,
+        reason: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.preflight_calls.append(
+            {
+                "model_id": model_id,
+                "operation": operation,
+                "policy_decision": policy_decision,
+                "previous_model_id": previous_model_id,
+                "override_missing_active": override_missing_active,
+                "reason": reason,
+                "request_id": request_id,
+            }
+        )
+        if model_id not in self.models:
+            raise MissingResourceError(f"model_id not found: {model_id}")
+        model = self.models[model_id]
+        blockers = []
+        if operation == "activate" and model.get("model_package_uri") == "ftp://unsafe/package":
+            blockers.append(
+                {"code": "OBJECT_URI_PREFIX_INVALID", "message": "Model package URI prefix is not supported."}
+            )
+        roles = tuple(getattr(policy_decision, "roles", ()))
+        if operation == "deactivate" and override_missing_active and roles and "sys_admin" not in roles:
+            blockers.append(
+                {"code": "OVERRIDE_REQUIRES_SYS_ADMIN", "message": "Missing-active override requires sys_admin."}
+            )
+        return {
+            "schema": "nhms.model_operation_preflight.v1",
+            "request_id": request_id,
+            "operation": operation,
+            "status": "blocked" if blockers else "ready",
+            "model_id": model_id,
+            "basin_id": model.get("basin_id"),
+            "basin_version_id": model.get("basin_version_id"),
+            "current_active_model_id": "active_model",
+            "river_network_version_id": model.get("river_network_version_id"),
+            "mesh_version_id": model.get("mesh_version_id"),
+            "impact": {
+                "downstream_surfaces": ["forecast-routing"],
+                "active_scope": {"basin_version_id": model.get("basin_version_id")},
+            },
+            "blockers": blockers,
+            "warnings": [],
+            "reason": "[redacted]",
+        }
+
+    def model_lifecycle_operation(
+        self,
+        model_id: str,
+        *,
+        operation: str,
+        policy_decision: Any = None,
+        request_id: str | None = None,
+        previous_model_id: str | None = None,
+        override_missing_active: bool = False,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        self.lifecycle_calls.append((model_id, operation))
+        preflight = self.preflight_model_operation(
+            model_id,
+            operation=operation,
+            policy_decision=policy_decision,
+            previous_model_id=previous_model_id,
+            override_missing_active=override_missing_active,
+            reason=reason,
+            request_id=request_id,
+        )
+        model = self.models[model_id]
+        if preflight["status"] == "blocked":
+            self.activation_audit_rows.append(
+                {
+                    "action": getattr(policy_decision, "action_id", None),
+                    "details": {"outcome": "blocked", "preflight": preflight},
+                }
+            )
+            return {
+                "status": "blocked",
+                "operation": operation,
+                "model": dict(model),
+                "preflight": preflight,
+                "audit_reference": None,
+            }
+        if operation in {"activate", "switch_version"}:
+            for item in self.models.values():
+                if item.get("basin_version_id") == model.get("basin_version_id") and item.get("active_flag"):
+                    item["active_flag"] = False
+                    item["lifecycle_state"] = "superseded"
+            model["active_flag"] = True
+            model["lifecycle_state"] = "active"
+        elif operation == "deactivate":
+            model["active_flag"] = False
+            model["lifecycle_state"] = "inactive"
+        elif operation == "supersede":
+            model["active_flag"] = False
+            model["lifecycle_state"] = "superseded"
+        elif operation == "deprecate":
+            model["active_flag"] = False
+            model["lifecycle_state"] = "deprecated"
+        return {
+            "status": "allowed",
+            "operation": operation,
+            "model": dict(model),
+            "preflight": preflight,
+            "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": 1},
+        }
 
     def list_models(
         self,
@@ -878,6 +999,191 @@ async def test_model_registry_admin_write_success_exposes_allowed_policy_evidenc
     assert decision["reason_code"] == "RBAC_ALLOWED"
     assert decision["execution_mode"] == "backend_route_executed"
     assert fake_store.write_calls == ["create_mesh_version"]
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_route_runs_preflight_and_activation_with_canonical_policy(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/inactive_model/lifecycle",
+            headers={"X-User-Role": "model_admin", "X-User-ID": "alice"},
+            json={"operation": "activate"},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["data"]["status"] == "allowed"
+    assert body["data"]["operation"] == "activate"
+    assert body["data"]["model"]["active_flag"] is True
+    assert body["data"]["model"]["lifecycle_state"] == "active"
+    assert body["data"]["preflight"]["status"] == "ready"
+    assert body["data"]["audit_reference"] == {
+        "entity_type": "model_instance",
+        "entity_id": "inactive_model",
+        "log_id": 1,
+    }
+    decision = body["auth_policy_decisions"][0]
+    assert decision["action_id"] == "models.activate"
+    assert decision["decision"] == "allow"
+    assert fake_store.lifecycle_calls == [("inactive_model", "activate")]
+    assert fake_store.models["active_model"]["lifecycle_state"] == "superseded"
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_preflight_requires_auth_before_store_call(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/inactive_model/preflight",
+            json={"operation": "activate"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "AUTH_REQUIRED"
+    assert fake_store.preflight_calls == []
+    assert fake_store.lifecycle_calls == []
+    assert fake_store.models["inactive_model"]["active_flag"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_preflight_forbidden_role_happens_before_store_call(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/inactive_model/preflight",
+            headers={"X-User-Role": "operator", "X-User-ID": "ops"},
+            json={"operation": "activate"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "RBAC_FORBIDDEN"
+    assert fake_store.preflight_calls == []
+    assert fake_store.lifecycle_calls == []
+    assert fake_store.models["inactive_model"]["active_flag"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_preflight_authorized_model_admin_passes_policy_roles(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/inactive_model/preflight",
+            headers={"X-User-Role": "model_admin", "X-User-ID": "alice"},
+            json={"operation": "activate"},
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["status"] == "ready"
+    assert fake_store.lifecycle_calls == []
+    assert len(fake_store.preflight_calls) == 1
+    decision = fake_store.preflight_calls[0]["policy_decision"]
+    assert decision.action_id == "models.activate"
+    assert decision.roles == ("model_admin",)
+    assert decision.target_id == "inactive_model"
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_preflight_model_admin_override_missing_active_is_blocked(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/active_model/preflight",
+            headers={"X-User-Role": "model_admin"},
+            json={
+                "operation": "deactivate",
+                "override_missing_active": True,
+                "reason": "planned maintenance",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["status"] == "blocked"
+    assert data["blockers"] == [
+        {"code": "OVERRIDE_REQUIRES_SYS_ADMIN", "message": "Missing-active override requires sys_admin."}
+    ]
+    assert fake_store.lifecycle_calls == []
+    assert fake_store.models["active_model"]["active_flag"] is True
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_preflight_sys_admin_override_missing_active_can_be_ready(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/active_model/preflight",
+            headers={"X-User-Role": "sys_admin"},
+            json={
+                "operation": "deactivate",
+                "override_missing_active": True,
+                "reason": "planned maintenance",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["status"] == "ready"
+    assert data["blockers"] == []
+    assert fake_store.lifecycle_calls == []
+    assert fake_store.models["active_model"]["active_flag"] is True
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_preflight_block_persists_blocked_evidence_without_mutation(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    fake_store.models["inactive_model"]["model_package_uri"] = "ftp://unsafe/package"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/inactive_model/lifecycle",
+            headers={"X-User-Role": "model_admin"},
+            json={"operation": "activate", "reason": "unsafe /tmp/local secret-token"},
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["status"] == "blocked"
+    assert data["model"]["active_flag"] is False
+    assert data["preflight"]["blockers"] == [
+        {"code": "OBJECT_URI_PREFIX_INVALID", "message": "Model package URI prefix is not supported."}
+    ]
+    assert data["preflight"]["reason"] == "[redacted]"
+    assert fake_store.models["inactive_model"]["active_flag"] is False
+    assert fake_store.models["active_model"]["active_flag"] is True
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_rbac_denial_happens_before_store_mutation(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/inactive_model/lifecycle",
+            headers={"X-User-Role": "operator"},
+            json={"operation": "activate"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "RBAC_FORBIDDEN"
+    assert fake_store.lifecycle_calls == []
+    assert fake_store.models["inactive_model"]["active_flag"] is False
 
 
 @pytest.mark.asyncio
@@ -2206,6 +2512,90 @@ def test_set_model_active_direct_call_requires_policy_evidence(monkeypatch: pyte
         store.set_model_active("basins_model", True)
 
     assert cursor.statements == []
+
+
+def test_preflight_model_operation_uses_policy_roles_for_missing_active_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTransaction:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    model = {
+        "model_id": "active_model",
+        "basin_id": "basin",
+        "basin_name": "Basin",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "basin_rivnet_v01",
+        "mesh_version_id": "basin_mesh_v01",
+        "model_package_uri": "s3://nhms/models/active_model/package/",
+        "package_checksum": "package-sha-1",
+        "resource_profile": {"package_checksum": "package-sha-1"},
+        "active_flag": True,
+        "lifecycle_state": "active",
+    }
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_model_lifecycle_row",
+        lambda _self, _cursor, model_id, *, for_update: dict(model) if model_id == "active_model" else None,
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_active_model_for_scope",
+        lambda _self, _cursor, _basin_version_id, *, for_update: dict(model),
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_trustworthy_rollback_history",
+        lambda *_args, **_kwargs: None,
+    )
+    store = PsycopgModelRegistryStore("postgresql://example")
+    model_admin_decision = evaluate_policy(
+        AuthContext(
+            actor_id="model-admin",
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.deactivate",
+        target_type="model_instance",
+        target_id="active_model",
+    )
+    sys_admin_decision = evaluate_policy(
+        AuthContext(
+            actor_id="sys-admin",
+            roles=("sys_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.deactivate",
+        target_type="model_instance",
+        target_id="active_model",
+    )
+
+    model_admin_preflight = store.preflight_model_operation(
+        "active_model",
+        operation="deactivate",
+        policy_decision=model_admin_decision,
+        override_missing_active=True,
+        reason="planned maintenance",
+    )
+    sys_admin_preflight = store.preflight_model_operation(
+        "active_model",
+        operation="deactivate",
+        policy_decision=sys_admin_decision,
+        override_missing_active=True,
+        reason="planned maintenance",
+    )
+
+    assert model_admin_preflight["status"] == "blocked"
+    assert {item["code"] for item in model_admin_preflight["blockers"]} == {"OVERRIDE_REQUIRES_SYS_ADMIN"}
+    assert sys_admin_preflight["status"] == "ready"
+    assert sys_admin_preflight["blockers"] == []
 
 
 def test_set_model_active_duplicate_and_missing_do_not_write_audit(

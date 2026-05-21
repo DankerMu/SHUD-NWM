@@ -18,6 +18,7 @@ from packages.common.model_registry import (
     InvalidPayloadError,
     InvalidReferenceError,
     MissingResourceError,
+    ModelLifecycleOperation,
     ModelRegistryError,
     PsycopgModelRegistryStore,
     RiverSegmentGeoJsonBudgetError,
@@ -122,6 +123,15 @@ class ActiveFlagPayload(BaseModel):
     )
 
 
+class ModelLifecyclePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: ModelLifecycleOperation
+    previous_model_id: str | None = None
+    override_missing_active: bool = False
+    reason: str | None = None
+
+
 class CrosswalkEntryPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -197,6 +207,28 @@ def require_model_active_action(
         target_type="model_instance",
         target_id=model_id,
         payload={"model_id": model_id, "active": payload.active},
+    )
+
+
+def require_model_lifecycle_action(
+    request: Request,
+    model_id: str,
+    payload: ModelLifecyclePayload,
+) -> PolicyDecision:
+    action_id = {
+        "activate": "models.activate",
+        "deactivate": "models.deactivate",
+        "switch_version": "models.switch_version",
+        "rollback_version": "models.rollback_version",
+        "supersede": "models.supersede",
+        "deprecate": "models.deactivate",
+    }[payload.operation]
+    return require_action(
+        request,
+        action_id,
+        target_type="model_instance",
+        target_id=model_id,
+        payload=payload.model_dump(),
     )
 
 
@@ -453,6 +485,60 @@ def set_model_active(
                 payload.active,
                 policy_decision=policy_decision,
                 request_id=getattr(request.state, "request_id", None),
+            ),
+        )
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
+@router.post("/models/{model_id}/preflight")
+def preflight_model_lifecycle(
+    request: Request,
+    model_id: str,
+    payload: ModelLifecyclePayload,
+    policy_decision: PolicyDecision = Depends(require_model_lifecycle_action),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            request,
+            store.preflight_model_operation(
+                model_id,
+                operation=payload.operation,
+                policy_decision=policy_decision,
+                previous_model_id=payload.previous_model_id,
+                override_missing_active=payload.override_missing_active,
+                reason=payload.reason,
+                request_id=getattr(request.state, "request_id", None),
+            ),
+        )
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
+@router.post("/models/{model_id}/lifecycle")
+def model_lifecycle_operation(
+    request: Request,
+    model_id: str,
+    payload: ModelLifecyclePayload,
+    policy_decision: PolicyDecision = Depends(require_model_lifecycle_action),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            request,
+            store.model_lifecycle_operation(
+                model_id,
+                operation=payload.operation,
+                policy_decision=policy_decision,
+                request_id=getattr(request.state, "request_id", None),
+                previous_model_id=payload.previous_model_id,
+                override_missing_active=payload.override_missing_active,
+                reason=payload.reason,
             ),
         )
     except (ModelRegistryError, ModelPackageValidationError) as error:

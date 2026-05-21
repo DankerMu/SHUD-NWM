@@ -181,7 +181,7 @@ uv run nhms-production validate-ops \
 
 1. **M12 后续数据合同**：为 `/segments/:segmentId` 补 station/forcing/weather/frequency-curve/run lineage 合同后接入真实 PRCP/TEMP/RH/wind/Press、forcing 小图、完整频率曲线和 lineage；继续禁止伪造未接入数据。
 2. **效果图 5/6：气象数据产品页**：把 M13 前端合同夹具升级为后端 API/OpenAPI 合同和真实 tile/query/area-stat/station-series 数据源；继续禁止伪造未接入图层。
-3. **效果图 7 后续**：在 readonly 页面基础上补后续经审计的 mutating workflow；创建/编辑/删除/发布、active model switching 仍需单独 OpenSpec/backend auth/audit 设计。
+3. **效果图 7 / M18 模型资产操作**：readonly 浏览已扩展为经 M17 RBAC、preflight、审计保护的 registry lifecycle mutation；支持 activate、deactivate、switch version、rollback version、supersede、deprecate，canonical 状态为 `inactive`/`active`/`deprecated`/`superseded`，`active_flag` 仅保留兼容。仍不支持任意模型包上传、生产对象存储 delete/upload、模型创建/编辑/发布 UI。
 4. **真实 MVT 与全国规模性能**：M16 已完成 measured deterministic MVT contract、metadata、frontend vector consumption、bounded GeoJSON compatibility guardrail 和 performance evidence；canonical `.pbf` production success 仍依赖目标环境 live PostGIS。下一步补 live PostGIS/national-data/browser proof，移除 `m16-live-postgis-national-proof` release blocker。
 5. **真实生产验证**：在目标环境跑 live auth、alert sink、rollback、真实 Slurm、真实对象存储、真实气象下载。
 6. **CLDAS 接入**：实现 adapter、授权数据质量检查、best_available 生产路径。

@@ -433,6 +433,9 @@ def validate_ops(config: ProductionOpsConfig) -> dict[str, Any]:
     audit = _audit_redaction_evidence(config, auth_rbac)
     writer.write_json(config.lane_dir / "audit_redaction.json", audit)
 
+    model_lifecycle = _model_lifecycle_drill_evidence(config)
+    writer.write_json(config.lane_dir / "model_lifecycle_drills.json", model_lifecycle)
+
     monitoring = _monitoring_alert_evidence(config)
     writer.write_json(config.lane_dir / "monitoring_alerts.json", monitoring)
 
@@ -452,6 +455,7 @@ def validate_ops(config: ProductionOpsConfig) -> dict[str, Any]:
         blockers=blockers,
         production_config=production_config,
         auth_rbac=auth_rbac,
+        model_lifecycle=model_lifecycle,
         monitoring=monitoring,
         rollback=rollback,
         dependencies=dependencies,
@@ -1183,6 +1187,65 @@ def _rollback_drill_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     }
 
 
+def _model_lifecycle_drill_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
+    del config
+    scope = {"basin_id": "deterministic_basin", "basin_version_id": "deterministic_basin_v1"}
+    drills = [
+        {
+            "drill": "bad_activation_preflight",
+            "operation": "activate",
+            "status": "blocked",
+            "model_id": "deterministic_bad_model",
+            "blockers": [{"code": "OBJECT_URI_PREFIX_INVALID"}],
+            "state_mutated": False,
+            "object_store_mutated": False,
+        },
+        {
+            "drill": "rollback_to_previous_active",
+            "operation": "rollback_version",
+            "status": "rollback",
+            "model_id": "deterministic_current_model",
+            "previous_model_id": "deterministic_previous_model",
+            "audit_history_required": True,
+            "state_mutated": True,
+            "object_store_mutated": False,
+        },
+        {
+            "drill": "blocked_deactivation_missing_active",
+            "operation": "deactivate",
+            "status": "blocked",
+            "model_id": "deterministic_current_model",
+            "blockers": [{"code": "MISSING_ACTIVE_RISK"}],
+            "state_mutated": False,
+            "object_store_mutated": False,
+        },
+        {
+            "drill": "idempotent_repeat_activation",
+            "operation": "activate",
+            "status": "already_current",
+            "model_id": "deterministic_current_model",
+            "state_mutated": False,
+            "object_store_mutated": False,
+        },
+    ]
+    return {
+        "schema": "nhms.production_closure.ops.model_lifecycle_drills.v1",
+        "status": "ready",
+        "execution_mode": "deterministic_fixture",
+        "deterministic_fixture": True,
+        "live_object_store_mutation": False,
+        "live_external_material_required": False,
+        "active_scope": scope,
+        "drills": drills,
+        "non_goals": [
+            "arbitrary_model_package_upload",
+            "production_object_store_delete",
+            "production_object_store_upload",
+        ],
+        "blockers": [],
+    }
+
+
 def _dependency_closure_evidence(config: ProductionOpsConfig) -> dict[str, Any]:
     dependencies = []
     blockers = []
@@ -1230,6 +1293,7 @@ def _summary(
     blockers: list[dict[str, Any]],
     production_config: Mapping[str, Any],
     auth_rbac: Mapping[str, Any],
+    model_lifecycle: Mapping[str, Any],
     monitoring: Mapping[str, Any],
     rollback: Mapping[str, Any],
     dependencies: Mapping[str, Any],
@@ -1239,6 +1303,7 @@ def _summary(
         and auth_rbac["live_backend_auth_executed"]
         and monitoring["live_alert_sink_delivered"]
         and rollback["live_rollback_executed"]
+        and model_lifecycle["status"] == "ready"
         and dependencies["status"] == "accepted"
         and production_config["status"] == "ready"
     )
@@ -1255,6 +1320,8 @@ def _summary(
         "auth_readiness_execution_mode": auth_rbac["auth_readiness_execution_mode"],
         "live_alert_sink_delivered": monitoring["live_alert_sink_delivered"],
         "live_rollback_executed": rollback["live_rollback_executed"],
+        "model_lifecycle_drill_status": model_lifecycle["status"],
+        "model_lifecycle_live_object_store_mutation": model_lifecycle["live_object_store_mutation"],
         "dependency_status": dependencies["status"],
         "release_blockers": blockers,
         "files": [
@@ -1263,6 +1330,7 @@ def _summary(
             "auth_rbac.json",
             "auth_release_blockers.json",
             "audit_redaction.json",
+            "model_lifecycle_drills.json",
             "monitoring_alerts.json",
             "rollback_drills.json",
             "dependency_closure.json",

@@ -110,6 +110,24 @@ uv run pytest -q \
   tests/test_openapi_drift.py
 ```
 
+Focused M18 model asset lifecycle checks:
+
+```bash
+openspec validate m18-model-asset-operations --strict --no-interactive
+uv run pytest -q tests/test_model_registration.py tests/test_model_activation_audit_integration.py
+uv run pytest -q tests/test_production_ops_validation.py tests/test_production_object_store_validation.py
+uv run pytest -q tests/test_api_contract.py tests/test_auth_policy_matrix.py
+cd apps/frontend && corepack pnpm test
+cd apps/frontend && corepack pnpm build
+```
+
+M18 mutates registry lifecycle state only. Supported operations are activate,
+deactivate, switch version, rollback version, supersede, and deprecate, guarded
+by M17 action ids and preflight/audit evidence. It does not upload arbitrary
+model packages or delete/upload production object-store assets. Production ops
+validation includes deterministic model lifecycle drills for bad activation,
+rollback, blocked deactivation, and idempotent repeat without live credentials.
+
 ## Real Slurm Smoke
 
 Use the real cluster smoke only on a host with Slurm CLI access. Keep log paths

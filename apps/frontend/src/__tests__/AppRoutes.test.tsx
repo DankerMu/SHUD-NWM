@@ -58,6 +58,7 @@ vi.mock('@/components/map/MapView', () => ({
 vi.mock('@/api/client', () => ({
   client: {
     GET: vi.fn(),
+    POST: vi.fn(),
   },
 }))
 
@@ -446,6 +447,7 @@ function modelAssetRouteFixture(overrides: Partial<ModelAsset> = {}): ModelAsset
     mesh_checksum: 'mesh-sha',
     shud_code_version: 'shud-1',
     active_flag: true,
+    lifecycle_state: 'active',
     model_package_uri: 'https://user:pass@assets.example.test/pkg?token=abc#frag',
     package_checksum: 'pkg-sha',
     manifest_uri: 's3://key:secret@nhms/private/manifest?sig=x#frag',
@@ -4392,6 +4394,108 @@ describe('App route state', () => {
     expect(screen.queryByText(/user:pass/)).not.toBeInTheDocument()
     expect(screen.queryByText(/token=abc/)).not.toBeInTheDocument()
     expect(screen.queryByText(/#frag/)).not.toBeInTheDocument()
+  })
+
+  it('runs model asset lifecycle preflight, confirmation, audit display, and refresh', async () => {
+    useAuthStore.setState({ role: 'model_admin' })
+    const model = modelAssetRouteFixture({ active_flag: false, lifecycle_state: 'inactive' })
+    const activatedModel = modelAssetRouteFixture({ active_flag: true, lifecycle_state: 'active' })
+    const page: ModelAssetPage = { items: [model], total: 1, limit: 50, offset: 0 }
+    const activePage: ModelAssetPage = { items: [activatedModel], total: 1, limit: 50, offset: 0 }
+    let activated = false
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') return { data: success(activated ? activePage : page), error: undefined } as never
+      if (path === '/api/v1/models/{model_id}') return { data: success(activated ? activatedModel : model), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+    vi.mocked(client.POST).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models/{model_id}/preflight') {
+        return {
+          data: success({
+            schema: 'nhms.model_operation_preflight.v1',
+            operation: 'activate',
+            status: 'ready',
+            model_id: model.model_id,
+            basin_version_id: model.basin_version_id,
+            current_active_model_id: null,
+            blockers: [],
+            warnings: [],
+            impact: { downstream_surfaces: ['forecast-routing', 'operator-audit'] },
+          }),
+          error: undefined,
+        } as never
+      }
+      if (path === '/api/v1/models/{model_id}/lifecycle') {
+        activated = true
+        return {
+          data: success({
+            status: 'allowed',
+            operation: 'activate',
+            model: activatedModel,
+            preflight: {
+              schema: 'nhms.model_operation_preflight.v1',
+              operation: 'activate',
+              status: 'ready',
+              model_id: model.model_id,
+              blockers: [],
+              warnings: [],
+              impact: { downstream_surfaces: ['forecast-routing'] },
+            },
+            audit_reference: { entity_type: 'model_instance', entity_id: model.model_id, log_id: 12 },
+          }),
+          error: undefined,
+        } as never
+      }
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
+    const lifecycleCard = screen.getByRole('heading', { name: '生命周期操作' }).closest('div')?.parentElement
+    expect(lifecycleCard).not.toBeNull()
+    await userEvent.click(within(lifecycleCard as HTMLElement).getByRole('button', { name: /启用/ }))
+    expect(await screen.findByText('预检通过')).toBeInTheDocument()
+    expect(screen.getByText(/forecast-routing/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /确认执行/ }))
+    expect(await screen.findByText('审计记录 12')).toBeInTheDocument()
+    await waitFor(() => expect(vi.mocked(client.GET).mock.calls.filter(([path]) => path === '/api/v1/models').length).toBeGreaterThan(1))
+  })
+
+  it('shows backend lifecycle preflight blockers without executing confirmation', async () => {
+    useAuthStore.setState({ role: 'model_admin' })
+    const model = modelAssetRouteFixture()
+    const page: ModelAssetPage = { items: [model], total: 1, limit: 50, offset: 0 }
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/models') return { data: success(page), error: undefined } as never
+      if (path === '/api/v1/models/{model_id}') return { data: success(model), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+    vi.mocked(client.POST).mockResolvedValue({
+      data: success({
+        schema: 'nhms.model_operation_preflight.v1',
+        operation: 'deactivate',
+        status: 'blocked',
+        model_id: model.model_id,
+        blockers: [{ code: 'MISSING_ACTIVE_RISK', message: 'Deactivation would leave this basin version without an active model.' }],
+        warnings: [],
+        impact: { downstream_surfaces: ['forecast-routing'] },
+      }),
+      error: undefined,
+    } as never)
+    window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
+    const lifecycleCard = screen.getByRole('heading', { name: '生命周期操作' }).closest('div')?.parentElement
+    expect(lifecycleCard).not.toBeNull()
+    await userEvent.click(within(lifecycleCard as HTMLElement).getByRole('button', { name: /停用/ }))
+    expect(await screen.findByText('预检阻断')).toBeInTheDocument()
+    expect(screen.getByText(/MISSING_ACTIVE_RISK/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /确认执行/ })).toBeDisabled()
+    expect(vi.mocked(client.POST).mock.calls.filter(([path]) => path === '/api/v1/models/{model_id}/lifecycle')).toHaveLength(0)
   })
 
   it('does not render sibling model detail when the URL-selected model detail body has a mismatched id', async () => {
