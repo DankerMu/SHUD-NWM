@@ -418,6 +418,18 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
                 json={"operation": "rollback_version", "previous_model_id": ids["candidate_a_model_id"]},
                 headers=headers,
             )
+            with psycopg_connection(integration_database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT model_id, active_flag, lifecycle_state
+                        FROM core.model_instance
+                        WHERE model_id IN (%s, %s, %s)
+                        ORDER BY model_id
+                        """,
+                        (ids["active_model_id"], ids["candidate_a_model_id"], ids["candidate_b_model_id"]),
+                    )
+                    after_stale = {row["model_id"]: dict(row) for row in cursor.fetchall()}
             allowed_preflight = client.post(
                 f"/api/v1/models/{ids['active_model_id']}/preflight",
                 json={"operation": "rollback_version", "previous_model_id": ids["candidate_b_model_id"]},
@@ -479,19 +491,6 @@ def test_m18_rollback_history_is_bound_to_current_active_epoch(
     assert allowed_preflight.json()["data"]["status"] == "ready"
     assert allowed_preflight.json()["data"]["previous_model_id"] == ids["candidate_b_model_id"]
     assert allowed_preflight.json()["data"]["restored_model_id"] == ids["candidate_b_model_id"]
-
-    with psycopg_connection(integration_database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT model_id, active_flag, lifecycle_state
-                FROM core.model_instance
-                WHERE model_id IN (%s, %s, %s)
-                ORDER BY model_id
-                """,
-                (ids["active_model_id"], ids["candidate_a_model_id"], ids["candidate_b_model_id"]),
-            )
-            after_stale = {row["model_id"]: dict(row) for row in cursor.fetchall()}
 
     assert after_stale[ids["active_model_id"]]["active_flag"] is True
     assert after_stale[ids["active_model_id"]]["lifecycle_state"] == "active"
