@@ -307,13 +307,13 @@ def test_m18_lifecycle_blocks_active_removal_invalid_transition_and_unsafe_evide
                 json={"operation": "deprecate"},
                 headers=headers,
             )
-            activate_superseded = client.post(
-                f"/api/v1/models/{ids['superseded_model_id']}/lifecycle",
+            activate_unsafe = client.post(
+                f"/api/v1/models/{ids['unsafe_model_id']}/lifecycle",
                 json={"operation": "activate"},
                 headers=headers,
             )
-            switch_superseded = client.post(
-                f"/api/v1/models/{ids['superseded_model_id']}/lifecycle",
+            switch_unsafe = client.post(
+                f"/api/v1/models/{ids['unsafe_model_id']}/lifecycle",
                 json={"operation": "switch_version"},
                 headers=headers,
             )
@@ -329,7 +329,7 @@ def test_m18_lifecycle_blocks_active_removal_invalid_transition_and_unsafe_evide
             os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
         app.dependency_overrides.pop(get_model_registry_store, None)
 
-    for response in (supersede_active, deprecate_active, activate_superseded, switch_superseded, unsafe_preflight):
+    for response in (supersede_active, deprecate_active, activate_unsafe, switch_unsafe, unsafe_preflight):
         assert response.status_code == 200, response.text
 
     assert supersede_active.json()["data"]["status"] == "blocked"
@@ -338,8 +338,8 @@ def test_m18_lifecycle_blocks_active_removal_invalid_transition_and_unsafe_evide
     assert deprecate_active.json()["data"]["status"] == "blocked"
     deprecate_codes = {item["code"] for item in deprecate_active.json()["data"]["preflight"]["blockers"]}
     assert deprecate_codes >= {"MISSING_ACTIVE_RISK", "INVALID_TRANSITION"}
-    assert activate_superseded.json()["data"]["status"] == "blocked"
-    assert switch_superseded.json()["data"]["status"] == "blocked"
+    assert activate_unsafe.json()["data"]["status"] == "blocked"
+    assert switch_unsafe.json()["data"]["status"] == "blocked"
     unsafe_data = unsafe_preflight.json()["data"]
     unsafe_codes = {item["code"] for item in unsafe_data["blockers"]}
     assert unsafe_codes >= {"SOURCE_ROOT_UNSAFE", "PACKAGE_CHECKSUM_UNVERIFIED"}
@@ -907,7 +907,13 @@ def _seed_issue_137_models(database_url: str) -> dict[str, str]:
                     ids["river_network_version_id"],
                     ids["mesh_version_id"],
                     "s3://nhms/models/it137_active_model/package/",
-                    Json({"fixture": "issue-137-active"}),
+                    Json(
+                        {
+                            "fixture": "issue-137-active",
+                            "package_checksum": "package-sha-active",
+                            "manifest_uri": "s3://nhms/models/it137_active_model/v1/manifest.json",
+                        }
+                    ),
                     ids["basins_model_id"],
                     ids["basin_version_id"],
                     ids["river_network_version_id"],
