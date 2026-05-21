@@ -18,10 +18,13 @@ from packages.common.model_registry import (
     InvalidPayloadError,
     InvalidReferenceError,
     MissingResourceError,
+    ModelLifecycleAuditPersistenceError,
     ModelLifecycleOperation,
     ModelRegistryError,
     PsycopgModelRegistryStore,
     RiverSegmentGeoJsonBudgetError,
+    sanitize_model_detail_payload,
+    sanitize_model_list_payload,
 )
 from workers.model_registry.validator import ModelPackageValidationError, validate_model_package_uri
 
@@ -243,6 +246,13 @@ def require_model_lifecycle_action(
 
 
 def _handle_registry_error(error: Exception) -> ApiError:
+    if isinstance(error, ModelLifecycleAuditPersistenceError):
+        return ApiError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="MODEL_LIFECYCLE_AUDIT_PERSISTENCE_FAILED",
+            message="Model lifecycle audit evidence could not be persisted.",
+            details=error.result,
+        )
     if isinstance(error, DuplicateResourceError):
         return ApiError(
             status_code=status.HTTP_409_CONFLICT,
@@ -577,12 +587,12 @@ def list_models(
     try:
         return _ok(
             request,
-            store.list_models(
+            sanitize_model_list_payload(store.list_models(
                 basin_version_id=basin_version_id,
                 active=active_filter,
                 limit=limit,
                 offset=offset,
-            ),
+            )),
         )
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
@@ -597,7 +607,7 @@ def get_model(
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return _ok(request, store.get_model(model_id))
+        return _ok(request, sanitize_model_detail_payload(store.get_model(model_id)))
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:

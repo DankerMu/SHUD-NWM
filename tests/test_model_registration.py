@@ -1628,15 +1628,15 @@ async def test_get_basins_model_detail_returns_asset_metadata(fake_store: FakeMo
         "calibration_version_id": "basin_cal_v01",
         "segment_count": 2,
         "mesh_uri": "s3://nhms/models/inactive_model/v1/package/basin_a.sp.mesh",
-        "mesh_checksum": "mesh-sha-1",
         "model_package_uri": "s3://nhms/models/inactive_model/package/",
-        "package_checksum": "package-sha-1",
         "active_flag": False,
         "manifest_uri": "s3://nhms/models/inactive_model/v1/manifest.json",
-        "source_inventory_checksum": "inventory-sha-1",
         "basin_slug": "basin-a",
         "shud_input_name": "basin_a",
     }.items() <= data.items()
+    assert data["mesh_checksum"] is None
+    assert data["package_checksum"] is None
+    assert data["source_inventory_checksum"] is None
 
 
 @pytest.mark.asyncio
@@ -2524,6 +2524,130 @@ def test_preflight_model_operation_uses_policy_roles_for_missing_active_override
     assert sys_admin_preflight["roles"] == ["sys_admin"]
 
 
+def test_model_lifecycle_non_rollback_ignores_idempotent_rollback_retry_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTransaction:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    superseded_model = {
+        "model_id": "rolled_back_from",
+        "model_name": "rolled_back_from",
+        "basin_id": "basin",
+        "basin_name": "Basin",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "basin_rivnet_v01",
+        "mesh_version_id": "basin_mesh_v01",
+        "calibration_version_id": "basin_cal_v01",
+        "shud_code_version": "2.0",
+        "model_package_uri": "s3://nhms/models/rolled_back_from/package/",
+        "package_checksum": "package-sha-1",
+        "resource_profile": {"package_checksum": "package-sha-1"},
+        "active_flag": False,
+        "lifecycle_state": "superseded",
+        "segment_count": 1,
+    }
+    current_active = {
+        **superseded_model,
+        "model_id": "current_active",
+        "model_name": "current_active",
+        "model_package_uri": "s3://nhms/models/current_active/package/",
+        "active_flag": True,
+        "lifecycle_state": "active",
+    }
+    rows = {
+        superseded_model["model_id"]: superseded_model,
+        current_active["model_id"]: current_active,
+    }
+    idempotent_retry_calls: list[dict[str, Any]] = []
+
+    def fetch_model_row(
+        _self: PsycopgModelRegistryStore,
+        _cursor: object,
+        model_id: str,
+        *,
+        for_update: bool,
+    ) -> dict[str, Any] | None:
+        row = rows.get(model_id)
+        return dict(row) if row is not None else None
+
+    def update_lifecycle_state(
+        _self: PsycopgModelRegistryStore,
+        _cursor: object,
+        model_id: str,
+        lifecycle_state: str,
+    ) -> dict[str, Any]:
+        rows[model_id] = {
+            **rows[model_id],
+            "lifecycle_state": lifecycle_state,
+            "active_flag": lifecycle_state == "active",
+        }
+        return dict(rows[model_id])
+
+    def fetch_idempotent_retry(
+        _self: PsycopgModelRegistryStore,
+        _cursor: object,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        idempotent_retry_calls.append(kwargs)
+        return {
+            "trusted": True,
+            "prior_audit_log_id": 7,
+            "matched_previous_model_id": current_active["model_id"],
+        }
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_lock_basin_version_scope", lambda *_args: None)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_fetch_model_lifecycle_row", fetch_model_row)
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_active_model_for_scope",
+        lambda _self, _cursor, _basin_version_id, *, for_update: dict(current_active),
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_trustworthy_rollback_history",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_idempotent_rollback_retry_history",
+        fetch_idempotent_retry,
+    )
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_update_model_lifecycle_state", update_lifecycle_state)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_insert_model_lifecycle_audit", lambda *_args, **_kwargs: 42)
+    store = PsycopgModelRegistryStore("postgresql://example")
+    decision = evaluate_policy(
+        AuthContext(
+            actor_id="model-admin",
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.deactivate",
+        target_type="model_instance",
+        target_id="rolled_back_from",
+    )
+
+    result = store.model_lifecycle_operation(
+        "rolled_back_from",
+        operation="deprecate",
+        policy_decision=decision,
+        previous_model_id="current_active",
+    )
+
+    assert idempotent_retry_calls == []
+    assert result["status"] == "allowed"
+    assert result["operation"] == "deprecate"
+    assert result["model"]["model_id"] == "rolled_back_from"
+    assert result["model"]["lifecycle_state"] == "deprecated"
+    assert result["audit_reference"]["log_id"] == 42
+
+
 def test_set_model_active_missing_does_not_write_legacy_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2621,10 +2745,10 @@ def test_get_model_joins_asset_metadata_and_lineage(
     assert detail["basin_name"] == "Basin A"
     assert detail["segment_count"] == 2
     assert detail["mesh_uri"] == "s3://nhms/models/basins_basin_a_shud/vbasins/package/alias-a.sp.mesh"
-    assert detail["mesh_checksum"] == "mesh-sha-1"
-    assert detail["package_checksum"] == "package-sha-1"
+    assert detail["mesh_checksum"] is None
+    assert detail["package_checksum"] is None
     assert detail["manifest_uri"] == "s3://nhms/models/basins_basin_a_shud/vbasins/manifest.json"
-    assert detail["source_inventory_checksum"] == "inventory-sha-1"
+    assert detail["source_inventory_checksum"] is None
     assert detail["basin_slug"] == "basin-a"
     assert detail["shud_input_name"] == "alias-a"
     assert detail["source_path"] == "//nhms/source-path"
@@ -2638,14 +2762,23 @@ def test_get_model_joins_asset_metadata_and_lineage(
     assert detail["resource_profile"]["source_lineage"]["uris"] == [
         "s3://nhms/sources/nested",
         "//nhms/protocol-relative",
-        "/volume/data/nwm/Basins/local-source",
+        None,
     ]
     assert detail["resource_profile"]["source_lineage"]["label"] == "s3 path label, not a URI"
-    assert detail["resource_profile"]["source_lineage"]["local_path"] == "/volume/data/nwm/Basins/ordinary"
-    public_profile_json = json.dumps(detail["resource_profile"])
-    assert "token=secret" not in public_profile_json
-    assert "user:pass@" not in public_profile_json
-    assert "#frag" not in public_profile_json
+    assert detail["resource_profile"]["source_lineage"]["local_path"] is None
+    public_detail_json = json.dumps(detail)
+    for token in (
+        "/volume/data",
+        "C:\\",
+        "file://",
+        "token=secret",
+        "user:pass@",
+        "#frag",
+        "package-sha-1",
+        "inventory-sha-1",
+        "mesh-sha-1",
+    ):
+        assert token not in public_detail_json
     assert "mesh_properties_json" not in detail
 
 
@@ -3153,7 +3286,7 @@ def test_list_models_returns_public_safe_resource_profile(
     assert item["model_package_uri"] == "s3://nhms/models/basins_basin_a_shud/package/"
     assert item["resource_profile"]["manifest_uri"] == "//nhms/models/basins_basin_a_shud/manifest.json"
     assert item["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
-    assert item["resource_profile"]["source_path"] == "/volume/data/nwm/Basins/basin-a"
+    assert item["resource_profile"]["source_path"] is None
     assert item["resource_profile"]["resolved_source_path"] == "//nhms/resolved-source-path"
     assert item["resource_profile"]["nested"] == [
         {"uri": "s3://nhms/nested"},
@@ -3161,9 +3294,18 @@ def test_list_models_returns_public_safe_resource_profile(
         "normal string",
     ]
     public_item_json = json.dumps(item)
-    assert "token=secret" not in public_item_json
-    assert "user:pass@" not in public_item_json
-    assert "#frag" not in public_item_json
+    for token in (
+        "/volume/data",
+        "C:\\",
+        "file://",
+        "token=secret",
+        "user:pass@",
+        "#frag",
+        "package-sha-1",
+        "inventory-sha-1",
+        "mesh-sha-1",
+    ):
+        assert token not in public_item_json
 
 
 def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:

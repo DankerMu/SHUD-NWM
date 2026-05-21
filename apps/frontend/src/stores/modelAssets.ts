@@ -890,14 +890,18 @@ export const useModelAssetsStore = create<ModelAssetsState>((set) => {
       set({ operationLoading: true, operationError: null, operationResult: null })
       try {
         const result = await postModelLifecycle(modelId, payload)
-        const normalizedModel = normalizeModelAsset(result.model)
+        const updatedModels = [result.model, result.previous_model].filter((model): model is ModelAsset => Boolean(model))
+        const normalizedById = new Map(updatedModels.map((model) => [model.model_id, normalizeModelAsset(model)]))
         set((state) => ({
           operationLoading: false,
           operationResult: result,
           operationPreflight: result.preflight,
           operationError: null,
-          selectedModel: state.selectedModel?.model_id === normalizedModel.model_id ? normalizedModel : state.selectedModel,
-          models: state.models.map((model) => (model.model_id === normalizedModel.model_id ? normalizedModel : model)),
+          selectedModel:
+            state.selectedModel && normalizedById.has(state.selectedModel.model_id)
+              ? normalizedById.get(state.selectedModel.model_id) ?? state.selectedModel
+              : state.selectedModel,
+          models: state.models.map((model) => normalizedById.get(model.model_id) ?? model),
         }))
         return result
       } catch (error) {

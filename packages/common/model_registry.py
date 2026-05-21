@@ -39,6 +39,15 @@ class InvalidPayloadError(ModelRegistryError):
     """Raised when a payload is structurally invalid."""
 
 
+class ModelLifecycleAuditPersistenceError(ModelRegistryError):
+    """Raised when lifecycle audit persistence fails after a prepared mutation."""
+
+    def __init__(self, result: Mapping[str, Any], cause: BaseException) -> None:
+        super().__init__("Model lifecycle audit evidence could not be persisted.")
+        self.result = dict(result)
+        self.__cause__ = cause
+
+
 ModelLifecycleState = Literal["inactive", "active", "deprecated", "superseded"]
 ModelLifecycleOperation = Literal[
     "activate",
@@ -777,113 +786,161 @@ class PsycopgModelRegistryStore:
         if decision.decision != "allow":
             raise ModelRegistryError(decision.reason)
 
-        with self._transaction() as cursor:
-            unlocked_model = self._fetch_model_lifecycle_row(cursor, model_id, for_update=False)
-            if unlocked_model is None:
-                raise MissingResourceError(f"model_id not found: {model_id}")
-            self._lock_basin_version_scope(cursor, str(unlocked_model["basin_version_id"]))
-            unlocked_current_active = self._fetch_active_model_for_scope(
-                cursor,
-                str(unlocked_model["basin_version_id"]),
-                for_update=False,
-            )
-            unlocked_previous = (
-                self._fetch_model_lifecycle_row(cursor, previous_model_id, for_update=False)
-                if previous_model_id is not None
-                else None
-            )
-            if previous_model_id is not None and unlocked_previous is None:
-                raise MissingResourceError(f"model_id not found: {previous_model_id}")
-            lock_ids = {
-                str(unlocked_model["model_id"]),
-                *(
-                    [str(unlocked_current_active["model_id"])]
+        try:
+            with self._transaction() as cursor:
+                unlocked_model = self._fetch_model_lifecycle_row(cursor, model_id, for_update=False)
+                if unlocked_model is None:
+                    raise MissingResourceError(f"model_id not found: {model_id}")
+                self._lock_basin_version_scope(cursor, str(unlocked_model["basin_version_id"]))
+                unlocked_current_active = self._fetch_active_model_for_scope(
+                    cursor,
+                    str(unlocked_model["basin_version_id"]),
+                    for_update=False,
+                )
+                unlocked_previous = (
+                    self._fetch_model_lifecycle_row(cursor, previous_model_id, for_update=False)
+                    if previous_model_id is not None
+                    else None
+                )
+                if previous_model_id is not None and unlocked_previous is None:
+                    raise MissingResourceError(f"model_id not found: {previous_model_id}")
+                lock_ids = {
+                    str(unlocked_model["model_id"]),
+                    *(
+                        [str(unlocked_current_active["model_id"])]
+                        if unlocked_current_active is not None
+                        else []
+                    ),
+                    *([str(unlocked_previous["model_id"])] if unlocked_previous is not None else []),
+                }
+                locked_rows: dict[str, dict[str, Any]] = {}
+                for locked_model_id in sorted(lock_ids):
+                    locked = self._fetch_model_lifecycle_row(cursor, locked_model_id, for_update=True)
+                    if locked is None:
+                        raise MissingResourceError(f"model_id not found: {locked_model_id}")
+                    locked_rows[locked_model_id] = locked
+                model = locked_rows[str(unlocked_model["model_id"])]
+                current_active = (
+                    locked_rows.get(str(unlocked_current_active["model_id"]))
                     if unlocked_current_active is not None
-                    else []
-                ),
-                *([str(unlocked_previous["model_id"])] if unlocked_previous is not None else []),
-            }
-            locked_rows: dict[str, dict[str, Any]] = {}
-            for locked_model_id in sorted(lock_ids):
-                locked = self._fetch_model_lifecycle_row(cursor, locked_model_id, for_update=True)
-                if locked is None:
-                    raise MissingResourceError(f"model_id not found: {locked_model_id}")
-                locked_rows[locked_model_id] = locked
-            model = locked_rows[str(unlocked_model["model_id"])]
-            current_active = (
-                locked_rows.get(str(unlocked_current_active["model_id"]))
-                if unlocked_current_active is not None
-                else None
-            )
-            previous = locked_rows.get(str(unlocked_previous["model_id"])) if unlocked_previous is not None else None
-            rollback_history = self._fetch_trustworthy_rollback_history(
-                cursor,
-                current_model=model,
-                previous_model_id=previous_model_id,
-            )
-            preflight = self._build_model_operation_preflight(
-                model=model,
-                current_active=current_active,
-                operation=operation,
-                action_id=action_id,
-                actor_id=decision.actor_id,
-                request_id=request_id,
-                previous_model=previous,
-                rollback_history=rollback_history,
-                override_missing_active=override_missing_active,
-                reason=reason,
-                actor_roles=decision.roles,
-            )
-            if preflight["status"] == "blocked":
-                audit_id = self._insert_model_lifecycle_audit(
+                    else None
+                )
+                previous = (
+                    locked_rows.get(str(unlocked_previous["model_id"])) if unlocked_previous is not None else None
+                )
+                rollback_history = self._fetch_trustworthy_rollback_history(
+                    cursor,
+                    current_model=model,
+                    previous_model_id=previous_model_id,
+                )
+                idempotent_rollback_history = (
+                    self._fetch_idempotent_rollback_retry_history(
+                        cursor,
+                        model=model,
+                        current_active=current_active,
+                        previous_model_id=previous_model_id,
+                    )
+                    if operation == "rollback_version"
+                    else None
+                )
+                preflight = self._build_model_operation_preflight(
+                    model=model,
+                    current_active=current_active,
+                    operation=operation,
+                    action_id=action_id,
+                    actor_id=decision.actor_id,
+                    request_id=request_id,
+                    previous_model=previous,
+                    rollback_history=rollback_history,
+                    override_missing_active=override_missing_active,
+                    reason=reason,
+                    actor_roles=decision.roles,
+                )
+                if idempotent_rollback_history is not None:
+                    preflight["status"] = "ready"
+                    preflight["blockers"] = []
+                    preflight["warnings"] = [
+                        *list(preflight.get("warnings") or []),
+                        {
+                            "code": "ROLLBACK_ALREADY_CURRENT",
+                            "message": "Rollback retry is already reflected by the current active model.",
+                        },
+                    ]
+                    preflight["prior_audit_log_id"] = idempotent_rollback_history.get("prior_audit_log_id")
+                    preflight["rollback_history"] = _rollback_history_preflight_reference(idempotent_rollback_history)
+                    return {
+                        "status": "already_current",
+                        "operation": operation,
+                        "model": _model_public_projection(current_active),
+                        "previous_model": _model_public_projection(model),
+                        "preflight": preflight,
+                        "audit_reference": None,
+                    }
+                if preflight["status"] == "blocked":
+                    audit_id = self._insert_model_lifecycle_audit(
+                        cursor,
+                        model=model,
+                        updated=model,
+                        operation=operation,
+                        outcome="blocked",
+                        policy_decision=decision,
+                        request_id=request_id,
+                        preflight=preflight,
+                        previous_model=current_active,
+                        reason=reason,
+                    )
+                    return {
+                        "status": "blocked",
+                        "operation": operation,
+                        "model": _model_public_projection(model),
+                        "preflight": preflight,
+                        "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
+                    }
+
+                transition = self._apply_model_lifecycle_transition(
                     cursor,
                     model=model,
-                    updated=model,
+                    current_active=current_active,
                     operation=operation,
-                    outcome="blocked",
-                    policy_decision=decision,
-                    request_id=request_id,
-                    preflight=preflight,
-                    previous_model=current_active,
-                    reason=reason,
+                    previous_model=previous,
                 )
+                try:
+                    audit_id = self._insert_model_lifecycle_audit(
+                        cursor,
+                        model=model,
+                        updated=transition["model"],
+                        operation=operation,
+                        outcome=transition["outcome"],
+                        policy_decision=decision,
+                        request_id=request_id,
+                        preflight=preflight,
+                        previous_model=transition.get("previous_model"),
+                        reason=reason,
+                    )
+                except Exception as audit_error:
+                    raise ModelLifecycleAuditPersistenceError(
+                        _lifecycle_audit_persistence_failure_result(
+                            model=model,
+                            current_active=current_active,
+                            operation=operation,
+                            preflight=preflight,
+                        ),
+                        audit_error,
+                    ) from audit_error
                 return {
-                    "status": "blocked",
+                    "status": transition["outcome"],
                     "operation": operation,
-                    "model": _model_public_projection(model),
+                    "model": _model_public_projection(transition["model"]),
+                    "previous_model": (
+                        _model_public_projection(transition["previous_model"])
+                        if transition.get("previous_model")
+                        else None
+                    ),
                     "preflight": preflight,
                     "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
                 }
-
-            transition = self._apply_model_lifecycle_transition(
-                cursor,
-                model=model,
-                current_active=current_active,
-                operation=operation,
-                previous_model=previous,
-            )
-            audit_id = self._insert_model_lifecycle_audit(
-                cursor,
-                model=model,
-                updated=transition["model"],
-                operation=operation,
-                outcome=transition["outcome"],
-                policy_decision=decision,
-                request_id=request_id,
-                preflight=preflight,
-                previous_model=transition.get("previous_model"),
-                reason=reason,
-            )
-            return {
-                "status": transition["outcome"],
-                "operation": operation,
-                "model": _model_public_projection(transition["model"]),
-                "previous_model": (
-                    _model_public_projection(transition["previous_model"]) if transition.get("previous_model") else None
-                ),
-                "preflight": preflight,
-                "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
-            }
+        except ModelLifecycleAuditPersistenceError as error:
+            return error.result
 
     def list_models(
         self,
@@ -1233,6 +1290,54 @@ class PsycopgModelRegistryStore:
         row["matched_previous_model_id"] = previous_ref.get("model_id")
         if not trusted:
             row["stale_reason"] = "latest_current_epoch_previous_mismatch"
+        return row
+
+    def _fetch_idempotent_rollback_retry_history(
+        self,
+        cursor: Any,
+        *,
+        model: Mapping[str, Any],
+        current_active: Mapping[str, Any] | None,
+        previous_model_id: str | None,
+    ) -> dict[str, Any] | None:
+        if current_active is None or previous_model_id is None:
+            return None
+        if str(current_active.get("model_id")) != str(previous_model_id):
+            return None
+        if str(current_active.get("basin_version_id")) != str(model.get("basin_version_id")):
+            return None
+        if not bool(current_active.get("active_flag")) or _canonical_lifecycle_state(current_active) != "active":
+            return None
+        if bool(model.get("active_flag")) or _canonical_lifecycle_state(model) not in {"inactive", "superseded"}:
+            return None
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT log_id, action, entity_id, details, created_at
+            FROM ops.audit_log
+            WHERE entity_type = 'model_instance'
+              AND entity_id = %s
+              AND action = 'models.rollback_version'
+              AND details->>'operation' = 'rollback_version'
+              AND details->>'outcome' = 'rollback'
+              AND details->>'basin_version_id' = %s
+              AND details->'previous_model'->>'model_id' = %s
+              AND details->'updated_model'->>'model_id' = %s
+            ORDER BY created_at DESC, log_id DESC
+            LIMIT 1
+            """,
+            (
+                str(model["model_id"]),
+                str(model["basin_version_id"]),
+                str(model["model_id"]),
+                str(previous_model_id),
+            ),
+        )
+        if row is None:
+            return None
+        row["trusted"] = True
+        row["prior_audit_log_id"] = row.get("log_id")
+        row["matched_previous_model_id"] = previous_model_id
         return row
 
     def _build_model_operation_preflight(
@@ -1626,6 +1731,16 @@ class PsycopgModelRegistryStore:
         return _PsycopgTransaction(self.database_url)
 
 
+def sanitize_model_list_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    result["items"] = [_model_public_projection(item) for item in list(result.get("items") or [])]
+    return result
+
+
+def sanitize_model_detail_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return _model_asset_detail(payload)
+
+
 BASINS_AUDIT_LINEAGE_KEYS = (
     "basin_slug",
     "shud_input_name",
@@ -1700,21 +1815,31 @@ def _model_asset_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     )
 
     for key in MODEL_ASSET_LINEAGE_KEYS:
-        detail[key] = _first_non_empty(resource_profile.get(key), mesh_properties.get(key))
+        detail[key] = _first_non_empty(resource_profile.get(key), mesh_properties.get(key), detail.get(key))
     for key in MODEL_ASSET_URI_KEYS:
         if detail.get(key) not in (None, ""):
-            detail[key] = _sanitize_audit_uri(detail[key])
+            detail[key] = _sanitize_public_json_value(detail[key])
     for key in MODEL_ASSET_URI_OR_PATH_KEYS:
-        if detail.get(key) not in (None, "") and _is_uri_like(detail[key]):
-            detail[key] = _sanitize_audit_uri(detail[key])
+        if detail.get(key) not in (None, ""):
+            detail[key] = _sanitize_public_json_value(detail[key])
 
     model_name = _first_non_empty(
         resource_profile.get("model_name"),
         resource_profile.get("shud_input_name"),
+        detail.get("model_name"),
         detail.get("model_id"),
     )
     detail["model_name"] = str(model_name) if model_name is not None else None
     detail["segment_count"] = int(detail["segment_count"]) if detail.get("segment_count") is not None else None
+    for key in (
+        "package_checksum",
+        "source_inventory_checksum",
+        "mesh_checksum",
+        "basin_checksum",
+        "river_network_checksum",
+    ):
+        if key in detail:
+            detail[key] = None
     return detail
 
 
@@ -1747,23 +1872,75 @@ def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     )
     for key in MODEL_ASSET_URI_KEYS:
         if detail.get(key) not in (None, ""):
-            detail[key] = _sanitize_audit_uri(detail[key])
+            detail[key] = _sanitize_public_json_value(detail[key])
     for key in MODEL_ASSET_URI_OR_PATH_KEYS:
-        if detail.get(key) not in (None, "") and _is_uri_like(detail[key]):
-            detail[key] = _sanitize_audit_uri(detail[key])
+        if detail.get(key) not in (None, ""):
+            detail[key] = _sanitize_public_json_value(detail[key])
+    for key in (
+        "package_checksum",
+        "source_inventory_checksum",
+        "mesh_checksum",
+        "basin_checksum",
+        "river_network_checksum",
+    ):
+        if key in detail:
+            detail[key] = None
     return detail
 
 
 def _sanitize_public_json_value(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {key: _sanitize_public_json_value(child) for key, child in value.items()}
+        sanitized: dict[str, Any] = {}
+        for key, child in value.items():
+            if _is_sensitive_public_json_key(key):
+                sanitized[key] = None
+            else:
+                sanitized[key] = _sanitize_public_json_value(child)
+        return sanitized
     if isinstance(value, list):
         return [_sanitize_public_json_value(child) for child in value]
     if isinstance(value, tuple):
         return [_sanitize_public_json_value(child) for child in value]
-    if isinstance(value, str) and _is_uri_like(value):
-        return _sanitize_audit_uri(value)
+    if isinstance(value, str):
+        if _is_public_sensitive_path_or_file_uri(value):
+            return None
+        if _is_uri_like(value):
+            return _sanitize_audit_uri(value)
     return value
+
+
+def _is_sensitive_public_json_key(key: str) -> bool:
+    lowered = key.lower()
+    if lowered in {
+        "package_checksum",
+        "source_inventory_checksum",
+        "mesh_checksum",
+        "basin_checksum",
+        "river_network_checksum",
+        "stored_manifest_package_checksum",
+    }:
+        return True
+    return lowered.endswith("_checksum") or lowered.endswith("checksum")
+
+
+def _is_public_sensitive_path_or_file_uri(value: str) -> bool:
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() == "file":
+        return True
+    if re.match(r"^[a-zA-Z]:[\\/]", value):
+        return True
+    if value.startswith("\\\\"):
+        return True
+    normalized = (parsed.path if parsed.scheme else value).replace("\\", "/")
+    if normalized.startswith("/volume/"):
+        return True
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"/", ""}]
+    for index, part in enumerate(parts):
+        if part == "data" and index + 1 < len(parts) and parts[index + 1] == "Basins":
+            return True
+        if part == "Basins" and index > 0 and parts[index - 1] == "data":
+            return True
+    return False
 
 
 def _json_mapping(value: Any) -> dict[str, Any]:
@@ -1786,6 +1963,32 @@ def _first_non_empty(*values: Any) -> Any:
 
 def _preflight_blocker(code: str, message: str) -> dict[str, str]:
     return {"code": code, "message": message}
+
+
+def _lifecycle_audit_persistence_failure_result(
+    *,
+    model: Mapping[str, Any],
+    current_active: Mapping[str, Any] | None,
+    operation: ModelLifecycleOperation,
+    preflight: Mapping[str, Any],
+) -> dict[str, Any]:
+    blocked_preflight = dict(preflight)
+    blocked_preflight["status"] = "blocked"
+    blocked_preflight["blockers"] = [
+        *list(preflight.get("blockers") or []),
+        _preflight_blocker(
+            "LIFECYCLE_AUDIT_PERSISTENCE_FAILED",
+            "Lifecycle audit evidence could not be persisted; mutation was rolled back.",
+        ),
+    ]
+    return {
+        "status": "blocked",
+        "operation": operation,
+        "model": _model_public_projection(model),
+        "previous_model": _model_public_projection(current_active) if current_active is not None else None,
+        "preflight": blocked_preflight,
+        "audit_reference": None,
+    }
 
 
 def _preflight_warning(code: str, message: str) -> dict[str, str]:

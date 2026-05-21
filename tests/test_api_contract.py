@@ -291,10 +291,19 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
     assert {item["model_id"] for item in data["items"]} == {"active_model", "inactive_model"}
     inactive_item = next(item for item in data["items"] if item["model_id"] == "inactive_model")
     assert inactive_item["resource_profile"]["manifest_uri"] == "s3://nhms/models/inactive_model/vbasins/manifest.json"
-    public_listing_profile_json = json.dumps(inactive_item["resource_profile"])
-    assert "token=secret" not in public_listing_profile_json
-    assert "user:pass@" not in public_listing_profile_json
-    assert "#frag" not in public_listing_profile_json
+    public_listing_json = json.dumps(inactive_item)
+    for token in (
+        "/volume/data",
+        "C:\\",
+        "file://",
+        "token=secret",
+        "user:pass@",
+        "#frag",
+        "package-sha-1",
+        "inventory-sha-1",
+        "mesh-sha-1",
+    ):
+        assert token not in public_listing_json
 
     spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
     list_models = spec["paths"]["/api/v1/models"]["get"]
@@ -333,30 +342,39 @@ def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
         "calibration_version_id": "calibration_v1",
         "segment_count": 2,
         "mesh_uri": "s3://nhms/models/inactive_model/vbasins/package/alias-a.sp.mesh",
-        "mesh_checksum": "mesh-sha-1",
         "model_package_uri": "s3://nhms/models/inactive_model/package/",
-        "package_checksum": "package-sha-1",
         "active_flag": False,
         "manifest_uri": "s3://nhms/models/inactive_model/vbasins/manifest.json",
-        "source_inventory_checksum": "inventory-sha-1",
         "basin_slug": "basin-a",
         "shud_input_name": "alias-a",
-        "source_path": "/volume/data/nwm/Basins/basin-a",
-        "resolved_source_path": "/volume/data/nwm/Basins/basin-a",
         "source_uri": "s3://nhms/sources/basin-a",
         "source_is_symlink": False,
     }.items() <= data.items()
+    assert data["mesh_checksum"] is None
+    assert data["package_checksum"] is None
+    assert data["source_inventory_checksum"] is None
+    assert data["source_path"] is None
+    assert data["resolved_source_path"] is None
     assert data["resource_profile"]["manifest_uri"] == "s3://nhms/models/inactive_model/vbasins/manifest.json"
     assert data["resource_profile"]["source_uri"] == "s3://nhms/sources/basin-a"
     assert data["resource_profile"]["lineage"]["source_uris"] == [
         "s3://nhms/sources/nested",
-        "/volume/data/nwm/Basins/local-source",
+        None,
     ]
     assert data["resource_profile"]["lineage"]["note"] == "s3 label only"
-    public_profile_json = json.dumps(data["resource_profile"])
-    assert "token=secret" not in public_profile_json
-    assert "user:pass@" not in public_profile_json
-    assert "#frag" not in public_profile_json
+    public_detail_json = json.dumps(data)
+    for token in (
+        "/volume/data",
+        "C:\\",
+        "file://",
+        "token=secret",
+        "user:pass@",
+        "#frag",
+        "package-sha-1",
+        "inventory-sha-1",
+        "mesh-sha-1",
+    ):
+        assert token not in public_detail_json
 
     assert missing_response.status_code == 404
     assert missing_response.json()["error"]["code"] == "MODEL_REGISTRY_NOT_FOUND"
