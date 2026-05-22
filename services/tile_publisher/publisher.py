@@ -107,13 +107,13 @@ class TilePublisher:
         if not _has_table(session, "map", "tile_layer"):
             raise PublishError("DELIVERY_SCHEMA_MISSING", "map.tile_layer is required for tile publication.")
 
+        cycle_quality = self._cycle_display_quality_state(session, cycle_id)
         runs = self._discover_publishable_runs(session, cycle_id)
         if not runs:
-            quality_state = self._cycle_display_quality_state(session, cycle_id)
             raise PublishError(
                 "NO_PUBLISHABLE_PRODUCTS",
                 f"No publishable flood return-period products found for cycle_id={cycle_id}.",
-                {"cycle_id": cycle_id, **quality_state},
+                {"cycle_id": cycle_id, **cycle_quality},
             )
 
         layers: list[dict[str, Any]] = []
@@ -144,9 +144,9 @@ class TilePublisher:
                 "cycle_id": cycle_id,
                 "published_basins": len(runs),
                 "source_run_ids": [str(run["run_id"]) for run in runs],
-                "quality_state": "ready",
-                "unavailable_products": [],
-                "residual_blockers": [],
+                "quality_state": "ready" if cycle_quality["quality_state"] == "ready" else "degraded",
+                "unavailable_products": list(cycle_quality["unavailable_products"]),
+                "residual_blockers": list(cycle_quality["residual_blockers"]),
             },
         )
 
@@ -178,12 +178,20 @@ class TilePublisher:
             where_clauses.append("h.cycle_time = :cycle_time")
             params["cycle_time"] = cycle["cycle_time"]
 
+        quality_flags_expr = (
+            "GROUP_CONCAT(DISTINCT r.quality_flag)"
+            if session.get_bind().dialect.name == "sqlite"
+            else "STRING_AGG(DISTINCT r.quality_flag, ',')"
+        )
         rows = session.execute(
             text(
                 f"""
                 SELECT h.run_id, h.scenario_id, h.model_id, h.basin_version_id, h.source_id, h.cycle_time,
                        COUNT(r.river_segment_id) AS result_rows,
-                       COUNT(DISTINCT r.river_network_version_id || '::' || r.river_segment_id) AS segment_count
+                       SUM(CASE WHEN r.return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
+                       SUM(CASE WHEN r.warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows,
+                       COUNT(DISTINCT r.river_network_version_id || '::' || r.river_segment_id) AS segment_count,
+                       {quality_flags_expr} AS quality_flags
                 FROM hydro.hydro_run h
                 JOIN flood.return_period_result r ON r.run_id = h.run_id
                 WHERE {' AND '.join(where_clauses)}
@@ -194,7 +202,11 @@ class TilePublisher:
             ),
             params,
         ).mappings()
-        return [dict(row) for row in rows if int(row["result_rows"] or 0) > 0]
+        return [
+            dict(row)
+            for row in rows
+            if _publish_run_quality_state(dict(row)) == "ready"
+        ]
 
     def _cycle_display_quality_state(self, session: Session, cycle_id: str) -> dict[str, Any]:
         cycle = _cycle_filter(cycle_id)
@@ -226,47 +238,67 @@ class TilePublisher:
         params: dict[str, Any] = {"source_id": cycle["source_id"].lower()}
         time_clause: str
         if session.get_bind().dialect.name == "sqlite":
-            time_clause = "strftime('%Y%m%d%H', cycle_time) = :compact_time"
+            time_clause = "strftime('%Y%m%d%H', h.cycle_time) = :compact_time"
             params["compact_time"] = cycle["compact_time"]
         else:
-            time_clause = "cycle_time = :cycle_time"
+            time_clause = "h.cycle_time = :cycle_time"
             params["cycle_time"] = cycle["cycle_time"]
-        rows = session.execute(
+        error_code_select = "h.error_code" if "error_code" in hydro_columns else "NULL AS error_code"
+        error_message_select = "h.error_message" if "error_message" in hydro_columns else "NULL AS error_message"
+        error_code_group = "h.error_code" if "error_code" in hydro_columns else "NULL"
+        error_message_group = "h.error_message" if "error_message" in hydro_columns else "NULL"
+        rows = list(session.execute(
             text(
                 f"""
-                SELECT run_id, model_id, status, error_code, error_message
-                FROM hydro.hydro_run
-                WHERE lower(source_id) = :source_id
+                SELECT h.run_id, h.model_id, h.status, {error_code_select}, {error_message_select},
+                       COUNT(r.river_segment_id) AS result_rows,
+                       SUM(CASE WHEN r.return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
+                       SUM(CASE WHEN r.warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows
+                FROM hydro.hydro_run h
+                LEFT JOIN flood.return_period_result r
+                  ON r.run_id = h.run_id
+                 AND r.max_over_window = true
+                WHERE lower(h.source_id) = :source_id
                   AND {time_clause}
-                ORDER BY run_id
+                GROUP BY h.run_id, h.model_id, h.status, {error_code_group}, {error_message_group}
+                ORDER BY h.run_id
                 """
             ),
             params,
-        ).mappings()
-        blockers = [
-            {
-                "code": "DISPLAY_PRODUCT_UNAVAILABLE",
-                "state": "unavailable",
-                "run_id": row["run_id"],
-                "model_id": row.get("model_id"),
-                "status": row.get("status"),
-                "error_code": row.get("error_code"),
-                "residual_risk": row.get("error_message")
-                or "No max-over-window return-period rows are publishable for this run.",
-            }
-            for row in rows
-        ]
-        if not blockers:
+        ).mappings())
+        blockers = []
+        unavailable_products: set[str] = set()
+        for row in rows:
+            if _publish_run_quality_state(dict(row)) == "ready":
+                continue
+            code = _display_blocker_code(row)
+            unavailable_products.update(_display_unavailable_products(code))
             blockers.append(
+                {
+                    "code": code,
+                    "state": "unavailable",
+                    "run_id": row["run_id"],
+                    "model_id": row.get("model_id"),
+                    "status": row.get("status"),
+                    "error_code": row.get("error_code"),
+                    "residual_risk": row.get("error_message")
+                    or _display_blocker_message(code),
+                }
+            )
+        if not rows:
+            unavailable_products.add("return_period_result")
+            blockers = [
                 {
                     "code": "NO_CYCLE_RUNS",
                     "state": "unavailable",
                     "residual_risk": "No hydro runs were found for the requested source cycle.",
                 }
-            )
+            ]
+        if not blockers:
+            return {"quality_state": "ready", "unavailable_products": [], "residual_blockers": []}
         return {
             "quality_state": "unavailable",
-            "unavailable_products": ["return_period_result"],
+            "unavailable_products": sorted(unavailable_products),
             "residual_blockers": blockers,
         }
 
@@ -319,6 +351,8 @@ class TilePublisher:
             ),
             values,
         )
+        unavailable_products = _publish_run_unavailable_products(run)
+        quality_state = _publish_run_quality_state(run)
         return {
             "layer_id": layer_id,
             "layer_type": "flood_return_period",
@@ -328,6 +362,12 @@ class TilePublisher:
             "tile_uri_template": tile_uri_template,
             "published_flag": True,
             "segment_count": int(run.get("segment_count") or 0),
+            "return_period_rows": int(run.get("return_period_rows") or 0),
+            "warning_rows": int(run.get("warning_rows") or 0),
+            "quality_flags": _quality_flags(run.get("quality_flags")),
+            "quality_state": quality_state,
+            "unavailable_products": unavailable_products,
+            "residual_blockers": _publish_run_residual_blockers(run),
         }
 
     def _mark_runs_published(self, session: Session, run_ids: list[str]) -> None:
@@ -482,6 +522,109 @@ def _metadata_source_run_ids(metadata: dict[str, Any]) -> set[str]:
     if not isinstance(raw_source_run_ids, list):
         return set()
     return {run_id.strip() for run_id in raw_source_run_ids if isinstance(run_id, str) and run_id.strip()}
+
+
+def _quality_flags(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return sorted({item.strip() for item in value.split(",") if item.strip()})
+    if isinstance(value, list | tuple | set):
+        return sorted({str(item).strip() for item in value if str(item).strip()})
+    return [str(value)]
+
+
+def _publish_run_unavailable_products(run: dict[str, Any]) -> list[str]:
+    unavailable: list[str] = []
+    result_rows = int(run.get("result_rows") or 0)
+    return_period_rows = int(run.get("return_period_rows") or 0)
+    warning_rows = int(run.get("warning_rows") or 0)
+    if return_period_rows <= 0:
+        unavailable.append("return_period_result")
+    elif result_rows > return_period_rows:
+        unavailable.append("frequency_curves")
+    if return_period_rows > 0 and warning_rows < return_period_rows:
+        unavailable.append("warning_thresholds")
+    return unavailable
+
+
+def _publish_run_quality_state(run: dict[str, Any]) -> str:
+    return "ready" if not _publish_run_unavailable_products(run) else "unavailable"
+
+
+def _publish_run_residual_blockers(run: dict[str, Any]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    result_rows = int(run.get("result_rows") or 0)
+    return_period_rows = int(run.get("return_period_rows") or 0)
+    warning_rows = int(run.get("warning_rows") or 0)
+    if return_period_rows <= 0:
+        blockers.append(
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run.get("run_id"),
+                "model_id": run.get("model_id"),
+                "quality_flags": _quality_flags(run.get("quality_flags")),
+                "residual_risk": "No non-null return-period peak rows are publishable for this run.",
+            }
+        )
+    elif result_rows > return_period_rows:
+        blockers.append(
+            {
+                "code": "FREQUENCY_CURVES_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run.get("run_id"),
+                "model_id": run.get("model_id"),
+                "quality_flags": _quality_flags(run.get("quality_flags")),
+                "residual_risk": "Some peak rows have null return_period because frequency curves are unavailable.",
+            }
+        )
+    if return_period_rows > 0 and warning_rows < return_period_rows:
+        blockers.append(
+            {
+                "code": "WARNING_THRESHOLDS_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run.get("run_id"),
+                "model_id": run.get("model_id"),
+                "quality_flags": _quality_flags(run.get("quality_flags")),
+                "residual_risk": "warning_level remains null for published return-period rows.",
+            }
+        )
+    return blockers
+
+
+def _display_blocker_code(row: Any) -> str:
+    try:
+        result_rows = int(row.get("result_rows") or 0)
+        return_period_rows = int(row.get("return_period_rows") or 0)
+        warning_rows = int(row.get("warning_rows") or 0)
+    except AttributeError:
+        return "DISPLAY_PRODUCT_UNAVAILABLE"
+    if result_rows > 0 and return_period_rows <= 0:
+        return "RETURN_PERIOD_RESULT_UNAVAILABLE"
+    if result_rows > return_period_rows:
+        return "FREQUENCY_CURVES_UNAVAILABLE"
+    if return_period_rows > 0 and warning_rows < return_period_rows:
+        return "WARNING_THRESHOLDS_UNAVAILABLE"
+    return "DISPLAY_PRODUCT_UNAVAILABLE"
+
+
+def _display_unavailable_products(code: str) -> list[str]:
+    if code == "WARNING_THRESHOLDS_UNAVAILABLE":
+        return ["warning_thresholds"]
+    if code == "FREQUENCY_CURVES_UNAVAILABLE":
+        return ["frequency_curves"]
+    if code == "HYDRO_RUN_LINEAGE_UNAVAILABLE":
+        return ["hydro_run_lineage"]
+    return ["return_period_result"]
+
+
+def _display_blocker_message(code: str) -> str:
+    if code == "WARNING_THRESHOLDS_UNAVAILABLE":
+        return "warning_level remains null for max-over-window return-period rows."
+    if code == "FREQUENCY_CURVES_UNAVAILABLE":
+        return "Some max-over-window rows have null return_period because frequency curves are unavailable."
+    return "No max-over-window return-period rows are publishable for this run."
 
 
 def _validate_metadata_delivery_references(

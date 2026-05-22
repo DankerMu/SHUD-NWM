@@ -59,6 +59,17 @@ describe('useFloodAlertStore', () => {
     output_uri: 's3://runs/run-1',
     error_code: null,
     error_message: null,
+    product_quality: {
+      flood_return_period: {
+        quality_state: 'ready',
+        max_over_window: true,
+        result_rows: 2,
+        return_period_rows: 2,
+        warning_rows: 2,
+        unavailable_products: [],
+        residual_blockers: [],
+      },
+    },
     created_at: '2026-05-12T00:00:00Z',
     updated_at: '2026-05-12T04:00:00Z',
   }
@@ -251,10 +262,10 @@ describe('useFloodAlertStore', () => {
     await useFloodAlertStore.getState().fetchTimeline('seg-1')
 
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
-      params: { query: { status: 'frequency_done', limit: 50 } },
+      params: { query: { status: 'frequency_done', flood_product_ready: true, limit: 50 } },
     })
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
-      params: { query: { status: 'published', limit: 50 } },
+      params: { query: { status: 'published', flood_product_ready: true, limit: 50 } },
     })
     expect(fetchUrls).toEqual([
       `${apiBase}/api/v1/layers/flood-return-period/valid-times?run_id=run-1&duration=1h`,
@@ -475,10 +486,10 @@ describe('useFloodAlertStore', () => {
     })
 
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
-      params: { query: { source: 'IFS', cycle_time: '2026-05-11T00:00:00.000Z', status: 'frequency_done', limit: 50 } },
+      params: { query: { source: 'IFS', cycle_time: '2026-05-11T00:00:00.000Z', status: 'frequency_done', flood_product_ready: true, limit: 50 } },
     })
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
-      params: { query: { source: 'IFS', cycle_time: '2026-05-11T00:00:00.000Z', status: 'published', limit: 50 } },
+      params: { query: { source: 'IFS', cycle_time: '2026-05-11T00:00:00.000Z', status: 'published', flood_product_ready: true, limit: 50 } },
     })
     expect(useFloodAlertStore.getState().selectedRunId).toBe('run-sibling')
     expect(useFloodAlertStore.getState().selectedValidTime).toBe('2026-05-11T03:00:00.000Z')
@@ -599,10 +610,10 @@ describe('useFloodAlertStore', () => {
     })
 
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
-      params: { query: { source: 'IFS', cycle_time: '2026-05-12T00:00:00.000Z', status: 'frequency_done', limit: 50 } },
+      params: { query: { source: 'IFS', cycle_time: '2026-05-12T00:00:00.000Z', status: 'frequency_done', flood_product_ready: true, limit: 50 } },
     })
     expect(client.GET).toHaveBeenCalledWith('/api/v1/runs', {
-      params: { query: { source: 'IFS', cycle_time: '2026-05-12T00:00:00.000Z', status: 'published', limit: 50 } },
+      params: { query: { source: 'IFS', cycle_time: '2026-05-12T00:00:00.000Z', status: 'published', flood_product_ready: true, limit: 50 } },
     })
     expect(useFloodAlertStore.getState().selectedRunId).toBeNull()
     expect(useFloodAlertStore.getState().latestRun).toBeNull()
@@ -821,16 +832,63 @@ describe('useFloodAlertStore', () => {
     await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun()
 
     expect(client.GET).toHaveBeenNthCalledWith(1, '/api/v1/runs', {
-      params: { query: { status: 'frequency_done', limit: 50 } },
+      params: { query: { status: 'frequency_done', flood_product_ready: true, limit: 50 } },
     })
     expect(client.GET).toHaveBeenNthCalledWith(2, '/api/v1/runs', {
-      params: { query: { status: 'published', limit: 50 } },
+      params: { query: { status: 'published', flood_product_ready: true, limit: 50 } },
     })
     expect(useFloodAlertStore.getState()).toMatchObject({
       selectedRunId: 'run-published',
       latestRun: expect.objectContaining({ run_id: 'run-published', status: 'published' }),
       empty: false,
       error: null,
+    })
+  })
+
+  it('does not select status-ready runs whose flood product quality is unavailable', async () => {
+    const unavailableRun = {
+      ...latestRun,
+      run_id: 'run-warning-thresholds-unavailable',
+      product_quality: {
+        flood_return_period: {
+          quality_state: 'unavailable',
+          max_over_window: true,
+          result_rows: 2,
+          return_period_rows: 2,
+          warning_rows: 0,
+          unavailable_products: ['warning_thresholds'],
+          residual_blockers: [],
+        },
+      },
+    }
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce({
+        data: success({
+          items: [unavailableRun],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        }),
+        error: undefined,
+      } as never)
+      .mockResolvedValueOnce({
+        data: success({
+          items: [],
+          total: 0,
+          limit: 50,
+          offset: 0,
+        }),
+        error: undefined,
+      } as never)
+    vi.stubGlobal('fetch', vi.fn())
+
+    await useFloodAlertStore.getState().fetchLatestFrequencyDoneRun()
+
+    expect(fetch).not.toHaveBeenCalled()
+    expect(useFloodAlertStore.getState()).toMatchObject({
+      selectedRunId: null,
+      latestRun: null,
+      empty: true,
     })
   })
 

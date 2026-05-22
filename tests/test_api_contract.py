@@ -68,6 +68,7 @@ def test_runs_contract_uses_success_envelope_and_paginated_data() -> None:
     assert run["run_type"] == "forecast"
     assert run["status"] == "frequency_done"
     assert run["river_network_version_id"] == "network_v1"
+    assert run["product_quality"]["flood_return_period"]["quality_state"] == "ready"
     assert isinstance(run["start_time"], str)
     assert isinstance(run["end_time"], str)
 
@@ -603,6 +604,40 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert "frequency_thresholds?: Record<string, never> | null;" not in generated_types
 
 
+def test_flood_product_quality_contract_is_in_static_openapi_and_types() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+
+    run_parameters = spec["paths"]["/api/v1/runs"]["get"]["parameters"]
+    ready_filter = next(parameter for parameter in run_parameters if parameter.get("name") == "flood_product_ready")
+    assert ready_filter["schema"]["type"] == "boolean"
+    assert spec["components"]["schemas"]["HydroRun"]["properties"]["product_quality"] == {
+        "type": "object",
+        "additionalProperties": True,
+        "nullable": True,
+        "description": "Product readiness evidence keyed by product family, including flood_return_period readiness.",
+    }
+    assert spec["components"]["schemas"]["FloodReturnPeriodFeatureCollection"]["properties"]["product_quality"] == {
+        "type": "object",
+        "additionalProperties": True,
+        "nullable": True,
+        "description": "Flood return-period readiness evidence for the selected run.",
+    }
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    runs_start = generated_types.index("listRuns:")
+    get_run_start = generated_types.index("getRun:")
+    assert "flood_product_ready?: boolean;" in generated_types[runs_start:get_run_start]
+    hydro_run_start = generated_types.index("HydroRun:")
+    hydro_page_start = generated_types.index("HydroRunPage:")
+    assert "product_quality?: {" in generated_types[hydro_run_start:hydro_page_start]
+    collection_start = generated_types.index("FloodReturnPeriodFeatureCollection:")
+    feature_start = generated_types.index("FloodReturnPeriodFeature:")
+    assert "product_quality?: {" in generated_types[collection_start:feature_start]
+
+
 def test_flood_alert_ranking_and_timeline_bounds_are_in_static_contract_and_types() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
@@ -777,6 +812,17 @@ class _RunStore:
                     "log_uri": None,
                     "error_code": None,
                     "error_message": None,
+                    "product_quality": {
+                        "flood_return_period": {
+                            "quality_state": "ready",
+                            "max_over_window": True,
+                            "result_rows": 2,
+                            "return_period_rows": 2,
+                            "warning_rows": 2,
+                            "unavailable_products": [],
+                            "residual_blockers": [],
+                        }
+                    },
                     "created_at": now.isoformat(),
                     "updated_at": now.isoformat(),
                 }

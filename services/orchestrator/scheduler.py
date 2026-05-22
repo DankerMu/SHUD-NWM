@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -83,6 +84,9 @@ class CycleDiscoveryAdapter(Protocol):
 
 class ActiveCandidateRepository(Protocol):
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        raise NotImplementedError
+
+    def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         raise NotImplementedError
 
 
@@ -324,28 +328,28 @@ class ProductionScheduler:
             failed_count = 0
             partial_count = 0
             execution_boundary = "planning_only"
-            no_mutation_proof = {
-                "adapter_download_called": False,
-                "slurm_submit_called": False,
-                "shud_runtime_called": False,
-                "hydro_result_table_writes": False,
-                "met_result_table_writes": False,
-            }
+            pass_status = "planned"
+            no_mutation_proof = _no_mutation_proof()
             if not self.config.dry_run and candidates:
-                execution_evidence = self._execute_candidates(candidates)
-                submitted_count = sum(1 for item in execution_evidence if item.get("status") != "blocked")
+                if self.orchestrator_factory is None:
+                    execution_evidence = [_candidate_preflight_blocked_evidence(candidate) for candidate in candidates]
+                    execution_boundary = "preflight_blocked"
+                    pass_status = "preflight_blocked"
+                    no_mutation_proof = _no_mutation_proof()
+                else:
+                    execution_evidence = self._execute_candidates(candidates)
+                    submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
+                    execution_boundary = "production_orchestration"
+                    pass_status = _scheduler_pass_status_from_execution(execution_evidence)
+                    no_mutation_proof = {
+                        "adapter_download_called": False,
+                        "slurm_submit_called": submitted_count > 0,
+                        "shud_runtime_called": False,
+                        "hydro_result_table_writes": submitted_count > 0,
+                        "met_result_table_writes": submitted_count > 0,
+                    }
                 failed_count = sum(1 for item in execution_evidence if item.get("status") == "failed")
-                partial_count = sum(
-                    1 for item in execution_evidence if str(item.get("status", "")).endswith("_partial")
-                )
-                execution_boundary = "production_orchestration"
-                no_mutation_proof = {
-                    "adapter_download_called": False,
-                    "slurm_submit_called": submitted_count > 0,
-                    "shud_runtime_called": False,
-                    "hydro_result_table_writes": submitted_count > 0,
-                    "met_result_table_writes": submitted_count > 0,
-                }
+                partial_count = _scheduler_partial_count_from_execution(execution_evidence)
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
             evidence["operator_filters"].update(model_evidence["operator_filters"])
@@ -356,7 +360,7 @@ class ProductionScheduler:
             ]
             evidence.update(
                 {
-                    "status": "planned",
+                    "status": pass_status,
                     "finished_at": _format_utc(finished_at),
                     "lock": lock_result,
                     "model_discovery": model_evidence,
@@ -381,7 +385,7 @@ class ProductionScheduler:
                 }
             )
             artifact_path = self._write_evidence(pass_id, evidence)
-            status = _evidence_status(evidence, "planned")
+            status = _evidence_status(evidence, pass_status)
             return SchedulerPassResult(
                 pass_id=pass_id,
                 status=status,
@@ -457,16 +461,47 @@ class ProductionScheduler:
             grouped.items(),
             key=lambda item: (item[0][0], item[0][1], [candidate.model_id for candidate in item[1]]),
         ):
-            basins = [_candidate_basin_manifest(candidate) for candidate in cycle_candidates]
             cycle_id = cycle_id_for(source_id, cycle_time)
-            try:
-                result = self._orchestrator_for(source_id).orchestrate_cycle(source_id, cycle_time, basins)
-            except Exception as error:
-                for candidate in cycle_candidates:
+            orchestrator = self._orchestrator_for(source_id)
+            basins: list[dict[str, Any]] = []
+            submitted_candidates: list[SchedulerCandidate] = []
+            candidate_output_uris: dict[str, str] = {}
+            for candidate in cycle_candidates:
+                output_uri = _candidate_output_uri(candidate, getattr(orchestrator, "object_store", None))
+                if output_uri is None:
                     evidence.append(
                         {
                             **_candidate_identity_evidence(candidate),
-                            "status": "failed",
+                            "status": "blocked",
+                            "submitted": False,
+                            "mutation_occurred": False,
+                            "cycle_id": cycle_id,
+                            "error_code": "OUTPUT_URI_UNAVAILABLE",
+                            "error_message": (
+                                "Production orchestration requires an absolute deterministic output_uri "
+                                "before runtime handoff."
+                            ),
+                            "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+                            "qhh_script_invoked": False,
+                        }
+                    )
+                    continue
+                candidate_output_uris[candidate.candidate_id] = output_uri
+                submitted_candidates.append(candidate)
+                basins.append(_candidate_basin_manifest(candidate, output_uri=output_uri))
+            if not basins:
+                continue
+            try:
+                result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
+            except Exception as error:
+                for candidate in submitted_candidates:
+                    output_uri = candidate_output_uris.get(candidate.candidate_id)
+                    evidence.append(
+                        {
+                            **_candidate_identity_evidence(candidate, output_uri=output_uri),
+                            "status": "blocked",
+                            "submitted": False,
+                            "mutation_occurred": False,
                             "cycle_id": cycle_id,
                             "error_code": getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"),
                             "error_message": getattr(error, "message", str(error)),
@@ -475,7 +510,13 @@ class ProductionScheduler:
                         }
                     )
                 continue
-            evidence.extend(_candidate_execution_evidence(result, cycle_candidates))
+            evidence.extend(
+                _candidate_execution_evidence(
+                    result,
+                    submitted_candidates,
+                    output_uris=candidate_output_uris,
+                )
+            )
         return evidence
 
     def _orchestrator_for(self, source_id: str) -> ForecastOrchestrator:
@@ -510,7 +551,7 @@ class ProductionScheduler:
         return {
             "pass_id": pass_id,
             "started_at": _format_utc(started_at),
-            "execution_mode": "dry_run" if self.config.dry_run else "planning",
+            "execution_mode": "dry_run" if self.config.dry_run else "production_orchestration",
             "dry_run": self.config.dry_run,
             "sources": list(self.config.sources),
             "duplicate_exclusions": list(self.config.source_exclusions),
@@ -713,6 +754,18 @@ class ProductionScheduler:
                     model_id=model.model_id,
                 ):
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
+                    continue
+                completed_provider = (
+                    getattr(self.active_repository, "has_completed_pipeline", None)
+                    if self.active_repository is not None
+                    else None
+                )
+                if callable(completed_provider) and completed_provider(
+                    source_id=discovery.source_id,
+                    cycle_time=discovery.cycle_time,
+                    model_id=model.model_id,
+                ):
+                    skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                     continue
                 candidates.append(candidate)
         return candidates, blocked, skipped, duplicate_exclusions
@@ -1014,6 +1067,7 @@ def _resource_profile_summary(resource_profile: Mapping[str, Any]) -> dict[str, 
         "station_ids",
         "forcing_station_metadata",
         "manifest_uri",
+        "output_uri",
         "display_capabilities",
         "frequency_capabilities",
     )
@@ -1139,8 +1193,9 @@ def _blocked_candidate(candidate: SchedulerCandidate, reason: str) -> SchedulerC
     )
 
 
-def _candidate_basin_manifest(candidate: SchedulerCandidate) -> dict[str, Any]:
-    return {
+def _candidate_basin_manifest(candidate: SchedulerCandidate, *, output_uri: str) -> dict[str, Any]:
+    resource_profile = dict(candidate.resource_profile)
+    manifest = {
         "candidate_id": candidate.candidate_id,
         "source_id": candidate.source_id,
         "cycle_id": candidate.cycle_id,
@@ -1171,11 +1226,16 @@ def _candidate_basin_manifest(candidate: SchedulerCandidate) -> dict[str, Any]:
         "warning_thresholds_available": _nested_bool(candidate.frequency_capabilities, "warning_thresholds_available"),
         "optional_weather_available": _nested_bool(candidate.display_capabilities, "optional_weather_available"),
         "output_key": _candidate_output_key(candidate),
+        "output_uri": output_uri,
     }
+    forcing_metadata = resource_profile.get("forcing_station_metadata")
+    if isinstance(forcing_metadata, Mapping):
+        manifest["forcing_station_metadata"] = dict(forcing_metadata)
+    return manifest
 
 
-def _candidate_identity_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
-    return {
+def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: str | None = None) -> dict[str, Any]:
+    evidence = {
         "candidate_id": candidate.candidate_id,
         "source_id": candidate.source_id,
         "cycle_id": candidate.cycle_id,
@@ -1191,11 +1251,42 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate) -> dict[str, Any
         "segment_count": candidate.segment_count,
         "output_key": _candidate_output_key(candidate),
     }
+    resolved_output_uri = output_uri or _candidate_output_uri(candidate)
+    if resolved_output_uri is not None:
+        evidence["output_uri"] = resolved_output_uri
+    return evidence
+
+
+def _candidate_preflight_blocked_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
+    return {
+        **_candidate_identity_evidence(candidate),
+        "status": "preflight_blocked",
+        "submitted": False,
+        "mutation_occurred": False,
+        "execution_mode": "unsupported_without_safe_preflight",
+        "error_code": "PRODUCTION_PREFLIGHT_UNSUPPORTED",
+        "error_message": (
+            "Default non-dry-run production scheduling is blocked until the Slurm/database preflight "
+            "from issue #194 is available or a deterministic orchestrator_factory is injected."
+        ),
+        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+        "qhh_script_invoked": False,
+        "residual_blockers": [
+            {
+                "code": "PRODUCTION_PREFLIGHT_UNSUPPORTED",
+                "state": "blocked",
+                "quality_flag": "preflight_required",
+                "residual_risk": "No scheduler mutation was attempted.",
+            }
+        ],
+    }
 
 
 def _candidate_execution_evidence(
     result: PipelineResult,
     candidates: Sequence[SchedulerCandidate],
+    *,
+    output_uris: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     stage_names = [stage.stage for stage in result.stages]
     stage_statuses = [
@@ -1208,17 +1299,76 @@ def _candidate_execution_evidence(
         }
         for stage in result.stages
     ]
+    submitted = any(stage.slurm_job_id for stage in result.stages)
+    outcomes_by_candidate = {
+        str(outcome.get("candidate_id")): dict(outcome)
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if outcome.get("candidate_id")
+    }
     return [
-        {
-            **_candidate_identity_evidence(candidate),
-            "status": result.status,
-            "pipeline_run_id": result.run_id,
-            "standard_chain_shape": stage_names,
-            "stage_statuses": stage_statuses,
-            "qhh_script_invoked": False,
-        }
+        _candidate_execution_evidence_item(
+            result,
+            candidate,
+            output_uri=(output_uris or {}).get(candidate.candidate_id),
+            outcome=outcomes_by_candidate.get(candidate.candidate_id),
+            submitted=submitted,
+            stage_names=stage_names,
+            stage_statuses=stage_statuses,
+        )
         for candidate in candidates
     ]
+
+
+def _candidate_execution_evidence_item(
+    result: PipelineResult,
+    candidate: SchedulerCandidate,
+    *,
+    output_uri: str | None,
+    outcome: Mapping[str, Any] | None,
+    submitted: bool,
+    stage_names: Sequence[str],
+    stage_statuses: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if outcome is None:
+        status = result.status
+        candidate_submitted = submitted
+        mutation_occurred = submitted
+        candidate_outcome: dict[str, Any] | None = None
+    else:
+        outcome_status = str(outcome.get("status") or "")
+        status = _candidate_status_from_outcome(result.status, outcome_status)
+        candidate_submitted = submitted and outcome_status == "active"
+        mutation_occurred = submitted and outcome_status == "active"
+        candidate_outcome = dict(outcome)
+    item = {
+        **_candidate_identity_evidence(
+            candidate,
+            output_uri=output_uri,
+        ),
+        "status": status,
+        "submitted": candidate_submitted,
+        "mutation_occurred": mutation_occurred,
+        "pipeline_run_id": result.run_id,
+        "standard_chain_shape": stage_names,
+        "stage_statuses": stage_statuses,
+        "qhh_script_invoked": False,
+    }
+    if candidate_outcome is not None:
+        item["candidate_outcome"] = candidate_outcome
+        if _is_partial_candidate_evidence(item):
+            item["error_code"] = str(candidate_outcome.get("reason") or f"CANDIDATE_{status}").upper()
+            item["error_message"] = (
+                f"Candidate {candidate.candidate_id} was {status} in the partial multi-basin cycle."
+            )
+    return item
+
+
+def _candidate_status_from_outcome(result_status: str, outcome_status: str) -> str:
+    if outcome_status == "active":
+        return result_status
+    if _is_non_submitted_terminal_or_unavailable_status(outcome_status):
+        return outcome_status
+    return "unavailable"
 
 
 def _model_package_manifest_uri(candidate: SchedulerCandidate) -> str:
@@ -1234,6 +1384,21 @@ def _model_package_manifest_uri(candidate: SchedulerCandidate) -> str:
 
 def _candidate_output_key(candidate: SchedulerCandidate) -> str:
     return f"runs/{candidate.run_id}/output/"
+
+
+def _candidate_output_uri(candidate: SchedulerCandidate, object_store: Any | None = None) -> str | None:
+    explicit = candidate.resource_profile.get("output_uri")
+    if explicit not in (None, "") and _has_uri_scheme(str(explicit)):
+        return str(explicit).rstrip("/") + "/"
+    if object_store is not None:
+        uri_for_key = getattr(object_store, "uri_for_key", None)
+        if callable(uri_for_key):
+            return str(uri_for_key(_candidate_output_key(candidate))).rstrip("/") + "/"
+    return None
+
+
+def _has_uri_scheme(value: str) -> bool:
+    return re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value.strip()) is not None
 
 
 def _candidate_station_count(candidate: SchedulerCandidate) -> int | None:
@@ -1305,6 +1470,57 @@ def _empty_counts() -> dict[str, int]:
         "failed_count": 0,
         "partial_count": 0,
     }
+
+
+def _no_mutation_proof() -> dict[str, bool]:
+    return {
+        "adapter_download_called": False,
+        "slurm_submit_called": False,
+        "shud_runtime_called": False,
+        "hydro_result_table_writes": False,
+        "met_result_table_writes": False,
+    }
+
+
+def _scheduler_pass_status_from_execution(execution_evidence: Sequence[Mapping[str, Any]]) -> str:
+    if not execution_evidence:
+        return "planned"
+    if all(str(item.get("status")) == "preflight_blocked" for item in execution_evidence):
+        return "preflight_blocked"
+    if any(item.get("submitted") is True for item in execution_evidence):
+        if _scheduler_partial_count_from_execution(execution_evidence) > 0:
+            return "submitted_partial"
+        return "submitted"
+    if any(str(item.get("status")) in {"blocked", "failed"} for item in execution_evidence):
+        return "preflight_blocked"
+    return str(execution_evidence[-1].get("status") or "planned")
+
+
+def _scheduler_partial_count_from_execution(execution_evidence: Sequence[Mapping[str, Any]]) -> int:
+    if not any(item.get("submitted") is True for item in execution_evidence):
+        return 0
+    return sum(1 for item in execution_evidence if _is_partial_candidate_evidence(item))
+
+
+def _is_partial_candidate_evidence(item: Mapping[str, Any]) -> bool:
+    status = str(item.get("status") or "")
+    if item.get("submitted") is True:
+        return _is_non_submitted_terminal_or_unavailable_status(status)
+    return _is_non_submitted_terminal_or_unavailable_status(status) or status.endswith("_partial")
+
+
+def _is_non_submitted_terminal_or_unavailable_status(status: str) -> bool:
+    normalized = status.strip().lower()
+    return normalized in {
+        "blocked",
+        "cancelled",
+        "failed",
+        "partially_failed",
+        "permanently_failed",
+        "preflight_blocked",
+        "submission_failed",
+        "unavailable",
+    } or normalized.endswith(("_blocked", "_cancelled", "_failed", "_unavailable"))
 
 
 def _empty_model_discovery() -> dict[str, Any]:

@@ -15,6 +15,7 @@ describe('flood return-period GeoJSON validation', () => {
   it('returns sanitized FeatureCollection data for safe payloads', () => {
     const result = validateFloodReturnPeriodFeatureCollection({
       type: 'FeatureCollection',
+      product_quality: { quality_state: 'ready', unavailable_products: [] },
       features: [{ ...feature, extra: 'ignored' }],
     })
 
@@ -22,6 +23,7 @@ describe('flood return-period GeoJSON validation', () => {
     if (!result.ok) return
     expect(result.data).toEqual({
       type: 'FeatureCollection',
+      product_quality: { quality_state: 'ready', unavailable_products: [] },
       features: [{ ...feature, properties: { ...feature.properties, feature_id: 'rn-v1::seg-1' } }],
     })
     expect(result.coordinateCount).toBe(2)

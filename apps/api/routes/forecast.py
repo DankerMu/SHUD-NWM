@@ -80,6 +80,13 @@ def list_runs(
     source: str | None = None,
     cycle_time: datetime | None = None,
     status: str | None = None,
+    flood_product_ready: bool | None = Query(
+        default=None,
+        description=(
+            "When true, return only frequency_done/published runs with ready flood return-period "
+            "products, including warning thresholds."
+        ),
+    ),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1),
     offset: int = Query(default=0, ge=0),
     store: PsycopgForecastStore = Depends(get_forecast_store),
@@ -91,6 +98,7 @@ def list_runs(
             source=source,
             cycle_time=cycle_time,
             status=status,
+            flood_product_ready=flood_product_ready,
             limit=capped_limit,
             offset=offset,
         )

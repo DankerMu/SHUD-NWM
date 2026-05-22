@@ -309,6 +309,15 @@ function cycleMatches(run: ApiHydroRun, cycleTime: string | null | undefined) {
   return normalizeIso(run.cycle_time) === normalized
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isReadyFloodRun(run: ApiHydroRun) {
+  const quality = run.product_quality?.flood_return_period
+  return isRecord(quality) && quality.quality_state === 'ready'
+}
+
 function sourceForRunsQuery(source: string | null | undefined) {
   if (!source) return undefined
   if (source.toLowerCase() === 'ifs') return 'IFS'
@@ -320,6 +329,7 @@ async function fetchRunsByStatus(query: {
   source?: string
   cycle_time?: string
   status: 'frequency_done' | 'published'
+  flood_product_ready: true
   limit: number
 }) {
   const { data, error } = await client.GET('/api/v1/runs', {
@@ -340,11 +350,13 @@ async function fetchReadyFloodRuns(baseQuery: {
       await fetchRunsByStatus({
         ...baseQuery,
         status,
+        flood_product_ready: true,
       }),
     )
   }
   const byRunId = new Map<string, ApiHydroRun>()
   pages.flatMap((page) => page.items).forEach((run) => {
+    if (!isReadyFloodRun(run)) return
     byRunId.set(run.run_id, run)
   })
   return [...byRunId.values()]

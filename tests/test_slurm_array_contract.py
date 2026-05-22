@@ -579,6 +579,54 @@ def test_compute_frequency_array_cli_accepts_manifest_index(monkeypatch, tmp_pat
     assert captured["run_id"] == "run_001"
 
 
+def test_compute_frequency_array_cli_passes_manifest_quality_contract(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    path = tmp_path / "manifest_index.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": 0,
+                    "model_id": "model_001",
+                    "basin_version_id": "basin_001",
+                    "river_network_version_id": "river_001",
+                    "run_id": "run_001",
+                    "workspace_dir": str(tmp_path / "workspace"),
+                    "source_id": "GFS",
+                    "cycle_time": "2026051200",
+                    "quality_states": {
+                        "frequency": {
+                            "state": "unavailable",
+                            "quality_flag": "frequency_inputs_unavailable",
+                            "unavailable_products": ["warning_thresholds"],
+                        }
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_compute_return_period(run_id: str, quality_contract: dict[str, object] | None = None) -> dict[str, object]:
+        captured["run_id"] = run_id
+        captured["quality_contract"] = quality_contract
+        return {"status": "succeeded", "rows_written": 0}
+
+    monkeypatch.setattr(flood_cli, "_compute_return_period", fake_compute_return_period)
+
+    _invoke_main(
+        flood_cli.main,
+        ["compute-return-period", "--manifest-index", str(path), "--task-id", "0"],
+    )
+
+    assert captured["run_id"] == "run_001"
+    assert captured["quality_contract"] == {
+        "state": "unavailable",
+        "quality_flag": "frequency_inputs_unavailable",
+        "unavailable_products": ["warning_thresholds"],
+    }
+
+
 def test_worker_does_not_call_downstream_on_manifest_validation_error(monkeypatch, tmp_path):
     path = tmp_path / "manifest_index.json"
     path.write_text(
@@ -914,6 +962,85 @@ def test_publish_tiles_missing_product_fails_without_layer_metadata(
     with Session(engine) as session:
         count = session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one()
     assert count == 0
+
+
+def test_publish_tiles_no_frequency_curve_rows_fail_without_ready_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine()
+    _seed_publish_product(engine, cycle_id="GFS_2026050100", run_id="fcst_gfs_2026050100_model_001")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE flood.return_period_result
+                SET return_period = NULL,
+                    warning_level = NULL,
+                    quality_flag = 'no_frequency_curve'
+                WHERE run_id = 'fcst_gfs_2026050100_model_001'
+                """
+            )
+        )
+    _set_publish_env(monkeypatch, tmp_path, engine)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "GFS_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "NO_PUBLISHABLE_PRODUCTS"
+    assert payload["details"]["quality_state"] == "unavailable"
+    assert payload["details"]["unavailable_products"] == ["return_period_result"]
+    assert payload["details"]["residual_blockers"][0]["code"] == "RETURN_PERIOD_RESULT_UNAVAILABLE"
+    with Session(engine) as session:
+        assert session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one() == 0
+        assert (
+            session.execute(
+                text("SELECT status FROM hydro.hydro_run WHERE run_id = 'fcst_gfs_2026050100_model_001'")
+            ).scalar_one()
+            == "frequency_done"
+        )
+
+
+def test_publish_tiles_warning_thresholds_unavailable_fails_without_ready_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _publish_engine()
+    _seed_publish_product(engine, cycle_id="GFS_2026050100", run_id="fcst_gfs_2026050100_model_001")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE flood.return_period_result
+                SET warning_level = NULL,
+                    quality_flag = 'warning_thresholds_unavailable'
+                WHERE run_id = 'fcst_gfs_2026050100_model_001'
+                """
+            )
+        )
+    _set_publish_env(monkeypatch, tmp_path, engine)
+
+    exit_code = _main_exit_code(orchestrator_cli.main, ["publish-tiles", "--cycle-id", "GFS_2026050100"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "NO_PUBLISHABLE_PRODUCTS"
+    assert payload["details"]["quality_state"] == "unavailable"
+    assert payload["details"]["unavailable_products"] == ["warning_thresholds"]
+    assert payload["details"]["residual_blockers"][0]["code"] == "WARNING_THRESHOLDS_UNAVAILABLE"
+    with Session(engine) as session:
+        assert session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one() == 0
+        assert (
+            session.execute(
+                text("SELECT status FROM hydro.hydro_run WHERE run_id = 'fcst_gfs_2026050100_model_001'")
+            ).scalar_one()
+            == "frequency_done"
+        )
 
 
 def test_publish_tiles_rejects_noncanonical_cycle_without_substring_publish(

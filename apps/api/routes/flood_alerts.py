@@ -246,6 +246,7 @@ class TileFeature(BaseModel):
 class TileFeatureCollection(BaseModel):
     type: str = "FeatureCollection"
     features: list[TileFeature] = Field(default_factory=list)
+    product_quality: dict[str, Any] | None = None
 
 
 class Layer(BaseModel):
@@ -320,6 +321,11 @@ def list_layers(
     river_network_source_version = (
         _river_network_source_version(session, basin_version_id) if basin_version_id is not None else source_version
     )
+    flood_product_quality = (
+        _flood_product_quality(session, resolved_run_id, status=_optional_str(run.get("status")))
+        if resolved_run_id is not None
+        else None
+    )
     layers = _default_layer_catalog(
         session,
         run_id=resolved_run_id,
@@ -328,6 +334,8 @@ def list_layers(
         basin_version_id=basin_version_id,
         river_network_version_id=river_network_version_id,
     )
+    if flood_product_quality is not None:
+        _annotate_flood_layer_quality(layers, flood_product_quality)
     return _ok(request, [layer.model_dump() for layer in layers[offset : offset + limit]])
 
 
@@ -361,6 +369,8 @@ def list_layer_valid_times(
     if duration is not None:
         validate_identifier(duration, "duration")
     if layer_id in {"flood-return-period", "warning-level"}:
+        if run_id is not None:
+            _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
         resolved_duration = duration or DEFAULT_FLOOD_RETURN_PERIOD_DURATION
         _validate_supported_flood_duration(resolved_duration)
     elif duration is not None:
@@ -392,6 +402,7 @@ def flood_alert_summary(
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     run = _require_frequency_ready(session, run_id)
+    _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
     min_return_period = _parse_threshold(threshold)
     rows = session.execute(
         text(
@@ -442,7 +453,8 @@ def flood_alert_ranking(
     valid_time: datetime | None = Query(default=None),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
-    _require_frequency_ready(session, run_id)
+    run = _require_frequency_ready(session, run_id)
+    _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
     geom_sql, centroid_sql = _geometry_select_sql(session)
     where_sql, params = _ranking_filters(run_id=run_id, basin_id=basin_id, valid_time=valid_time)
     count_statement = text(f"SELECT COUNT(*) AS count FROM flood.return_period_result r {where_sql}").bindparams(
@@ -507,7 +519,8 @@ def flood_alert_segments(
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
-    _require_frequency_ready(session, run_id)
+    run = _require_frequency_ready(session, run_id)
+    _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
     if min_return_period is not None:
         min_return_period = _finite_query_float(
             min_return_period,
@@ -609,7 +622,8 @@ def flood_alert_timeline(
     ),
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
-    _require_frequency_ready(session, run_id)
+    run = _require_frequency_ready(session, run_id)
+    _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
     rows = list(
         session.execute(
             text(
@@ -714,7 +728,15 @@ def flood_return_period_map(
     through `/api/v1/layers` metadata.
     """
     _validate_supported_flood_duration(duration)
-    _require_frequency_ready(session, run_id)
+    run = _require_frequency_ready(session, run_id)
+    product_quality = _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
+    _require_flood_route_product_ready(
+        session,
+        run_id=run_id,
+        duration=duration,
+        valid_time=valid_time,
+        max_over_window=False,
+    )
     if return_period is not None:
         return_period = _finite_query_float(return_period, field="return_period", original=return_period)
     bounds = _parse_bbox(bbox)
@@ -790,6 +812,7 @@ def flood_return_period_map(
             details={"limit": limit},
         )
     payload = TileFeatureCollection(
+        product_quality=product_quality,
         features=[
             TileFeature(
                 properties={
@@ -831,6 +854,13 @@ def flood_return_period_mvt_tile(
     _validate_supported_flood_duration(duration)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
+    _require_flood_route_product_ready(
+        session,
+        run_id=run_id,
+        duration=duration,
+        valid_time=valid_time,
+        max_over_window=False,
+    )
     basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="flood-return-period")
     _require_flood_mvt_source_identity(
         session,
@@ -1298,6 +1328,94 @@ def _require_flood_mvt_source_identity(
     )
 
 
+def _require_flood_route_product_ready(
+    session: Session,
+    *,
+    run_id: str,
+    duration: str,
+    valid_time: datetime,
+    max_over_window: bool,
+) -> None:
+    row = session.execute(
+        text(
+            """
+            SELECT COUNT(*) AS result_rows,
+                   SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
+                   SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows
+            FROM flood.return_period_result
+            WHERE run_id = :run_id
+              AND duration = :duration
+              AND valid_time = :valid_time
+              AND max_over_window = :max_over_window
+            """
+        ),
+        {
+            "run_id": run_id,
+            "duration": duration,
+            "valid_time": valid_time,
+            "max_over_window": max_over_window,
+        },
+    ).mappings().one()
+    result_rows = int(row["result_rows"] or 0)
+    return_period_rows = int(row["return_period_rows"] or 0)
+    warning_rows = int(row["warning_rows"] or 0)
+    unavailable_products: list[str] = []
+    residual_blockers: list[dict[str, Any]] = []
+    if result_rows <= 0:
+        return
+    if return_period_rows <= 0:
+        unavailable_products.append("return_period_result")
+        residual_blockers.append(
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": "No non-null return-period rows are available for the requested tile identity.",
+            }
+        )
+    elif result_rows > return_period_rows:
+        unavailable_products.append("frequency_curves")
+        residual_blockers.append(
+            {
+                "code": "FREQUENCY_CURVES_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": (
+                    "Some requested tile rows have null return_period because frequency curves are unavailable."
+                ),
+            }
+        )
+    if return_period_rows > 0 and warning_rows <= 0:
+        unavailable_products.append("warning_thresholds")
+        residual_blockers.append(
+            {
+                "code": "WARNING_THRESHOLDS_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": "warning_level remains null for requested tile rows.",
+            }
+        )
+    blocking_products = [product for product in unavailable_products if product != "frequency_curves"]
+    if return_period_rows <= 0 or blocking_products:
+        raise ApiError(
+            status_code=409,
+            code="FLOOD_PRODUCT_UNAVAILABLE",
+            message="Flood return-period product is unavailable or degraded for the requested tile identity.",
+            details={
+                "run_id": run_id,
+                "duration": duration,
+                "valid_time": _format_time(valid_time),
+                "max_over_window": max_over_window,
+                "quality_state": "unavailable",
+                "result_rows": result_rows,
+                "return_period_rows": return_period_rows,
+                "warning_rows": warning_rows,
+                "unavailable_products": unavailable_products,
+                "residual_blockers": residual_blockers,
+            },
+        )
+
+
 def _require_run_source_identity(run: dict[str, Any] | Any, *, layer_id: str) -> tuple[str, str]:
     basin_version_id = run.get("basin_version_id")
     river_network_version_id = run.get("river_network_version_id")
@@ -1386,6 +1504,108 @@ def _require_run(session: Session, run_id: str) -> dict[str, Any]:
             details={"run_id": run_id},
         )
     return dict(row)
+
+
+def _require_flood_product_ready(session: Session, run_id: str, *, status: str | None = None) -> dict[str, Any]:
+    quality = _flood_product_quality(session, run_id, status=status)
+    if quality["quality_state"] != "ready":
+        raise ApiError(
+            status_code=409,
+            code="FLOOD_PRODUCT_UNAVAILABLE",
+            message="Flood return-period product is unavailable or degraded for this run.",
+            details={"run_id": run_id, **quality},
+        )
+    return quality
+
+
+def _flood_product_quality(session: Session, run_id: str, *, status: str | None = None) -> dict[str, Any]:
+    row = _flood_product_quality_counts(session, run_id, max_over_window=True)
+    max_over_window: bool | None = True
+    if int(row["result_rows"] or 0) <= 0:
+        row = _flood_product_quality_counts(session, run_id, max_over_window=None)
+        max_over_window = None
+    result_rows = int(row["result_rows"] or 0)
+    return_period_rows = int(row["return_period_rows"] or 0)
+    warning_rows = int(row["warning_rows"] or 0)
+    unavailable_products: list[str] = []
+    residual_blockers: list[dict[str, Any]] = []
+    if return_period_rows <= 0:
+        unavailable_products.append("return_period_result")
+        residual_blockers.append(
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": "No non-null peak return-period rows are available for this run.",
+            }
+        )
+    elif result_rows > return_period_rows:
+        unavailable_products.append("frequency_curves")
+        residual_blockers.append(
+            {
+                "code": "FREQUENCY_CURVES_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": "Some peak rows have null return_period because frequency curves are unavailable.",
+            }
+        )
+    if return_period_rows > 0 and warning_rows < return_period_rows:
+        unavailable_products.append("warning_thresholds")
+        residual_blockers.append(
+            {
+                "code": "WARNING_THRESHOLDS_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": "warning_level remains null for peak return-period rows.",
+            }
+        )
+    quality_state = "ready"
+    if "warning_thresholds" in unavailable_products or "return_period_result" in unavailable_products:
+        quality_state = "unavailable"
+    elif unavailable_products:
+        quality_state = "degraded"
+    return {
+        "quality_state": quality_state,
+        **({"status": status} if status is not None else {}),
+        "max_over_window": max_over_window,
+        "result_rows": result_rows,
+        "return_period_rows": return_period_rows,
+        "warning_rows": warning_rows,
+        "unavailable_products": unavailable_products,
+        "residual_blockers": residual_blockers,
+    }
+
+
+def _flood_product_quality_counts(session: Session, run_id: str, *, max_over_window: bool | None) -> Any:
+    max_window_filter = "" if max_over_window is None else "AND max_over_window = :max_over_window"
+    params: dict[str, Any] = {"run_id": run_id}
+    if max_over_window is not None:
+        params["max_over_window"] = max_over_window
+    return session.execute(
+        text(
+            f"""
+            SELECT COUNT(*) AS result_rows,
+                   SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
+                   SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows
+            FROM flood.return_period_result
+            WHERE run_id = :run_id
+              {max_window_filter}
+            """
+        ),
+        params,
+    ).mappings().one()
+
+
+def _annotate_flood_layer_quality(layers: list[Layer], quality: dict[str, Any]) -> None:
+    for layer in layers:
+        if layer.layer_id not in {"flood-return-period", "warning-level"}:
+            continue
+        metadata = dict(layer.metadata or {})
+        metadata["product_quality"] = quality
+        metadata["quality_state"] = quality["quality_state"]
+        metadata["unavailable_products"] = list(quality["unavailable_products"])
+        metadata["residual_blockers"] = list(quality["residual_blockers"])
+        layer.metadata = metadata
 
 
 def _mvt_response(tile: Any) -> Response:

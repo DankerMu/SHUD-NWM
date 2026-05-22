@@ -328,7 +328,8 @@ function settledValue<T>(result: PromiseSettledResult<T>, errors: string[], labe
 
 function latestPublishedRun(runs: ApiHydroRunPage | null, query?: M11QueryState): ApiHydroRun | null {
   const items = runs?.items ?? []
-  const candidates = query?.source === 'best' ? items.filter((run) => concreteSourceFromRun(run)) : items
+  const readyRuns = items.filter(isReadyFloodRun)
+  const candidates = query?.source === 'best' ? readyRuns.filter((run) => concreteSourceFromRun(run)) : readyRuns
   return [...candidates].sort((a, b) => {
     const bCycleTime = Date.parse(b.cycle_time ?? '')
     const aCycleTime = Date.parse(a.cycle_time ?? '')
@@ -341,10 +342,20 @@ function latestPublishedRun(runs: ApiHydroRunPage | null, query?: M11QueryState)
   })[0] ?? null
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isReadyFloodRun(run: ApiHydroRun) {
+  const quality = run.product_quality?.flood_return_period
+  return isRecord(quality) && quality.quality_state === 'ready'
+}
+
 function mergeRunPages(pages: ApiHydroRunPage[], statuses: readonly ReadyRunStatus[] = READY_RUN_STATUSES): ReadyRunPage {
   const byRunId = new Map<string, ApiHydroRun>()
   pages.forEach((page) => {
     page.items.forEach((run) => {
+      if (!isReadyFloodRun(run)) return
       byRunId.set(run.run_id, run)
     })
   })
@@ -560,6 +571,7 @@ async function fetchRunsPageByStatus(
               source,
               cycle_time: query.cycle ?? undefined,
               status,
+              flood_product_ready: true,
               limit,
               offset,
             },
