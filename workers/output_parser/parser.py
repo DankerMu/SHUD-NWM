@@ -206,6 +206,7 @@ def parse_rivqdown_file(
     if not lines:
         raise OutputParsingError("RIVQDOWN_EMPTY", f".rivqdown file is empty: {path}")
 
+    time_basis = _rivqdown_time_basis(lines, context.start_time, context=context)
     data_lines = _rivqdown_data_lines(lines, context.start_time)
     if not data_lines:
         raise OutputParsingError("RIVQDOWN_NO_DATA", f".rivqdown file contains no data rows: {path}")
@@ -233,8 +234,8 @@ def parse_rivqdown_file(
         if len(tokens) < 2:
             raise OutputParsingError("MALFORMED_ROW", f"Row {line_number} must contain time plus data columns")
 
-        valid_time = _parse_valid_time(tokens[0], context.start_time, line_number, numeric_unit="minutes")
-        if _ensure_utc(valid_time) > _ensure_utc(context.start_time) + timedelta(days=366):
+        valid_time = _parse_valid_time(tokens[0], context.start_time, line_number, numeric_unit=time_basis)
+        if time_basis == "auto" and _ensure_utc(valid_time) > _ensure_utc(context.start_time) + timedelta(days=366):
             valid_time = _parse_valid_time(
                 tokens[0],
                 datetime(1970, 1, 1, tzinfo=UTC),
@@ -620,6 +621,31 @@ def _rivqdown_data_lines(lines: list[str], start_time: datetime) -> list[str]:
             continue
         data_lines.append(line)
     return data_lines
+
+
+def _rivqdown_time_basis(lines: list[str], start_time: datetime, *, context: HydroRunContext) -> str:
+    joined = "\n".join(lines[:10]).lower()
+    if "time_min" in joined or "unix minute" in joined or "unix_min" in joined:
+        return "absolute_unix_minutes"
+    data_lines = _rivqdown_data_lines(lines, start_time)
+    if data_lines:
+        first_token = _split_row(data_lines[0])[0]
+        if _is_float(first_token):
+            absolute_time = _parse_time_token(first_token, datetime(1970, 1, 1, tzinfo=UTC), numeric_unit="minutes")
+            if _absolute_time_matches_context(absolute_time, context):
+                return "absolute_unix_minutes"
+    return "minutes"
+
+
+def _absolute_time_matches_context(valid_time: datetime, context: HydroRunContext) -> bool:
+    candidate = _ensure_utc(valid_time)
+    start_time = _ensure_utc(context.start_time)
+    if context.run_type == "analysis":
+        return start_time - timedelta(days=1) <= candidate <= start_time + timedelta(days=366)
+    if context.cycle_time is not None:
+        cycle_time = _ensure_utc(context.cycle_time)
+        return cycle_time - timedelta(days=1) <= candidate <= cycle_time + timedelta(days=366)
+    return start_time - timedelta(days=1) <= candidate <= start_time + timedelta(days=366)
 
 
 def _looks_like_shud_metadata_row(tokens: list[str]) -> bool:

@@ -9,6 +9,15 @@
 
 set -euo pipefail
 
+if [[ -n "${QHH_SLURM_ENV_FILE:-}" ]]; then
+  if [[ ! -f "$QHH_SLURM_ENV_FILE" ]]; then
+    printf 'QHH_SLURM_ENV_FILE does not exist: %s\n' "$QHH_SLURM_ENV_FILE" >&2
+    exit 2
+  fi
+  # shellcheck source=/dev/null
+  source "$QHH_SLURM_ENV_FILE"
+fi
+
 ROOT_DIR="${QHH_REPO_ROOT:-/scratch/frd_muziyao/NWM}"
 cd "$ROOT_DIR"
 

@@ -16,6 +16,7 @@ IFSCanonicalConverter = converter_module.IFSCanonicalConverter
 IFSCanonicalConverterConfig = converter_module.IFSCanonicalConverterConfig
 IFS_VARIABLE_MAPPING = converter_module.IFS_VARIABLE_MAPPING
 convert_ifs_precipitation_with_metadata = converter_module.convert_ifs_precipitation_with_metadata
+convert_ifs_shortwave_down_values = converter_module.convert_ifs_shortwave_down_values
 parse_cycle_time = converter_module.parse_cycle_time
 
 IFS_VARIABLES: tuple[str, ...] = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str")
@@ -252,6 +253,36 @@ def test_radiation_cumulative_diff_to_w_m2(tmp_path: Path) -> None:
     assert radiation["lineage_json"]["radiation_method"] == "direct_net"
     assert radiation["lineage_json"]["components"] == ["ssr", "str"]
     assert shortwave["lineage_json"]["conversion_params"]["operation"] == "cumulative_j_m2_to_w_m2_downward_shortwave"
+
+
+def test_ifs_shortwave_rejects_nonfinite_accumulated_values() -> None:
+    with pytest.raises(Exception, match="finite"):
+        convert_ifs_shortwave_down_values([float("nan")], [0.0], forecast_hour=3, previous_forecast_hour=0)
+
+
+def test_ifs_shortwave_negative_delta_is_explicitly_clipped_to_zero() -> None:
+    values, step_hours = convert_ifs_shortwave_down_values([100.0], [200.0], forecast_hour=6, previous_forecast_hour=3)
+
+    assert step_hours == 3.0
+    assert values == pytest.approx((0.0,))
+
+
+def test_ifs_convert_manifest_streams_by_group_without_read_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_ifs_manifest(tmp_path, forecast_hours=(0, 3))
+    converter = build_converter(tmp_path, repository=repository)
+
+    def forbidden_read_records(_entries: list[dict[str, Any]]) -> list[Any]:
+        raise AssertionError("_read_records must not be used by convert_manifest")
+
+    monkeypatch.setattr(converter, "_read_records", forbidden_read_records)
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_ready"
+    assert len(result.products) == 16
 
 
 def test_lineage_json_structure_for_each_variable_type(tmp_path: Path) -> None:

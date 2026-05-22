@@ -5,7 +5,7 @@ import logging
 import math
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -485,13 +485,17 @@ def convert_ifs_radiation_values(
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
 ) -> tuple[tuple[float, ...], float]:
-    ssr = tuple(float(value) for value in ssr_values)
-    str_ = tuple(float(value) for value in str_values)
+    ssr = _finite_float_tuple(ssr_values, "IFS ssr")
+    str_ = _finite_float_tuple(str_values, "IFS str")
     previous_ssr = (
-        tuple(float(value) for value in previous_ssr_values) if previous_ssr_values is not None else (0.0,) * len(ssr)
+        _finite_float_tuple(previous_ssr_values, "previous IFS ssr")
+        if previous_ssr_values is not None
+        else (0.0,) * len(ssr)
     )
     previous_str = (
-        tuple(float(value) for value in previous_str_values) if previous_str_values is not None else (0.0,) * len(str_)
+        _finite_float_tuple(previous_str_values, "previous IFS str")
+        if previous_str_values is not None
+        else (0.0,) * len(str_)
     )
     lengths = {len(ssr), len(str_), len(previous_ssr), len(previous_str)}
     if len(lengths) != 1:
@@ -499,11 +503,14 @@ def convert_ifs_radiation_values(
 
     step_hours = _ifs_step_hours(forecast_hour, previous_forecast_hour)
     step_seconds = step_hours * 3600.0
-    values = tuple(
-        ((current_ssr - prior_ssr) + (current_str - prior_str)) / step_seconds
-        for current_ssr, prior_ssr, current_str, prior_str in zip(ssr, previous_ssr, str_, previous_str)
-    )
-    return values, step_hours
+    values: list[float] = []
+    for current_ssr, prior_ssr, current_str, prior_str in zip(ssr, previous_ssr, str_, previous_str):
+        ssr_delta = current_ssr - prior_ssr
+        str_delta = current_str - prior_str
+        if not math.isfinite(ssr_delta) or not math.isfinite(str_delta):
+            raise CanonicalConversionError("IFS radiation deltas must be finite.")
+        values.append((ssr_delta + str_delta) / step_seconds)
+    return tuple(values), step_hours
 
 
 def convert_ifs_shortwave_down_values(
@@ -513,20 +520,31 @@ def convert_ifs_shortwave_down_values(
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
 ) -> tuple[tuple[float, ...], float]:
-    ssr = tuple(float(value) for value in ssr_values)
+    ssr = _finite_float_tuple(ssr_values, "IFS ssr")
     previous_ssr = (
-        tuple(float(value) for value in previous_ssr_values) if previous_ssr_values is not None else (0.0,) * len(ssr)
+        _finite_float_tuple(previous_ssr_values, "previous IFS ssr")
+        if previous_ssr_values is not None
+        else (0.0,) * len(ssr)
     )
     if len(ssr) != len(previous_ssr):
         raise CanonicalConversionError("IFS shortwave radiation arrays must have the same length.")
 
     step_hours = _ifs_step_hours(forecast_hour, previous_forecast_hour)
     step_seconds = step_hours * 3600.0
-    values = tuple(
-        max(0.0, (current_ssr - prior_ssr) / step_seconds)
-        for current_ssr, prior_ssr in zip(ssr, previous_ssr)
-    )
-    return values, step_hours
+    values: list[float] = []
+    for current_ssr, prior_ssr in zip(ssr, previous_ssr):
+        delta = current_ssr - prior_ssr
+        if not math.isfinite(delta):
+            raise CanonicalConversionError("IFS shortwave radiation deltas must be finite.")
+        values.append(max(0.0, delta / step_seconds))
+    return tuple(values), step_hours
+
+
+def _finite_float_tuple(values: Iterable[float], label: str) -> tuple[float, ...]:
+    parsed = tuple(float(value) for value in values)
+    if not all(math.isfinite(value) for value in parsed):
+        raise CanonicalConversionError(f"{label} values must be finite.")
+    return parsed
 
 
 def _step_hours(forecast_hour: int | None, previous_forecast_hour: int | None) -> float:
@@ -599,24 +617,28 @@ class CanonicalConverter:
 
         try:
             entries = _manifest_entries(manifest)
-            raw_records = self._read_records(entries)
-            missing_pairs = self._missing_required_pairs(manifest, entries, raw_records)
+            covered_pairs = self._covered_required_pairs(entries)
+            missing_pairs = self._missing_required_pairs_from_covered(manifest, entries, covered_pairs)
             if missing_pairs:
                 self._record_missing_products(source_id, cycle_time, missing_pairs)
                 raise CanonicalConversionError(self._missing_pairs_message(missing_pairs))
 
-            grouped = self._group_records(raw_records)
-            missing_variables = sorted(set(self.config.variable_mapping.values()) - set(grouped))
+            entries_by_standard_variable = self._entries_by_standard_variable(entries)
+            missing_variables = sorted(set(self.config.variable_mapping.values()) - set(entries_by_standard_variable))
             if missing_variables:
                 raise CanonicalConversionError(f"Missing required canonical variables: {', '.join(missing_variables)}")
 
             products: list[CanonicalProductResult] = []
-            for standard_variable in sorted(grouped):
-                native_records = sorted(grouped[standard_variable], key=lambda record: record.forecast_hour)
+            for standard_variable in sorted(entries_by_standard_variable):
+                native_entries = sorted(
+                    entries_by_standard_variable[standard_variable],
+                    key=lambda entry: int(entry["forecast_hour"]),
+                )
                 previous_values: tuple[float, ...] | None = None
                 previous_source_file: str | None = None
                 previous_forecast_hour: int | None = None
-                for record in native_records:
+                for entry in native_entries:
+                    record = self._read_record(entry)
                     product = self._convert_record(
                         source_id=source_id,
                         cycle_time=cycle_time,
@@ -744,14 +766,50 @@ class CanonicalConverter:
             grouped.setdefault(standard_variable, []).append(record)
         return grouped
 
+    def _entries_by_standard_variable(self, entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            native_variable = entry["variable"]
+            standard_variable = map_variable(native_variable, self.config.variable_mapping)
+            if standard_variable is None:
+                LOGGER.warning("Skipping unmapped variable %s from %s", native_variable, entry["local_key"])
+                continue
+            grouped.setdefault(standard_variable, []).append(entry)
+        return grouped
+
+    def _entries_by_hour_and_variable(self, entries: list[dict[str, Any]]) -> dict[int, dict[str, dict[str, Any]]]:
+        grouped: dict[int, dict[str, dict[str, Any]]] = {}
+        for entry in entries:
+            native_variable = str(entry["variable"])
+            if map_variable(native_variable, self.config.variable_mapping) is None:
+                LOGGER.warning("Skipping unmapped variable %s from %s", native_variable, entry["local_key"])
+                continue
+            grouped.setdefault(int(entry["forecast_hour"]), {})[native_variable] = entry
+        return grouped
+
+    def _covered_required_pairs(self, entries: list[dict[str, Any]]) -> set[tuple[str, int]]:
+        return {
+            (str(entry["variable"]), int(entry["forecast_hour"]))
+            for entry in entries
+            if map_variable(str(entry["variable"]), self.config.variable_mapping) is not None
+        }
+
     def _missing_required_pairs(
         self,
         manifest: Any,
         entries: list[dict[str, Any]],
         records: list[RawRecord],
     ) -> tuple[MissingForecastVariable, ...]:
-        forecast_hours = self._configured_forecast_hours(manifest, entries)
         covered = {(record.native_variable, record.forecast_hour) for record in records}
+        return self._missing_required_pairs_from_covered(manifest, entries, covered)
+
+    def _missing_required_pairs_from_covered(
+        self,
+        manifest: Any,
+        entries: list[dict[str, Any]],
+        covered: set[tuple[str, int]],
+    ) -> tuple[MissingForecastVariable, ...]:
+        forecast_hours = self._configured_forecast_hours(manifest, entries)
         missing: list[MissingForecastVariable] = []
         for forecast_hour in forecast_hours:
             for native_variable, standard_variable in sorted(self.config.variable_mapping.items()):
@@ -1110,14 +1168,13 @@ class ERA5CanonicalConverter(CanonicalConverter):
 
         try:
             entries = _manifest_entries(manifest)
-            raw_records = self._read_records(entries)
-            missing_pairs = self._missing_required_pairs(manifest, entries, raw_records)
+            covered_pairs = self._covered_required_pairs(entries)
+            missing_pairs = self._missing_required_pairs_from_covered(manifest, entries, covered_pairs)
             if missing_pairs:
                 self._record_missing_products(source_id, cycle_time, missing_pairs)
                 raise CanonicalConversionError(self._missing_pairs_message(missing_pairs))
-            self._ensure_grid_definition_from_records(raw_records)
 
-            records_by_hour = self._records_by_hour_and_variable(raw_records)
+            entries_by_hour = self._entries_by_hour_and_variable(entries)
             forecast_hours = self._configured_forecast_hours(manifest, entries)
             products: list[CanonicalProductResult] = []
             previous_precipitation: RawRecord | None = None
@@ -1125,7 +1182,11 @@ class ERA5CanonicalConverter(CanonicalConverter):
             previous_str: RawRecord | None = None
 
             for forecast_hour in forecast_hours:
-                records = records_by_hour[forecast_hour]
+                records = {
+                    native_variable: self._read_record(entry)
+                    for native_variable, entry in entries_by_hour[forecast_hour].items()
+                }
+                self._ensure_grid_definition_from_records(records.values())
                 temperature = records["2m_temperature"]
                 dewpoint = records["2m_dewpoint_temperature"]
                 wind_u = records["10m_u_component_of_wind"]
@@ -1303,7 +1364,7 @@ class ERA5CanonicalConverter(CanonicalConverter):
             grouped.setdefault(record.forecast_hour, {})[record.native_variable] = record
         return grouped
 
-    def _ensure_grid_definition_from_records(self, records: list[RawRecord]) -> None:
+    def _ensure_grid_definition_from_records(self, records: Iterable[RawRecord]) -> None:
         for record in records:
             if record.longitudes and record.latitudes:
                 self._ensure_grid_definition(record)
@@ -1487,14 +1548,13 @@ class IFSCanonicalConverter(CanonicalConverter):
 
         try:
             entries = _manifest_entries(manifest)
-            raw_records = self._read_records(entries)
-            missing_pairs = self._missing_required_pairs(manifest, entries, raw_records)
+            covered_pairs = self._covered_required_pairs(entries)
+            missing_pairs = self._missing_required_pairs_from_covered(manifest, entries, covered_pairs)
             if missing_pairs:
                 self._record_missing_products(source_id, cycle_time, missing_pairs)
                 raise CanonicalConversionError(self._missing_pairs_message(missing_pairs))
-            self._ensure_grid_definition_from_records(raw_records)
 
-            records_by_hour = self._records_by_hour_and_variable(raw_records)
+            entries_by_hour = self._entries_by_hour_and_variable(entries)
             forecast_hours = self._configured_forecast_hours(manifest, entries)
             products: list[CanonicalProductResult] = []
             previous_precipitation: RawRecord | None = None
@@ -1503,7 +1563,11 @@ class IFSCanonicalConverter(CanonicalConverter):
             consecutive_negative_precipitation = 0
 
             for forecast_hour in forecast_hours:
-                records = records_by_hour[forecast_hour]
+                records = {
+                    native_variable: self._read_record(entry)
+                    for native_variable, entry in entries_by_hour[forecast_hour].items()
+                }
+                self._ensure_grid_definition_from_records(records.values())
                 temperature = records["2t"]
                 dewpoint = records["2d"]
                 wind_u = records["10u"]
@@ -1722,6 +1786,21 @@ class IFSCanonicalConverter(CanonicalConverter):
         records: list[RawRecord],
     ) -> tuple[MissingForecastVariable, ...]:
         pairs = list(super()._missing_required_pairs(manifest, entries, records))
+        return self._add_shortwave_missing_pairs(pairs)
+
+    def _missing_required_pairs_from_covered(
+        self,
+        manifest: Any,
+        entries: list[dict[str, Any]],
+        covered: set[tuple[str, int]],
+    ) -> tuple[MissingForecastVariable, ...]:
+        pairs = list(super()._missing_required_pairs_from_covered(manifest, entries, covered))
+        return self._add_shortwave_missing_pairs(pairs)
+
+    def _add_shortwave_missing_pairs(
+        self,
+        pairs: list[MissingForecastVariable],
+    ) -> tuple[MissingForecastVariable, ...]:
         shortwave_pairs = [
             MissingForecastVariable(
                 native_variable=pair.native_variable,
@@ -1733,7 +1812,7 @@ class IFSCanonicalConverter(CanonicalConverter):
         ]
         return tuple([*pairs, *shortwave_pairs])
 
-    def _ensure_grid_definition_from_records(self, records: list[RawRecord]) -> None:
+    def _ensure_grid_definition_from_records(self, records: Iterable[RawRecord]) -> None:
         for record in records:
             if record.longitudes and record.latitudes:
                 self._ensure_grid_definition(record)

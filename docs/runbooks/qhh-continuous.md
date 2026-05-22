@@ -34,14 +34,10 @@ export DATABASE_URL=$(./scripts/local_pg.sh url)
 uv run python scripts/run_qhh_continuous.py --once
 ```
 
-Slurm 计算节点执行，一次扫描：
+Slurm 计算节点执行，一次扫描。`DATABASE_URL` 必须指向计算节点可达的生产或集群 PostgreSQL；不要把默认本地开发库暴露到集群网络：
 
 ```bash
-export PGLISTEN=10.0.2.100
-export PGHOSTCIDR=10.0.2.0/24
-./scripts/local_pg.sh restart
-
-export DATABASE_URL=$(./scripts/local_pg.sh url)
+export DATABASE_URL="postgresql://nhms:<strong-password>@pg.cluster.example:5432/nhms"
 export QHH_RUN_ROOT="$PWD/.nhms-runs/qhh-continuous"
 export OBJECT_STORE_ROOT="$PWD/.nhms-runs/qhh-continuous"
 export OBJECT_STORE_PREFIX="s3://nhms"
@@ -71,6 +67,7 @@ uv run python scripts/run_qhh_continuous.py --once --executor slurm
 `nhms-shud-runtime execute`、parse 和 display product 发布都在 compute node
 内完成。该模式要求 `DATABASE_URL` 不能指向 `localhost`，否则 compute node
 无法写回 `met.*`、`hydro.*` 和展示产品表，runner 会在提交前拒绝执行。
+前台 runner 取消时会对已提交作业发起 `scancel`；等待 `sacct` 的阶段有超时边界，默认不会无限挂起。
 
 常驻轮询：
 
@@ -112,22 +109,33 @@ uv run python scripts/run_qhh_continuous.py --dry-run --once
 | `QHH_GFS_FORECAST_START_HOUR` | `3` | GFS 起始 lead hour |
 | `QHH_GFS_FORECAST_END_HOUR` | `168` | GFS 结束 lead hour |
 | `QHH_MAX_LEAD_HOURS` | 空 | forcing 阶段可选截断 lead hour |
+| `QHH_IFS_FORECAST_END_HOUR` | 空 | IFS 结束 lead hour 显式覆盖；未设置时使用 IFS 00/12=168、06/18=144 的源策略 |
 | `QHH_CONTINUOUS_EXECUTOR` | `local` | 执行器，重计算应使用 `slurm` |
 | `QHH_SLURM_PARTITION` | `CPU` | Slurm partition |
 | `QHH_SLURM_CPUS` | `8` | 单周期作业 CPU |
 | `QHH_SLURM_MEM` | `128G` | 单周期作业内存 |
 | `QHH_SLURM_TIME` | `08:00:00` | 单周期作业 walltime |
+| `QHH_SLURM_WAIT_TIMEOUT_SECONDS` | `43200` | Slurm 等待总上限 |
+| `QHH_SLURM_ACCOUNTING_TIMEOUT_SECONDS` | `300` | 作业离开 `squeue` 后等待 `sacct` 出账的上限 |
 
-本地 PostgreSQL 若作为 Slurm compute node 写回库使用，需绑定集群可达地址：
+本地 PostgreSQL helper 默认只允许 loopback 监听，适合单机调试：
 
 ```bash
-export PGLISTEN=10.0.2.100
-export PGHOSTCIDR=10.0.2.0/24
 ./scripts/local_pg.sh restart
 export DATABASE_URL=$(./scripts/local_pg.sh url)
 ```
 
-`scripts/local_pg.sh` 会刷新 `postgresql.conf` 和 `pg_hba.conf`，并把 URL 写入 `.pgdata/qhh-smoke.database-url`。该配置仍把 PGDATA、socket 和日志放在项目目录下，避免占用系统盘。
+如确需把 helper 暂时暴露给受控测试集群，必须显式确认并使用非默认密码：
+
+```bash
+export QHH_LOCAL_PG_ALLOW_REMOTE=1
+export APP_PASSWORD="<non-default-strong-password>"
+export PGLISTEN=10.0.2.100
+export PGHOSTCIDR=10.0.2.0/24
+./scripts/local_pg.sh restart
+```
+
+`scripts/local_pg.sh` 会刷新 `postgresql.conf` 和 `pg_hba.conf`，并把 URL 写入 `.pgdata/qhh-smoke.database-url`。应用角色是非 superuser；生产 Slurm 仍应优先使用正式 PostgreSQL endpoint。
 
 compute node 若缺系统 ecCodes，使用项目内 runtime：
 

@@ -12,6 +12,7 @@ PGHOSTCIDR="${PGHOSTCIDR:-127.0.0.1/32}"
 APP_DB="${APP_DB:-nhms}"
 APP_USER="${APP_USER:-nhms}"
 APP_PASSWORD="${APP_PASSWORD:-nhms_dev}"
+QHH_LOCAL_PG_ALLOW_REMOTE="${QHH_LOCAL_PG_ALLOW_REMOTE:-0}"
 
 export PATH="$PG_PREFIX/bin:$PATH"
 export LD_LIBRARY_PATH="$PG_PREFIX/lib:${LD_LIBRARY_PATH:-}"
@@ -27,6 +28,38 @@ require_bins() {
       exit 1
     fi
   done
+}
+
+is_loopback_listen() {
+  python - "$PGLISTEN" <<'PY'
+from __future__ import annotations
+
+import ipaddress
+import sys
+
+listen = sys.argv[1].strip()
+if listen == "localhost":
+    raise SystemExit(0)
+try:
+    address = ipaddress.ip_address(listen)
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if address.is_loopback else 1)
+PY
+}
+
+guard_remote_listen() {
+  if is_loopback_listen; then
+    return
+  fi
+  if [[ "$QHH_LOCAL_PG_ALLOW_REMOTE" != "1" ]]; then
+    printf '[local-pg] refusing non-loopback PGLISTEN=%s without QHH_LOCAL_PG_ALLOW_REMOTE=1\n' "$PGLISTEN" >&2
+    exit 2
+  fi
+  if [[ "$APP_PASSWORD" == "nhms_dev" || -z "$APP_PASSWORD" ]]; then
+    printf '[local-pg] refusing remote helper mode with default or empty APP_PASSWORD\n' >&2
+    exit 2
+  fi
 }
 
 configure_access() {
@@ -81,6 +114,7 @@ PY
 
 init() {
   require_bins
+  guard_remote_listen
   mkdir -p "$PGDATA" "$PGSOCKET_DIR" "$PGLOG_DIR"
   if [[ ! -f "$PGDATA/PG_VERSION" ]]; then
     log "initializing PGDATA at $PGDATA"
@@ -106,9 +140,9 @@ start() {
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$APP_USER') THEN
-    EXECUTE format('CREATE ROLE %I LOGIN SUPERUSER PASSWORD %L', '$APP_USER', '$APP_PASSWORD');
+    EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L', '$APP_USER', '$APP_PASSWORD');
   ELSE
-    EXECUTE format('ALTER ROLE %I LOGIN SUPERUSER PASSWORD %L', '$APP_USER', '$APP_PASSWORD');
+    EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L', '$APP_USER', '$APP_PASSWORD');
   END IF;
 END
 \$\$;

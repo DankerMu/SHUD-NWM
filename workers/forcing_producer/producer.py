@@ -307,16 +307,6 @@ class ForcingProducer:
                 cycle_time=parsed_cycle_time,
                 model_id=model_id,
             )
-            if self._existing_forcing_version_is_current(existing):
-                return ForcingProductionResult(
-                    status="already_done",
-                    forcing_version_id=str(existing["forcing_version_id"]),
-                    forcing_package_uri=str(existing["forcing_package_uri"]),
-                    checksum=str(existing["checksum"]),
-                    station_count=int(existing["station_count"]),
-                    timestep_count=0,
-                    file_uris={},
-                )
 
             basin_version_id = self.repository.resolve_model_basin_version(model_id=model_id)
             stations = self._load_valid_stations(basin_version_id=basin_version_id)
@@ -338,6 +328,17 @@ class ForcingProducer:
                 cycle_time=parsed_cycle_time,
                 min_lead_hours=_min_lead_hours_from_env(),
             )
+            lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
+            if self._existing_forcing_version_is_current(existing, lead_window=lead_window):
+                return ForcingProductionResult(
+                    status="already_done",
+                    forcing_version_id=str(existing["forcing_version_id"]),
+                    forcing_package_uri=str(existing["forcing_package_uri"]),
+                    checksum=str(existing["checksum"]),
+                    station_count=int(existing["station_count"]),
+                    timestep_count=0,
+                    file_uris={},
+                )
             fallback_lineage = self._apply_era5_latency_fallback(
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
@@ -357,7 +358,6 @@ class ForcingProducer:
                 stations=stations,
                 grid_points_by_source_grid=grid_points_by_source_grid,
             )
-            del grid_points_by_source_grid
             forcing_version_id = (
                 str(existing["forcing_version_id"])
                 if existing is not None
@@ -370,8 +370,10 @@ class ForcingProducer:
                 products_by_variable=products_by_variable,
                 stations=stations,
                 weights=weights,
+                grid_points_by_source_grid=grid_points_by_source_grid,
                 canonical_to_forcing=canonical_to_forcing,
             )
+            del grid_points_by_source_grid
 
             result = self._write_outputs_and_records(
                 source_id=resolved_source_id,
@@ -384,7 +386,7 @@ class ForcingProducer:
                 components=components,
                 products_by_variable=products_by_variable,
                 fallback_lineage=fallback_lineage,
-                max_lead_hours=max_lead_hours,
+                lead_window=lead_window,
             )
             self.repository.update_forecast_cycle(
                 source_id=resolved_source_id,
@@ -403,8 +405,9 @@ class ForcingProducer:
     def _load_valid_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         assert self.repository is not None
         loaded = self.repository.load_met_stations(basin_version_id=basin_version_id)
+        selected = tuple(station for station in loaded if station.station_role == "forcing_grid") or loaded
         stations: list[MetStation] = []
-        for station in loaded:
+        for station in selected:
             if not _valid_station(station):
                 LOGGER.warning("Excluding invalid met station %s for basin %s", station.station_id, basin_version_id)
                 continue
@@ -603,6 +606,18 @@ class ForcingProducer:
             for source_grid, product in sorted(representatives.items(), key=lambda item: item[0])
         }
 
+    def _validate_field_grid_matches_product(
+        self,
+        product: CanonicalProduct,
+        grid_points: Sequence[GridPoint],
+    ) -> None:
+        representative = self._read_canonical_grid(product)
+        if _grid_signature(representative) != _grid_signature(grid_points):
+            raise ForcingProductionError(
+                f"Canonical product {product.canonical_product_id} grid definition/order does not match "
+                f"the interpolation grid for source {product.source_id} grid {product.grid_id}."
+            )
+
     def _read_canonical_grid(self, product: CanonicalProduct) -> tuple[GridPoint, ...]:
         try:
             import xarray as xr
@@ -799,6 +814,7 @@ class ForcingProducer:
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
         stations: Sequence[MetStation],
         weights: Mapping[tuple[str, str], Sequence[InterpolationWeight]],
+        grid_points_by_source_grid: Mapping[tuple[str, str], Sequence[GridPoint]],
         canonical_to_forcing: Mapping[str, str],
     ) -> tuple[tuple[ForcingTimeseriesRow, ...], tuple[ForcingComponent, ...]]:
         valid_times = _valid_times(products_by_variable)
@@ -824,6 +840,10 @@ class ForcingProducer:
                     product,
                     required_grid_cell_ids=required_grid_cell_ids_by_source_grid.get(source_grid),
                     retain_grid_points=False,
+                )
+                self._validate_field_grid_matches_product(
+                    product,
+                    tuple(grid_points_by_source_grid[source_grid]),
                 )
                 field_cache[variable] = field
                 return field
@@ -985,7 +1005,7 @@ class ForcingProducer:
         components: Sequence[ForcingComponent],
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
         fallback_lineage: FallbackLineage | None = None,
-        max_lead_hours: int | None = None,
+        lead_window: Mapping[str, int | None] | None = None,
     ) -> ForcingProductionResult:
         assert self.repository is not None
         compact_cycle = format_cycle_time(cycle_time)
@@ -1021,7 +1041,8 @@ class ForcingProducer:
             "producer_version": self.config.producer_version,
             "source_id": source_id,
             "cycle_time": _format_time(cycle_time),
-            "max_lead_hours": max_lead_hours or _max_product_lead_hours(products_by_variable, cycle_time),
+            "min_lead_hours": (lead_window or {}).get("min_lead_hours"),
+            "max_lead_hours": (lead_window or {}).get("max_lead_hours"),
             "model_id": model_id,
             "basin_version_id": basin_version_id,
             "grid_id": grid_id,
@@ -1100,12 +1121,29 @@ class ForcingProducer:
             },
         )
 
-    def _existing_forcing_version_is_current(self, existing: Mapping[str, Any] | None) -> bool:
+    def _existing_forcing_version_is_current(
+        self,
+        existing: Mapping[str, Any] | None,
+        *,
+        lead_window: Mapping[str, int | None],
+    ) -> bool:
         if not existing:
             return False
         checksum = str(existing.get("checksum") or "").strip()
         package_uri = str(existing.get("forcing_package_uri") or "")
         if not checksum or checksum.lower() == "pending" or not package_uri:
+            return False
+        lineage = existing.get("lineage_json")
+        if isinstance(lineage, str):
+            try:
+                lineage = json.loads(lineage)
+            except json.JSONDecodeError:
+                lineage = {}
+        if not isinstance(lineage, Mapping):
+            lineage = {}
+        if _optional_int(lineage.get("min_lead_hours")) != lead_window.get("min_lead_hours"):
+            return False
+        if _optional_int(lineage.get("max_lead_hours")) != lead_window.get("max_lead_hours"):
             return False
         try:
             manifest_uri = _package_manifest_uri(package_uri, self.config.package_manifest_filename)
@@ -1409,6 +1447,13 @@ def _validate_grid_points(grid_points: Sequence[GridPoint], canonical_product_id
             )
 
 
+def _grid_signature(grid_points: Sequence[GridPoint]) -> tuple[tuple[str, float, float], ...]:
+    return tuple(
+        (point.grid_cell_id, round(float(point.longitude), 12), round(float(point.latitude), 12))
+        for point in grid_points
+    )
+
+
 def _validate_field_values(
     values: Sequence[float],
     grid_points: Sequence[GridPoint],
@@ -1495,6 +1540,29 @@ def _limit_products_by_min_lead_hours(
 
 def _min_lead_hours_from_env() -> int | None:
     value = os.getenv("FORCING_MIN_LEAD_HOURS")
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _lead_window_from_products(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    cycle_time: datetime,
+) -> dict[str, int | None]:
+    lead_hours = sorted(
+        {
+            _product_lead_hours(product, cycle_time)
+            for products_for_variable in products_by_variable.values()
+            for product in products_for_variable.values()
+        }
+    )
+    return {
+        "min_lead_hours": lead_hours[0] if lead_hours else None,
+        "max_lead_hours": lead_hours[-1] if lead_hours else None,
+    }
+
+
+def _optional_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
     return int(value)

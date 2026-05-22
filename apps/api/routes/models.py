@@ -23,6 +23,7 @@ from packages.common.model_registry import (
     ModelRegistryError,
     PsycopgModelRegistryStore,
     RiverSegmentGeoJsonBudgetError,
+    sanitize_basin_version_list_payload,
     sanitize_model_detail_payload,
     sanitize_model_list_payload,
 )
@@ -382,7 +383,12 @@ def list_basin_versions(
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return _ok(request, store.list_basin_versions(basin_id=basin_id, limit=limit, offset=offset))
+        return _ok(
+            request,
+            sanitize_basin_version_list_payload(
+                store.list_basin_versions(basin_id=basin_id, limit=limit, offset=offset)
+            ),
+        )
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:

@@ -40,7 +40,8 @@ minio-data/
 .conda-pkgs/
 .conda-postgres-runtime/
 data/
-.codex/
+.codex/tmp/
+.codex/cache/
 
 # Coverage
 htmlcov/

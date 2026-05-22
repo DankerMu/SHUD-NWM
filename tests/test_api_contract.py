@@ -319,6 +319,26 @@ def test_model_list_contract_uses_page_envelope_and_active_values() -> None:
     assert response_schema["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/ModelInstancePage"
 
 
+def test_basin_version_list_redacts_source_uri_and_checksum() -> None:
+    store = _ModelRegistryStore()
+    store.basin_versions[0]["source_uri"] = "/volume/data/nwm/Basins/qhh/gis/domain.shp"
+    store.basin_versions[0]["checksum"] = "checksum-secret"
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/basins/basins_basin_a/versions")
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert response.status_code == 200
+    data = _assert_success_envelope(response.json())
+    assert data[0]["source_uri"] is None
+    assert data[0]["checksum"] is None
+    rendered = json.dumps(data)
+    assert "/volume/data" not in rendered
+    assert "checksum-secret" not in rendered
+
+
 def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
     store = _ModelRegistryStore()
     app.dependency_overrides[get_model_registry_store] = lambda: store
@@ -876,6 +896,20 @@ class _ModelRegistryStore:
                 "created_at": "2026-05-14T00:00:00Z",
             },
         ]
+        self.basin_versions = [
+            {
+                "basin_version_id": "basins_basin_a_vbasins",
+                "basin_id": "basins_basin_a",
+                "version_label": "vbasins",
+                "geom": {"type": "MultiPolygon", "coordinates": []},
+                "active_flag": True,
+                "valid_from": None,
+                "valid_to": None,
+                "source_uri": None,
+                "checksum": None,
+                "created_at": "2026-05-14T00:00:00Z",
+            }
+        ]
 
     def set_model_active(self, model_id: str, active: bool, **_kwargs: Any) -> dict[str, Any]:
         self.calls.append((model_id, active))
@@ -937,6 +971,21 @@ class _ModelRegistryStore:
         from packages.common.model_registry import MissingResourceError
 
         raise MissingResourceError(f"model_id not found: {model_id}")
+
+    def list_basins(self, *, limit: int, offset: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "basin_id": "basins_basin_a",
+                "basin_name": "Basin A",
+                "basin_group": None,
+                "description": None,
+                "created_at": "2026-05-14T00:00:00Z",
+            }
+        ][offset : offset + limit]
+
+    def list_basin_versions(self, *, basin_id: str, limit: int, offset: int) -> list[dict[str, Any]]:
+        del basin_id
+        return [dict(item) for item in self.basin_versions[offset : offset + limit]]
 
 
 class _OversizedRiverSegmentStore(_ModelRegistryStore):

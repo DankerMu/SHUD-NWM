@@ -285,7 +285,7 @@ class PsycopgModelRegistryStore:
                 """,
                 (basin_id, limit, offset),
             )
-            return [dict(row) for row in cursor.fetchall()]
+            return [_basin_version_public_projection(row) for row in cursor.fetchall()]
 
     def create_river_network(
         self,
@@ -1794,6 +1794,10 @@ def sanitize_model_detail_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return _model_asset_detail(payload)
 
 
+def sanitize_basin_version_list_payload(payload: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [_basin_version_public_projection(item) for item in payload]
+
+
 BASINS_AUDIT_LINEAGE_KEYS = (
     "basin_slug",
     "shud_input_name",
@@ -1975,6 +1979,15 @@ def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     ):
         if key in detail:
             detail[key] = None
+    return detail
+
+
+def _basin_version_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    detail = dict(row)
+    if "source_uri" in detail:
+        detail["source_uri"] = None
+    if "checksum" in detail:
+        detail["checksum"] = None
     return detail
 
 

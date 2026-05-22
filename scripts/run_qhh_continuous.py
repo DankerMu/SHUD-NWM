@@ -4,6 +4,9 @@ import argparse
 import fcntl
 import json
 import os
+import re
+import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -21,6 +24,14 @@ MODEL_ID = "basins_qhh_shud"
 TERMINAL_SUCCESS = {"frequency_done", "published", "already_done"}
 RETRYABLE_STATE = {"failed", "unavailable"}
 ACTIVE_STATE = {"submitted", "running"}
+SLURM_TERMINAL_SUCCESS = {"COMPLETED"}
+SLURM_TERMINAL_FAILURE = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL"}
+SLURM_ACCOUNTING_UNKNOWN = "UNKNOWN_ACCOUNTING_UNAVAILABLE"
+DEFAULT_SLURM_WAIT_TIMEOUT_SECONDS = 12 * 60 * 60
+DEFAULT_SLURM_SQUEUE_POLL_SECONDS = 30
+DEFAULT_SLURM_ACCOUNTING_TIMEOUT_SECONDS = 300
+DEFAULT_SLURM_ACCOUNTING_POLL_SECONDS = 10
+SLURM_EXPORT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -61,6 +72,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--slurm-mem", default=os.getenv("QHH_SLURM_MEM", "128G"))
     parser.add_argument("--slurm-time", default=os.getenv("QHH_SLURM_TIME", "08:00:00"))
     parser.add_argument("--slurm-wait", action="store_true", default=_env_bool("QHH_SLURM_WAIT", True))
+    parser.add_argument(
+        "--slurm-wait-timeout-seconds",
+        type=int,
+        default=int(os.getenv("QHH_SLURM_WAIT_TIMEOUT_SECONDS", str(DEFAULT_SLURM_WAIT_TIMEOUT_SECONDS))),
+    )
+    parser.add_argument(
+        "--slurm-accounting-timeout-seconds",
+        type=int,
+        default=int(os.getenv("QHH_SLURM_ACCOUNTING_TIMEOUT_SECONDS", str(DEFAULT_SLURM_ACCOUNTING_TIMEOUT_SECONDS))),
+    )
     args = parser.parse_args(argv)
 
     if args.executor == "slurm" and not args.dry_run:
@@ -224,6 +245,7 @@ def _submit_slurm_cycle(
     slurm_root = run_root / "slurm-logs" / candidate.source_segment / candidate.token
     slurm_root.mkdir(parents=True, exist_ok=True)
     env_exports = _slurm_exports(candidate, run_root)
+    env_file = _write_slurm_env_file(slurm_root / "qhh-cycle.env", env_exports)
     command = [
         "sbatch",
         "--parsable",
@@ -242,7 +264,7 @@ def _submit_slurm_cycle(
         "--error",
         str(slurm_root / "%j.err"),
         "--export",
-        _format_slurm_export(env_exports),
+        _format_slurm_export({"QHH_SLURM_ENV_FILE": str(env_file)}),
         str(ROOT / "scripts" / "run_qhh_cycle.sbatch"),
     ]
     started = time.monotonic()
@@ -282,7 +304,11 @@ def _submit_slurm_cycle(
             "slurm_job_id": job_id,
         }
 
-    status = _wait_for_slurm_job(job_id)
+    status = _wait_for_slurm_job(
+        job_id,
+        wait_timeout_seconds=args.slurm_wait_timeout_seconds,
+        accounting_timeout_seconds=args.slurm_accounting_timeout_seconds,
+    )
     elapsed_seconds = round(time.monotonic() - started, 3)
     state = _read_json(state_file)
     if status == "COMPLETED":
@@ -313,13 +339,13 @@ def _slurm_exports(candidate: CandidateCycle, run_root: Path) -> dict[str, str]:
     inherited = {
         key: value
         for key, value in os.environ.items()
-        if key.startswith(("QHH_", "GFS_", "IFS_", "FORCING_", "OBJECT_STORE_", "SHUD_", "NHMS_"))
+        if _slurm_env_allowed(key)
+        and not _slurm_env_sensitive(key)
         and not key.startswith("QHH_CONTINUOUS_")
-        and "," not in value
+        and _slurm_export_value_allowed(value)
     }
     inherited.update(
         {
-            "ALL": "",
             "QHH_REPO_ROOT": str(ROOT),
             "QHH_RUN_ROOT": str(run_root),
             "WORKSPACE_ROOT": str(run_root),
@@ -330,8 +356,6 @@ def _slurm_exports(candidate: CandidateCycle, run_root: Path) -> dict[str, str]:
             "QHH_RUN_ID": candidate.run_id,
             "QHH_AUTO_START_PG": "0",
             "PATH": os.environ.get("PATH", ""),
-            "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
-            "LD_PRELOAD": os.environ.get("LD_PRELOAD", ""),
         }
     )
     if "DATABASE_URL" in os.environ:
@@ -340,33 +364,100 @@ def _slurm_exports(candidate: CandidateCycle, run_root: Path) -> dict[str, str]:
 
 
 def _format_slurm_export(values: Mapping[str, str]) -> str:
-    assignments = [f"{key}={value}" for key, value in values.items() if key != "ALL"]
-    return ",".join(["ALL", *assignments])
+    assignments = [f"{key}={value}" for key, value in values.items()]
+    return ",".join(assignments)
 
 
-def _wait_for_slurm_job(job_id: str) -> str:
-    while True:
-        running = subprocess.run(
-            ["squeue", "-h", "-j", job_id, "-o", "%T"],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if running.returncode == 0 and running.stdout.strip():
-            time.sleep(30)
-            continue
-        accounting = subprocess.run(
-            ["sacct", "-n", "-P", "-j", job_id, "-o", "State"],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        states = [line.split("|", 1)[0].strip() for line in accounting.stdout.splitlines() if line.strip()]
-        if states:
-            return states[0].split()[0]
-        time.sleep(10)
+def _write_slurm_env_file(path: Path, values: Mapping[str, str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"export {key}={shlex.quote(value)}" for key, value in sorted(values.items())]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def _wait_for_slurm_job(
+    job_id: str,
+    *,
+    wait_timeout_seconds: int = DEFAULT_SLURM_WAIT_TIMEOUT_SECONDS,
+    accounting_timeout_seconds: int = DEFAULT_SLURM_ACCOUNTING_TIMEOUT_SECONDS,
+    squeue_poll_seconds: int = DEFAULT_SLURM_SQUEUE_POLL_SECONDS,
+    accounting_poll_seconds: int = DEFAULT_SLURM_ACCOUNTING_POLL_SECONDS,
+) -> str:
+    wait_deadline = time.monotonic() + max(wait_timeout_seconds, 1)
+    accounting_deadline: float | None = None
+    signals = (signal.SIGINT, signal.SIGTERM)
+    previous_handlers = {signum: signal.getsignal(signum) for signum in signals}
+
+    def cancel_and_raise(signum: int, _frame: Any) -> None:
+        _cancel_slurm_job(job_id)
+        raise SystemExit(f"cancelled by signal {signum}; requested scancel for Slurm job {job_id}")
+
+    for signum in signals:
+        signal.signal(signum, cancel_and_raise)
+    try:
+        while time.monotonic() < wait_deadline:
+            running = subprocess.run(
+                ["squeue", "-h", "-j", job_id, "-o", "%T"],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if running.returncode == 0 and running.stdout.strip():
+                time.sleep(min(max(squeue_poll_seconds, 1), max(wait_deadline - time.monotonic(), 0.0)))
+                continue
+            accounting = subprocess.run(
+                ["sacct", "-n", "-P", "-j", job_id, "-o", "State"],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if accounting.returncode != 0:
+                return SLURM_ACCOUNTING_UNKNOWN
+            states = [
+                line.split("|", 1)[0].strip().split()[0]
+                for line in accounting.stdout.splitlines()
+                if line.strip()
+            ]
+            if states:
+                for state in states:
+                    if state in SLURM_TERMINAL_FAILURE:
+                        return state
+                if all(state in SLURM_TERMINAL_SUCCESS for state in states):
+                    return "COMPLETED"
+                return states[0]
+            if accounting_deadline is None:
+                accounting_deadline = time.monotonic() + max(accounting_timeout_seconds, 1)
+            if time.monotonic() >= accounting_deadline:
+                return SLURM_ACCOUNTING_UNKNOWN
+            time.sleep(min(max(accounting_poll_seconds, 1), max(accounting_deadline - time.monotonic(), 0.0)))
+        return "UNKNOWN_WAIT_TIMEOUT"
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
+def _cancel_slurm_job(job_id: str) -> None:
+    subprocess.run(["scancel", job_id], cwd=ROOT, check=False, capture_output=True, text=True)
+
+
+def _slurm_env_allowed(key: str) -> bool:
+    if SLURM_EXPORT_NAME_RE.fullmatch(key) is None:
+        return False
+    if key == "PATH":
+        return True
+    return key.startswith(("QHH_", "GFS_", "IFS_", "FORCING_", "OBJECT_STORE_", "SHUD_", "NHMS_"))
+
+
+def _slurm_env_sensitive(key: str) -> bool:
+    upper = key.upper()
+    return any(token in upper for token in ("PASSWORD", "SECRET", "TOKEN", "KEY", "CREDENTIAL"))
+
+
+def _slurm_export_value_allowed(value: str) -> bool:
+    return "," not in value and "\n" not in value and "\r" not in value
 
 
 def _require_slurm_reachable_database() -> None:
@@ -385,8 +476,8 @@ def _require_slurm_reachable_database() -> None:
     if host in {"127.0.0.1", "localhost", "::1"}:
         raise SystemExit(
             "QHH_CONTINUOUS_EXECUTOR=slurm requires DATABASE_URL reachable from compute nodes; "
-            f"got host {host!r}. Restart local PG with PGLISTEN=<cluster-ip> PGHOSTCIDR=<cluster-cidr> "
-            "or use a cluster PostgreSQL endpoint."
+            f"got host {host!r}. Use a cluster-reachable production PostgreSQL endpoint, or intentionally run "
+            "scripts/local_pg.sh in safe helper mode with QHH_LOCAL_PG_ALLOW_REMOTE=1 and a non-default APP_PASSWORD."
         )
 
 

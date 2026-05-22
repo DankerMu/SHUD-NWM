@@ -272,6 +272,42 @@ def test_produce_writes_standard_shud_forcing_package_for_all_stations(tmp_path:
     assert result.station_count == 2
 
 
+def test_produce_uses_only_forcing_grid_stations_for_qhh_package(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    stations = (
+        MetStation(
+            "qhh_forc_001",
+            "basin_v1",
+            100.95,
+            36.25,
+            3657.0,
+            "forcing_grid",
+            properties_json={"shud_forcing_index": 1, "forcing_filename": "X100.95Y36.25.csv"},
+        ),
+        MetStation(
+            "qhh_proxy_001",
+            "basin_v1",
+            101.95,
+            37.25,
+            3700.0,
+            "forcing_proxy",
+            properties_json={"shud_forcing_index": 999, "forcing_filename": "proxy.csv"},
+        ),
+    )
+    repository = FakeForcingRepository(stations=stations, products=_write_canonical_products(store))
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    package_root = tmp_path / result.forcing_package_uri.strip("/")
+    tsd_forc = (package_root / "shud" / "qhh.tsd.forc").read_text(encoding="utf-8")
+    assert result.station_count == 1
+    assert repository.forcing_versions[result.forcing_version_id]["station_count"] == 1
+    assert tsd_forc.splitlines()[0] == "1 20260507"
+    assert "proxy.csv" not in tsd_forc
+    assert {row.station_id for row in repository.timeseries} == {"qhh_forc_001"}
+
+
 def test_forcing_timeseries_long_table_rows_have_composite_pk_shape(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path)
     producer = _build_producer(tmp_path, repository, store)
@@ -372,6 +408,23 @@ def test_produce_is_idempotent_when_existing_checksum_is_valid(tmp_path: Path) -
     assert repository.upsert_count == 1
     assert len(repository.forcing_versions) == 1
     assert len(repository.timeseries) == row_count
+
+
+def test_existing_forcing_version_not_reused_when_lead_window_changes(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model", max_lead_hours=0)
+    row_count = len(repository.timeseries)
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "forcing_ready"
+    assert repository.upsert_count == 2
+    assert len(repository.timeseries) > row_count
+    lineage = repository.forcing_versions[second.forcing_version_id]["lineage_json"]
+    assert lineage["min_lead_hours"] == 0
+    assert lineage["max_lead_hours"] == 3
 
 
 def test_forcing_version_checksum_is_finalized_after_child_rows(tmp_path: Path) -> None:
@@ -518,6 +571,40 @@ def test_streaming_field_read_retains_only_required_interpolation_cells(tmp_path
     assert field.values_by_grid_cell_id == {"1": pytest.approx(2.0)}
 
 
+def test_product_grid_mismatch_is_rejected_before_interpolation_reuses_weights(tmp_path: Path) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        longitudes=(-75.0, -74.5, -74.0),
+        latitudes=(40.0, 40.2, 40.4),
+    )
+    mismatched = _write_canonical_products(
+        store,
+        product_id_prefix="mismatch",
+        forecast_hours=(0,),
+        omitted_variables={
+            "prcp_rate_or_amount",
+            "air_temperature_2m",
+            "relative_humidity_2m",
+            "wind_u_10m",
+            "wind_v_10m",
+            "pressure_surface",
+        },
+        longitudes=(-74.0, -74.5, -75.0),
+        latitudes=(40.4, 40.2, 40.0),
+    )
+    replacement = next(product for product in mismatched if product.variable == "shortwave_down")
+    repository.products = tuple(
+        replacement
+        if product.variable == "shortwave_down" and product.valid_time == replacement.valid_time
+        else product
+        for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="grid definition/order does not match"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+
 def test_nonfinite_interp_weights_are_rejected(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path)
     repository.interp_weights = [
@@ -607,6 +694,8 @@ def _write_canonical_products(
         "pressure_surface": ("Pa", 101000.0),
         radiation_variable: ("W/m2", 250.0),
     }
+    if omitted_variables:
+        variables = {variable: details for variable, details in variables.items() if variable not in omitted_variables}
     compact_cycle = cycle_time.strftime("%Y%m%d%H")
     for forecast_hour in forecast_hours:
         valid_time = cycle_time + timedelta(hours=forecast_hour)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 import subprocess
 from argparse import Namespace
 from datetime import UTC, datetime
@@ -39,6 +40,8 @@ def test_slurm_exports_filters_continuous_and_comma_values(monkeypatch: pytest.M
     monkeypatch.setenv("QHH_CONTINUOUS_SOURCES", "gfs,IFS")
     monkeypatch.setenv("QHH_MAX_LEAD_HOURS", "144")
     monkeypatch.setenv("QHH_UNSAFE_LIST", "a,b")
+    monkeypatch.setenv("QHH_SECRET_TOKEN", "do-not-export")
+    monkeypatch.setenv("QHH-BAD-NAME", "do-not-export")
     monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55432/nhms")
 
     exports = runner._slurm_exports(_candidate(), tmp_path)
@@ -46,10 +49,115 @@ def test_slurm_exports_filters_continuous_and_comma_values(monkeypatch: pytest.M
 
     assert "QHH_CONTINUOUS_SOURCES" not in exports
     assert "QHH_UNSAFE_LIST" not in exports
+    assert "QHH_SECRET_TOKEN" not in exports
+    assert "QHH-BAD-NAME" not in exports
     assert exports["QHH_MAX_LEAD_HOURS"] == "144"
     assert exports["QHH_SOURCE_ID"] == "gfs"
     assert exports["QHH_CYCLE_TIME"] == "2026052106"
+    assert formatted.startswith("QHH_MAX_LEAD_HOURS=144,") or ",QHH_MAX_LEAD_HOURS=144," in formatted
+    assert "ALL" not in formatted
     assert ",QHH_CONTINUOUS_SOURCES=" not in formatted
+
+
+def test_slurm_submit_uses_env_file_not_full_submit_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="5743\n", stderr="")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55432/nhms")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    args = Namespace(
+        slurm_partition="CPU",
+        slurm_cpus=2,
+        slurm_mem="4G",
+        slurm_time="00:30:00",
+        slurm_wait=False,
+    )
+
+    result = runner._submit_slurm_cycle(_candidate(), run_root=tmp_path, state_file=tmp_path / "state.json", args=args)
+
+    submit_command = commands[0]
+    export_arg = submit_command[submit_command.index("--export") + 1]
+    assert result["status"] == "submitted"
+    assert export_arg.startswith("QHH_SLURM_ENV_FILE=")
+    assert "ALL" not in export_arg
+    assert "DATABASE_URL" not in export_arg
+    env_file = tmp_path / "slurm-logs" / "gfs" / "2026052106" / "qhh-cycle.env"
+    assert env_file.exists()
+    assert env_file.stat().st_mode & 0o777 == 0o600
+    assert "DATABASE_URL=" in env_file.read_text(encoding="utf-8")
+
+
+def test_slurm_wait_returns_unknown_when_accounting_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if command[0] == "squeue":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="sacct disabled")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    status = runner._wait_for_slurm_job("5743", wait_timeout_seconds=1, accounting_timeout_seconds=1)
+
+    assert status == runner.SLURM_ACCOUNTING_UNKNOWN
+
+
+def test_slurm_wait_is_bounded_when_sacct_has_no_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if command[0] == "squeue":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    status = runner._wait_for_slurm_job(
+        "5743",
+        wait_timeout_seconds=5,
+        accounting_timeout_seconds=1,
+        accounting_poll_seconds=1,
+    )
+
+    assert status == runner.SLURM_ACCOUNTING_UNKNOWN
+    assert sleeps
+
+
+def test_slurm_wait_signal_cancels_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    handlers: dict[int, Any] = {}
+    calls: list[list[str]] = []
+
+    def fake_signal(signum: int, handler: Any) -> Any:
+        previous = handlers.get(signum, signal.SIG_DFL)
+        handlers[signum] = handler
+        return previous
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[0] == "squeue":
+            return subprocess.CompletedProcess(command, 0, stdout="RUNNING\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def fake_sleep(_seconds: float) -> None:
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    monkeypatch.setattr(runner.signal, "signal", fake_signal)
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.time, "sleep", fake_sleep)
+
+    with pytest.raises(SystemExit):
+        runner._wait_for_slurm_job("5743", wait_timeout_seconds=1, accounting_timeout_seconds=1)
+
+    assert ["scancel", "5743"] in calls
 
 
 def test_active_submitted_slurm_state_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:

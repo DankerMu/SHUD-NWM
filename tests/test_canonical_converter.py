@@ -221,6 +221,22 @@ def test_conversion_is_idempotent_on_rerun(tmp_path: Path) -> None:
     assert len(repository.products) == 14
 
 
+def test_convert_manifest_streams_without_reading_all_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_raw_manifest(tmp_path)
+    converter = build_converter(tmp_path, repository=repository)
+
+    def forbidden_read_records(_entries: list[dict[str, Any]]) -> list[Any]:
+        raise AssertionError("_read_records must not be used by convert_manifest")
+
+    monkeypatch.setattr(converter, "_read_records", forbidden_read_records)
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_ready"
+    assert len(result.products) == 14
+
+
 def test_quality_flag_fail_triggers_reconversion(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     _, manifest = build_raw_manifest(tmp_path)

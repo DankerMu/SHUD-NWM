@@ -9,10 +9,13 @@ from typing import Any
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from packages.common.object_store import LocalObjectStore
 from packages.common.source_identity import normalize_source_id
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_ROOT = Path(os.getenv("QHH_RUN_ROOT", ROOT / ".nhms-runs" / "qhh-continuous")).resolve()
+OBJECT_STORE_ROOT = Path(os.getenv("OBJECT_STORE_ROOT", str(RUN_ROOT))).expanduser().resolve()
+OBJECT_STORE_PREFIX = os.getenv("OBJECT_STORE_PREFIX", "")
 MODEL_ID = os.getenv("QHH_MODEL_ID", "basins_qhh_shud")
 PACKAGE_VERSION = os.getenv("QHH_PACKAGE_VERSION", "v0.0.1-qhh-smoke-lake2")
 SOURCE_ID = normalize_source_id(os.getenv("QHH_SOURCE_ID", "gfs"))
@@ -28,11 +31,12 @@ def main() -> int:
     forcing_version_id = f"forc_{source_segment}_{cycle_token}_{MODEL_ID}"
     run_id = os.getenv("QHH_RUN_ID", f"fcst_{source_segment}_{cycle_token}_{MODEL_ID}")
     database_url = os.environ["DATABASE_URL"]
+    object_store = LocalObjectStore(OBJECT_STORE_ROOT, OBJECT_STORE_PREFIX)
 
     with psycopg2.connect(database_url) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT model_id, basin_version_id, river_network_version_id, mesh_version_id
+            SELECT model_id, basin_version_id, river_network_version_id, mesh_version_id, model_package_uri
             FROM core.model_instance
             WHERE model_id = %s
             """,
@@ -76,7 +80,7 @@ def main() -> int:
             "basin_version_id": model["basin_version_id"],
             "river_network_version_id": model["river_network_version_id"],
             "mesh_version_id": model["mesh_version_id"],
-            "model_package_uri": f"s3://nhms/models/{MODEL_ID}/{PACKAGE_VERSION}/package/",
+            "model_package_uri": _model_package_uri(model, object_store),
             "project_name": PROJECT_NAME,
             "segment_count": segment_count,
             "segment_source": "shud_sp_riv",
@@ -102,9 +106,9 @@ def main() -> int:
             "threads": THREADS,
         },
         "outputs": {
-            "output_uri": f"s3://nhms/runs/{run_id}/output/",
-            "log_uri": f"s3://nhms/runs/{run_id}/logs/",
-            "run_manifest_uri": f"s3://nhms/runs/{run_id}/input/manifest.json",
+            "output_uri": _directory_uri(object_store, f"runs/{run_id}/output"),
+            "log_uri": _directory_uri(object_store, f"runs/{run_id}/logs"),
+            "run_manifest_uri": object_store.uri_for_key(f"runs/{run_id}/input/manifest.json"),
         },
     }
 
@@ -133,6 +137,22 @@ def _format_time(value: datetime) -> str:
 
 def _first_int(path: Path) -> int:
     return int(path.read_text(encoding="utf-8").split()[0])
+
+
+def _model_package_uri(model: dict[str, Any], object_store: LocalObjectStore) -> str:
+    configured_uri = str(model.get("model_package_uri") or "").strip()
+    if configured_uri:
+        object_store.normalize_key(configured_uri)
+        return _ensure_directory_uri(configured_uri)
+    return _directory_uri(object_store, f"models/{MODEL_ID}/{PACKAGE_VERSION}/package")
+
+
+def _directory_uri(object_store: LocalObjectStore, key: str) -> str:
+    return _ensure_directory_uri(object_store.uri_for_key(key))
+
+
+def _ensure_directory_uri(uri: str) -> str:
+    return uri.rstrip("/") + "/"
 
 
 def _scenario_for_source(source_id: str) -> str:
