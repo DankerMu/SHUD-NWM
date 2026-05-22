@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ CanonicalConverterConfig = converter_module.CanonicalConverterConfig
 VARIABLE_MAPPING = converter_module.VARIABLE_MAPPING
 compute_time_axis = converter_module.compute_time_axis
 convert_units = converter_module.convert_units
+convert_units_with_metadata = converter_module.convert_units_with_metadata
+convert_era5_precipitation_with_metadata = converter_module.convert_era5_precipitation_with_metadata
 map_variable = converter_module.map_variable
 parse_cycle_time = converter_module.parse_cycle_time
 
@@ -99,6 +102,15 @@ def build_converter(tmp_path: Path, repository: FakeCanonicalRepository | None =
     )
 
 
+def _netcdf_dataset_bytes(dataset: Any) -> bytes:
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".nc") as temp_file:
+        dataset.to_netcdf(temp_file.name, engine="netcdf4", format="NETCDF4")
+        temp_file.seek(0)
+        return temp_file.read()
+
+
 def test_variable_mapping_covers_required_gfs_variables() -> None:
     assert map_variable("tmp2m") == "air_temperature_2m"
     assert map_variable("apcp") == "prcp_rate_or_amount"
@@ -143,6 +155,47 @@ def test_conversion_writes_lineage_json_with_required_keys(tmp_path: Path) -> No
     assert lineage["conversion_params"]["operation"] == "cumulative_to_period"
 
 
+def test_conversion_writes_rectilinear_grid_definition(tmp_path: Path) -> None:
+    _, manifest = build_raw_manifest(tmp_path)
+    converter = build_converter(tmp_path)
+
+    converter.convert_manifest(manifest)
+
+    definition = converter.object_store.read_bytes("canonical/gfs/grid/gfs_0p25/grid.json").decode("utf-8")
+    assert '"cells":[{"id":0,"lat":0.0,"lon":0.0}]' in definition
+
+
+def test_conversion_normalizes_point_grid_definition_longitudes(tmp_path: Path) -> None:
+    store, manifest = build_raw_manifest(tmp_path)
+    import xarray as xr
+
+    for entry in manifest["entries"]:
+        dataset = xr.open_dataset(store.resolve_path(entry["local_key"]), engine="netcdf4")
+        try:
+            variable = next(iter(dataset.data_vars))
+            rewritten = xr.Dataset(
+                data_vars={variable: ("point", dataset[variable].values.tolist())},
+                coords={
+                    "point": [0],
+                    "longitude": ("point", [350.0]),
+                    "latitude": ("point", [35.0]),
+                },
+            )
+            try:
+                store.write_bytes_atomic(entry["local_key"], _netcdf_dataset_bytes(rewritten))
+            finally:
+                rewritten.close()
+        finally:
+            dataset.close()
+    converter = build_converter(tmp_path)
+
+    converter.convert_manifest(manifest)
+
+    definition = converter.object_store.read_bytes("canonical/gfs/grid/gfs_0p25/grid.json").decode("utf-8")
+    assert '"lon":-10.0' in definition
+    assert '"lon":350.0' not in definition
+
+
 def test_unmapped_variable_is_skipped(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     repository = FakeCanonicalRepository()
     _, manifest = build_raw_manifest(tmp_path, include_unmapped=True)
@@ -169,6 +222,22 @@ def test_conversion_is_idempotent_on_rerun(tmp_path: Path) -> None:
     assert {product.status for product in second.products} == {"already_done"}
     assert repository.upsert_count == upserts_after_first_run
     assert len(repository.products) == 14
+
+
+def test_convert_manifest_streams_without_reading_all_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_raw_manifest(tmp_path)
+    converter = build_converter(tmp_path, repository=repository)
+
+    def forbidden_read_records(_entries: list[dict[str, Any]]) -> list[Any]:
+        raise AssertionError("_read_records must not be used by convert_manifest")
+
+    monkeypatch.setattr(converter, "_read_records", forbidden_read_records)
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_ready"
+    assert len(result.products) == 14
 
 
 def test_quality_flag_fail_triggers_reconversion(tmp_path: Path) -> None:
@@ -215,6 +284,48 @@ def test_negative_apcp_delta_marks_product_warn(tmp_path: Path) -> None:
     conversion_params = prcp_f003["lineage_json"]["conversion_params"]
     assert conversion_params["negative_delta_forecast_hours"] == [3]
     assert conversion_params["anomalies"][0]["min_delta"] == -2.0
+
+
+def test_gfs_apcp_rejects_nonfinite_accumulated_values() -> None:
+    with pytest.raises(CanonicalConversionError, match="finite"):
+        convert_units_with_metadata("apcp", [math.nan], [0.0], forecast_hour=3, previous_forecast_hour=0)
+
+
+def test_era5_precipitation_rejects_nonfinite_accumulated_values() -> None:
+    with pytest.raises(CanonicalConversionError, match="finite"):
+        convert_era5_precipitation_with_metadata([math.nan], [0.0], forecast_hour=3, previous_forecast_hour=0)
+
+
+def test_grid_definition_mismatch_for_same_configured_uri_fails_conversion(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    store, manifest = build_raw_manifest(tmp_path, forecast_hours=(0,))
+    import xarray as xr
+
+    for entry in manifest["entries"]:
+        values = [float(entry["forecast_hour"])]
+        variable = entry["variable"]
+        if variable == "dswrf":
+            longitudes = [1.0, 0.0]
+            latitudes = [1.0, 0.0]
+        else:
+            longitudes = [0.0, 1.0]
+            latitudes = [0.0, 1.0]
+        dataset = xr.Dataset(
+            data_vars={variable: ("point", values * 2)},
+            coords={
+                "point": [0, 1],
+                "longitude": ("point", longitudes),
+                "latitude": ("point", latitudes),
+            },
+        )
+        try:
+            store.write_bytes_atomic(entry["local_key"], _netcdf_dataset_bytes(dataset))
+        finally:
+            dataset.close()
+    converter = build_converter(tmp_path, repository=repository)
+
+    with pytest.raises(CanonicalConversionError, match="different longitude/latitude definition"):
+        converter.convert_manifest(manifest)
 
 
 def test_missing_required_variable_marks_cycle_failed_and_records_fail_product(tmp_path: Path) -> None:

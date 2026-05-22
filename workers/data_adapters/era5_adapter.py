@@ -8,7 +8,7 @@ import queue
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -279,11 +279,15 @@ class MockCDSClient:
         unavailable_dates: set[date] | None = None,
         failures_before_success: int = 0,
         failure_factory: Callable[[], Exception] | None = None,
+        longitudes: Sequence[float] | None = None,
+        latitudes: Sequence[float] | None = None,
     ) -> None:
         self.available_dates = available_dates
         self.unavailable_dates = unavailable_dates or set()
         self.failures_before_success = failures_before_success
         self.failure_factory = failure_factory or (lambda: TimeoutError("mock CDS timeout"))
+        self.longitudes = tuple(longitudes) if longitudes is not None else None
+        self.latitudes = tuple(latitudes) if latitudes is not None else None
         self.availability_requests: list[dict[str, Any]] = []
         self.retrieve_requests: list[dict[str, Any]] = []
 
@@ -319,7 +323,16 @@ class MockCDSClient:
         cycle_time = _cycle_time_from_request(request)
         variable = str(request["variable"])
         forecast_hour = int(str(request["time"]).split(":", maxsplit=1)[0])
-        target.write_bytes(encode_test_netcdf4(variable, forecast_hour, cycle_time=cycle_time, source="ERA5"))
+        target.write_bytes(
+            encode_test_netcdf4(
+                variable,
+                forecast_hour,
+                cycle_time=cycle_time,
+                source="ERA5",
+                longitudes=self.longitudes,
+                latitudes=self.latitudes,
+            )
+        )
 
 
 class ERA5AdapterError(RuntimeError):

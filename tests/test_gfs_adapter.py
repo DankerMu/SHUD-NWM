@@ -132,6 +132,28 @@ def test_manifest_contains_57_forecast_hours_times_7_variables(tmp_path: Path) -
     assert adapter.object_store.exists("raw/gfs/2026050700/manifest.json")
 
 
+def test_forecast_hours_can_be_limited_from_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GFS_FORECAST_START_HOUR", "3")
+    monkeypatch.setenv("GFS_FORECAST_END_HOUR", "24")
+    repository = FakeMetRepository()
+    adapter = GFSAdapter(
+        config=GFSAdapterConfig(workspace_root=tmp_path),
+        repository=repository,
+        object_store=LocalObjectStore(tmp_path),
+        downloader=lambda _url: b"GRIB mock bytes 7777",
+        availability_checker=lambda _url: True,
+        sleeper=lambda _seconds: None,
+    )
+
+    manifest = adapter.build_manifest("2026050700")
+
+    assert len(manifest.entries) == 8 * 7
+    assert manifest.metadata["first_forecast_hour"] == 3
+    assert manifest.metadata["last_forecast_hour"] == 24
+    assert repository.data_sources["gfs"]["config_json"]["forecast_hours"]["start"] == 3
+    assert repository.data_sources["gfs"]["config_json"]["forecast_hours"]["end"] == 24
+
+
 @pytest.mark.parametrize("forecast_hours", [[-3], [1], [171]])
 def test_build_manifest_rejects_invalid_forecast_hours(tmp_path: Path, forecast_hours: list[int]) -> None:
     adapter = build_adapter(tmp_path)

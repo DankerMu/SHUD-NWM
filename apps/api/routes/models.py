@@ -23,6 +23,7 @@ from packages.common.model_registry import (
     ModelRegistryError,
     PsycopgModelRegistryStore,
     RiverSegmentGeoJsonBudgetError,
+    sanitize_basin_version_list_payload,
     sanitize_model_detail_payload,
     sanitize_model_list_payload,
 )
@@ -352,6 +353,42 @@ def create_basin_version(
 ) -> dict[str, Any]:
     try:
         return _ok(request, store.create_basin_version(basin_id, payload.model_dump(), policy_decision=policy_decision))
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
+@router.get("/basins")
+def list_basins(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(request, store.list_basins(limit=limit, offset=offset))
+    except (ModelRegistryError, ModelPackageValidationError) as error:
+        raise _handle_registry_error(error) from error
+    except Exception as error:
+        raise _handle_registry_error(error) from error
+
+
+@router.get("/basins/{basin_id}/versions")
+def list_basin_versions(
+    request: Request,
+    basin_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            request,
+            sanitize_basin_version_list_payload(
+                store.list_basin_versions(basin_id=basin_id, limit=limit, offset=offset)
+            ),
+        )
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:

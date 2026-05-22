@@ -547,7 +547,7 @@ def _river_segments_from_layer(
                 attrs,
                 ("river_segment_id", "segment_id", "seg_id", "segid", "comid", "linkno", "id", "iriv", "iele"),
             )
-            segment_id = _stable_segment_id(model_id, raw_id, segment_order)
+            segment_id_base = _stable_segment_id(model_id, raw_id, segment_order)
             downstream = _optional_text(
                 _pick_attr(
                     attrs,
@@ -566,6 +566,7 @@ def _river_segments_from_layer(
                     "source_record_index": record_index,
                     "source_part_count": len(source_parts),
                     "source_raw_segment_id": _jsonable(raw_id),
+                    "source_stable_segment_id_base": segment_id_base,
                     "source_downstream_segment_id": _jsonable(downstream),
                     "source_crs": coordinate_transform.source_name,
                     "source_crs_projected": coordinate_transform.source_is_projected,
@@ -574,8 +575,10 @@ def _river_segments_from_layer(
             )
             pending.append(
                 {
-                    "river_segment_id": segment_id,
+                    "river_segment_id_base": segment_id_base,
+                    "river_segment_id": segment_id_base,
                     "segment_order": segment_order,
+                    "record_index": record_index,
                     "raw_id": raw_id,
                     "raw_downstream": downstream,
                     "length_m": length_m,
@@ -585,11 +588,14 @@ def _river_segments_from_layer(
             )
     finally:
         reader.close()
-    raw_to_segment_id = {
-        key: item["river_segment_id"]
-        for item in pending
-        if (key := _raw_segment_key(item["raw_id"])) is not None
-    }
+    _deduplicate_pending_segment_ids(pending)
+    raw_to_segment_ids: dict[str, set[str]] = {}
+    for item in pending:
+        key = _raw_segment_key(item["raw_id"])
+        if key is None:
+            continue
+        raw_to_segment_ids.setdefault(key, set()).add(item["river_segment_id"])
+    raw_to_segment_id = {key: next(iter(ids)) for key, ids in raw_to_segment_ids.items() if len(ids) == 1}
     segment_ids = {item["river_segment_id"] for item in pending}
     segments: list[RiverSegmentGeometry] = []
     for item in pending:
@@ -729,6 +735,19 @@ def _stable_segment_id(model_id: str, raw_id: Any, segment_order: int) -> str:
         if slug:
             return f"{model_id}_seg_{slug}"
     return f"{model_id}_seg_{segment_order:06d}"
+
+
+def _deduplicate_pending_segment_ids(pending: list[dict[str, Any]]) -> None:
+    counts: dict[str, int] = {}
+    for item in pending:
+        base_id = item["river_segment_id_base"]
+        counts[base_id] = counts.get(base_id, 0) + 1
+    for item in pending:
+        base_id = item["river_segment_id_base"]
+        if counts[base_id] == 1:
+            continue
+        item["river_segment_id"] = f"{base_id}_ord_{item['segment_order']:06d}_rec_{item['record_index']:06d}"
+        item["properties"]["source_duplicate_segment_id_disambiguated"] = True
 
 
 def _raw_segment_key(value: Any) -> str | None:

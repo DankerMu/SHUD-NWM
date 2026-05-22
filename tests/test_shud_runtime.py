@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
+import tarfile
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from packages.common.object_store import LocalObjectStore
+from packages.common.object_store import LocalObjectStore, sha256_bytes
 from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, SHUDRuntimeError
 
 
@@ -76,6 +78,41 @@ def _write_forcing(object_root: Path) -> None:
     (forcing / "forcing.tsd.forc").write_text("forcing\n", encoding="utf-8")
 
 
+def _write_standard_shud_forcing(object_root: Path) -> dict[str, str]:
+    forcing = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    shud_dir = forcing / "shud"
+    shud_dir.mkdir(parents=True)
+    tsd_content = "1 20260501\n/data\nID\tLon\tLat\tX\tY\tZ\tFilename\n1\t100\t30\t1\t1\t1\tforcing.csv\n"
+    csv_content = "2\t6\t20260501\t20260501\nTime_Day\tPrecip\tTemp\tRH\tWind\tRN\n0\t1\t2\t3\t4\t5\n"
+    (shud_dir / "qhh.tsd.forc").write_text(tsd_content, encoding="utf-8")
+    (shud_dir / "forcing.csv").write_text(csv_content, encoding="utf-8")
+    manifest_payload = {
+        "station_count": 1,
+        "files": [
+            {
+                "role": "shud_forcing",
+                "relative_path": "shud/qhh.tsd.forc",
+                "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc",
+                "checksum": sha256_bytes(tsd_content.encode("utf-8")),
+            },
+            {
+                "role": "shud_forcing_csv",
+                "relative_path": "shud/forcing.csv",
+                "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/forcing.csv",
+                "checksum": sha256_bytes(csv_content.encode("utf-8")),
+            },
+        ],
+    }
+    manifest_content = json_bytes(manifest_payload)
+    (forcing / "forcing_package.json").write_bytes(manifest_content)
+    return {
+        "manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing_package.json",
+        "manifest_checksum": sha256_bytes(manifest_content),
+        "tsd_checksum": sha256_bytes(tsd_content.encode("utf-8")),
+        "csv_checksum": sha256_bytes(csv_content.encode("utf-8")),
+    }
+
+
 def _manifest() -> dict[str, Any]:
     return {
         "run_id": "fcst_gfs_2026050100_demo_model",
@@ -109,6 +146,12 @@ def _manifest() -> dict[str, Any]:
     }
 
 
+def json_bytes(payload: dict[str, Any]) -> bytes:
+    import json
+
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 def _runtime(tmp_path: Path, repository: FakeHydroRunRepository, shud_executable: Path | None = None) -> SHUDRuntime:
     config = SHUDRuntimeConfig(
         workspace_root=tmp_path / "workspace",
@@ -123,6 +166,38 @@ def _runtime(tmp_path: Path, repository: FakeHydroRunRepository, shud_executable
         repository=repository,
         object_store=LocalObjectStore(config.object_store_root, config.object_store_prefix),
     )
+
+
+def _shud_project_manifest_with_forcing_checksums(checksums: dict[str, str]) -> dict[str, Any]:
+    manifest = _manifest()
+    manifest["model"] = {
+        "model_id": "basins_basin_a_shud",
+        "basin_version_id": "basins_basin_a_vbasins",
+        "model_package_uri": "s3://nhms/models/basins_basin_a_shud/vbasins-test/package/",
+        "project_name": "alias-a",
+        "segment_count": 2,
+    }
+    manifest["runtime"]["command_style"] = "shud_project"
+    manifest["forcing"] = {
+        **manifest["forcing"],
+        "package_manifest_uri": checksums["manifest_uri"],
+        "package_manifest_checksum": checksums["manifest_checksum"],
+        "files": [
+            {
+                "role": "shud_forcing",
+                "relative_path": "shud/qhh.tsd.forc",
+                "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc",
+                "checksum": checksums["tsd_checksum"],
+            },
+            {
+                "role": "shud_forcing_csv",
+                "relative_path": "shud/forcing.csv",
+                "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/forcing.csv",
+                "checksum": checksums["csv_checksum"],
+            },
+        ],
+    }
+    return manifest
 
 
 def test_runtime_executes_mock_shud_and_updates_statuses(tmp_path: Path) -> None:
@@ -150,6 +225,39 @@ def test_runtime_executes_mock_shud_and_updates_statuses(tmp_path: Path) -> None
     assert "MODEL_OUTPUT_INTERVAL = 1440" in cfg
     assert "INIT_MODE = 1" in cfg
     assert ".cfg.ic" not in cfg
+
+
+def test_runtime_manifest_path_missing_raises_stable_manifest_error(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest_path = tmp_path / "workspace" / "runs" / "missing_run" / "input" / "manifest.json"
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute_manifest_path(manifest_path)
+
+    assert exc_info.value.error_code == "RUNTIME_MANIFEST_MISSING"
+    assert "missing_run" in exc_info.value.message
+    assert repository.statuses == []
+
+
+def test_runtime_manifest_path_symlink_is_not_followed(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest_path = tmp_path / "workspace" / "runs" / "run_001" / "input" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    target = tmp_path / "outside_manifest.json"
+    target.write_text("{}", encoding="utf-8")
+    try:
+        manifest_path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute_manifest_path(manifest_path)
+
+    assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
+    assert "symlink" in exc_info.value.message
+    assert repository.statuses == []
 
 
 def test_basins_package_stages_and_generates_cfg_without_live_solver(tmp_path: Path) -> None:
@@ -188,6 +296,190 @@ def test_basins_package_stages_and_generates_cfg_without_live_solver(tmp_path: P
     assert repository.statuses == []
 
 
+def test_runtime_staging_rejects_forcing_file_checksum_mismatch(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"]["files"][0]["checksum"] = "stale-file-checksum"
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "FORCING_FILE_CHECKSUM_MISMATCH"
+
+
+def test_runtime_staging_accepts_manifest_carried_forcing_checksums(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+    assert (input_dir / "alias-a" / "forcing.csv").exists()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["../qhh.tsd.forc", "shud/../qhh.tsd.forc", "/tmp/qhh.tsd.forc"],
+)
+def test_runtime_staging_rejects_forcing_relative_path_escape(tmp_path: Path, relative_path: str) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"]["files"][0]["relative_path"] = relative_path
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError, match="relative_path escapes model input directory") as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "FORCING_FILE_PATH_INVALID"
+    assert repository.statuses == []
+
+
+def test_runtime_staging_accepts_forcing_checksums_without_relative_path(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    for file_entry in manifest["forcing"]["files"]:
+        file_entry.pop("relative_path")
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+    assert (input_dir / "alias-a" / "forcing.csv").exists()
+
+
+def test_runtime_staging_rejects_forcing_checksum_symlink_relative_path(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    target_content = b"target forcing\n"
+    manifest["forcing"]["files"] = [
+        {
+            "role": "shud_forcing_csv",
+            "relative_path": "shud/link.csv",
+            "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/link.csv",
+            "checksum": sha256_bytes(target_content),
+        }
+    ]
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_dir = input_dir / "shud"
+    staged_dir.mkdir(parents=True)
+    (staged_dir / "target.csv").write_bytes(target_content)
+    (staged_dir / "link.csv").symlink_to("target.csv")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._verify_staged_forcing_checksums(manifest, input_dir)
+
+    assert exc_info.value.error_code == "FORCING_FILE_NOT_STAGED"
+    assert "symlink" in exc_info.value.message
+
+
+def test_runtime_staging_rejects_object_store_source_symlink_descendant(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    outside_secret = tmp_path / "outside-secret.txt"
+    outside_secret.write_text("secret\n", encoding="utf-8")
+    (object_root / "models" / "demo_model" / "package" / "leaked.mesh").symlink_to(outside_secret)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "ARTIFACT_UNSAFE"
+    assert "symlink" in exc_info.value.message
+    assert not (input_dir / "leaked.mesh").exists()
+
+
+def test_runtime_staging_rejects_preexisting_destination_symlink_escape(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    outside_target = tmp_path / "outside-target.txt"
+    outside_target.write_text("keep\n", encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+    (input_dir / "demo.mesh").symlink_to(outside_target)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
+    assert outside_target.read_text(encoding="utf-8") == "keep\n"
+    assert (input_dir / "demo.mesh").is_symlink()
+
+
+@pytest.mark.parametrize("member_name", ["../evil.mesh", "/tmp/evil.mesh"])
+def test_runtime_tar_artifact_staging_rejects_traversal_member(tmp_path: Path, member_name: str) -> None:
+    object_root = tmp_path / "object-store"
+    package_tar = object_root / "models" / "demo_model" / "package.tar"
+    package_tar.parent.mkdir(parents=True)
+    with tarfile.open(package_tar, "w") as archive:
+        payload = b"mesh\n"
+        info = tarfile.TarInfo(member_name)
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    input_dir = tmp_path / "workspace" / "runs" / "run-a" / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._stage_artifact("s3://nhms/models/demo_model/package.tar", input_dir)
+
+    assert exc_info.value.error_code == "ARTIFACT_TAR_UNSAFE"
+    assert not (tmp_path / "evil.mesh").exists()
+
+
+def test_runtime_tar_artifact_staging_rejects_symlink_member(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    package_tar = object_root / "models" / "demo_model" / "package.tar"
+    package_tar.parent.mkdir(parents=True)
+    with tarfile.open(package_tar, "w") as archive:
+        info = tarfile.TarInfo("leaked.mesh")
+        info.type = tarfile.SYMTYPE
+        info.linkname = str(tmp_path / "outside-secret.txt")
+        archive.addfile(info)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    input_dir = tmp_path / "workspace" / "runs" / "run-a" / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._stage_artifact("s3://nhms/models/demo_model/package.tar", input_dir)
+
+    assert exc_info.value.error_code == "ARTIFACT_TAR_UNSAFE"
+    assert not (input_dir / "leaked.mesh").exists()
+
+
 def test_output_verification_rejects_wrong_row_count(tmp_path: Path) -> None:
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
@@ -198,6 +490,35 @@ def test_output_verification_rejects_wrong_row_count(tmp_path: Path) -> None:
 
     with pytest.raises(SHUDRuntimeError, match="expected 3 data rows"):
         runtime.verify_output(manifest, output_dir)
+
+
+def test_upload_directory_rejects_object_target_symlink_to_workspace_file(tmp_path: Path) -> None:
+    config = SHUDRuntimeConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        upload_retries=1,
+    )
+    runtime = SHUDRuntime(
+        config=config,
+        repository=FakeHydroRunRepository(),
+        object_store=LocalObjectStore(config.object_store_root, config.object_store_prefix),
+    )
+    output_dir = Path(config.workspace_root) / "runs" / "run-a" / "output"
+    output_dir.mkdir(parents=True)
+    output_file = output_dir / "demo.rivqdown"
+    output_file.write_bytes(b"workspace output\n")
+    object_target = Path(config.object_store_root) / "runs" / "run-a" / "output" / "demo.rivqdown"
+    object_target.parent.mkdir(parents=True)
+    object_target.symlink_to(output_file)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._upload_directory(output_dir, "runs/run-a/output")
+
+    assert exc_info.value.error_code == "UPLOAD_FAILED"
+    assert "Target file must not be a symlink" in exc_info.value.message
+    assert output_file.read_bytes() == b"workspace output\n"
+    assert object_target.is_symlink()
 
 
 def test_workspace_failure_marks_run_failed(tmp_path: Path) -> None:

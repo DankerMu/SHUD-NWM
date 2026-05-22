@@ -136,7 +136,17 @@ def _write_raw_manifest(store: LocalObjectStore) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     for variable in VARIABLE_MAPPING:
         key = f"raw/gfs/2026050300/{variable}.nc"
-        store.write_bytes_atomic(key, encode_test_netcdf4(variable, 0, values=[300.0], cycle_time=CYCLE_TIME))
+        store.write_bytes_atomic(
+            key,
+            encode_test_netcdf4(
+                variable,
+                0,
+                values=[300.0],
+                cycle_time=CYCLE_TIME,
+                longitudes=[110.2],
+                latitudes=[30.2],
+            ),
+        )
         entries.append({"local_key": key, "variable": variable, "forecast_hour": 0, "remote_url": f"mock://{variable}"})
     return {"source_id": SOURCE_ID, "cycle_time": CYCLE_TIME.isoformat(), "entries": entries}
 

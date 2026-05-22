@@ -55,6 +55,49 @@ def test_parser_reads_real_shapefiles_and_shud_evidence(tmp_path: Path) -> None:
     assert parsed.river_segments[0].geom_wkt.startswith("LINESTRING")
 
 
+def test_parser_disambiguates_duplicate_raw_segment_ids(tmp_path: Path) -> None:
+    root, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path, sp_segment_count=3)
+    del root, inventory_path, manifest_path
+    _write_line_shapefile(
+        input_dir / "gis" / "seg",
+        points=[
+            [(100.1, 30.1), (100.3, 30.3)],
+            [(100.3, 30.3), (100.5, 30.5)],
+            [(100.5, 30.5), (100.7, 30.7)],
+        ],
+        records=[
+            (1, 1, 2, 100.0),
+            (1, 2, 2, 200.0),
+            (2, 3, 1, 300.0),
+        ],
+    )
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+
+    parsed = parse_basins_geometry(
+        model_id=model_id,
+        input_dir=input_dir,
+        shud_input_name="alias-a",
+        required_files=model["required_files"],
+    )
+
+    ids = [segment.river_segment_id for segment in parsed.river_segments]
+    assert len(ids) == 3
+    assert len(set(ids)) == 3
+    assert ids[:2] == [
+        f"{model_id}_seg_1_ord_000001_rec_000001",
+        f"{model_id}_seg_1_ord_000002_rec_000002",
+    ]
+    assert ids[2] == f"{model_id}_seg_2"
+    assert parsed.river_segments[0].downstream_segment_id == f"{model_id}_seg_2"
+    assert parsed.river_segments[1].downstream_segment_id == f"{model_id}_seg_2"
+    assert parsed.river_segments[2].downstream_segment_id is None
+    assert parsed.river_segments[0].properties["source_raw_segment_id"] == 1
+    assert parsed.river_segments[0].properties["source_stable_segment_id_base"] == f"{model_id}_seg_1"
+    assert parsed.river_segments[0].properties["source_duplicate_segment_id_disambiguated"] is True
+    assert "source_duplicate_segment_id_disambiguated" not in parsed.river_segments[2].properties
+
+
 def test_manifest_must_match_selected_inventory_source_before_database(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1758,6 +1801,7 @@ def _write_line_shapefile(
     base: Path,
     *,
     points: list[list[tuple[float, float]]] | None = None,
+    records: list[tuple[int, int, int, float]] | None = None,
     prj_text: str | None = None,
 ) -> None:
     import shapefile
@@ -1768,10 +1812,10 @@ def _write_line_shapefile(
     writer.field("DOWN_ID", "N")
     writer.field("LENGTH_M", "F", decimal=3)
     lines = points or [[(100.1, 30.1), (100.5, 30.4)], [(100.5, 30.4), (100.8, 30.8)]]
-    writer.line([[list(point) for point in lines[0]]])
-    writer.record(1, 1, 2, 50000.0)
-    writer.line([[list(point) for point in lines[1]]])
-    writer.record(2, 2, 0, 60000.0)
+    line_records = records or [(1, 1, 2, 50000.0), (2, 2, 0, 60000.0)]
+    for line, record in zip(lines, line_records, strict=True):
+        writer.line([[list(point) for point in line]])
+        writer.record(*record)
     writer.close()
     _write_prj(base.with_suffix(".prj"), prj_text=prj_text)
 

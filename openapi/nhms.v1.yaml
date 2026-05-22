@@ -60,7 +60,14 @@ paths:
       summary: List basins
       tags: [basins]
       parameters:
-        - $ref: "#/components/parameters/Limit"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
         - $ref: "#/components/parameters/Offset"
       responses:
         "200":
@@ -88,7 +95,14 @@ paths:
       tags: [basins]
       parameters:
         - $ref: "#/components/parameters/BasinId"
-        - $ref: "#/components/parameters/Limit"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
         - $ref: "#/components/parameters/Offset"
       responses:
         "200":
@@ -1901,9 +1915,11 @@ components:
         source_uri:
           type: string
           nullable: true
+          description: Public responses redact local/source lineage URIs and return null.
         checksum:
           type: string
           nullable: true
+          description: Public responses redact raw lineage checksums and return null.
         created_at:
           type: string
           format: date-time

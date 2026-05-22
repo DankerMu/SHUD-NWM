@@ -26,10 +26,6 @@ RouteKey = tuple[str, str]
 # legacy tile backing stores. Each entry carries a narrow reason so future drift
 # cannot hide behind a broad allowlist.
 DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
-    ("GET", "/api/v1/basins"): "issue-123 future registry read surface; backing read store is out of scope",
-    ("GET", "/api/v1/basins/{basin_id}/versions"): (
-        "issue-123 future registry read surface; backing read store is out of scope"
-    ),
     (
         "GET",
         "/api/v1/models/{model_id}/flood-frequency-curves",
@@ -613,6 +609,23 @@ def test_openapi_success_envelope_accepts_array_data_composition() -> None:
     )
 
 
+def test_basin_limit_parameters_match_fastapi_runtime_contract() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+
+    expected = {
+        "/api/v1/basins": {"default": 200, "maximum": 500},
+        "/api/v1/basins/{basin_id}/versions": {"default": 50, "maximum": 500},
+    }
+    for path, expected_schema in expected.items():
+        static_limit = _parameter_by_name(static_spec["paths"][path]["get"]["parameters"], static_spec, "limit")
+        fastapi_limit = _parameter_by_name(fastapi_spec["paths"][path]["get"]["parameters"], fastapi_spec, "limit")
+        assert static_limit["schema"]["default"] == expected_schema["default"]
+        assert static_limit["schema"]["maximum"] == expected_schema["maximum"]
+        assert fastapi_limit["schema"]["default"] == expected_schema["default"]
+        assert fastapi_limit["schema"]["maximum"] == expected_schema["maximum"]
+
+
 def _openapi_routes() -> set[RouteKey]:
     spec = _openapi_spec()
     routes: set[RouteKey] = set()
@@ -636,6 +649,19 @@ def _resolve_all_of(schema: dict[str, Any], spec: dict[str, Any]) -> dict[str, A
         resolved["properties"].update(subschema.get("properties", {}))
         resolved["required"].extend(item for item in subschema.get("required", []) if item not in resolved["required"])
     return resolved
+
+
+def _parameter_by_name(parameters: list[dict[str, Any]], spec: dict[str, Any], name: str) -> dict[str, Any]:
+    for parameter in parameters:
+        if "$ref" in parameter:
+            ref = parameter["$ref"].removeprefix("#/")
+            resolved: Any = spec
+            for part in ref.split("/"):
+                resolved = resolved[part]
+            parameter = resolved
+        if parameter.get("name") == name:
+            return parameter
+    raise AssertionError(f"parameter not found: {name}")
 
 
 def _resolve_ref(ref: str, spec: dict[str, Any]) -> dict[str, Any]:

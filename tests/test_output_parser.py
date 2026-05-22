@@ -94,6 +94,34 @@ def test_parse_dat_relative_minutes_from_run_start(tmp_path: Path) -> None:
     assert repository.rows[("run_001", "rivnet_v1", "seg_a", "q_down", second_time)].lead_time_hours == 1
 
 
+def test_parse_dat_long_relative_minutes_stay_relative_to_run_start(tmp_path: Path) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    minutes = 367 * 24 * 60
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        f"{minutes} 86400 172800\n".encode("utf-8"),
+    )
+
+    parser.parse_run("run_001")
+
+    expected_time = _dt("2027-05-03T00:00:00Z")
+    assert repository.rows[("run_001", "rivnet_v1", "seg_a", "q_down", expected_time)].lead_time_hours == 8808
+
+
+def test_parse_qhh_time_min_absolute_minutes_when_header_declares_unix_minutes(tmp_path: Path) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    absolute_minutes = int(_dt("2026-05-01T03:00:00Z").timestamp() / 60)
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown.csv",
+        f"Time_min,seg_a,seg_b\n{absolute_minutes},86400,172800\n".encode("utf-8"),
+    )
+
+    parser.parse_run("run_001")
+
+    expected_time = _dt("2026-05-01T03:00:00Z")
+    assert repository.rows[("run_001", "rivnet_v1", "seg_a", "q_down", expected_time)].lead_time_hours == 3
+
+
 def test_column_mismatch_marks_run_failed_without_writing_rows(tmp_path: Path) -> None:
     store, parser, repository = _build_parser(tmp_path)
     store.write_bytes_atomic(

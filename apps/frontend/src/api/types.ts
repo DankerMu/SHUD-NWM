@@ -766,7 +766,9 @@ export interface components {
             valid_from?: string | null;
             /** Format: date-time */
             valid_to?: string | null;
+            /** @description Public responses redact local/source lineage URIs and return null. */
             source_uri?: string | null;
+            /** @description Public responses redact raw lineage checksums and return null. */
             checksum?: string | null;
             /** Format: date-time */
             created_at: string;
@@ -1588,7 +1590,7 @@ export interface operations {
     listBasins: {
         parameters: {
             query?: {
-                limit?: components["parameters"]["Limit"];
+                limit?: number;
                 offset?: components["parameters"]["Offset"];
             };
             header?: never;
@@ -1615,7 +1617,7 @@ export interface operations {
     listBasinVersions: {
         parameters: {
             query?: {
-                limit?: components["parameters"]["Limit"];
+                limit?: number;
                 offset?: components["parameters"]["Offset"];
             };
             header?: never;

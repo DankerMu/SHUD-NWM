@@ -712,6 +712,17 @@ def _package_source_files(
         version=version,
         manifest_uri=manifest_uri,
     )
+    files.extend(
+        _optional_shud_runtime_files(
+            input_dir,
+            source_root,
+            object_store,
+            package_key,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+    )
 
     calib_path = source_root / "CALIB"
     _reject_source_symlink_path(calib_path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
@@ -731,6 +742,46 @@ def _package_source_files(
                 )
             )
     return sorted(files, key=lambda item: (item.role, item.relative_path))
+
+
+def _optional_shud_runtime_files(
+    input_dir: Path,
+    source_root: Path,
+    object_store: LocalObjectStore,
+    package_key: str,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str,
+) -> list[SourceFile]:
+    optional_names = (
+        f"{input_dir.name}.lake.sp",
+        f"{input_dir.name}.lake.bathy",
+        f"{input_dir.name}.lake.ic",
+    )
+    files: list[SourceFile] = []
+    for relative_path in optional_names:
+        candidate = input_dir / relative_path
+        if not candidate.exists():
+            continue
+        source_path = _safe_source_file(
+            candidate,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        files.append(
+            _source_file_for_package(
+                source_path,
+                relative_path,
+                object_store,
+                package_key,
+                source_root=source_root,
+                role="runtime_input",
+            )
+        )
+    return files
 
 
 def _validated_canonical_required_source_files(

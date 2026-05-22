@@ -137,7 +137,7 @@ class IFSAdapterConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
     cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18)
-    forecast_start_hour: int = 0
+    forecast_start_hour: int = field(default_factory=lambda: int(os.getenv("IFS_FORECAST_START_HOUR", "0")))
     forecast_step_hours: int = 3
     preferred_source: str = field(default_factory=lambda: os.getenv("IFS_OPEN_DATA_SOURCE", "ecmwf"))
     fallback_sources: tuple[str, ...] = IFS_FALLBACK_SOURCES
@@ -156,6 +156,13 @@ class IFSAdapterConfig:
     variables: tuple[str, ...] = IFS_VARIABLES
 
     def forecast_end_hour_for_cycle(self, cycle_hour: int) -> int:
+        if override := os.getenv("IFS_FORECAST_END_HOUR"):
+            override_hour = int(override)
+            if override_hour < self.forecast_start_hour:
+                raise ValueError("IFS_FORECAST_END_HOUR must be >= forecast_start_hour.")
+            if (override_hour - self.forecast_start_hour) % self.forecast_step_hours != 0:
+                raise ValueError("IFS_FORECAST_END_HOUR must align to the IFS forecast step.")
+            return override_hour
         normalized = cycle_hour % 24
         if normalized in (0, 12):
             return 168

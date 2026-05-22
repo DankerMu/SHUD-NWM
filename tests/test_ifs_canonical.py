@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ IFSCanonicalConverter = converter_module.IFSCanonicalConverter
 IFSCanonicalConverterConfig = converter_module.IFSCanonicalConverterConfig
 IFS_VARIABLE_MAPPING = converter_module.IFS_VARIABLE_MAPPING
 convert_ifs_precipitation_with_metadata = converter_module.convert_ifs_precipitation_with_metadata
+convert_ifs_shortwave_down_values = converter_module.convert_ifs_shortwave_down_values
 parse_cycle_time = converter_module.parse_cycle_time
 
 IFS_VARIABLES: tuple[str, ...] = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str")
@@ -135,6 +137,23 @@ def test_ifs_variable_mapping_uses_surface_pressure() -> None:
     assert IFS_VARIABLE_MAPPING["sp"] == "surface_pressure"
 
 
+def test_missing_ssr_records_shortwave_down_fail_product(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_ifs_manifest(tmp_path, forecast_hours=(0,))
+    manifest["entries"] = [entry for entry in manifest["entries"] if entry["variable"] != "ssr"]
+    converter = build_converter(tmp_path, repository=repository)
+
+    with pytest.raises(Exception, match="ssr->net_radiation"):
+        converter.convert_manifest(manifest)
+
+    net_radiation = repository.products["IFS_2026050100_net_radiation_f000"]
+    shortwave = repository.products["IFS_2026050100_shortwave_down_f000"]
+    assert net_radiation["quality_flag"] == "fail"
+    assert shortwave["quality_flag"] == "fail"
+    assert shortwave["lineage_json"]["conversion_params"]["missing_native_variable"] == "ssr"
+    assert shortwave["lineage_json"]["conversion_params"]["missing_standard_variable"] == "shortwave_down"
+
+
 def test_temperature_rh_wind_and_pressure_conversion(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     store, manifest = build_ifs_manifest(
@@ -153,7 +172,7 @@ def test_temperature_rh_wind_and_pressure_conversion(tmp_path: Path) -> None:
     result = converter.convert_manifest(manifest)
 
     assert result.status == "canonical_ready"
-    assert len(result.products) == 7
+    assert len(result.products) == 8
     temperature = repository.products["IFS_2026050100_air_temperature_2m_f000"]
     humidity = repository.products["IFS_2026050100_relative_humidity_2m_f000"]
     wind_u = repository.products["IFS_2026050100_wind_u_10m_f000"]
@@ -229,9 +248,74 @@ def test_radiation_cumulative_diff_to_w_m2(tmp_path: Path) -> None:
     converter.convert_manifest(manifest)
 
     radiation = repository.products["IFS_2026050100_net_radiation_f006"]
+    shortwave = repository.products["IFS_2026050100_shortwave_down_f006"]
     assert read_product_values(store, radiation, "net_radiation") == pytest.approx([50.0])
+    assert read_product_values(store, shortwave, "shortwave_down") == pytest.approx([66.6666667])
     assert radiation["lineage_json"]["radiation_method"] == "direct_net"
     assert radiation["lineage_json"]["components"] == ["ssr", "str"]
+    assert shortwave["lineage_json"]["conversion_params"]["operation"] == "cumulative_j_m2_to_w_m2_downward_shortwave"
+
+
+def test_ifs_shortwave_rejects_nonfinite_accumulated_values() -> None:
+    with pytest.raises(Exception, match="finite"):
+        convert_ifs_shortwave_down_values([float("nan")], [0.0], forecast_hour=3, previous_forecast_hour=0)
+
+
+def test_ifs_precipitation_rejects_nonfinite_accumulated_values() -> None:
+    with pytest.raises(Exception, match="finite"):
+        convert_ifs_precipitation_with_metadata([math.nan], [0.0], forecast_hour=3, previous_forecast_hour=0)
+
+
+def test_ifs_shortwave_negative_delta_is_warn_lineage_not_silent_ok() -> None:
+    conversion, step_hours = convert_ifs_shortwave_down_values(
+        [100.0],
+        [200.0],
+        forecast_hour=6,
+        previous_forecast_hour=3,
+    )
+
+    assert step_hours == 3.0
+    assert conversion.values == pytest.approx((0.0,))
+    assert conversion.quality_flag == "warn"
+    assert conversion.anomalies[0]["type"] == "negative_ifs_shortwave_delta"
+
+
+def test_ifs_shortwave_negative_delta_writes_warn_product_with_lineage(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_ifs_manifest(
+        tmp_path,
+        forecast_hours=(3, 6),
+        overrides={
+            ("ssr", 3): [200.0],
+            ("ssr", 6): [100.0],
+        },
+    )
+    converter = build_converter(tmp_path, repository=repository)
+
+    converter.convert_manifest(manifest)
+
+    shortwave = repository.products["IFS_2026050100_shortwave_down_f006"]
+    assert shortwave["quality_flag"] == "warn"
+    anomalies = shortwave["lineage_json"]["conversion_params"]["anomalies"]
+    assert anomalies[0]["type"] == "negative_ifs_shortwave_delta"
+
+
+def test_ifs_convert_manifest_streams_by_group_without_read_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_ifs_manifest(tmp_path, forecast_hours=(0, 3))
+    converter = build_converter(tmp_path, repository=repository)
+
+    def forbidden_read_records(_entries: list[dict[str, Any]]) -> list[Any]:
+        raise AssertionError("_read_records must not be used by convert_manifest")
+
+    monkeypatch.setattr(converter, "_read_records", forbidden_read_records)
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_ready"
+    assert len(result.products) == 16
 
 
 def test_lineage_json_structure_for_each_variable_type(tmp_path: Path) -> None:

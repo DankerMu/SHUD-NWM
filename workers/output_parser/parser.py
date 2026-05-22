@@ -206,16 +206,15 @@ def parse_rivqdown_file(
     if not lines:
         raise OutputParsingError("RIVQDOWN_EMPTY", f".rivqdown file is empty: {path}")
 
-    first_tokens = _split_row(lines[0])
-    data_lines = lines[1:] if _looks_like_header(first_tokens, context.start_time) else lines
+    time_basis = _rivqdown_time_basis(lines, context.start_time, context=context)
+    data_lines = _rivqdown_data_lines(lines, context.start_time)
     if not data_lines:
         raise OutputParsingError("RIVQDOWN_NO_DATA", f".rivqdown file contains no data rows: {path}")
 
     rows: list[RiverTimeseriesRow] = []
     expected_columns: int | None = None
-    data_start_line = 2 if len(data_lines) != len(lines) else 1
     for row_offset, line in enumerate(data_lines):
-        line_number = data_start_line + row_offset
+        line_number = row_offset + 1
         tokens = _split_row(line)
         if expected_columns is None:
             expected_columns = len(tokens)
@@ -235,7 +234,14 @@ def parse_rivqdown_file(
         if len(tokens) < 2:
             raise OutputParsingError("MALFORMED_ROW", f"Row {line_number} must contain time plus data columns")
 
-        valid_time = _parse_valid_time(tokens[0], context.start_time, line_number)
+        valid_time = _parse_valid_time(tokens[0], context.start_time, line_number, numeric_unit=time_basis)
+        if time_basis == "auto" and _ensure_utc(valid_time) > _ensure_utc(context.start_time) + timedelta(days=366):
+            valid_time = _parse_valid_time(
+                tokens[0],
+                datetime(1970, 1, 1, tzinfo=UTC),
+                line_number,
+                numeric_unit="absolute_unix_minutes",
+            )
         lead_time_hours = None if context.run_type == "analysis" else _lead_time_hours(valid_time, context.cycle_time)
         for segment, value_token in zip(segments, tokens[1:], strict=True):
             try:
@@ -365,10 +371,21 @@ class PsycopgOutputParserRepository:
             SELECT river_segment_id, river_network_version_id, segment_order
             FROM core.river_segment
             WHERE river_network_version_id = %s
+              AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
             ORDER BY segment_order NULLS LAST, river_segment_id
             """,
             (river_network_version_id,),
         )
+        if not rows:
+            rows = self._fetch_all(
+                """
+                SELECT river_segment_id, river_network_version_id, segment_order
+                FROM core.river_segment
+                WHERE river_network_version_id = %s
+                ORDER BY segment_order NULLS LAST, river_segment_id
+                """,
+                (river_network_version_id,),
+            )
         return tuple(
             RiverSegmentOrder(
                 river_segment_id=str(row["river_segment_id"]),
@@ -571,23 +588,92 @@ def _looks_like_header(tokens: list[str], start_time: datetime) -> bool:
     if not tokens:
         return True
     try:
-        _parse_time_token(tokens[0], start_time)
+        _parse_time_token(tokens[0], start_time, numeric_unit="minutes")
     except OutputParsingError:
         return True
     return False
 
 
-def _parse_valid_time(token: str, start_time: datetime, line_number: int) -> datetime:
+def _rivqdown_data_lines(lines: list[str], start_time: datetime) -> list[str]:
+    candidate_lines = [line for line in lines if not line.lstrip().startswith("#")]
+    if candidate_lines:
+        first_tokens = _split_row(candidate_lines[0])
+        if _looks_like_header(first_tokens, start_time):
+            return candidate_lines[1:]
+    data_lines: list[str] = []
+    start_index = 0
+    if len(candidate_lines) >= 2:
+        first_tokens = _split_row(candidate_lines[0])
+        second_tokens = _split_row(candidate_lines[1])
+        if first_tokens and all(_is_float(token) for token in first_tokens) and any(
+            not _is_float(token) for token in second_tokens
+        ):
+            start_index = 2
+    for line in candidate_lines[start_index:]:
+        tokens = _split_row(line)
+        if len(tokens) < 2:
+            continue
+        if _looks_like_shud_metadata_row(tokens):
+            continue
+        if not _is_float(tokens[0]):
+            continue
+        if any(not _is_float(token) for token in tokens[1:]):
+            continue
+        data_lines.append(line)
+    return data_lines
+
+
+def _rivqdown_time_basis(lines: list[str], start_time: datetime, *, context: HydroRunContext) -> str:
+    joined = "\n".join(lines[:10]).lower()
+    if "time_min" in joined or "unix minute" in joined or "unix_min" in joined:
+        return "absolute_unix_minutes"
+    data_lines = _rivqdown_data_lines(lines, start_time)
+    if data_lines:
+        first_token = _split_row(data_lines[0])[0]
+        if _is_float(first_token):
+            absolute_time = _parse_time_token(first_token, datetime(1970, 1, 1, tzinfo=UTC), numeric_unit="minutes")
+            if _absolute_time_matches_context(absolute_time, context):
+                return "absolute_unix_minutes"
+    return "minutes"
+
+
+def _absolute_time_matches_context(valid_time: datetime, context: HydroRunContext) -> bool:
+    candidate = _ensure_utc(valid_time)
+    start_time = _ensure_utc(context.start_time)
+    if context.run_type == "analysis":
+        return start_time - timedelta(days=1) <= candidate <= start_time + timedelta(days=366)
+    if context.cycle_time is not None:
+        cycle_time = _ensure_utc(context.cycle_time)
+        return cycle_time - timedelta(days=1) <= candidate <= cycle_time + timedelta(days=366)
+    return start_time - timedelta(days=1) <= candidate <= start_time + timedelta(days=366)
+
+
+def _looks_like_shud_metadata_row(tokens: list[str]) -> bool:
+    return len(tokens) == 3 and tokens[0] == "0" and tokens[2].isdigit() and len(tokens[2]) == 8
+
+
+def _parse_valid_time(
+    token: str,
+    start_time: datetime,
+    line_number: int,
+    *,
+    numeric_unit: str = "minutes",
+) -> datetime:
     try:
-        return _parse_time_token(token, start_time)
+        return _parse_time_token(token, start_time, numeric_unit=numeric_unit)
     except OutputParsingError as error:
         raise OutputParsingError("INVALID_TIME_VALUE", f"Row {line_number} has invalid time value {token!r}") from error
 
 
-def _parse_time_token(token: str, start_time: datetime) -> datetime:
+def _parse_time_token(token: str, start_time: datetime, *, numeric_unit: str = "minutes") -> datetime:
     candidate = token.strip()
     if _is_float(candidate):
-        return _ensure_utc(start_time) + timedelta(minutes=float(candidate))
+        value = float(candidate)
+        if numeric_unit == "days":
+            return _ensure_utc(start_time) + timedelta(days=value)
+        if numeric_unit == "absolute_unix_minutes":
+            return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(minutes=value)
+        return _ensure_utc(start_time) + timedelta(minutes=value)
 
     try:
         parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))

@@ -49,7 +49,7 @@ def test_build_run_context_uses_ifs_run_id_and_144h_horizon_for_06z(tmp_path: Pa
     assert manifest["forecast_horizon_hours"] == 144
 
 
-def test_ifs_forcing_uses_surface_pressure_net_radiation_and_precip_conversion(tmp_path: Path) -> None:
+def test_ifs_forcing_uses_surface_pressure_shortwave_and_precip_conversion(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
     cycle_time = parse_cycle_time("2026050706")
     products = _write_ifs_products(store, cycle_time=cycle_time, forecast_hours=(0, 3))
@@ -64,10 +64,10 @@ def test_ifs_forcing_uses_surface_pressure_net_radiation_and_precip_conversion(t
     component_variables = {component.variable for component in repository.components}
     assert "surface_pressure" in component_variables
     assert "pressure_surface" not in component_variables
-    assert "net_radiation" in component_variables
-    assert "shortwave_down" not in component_variables
+    assert "shortwave_down" in component_variables
+    assert "net_radiation" not in component_variables
     assert _row_value(repository.timeseries, "PRCP", cycle_time + timedelta(hours=3)) == pytest.approx(16.0)
-    assert _row_value(repository.timeseries, "Rn", cycle_time + timedelta(hours=3)) == pytest.approx(250.0)
+    assert _row_value(repository.timeseries, "Rn", cycle_time + timedelta(hours=3)) == pytest.approx(500.0)
     assert _row_value(repository.timeseries, "Press", cycle_time + timedelta(hours=3)) == pytest.approx(100000.0)
 
 
@@ -496,7 +496,8 @@ def _write_ifs_products(
         "wind_u_10m": ("m/s", 3.0),
         "wind_v_10m": ("m/s", 4.0),
         "surface_pressure": ("Pa", 100000.0),
-        "net_radiation": ("W/m2", 250.0),
+        "net_radiation": ("W/m2", -50.0),
+        "shortwave_down": ("W/m2", 500.0),
     }
     products: list[CanonicalProduct] = []
     compact_cycle = cycle_time.strftime("%Y%m%d%H")

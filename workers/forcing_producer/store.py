@@ -49,7 +49,8 @@ class PsycopgForcingRepository:
                 ST_X(geom) AS longitude,
                 ST_Y(geom) AS latitude,
                 elevation_m,
-                station_role
+                station_role,
+                properties_json
             FROM met.met_station
             WHERE basin_version_id = %s
               AND active_flag = true
@@ -66,6 +67,7 @@ class PsycopgForcingRepository:
                 latitude=float(row["latitude"]),
                 elevation_m=float(row["elevation_m"]),
                 station_role=str(row["station_role"]),
+                properties_json=row.get("properties_json") or {},
             )
             for row in rows
             if row["elevation_m"] is not None
@@ -210,7 +212,15 @@ class PsycopgForcingRepository:
     ) -> tuple[InterpolationWeight, ...]:
         rows = self._fetch_all(
             """
-            SELECT source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method
+            SELECT source_id,
+                   grid_id,
+                   model_id,
+                   station_id,
+                   variable,
+                   grid_cell_id,
+                   weight,
+                   method,
+                   grid_signature
             FROM met.interp_weight
             WHERE source_id = %s
               AND grid_id = %s
@@ -229,6 +239,7 @@ class PsycopgForcingRepository:
                 grid_cell_id=str(row["grid_cell_id"]),
                 weight=float(row["weight"]),
                 method=str(row["method"]),
+                grid_signature=row.get("grid_signature"),
             )
             for row in rows
         )
@@ -236,6 +247,10 @@ class PsycopgForcingRepository:
     def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None:
         if not weights:
             return
+        scopes = {(weight.source_id, weight.grid_id, weight.model_id) for weight in weights}
+        if len(scopes) != 1:
+            raise MetStoreError("Interpolation weights must be replaced one source/grid/model scope at a time.")
+        source_id, grid_id, model_id = next(iter(scopes))
         rows = [
             (
                 weight.source_id,
@@ -246,19 +261,28 @@ class PsycopgForcingRepository:
                 weight.grid_cell_id,
                 weight.weight,
                 weight.method,
+                weight.grid_signature,
             )
             for weight in weights
         ]
-        self._execute_values(
+        self._replace_values(
+            """
+            DELETE FROM met.interp_weight
+            WHERE source_id = %s
+              AND grid_id = %s
+              AND model_id = %s
+            """,
+            (source_id, grid_id, model_id),
             """
             INSERT INTO met.interp_weight (
-                source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method
+                source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method, grid_signature
             )
             VALUES %s
             ON CONFLICT (source_id, grid_id, model_id, station_id, variable, grid_cell_id)
             DO UPDATE SET
                 weight = EXCLUDED.weight,
-                method = EXCLUDED.method
+                method = EXCLUDED.method,
+                grid_signature = EXCLUDED.grid_signature
             """,
             rows,
         )
@@ -475,11 +499,6 @@ class PsycopgForcingRepository:
         finally:
             if connection is not None:
                 connection.close()
-
-    def _execute_values(self, statement: str, rows: Sequence[tuple[Any, ...]]) -> None:
-        if not rows:
-            return
-        self._replace_values(None, (), statement, rows)
 
     def _replace_values(
         self,
