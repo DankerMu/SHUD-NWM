@@ -282,7 +282,7 @@ class SHUDRuntime:
         return cls(config=config)
 
     def execute_manifest_path(self, manifest_path: str | Path) -> SHUDExecutionResult:
-        manifest = json.loads(_read_text_no_follow(Path(manifest_path), containment_root=Path(manifest_path).parent))
+        manifest = json.loads(_read_runtime_manifest_text_no_follow(Path(manifest_path)))
         return self.execute(manifest)
 
     def execute(self, manifest: dict[str, Any]) -> SHUDExecutionResult:
@@ -925,6 +925,24 @@ def _write_staged_bytes(path: Path, content: bytes, *, root: Path) -> Path:
 
 def _read_text_no_follow(path: Path, *, containment_root: Path) -> str:
     return _read_staged_bytes(path, root=containment_root).decode("utf-8")
+
+
+def _read_runtime_manifest_text_no_follow(path: Path) -> str:
+    try:
+        return _read_text_no_follow(path, containment_root=path.parent)
+    except SHUDRuntimeError as error:
+        if _caused_by_missing_path(error):
+            raise SHUDRuntimeError("RUNTIME_MANIFEST_MISSING", f"Runtime manifest not found: {path}") from error
+        raise
+
+
+def _caused_by_missing_path(error: BaseException) -> bool:
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, FileNotFoundError):
+            return True
+        current = current.__cause__
+    return False
 
 
 def _read_staged_bytes(path: Path, *, root: Path) -> bytes:

@@ -476,6 +476,27 @@ def test_runtime_array_cli_fails_stably_when_runtime_manifest_is_missing(tmp_pat
     assert "run_001" in captured.err
 
 
+def test_runtime_array_cli_rejects_symlinked_runtime_manifest(tmp_path, capsys):
+    manifest_index = _manifest_index(tmp_path)
+    manifest_path = tmp_path / "workspace" / "runs" / "run_001" / "input" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    target = tmp_path / "outside_manifest.json"
+    target.write_text("{}", encoding="utf-8")
+    try:
+        manifest_path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+
+    _invoke_main_expect_failure(
+        runtime_cli.main,
+        ["execute", "--manifest-index", str(manifest_index), "--task-id", "0", "--dry-run"],
+    )
+
+    captured = capsys.readouterr()
+    assert "WORKSPACE_PATH_UNSAFE:" in captured.err
+    assert "symlink" in captured.err
+
+
 def test_runtime_array_cli_uses_manifest_path_override(monkeypatch, tmp_path):
     captured: dict[str, str] = {}
     manifest_path = tmp_path / "workspace" / "runs" / "run_001" / "input" / "manifest.json"

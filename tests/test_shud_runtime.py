@@ -227,6 +227,39 @@ def test_runtime_executes_mock_shud_and_updates_statuses(tmp_path: Path) -> None
     assert ".cfg.ic" not in cfg
 
 
+def test_runtime_manifest_path_missing_raises_stable_manifest_error(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest_path = tmp_path / "workspace" / "runs" / "missing_run" / "input" / "manifest.json"
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute_manifest_path(manifest_path)
+
+    assert exc_info.value.error_code == "RUNTIME_MANIFEST_MISSING"
+    assert "missing_run" in exc_info.value.message
+    assert repository.statuses == []
+
+
+def test_runtime_manifest_path_symlink_is_not_followed(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest_path = tmp_path / "workspace" / "runs" / "run_001" / "input" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    target = tmp_path / "outside_manifest.json"
+    target.write_text("{}", encoding="utf-8")
+    try:
+        manifest_path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute_manifest_path(manifest_path)
+
+    assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
+    assert "symlink" in exc_info.value.message
+    assert repository.statuses == []
+
+
 def test_basins_package_stages_and_generates_cfg_without_live_solver(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
