@@ -17,6 +17,7 @@ from services.orchestrator.scheduler import (
     ProductionScheduler,
     ProductionSchedulerConfig,
     SchedulerEvidenceWriteError,
+    SchedulerPassResult,
 )
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
@@ -184,6 +185,50 @@ def test_explicit_paths_must_stay_under_workspace(tmp_path: Path) -> None:
         _config(tmp_path, lock_path=outside)
     with pytest.raises(ValueError, match="evidence_dir must be under workspace_root"):
         _config(tmp_path, evidence_dir=outside)
+
+
+def test_fresh_default_workspace_runtime_paths_are_created_safely(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
+
+    result = scheduler.run_once()
+
+    workspace_root = tmp_path / ".nhms-workspace"
+    assert result.status == "planned"
+    assert config.workspace_root == workspace_root.resolve()
+    assert Path(config.lock_path) == workspace_root.resolve() / "scheduler" / "production-scheduler.lock"
+    assert Path(config.evidence_dir) == workspace_root.resolve() / "scheduler" / "evidence"
+    assert Path(result.artifact_path or "").is_file()
+    assert (workspace_root / "scheduler" / "production-scheduler.lock.guard").is_file()
+
+
+def test_plan_production_cli_uses_fresh_default_workspace_path(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            captured["config"] = config
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned"})
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production"])
+
+    workspace_root = tmp_path / ".nhms-workspace"
+    assert rc == 0
+    assert captured["config"].workspace_root == workspace_root.resolve()
+    assert Path(captured["config"].lock_path) == workspace_root.resolve() / "scheduler" / "production-scheduler.lock"
+    assert Path(captured["config"].evidence_dir) == workspace_root.resolve() / "scheduler" / "evidence"
 
 
 def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
@@ -419,6 +464,57 @@ def test_cycle_discovery_limit_blocks_before_candidate_or_duplicate_evidence(tmp
     assert result.evidence["duplicate_exclusions"] == []
 
 
+def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 400)
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.status == "resource_limit_blocked"
+    assert result.evidence["status"] == "resource_limit_blocked"
+    assert persisted["status"] == "resource_limit_blocked"
+    assert result.evidence["limit"]["reason"] == "evidence_size_limit_exceeded"
+    assert persisted["limit"]["reason"] == "evidence_size_limit_exceeded"
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            self.config = config
+
+        def run_continuous(self, *, max_passes: int | None = None) -> list[SchedulerPassResult]:
+            assert max_passes == 1
+            return [result]
+
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=(),
+        basin_ids=(),
+        dry_run=True,
+        continuous=True,
+        interval_seconds=300.0,
+        max_passes=1,
+        workspace_root=str(tmp_path),
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "resource_limit_blocked"
+    assert payload["passes"][0]["status"] == "resource_limit_blocked"
+
+
 def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
@@ -481,6 +577,36 @@ def test_plan_production_cli_smoke_with_injected_scheduler(monkeypatch: Any, tmp
     )
 
     assert rc == 0
+
+
+def test_run_continuous_unbounded_keeps_only_latest_result(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    scheduler = CountingScheduler(config, stop_after=3)
+
+    with pytest.raises(StopIteration):
+        scheduler.run_continuous()
+
+    assert len(scheduler.snapshots) == 3
+    assert scheduler.snapshots == [1, 1, 1]
+
+
+def test_cli_rejects_unbounded_json_continuous_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="--continuous JSON output requires --max-passes"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=True,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=str(tmp_path),
+            lock_path=None,
+            evidence_dir=None,
+        )
 
 
 class SimpleResult:
@@ -570,6 +696,33 @@ class FakeActiveRepository:
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         del source_id, cycle_time, model_id
         return self.active
+
+
+class CountingScheduler(ProductionScheduler):
+    def __init__(self, config: ProductionSchedulerConfig, *, stop_after: int) -> None:
+        super().__init__(config, registry=FakeRegistry([]), adapters={}, sleep=self._sleep)
+        self.stop_after = stop_after
+        self.pass_count = 0
+        self.snapshots: list[int] = []
+
+    def run_once(self) -> SchedulerPassResult:
+        self.pass_count += 1
+        return SchedulerPassResult(
+            pass_id=f"pass_{self.pass_count}",
+            status="planned",
+            evidence={"pass_id": f"pass_{self.pass_count}", "status": "planned"},
+        )
+
+    def _sleep(self, _seconds: float) -> None:
+        import inspect
+
+        caller = inspect.currentframe().f_back
+        if caller is not None:
+            results = caller.f_locals.get("results")
+            if isinstance(results, list):
+                self.snapshots.append(len(results))
+        if self.pass_count >= self.stop_after:
+            raise StopIteration
 
 
 def _config(tmp_path: Path, **kwargs: Any) -> ProductionSchedulerConfig:

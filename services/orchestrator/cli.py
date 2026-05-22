@@ -85,6 +85,9 @@ def _plan_production(
         lock_path=lock_path,
         evidence_dir=evidence_dir,
     )
+    if continuous:
+        if max_passes is None:
+            raise ValueError("plan-production --continuous JSON output requires --max-passes")
     scheduler = ProductionScheduler(config)
     if continuous:
         results = scheduler.run_continuous(max_passes=max_passes)
@@ -166,26 +169,30 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         lock_path: str | None,
         evidence_dir: str | None,
     ) -> None:
-        click.echo(
-            json.dumps(
-                _plan_production(
-                    sources=_split_csv(sources),
-                    lookback_hours=lookback_hours,
-                    cycle_lag_hours=cycle_lag_hours,
-                    max_cycles_per_source=max_cycles_per_source,
-                    model_ids=_split_csv(model_ids),
-                    basin_ids=_split_csv(basin_ids),
-                    dry_run=dry_run,
-                    continuous=continuous,
-                    interval_seconds=interval_seconds,
-                    max_passes=max_passes,
-                    workspace_root=workspace_root,
-                    lock_path=lock_path,
-                    evidence_dir=evidence_dir,
-                ),
-                sort_keys=True,
+        try:
+            click.echo(
+                json.dumps(
+                    _plan_production(
+                        sources=_split_csv(sources),
+                        lookback_hours=lookback_hours,
+                        cycle_lag_hours=cycle_lag_hours,
+                        max_cycles_per_source=max_cycles_per_source,
+                        model_ids=_split_csv(model_ids),
+                        basin_ids=_split_csv(basin_ids),
+                        dry_run=dry_run,
+                        continuous=continuous,
+                        interval_seconds=interval_seconds,
+                        max_passes=max_passes,
+                        workspace_root=workspace_root,
+                        lock_path=lock_path,
+                        evidence_dir=evidence_dir,
+                    ),
+                    sort_keys=True,
+                )
             )
-        )
+        except ValueError as error:
+            click.echo(str(error), err=True)
+            raise SystemExit(2) from error
 
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=argv is None)
     return 0
@@ -231,26 +238,30 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(failure_payload(args.cycle_id, error), sort_keys=True))
             return 1
     if args.command == "plan-production":
-        print(
-            json.dumps(
-                _plan_production(
-                    sources=_split_csv(args.source),
-                    lookback_hours=args.lookback_hours,
-                    cycle_lag_hours=args.cycle_lag_hours,
-                    max_cycles_per_source=args.max_cycles_per_source,
-                    model_ids=_split_csv(args.model_id),
-                    basin_ids=_split_csv(args.basin_id),
-                    dry_run=args.dry_run,
-                    continuous=args.continuous,
-                    interval_seconds=args.interval_seconds,
-                    max_passes=args.max_passes,
-                    workspace_root=args.workspace_root,
-                    lock_path=args.lock_path,
-                    evidence_dir=args.evidence_dir,
-                ),
-                sort_keys=True,
+        try:
+            print(
+                json.dumps(
+                    _plan_production(
+                        sources=_split_csv(args.source),
+                        lookback_hours=args.lookback_hours,
+                        cycle_lag_hours=args.cycle_lag_hours,
+                        max_cycles_per_source=args.max_cycles_per_source,
+                        model_ids=_split_csv(args.model_id),
+                        basin_ids=_split_csv(args.basin_id),
+                        dry_run=args.dry_run,
+                        continuous=args.continuous,
+                        interval_seconds=args.interval_seconds,
+                        max_passes=args.max_passes,
+                        workspace_root=args.workspace_root,
+                        lock_path=args.lock_path,
+                        evidence_dir=args.evidence_dir,
+                    ),
+                    sort_keys=True,
+                )
             )
-        )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 2
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2

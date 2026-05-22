@@ -290,9 +290,10 @@ class ProductionScheduler:
                 }
             )
             artifact_path = self._write_evidence(pass_id, evidence)
+            status = _evidence_status(evidence, "lock_contended")
             return SchedulerPassResult(
                 pass_id=pass_id,
-                status="lock_contended",
+                status=status,
                 evidence=evidence,
                 artifact_path=artifact_path,
             )
@@ -344,9 +345,10 @@ class ProductionScheduler:
                 }
             )
             artifact_path = self._write_evidence(pass_id, evidence)
+            status = _evidence_status(evidence, "planned")
             return SchedulerPassResult(
                 pass_id=pass_id,
-                status="planned",
+                status=status,
                 evidence=evidence,
                 artifact_path=artifact_path,
             )
@@ -377,9 +379,10 @@ class ProductionScheduler:
                 }
             )
             artifact_path = self._write_evidence(pass_id, evidence)
+            status = _evidence_status(evidence, "resource_limit_blocked")
             return SchedulerPassResult(
                 pass_id=pass_id,
-                status="resource_limit_blocked",
+                status=status,
                 evidence=evidence,
                 artifact_path=artifact_path,
             )
@@ -390,7 +393,11 @@ class ProductionScheduler:
         results: list[SchedulerPassResult] = []
         completed = 0
         while max_passes is None or completed < max_passes:
-            results.append(self.run_once())
+            result = self.run_once()
+            if max_passes is None:
+                results[:] = [result]
+            else:
+                results.append(result)
             completed += 1
             if max_passes is not None and completed >= max_passes:
                 break
@@ -1102,6 +1109,7 @@ def _open_lock_parent_directory(lock_parent: Path, workspace_root: Path | None) 
             raise
 
     workspace_root = workspace_root.resolve()
+    _ensure_workspace_directory(workspace_root)
     try:
         relative_parent = lock_parent.relative_to(workspace_root)
     except ValueError as error:
@@ -1139,6 +1147,21 @@ def _open_lock_parent_directory(lock_parent: Path, workspace_root: Path | None) 
         os.close(parent_fd)
         raise
     return parent_fd
+
+
+def _ensure_workspace_directory(workspace_root: Path) -> None:
+    try:
+        workspace_root.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        if error.errno in {ELOOP, ENOTDIR}:
+            raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
+        raise
+    try:
+        root_stat = workspace_root.lstat()
+    except FileNotFoundError as error:
+        raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        raise UnsafeSchedulerLockError("unsafe_lock_parent_directory")
 
 
 def _open_evidence_directory(evidence_dir: Path, workspace_root: Path) -> int:
@@ -1260,6 +1283,11 @@ def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dic
             },
         ),
     }
+
+
+def _evidence_status(evidence: Mapping[str, Any], fallback: str) -> str:
+    status = evidence.get("status")
+    return str(status) if status not in (None, "") else fallback
 
 
 def _now(config: ProductionSchedulerConfig) -> datetime:
