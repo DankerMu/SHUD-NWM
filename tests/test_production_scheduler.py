@@ -664,6 +664,53 @@ def test_plan_production_cli_public_path_skips_active_duplicate(
     assert payload["counts"]["submitted_count"] == 0
 
 
+def test_plan_production_click_missing_database_url_exits_cleanly_without_mutation(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    monkeypatch.setattr("services.orchestrator.scheduler.ProductionScheduler.run_once", _unexpected_run_once)
+
+    try:
+        cli._click_main(["plan-production", "--workspace-root", str(tmp_path)])
+    except SystemExit as error:
+        rc = int(error.code or 0)
+    else:
+        rc = 0
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert captured.out == ""
+    assert captured.err == "DATABASE_URL_MISSING: DATABASE_URL is required for orchestration.\n"
+    assert list((tmp_path / "scheduler").glob("*")) == []
+
+
+def test_plan_production_argparse_missing_database_url_exits_cleanly_without_mutation(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+    monkeypatch.setattr("services.orchestrator.scheduler.ProductionScheduler.run_once", _unexpected_run_once)
+
+    rc = cli._argparse_main(["plan-production", "--workspace-root", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert captured.out == ""
+    assert captured.err == "DATABASE_URL_MISSING: DATABASE_URL is required for orchestration.\n"
+    assert list((tmp_path / "scheduler").glob("*")) == []
+
+
 def test_plan_production_cli_smoke_with_injected_scheduler(monkeypatch: Any, tmp_path: Path) -> None:
     class FakeScheduler:
         def __init__(self, config: ProductionSchedulerConfig) -> None:
@@ -929,3 +976,19 @@ def _dt(value: str) -> datetime:
 
 def _candidates(evidence: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(evidence["candidates"], key=lambda item: item["candidate_id"])
+
+
+def _unexpected_registry() -> FakeRegistry:
+    raise AssertionError("missing DATABASE_URL must fail before registry construction")
+
+
+def _unexpected_adapters() -> dict[str, FakeAdapter]:
+    raise AssertionError("missing DATABASE_URL must fail before adapter construction")
+
+
+def _unexpected_lock_acquire(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    raise AssertionError("missing DATABASE_URL must fail before scheduler lock acquisition")
+
+
+def _unexpected_run_once(*_args: Any, **_kwargs: Any) -> SchedulerPassResult:
+    raise AssertionError("missing DATABASE_URL must fail before candidate or evidence work")
