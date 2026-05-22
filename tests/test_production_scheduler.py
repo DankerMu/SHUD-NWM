@@ -16,6 +16,7 @@ from services.orchestrator.scheduler import (
     FileSchedulerLease,
     ProductionScheduler,
     ProductionSchedulerConfig,
+    SchedulerEvidenceWriteError,
 )
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
@@ -208,6 +209,45 @@ def test_explicit_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -
         _config(tmp_path, evidence_dir=evidence_link)
 
     assert list(outside.iterdir()) == []
+
+
+def test_evidence_final_artifact_symlink_is_not_followed(tmp_path: Path) -> None:
+    pass_id = "scheduler_20260521120000_fixed"
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
+    evidence_dir = Path(config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    outside_target = tmp_path.parent / f"{tmp_path.name}-outside-evidence-target.json"
+    outside_target.write_text("keep", encoding="utf-8")
+    artifact_path = evidence_dir / f"{pass_id}.json"
+    artifact_path.symlink_to(outside_target)
+    evidence = {"pass_id": pass_id, "status": "planned"}
+
+    with pytest.raises(SchedulerEvidenceWriteError) as error:
+        scheduler._write_evidence(pass_id, evidence)
+
+    assert error.value.reason == "unsafe_evidence_artifact"
+    assert artifact_path.is_symlink()
+    assert outside_target.read_text(encoding="utf-8") == "keep"
+    assert evidence == {"pass_id": pass_id, "status": "planned"}
+
+
+def test_evidence_existing_artifact_file_is_not_overwritten(tmp_path: Path) -> None:
+    pass_id = "scheduler_20260521120000_fixed"
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
+    evidence_dir = Path(config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    artifact_path = evidence_dir / f"{pass_id}.json"
+    artifact_path.write_text("existing", encoding="utf-8")
+    evidence = {"pass_id": pass_id, "status": "planned"}
+
+    with pytest.raises(SchedulerEvidenceWriteError) as error:
+        scheduler._write_evidence(pass_id, evidence)
+
+    assert error.value.reason == "evidence_artifact_exists"
+    assert artifact_path.read_text(encoding="utf-8") == "existing"
+    assert evidence == {"pass_id": pass_id, "status": "planned"}
 
 
 def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path) -> None:

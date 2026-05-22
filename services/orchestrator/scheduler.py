@@ -48,6 +48,13 @@ class UnsafeSchedulerLockError(OSError):
         self.reason = reason
 
 
+class SchedulerEvidenceWriteError(OSError):
+    def __init__(self, reason: str, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.details = dict(details or {})
+
+
 class ModelRegistryReader(Protocol):
     def list_models(
         self,
@@ -605,21 +612,32 @@ class ProductionScheduler:
 
     def _write_evidence(self, pass_id: str, evidence: Mapping[str, Any]) -> Path | None:
         evidence_dir = Path(self.config.evidence_dir)
-        _require_safe_directory_final_component(evidence_dir, Path(self.config.workspace_root), "evidence_dir")
-        evidence_dir.mkdir(parents=True, exist_ok=True)
+        workspace_root = Path(self.config.workspace_root)
+        _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
         artifact_path = evidence_dir / f"{pass_id}.json"
-        _require_under_workspace(artifact_path.parent.resolve(), Path(self.config.workspace_root), "evidence_dir")
+        _require_under_workspace(artifact_path.parent.resolve(), workspace_root, "evidence_dir")
         payload = dict(evidence)
         payload["artifact_path"] = str(artifact_path)
         serialized = json.dumps(payload, indent=2, sort_keys=True)
+        bounded_payload: dict[str, Any] | None = None
         if len(serialized.encode("utf-8")) > MAX_EVIDENCE_BYTES:
-            payload = _bounded_evidence_payload(payload, reason="evidence_size_limit_exceeded")
-            serialized = json.dumps(payload, indent=2, sort_keys=True)
-            if isinstance(evidence, dict):
+            bounded_payload = _bounded_evidence_payload(payload, reason="evidence_size_limit_exceeded")
+            serialized = json.dumps(bounded_payload, indent=2, sort_keys=True)
+        evidence_dir_fd = _open_evidence_directory(evidence_dir, workspace_root)
+        try:
+            _write_new_regular_file(
+                f"{pass_id}.json",
+                serialized,
+                dir_fd=evidence_dir_fd,
+                artifact_path=artifact_path,
+            )
+        finally:
+            os.close(evidence_dir_fd)
+        if isinstance(evidence, dict):
+            if bounded_payload is not None:
                 evidence.clear()
-                evidence.update(payload)
-        artifact_path.write_text(serialized, encoding="utf-8")
-        evidence.setdefault("artifact_path", str(artifact_path)) if isinstance(evidence, dict) else None
+                evidence.update(bounded_payload)
+            evidence.setdefault("artifact_path", str(artifact_path))
         return artifact_path
 
 
@@ -1121,6 +1139,53 @@ def _open_lock_parent_directory(lock_parent: Path, workspace_root: Path | None) 
         os.close(parent_fd)
         raise
     return parent_fd
+
+
+def _open_evidence_directory(evidence_dir: Path, workspace_root: Path) -> int:
+    try:
+        return _open_lock_parent_directory(evidence_dir, workspace_root)
+    except UnsafeSchedulerLockError as error:
+        raise SchedulerEvidenceWriteError("unsafe_evidence_directory") from error
+
+
+def _write_new_regular_file(
+    artifact_name: str,
+    serialized: str,
+    *,
+    dir_fd: int,
+    artifact_path: Path,
+) -> None:
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(artifact_name, flags, 0o644, dir_fd=dir_fd)
+    except FileExistsError as error:
+        try:
+            artifact_stat = os.stat(artifact_name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            artifact_stat = None
+        reason = (
+            "evidence_artifact_exists"
+            if artifact_stat is not None and stat.S_ISREG(artifact_stat.st_mode)
+            else "unsafe_evidence_artifact"
+        )
+        raise SchedulerEvidenceWriteError(
+            reason,
+            {"artifact_path": str(artifact_path)},
+        ) from error
+    except OSError as error:
+        if error.errno in {EEXIST, EISDIR, ELOOP, ENOTDIR}:
+            raise SchedulerEvidenceWriteError(
+                "unsafe_evidence_artifact",
+                {"artifact_path": str(artifact_path)},
+            ) from error
+        raise
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(serialized)
 
 
 def _open_regular_guard_file(guard_name: str, *, dir_fd: int) -> int:
