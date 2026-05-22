@@ -12,11 +12,14 @@ from datetime import UTC, date, datetime, timedelta
 from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from packages.common.model_registry import PsycopgModelRegistryStore
+from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
+from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 
 DEFAULT_PRODUCTION_SOURCES = ("gfs", "IFS")
@@ -34,8 +37,18 @@ MAX_REGISTRY_PAGES = 20
 MAX_EVIDENCE_BYTES = 5_000_000
 MAX_LOCK_PAYLOAD_BYTES = 16_384
 MAX_CONTINUOUS_JSON_PASSES = 100
+MAX_SLURM_ENV_VALUE_LENGTH = 1024
 LOCK_OWNER = "production_scheduler"
 LOCK_SCHEMA_VERSION = 1
+SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "frequency"}
+SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
+SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
+SENSITIVE_ENV_KEY_RE = re.compile(
+    r"(TOKEN|PASSWORD|PASSWD|PWD|SECRET|CREDENTIAL|API_?KEY|ACCESS_?KEY|SESSION_?KEY|SIGNATURE)",
+    re.IGNORECASE,
+)
+LOCALHOST_NAMES = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 class SchedulerResourceLimitError(ValueError):
@@ -92,6 +105,15 @@ class ActiveCandidateRepository(Protocol):
     def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         raise NotImplementedError
 
+    def active_slurm_jobs(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+    ) -> Sequence[Mapping[str, Any]]:
+        raise NotImplementedError
+
 
 class ProductionOrchestratorFactory(Protocol):
     def __call__(self, source_id: str) -> ForecastOrchestrator:
@@ -101,6 +123,26 @@ class ProductionOrchestratorFactory(Protocol):
 @dataclass(frozen=True)
 class ProductionSchedulerConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
+    object_store_root: Path | str | None = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT"))
+    log_root: Path | str | None = field(
+        default_factory=lambda: os.getenv("SLURM_SHARED_LOG_ROOT") or os.getenv("LOG_ROOT")
+    )
+    runtime_root: Path | str | None = field(
+        default_factory=lambda: os.getenv("NHMS_RUNTIME_ROOT")
+        or os.getenv("RUN_WORKSPACE_ROOT")
+        or os.getenv("SHUD_RUNTIME_ROOT")
+    )
+    database_url: str | None = field(
+        default_factory=lambda: os.getenv("PIPELINE_DATABASE_URL") or os.getenv("DATABASE_URL")
+    )
+    slurm_execution_enabled: bool = field(
+        default_factory=lambda: _env_flag("NHMS_PRODUCTION_SLURM_ENABLED")
+        or _env_flag("SLURM_EXECUTION_ENABLED")
+    )
+    allowed_storage_roots: tuple[Path | str, ...] = ()
+    slurm_job_type_templates: Mapping[str, str] | None = None
+    slurm_env: Mapping[str, str] = field(default_factory=dict)
+    cancel_active_slurm: bool = False
     sources: tuple[str, ...] = DEFAULT_PRODUCTION_SOURCES
     lookback_hours: int = DEFAULT_LOOKBACK_HOURS
     cycle_lag_hours: int = DEFAULT_CYCLE_LAG_HOURS
@@ -119,6 +161,15 @@ class ProductionSchedulerConfig:
     def __post_init__(self) -> None:
         workspace_root = Path(self.workspace_root).expanduser().resolve()
         object.__setattr__(self, "workspace_root", workspace_root)
+        object.__setattr__(self, "object_store_root", _optional_config_path(self.object_store_root))
+        object.__setattr__(self, "log_root", _optional_config_path(self.log_root))
+        object.__setattr__(self, "runtime_root", _optional_config_path(self.runtime_root))
+        object.__setattr__(self, "database_url", str(self.database_url).strip() if self.database_url else None)
+        allowed_roots = tuple(_optional_config_path(root) for root in self.allowed_storage_roots if root)
+        object.__setattr__(self, "allowed_storage_roots", allowed_roots)
+        templates = dict(self.slurm_job_type_templates or DEFAULT_JOB_TYPE_TEMPLATES)
+        object.__setattr__(self, "slurm_job_type_templates", templates)
+        object.__setattr__(self, "slurm_env", {str(key): str(value) for key, value in dict(self.slurm_env).items()})
         if len(self.sources) > MAX_SOURCES:
             raise ValueError(f"production scheduler source count exceeds limit {MAX_SOURCES}")
         sources, source_exclusions = _normalize_sources(self.sources)
@@ -326,6 +377,13 @@ class ProductionScheduler:
                 models=models,
                 cycles=cycles,
             )
+            cancellation_evidence: list[dict[str, Any]] = []
+            if (
+                self.config.cancel_active_slurm
+                and not self.config.dry_run
+                and any(candidate.get("reason") == "cancel_requested_active_slurm" for candidate in skipped_candidates)
+            ):
+                cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
             execution_evidence: list[dict[str, Any]] = []
             submitted_count = 0
             failed_count = 0
@@ -333,24 +391,41 @@ class ProductionScheduler:
             execution_boundary = "planning_only"
             pass_status = "planned"
             no_mutation_proof = _no_mutation_proof()
+            slurm_preflight_evidence: dict[str, Any] | None = None
             if not self.config.dry_run and candidates:
-                if self.orchestrator_factory is None:
-                    execution_evidence = [_candidate_preflight_blocked_evidence(candidate) for candidate in candidates]
+                slurm_preflight = _slurm_preflight(self.config)
+                if slurm_preflight["status"] != "not_required":
+                    slurm_preflight_evidence = redact_payload(slurm_preflight)
+                if slurm_preflight["status"] == "blocked":
+                    execution_evidence = [
+                        _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                        for candidate in candidates
+                    ]
+                    execution_boundary = "slurm_preflight_blocked"
+                    pass_status = "preflight_blocked"
+                elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
+                    execution_evidence = [
+                        _candidate_preflight_blocked_evidence(candidate, config=self.config) for candidate in candidates
+                    ]
                     execution_boundary = "preflight_blocked"
                     pass_status = "preflight_blocked"
                     no_mutation_proof = _no_mutation_proof()
                 else:
                     execution_evidence = self._execute_candidates(candidates)
                     submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
-                    execution_boundary = "production_orchestration"
-                    pass_status = _scheduler_pass_status_from_execution(execution_evidence)
-                    no_mutation_proof = {
-                        "adapter_download_called": False,
-                        "slurm_submit_called": submitted_count > 0,
-                        "shud_runtime_called": False,
-                        "hydro_result_table_writes": submitted_count > 0,
-                        "met_result_table_writes": submitted_count > 0,
-                    }
+                    execution_boundary = (
+                        "slurm_gateway_orchestration"
+                        if self.config.slurm_execution_enabled
+                        else "production_orchestration"
+                    )
+                pass_status = _scheduler_pass_status_from_execution(execution_evidence)
+                no_mutation_proof = {
+                    "adapter_download_called": False,
+                    "slurm_submit_called": submitted_count > 0,
+                    "shud_runtime_called": False,
+                    "hydro_result_table_writes": submitted_count > 0,
+                    "met_result_table_writes": submitted_count > 0,
+                }
                 failed_count = sum(1 for item in execution_evidence if item.get("status") == "failed")
                 partial_count = _scheduler_partial_count_from_execution(execution_evidence)
             finished_at = _now(self.config)
@@ -383,10 +458,13 @@ class ProductionScheduler:
                         "partial_count": partial_count,
                     },
                     "model_run_evidence": execution_evidence,
+                    "slurm_cancellation_evidence": cancellation_evidence,
                     "no_mutation_proof": no_mutation_proof,
                     "execution_boundary": execution_boundary,
                 }
             )
+            if slurm_preflight_evidence is not None:
+                evidence["slurm_preflight"] = slurm_preflight_evidence
             artifact_path = self._write_evidence(pass_id, evidence)
             status = _evidence_status(evidence, pass_status)
             return SchedulerPassResult(
@@ -519,6 +597,64 @@ class ProductionScheduler:
                     submitted_candidates,
                     output_uris=candidate_output_uris,
                 )
+            )
+        return evidence
+
+    def _cancel_requested_active_slurm(self, skipped_candidates: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for candidate in skipped_candidates:
+            if candidate.get("reason") != "cancel_requested_active_slurm":
+                continue
+            source_id = str(candidate.get("source_id") or "")
+            cycle_time_text = candidate.get("cycle_time_utc")
+            if not source_id or not cycle_time_text:
+                continue
+            grouped.setdefault((source_id, str(cycle_time_text)), candidate)
+
+        evidence: list[dict[str, Any]] = []
+        for (source_id, cycle_time_text), skipped in sorted(grouped.items()):
+            cycle_time = _ensure_utc(datetime.fromisoformat(cycle_time_text.replace("Z", "+00:00")))
+            cycle_id = cycle_id_for(source_id, cycle_time)
+            orchestrator = self._orchestrator_for(source_id)
+            cancel = getattr(orchestrator, "cancel_active_cycle_jobs", None)
+            if not callable(cancel):
+                evidence.append(
+                    {
+                        "source_id": source_id,
+                        "cycle_id": cycle_id,
+                        "cycle_time_utc": cycle_time_text,
+                        "status": "blocked",
+                        "error_code": "SLURM_CANCEL_UNSUPPORTED",
+                        "replacement_submitted": False,
+                    }
+                )
+                continue
+            try:
+                cancelled = [dict(item) for item in cancel(cycle_id, reason="scheduler_cancel_requested")]
+            except Exception as error:
+                evidence.append(
+                    {
+                        "source_id": source_id,
+                        "cycle_id": cycle_id,
+                        "cycle_time_utc": cycle_time_text,
+                        "status": "failed",
+                        "error_code": getattr(error, "error_code", "SLURM_CANCEL_FAILED"),
+                        "error_message": getattr(error, "message", str(error)),
+                        "replacement_submitted": False,
+                        "active_slurm_jobs": skipped.get("active_slurm_jobs", []),
+                    }
+                )
+                continue
+            evidence.append(
+                {
+                    "source_id": source_id,
+                    "cycle_id": cycle_id,
+                    "cycle_time_utc": cycle_time_text,
+                    "status": "cancelled",
+                    "cancelled_jobs": cancelled,
+                    "replacement_submitted": False,
+                    "active_slurm_jobs": skipped.get("active_slurm_jobs", []),
+                }
             )
         return evidence
 
@@ -735,6 +871,11 @@ class ProductionScheduler:
             if self.active_repository is not None
             else None
         )
+        active_slurm_jobs_provider = (
+            getattr(self.active_repository, "active_slurm_jobs", None)
+            if self.active_repository is not None
+            else None
+        )
         for cycle in cycles:
             discovery = cycle.discovery
             has_active_orchestration: bool | None = None
@@ -772,6 +913,36 @@ class ProductionScheduler:
                     )
                 if has_active_orchestration:
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
+                    continue
+                active_slurm_jobs = (
+                    list(
+                        active_slurm_jobs_provider(
+                            source_id=discovery.source_id,
+                            cycle_time=discovery.cycle_time,
+                            model_id=model.model_id,
+                        )
+                    )
+                    if callable(active_slurm_jobs_provider)
+                    else []
+                )
+                if active_slurm_jobs:
+                    if self.config.cancel_active_slurm:
+                        skipped.append(
+                            {
+                                **candidate.to_dict(),
+                                "reason": "cancel_requested_active_slurm",
+                                "active_slurm_jobs": [dict(job) for job in active_slurm_jobs],
+                                "replacement_submitted": False,
+                            }
+                        )
+                    else:
+                        skipped.append(
+                            {
+                                **candidate.to_dict(),
+                                "reason": "active_slurm_job",
+                                "active_slurm_jobs": [dict(job) for job in active_slurm_jobs],
+                            }
+                        )
                     continue
                 if self.active_repository is not None and self.active_repository.has_active_pipeline(
                     source_id=discovery.source_id,
@@ -1277,7 +1448,14 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
     return evidence
 
 
-def _candidate_preflight_blocked_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
+def _candidate_preflight_blocked_evidence(
+    candidate: SchedulerCandidate,
+    *,
+    config: ProductionSchedulerConfig | None = None,
+) -> dict[str, Any]:
+    if config is not None and config.slurm_execution_enabled:
+        preflight = _slurm_preflight(config)
+        return _candidate_slurm_preflight_blocked_evidence(candidate, preflight)
     return {
         **_candidate_identity_evidence(candidate),
         "status": "preflight_blocked",
@@ -1298,6 +1476,39 @@ def _candidate_preflight_blocked_evidence(candidate: SchedulerCandidate) -> dict
                 "quality_flag": "preflight_required",
                 "residual_risk": "No scheduler mutation was attempted.",
             }
+        ],
+    }
+
+
+def _candidate_slurm_preflight_blocked_evidence(
+    candidate: SchedulerCandidate,
+    preflight: Mapping[str, Any],
+) -> dict[str, Any]:
+    blockers = list(preflight.get("blockers") or [])
+    primary = blockers[0] if blockers else {
+        "code": "SLURM_PREFLIGHT_BLOCKED",
+        "message": "Slurm preflight blocked submission.",
+    }
+    return {
+        **_candidate_identity_evidence(candidate),
+        "status": "preflight_blocked",
+        "submitted": False,
+        "mutation_occurred": False,
+        "execution_mode": "slurm_preflight",
+        "slurm_preflight": redact_payload(preflight),
+        "error_code": str(primary.get("code") or "SLURM_PREFLIGHT_BLOCKED"),
+        "error_message": str(primary.get("message") or "Slurm preflight blocked submission."),
+        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+        "qhh_script_invoked": False,
+        "residual_blockers": [
+            {
+                "code": str(blocker.get("code") or "SLURM_PREFLIGHT_BLOCKED"),
+                "field": blocker.get("field"),
+                "state": "blocked",
+                "quality_flag": "slurm_preflight_blocked",
+                "residual_risk": blocker.get("message"),
+            }
+            for blocker in blockers
         ],
     }
 
@@ -1444,6 +1655,249 @@ def _candidate_station_ids(candidate: SchedulerCandidate) -> list[str]:
     return []
 
 
+def _slurm_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
+    if not config.slurm_execution_enabled:
+        return {
+            "status": "not_required",
+            "enabled": False,
+            "blockers": [],
+            "checks": {},
+        }
+
+    blockers: list[dict[str, Any]] = []
+    checks: dict[str, Any] = {}
+
+    database_url = config.database_url
+    db_blocker = _database_url_blocker(database_url)
+    checks["database"] = {
+        "configured": bool(database_url),
+        "host": _database_host(database_url),
+        "compute_node_reachable": db_blocker is None,
+    }
+    if db_blocker is not None:
+        blockers.append(db_blocker)
+
+    roots = {
+        "workspace_root": config.workspace_root,
+        "object_store_root": config.object_store_root,
+        "log_root": config.log_root,
+        "runtime_root": config.runtime_root,
+    }
+    allowed_roots = _preflight_allowed_roots(config)
+    root_checks: dict[str, Any] = {}
+    for field_name, value in roots.items():
+        root_check, blocker = _storage_root_check(field_name, value, allowed_roots)
+        root_checks[field_name] = root_check
+        if blocker is not None:
+            blockers.append(blocker)
+    checks["storage_roots"] = root_checks
+    checks["allowed_roots"] = [str(root) for root in allowed_roots]
+
+    template_check, template_blockers = _slurm_template_allowlist_check(config)
+    checks["templates"] = template_check
+    blockers.extend(template_blockers)
+
+    env_check, env_blockers = _slurm_env_check(config.slurm_env)
+    checks["environment"] = env_check
+    blockers.extend(env_blockers)
+
+    return {
+        "status": "blocked" if blockers else "ready",
+        "enabled": True,
+        "blockers": blockers,
+        "checks": checks,
+    }
+
+
+def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:
+    if not database_url:
+        return {
+            "code": "SLURM_PREFLIGHT_DATABASE_URL_MISSING",
+            "field": "DATABASE_URL",
+            "message": "Slurm execution requires a compute-node reachable DATABASE_URL before submission.",
+        }
+    host = _database_host(database_url)
+    if host is None or host.lower() in LOCALHOST_NAMES:
+        return {
+            "code": "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST",
+            "field": "DATABASE_URL",
+            "message": "Slurm execution rejects localhost-only DATABASE_URL values.",
+            "host": host,
+        }
+    return None
+
+
+def _database_host(database_url: str | None) -> str | None:
+    if not database_url:
+        return None
+    parsed = urlparse(database_url)
+    if parsed.scheme == "sqlite":
+        return "localhost"
+    return parsed.hostname
+
+
+def _preflight_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
+    roots = list(config.allowed_storage_roots) or [Path(config.workspace_root)]
+    resolved: list[Path] = []
+    for root in roots:
+        candidate = root.expanduser().resolve()
+        if candidate not in resolved:
+            resolved.append(candidate)
+    return tuple(resolved)
+
+
+def _storage_root_check(
+    field_name: str,
+    value: Path | str | None,
+    allowed_roots: Sequence[Path],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if value in (None, ""):
+        return (
+            {
+                "configured": False,
+                "path": None,
+                "contained": False,
+                "compute_node_visible": False,
+            },
+            {
+                "code": f"SLURM_PREFLIGHT_{field_name.upper()}_MISSING",
+                "field": field_name,
+                "message": f"Slurm execution requires configured {field_name}.",
+            },
+        )
+    path = Path(value).expanduser()
+    resolved = path.resolve()
+    visible = path.exists() and path.is_dir()
+    contained = _path_is_under_any(resolved, allowed_roots)
+    check = {
+        "configured": True,
+        "path": str(resolved),
+        "contained": contained,
+        "compute_node_visible": visible,
+    }
+    if not contained:
+        return (
+            check,
+            {
+                "code": f"SLURM_PREFLIGHT_{field_name.upper()}_OUT_OF_ROOT",
+                "field": field_name,
+                "path": str(resolved),
+                "message": f"Slurm {field_name} must stay under configured project or production roots.",
+            },
+        )
+    if not visible:
+        return (
+            check,
+            {
+                "code": f"SLURM_PREFLIGHT_{field_name.upper()}_NOT_VISIBLE",
+                "field": field_name,
+                "path": str(resolved),
+                "message": f"Slurm {field_name} must exist as a compute-node visible directory.",
+            },
+        )
+    return check, None
+
+
+def _path_is_under_any(path: Path, allowed_roots: Sequence[Path]) -> bool:
+    for root in allowed_roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _slurm_template_allowlist_check(config: ProductionSchedulerConfig) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    templates = dict(config.slurm_job_type_templates or {})
+    blockers: list[dict[str, Any]] = []
+    expected_by_stage = {stage.stage: stage.job_type for stage in ForecastOrchestrator.stages}
+    allowed_names = set(DEFAULT_JOB_TYPE_TEMPLATES.values())
+    checks: dict[str, Any] = {}
+    for stage_name, job_type in expected_by_stage.items():
+        template_name = templates.get(job_type)
+        check = {
+            "job_type": job_type,
+            "template_name": template_name,
+            "allowlisted": template_name in allowed_names,
+            "array_capable": stage_name in SLURM_ARRAY_STAGE_NAMES,
+        }
+        checks[stage_name] = check
+        if template_name not in allowed_names:
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_TEMPLATE_NOT_ALLOWLISTED",
+                    "field": f"slurm_job_type_templates.{job_type}",
+                    "stage": stage_name,
+                    "job_type": job_type,
+                    "template_name": template_name,
+                    "message": f"Slurm stage {stage_name} must use an allowlisted sbatch template.",
+                }
+            )
+        if stage_name in SLURM_ARRAY_STAGE_NAMES and not str(template_name or "").endswith("_array.sbatch"):
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_ARRAY_TEMPLATE_REQUIRED",
+                    "field": f"slurm_job_type_templates.{job_type}",
+                    "stage": stage_name,
+                    "job_type": job_type,
+                    "template_name": template_name,
+                    "message": f"Slurm stage {stage_name} requires an array-capable template.",
+                }
+            )
+    return {"stage_templates": checks}, blockers
+
+
+def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    sanitized: dict[str, str] = {}
+    for key, value in env.items():
+        key_text = str(key)
+        value_text = str(value)
+        if not SAFE_SLURM_ENV_KEY_RE.fullmatch(key_text):
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_ENV_KEY_UNSAFE",
+                    "field": f"slurm_env.{key_text}",
+                    "message": "Slurm exported environment keys must be uppercase shell identifiers.",
+                }
+            )
+            continue
+        if SENSITIVE_ENV_KEY_RE.search(key_text):
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
+                    "field": f"slurm_env.{key_text}",
+                    "message": "Slurm scheduler evidence and exports reject secret-shaped environment keys.",
+                }
+            )
+            sanitized[key_text] = "[redacted]"
+            continue
+        if len(value_text) > MAX_SLURM_ENV_VALUE_LENGTH:
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_ENV_VALUE_TOO_LONG",
+                    "field": f"slurm_env.{key_text}",
+                    "max_length": MAX_SLURM_ENV_VALUE_LENGTH,
+                    "message": "Slurm exported environment values must be bounded.",
+                }
+            )
+            sanitized[key_text] = value_text[:64] + "...[truncated]"
+            continue
+        if SHELL_META_RE.search(value_text) or not SAFE_SLURM_ENV_VALUE_RE.fullmatch(value_text):
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_ENV_VALUE_UNSAFE",
+                    "field": f"slurm_env.{key_text}",
+                    "message": "Slurm exported environment values must be shell-safe.",
+                }
+            )
+            sanitized[key_text] = "[unsafe]"
+            continue
+        sanitized[key_text] = value_text
+    return {"count": len(env), "sanitized": sanitized}, blockers
+
+
 def _nested_bool(mapping: Mapping[str, Any], key: str, *, fallback: bool | None = None) -> bool | None:
     value = mapping.get(key)
     if isinstance(value, bool):
@@ -1584,6 +2038,19 @@ def _confined_path(value: Path | str, workspace_root: Path, field_name: str) -> 
     candidate = resolved_parent / path.name
     _require_under_workspace(resolved_parent, workspace_root, field_name)
     return candidate
+
+
+def _optional_config_path(value: Path | str | None) -> Path | None:
+    if value in (None, ""):
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def _require_under_workspace(path: Path, workspace_root: Path, field_name: str) -> None:

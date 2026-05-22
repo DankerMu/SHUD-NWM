@@ -21,15 +21,20 @@ class FakeCycleSlurmClient:
         array_results_by_stage: dict[str, list[str] | list[list[str]]] | None = None,
         failures_before_success_by_stage: dict[str, int] | None = None,
         error_code_by_stage: dict[str, str] | None = None,
+        accounting_by_stage: dict[str, dict[str, str]] | None = None,
+        malformed_array_accounting_stages: set[str] | None = None,
     ) -> None:
         self.fail_stage = fail_stage
         self.never_terminal_stage = never_terminal_stage
         self.array_results_by_stage = array_results_by_stage or {}
         self.failures_before_success_by_stage = failures_before_success_by_stage or {}
         self.error_code_by_stage = error_code_by_stage or {}
+        self.accounting_by_stage = accounting_by_stage or {}
+        self.malformed_array_accounting_stages = malformed_array_accounting_stages or set()
         self.submissions: list[dict[str, Any]] = []
         self.jobs: dict[str, dict[str, Any]] = {}
         self.poll_counts: dict[str, int] = {}
+        self.cancelled_jobs: list[str] = []
         self.next_job = 2000
         self.fail_next_array_submission_stage: str | None = None
 
@@ -67,6 +72,7 @@ class FakeCycleSlurmClient:
             job["status"] = "failed" if failed else "succeeded"
             job["finished_at"] = _fmt(submitted_at + timedelta(minutes=2))
             job["exit_code"] = 1 if failed else 0
+            job.update(self.accounting_by_stage.get(job["stage"], {}))
             if failed:
                 job["error_code"] = self.error_code_by_stage.get(job["stage"], "FORCED_FAILURE")
                 job["error_message"] = "forced failure"
@@ -74,6 +80,8 @@ class FakeCycleSlurmClient:
 
     def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
         job = self.jobs[job_id]
+        if job["stage"] in self.malformed_array_accounting_stages:
+            return [{"task_id": "not-an-int", "status": "succeeded", "exit_code": 0}]
         statuses = self.array_results_by_stage.get(job["stage"])
         task_count = len(job["payload"].get("tasks") or [])
         if statuses is None:
@@ -86,12 +94,26 @@ class FakeCycleSlurmClient:
                 "job_id": f"{job_id}_{index}",
                 "status": status,
                 "exit_code": 0 if status == "succeeded" else 1,
+                "log_uri": f"s3://nhms/runs/{job['run_id']}/logs/{job_id}_{index}.out",
+                "accounting": {
+                    "elapsed": f"00:0{index + 1}:00",
+                    "max_rss": f"{index + 1}024K",
+                    "alloc_tres": "cpu=1,mem=2G",
+                },
             }
             for index, status in enumerate(statuses)
         ]
 
     def fetch_logs(self, job_id: str) -> dict[str, Any]:
         return {"job_id": job_id, "run_id": self.jobs[job_id]["run_id"], "complete": True, "logs": "ok"}
+
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        job = self.jobs[job_id]
+        self.cancelled_jobs.append(job_id)
+        job["status"] = "cancelled"
+        job["exit_code"] = -1
+        job["finished_at"] = _fmt(_dt("2026-05-01T00:30:00Z"))
+        return dict(job)
 
     def _submit(self, stage: str, run_id: str, model_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         active = [job for job in self.jobs.values() if job["status"] not in {"succeeded", "failed", "cancelled"}]
@@ -1103,6 +1125,140 @@ def test_partial_success_reindexes_downstream_and_keeps_partial_status(tmp_path:
     assert [item["model_id"] for item in publish_submission["basins"]] == ["model_0", "model_2"]
     assert [item["model_id"] for item in publish_submission["metadata"]["quality_states"]] == ["model_0", "model_2"]
     assert repository.cycle_statuses[-1] == "parsed_partial"
+
+
+def test_array_partial_success_records_task_accounting_and_reduces_downstream_manifests(
+    tmp_path: Path,
+) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": ["succeeded", "failed", "succeeded"]})
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    forcing_result = next(stage for stage in result.stages if stage.stage == "forcing")
+    forcing_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_forcing"
+        and event["status_to"] == "partially_failed"
+    )
+    task_results = forcing_event["details"]["task_results"]
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    assert result.status == "parsed_partial"
+    assert forcing_result.status == "partially_failed"
+    assert forcing_result.task_results == tuple(task_results)
+    assert task_results[0]["array_task_id"] == 0
+    assert task_results[0]["slurm_job_id"].endswith("_0")
+    assert task_results[0]["exit_code"] == 0
+    assert task_results[0]["log_uri"].endswith("_0.out")
+    assert task_results[0]["accounting"]["elapsed"] == "00:01:00"
+    assert task_results[0]["resource_metrics"]["max_rss"] == "1024K"
+    assert task_results[1]["status"] == "failed"
+    assert task_results[1]["exit_code"] == 1
+    assert [task["model_id"] for task in forecast_submission["tasks"]] == ["model_0", "model_2"]
+    assert repository.cycle_statuses[-1] == "parsed_partial"
+
+
+def test_slurm_accounting_available_is_recorded_in_pipeline_event_details(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(
+        accounting_by_stage={"download": {"elapsed": "00:02:00", "max_rss": "2048K", "alloc_tres": "cpu=2,mem=4G"}}
+    )
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    accounting_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        and event["event_type"] == "slurm_accounting"
+    )
+    slurm = accounting_event["details"]["slurm"]
+    assert result.status == "complete"
+    assert slurm["job_id"] == "2001"
+    assert slurm["state"] == "succeeded"
+    assert slurm["exit_code"] == 0
+    assert slurm["log_uri"].endswith("/download.log")
+    assert slurm["accounting"]["elapsed"] == "00:02:00"
+    assert slurm["accounting"]["max_rss"] == "2048K"
+    assert slurm["resource_metrics"]["alloc_tres"] == "cpu=2,mem=4G"
+
+
+def test_malformed_array_accounting_records_gap_without_fabricating_metrics(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(malformed_array_accounting_stages={"forcing"})
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    gap_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_forcing"
+        and event["event_type"] == "slurm_accounting_gap"
+    )
+    forcing_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_forcing"
+        and event["status_to"] == "succeeded"
+    )
+    assert result.status == "complete"
+    assert gap_event["details"]["fabricated_metrics"] is False
+    assert gap_event["details"]["gap"]["error"]
+    assert forcing_event["details"]["task_results"][0]["accounting"] == {}
+
+
+def test_cancel_active_cycle_jobs_calls_gateway_and_records_no_replacement(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    repository.jobs["job_cycle_gfs_2026050100_forcing"] = {
+        "job_id": "job_cycle_gfs_2026050100_forcing",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3001",
+        "model_id": "model_0",
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": "s3://nhms/runs/cycle_gfs_2026050100/logs/forcing.log",
+    }
+    client = FakeCycleSlurmClient()
+    client.jobs["3001"] = {
+        "job_id": "3001",
+        "run_id": "cycle_gfs_2026050100",
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "payload": {},
+        "stage_attempt": 0,
+    }
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    cancelled = orchestrator.cancel_active_cycle_jobs(cycle_id, reason="scheduler_cancel_requested")
+
+    cancel_event = repository.events[-1]
+    assert client.cancelled_jobs == ["3001"]
+    assert cancelled[0]["status"] == "cancelled"
+    assert cancel_event["event_type"] == "cancel"
+    assert cancel_event["details"]["replacement_submitted"] is False
+    assert cancel_event["details"]["slurm"]["job_id"] == "3001"
+    assert cancel_event["details"]["reason"] == "scheduler_cancel_requested"
+    assert client.submissions == []
 
 
 def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Path) -> None:

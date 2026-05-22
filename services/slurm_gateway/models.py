@@ -123,6 +123,9 @@ class SlurmJobRecord(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     manifest: dict[str, Any] = Field(default_factory=dict)
+    elapsed: str | None = None
+    max_rss: str | None = None
+    resource_metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class SlurmLogsResponse(BaseModel):

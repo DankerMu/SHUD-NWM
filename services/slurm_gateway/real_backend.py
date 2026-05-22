@@ -49,6 +49,7 @@ SLURM_JOB_ID_RE = re.compile(r"^\d+(_\d+)?$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
+MAX_RENDERED_STRING_BYTES = 4096
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
 LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
@@ -109,6 +110,11 @@ def map_slurm_error_code(raw_state: str) -> str:
     if normalized == "OUT_OF_MEMORY":
         return "OUT_OF_MEMORY"
     return "SLURM_JOB_FAILED"
+
+
+def _sacct_metric_fields(fields: Sequence[str]) -> dict[str, Any]:
+    names = ("elapsed", "max_rss", "ave_rss", "alloc_tres", "max_disk_read", "max_disk_write")
+    return {name: value for name, value in zip(names, fields, strict=False) if value not in (None, "")}
 
 
 def _normalize_slurm_state(raw_state: str) -> str:
@@ -224,7 +230,7 @@ class RealSlurmGateway(SlurmGateway):
                 self._slurm_command("sacct"),
                 "--parsable2",
                 "--noheader",
-                "--format=JobID,State,ExitCode,Start,End",
+                "--format=JobID,State,ExitCode,Start,End,Elapsed,MaxRSS,AveRSS,AllocTRES",
                 f"--jobs={job_id}",
             ]
         )
@@ -239,7 +245,7 @@ class RealSlurmGateway(SlurmGateway):
                 self._slurm_command("sacct"),
                 "--parsable2",
                 "--noheader",
-                "--format=JobID,State,ExitCode",
+                "--format=JobID,State,ExitCode,Elapsed,MaxRSS,AveRSS,AllocTRES",
                 f"--jobs={job_id}",
             ]
         )
@@ -613,7 +619,7 @@ class RealSlurmGateway(SlurmGateway):
             if not raw_line.strip():
                 continue
             fields = raw_line.rstrip("\n").split("|")
-            if len(fields) != 5:
+            if len(fields) < 5:
                 LOGGER.error("Failed to parse sacct status output: %r", stdout)
                 raise SlurmParseError("Unable to parse sacct status output.", {"stdout": stdout})
             if fields[0] == job_id:
@@ -651,19 +657,25 @@ class RealSlurmGateway(SlurmGateway):
             if not raw_line.strip():
                 continue
             fields = raw_line.rstrip("\n").split("|")
-            if len(fields) != 3:
+            if len(fields) < 3:
                 LOGGER.error("Failed to parse sacct array task output: %r", stdout)
                 raise SlurmParseError("Unable to parse sacct array task output.", {"stdout": stdout})
-            task_job_id, state, raw_exit_code = fields
+            task_job_id, state, raw_exit_code = fields[0], fields[1], fields[2]
             match = task_pattern.fullmatch(task_job_id)
             if match is None:
                 continue
+            metrics = _sacct_metric_fields(fields[3:])
             results.append(
                 {
                     "task_id": int(match.group(1)),
                     "job_id": task_job_id,
                     "state": state,
+                    "status": self._map_slurm_state(state).value,
                     "exit_code": self._parse_exit_code(raw_exit_code),
+                    "elapsed": metrics.get("elapsed"),
+                    "max_rss": metrics.get("max_rss"),
+                    "resource_metrics": metrics,
+                    "accounting": metrics,
                 }
             )
         return sorted(results, key=lambda result: int(result["task_id"]))
@@ -687,6 +699,9 @@ class RealSlurmGateway(SlurmGateway):
         if job_name:
             manifest["job_name"] = job_name
         error_code = map_slurm_error_code(raw_state) if state == SlurmJobStatus.FAILED else None
+        metrics = _sacct_metric_fields(fields[5:])
+        if metrics:
+            manifest["slurm_accounting"] = metrics
         return SlurmJobRecord(
             job_id=job_id,
             run_id=existing.run_id if existing else "",
@@ -699,6 +714,9 @@ class RealSlurmGateway(SlurmGateway):
             exit_code=exit_code,
             error_code=error_code,
             manifest=manifest,
+            elapsed=metrics.get("elapsed"),
+            max_rss=metrics.get("max_rss"),
+            resource_metrics=metrics,
         )
 
     def _map_slurm_state(self, raw_state: str) -> SlurmJobStatus:
@@ -866,6 +884,11 @@ class RealSlurmGateway(SlurmGateway):
             )
 
     def _validate_rendered_string(self, value: str, path: str) -> None:
+        if len(value.encode("utf-8")) > MAX_RENDERED_STRING_BYTES:
+            raise ManifestValidationError(
+                "Manifest field exceeds safe rendered string length.",
+                {"field": path, "max_bytes": MAX_RENDERED_STRING_BYTES},
+            )
         if SHELL_META_RE.search(value):
             raise ManifestValidationError(
                 "Manifest field contains shell metacharacters.",

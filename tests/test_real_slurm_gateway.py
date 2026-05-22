@@ -137,10 +137,58 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
 
     status = gateway.get_job_status("12345")
     assert status.status == SlurmJobStatus.SUCCEEDED
+    assert status.elapsed == "00:05:00"
+    assert status.max_rss == "1024K"
+    assert status.resource_metrics == {
+        "elapsed": "00:05:00",
+        "max_rss": "1024K",
+        "ave_rss": "512K",
+        "alloc_tres": "cpu=2,mem=4G",
+    }
     tasks = gateway.get_array_task_results("12345")
     assert tasks == [
-        {"task_id": 0, "job_id": "12345_0", "state": "COMPLETED", "exit_code": 0},
-        {"task_id": 1, "job_id": "12345_1", "state": "FAILED", "exit_code": 1},
+        {
+            "task_id": 0,
+            "job_id": "12345_0",
+            "state": "COMPLETED",
+            "status": "succeeded",
+            "exit_code": 0,
+            "elapsed": "00:04:30",
+            "max_rss": "900K",
+            "resource_metrics": {
+                "elapsed": "00:04:30",
+                "max_rss": "900K",
+                "ave_rss": "450K",
+                "alloc_tres": "cpu=1,mem=2G",
+            },
+            "accounting": {
+                "elapsed": "00:04:30",
+                "max_rss": "900K",
+                "ave_rss": "450K",
+                "alloc_tres": "cpu=1,mem=2G",
+            },
+        },
+        {
+            "task_id": 1,
+            "job_id": "12345_1",
+            "state": "FAILED",
+            "status": "failed",
+            "exit_code": 1,
+            "elapsed": "00:03:30",
+            "max_rss": "800K",
+            "resource_metrics": {
+                "elapsed": "00:03:30",
+                "max_rss": "800K",
+                "ave_rss": "400K",
+                "alloc_tres": "cpu=1,mem=2G",
+            },
+            "accounting": {
+                "elapsed": "00:03:30",
+                "max_rss": "800K",
+                "ave_rss": "400K",
+                "alloc_tres": "cpu=1,mem=2G",
+            },
+        },
     ]
     jobs = gateway.list_jobs(limit=10, offset=0)
     assert [job.job_id for job in jobs] == ["12345", "12346"]
@@ -181,10 +229,18 @@ argv = sys.argv[1:]
 Path({str(command_log)!r}).open("a", encoding="utf-8").write(json.dumps({{"program": program, "argv": argv}}) + "\\n")
 if program == "sbatch":
     print("Submitted batch job 12345")
+elif program == "sacct" and "--format=JobID,State,ExitCode,Start,End,Elapsed,MaxRSS,AveRSS,AllocTRES" in argv:
+    print("12345|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00|1024K|512K|cpu=2,mem=4G")
+    print("12345_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:04:30|900K|450K|cpu=1,mem=2G")
+    print("12345_1|FAILED|1:0|2026-05-08T12:00:00|2026-05-08T12:04:00|00:03:30|800K|400K|cpu=1,mem=2G")
 elif program == "sacct" and "--format=JobID,State,ExitCode,Start,End" in argv:
     print("12345|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00")
     print("12345_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00")
     print("12345_1|FAILED|1:0|2026-05-08T12:00:00|2026-05-08T12:04:00")
+elif program == "sacct" and "--format=JobID,State,ExitCode,Elapsed,MaxRSS,AveRSS,AllocTRES" in argv:
+    print("12345|COMPLETED|0:0|00:05:00|1024K|512K|cpu=2,mem=4G")
+    print("12345_0|COMPLETED|0:0|00:04:30|900K|450K|cpu=1,mem=2G")
+    print("12345_1|FAILED|1:0|00:03:30|800K|400K|cpu=1,mem=2G")
 elif program == "sacct" and "--format=JobID,State,ExitCode" in argv:
     print("12345|COMPLETED|0:0")
     print("12345_0|COMPLETED|0:0")
@@ -586,12 +642,12 @@ def test_array_task_results_parse_task_lines_only(monkeypatch, tmp_path):
         calls.append(command)
         stdout = "\n".join(
             [
-                "12345|COMPLETED|0:0",
-                "12345.batch|COMPLETED|0:0",
-                "12345_0|COMPLETED|0:0",
-                "12345_1|FAILED|1:0",
-                "12345_1.batch|FAILED|1:0",
-                "12345.extern|COMPLETED|0:0",
+                "12345|COMPLETED|0:0|00:02:00|1024K|512K|cpu=2,mem=4G",
+                "12345.batch|COMPLETED|0:0|00:02:00|1024K|512K|cpu=2,mem=4G",
+                "12345_0|COMPLETED|0:0|00:01:00|256K|128K|cpu=1,mem=1G",
+                "12345_1|FAILED|1:0|00:01:30|512K|256K|cpu=1,mem=1G",
+                "12345_1.batch|FAILED|1:0|00:01:30|512K|256K|cpu=1,mem=1G",
+                "12345.extern|COMPLETED|0:0|00:02:00|1024K|512K|cpu=2,mem=4G",
             ]
         )
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -599,11 +655,77 @@ def test_array_task_results_parse_task_lines_only(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert gateway.get_array_task_results("12345") == [
-        {"task_id": 0, "job_id": "12345_0", "state": "COMPLETED", "exit_code": 0},
-        {"task_id": 1, "job_id": "12345_1", "state": "FAILED", "exit_code": 1},
+        {
+            "task_id": 0,
+            "job_id": "12345_0",
+            "state": "COMPLETED",
+            "status": "succeeded",
+            "exit_code": 0,
+            "elapsed": "00:01:00",
+            "max_rss": "256K",
+            "resource_metrics": {
+                "elapsed": "00:01:00",
+                "max_rss": "256K",
+                "ave_rss": "128K",
+                "alloc_tres": "cpu=1,mem=1G",
+            },
+            "accounting": {
+                "elapsed": "00:01:00",
+                "max_rss": "256K",
+                "ave_rss": "128K",
+                "alloc_tres": "cpu=1,mem=1G",
+            },
+        },
+        {
+            "task_id": 1,
+            "job_id": "12345_1",
+            "state": "FAILED",
+            "status": "failed",
+            "exit_code": 1,
+            "elapsed": "00:01:30",
+            "max_rss": "512K",
+            "resource_metrics": {
+                "elapsed": "00:01:30",
+                "max_rss": "512K",
+                "ave_rss": "256K",
+                "alloc_tres": "cpu=1,mem=1G",
+            },
+            "accounting": {
+                "elapsed": "00:01:30",
+                "max_rss": "512K",
+                "ave_rss": "256K",
+                "alloc_tres": "cpu=1,mem=1G",
+            },
+        },
     ]
-    assert "--format=JobID,State,ExitCode" in calls[0]
+    assert "--format=JobID,State,ExitCode,Elapsed,MaxRSS,AveRSS,AllocTRES" in calls[0]
     assert "--jobs=12345" in calls[0]
+
+
+@pytest.mark.parametrize(
+    "manifest_update",
+    [
+        {"object_store_prefix": "safe;rm"},
+        {"object_store_prefix": "x" * 4097},
+    ],
+)
+def test_manifest_export_values_reject_shell_meta_and_unbounded_strings(
+    monkeypatch,
+    tmp_path,
+    manifest_update,
+):
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for unsafe manifests")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    manifest = {"run_id": "run_001", "model_id": "model_001", "job_type": "run_shud_forecast_array"}
+    manifest.update(manifest_update)
+    with pytest.raises(ManifestValidationError):
+        gateway.submit_job(SubmitJobRequest(**manifest))
 
 
 def test_scancel_invocation(monkeypatch, tmp_path):
@@ -1009,11 +1131,30 @@ def test_fake_slurm_command_matrix_for_production_job_types(monkeypatch, tmp_pat
                 stdout=f"Submitted batch job {next(submitted_job_ids)}\n",
                 stderr="",
             )
+        status_format = "--format=JobID,State,ExitCode,Start,End,Elapsed,MaxRSS,AveRSS,AllocTRES"
+        if executable == "sacct" and status_format in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="12345|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00|1024K|512K|cpu=2,mem=4G\n",
+                stderr="",
+            )
         if executable == "sacct" and "--format=JobID,State,ExitCode,Start,End" in command:
             return subprocess.CompletedProcess(
                 command,
                 0,
                 stdout="12345|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n",
+                stderr="",
+            )
+        if executable == "sacct" and "--format=JobID,State,ExitCode,Elapsed,MaxRSS,AveRSS,AllocTRES" in command:
+            requested_job = next(arg.removeprefix("--jobs=") for arg in command if arg.startswith("--jobs="))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    f"{requested_job}_0|COMPLETED|0:0|00:01:00|256K|128K|cpu=1,mem=1G\n"
+                    f"{requested_job}_1|FAILED|1:0|00:02:00|512K|256K|cpu=1,mem=1G\n"
+                ),
                 stderr="",
             )
         if executable == "sacct" and "--format=JobID,State,ExitCode" in command:
