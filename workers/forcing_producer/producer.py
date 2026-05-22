@@ -209,6 +209,7 @@ class ForcingRepository(Protocol):
 
     def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None: ...
 
+
     def get_forcing_version(
         self,
         *,
@@ -329,22 +330,6 @@ class ForcingProducer:
                 cycle_time=parsed_cycle_time,
                 min_lead_hours=_min_lead_hours_from_env(),
             )
-            lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
-            station_signature = _station_signature(stations)
-            if self._existing_forcing_version_is_current(
-                existing,
-                lead_window=lead_window,
-                station_signature=station_signature,
-            ):
-                return ForcingProductionResult(
-                    status="already_done",
-                    forcing_version_id=str(existing["forcing_version_id"]),
-                    forcing_package_uri=str(existing["forcing_package_uri"]),
-                    checksum=str(existing["checksum"]),
-                    station_count=int(existing["station_count"]),
-                    timestep_count=0,
-                    file_uris={},
-                )
             fallback_lineage = self._apply_era5_latency_fallback(
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
@@ -355,6 +340,24 @@ class ForcingProducer:
                 products_by_variable=products_by_variable,
                 required_variables=required_variables,
             )
+            lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
+            station_signature = _station_signature(stations)
+            canonical_input_signature = _canonical_input_signature(products_by_variable, parsed_cycle_time)
+            if self._existing_forcing_version_is_current(
+                existing,
+                lead_window=lead_window,
+                station_signature=station_signature,
+                canonical_input_signature=canonical_input_signature,
+            ):
+                return ForcingProductionResult(
+                    status="already_done",
+                    forcing_version_id=str(existing["forcing_version_id"]),
+                    forcing_package_uri=str(existing["forcing_package_uri"]),
+                    checksum=str(existing["checksum"]),
+                    station_count=int(existing["station_count"]),
+                    timestep_count=0,
+                    file_uris={},
+                )
 
             grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
             grid_ids = tuple(sorted({grid_id for _, grid_id in grid_points_by_source_grid}))
@@ -400,6 +403,7 @@ class ForcingProducer:
                 lead_window=lead_window,
                 station_signature=station_signature,
                 grid_signature_by_source_grid=grid_signature_by_source_grid,
+                canonical_input_signature=canonical_input_signature,
             )
             self.repository.update_forecast_cycle(
                 source_id=resolved_source_id,
@@ -576,11 +580,13 @@ class ForcingProducer:
         for (source_id, grid_id), grid_points in sorted(grid_points_by_source_grid.items()):
             grid_signature = grid_signature_by_source_grid[(source_id, grid_id)]
             existing = self.repository.load_interp_weights(source_id=source_id, grid_id=grid_id, model_id=model_id)
-            if _weights_cover(existing, stations, self.config.output_variables):
+            if _weights_cover(existing, stations, self.config.output_variables) and _weights_match_grid_signature(
+                existing,
+                grid_signature,
+            ):
                 _validate_weight_sums(existing)
-                if _weights_match_grid_signature(existing, grid_signature):
-                    weights_by_source_grid[(source_id, grid_id)] = tuple(existing)
-                    continue
+                weights_by_source_grid[(source_id, grid_id)] = tuple(existing)
+                continue
 
             computed = compute_idw_weights(
                 stations=stations,
@@ -1025,6 +1031,7 @@ class ForcingProducer:
         lead_window: Mapping[str, int | None] | None = None,
         station_signature: Mapping[str, Any] | None = None,
         grid_signature_by_source_grid: Mapping[tuple[str, str], str] | None = None,
+        canonical_input_signature: Mapping[str, Any] | None = None,
     ) -> ForcingProductionResult:
         assert self.repository is not None
         compact_cycle = format_cycle_time(cycle_time)
@@ -1069,6 +1076,8 @@ class ForcingProducer:
             "station_ids": [station.station_id for station in stations],
             "station_signature": station_signature or _station_signature(stations),
             "grid_signatures": _format_grid_signatures(grid_signature_by_source_grid or {}),
+            "canonical_input_signature": canonical_input_signature
+            or _canonical_input_signature(products_by_variable, cycle_time),
             "forcing_variables": list(self.config.output_variables),
             "canonical_product_ids": sorted(
                 product.canonical_product_id
@@ -1149,6 +1158,7 @@ class ForcingProducer:
         *,
         lead_window: Mapping[str, int | None],
         station_signature: Mapping[str, Any],
+        canonical_input_signature: Mapping[str, Any],
     ) -> bool:
         if not existing:
             return False
@@ -1174,6 +1184,8 @@ class ForcingProducer:
             return False
         if _optional_int(existing.get("station_count")) != int(station_signature["station_count"]):
             return False
+        if not _canonical_input_signature_matches(lineage.get("canonical_input_signature"), canonical_input_signature):
+            return False
         try:
             manifest_uri = _package_manifest_uri(package_uri, self.config.package_manifest_filename)
             if not self.object_store.exists(manifest_uri) or self.object_store.checksum(manifest_uri) != checksum:
@@ -1185,6 +1197,11 @@ class ForcingProducer:
             if not isinstance(manifest_lineage, Mapping):
                 return False
             if not _station_signature_matches(manifest_lineage.get("station_signature"), station_signature):
+                return False
+            if not _canonical_input_signature_matches(
+                manifest_lineage.get("canonical_input_signature"),
+                canonical_input_signature,
+            ):
                 return False
             return True
         except (OSError, ObjectStoreError, ValueError):
@@ -1532,6 +1549,59 @@ def _station_signature_matches(existing: Any, current: Mapping[str, Any]) -> boo
     return (
         _optional_int(existing.get("station_count")) == int(current["station_count"])
         and list(existing.get("station_ids") or []) == list(current["station_ids"])
+        and str(existing.get("checksum") or "") == str(current["checksum"])
+    )
+
+
+def _canonical_input_signature(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    cycle_time: datetime,
+) -> dict[str, Any]:
+    product_rows = [
+        {
+            "canonical_product_id": product.canonical_product_id,
+            "source_id": product.source_id,
+            "cycle_time": _format_time(product.cycle_time),
+            "valid_time": _format_time(product.valid_time),
+            "lead_time_hours": _product_lead_hours(product, cycle_time),
+            "variable": product.variable,
+            "unit": product.unit,
+            "grid_id": product.grid_id,
+            "grid_definition_uri": product.grid_definition_uri,
+            "native_time_resolution": product.native_time_resolution,
+            "native_spatial_resolution": product.native_spatial_resolution,
+            "object_uri": product.object_uri,
+            "checksum": product.checksum,
+            "quality_flag": product.quality_flag,
+        }
+        for products_for_variable in products_by_variable.values()
+        for product in products_for_variable.values()
+    ]
+    product_rows.sort(
+        key=lambda row: (
+            str(row["valid_time"]),
+            str(row["variable"]),
+            str(row["canonical_product_id"]),
+            str(row["source_id"]),
+        )
+    )
+    checksum = sha256_bytes(_json_bytes({"products": product_rows}))
+    return {
+        "schema_version": "nhms.forcing_canonical_input_signature.v1",
+        "product_count": len(product_rows),
+        "canonical_product_ids": [str(row["canonical_product_id"]) for row in product_rows],
+        "checksum": checksum,
+        "products": product_rows,
+    }
+
+
+def _canonical_input_signature_matches(existing: Any, current: Mapping[str, Any]) -> bool:
+    if not isinstance(existing, Mapping):
+        return False
+    return (
+        str(existing.get("schema_version") or "") == str(current.get("schema_version") or "")
+        and _optional_int(existing.get("product_count")) == int(current["product_count"])
+        and list(existing.get("canonical_product_ids") or []) == list(current["canonical_product_ids"])
         and str(existing.get("checksum") or "") == str(current["checksum"])
     )
 

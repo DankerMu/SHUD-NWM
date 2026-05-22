@@ -247,6 +247,10 @@ class PsycopgForcingRepository:
     def upsert_interp_weights(self, weights: Sequence[InterpolationWeight]) -> None:
         if not weights:
             return
+        scopes = {(weight.source_id, weight.grid_id, weight.model_id) for weight in weights}
+        if len(scopes) != 1:
+            raise MetStoreError("Interpolation weights must be replaced one source/grid/model scope at a time.")
+        source_id, grid_id, model_id = next(iter(scopes))
         rows = [
             (
                 weight.source_id,
@@ -261,7 +265,14 @@ class PsycopgForcingRepository:
             )
             for weight in weights
         ]
-        self._execute_values(
+        self._replace_values(
+            """
+            DELETE FROM met.interp_weight
+            WHERE source_id = %s
+              AND grid_id = %s
+              AND model_id = %s
+            """,
+            (source_id, grid_id, model_id),
             """
             INSERT INTO met.interp_weight (
                 source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method, grid_signature
@@ -488,11 +499,6 @@ class PsycopgForcingRepository:
         finally:
             if connection is not None:
                 connection.close()
-
-    def _execute_values(self, statement: str, rows: Sequence[tuple[Any, ...]]) -> None:
-        if not rows:
-            return
-        self._replace_values(None, (), statement, rows)
 
     def _replace_values(
         self,

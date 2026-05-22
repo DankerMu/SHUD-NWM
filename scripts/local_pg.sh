@@ -21,6 +21,14 @@ log() {
   printf '[local-pg] %s\n' "$*"
 }
 
+database_url() {
+  printf 'postgresql://%s:%s@%s:%s/%s\n' "$APP_USER" "$APP_PASSWORD" "$PGLISTEN" "$PGPORT" "$APP_DB"
+}
+
+redacted_database_url() {
+  printf 'postgresql://%s:****@%s:%s/%s\n' "$APP_USER" "$PGLISTEN" "$PGPORT" "$APP_DB"
+}
+
 require_bins() {
   for bin in initdb pg_ctl createdb psql; do
     if ! command -v "$bin" >/dev/null 2>&1; then
@@ -115,7 +123,8 @@ PY
 init() {
   require_bins
   guard_remote_listen
-  mkdir -p "$PGDATA" "$PGSOCKET_DIR" "$PGLOG_DIR"
+  mkdir -p "$ROOT_DIR/.pgdata" "$PGDATA" "$PGSOCKET_DIR" "$PGLOG_DIR"
+  chmod 700 "$ROOT_DIR/.pgdata" "$PGDATA" "$PGSOCKET_DIR" "$PGLOG_DIR"
   if [[ ! -f "$PGDATA/PG_VERSION" ]]; then
     log "initializing PGDATA at $PGDATA"
     initdb -D "$PGDATA" --encoding=UTF8 --locale=C.UTF-8 --auth-local=trust --auth-host=scram-sha-256
@@ -135,8 +144,7 @@ start() {
   fi
 
   log "ensuring role/database $APP_USER/$APP_DB"
-  psql -h "$PGSOCKET_DIR" -p "$PGPORT" -d postgres -v ON_ERROR_STOP=1 \
-    -v app_user="$APP_USER" -v app_password="$APP_PASSWORD" -v app_db="$APP_DB" <<SQL
+  psql -h "$PGSOCKET_DIR" -p "$PGPORT" -d postgres -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$APP_USER') THEN
@@ -151,8 +159,14 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$APP_DB')\gexec
 ALTER DATABASE "$APP_DB" OWNER TO "$APP_USER";
 SQL
 
-  printf 'postgresql://%s:%s@%s:%s/%s\n' "$APP_USER" "$APP_PASSWORD" "$PGLISTEN" "$PGPORT" "$APP_DB" > "$ROOT_DIR/.pgdata/qhh-smoke.database-url"
-  log "DATABASE_URL=$(cat "$ROOT_DIR/.pgdata/qhh-smoke.database-url")"
+  umask 077
+  url_file="$ROOT_DIR/.pgdata/qhh-smoke.database-url"
+  tmp_url_file="$(mktemp "$url_file.XXXXXX")"
+  database_url > "$tmp_url_file"
+  chmod 600 "$tmp_url_file"
+  mv -f "$tmp_url_file" "$url_file"
+  log "DATABASE_URL=$(redacted_database_url)"
+  log "full DATABASE_URL is available via ./scripts/local_pg.sh url"
 }
 
 stop() {
@@ -170,7 +184,7 @@ status() {
 }
 
 url() {
-  printf 'postgresql://%s:%s@%s:%s/%s\n' "$APP_USER" "$APP_PASSWORD" "$PGLISTEN" "$PGPORT" "$APP_DB"
+  database_url
 }
 
 case "${1:-start}" in

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -90,6 +91,8 @@ def write_test_netcdf4(
     values: list[float] | None = None,
     cycle_time: datetime | None = None,
     source: str = "gfs",
+    longitudes: Sequence[float] | None = None,
+    latitudes: Sequence[float] | None = None,
 ) -> bytes:
     """Write a minimal NetCDF4 file for testing. Returns the file content as bytes."""
     import xarray as xr
@@ -101,12 +104,17 @@ def write_test_netcdf4(
         else:
             values = [default_gfs_value(variable, forecast_hour)]
 
+    longitude_values = list(longitudes) if longitudes is not None else [0.0] * len(values)
+    latitude_values = list(latitudes) if latitudes is not None else [0.0] * len(values)
+    if len(longitude_values) != len(values) or len(latitude_values) != len(values):
+        raise ValueError("Longitude and latitude coordinate counts must match the value count.")
+
     ds = xr.Dataset(
         {short_name: (["point"], values)},
         coords={
             "point": list(range(len(values))),
-            "latitude": ("point", [0.0] * len(values)),
-            "longitude": ("point", [0.0] * len(values)),
+            "latitude": ("point", latitude_values),
+            "longitude": ("point", longitude_values),
         },
         attrs={
             "source": source,
@@ -134,6 +142,8 @@ def encode_test_netcdf4(
     values: list[float] | None = None,
     cycle_time: datetime | None = None,
     source: str = "gfs",
+    longitudes: Sequence[float] | None = None,
+    latitudes: Sequence[float] | None = None,
 ) -> bytes:
     """Encode a NetCDF4 payload in memory (returns bytes without needing a file path)."""
     import tempfile
@@ -141,4 +151,4 @@ def encode_test_netcdf4(
 
     with tempfile.TemporaryDirectory() as tmp:
         path = P(tmp) / "data.nc"
-        return write_test_netcdf4(path, variable, forecast_hour, values, cycle_time, source)
+        return write_test_netcdf4(path, variable, forecast_hour, values, cycle_time, source, longitudes, latitudes)

@@ -135,7 +135,7 @@ export PGHOSTCIDR=10.0.2.0/24
 ./scripts/local_pg.sh restart
 ```
 
-`scripts/local_pg.sh` 会刷新 `postgresql.conf` 和 `pg_hba.conf`，并把 URL 写入 `.pgdata/qhh-smoke.database-url`。应用角色是非 superuser；生产 Slurm 仍应优先使用正式 PostgreSQL endpoint。
+`scripts/local_pg.sh start/restart` 会刷新 `postgresql.conf` 和 `pg_hba.conf`，并把 URL 写入权限为 `0600` 的 `.pgdata/qhh-smoke.database-url`；普通日志只打印脱敏 URL。需要完整连接串时显式运行 `./scripts/local_pg.sh url`。应用角色是非 superuser；生产 Slurm 仍应优先使用正式 PostgreSQL endpoint。
 
 compute node 若缺系统 ecCodes，使用项目内 runtime：
 
@@ -158,6 +158,7 @@ compute node 若缺系统 ecCodes，使用项目内 runtime：
 状态语义：
 
 - `running`：当前周期正在执行。
+- `submitted`：Slurm 作业已提交，或 `squeue` / `sacct` 只能确认非终态、未知 accounting、等待超时等 skip-safe 状态；不会写 `finished_at`，后续扫描不会因为控制器或 accounting 暂不可见而重复提交。
 - `unavailable`：数据源暂不可用，IFS CLI 会在 cycle 尚未发布时返回该状态。
 - `already_done`：数据库中同名 run 已是 `frequency_done` 或 `published`。
 - `frequency_done`：完成 SHUD、parse 和 display product 发布。

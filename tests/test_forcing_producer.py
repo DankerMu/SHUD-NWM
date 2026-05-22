@@ -93,6 +93,16 @@ class FakeForcingRepository:
         )
 
     def upsert_interp_weights(self, weights: list[InterpolationWeight] | tuple[InterpolationWeight, ...]) -> None:
+        if not weights:
+            return
+        scopes = {(weight.source_id, weight.grid_id, weight.model_id) for weight in weights}
+        assert len(scopes) == 1
+        source_id, grid_id, model_id = next(iter(scopes))
+        self.interp_weights = [
+            weight
+            for weight in self.interp_weights
+            if not (weight.source_id == source_id and weight.grid_id == grid_id and weight.model_id == model_id)
+        ]
         existing_keys = {
             (weight.source_id, weight.grid_id, weight.model_id, weight.station_id, weight.variable, weight.grid_cell_id)
             for weight in self.interp_weights
@@ -443,6 +453,44 @@ def test_existing_forcing_version_not_reused_when_lead_window_changes(tmp_path: 
     assert lineage["max_lead_hours"] == 3
 
 
+def test_existing_forcing_version_not_reused_when_canonical_inputs_change_under_same_ids(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    first_lineage = repository.forcing_versions[first.forcing_version_id]["lineage_json"]
+    original_prcp = next(product for product in repository.products if product.variable == "prcp_rate_or_amount")
+    replacement_prcp = _write_replacement_canonical_product(
+        store,
+        original_prcp,
+        values=(99.0, 100.0, 101.0),
+        object_suffix="fresh",
+    )
+    repository.products = tuple(
+        replacement_prcp if product.canonical_product_id == original_prcp.canonical_product_id else product
+        for product in repository.products
+    )
+
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "forcing_ready"
+    assert repository.upsert_count == 2
+    assert second.forcing_version_id == first.forcing_version_id
+    updated_lineage = repository.forcing_versions[second.forcing_version_id]["lineage_json"]
+    assert updated_lineage["canonical_product_ids"] == first_lineage["canonical_product_ids"]
+    assert (
+        updated_lineage["canonical_input_signature"]["checksum"]
+        != first_lineage["canonical_input_signature"]["checksum"]
+    )
+    prcp_rows = [row for row in repository.timeseries if row.variable == "PRCP"]
+    assert prcp_rows
+    assert max(row.value for row in prcp_rows) > 90.0
+    package_root = tmp_path / second.forcing_package_uri.strip("/")
+    manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
+    assert manifest["lineage"]["canonical_input_signature"] == updated_lineage["canonical_input_signature"]
+
+
 def test_existing_forcing_version_not_reused_when_forcing_grid_station_set_changes(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
     proxy = MetStation(
@@ -691,10 +739,23 @@ def test_product_grid_mismatch_is_rejected_before_interpolation_reuses_weights(t
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
 
-def test_nonfinite_interp_weights_are_rejected(tmp_path: Path) -> None:
+def test_nonfinite_interp_weights_are_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store, repository = _build_repository(tmp_path)
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: "current-grid",
+    )
     repository.interp_weights = [
-        InterpolationWeight("gfs", "grid_a", "demo_model", "station_1", variable, "0", math.nan)
+        InterpolationWeight(
+            "gfs",
+            "grid_a",
+            "demo_model",
+            "station_1",
+            variable,
+            "0",
+            math.nan,
+            grid_signature="current-grid",
+        )
         for variable in FORCING_VARIABLES
     ]
     producer = _build_producer(tmp_path, repository, store)
@@ -718,6 +779,55 @@ def test_stale_interp_weights_are_recomputed_when_grid_signature_changes(tmp_pat
     assert "old-grid" not in signatures
     assert len(signatures) == 1
     assert all(weight.grid_signature for weight in repository.interp_weights)
+
+
+def test_stale_interp_weight_rows_are_removed_when_grid_signature_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository = _build_repository(tmp_path, longitudes=(-75.0, -74.5, -74.0), latitudes=(40.0, 40.2, 40.4))
+    current_signature = "current-grid"
+    repository.interp_weights = [
+        InterpolationWeight(
+            "gfs",
+            "grid_a",
+            "demo_model",
+            "station_1",
+            variable,
+            "legacy-cell",
+            1.0,
+            grid_signature="old",
+        )
+        for variable in FORCING_VARIABLES
+    ]
+    repository.interp_weights.extend(
+        InterpolationWeight(
+            "gfs",
+            "grid_a",
+            "demo_model",
+            "station_1",
+            variable,
+            "0",
+            1.0,
+            grid_signature=current_signature,
+        )
+        for variable in FORCING_VARIABLES
+    )
+    producer = _build_producer(tmp_path, repository, store)
+    monkeypatch.setattr(
+        "workers.forcing_producer.producer._grid_signature_hash",
+        lambda _grid_points: current_signature,
+    )
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    repository.forcing_versions[first.forcing_version_id]["checksum"] = None
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "forcing_ready"
+    assert {weight.grid_cell_id for weight in repository.interp_weights}.isdisjoint({"legacy-cell"})
+    assert {weight.grid_signature for weight in repository.interp_weights} == {current_signature}
+    assert len(repository.interp_weights) == len(FORCING_VARIABLES) * 3
 
 
 def _build_producer(
@@ -853,6 +963,39 @@ def _replace_product_quality(product: CanonicalProduct, quality_flag: str) -> Ca
         native_time_resolution=product.native_time_resolution,
         native_spatial_resolution=product.native_spatial_resolution,
         quality_flag=quality_flag,
+        lead_time_hours=product.lead_time_hours,
+    )
+
+
+def _write_replacement_canonical_product(
+    store: LocalObjectStore,
+    product: CanonicalProduct,
+    *,
+    values: tuple[float, float, float],
+    object_suffix: str,
+    longitudes: tuple[float, float, float] = (-75.0, -74.5, -74.0),
+    latitudes: tuple[float, float, float] = (40.0, 40.2, 40.4),
+) -> CanonicalProduct:
+    content = _netcdf_bytes(product.variable, values=values, longitudes=longitudes, latitudes=latitudes)
+    key = (
+        f"canonical/{product.source_id}/{product.cycle_time.strftime('%Y%m%d%H')}/"
+        f"{product.variable}/{product.canonical_product_id}-{object_suffix}.nc"
+    )
+    object_uri = store.write_bytes_atomic(key, content)
+    return CanonicalProduct(
+        canonical_product_id=product.canonical_product_id,
+        source_id=product.source_id,
+        cycle_time=product.cycle_time,
+        valid_time=product.valid_time,
+        variable=product.variable,
+        unit=product.unit,
+        grid_id=product.grid_id,
+        object_uri=object_uri,
+        checksum=sha256_bytes(content),
+        grid_definition_uri=product.grid_definition_uri,
+        native_time_resolution=product.native_time_resolution,
+        native_spatial_resolution=product.native_spatial_resolution,
+        quality_flag=product.quality_flag,
         lead_time_hours=product.lead_time_hours,
     )
 

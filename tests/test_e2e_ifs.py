@@ -281,6 +281,8 @@ def _run_ifs_adapter(
                 values=[_ifs_raw_value(entry.variable, entry.forecast_hour)],
                 cycle_time=cycle_time,
                 source="IFS",
+                longitudes=[110.0],
+                latitudes=[30.0],
             ),
         )
     return manifest

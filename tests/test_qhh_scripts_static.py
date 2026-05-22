@@ -123,3 +123,31 @@ def test_run_qhh_cycle_registry_ready_requires_published_package_manifest_match(
 
     assert 'uv run python - "$MODEL_ID" "$PACKAGE_MANIFEST"' in script
     assert "existing_uri == incoming_uri and existing_checksum == incoming_checksum" in script
+
+
+def test_local_pg_start_logs_redacted_database_url_and_url_command_prints_full_url() -> None:
+    script = Path("scripts/local_pg.sh").read_text(encoding="utf-8")
+    start_body = script[script.index("start() {") : script.index("\nstop() {")]
+    url_body = script[script.index("\nurl() {") : script.index('\ncase "${1:-start}"')]
+
+    assert "redacted_database_url()" in script
+    assert 'log "DATABASE_URL=$(redacted_database_url)"' in start_body
+    assert 'log "DATABASE_URL=$(cat "$ROOT_DIR/.pgdata/qhh-smoke.database-url")"' not in script
+    assert '-v app_password="$APP_PASSWORD"' not in script
+    assert "database_url" in url_body
+    assert "redacted_database_url" not in url_body
+
+
+def test_local_pg_database_url_file_is_created_private_without_real_postgres() -> None:
+    script = Path("scripts/local_pg.sh").read_text(encoding="utf-8")
+    start_body = script[script.index("start() {") : script.index("\nstop() {")]
+    init_body = script[script.index("init() {") : script.index("\nstart() {")]
+
+    assert 'mkdir -p "$ROOT_DIR/.pgdata" "$PGDATA" "$PGSOCKET_DIR" "$PGLOG_DIR"' in init_body
+    assert 'chmod 700 "$ROOT_DIR/.pgdata" "$PGDATA" "$PGSOCKET_DIR" "$PGLOG_DIR"' in init_body
+    assert "umask 077" in start_body
+    assert 'url_file="$ROOT_DIR/.pgdata/qhh-smoke.database-url"' in start_body
+    assert 'tmp_url_file="$(mktemp "$url_file.XXXXXX")"' in start_body
+    assert 'database_url > "$tmp_url_file"' in start_body
+    assert 'chmod 600 "$tmp_url_file"' in start_body
+    assert 'mv -f "$tmp_url_file" "$url_file"' in start_body

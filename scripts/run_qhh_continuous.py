@@ -28,6 +28,7 @@ SLURM_TERMINAL_SUCCESS = {"COMPLETED"}
 SLURM_TERMINAL_FAILURE = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL"}
 SLURM_ACCOUNTING_UNKNOWN = "UNKNOWN_ACCOUNTING_UNAVAILABLE"
 SLURM_WAIT_TIMEOUT = "UNKNOWN_WAIT_TIMEOUT"
+SLURM_UNKNOWN_ACTIVE = {SLURM_ACCOUNTING_UNKNOWN, SLURM_WAIT_TIMEOUT}
 DEFAULT_SLURM_WAIT_TIMEOUT_SECONDS = 12 * 60 * 60
 DEFAULT_SLURM_SQUEUE_POLL_SECONDS = 30
 DEFAULT_SLURM_ACCOUNTING_TIMEOUT_SECONDS = 300
@@ -352,7 +353,7 @@ def _submit_slurm_cycle(
             "slurm_job_id": job_id,
             "elapsed_seconds": elapsed_seconds,
         }
-    if status == SLURM_WAIT_TIMEOUT:
+    if _slurm_status_is_unknown_active(status):
         result = {
             "source_id": candidate.source_id,
             "cycle_time": candidate.token,
@@ -361,7 +362,7 @@ def _submit_slurm_cycle(
             "slurm_status": status,
             "slurm_job_id": job_id,
             "elapsed_seconds": elapsed_seconds,
-            "reason": "slurm wait timed out while job may still be active",
+            "reason": f"slurm status {status} is nonterminal or unknown",
         }
         _write_state(state_file, {**state, **result, "last_checked_at": _now_iso()})
         return result
@@ -428,6 +429,7 @@ def _wait_for_slurm_job(
 ) -> str:
     wait_deadline = time.monotonic() + max(wait_timeout_seconds, 1)
     accounting_deadline: float | None = None
+    last_active_status: str | None = None
     signals = (signal.SIGINT, signal.SIGTERM)
     previous_handlers = {signum: signal.getsignal(signum) for signum in signals}
 
@@ -446,7 +448,12 @@ def _wait_for_slurm_job(
                 capture_output=True,
                 text=True,
             )
-            if running.returncode == 0 and running.stdout.strip():
+            squeue_states = _parse_slurm_states(running.stdout)
+            if running.returncode == 0 and squeue_states:
+                squeue_status = _classify_slurm_states(squeue_states)
+                if not _slurm_status_is_unknown_active(squeue_status):
+                    return squeue_status
+                last_active_status = squeue_status
                 time.sleep(min(max(squeue_poll_seconds, 1), max(wait_deadline - time.monotonic(), 0.0)))
                 continue
             accounting = subprocess.run(
@@ -458,24 +465,15 @@ def _wait_for_slurm_job(
             )
             if accounting.returncode != 0:
                 return SLURM_ACCOUNTING_UNKNOWN
-            states = [
-                line.split("|", 1)[0].strip().split()[0]
-                for line in accounting.stdout.splitlines()
-                if line.strip()
-            ]
+            states = _parse_slurm_states(accounting.stdout)
             if states:
-                for state in states:
-                    if state in SLURM_TERMINAL_FAILURE:
-                        return state
-                if all(state in SLURM_TERMINAL_SUCCESS for state in states):
-                    return "COMPLETED"
-                return states[0]
+                return _classify_slurm_states(states)
             if accounting_deadline is None:
                 accounting_deadline = time.monotonic() + max(accounting_timeout_seconds, 1)
             if time.monotonic() >= accounting_deadline:
                 return SLURM_ACCOUNTING_UNKNOWN
             time.sleep(min(max(accounting_poll_seconds, 1), max(accounting_deadline - time.monotonic(), 0.0)))
-        return SLURM_WAIT_TIMEOUT
+        return last_active_status or SLURM_WAIT_TIMEOUT
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
@@ -533,8 +531,11 @@ def _skip_reason(candidate: CandidateCycle, state: dict[str, Any], *, executor: 
         return "state file already terminal"
     if status in ACTIVE_STATE and executor == "slurm":
         job_id = str(state.get("slurm_job_id") or "")
-        if job_id and _slurm_job_is_active(job_id):
-            return f"slurm job {job_id} is still active"
+        slurm_status = str(state.get("slurm_status") or "")
+        if job_id:
+            slurm_status = _slurm_job_status(job_id)
+        if _slurm_status_is_unknown_active(slurm_status):
+            return f"slurm job {job_id or '<unknown>'} status is nonterminal or unknown ({slurm_status})"
     if status in RETRYABLE_STATE and os.getenv("QHH_CONTINUOUS_RETRY_FAILED", "1") != "1":
         return "state file retry disabled"
     if not state:
@@ -549,6 +550,10 @@ def _should_skip(candidate: CandidateCycle, state: dict[str, Any]) -> bool:
 
 
 def _slurm_job_is_active(job_id: str) -> bool:
+    return _slurm_status_is_unknown_active(_slurm_job_status(job_id))
+
+
+def _slurm_job_status(job_id: str) -> str:
     running = subprocess.run(
         ["squeue", "-h", "-j", job_id, "-o", "%T"],
         cwd=ROOT,
@@ -556,8 +561,9 @@ def _slurm_job_is_active(job_id: str) -> bool:
         capture_output=True,
         text=True,
     )
-    if running.returncode == 0 and running.stdout.strip():
-        return True
+    squeue_states = _parse_slurm_states(running.stdout)
+    if running.returncode == 0 and squeue_states:
+        return _classify_slurm_states(squeue_states)
     accounting = subprocess.run(
         ["sacct", "-n", "-P", "-j", job_id, "-o", "State"],
         cwd=ROOT,
@@ -565,9 +571,45 @@ def _slurm_job_is_active(job_id: str) -> bool:
         capture_output=True,
         text=True,
     )
-    terminal = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED"}
-    states = [line.split("|", 1)[0].strip().split()[0] for line in accounting.stdout.splitlines() if line.strip()]
-    return bool(states) and all(state not in terminal for state in states)
+    if accounting.returncode != 0:
+        return SLURM_ACCOUNTING_UNKNOWN
+    states = _parse_slurm_states(accounting.stdout)
+    if not states:
+        return SLURM_ACCOUNTING_UNKNOWN
+    return _classify_slurm_states(states)
+
+
+def _parse_slurm_states(output: str) -> list[str]:
+    states: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        state = line.split("|", 1)[0].strip().split()[0].upper()
+        if state:
+            states.append(state)
+    return states
+
+
+def _classify_slurm_states(states: list[str]) -> str:
+    normalized = [state.upper() for state in states if state]
+    for state in normalized:
+        if state in SLURM_TERMINAL_FAILURE:
+            return state
+    if normalized and all(state in SLURM_TERMINAL_SUCCESS for state in normalized):
+        return "COMPLETED"
+    for state in normalized:
+        if state not in SLURM_TERMINAL_SUCCESS:
+            return state
+    return SLURM_ACCOUNTING_UNKNOWN
+
+
+def _slurm_status_is_unknown_active(status: str) -> bool:
+    normalized = status.strip().upper()
+    if not normalized:
+        return False
+    return normalized in SLURM_UNKNOWN_ACTIVE or (
+        normalized not in SLURM_TERMINAL_SUCCESS and normalized not in SLURM_TERMINAL_FAILURE
+    )
 
 
 def _state_file(state_root: Path, candidate: CandidateCycle) -> Path:

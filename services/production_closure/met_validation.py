@@ -1211,7 +1211,14 @@ def _write_object_guarded(store: LocalObjectStore, key: str, content: bytes, *, 
 
 def _deterministic_raw_content(source: str, variable: str, forecast_hour: int, cycle_time: datetime) -> bytes:
     if source == "GFS":
-        return encode_test_netcdf4(variable, forecast_hour, cycle_time=cycle_time, source="gfs")
+        return encode_test_netcdf4(
+            variable,
+            forecast_hour,
+            cycle_time=cycle_time,
+            source="gfs",
+            longitudes=[100.0],
+            latitudes=[30.0],
+        )
     payload = {
         "schema": "nhms.production_closure.met.raw_fixture.v1",
         "source": source,
@@ -1484,7 +1491,14 @@ def _replace_gfs_fixture_value(
 ) -> None:
     for entry in manifest["entries"]:
         if entry["variable"] == variable and int(entry["forecast_hour"]) == forecast_hour:
-            content = encode_test_netcdf4(variable, forecast_hour, values=[value], cycle_time=config.cycle_start)
+            content = encode_test_netcdf4(
+                variable,
+                forecast_hour,
+                values=[value],
+                cycle_time=config.cycle_start,
+                longitudes=[100.0],
+                latitudes=[30.0],
+            )
             _write_object_guarded(store, str(entry["local_key"]), content, force=True)
         else:
             content = _deterministic_raw_content(

@@ -740,7 +740,11 @@ def _run_gfs_adapter(
     manifest = adapter.build_manifest(cycle_time, forecast_hours=forecast_hours)
     for entry in manifest.entries:
         payloads_by_url[entry.remote_url] = encode_test_netcdf4(
-            entry.variable, entry.forecast_hour, cycle_time=cycle_time
+            entry.variable,
+            entry.forecast_hour,
+            cycle_time=cycle_time,
+            longitudes=[110.0],
+            latitudes=[30.0],
         )
     result = adapter.download_plan(manifest)
     assert result.status == "raw_complete"
@@ -764,7 +768,7 @@ def _run_era5_adapter(
         ),
         repository=repository,
         object_store=store,
-        cds_client=MockCDSClient(available_dates={cycle_time.date()}),
+        cds_client=MockCDSClient(available_dates={cycle_time.date()}, longitudes=[110.0], latitudes=[30.0]),
         sleeper=lambda _seconds: None,
         now=lambda: _parse_time("2026-05-08T00:00:00Z"),
     )

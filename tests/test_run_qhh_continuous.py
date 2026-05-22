@@ -178,8 +178,25 @@ def test_slurm_wait_timeout_while_job_active_returns_nonterminal_status(
 
     status = runner._wait_for_slurm_job("5743", wait_timeout_seconds=1, accounting_timeout_seconds=1)
 
-    assert status == runner.SLURM_WAIT_TIMEOUT
+    assert status == "RUNNING"
     assert calls == [["squeue", "-h", "-j", "5743", "-o", "%T"]]
+
+
+@pytest.mark.parametrize("slurm_state", ["RUNNING", "PENDING"])
+def test_slurm_wait_preserves_sacct_nonterminal_state(
+    monkeypatch: pytest.MonkeyPatch,
+    slurm_state: str,
+) -> None:
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if command[0] == "squeue":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=f"{slurm_state}|\n", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    status = runner._wait_for_slurm_job("5743", wait_timeout_seconds=1, accounting_timeout_seconds=1)
+
+    assert status == slurm_state
 
 
 def test_slurm_submit_wait_timeout_keeps_submitted_state(
@@ -210,6 +227,36 @@ def test_slurm_submit_wait_timeout_keeps_submitted_state(
     assert result["slurm_status"] == runner.SLURM_WAIT_TIMEOUT
     assert state["status"] == "submitted"
     assert state["slurm_job_id"] == "5743"
+    assert "finished_at" not in state
+
+
+def test_slurm_submit_accounting_unknown_keeps_submitted_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout="5743\n", stderr="")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55432/nhms")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_wait_for_slurm_job", lambda *_args, **_kwargs: runner.SLURM_ACCOUNTING_UNKNOWN)
+    args = Namespace(
+        slurm_partition="CPU",
+        slurm_cpus=2,
+        slurm_mem="4G",
+        slurm_time="00:30:00",
+        slurm_wait=True,
+        slurm_wait_timeout_seconds=1,
+        slurm_accounting_timeout_seconds=1,
+    )
+    state_file = tmp_path / "state.json"
+
+    result = runner._submit_slurm_cycle(_candidate(), run_root=tmp_path, state_file=state_file, args=args)
+    state = runner._read_json(state_file)
+
+    assert result["status"] == "submitted"
+    assert result["slurm_status"] == runner.SLURM_ACCOUNTING_UNKNOWN
+    assert state["status"] == "submitted"
     assert "finished_at" not in state
 
 
@@ -255,7 +302,7 @@ def test_active_submitted_slurm_state_is_skipped(monkeypatch: pytest.MonkeyPatch
 
     reason = runner._skip_reason(_candidate(), state, executor="slurm")
 
-    assert reason == "slurm job 5743 is still active"
+    assert reason == "slurm job 5743 status is nonterminal or unknown (RUNNING)"
     assert calls == [["squeue", "-h", "-j", "5743", "-o", "%T"]]
 
 
@@ -271,6 +318,41 @@ def test_finished_submitted_slurm_state_is_retried(monkeypatch: pytest.MonkeyPat
     assert runner._skip_reason(_candidate(), state, executor="slurm") is None
 
 
+def test_terminal_failed_slurm_state_is_not_skipped_after_unknown_active_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_slurm_job_status", lambda _job_id: "FAILED")
+    state = {
+        "status": "submitted",
+        "source_id": "gfs",
+        "cycle_time": "2026052106",
+        "slurm_job_id": "5743",
+        "slurm_status": runner.SLURM_ACCOUNTING_UNKNOWN,
+    }
+
+    assert runner._skip_reason(_candidate(), state, executor="slurm") is None
+
+
+def test_unknown_active_submitted_slurm_state_is_skipped_without_controller_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_slurm_job_status", lambda _job_id: runner.SLURM_ACCOUNTING_UNKNOWN)
+    state = {
+        "status": "submitted",
+        "source_id": "gfs",
+        "cycle_time": "2026052106",
+        "slurm_job_id": "5743",
+        "slurm_status": runner.SLURM_ACCOUNTING_UNKNOWN,
+    }
+
+    reason = runner._skip_reason(_candidate(), state, executor="slurm")
+
+    assert reason == (
+        "slurm job 5743 status is nonterminal or unknown "
+        f"({runner.SLURM_ACCOUNTING_UNKNOWN})"
+    )
+
+
 def test_run_pass_does_not_resubmit_active_slurm_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     state_root = tmp_path / "state"
     state_file = runner._state_file(state_root, _candidate())
@@ -283,7 +365,7 @@ def test_run_pass_does_not_resubmit_active_slurm_job(tmp_path: Path, monkeypatch
         "_candidate_cycles",
         lambda **_: [_candidate()],
     )
-    monkeypatch.setattr(runner, "_slurm_job_is_active", lambda job_id: job_id == "5743")
+    monkeypatch.setattr(runner, "_slurm_job_status", lambda job_id: "RUNNING" if job_id == "5743" else "COMPLETED")
     monkeypatch.setattr(
         runner,
         "_submit_slurm_cycle",
@@ -301,7 +383,49 @@ def test_run_pass_does_not_resubmit_active_slurm_job(tmp_path: Path, monkeypatch
     summary = runner.run_pass(args=args, run_root=tmp_path, state_root=state_root)
 
     assert summary["status"] == "completed"
-    assert summary["results"][0]["reason"] == "slurm job 5743 is still active"
+    assert summary["results"][0]["reason"] == "slurm job 5743 status is nonterminal or unknown (RUNNING)"
+
+
+def test_run_pass_does_not_resubmit_unknown_active_slurm_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    state_file = runner._state_file(state_root, _candidate())
+    runner._write_state(
+        state_file,
+        {
+            "status": "submitted",
+            "source_id": "gfs",
+            "cycle_time": "2026052106",
+            "slurm_job_id": "5743",
+            "slurm_status": runner.SLURM_ACCOUNTING_UNKNOWN,
+        },
+    )
+    monkeypatch.setattr(runner, "_candidate_cycles", lambda **_: [_candidate()])
+    monkeypatch.setattr(runner, "_slurm_job_status", lambda _job_id: runner.SLURM_ACCOUNTING_UNKNOWN)
+    monkeypatch.setattr(
+        runner,
+        "_submit_slurm_cycle",
+        lambda *_args, **_kwargs: pytest.fail("unknown-active job should not be resubmitted"),
+    )
+    args = Namespace(
+        sources="gfs",
+        lookback_hours=24,
+        max_cycles_per_source=1,
+        cycle_lag_hours=6,
+        dry_run=False,
+        executor="slurm",
+    )
+
+    summary = runner.run_pass(args=args, run_root=tmp_path, state_root=state_root)
+
+    assert summary["status"] == "completed"
+    assert summary["results"][0]["status"] == "submitted"
+    assert summary["results"][0]["reason"] == (
+        "slurm job 5743 status is nonterminal or unknown "
+        f"({runner.SLURM_ACCOUNTING_UNKNOWN})"
+    )
 
 
 def test_run_pass_does_not_resubmit_wait_timeout_slurm_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -318,7 +442,7 @@ def test_run_pass_does_not_resubmit_wait_timeout_slurm_job(tmp_path: Path, monke
         },
     )
     monkeypatch.setattr(runner, "_candidate_cycles", lambda **_: [_candidate()])
-    monkeypatch.setattr(runner, "_slurm_job_is_active", lambda job_id: job_id == "5743")
+    monkeypatch.setattr(runner, "_slurm_job_status", lambda job_id: "RUNNING" if job_id == "5743" else "COMPLETED")
     monkeypatch.setattr(
         runner,
         "_submit_slurm_cycle",
@@ -337,4 +461,4 @@ def test_run_pass_does_not_resubmit_wait_timeout_slurm_job(tmp_path: Path, monke
 
     assert summary["status"] == "completed"
     assert summary["results"][0]["status"] == "submitted"
-    assert summary["results"][0]["reason"] == "slurm job 5743 is still active"
+    assert summary["results"][0]["reason"] == "slurm job 5743 status is nonterminal or unknown (RUNNING)"
