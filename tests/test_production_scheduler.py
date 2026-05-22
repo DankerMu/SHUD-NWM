@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from services.orchestrator import cli
+from services.orchestrator.chain import M3_STAGES, PipelineResult, StageRunResult
 from services.orchestrator.scheduler import (
     LOCK_OWNER,
     LOCK_SCHEMA_VERSION,
@@ -21,7 +22,7 @@ from services.orchestrator.scheduler import (
     SchedulerEvidenceWriteError,
     SchedulerPassResult,
 )
-from workers.data_adapters.base import CycleDiscovery, cycle_id_for
+from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 
 
 def test_all_active_models_and_gfs_ifs_window_produce_stable_candidate_ids(tmp_path: Path) -> None:
@@ -610,6 +611,62 @@ def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) 
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
+def test_non_dry_run_qhh_candidate_executes_generic_m3_chain_without_qhh_scripts(tmp_path: Path) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(tmp_path, now=now, dry_run=False)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry(
+            [
+                _model(
+                    "basins_qhh_shud",
+                    "basins_qhh",
+                    resource_profile={
+                        "runnable": True,
+                        "memory_gb": 128,
+                        "station_count": 386,
+                        "display_capabilities": {"tiles": True, "optional_weather_available": False},
+                        "frequency_capabilities": {
+                            "return_periods": True,
+                            "curves_available": False,
+                            "warning_thresholds_available": False,
+                        },
+                    },
+                )
+            ]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "planned"
+    assert result.evidence["execution_boundary"] == "production_orchestration"
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
+    assert result.evidence["model_run_evidence"][0]["standard_chain_shape"] == [stage.stage for stage in M3_STAGES]
+    assert result.evidence["model_run_evidence"][0]["qhh_script_invoked"] is False
+    assert result.evidence["model_run_evidence"][0]["output_key"] == (
+        "runs/fcst_gfs_2026052106_basins_qhh_shud/output/"
+    )
+    assert "output_uri" not in result.evidence["model_run_evidence"][0]
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert submitted_basin["candidate_id"] == (
+        "gfs:2026-05-21T06:00:00Z:basins_qhh_shud:forecast_gfs_deterministic"
+    )
+    assert submitted_basin["run_id"] == "fcst_gfs_2026052106_basins_qhh_shud"
+    assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_basins_qhh_shud"
+    assert submitted_basin["model_package_uri"] == "s3://nhms/models/basins_qhh_shud/package/"
+    assert submitted_basin["station_count"] == 386
+    assert submitted_basin["frequency_curves_available"] is False
+    assert submitted_basin["warning_thresholds_available"] is False
+    assert submitted_basin["optional_weather_available"] is False
+    assert submitted_basin["output_key"] == "runs/fcst_gfs_2026052106_basins_qhh_shud/output/"
+    assert "output_uri" not in submitted_basin
+
+
 def test_public_from_env_wires_active_repository(monkeypatch: Any, tmp_path: Path) -> None:
     active_repository = FakeActiveRepository(active=False)
     monkeypatch.setattr("services.orchestrator.scheduler._active_repository_from_env", lambda: active_repository)
@@ -910,6 +967,35 @@ class FakeActiveRepository:
         return self.active
 
 
+class FakeProductionOrchestrator:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def orchestrate_cycle(
+        self,
+        source: str,
+        cycle_time: datetime,
+        basins: list[dict[str, Any]],
+    ) -> PipelineResult:
+        self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        stages = tuple(
+            StageRunResult(
+                stage=stage.stage,
+                job_type=stage.job_type,
+                pipeline_job_id=f"job_{stage.stage}",
+                slurm_job_id=f"slurm_{stage.stage}",
+                status="succeeded",
+            )
+            for stage in M3_STAGES
+        )
+        return PipelineResult(
+            run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+            cycle_id=cycle_id_for(source, cycle_time),
+            status="complete",
+            stages=stages,
+        )
+
+
 class CountingScheduler(ProductionScheduler):
     def __init__(self, config: ProductionSchedulerConfig, *, stop_after: int) -> None:
         super().__init__(config, registry=FakeRegistry([]), adapters={}, sleep=self._sleep)
@@ -950,7 +1036,15 @@ def _config(tmp_path: Path, **kwargs: Any) -> ProductionSchedulerConfig:
     return ProductionSchedulerConfig(**values)
 
 
-def _model(model_id: str, basin_id: str) -> dict[str, Any]:
+def _model(model_id: str, basin_id: str, *, resource_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    profile = {
+        "runnable": True,
+        "memory_gb": 8,
+        "display_capabilities": {"tiles": True},
+        "frequency_capabilities": {"return_periods": True},
+    }
+    if resource_profile is not None:
+        profile = dict(resource_profile)
     return {
         "model_id": model_id,
         "basin_id": basin_id,
@@ -961,12 +1055,7 @@ def _model(model_id: str, basin_id: str) -> dict[str, Any]:
         "shud_code_version": "2.0",
         "active_flag": True,
         "lifecycle_state": "active",
-        "resource_profile": {
-            "runnable": True,
-            "memory_gb": 8,
-            "display_capabilities": {"tiles": True},
-            "frequency_capabilities": {"return_periods": True},
-        },
+        "resource_profile": profile,
     }
 
 

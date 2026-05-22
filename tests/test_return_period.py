@@ -63,6 +63,10 @@ def test_no_frequency_curve_writes_null_result() -> None:
         assert row["return_period"] is None
         assert row["warning_level"] is None
         assert row["quality_flag"] == "no_frequency_curve"
+        assert result.quality_state == "unavailable"
+        assert result.unavailable_products == ("frequency_curves",)
+        assert result.residual_blockers[0]["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
+        assert result.residual_blockers[0]["quality_flag"] == "no_frequency_curve"
 
 
 def test_partial_sample_degrades_to_highest_reliable_warning_level() -> None:

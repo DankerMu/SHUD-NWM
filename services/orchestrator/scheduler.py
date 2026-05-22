@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.source_identity import normalize_source_id
-from services.orchestrator.chain import scenario_for_source
+from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 
 DEFAULT_PRODUCTION_SOURCES = ("gfs", "IFS")
@@ -83,6 +83,11 @@ class CycleDiscoveryAdapter(Protocol):
 
 class ActiveCandidateRepository(Protocol):
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        raise NotImplementedError
+
+
+class ProductionOrchestratorFactory(Protocol):
+    def __call__(self, source_id: str) -> ForecastOrchestrator:
         raise NotImplementedError
 
 
@@ -208,6 +213,7 @@ class SchedulerCandidate:
     basin_id: str
     basin_version_id: str
     river_network_version_id: str
+    segment_count: int | None
     model_package_uri: str
     resource_profile: Mapping[str, Any]
     display_capabilities: Mapping[str, Any]
@@ -229,6 +235,7 @@ class SchedulerCandidate:
             "basin_id": self.basin_id,
             "basin_version_id": self.basin_version_id,
             "river_network_version_id": self.river_network_version_id,
+            "segment_count": self.segment_count,
             "model_package_uri": self.model_package_uri,
             "resource_profile": dict(self.resource_profile),
             "display_capabilities": dict(self.display_capabilities),
@@ -256,12 +263,14 @@ class ProductionScheduler:
         registry: ModelRegistryReader | None = None,
         adapters: Mapping[str, CycleDiscoveryAdapter] | None = None,
         active_repository: ActiveCandidateRepository | None = None,
+        orchestrator_factory: ProductionOrchestratorFactory | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.config = config or ProductionSchedulerConfig()
         self.registry = registry or PsycopgModelRegistryStore.from_env()
         self.adapters = dict(adapters or _default_adapters())
         self.active_repository = active_repository
+        self.orchestrator_factory = orchestrator_factory
         self.sleep = sleep or _sleep
 
     @classmethod
@@ -310,6 +319,33 @@ class ProductionScheduler:
                 models=models,
                 cycles=cycles,
             )
+            execution_evidence: list[dict[str, Any]] = []
+            submitted_count = 0
+            failed_count = 0
+            partial_count = 0
+            execution_boundary = "planning_only"
+            no_mutation_proof = {
+                "adapter_download_called": False,
+                "slurm_submit_called": False,
+                "shud_runtime_called": False,
+                "hydro_result_table_writes": False,
+                "met_result_table_writes": False,
+            }
+            if not self.config.dry_run and candidates:
+                execution_evidence = self._execute_candidates(candidates)
+                submitted_count = sum(1 for item in execution_evidence if item.get("status") != "blocked")
+                failed_count = sum(1 for item in execution_evidence if item.get("status") == "failed")
+                partial_count = sum(
+                    1 for item in execution_evidence if str(item.get("status", "")).endswith("_partial")
+                )
+                execution_boundary = "production_orchestration"
+                no_mutation_proof = {
+                    "adapter_download_called": False,
+                    "slurm_submit_called": submitted_count > 0,
+                    "shud_runtime_called": False,
+                    "hydro_result_table_writes": submitted_count > 0,
+                    "met_result_table_writes": submitted_count > 0,
+                }
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
             evidence["operator_filters"].update(model_evidence["operator_filters"])
@@ -335,18 +371,13 @@ class ProductionScheduler:
                         "skipped_candidate_count": len(skipped_candidates),
                         "selected_model_count": len(models),
                         "source_cycle_count": len(cycles),
-                        "submitted_count": 0,
-                        "failed_count": 0,
-                        "partial_count": 0,
+                        "submitted_count": submitted_count,
+                        "failed_count": failed_count,
+                        "partial_count": partial_count,
                     },
-                    "no_mutation_proof": {
-                        "adapter_download_called": False,
-                        "slurm_submit_called": False,
-                        "shud_runtime_called": False,
-                        "hydro_result_table_writes": False,
-                        "met_result_table_writes": False,
-                    },
-                    "execution_boundary": "planning_only",
+                    "model_run_evidence": execution_evidence,
+                    "no_mutation_proof": no_mutation_proof,
+                    "execution_boundary": execution_boundary,
                 }
             )
             artifact_path = self._write_evidence(pass_id, evidence)
@@ -415,6 +446,63 @@ class ProductionScheduler:
                 break
             self.sleep(self.config.interval_seconds)
         return results
+
+    def _execute_candidates(self, candidates: Sequence[SchedulerCandidate]) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, datetime], list[SchedulerCandidate]] = {}
+        for candidate in candidates:
+            grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
+
+        evidence: list[dict[str, Any]] = []
+        for (source_id, cycle_time), cycle_candidates in sorted(
+            grouped.items(),
+            key=lambda item: (item[0][0], item[0][1], [candidate.model_id for candidate in item[1]]),
+        ):
+            basins = [_candidate_basin_manifest(candidate) for candidate in cycle_candidates]
+            cycle_id = cycle_id_for(source_id, cycle_time)
+            try:
+                result = self._orchestrator_for(source_id).orchestrate_cycle(source_id, cycle_time, basins)
+            except Exception as error:
+                for candidate in cycle_candidates:
+                    evidence.append(
+                        {
+                            **_candidate_identity_evidence(candidate),
+                            "status": "failed",
+                            "cycle_id": cycle_id,
+                            "error_code": getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"),
+                            "error_message": getattr(error, "message", str(error)),
+                            "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+                            "qhh_script_invoked": False,
+                        }
+                    )
+                continue
+            evidence.extend(_candidate_execution_evidence(result, cycle_candidates))
+        return evidence
+
+    def _orchestrator_for(self, source_id: str) -> ForecastOrchestrator:
+        if self.orchestrator_factory is not None:
+            return self.orchestrator_factory(source_id)
+        config = OrchestratorConfig.from_env()
+        if config.source_id != source_id:
+            config = OrchestratorConfig(
+                workspace_root=config.workspace_root,
+                object_store_root=config.object_store_root,
+                object_store_prefix=config.object_store_prefix,
+                slurm_gateway_url=config.slurm_gateway_url,
+                templates_dir=config.templates_dir,
+                poll_interval_seconds=config.poll_interval_seconds,
+                job_timeout_seconds=config.job_timeout_seconds,
+                source_id=source_id,
+                forecast_horizon_hours=config.forecast_horizon_hours,
+                scenario_id=scenario_for_source(source_id),
+                era5_area=config.era5_area,
+                state_soft_stale_threshold_days=config.state_soft_stale_threshold_days,
+                state_hard_stale_threshold_days=config.state_hard_stale_threshold_days,
+            )
+        return ForecastOrchestrator(
+            config=config,
+            repository=_orchestrator_repository_from_env(),
+            state_manager=None,
+        )
 
     def _base_evidence(self, pass_id: str, started_at: datetime) -> dict[str, Any]:
         end_time = started_at - timedelta(hours=self.config.cycle_lag_hours)
@@ -922,6 +1010,10 @@ def _resource_profile_summary(resource_profile: Mapping[str, Any]) -> dict[str, 
         "walltime",
         "max_concurrent",
         "shud_threads",
+        "station_count",
+        "station_ids",
+        "forcing_station_metadata",
+        "manifest_uri",
         "display_capabilities",
         "frequency_capabilities",
     )
@@ -1010,6 +1102,7 @@ def _candidate_for(
         basin_id=model.basin_id,
         basin_version_id=model.basin_version_id,
         river_network_version_id=model.river_network_version_id,
+        segment_count=model.segment_count,
         model_package_uri=model.model_package_uri,
         resource_profile=model.resource_profile_summary,
         display_capabilities=model.display_capabilities,
@@ -1032,6 +1125,7 @@ def _blocked_candidate(candidate: SchedulerCandidate, reason: str) -> SchedulerC
         basin_id=candidate.basin_id,
         basin_version_id=candidate.basin_version_id,
         river_network_version_id=candidate.river_network_version_id,
+        segment_count=candidate.segment_count,
         model_package_uri=candidate.model_package_uri,
         resource_profile=candidate.resource_profile,
         display_capabilities=candidate.display_capabilities,
@@ -1045,6 +1139,139 @@ def _blocked_candidate(candidate: SchedulerCandidate, reason: str) -> SchedulerC
     )
 
 
+def _candidate_basin_manifest(candidate: SchedulerCandidate) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "source_id": candidate.source_id,
+        "cycle_id": candidate.cycle_id,
+        "cycle_time": format_cycle_time(candidate.cycle_time_utc),
+        "model_id": candidate.model_id,
+        "basin_id": candidate.basin_id,
+        "basin_version_id": candidate.basin_version_id,
+        "river_network_version_id": candidate.river_network_version_id,
+        "segment_count": candidate.segment_count,
+        "model_package_uri": candidate.model_package_uri,
+        "model_package_manifest_uri": _model_package_manifest_uri(candidate),
+        "resource_profile": dict(candidate.resource_profile),
+        "display_capabilities": dict(candidate.display_capabilities),
+        "frequency_capabilities": dict(candidate.frequency_capabilities),
+        "scenario_id": candidate.scenario_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "forecast_horizon_hours": candidate.horizon.get("forecast_horizon_hours")
+        or candidate.horizon.get("max_lead_hours"),
+        "max_lead_hours": candidate.horizon.get("max_lead_hours"),
+        "station_count": _candidate_station_count(candidate),
+        "station_ids": _candidate_station_ids(candidate),
+        "frequency_curves_available": _nested_bool(
+            candidate.frequency_capabilities,
+            "curves_available",
+            fallback=_nested_bool(candidate.frequency_capabilities, "return_periods"),
+        ),
+        "warning_thresholds_available": _nested_bool(candidate.frequency_capabilities, "warning_thresholds_available"),
+        "optional_weather_available": _nested_bool(candidate.display_capabilities, "optional_weather_available"),
+        "output_key": _candidate_output_key(candidate),
+    }
+
+
+def _candidate_identity_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "source_id": candidate.source_id,
+        "cycle_id": candidate.cycle_id,
+        "cycle_time_utc": _format_utc(candidate.cycle_time_utc),
+        "model_id": candidate.model_id,
+        "scenario_id": candidate.scenario_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "model_package_uri": candidate.model_package_uri,
+        "model_package_manifest_uri": _model_package_manifest_uri(candidate),
+        "basin_version_id": candidate.basin_version_id,
+        "river_network_version_id": candidate.river_network_version_id,
+        "segment_count": candidate.segment_count,
+        "output_key": _candidate_output_key(candidate),
+    }
+
+
+def _candidate_execution_evidence(
+    result: PipelineResult,
+    candidates: Sequence[SchedulerCandidate],
+) -> list[dict[str, Any]]:
+    stage_names = [stage.stage for stage in result.stages]
+    stage_statuses = [
+        {
+            "stage": stage.stage,
+            "job_type": stage.job_type,
+            "status": stage.status,
+            "slurm_job_id": stage.slurm_job_id,
+            "error_code": stage.error_code,
+        }
+        for stage in result.stages
+    ]
+    return [
+        {
+            **_candidate_identity_evidence(candidate),
+            "status": result.status,
+            "pipeline_run_id": result.run_id,
+            "standard_chain_shape": stage_names,
+            "stage_statuses": stage_statuses,
+            "qhh_script_invoked": False,
+        }
+        for candidate in candidates
+    ]
+
+
+def _model_package_manifest_uri(candidate: SchedulerCandidate) -> str:
+    resource_profile = dict(candidate.resource_profile)
+    explicit = resource_profile.get("manifest_uri")
+    if explicit not in (None, ""):
+        return str(explicit)
+    package_uri = candidate.model_package_uri.rstrip("/")
+    if package_uri.endswith("/package"):
+        return f"{package_uri.removesuffix('/package')}/manifest.json"
+    return f"{package_uri}/manifest.json"
+
+
+def _candidate_output_key(candidate: SchedulerCandidate) -> str:
+    return f"runs/{candidate.run_id}/output/"
+
+
+def _candidate_station_count(candidate: SchedulerCandidate) -> int | None:
+    value = candidate.resource_profile.get("station_count")
+    if value in (None, ""):
+        forcing = candidate.resource_profile.get("forcing_station_metadata")
+        if isinstance(forcing, Mapping):
+            value = forcing.get("station_count")
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _candidate_station_ids(candidate: SchedulerCandidate) -> list[str]:
+    value = candidate.resource_profile.get("station_ids")
+    if value in (None, ""):
+        forcing = candidate.resource_profile.get("forcing_station_metadata")
+        if isinstance(forcing, Mapping):
+            value = forcing.get("station_ids")
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return [str(item) for item in value]
+    return []
+
+
+def _nested_bool(mapping: Mapping[str, Any], key: str, *, fallback: bool | None = None) -> bool | None:
+    value = mapping.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "available", "ready", "yes", "1"}:
+            return True
+        if normalized in {"false", "unavailable", "missing", "blocked", "no", "0"}:
+            return False
+    return fallback
+
+
 def _default_adapters() -> Mapping[str, CycleDiscoveryAdapter]:
     from workers.data_adapters.gfs_adapter import GFSAdapter, GFSAdapterConfig
     from workers.data_adapters.ifs_adapter import IFSAdapter, IFSAdapterConfig
@@ -1056,6 +1283,12 @@ def _default_adapters() -> Mapping[str, CycleDiscoveryAdapter]:
 
 
 def _active_repository_from_env() -> ActiveCandidateRepository:
+    from services.orchestrator.chain import PsycopgOrchestratorRepository
+
+    return PsycopgOrchestratorRepository.from_env()
+
+
+def _orchestrator_repository_from_env() -> Any:
     from services.orchestrator.chain import PsycopgOrchestratorRepository
 
     return PsycopgOrchestratorRepository.from_env()

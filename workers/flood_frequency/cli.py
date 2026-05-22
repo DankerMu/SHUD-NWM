@@ -147,6 +147,9 @@ def _compute_return_period(run_id: str) -> dict[str, object]:
             "status": result.status,
             "error_code": result.error_code,
             "error_message": result.error_message,
+            "quality_state": result.quality_state,
+            "unavailable_products": list(result.unavailable_products),
+            "residual_blockers": list(result.residual_blockers),
         }
 
 

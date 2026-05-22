@@ -355,6 +355,165 @@ def test_forecast_stage_writes_runtime_manifests_and_manifest_index_paths(tmp_pa
     ]
 
 
+def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "forcing_version_id": "forc_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "station_count": 2,
+        "station_ids": ["sta_001", "sta_002"],
+        "frequency_capabilities": {
+            "return_periods": True,
+            "curves_available": False,
+            "warning_thresholds_available": False,
+        },
+        "display_capabilities": {"tiles": True, "optional_weather_available": False},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    parse_submission = next(submission for submission in client.submissions if submission["stage"] == "parse")
+    frequency_submission = next(submission for submission in client.submissions if submission["stage"] == "frequency")
+    publish_submission = next(submission for submission in client.submissions if submission["stage"] == "publish")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+
+    assert result.status == "complete"
+    assert runtime_manifest["identity"]["candidate_id"] == basin["candidate_id"]
+    assert runtime_manifest["identity"]["run_id"] == basin["run_id"]
+    assert runtime_manifest["identity"]["forcing_version_id"] == basin["forcing_version_id"]
+    assert runtime_manifest["model"]["model_package_uri"] == basin["model_package_uri"]
+    assert runtime_manifest["model"]["model_package_manifest_uri"] == "s3://nhms/models/model_0/v1/manifest.json"
+    assert runtime_manifest["forcing"]["station_count"] == 2
+    assert runtime_manifest["runtime"]["mode"] == "native_shud_project"
+    assert runtime_manifest["runtime"]["output_river"]["river_network_version_id"] == "river_v0"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+    assert runtime_manifest["quality_states"]["frequency"]["unavailable_products"] == [
+        "frequency_curves",
+        "warning_thresholds",
+    ]
+    assert runtime_manifest["quality_states"]["display"]["unavailable_products"] == ["optional_weather_products"]
+    assert {blocker["code"] for blocker in runtime_manifest["residual_blockers"]} == {
+        "FREQUENCY_CURVES_UNAVAILABLE",
+        "WARNING_THRESHOLDS_UNAVAILABLE",
+        "OPTIONAL_WEATHER_PRODUCTS_UNAVAILABLE",
+    }
+    parse_entry = parse_submission["tasks"][0]
+    frequency_entry = frequency_submission["tasks"][0]
+    assert parse_entry["model_run_assembly"]["identity"]["candidate_id"] == basin["candidate_id"]
+    assert frequency_entry["model_run_assembly"]["identity"]["run_id"] == basin["run_id"]
+    assert frequency_submission["manifest"]["quality_states"][0]["quality_flag"] == "frequency_inputs_unavailable"
+    assert publish_submission["metadata"]["residual_blockers"]
+    assert publish_submission["metadata"]["quality_states"][0]["run_id"] == basin["run_id"]
+
+
+def test_missing_station_forcing_is_quality_state_without_discarding_output_uri(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True, "optional_weather_available": False},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    publish_submission = next(submission for submission in client.submissions if submission["stage"] == "publish")
+    quality = publish_submission["metadata"]["quality_states"][0]
+    blockers = publish_submission["metadata"]["residual_blockers"]
+    assert result.status == "complete"
+    assert quality["quality_states"]["station_forcing"] == {
+        "state": "unavailable",
+        "quality_flag": "station_forcing_unavailable",
+    }
+    assert quality["output_uri"].endswith("runs/fcst_gfs_2026050100_model_0/output/")
+    assert any(blocker["code"] == "STATION_FORCING_UNAVAILABLE" for blocker in blockers)
+    assert any(blocker["code"] == "OPTIONAL_WEATHER_PRODUCTS_UNAVAILABLE" for blocker in blockers)
+
+
+def test_scheduler_style_relative_output_key_does_not_downgrade_runtime_output_uri(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_key": "runs/fcst_gfs_2026050100_model_0/output/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+    assert task["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+
+
+def test_relative_output_uri_falls_back_to_object_store_output_uri(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "runs/fcst_gfs_2026050100_model_0/output/",
+        "log_uri": "runs/fcst_gfs_2026050100_model_0/logs/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+    assert runtime_manifest["outputs"]["log_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/logs/"
+
+
+def test_explicit_absolute_output_uri_is_preserved(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "s3://nhms/custom/fcst_gfs_2026050100_model_0/output",
+        "log_uri": "s3://nhms/custom/fcst_gfs_2026050100_model_0/logs",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/custom/fcst_gfs_2026050100_model_0/output/"
+    assert runtime_manifest["outputs"]["log_uri"] == "s3://nhms/custom/fcst_gfs_2026050100_model_0/logs/"
+
+
 def test_hydro_run_creation_is_idempotent_for_existing_created_status() -> None:
     repository = FakeCycleRepository()
     basin = _basins(1)[0]
@@ -632,7 +791,11 @@ def test_partial_success_reindexes_downstream_and_keeps_partial_status(tmp_path:
         "total_basins": 3,
         "published_basins": 2,
         "excluded_basins": ["basin_1"],
+        "quality_states": publish_submission["metadata"]["quality_states"],
+        "residual_blockers": publish_submission["metadata"]["residual_blockers"],
     }
+    assert [item["model_id"] for item in publish_submission["basins"]] == ["model_0", "model_2"]
+    assert [item["model_id"] for item in publish_submission["metadata"]["quality_states"]] == ["model_0", "model_2"]
     assert repository.cycle_statuses[-1] == "parsed_partial"
 
 

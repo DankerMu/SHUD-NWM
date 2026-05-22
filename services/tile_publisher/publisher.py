@@ -109,10 +109,11 @@ class TilePublisher:
 
         runs = self._discover_publishable_runs(session, cycle_id)
         if not runs:
+            quality_state = self._cycle_display_quality_state(session, cycle_id)
             raise PublishError(
                 "NO_PUBLISHABLE_PRODUCTS",
                 f"No publishable flood return-period products found for cycle_id={cycle_id}.",
-                {"cycle_id": cycle_id},
+                {"cycle_id": cycle_id, **quality_state},
             )
 
         layers: list[dict[str, Any]] = []
@@ -143,6 +144,9 @@ class TilePublisher:
                 "cycle_id": cycle_id,
                 "published_basins": len(runs),
                 "source_run_ids": [str(run["run_id"]) for run in runs],
+                "quality_state": "ready",
+                "unavailable_products": [],
+                "residual_blockers": [],
             },
         )
 
@@ -191,6 +195,80 @@ class TilePublisher:
             params,
         ).mappings()
         return [dict(row) for row in rows if int(row["result_rows"] or 0) > 0]
+
+    def _cycle_display_quality_state(self, session: Session, cycle_id: str) -> dict[str, Any]:
+        cycle = _cycle_filter(cycle_id)
+        if cycle is None or not _has_table(session, "hydro", "hydro_run"):
+            return {
+                "quality_state": "unavailable",
+                "unavailable_products": ["return_period_result"],
+                "residual_blockers": [
+                    {
+                        "code": "CYCLE_ID_UNRESOLVED",
+                        "state": "unavailable",
+                        "residual_risk": "Cycle identity could not be resolved for display publication.",
+                    }
+                ],
+            }
+        hydro_columns = _table_columns(session, "hydro", "hydro_run")
+        if not {"source_id", "cycle_time"}.issubset(hydro_columns):
+            return {
+                "quality_state": "unavailable",
+                "unavailable_products": ["hydro_run_lineage"],
+                "residual_blockers": [
+                    {
+                        "code": "HYDRO_RUN_LINEAGE_UNAVAILABLE",
+                        "state": "unavailable",
+                        "residual_risk": "hydro.hydro_run source/cycle lineage columns are unavailable.",
+                    }
+                ],
+            }
+        params: dict[str, Any] = {"source_id": cycle["source_id"].lower()}
+        time_clause: str
+        if session.get_bind().dialect.name == "sqlite":
+            time_clause = "strftime('%Y%m%d%H', cycle_time) = :compact_time"
+            params["compact_time"] = cycle["compact_time"]
+        else:
+            time_clause = "cycle_time = :cycle_time"
+            params["cycle_time"] = cycle["cycle_time"]
+        rows = session.execute(
+            text(
+                f"""
+                SELECT run_id, model_id, status, error_code, error_message
+                FROM hydro.hydro_run
+                WHERE lower(source_id) = :source_id
+                  AND {time_clause}
+                ORDER BY run_id
+                """
+            ),
+            params,
+        ).mappings()
+        blockers = [
+            {
+                "code": "DISPLAY_PRODUCT_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": row["run_id"],
+                "model_id": row.get("model_id"),
+                "status": row.get("status"),
+                "error_code": row.get("error_code"),
+                "residual_risk": row.get("error_message")
+                or "No max-over-window return-period rows are publishable for this run.",
+            }
+            for row in rows
+        ]
+        if not blockers:
+            blockers.append(
+                {
+                    "code": "NO_CYCLE_RUNS",
+                    "state": "unavailable",
+                    "residual_risk": "No hydro runs were found for the requested source cycle.",
+                }
+            )
+        return {
+            "quality_state": "unavailable",
+            "unavailable_products": ["return_period_result"],
+            "residual_blockers": blockers,
+        }
 
     def _upsert_flood_layer(self, session: Session, cycle_id: str, run: dict[str, Any]) -> dict[str, Any]:
         run_id = str(run["run_id"])

@@ -6,7 +6,7 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -53,6 +53,9 @@ class ReturnPeriodComputationStats:
     status: str = "succeeded"
     error_code: str | None = None
     error_message: str | None = None
+    quality_state: str = "ready"
+    unavailable_products: tuple[str, ...] = ()
+    residual_blockers: tuple[dict[str, Any], ...] = ()
 
 
 def extract_max_forecast_q(run_id: str, db_session: Session) -> dict[str, tuple[float, datetime]]:
@@ -237,6 +240,17 @@ def compute_return_periods(
                 status="failed",
                 error_code=str(error_code),
                 error_message=str(error_message),
+                quality_state="unavailable",
+                unavailable_products=("return_period_result",),
+                residual_blockers=(
+                    {
+                        "code": str(error_code),
+                        "state": "unavailable",
+                        "quality_flag": "frequency_failed",
+                        "run_id": run_id,
+                        "residual_risk": str(error_message),
+                    },
+                ),
             )
         raise
 
@@ -316,6 +330,11 @@ def _compute_return_periods(
         without_curve=sum(1 for curve in curves.values() if curve is None),
         warning_counts={level: int(warning_counts.get(level, 0)) for level in WARNING_LEVELS},
         rows_written=rows_written,
+        quality_state="ready" if all(curve is not None for curve in curves.values()) else "unavailable",
+        unavailable_products=tuple(
+            sorted({"frequency_curves"} if any(curve is None for curve in curves.values()) else set())
+        ),
+        residual_blockers=tuple(_frequency_residual_blockers(context, no_curve_quality)),
     )
 
 
@@ -573,6 +592,29 @@ def _any_frequency_curve_exists(context: dict[str, Any], segment_id: str, db_ses
         },
     ).first()
     return row is not None
+
+
+def _frequency_residual_blockers(
+    context: Mapping[str, Any],
+    no_curve_quality: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for segment_id, quality_flag in sorted(no_curve_quality.items()):
+        blockers.append(
+            {
+                "code": "FREQUENCY_CURVE_UNAVAILABLE",
+                "state": "unavailable",
+                "quality_flag": quality_flag,
+                "run_id": context.get("run_id"),
+                "model_id": context.get("model_id"),
+                "river_network_version_id": context.get("river_network_version_id"),
+                "river_segment_id": segment_id,
+                "residual_risk": (
+                    "Return period and warning level are null for this segment; no values were fabricated."
+                ),
+            }
+        )
+    return blockers
 
 
 def _mark_frequency_succeeded(

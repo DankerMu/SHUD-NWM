@@ -13,6 +13,14 @@
 - [ ] 2.2 Wire candidate orchestration through existing workers for download, canonical conversion, forcing production, native SHUD runtime, and output parser using deterministic fixtures.
 - [ ] 2.3 Implement frequency and cycle-level display/tile publication handoff with explicit unavailable/quality states for missing frequency curves, warning thresholds, station forcing, or optional weather products.
 - [ ] 2.4 Add focused qhh fixture regression proving the production scheduler can plan and execute the same standard chain shape without invoking qhh-specific continuous scripts or requiring a live full-chain rerun.
+- [ ] 2.5 For issue #193, include regression evidence for every row in the Issue #193 Invariant Matrix:
+  - qhh active model candidate -> generic production chain shape uses registry/package metadata and does not invoke qhh-specific continuous scripts.
+  - candidate model/package/forcing identity -> manifest index, runtime manifest, hydro run, parser input, frequency handoff, publish evidence all carry the same run/model/source/cycle identifiers.
+  - missing frequency curves or warning thresholds -> explicit quality/unavailable state and residual blocker; no fabricated return periods or warning values.
+  - missing station forcing or optional weather/display product -> stable unavailable/quality evidence while successful durable outputs remain reusable where valid.
+  - partial model success in a cycle -> reduced downstream manifests and cycle-level publish over successful basins only.
+  - unchanged non-qhh model fixture -> existing orchestrator and worker tests still pass with the same manifest schema and status contracts.
+- [ ] 2.6 Required verification for #193: `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_shud_runtime.py tests/test_output_parser.py tests/test_flood_frequency.py tests/test_production_slurm_validation.py` plus `uv run ruff check .` and `openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive`.
 
 ## 3. Slurm and Array Execution
 
