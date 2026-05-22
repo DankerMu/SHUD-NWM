@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from services.orchestrator import cli
-from services.orchestrator.scheduler import ProductionScheduler, ProductionSchedulerConfig
+from services.orchestrator.scheduler import (
+    LOCK_OWNER,
+    LOCK_SCHEMA_VERSION,
+    MAX_DISCOVERED_CYCLES,
+    FileSchedulerLease,
+    ProductionScheduler,
+    ProductionSchedulerConfig,
+)
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
 
@@ -38,6 +48,18 @@ def test_all_active_models_and_gfs_ifs_window_produce_stable_candidate_ids(tmp_p
     )
     assert gfs_model_a["run_id"] == "fcst_gfs_2026052100_model_a"
     assert gfs_model_a["forcing_version_id"] == "forc_gfs_2026052100_model_a"
+    assert gfs_model_a["river_network_version_id"] == "basin_a_rivnet_v1"
+    assert gfs_model_a["model_package_uri"] == "s3://nhms/models/model_a/package/"
+    assert gfs_model_a["resource_profile"]["memory_gb"] == 8
+    assert gfs_model_a["display_capabilities"] == {"tiles": True}
+    assert gfs_model_a["frequency_capabilities"] == {"return_periods": True}
+    assert gfs_model_a["horizon"]["max_lead_hours"] == 168
+    ifs_06z = next(
+        item
+        for item in first_candidates
+        if item["source_id"] == "IFS" and item["cycle_time_utc"] == "2026-05-21T06:00:00Z"
+    )
+    assert ifs_06z["horizon"]["max_lead_hours"] == 144
     assert first.evidence["counts"]["submitted_count"] == 0
 
 
@@ -61,12 +83,27 @@ def test_model_and_basin_filters_select_subset_and_record_excluded_runnable_coun
         "expression": "model_id in [model_a] and basin_id in [basin_a]",
         "excluded_runnable_count": 1,
     }
-    assert result.evidence["operator_filters"]["expression"] == "model_id in [model_a] and basin_id in [basin_a]"
+    assert result.evidence["operator_filters"] == {
+        "model_ids": ["model_a"],
+        "basin_ids": ["basin_a"],
+        "expression": "model_id in [model_a] and basin_id in [basin_a]",
+        "excluded_runnable_count": 1,
+    }
 
 
 def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path) -> None:
     lock_path = tmp_path / "scheduler.lock"
-    lock_path.write_text(json.dumps({"pass_id": "existing"}), encoding="utf-8")
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": LOCK_OWNER,
+                "schema_version": LOCK_SCHEMA_VERSION,
+                "lease_token": "existing-token",
+                "pass_id": "existing",
+            }
+        ),
+        encoding="utf-8",
+    )
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
     scheduler = ProductionScheduler(
         config,
@@ -95,6 +132,8 @@ def test_dry_run_is_non_mutating_and_does_not_call_execution_clients(tmp_path: P
 
     assert adapter.download_calls == 0
     assert result.evidence["execution_mode"] == "dry_run"
+    assert result.evidence["source_cycles"][0]["db_cycle_status_written"] is None
+    assert result.evidence["source_cycles"][0]["cycle_status_candidate"] == "discovered"
     assert result.evidence["no_mutation_proof"] == {
         "adapter_download_called": False,
         "slurm_submit_called": False,
@@ -118,6 +157,226 @@ def test_unavailable_ifs_cycle_is_evidence_only_not_db_enum_mutation(tmp_path: P
     assert result.evidence["blocked_candidates"][0]["reason"] == "source_cycle_unavailable"
     assert result.evidence["source_cycles"][0]["status"] == "unavailable"
     assert result.evidence["source_cycles"][0]["db_cycle_status_written"] is None
+
+
+def test_duplicate_sources_and_cycles_emit_one_candidate_with_exclusion_evidence(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("gfs", "gfs"))
+    duplicate_cycle = ("2026-05-21T06:00:00Z", True)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [duplicate_cycle, duplicate_cycle])},
+    )
+
+    result = scheduler.run_once()
+
+    assert len(result.evidence["candidates"]) == 1
+    reasons = {item["reason"] for item in result.evidence["duplicate_exclusions"]}
+    assert reasons == {"duplicate_source", "duplicate_source_cycle"}
+    assert result.evidence["sources"] == ["gfs"]
+
+
+def test_explicit_paths_must_stay_under_workspace(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-scheduler.lock"
+
+    with pytest.raises(ValueError, match="lock_path must be under workspace_root"):
+        _config(tmp_path, lock_path=outside)
+    with pytest.raises(ValueError, match="evidence_dir must be under workspace_root"):
+        _config(tmp_path, evidence_dir=outside)
+
+
+def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-evidence"
+    outside.mkdir()
+    evidence_link = tmp_path / "scheduler" / "evidence"
+    evidence_link.parent.mkdir()
+    evidence_link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="evidence_dir must be under workspace_root"):
+        _config(tmp_path)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_explicit_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-explicit-outside-evidence"
+    outside.mkdir()
+    evidence_link = tmp_path / "evidence-link"
+    evidence_link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="evidence_dir must be under workspace_root"):
+        _config(tmp_path, evidence_dir=evidence_link)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lock_path.write_text(json.dumps({"pass_id": "foreign"}), encoding="utf-8")
+    os.utime(lock_path, (1, 1))
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        lock_path=lock_path,
+        lock_ttl_seconds=1,
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["reason"] == "unsafe_lock_not_scheduler_owned"
+    assert lock_path.exists()
+    assert json.loads(lock_path.read_text(encoding="utf-8")) == {"pass_id": "foreign"}
+
+
+def test_stale_lock_symlink_is_not_unlinked(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_text("keep", encoding="utf-8")
+    lock_path = tmp_path / "scheduler.lock"
+    lock_path.symlink_to(target)
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        lock_path=lock_path,
+        lock_ttl_seconds=1,
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["reason"] == "unsafe_lock_symlink"
+    assert lock_path.is_symlink()
+    assert target.read_text(encoding="utf-8") == "keep"
+
+
+def test_lock_guard_symlink_is_not_opened_or_written(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    outside_guard = tmp_path.parent / f"{tmp_path.name}-outside-guard"
+    guard_path = lock_path.with_name(f"{lock_path.name}.guard")
+    guard_path.symlink_to(outside_guard)
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["reason"] == "unsafe_lock_guard_not_regular_file"
+    assert not outside_guard.exists()
+    assert guard_path.is_symlink()
+    assert not lock_path.exists()
+
+
+def test_lock_parent_symlink_is_rejected_at_acquire_without_outside_files(tmp_path: Path) -> None:
+    outside_locks = tmp_path.parent / f"{tmp_path.name}-outside-locks"
+    outside_locks.mkdir()
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        evidence_dir=tmp_path / "evidence",
+    )
+    lock_path = Path(config.lock_path)
+    lock_path.parent.mkdir()
+    lock_path.parent.rmdir()
+    lock_path.parent.symlink_to(outside_locks, target_is_directory=True)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["reason"] == "unsafe_lock_parent_directory"
+    assert not (outside_locks / lock_path.name).exists()
+    assert not (outside_locks / f"{lock_path.name}.guard").exists()
+
+
+def test_stale_scheduler_lock_takeover_does_not_delete_fresh_contender_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": LOCK_OWNER,
+                "schema_version": LOCK_SCHEMA_VERSION,
+                "lease_token": "stale-token",
+                "pass_id": "stale",
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.utime(lock_path, (1, 1))
+    first = FileSchedulerLease(lock_path, ttl_seconds=1)
+    second = FileSchedulerLease(lock_path, ttl_seconds=1)
+
+    first_result = first.acquire(pass_id="first", started_at=_dt("2026-05-21T12:00:00Z"))
+    second_result = second.acquire(pass_id="second", started_at=_dt("2026-05-21T12:00:00Z"))
+
+    assert first_result["acquired"] is True
+    assert second_result["acquired"] is False
+    assert second_result["existing_lock"]["pass_id"] == "first"
+    first.release(pass_id="first")
+    assert not lock_path.exists()
+
+
+def test_scheduler_caps_reject_oversized_config_and_bound_candidate_work(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="lookback_hours exceeds limit"):
+        _config(tmp_path, lookback_hours=169)
+    with pytest.raises(ValueError, match="source count exceeds limit"):
+        _config(tmp_path, sources=("gfs", "IFS", "a", "b", "c"))
+
+    config = _config(tmp_path, now=_dt("2026-05-21T18:00:00Z"), sources=("gfs",), max_cycles_per_source=16)
+    models = [_model(f"model_{index:05d}", "basin_a") for index in range(626)]
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry(models),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [(f"2026-05-21T{hour:02d}:00:00Z", True) for hour in range(16)],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "resource_limit_blocked"
+    assert result.evidence["limit"]["reason"] == "candidate_limit_exceeded"
+    assert result.evidence["candidates"] == []
+
+
+def test_cycle_discovery_limit_blocks_before_candidate_or_duplicate_evidence(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lookback_hours=1)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": OverLimitAdapter("gfs", "2026-05-21T12:00:00Z")},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "resource_limit_blocked"
+    assert result.evidence["limit"]["reason"] == "cycle_discovery_limit_exceeded"
+    assert result.evidence["limit"]["max_discovered_cycles"] == MAX_DISCOVERED_CYCLES
+    assert result.evidence["limit"]["discovered_cycle_count"] == MAX_DISCOVERED_CYCLES + 1
+    assert result.evidence["counts"]["source_cycle_count"] == 0
+    assert result.evidence["source_cycles"] == []
+    assert result.evidence["candidates"] == []
+    assert result.evidence["duplicate_exclusions"] == []
 
 
 def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
@@ -242,6 +501,26 @@ class FakeAdapter:
     def download_plan(self, *_args: Any, **_kwargs: Any) -> None:
         self.download_calls += 1
         raise AssertionError("dry-run scheduler must not download")
+
+
+class OverLimitAdapter:
+    def __init__(self, source_id: str, cycle_time: str) -> None:
+        self.source_id = source_id
+        self.cycle_time = _dt(cycle_time)
+
+    def discover_cycles(self, cycle_date: Any, end_date: Any = None) -> list[CycleDiscovery]:
+        del cycle_date, end_date
+        return [
+            CycleDiscovery(
+                cycle_id=f"{self.source_id}_cycle_{index}",
+                source_id=self.source_id,
+                cycle_time=self.cycle_time,
+                cycle_hour=self.cycle_time.hour,
+                available=True,
+                status="discovered",
+            )
+            for index in range(MAX_DISCOVERED_CYCLES + 1)
+        ]
 
 
 class FakeActiveRepository:

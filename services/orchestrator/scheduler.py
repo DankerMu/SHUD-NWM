@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -20,6 +23,29 @@ DEFAULT_LOOKBACK_HOURS = 24
 DEFAULT_CYCLE_LAG_HOURS = 0
 DEFAULT_MAX_CYCLES_PER_SOURCE = 1
 DEFAULT_LOCK_TTL_SECONDS = 3600
+MAX_LOOKBACK_HOURS = 168
+MAX_SOURCES = 4
+MAX_CYCLES_PER_SOURCE = 16
+MAX_DISCOVERED_MODELS = 1000
+MAX_DISCOVERED_CYCLES = 10000
+MAX_CANDIDATES = 10000
+MAX_REGISTRY_PAGES = 20
+MAX_EVIDENCE_BYTES = 5_000_000
+LOCK_OWNER = "production_scheduler"
+LOCK_SCHEMA_VERSION = 1
+
+
+class SchedulerResourceLimitError(ValueError):
+    def __init__(self, reason: str, details: Mapping[str, Any]) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.details = dict(details)
+
+
+class UnsafeSchedulerLockError(OSError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class ModelRegistryReader(Protocol):
@@ -67,26 +93,55 @@ class ProductionSchedulerConfig:
     evidence_dir: Path | str | None = None
     lock_ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS
     now: datetime | None = None
+    source_exclusions: tuple[dict[str, Any], ...] = field(init=False, default=())
 
     def __post_init__(self) -> None:
         workspace_root = Path(self.workspace_root).expanduser().resolve()
         object.__setattr__(self, "workspace_root", workspace_root)
-        object.__setattr__(self, "sources", tuple(normalize_source_id(source) for source in self.sources))
-        object.__setattr__(self, "lookback_hours", max(int(self.lookback_hours), 0))
+        if len(self.sources) > MAX_SOURCES:
+            raise ValueError(f"production scheduler source count exceeds limit {MAX_SOURCES}")
+        sources, source_exclusions = _normalize_sources(self.sources)
+        if len(sources) > MAX_SOURCES:
+            raise ValueError(f"production scheduler source count exceeds limit {MAX_SOURCES}")
+        object.__setattr__(self, "sources", sources)
+        object.__setattr__(self, "source_exclusions", tuple(source_exclusions))
+        lookback_hours = max(int(self.lookback_hours), 0)
+        if lookback_hours > MAX_LOOKBACK_HOURS:
+            raise ValueError(f"production scheduler lookback_hours exceeds limit {MAX_LOOKBACK_HOURS}")
+        object.__setattr__(self, "lookback_hours", lookback_hours)
         object.__setattr__(self, "cycle_lag_hours", max(int(self.cycle_lag_hours), 0))
-        object.__setattr__(self, "max_cycles_per_source", max(int(self.max_cycles_per_source), 1))
+        max_cycles_per_source = max(int(self.max_cycles_per_source), 1)
+        if max_cycles_per_source > MAX_CYCLES_PER_SOURCE:
+            raise ValueError(f"production scheduler max_cycles_per_source exceeds limit {MAX_CYCLES_PER_SOURCE}")
+        object.__setattr__(self, "max_cycles_per_source", max_cycles_per_source)
         object.__setattr__(self, "model_ids", tuple(str(model_id) for model_id in self.model_ids if model_id))
         object.__setattr__(self, "basin_ids", tuple(str(basin_id) for basin_id in self.basin_ids if basin_id))
         object.__setattr__(self, "interval_seconds", max(float(self.interval_seconds), 1.0))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))
         if self.lock_path is None:
-            object.__setattr__(self, "lock_path", workspace_root / "scheduler" / "production-scheduler.lock")
+            lock_path = _confined_path(
+                workspace_root / "scheduler" / "production-scheduler.lock",
+                workspace_root,
+                "lock_path",
+            )
+            object.__setattr__(self, "lock_path", lock_path)
         else:
-            object.__setattr__(self, "lock_path", Path(self.lock_path).expanduser().resolve())
+            lock_path = _confined_path(self.lock_path, workspace_root, "lock_path")
+            _require_under_workspace(lock_path, workspace_root, "lock_path")
+            object.__setattr__(self, "lock_path", lock_path)
         if self.evidence_dir is None:
-            object.__setattr__(self, "evidence_dir", workspace_root / "scheduler" / "evidence")
+            evidence_dir = _confined_path(
+                workspace_root / "scheduler" / "evidence",
+                workspace_root,
+                "evidence_dir",
+            )
+            _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            object.__setattr__(self, "evidence_dir", evidence_dir)
         else:
-            object.__setattr__(self, "evidence_dir", Path(self.evidence_dir).expanduser().resolve())
+            evidence_dir = _confined_path(self.evidence_dir, workspace_root, "evidence_dir")
+            _require_under_workspace(evidence_dir, workspace_root, "evidence_dir")
+            _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            object.__setattr__(self, "evidence_dir", evidence_dir)
         if self.now is not None:
             object.__setattr__(self, "now", _ensure_utc(self.now))
 
@@ -143,6 +198,12 @@ class SchedulerCandidate:
     model_id: str
     basin_id: str
     basin_version_id: str
+    river_network_version_id: str
+    model_package_uri: str
+    resource_profile: Mapping[str, Any]
+    display_capabilities: Mapping[str, Any]
+    frequency_capabilities: Mapping[str, Any]
+    horizon: Mapping[str, Any]
     scenario_id: str
     run_id: str
     forcing_version_id: str
@@ -158,12 +219,24 @@ class SchedulerCandidate:
             "model_id": self.model_id,
             "basin_id": self.basin_id,
             "basin_version_id": self.basin_version_id,
+            "river_network_version_id": self.river_network_version_id,
+            "model_package_uri": self.model_package_uri,
+            "resource_profile": dict(self.resource_profile),
+            "display_capabilities": dict(self.display_capabilities),
+            "frequency_capabilities": dict(self.frequency_capabilities),
+            "horizon": dict(self.horizon),
             "scenario_id": self.scenario_id,
             "run_id": self.run_id,
             "forcing_version_id": self.forcing_version_id,
             "status": self.status,
             "reason": self.reason,
         }
+
+
+@dataclass(frozen=True)
+class SchedulerSourceCycle:
+    discovery: CycleDiscovery
+    horizon: Mapping[str, Any]
 
 
 class ProductionScheduler:
@@ -189,7 +262,11 @@ class ProductionScheduler:
     def run_once(self) -> SchedulerPassResult:
         started_at = _now(self.config)
         pass_id = f"scheduler_{format_cycle_time(started_at)}_{uuid4().hex[:12]}"
-        lock = FileSchedulerLease(Path(self.config.lock_path), ttl_seconds=self.config.lock_ttl_seconds)
+        lock = FileSchedulerLease(
+            Path(self.config.lock_path),
+            ttl_seconds=self.config.lock_ttl_seconds,
+            workspace_root=Path(self.config.workspace_root),
+        )
         lock_result = lock.acquire(pass_id=pass_id, started_at=started_at)
         if not lock_result["acquired"]:
             evidence = self._base_evidence(pass_id, started_at)
@@ -216,9 +293,18 @@ class ProductionScheduler:
         try:
             models, model_evidence = self._discover_models()
             cycles, source_cycle_evidence = self._discover_cycles(started_at)
-            candidates, blocked_candidates, skipped_candidates = self._build_candidates(models=models, cycles=cycles)
+            candidates, blocked_candidates, skipped_candidates, candidate_duplicate_exclusions = self._build_candidates(
+                models=models,
+                cycles=cycles,
+            )
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
+            evidence["operator_filters"].update(model_evidence["operator_filters"])
+            duplicate_exclusions = [
+                *self.config.source_exclusions,
+                *[item for item in source_cycle_evidence if item.get("status") == "excluded"],
+                *candidate_duplicate_exclusions,
+            ]
             evidence.update(
                 {
                     "status": "planned",
@@ -229,6 +315,7 @@ class ProductionScheduler:
                     "candidates": [candidate.to_dict() for candidate in candidates],
                     "blocked_candidates": [candidate.to_dict() for candidate in blocked_candidates],
                     "skipped_candidates": skipped_candidates,
+                    "duplicate_exclusions": duplicate_exclusions,
                     "counts": {
                         "candidate_count": len(candidates),
                         "blocked_candidate_count": len(blocked_candidates),
@@ -256,6 +343,39 @@ class ProductionScheduler:
                 evidence=evidence,
                 artifact_path=artifact_path,
             )
+        except SchedulerResourceLimitError as error:
+            finished_at = _now(self.config)
+            evidence = self._base_evidence(pass_id, started_at)
+            evidence.update(
+                {
+                    "status": "resource_limit_blocked",
+                    "finished_at": _format_utc(finished_at),
+                    "lock": lock_result,
+                    "limit": {"reason": error.reason, **error.details},
+                    "counts": _empty_counts(),
+                    "candidates": [],
+                    "blocked_candidates": [],
+                    "skipped_candidates": [],
+                    "duplicate_exclusions": list(self.config.source_exclusions),
+                    "model_discovery": _empty_model_discovery(),
+                    "source_cycles": [],
+                    "no_mutation_proof": {
+                        "adapter_download_called": False,
+                        "slurm_submit_called": False,
+                        "shud_runtime_called": False,
+                        "hydro_result_table_writes": False,
+                        "met_result_table_writes": False,
+                    },
+                    "execution_boundary": "planning_only",
+                }
+            )
+            artifact_path = self._write_evidence(pass_id, evidence)
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status="resource_limit_blocked",
+                evidence=evidence,
+                artifact_path=artifact_path,
+            )
         finally:
             lock.release(pass_id=pass_id)
 
@@ -279,6 +399,7 @@ class ProductionScheduler:
             "execution_mode": "dry_run" if self.config.dry_run else "planning",
             "dry_run": self.config.dry_run,
             "sources": list(self.config.sources),
+            "duplicate_exclusions": list(self.config.source_exclusions),
             "cycle_window": {
                 "start_time_utc": _format_utc(start_time),
                 "end_time_utc": _format_utc(end_time),
@@ -349,11 +470,13 @@ class ProductionScheduler:
         }
         return selected, evidence
 
-    def _discover_cycles(self, started_at: datetime) -> tuple[list[CycleDiscovery], list[dict[str, Any]]]:
+    def _discover_cycles(self, started_at: datetime) -> tuple[list[SchedulerSourceCycle], list[dict[str, Any]]]:
         end_time = started_at - timedelta(hours=self.config.cycle_lag_hours)
         start_time = end_time - timedelta(hours=self.config.lookback_hours)
-        source_cycles: list[CycleDiscovery] = []
+        source_cycles: list[SchedulerSourceCycle] = []
         evidence: list[dict[str, Any]] = []
+        seen_cycles: set[tuple[str, str]] = set()
+        source_order = {source_id: index for index, source_id in enumerate(self.config.sources)}
 
         for source_id in self.config.sources:
             adapter = self.adapters.get(source_id)
@@ -369,26 +492,46 @@ class ProductionScheduler:
                 evidence.append(source_evidence)
                 continue
 
-            discoveries = self._discover_source_window(adapter, start_time=start_time, end_time=end_time)
+            discoveries = self._discover_source_window(
+                adapter,
+                source_id=source_id,
+                start_time=start_time,
+                end_time=end_time,
+            )
             discoveries = [
                 discovery
                 for discovery in discoveries
                 if discovery.source_id == source_id and start_time <= _ensure_utc(discovery.cycle_time) <= end_time
             ]
             discoveries.sort(key=lambda discovery: discovery.cycle_time, reverse=True)
-            selected_for_source = discoveries[: self.config.max_cycles_per_source]
-            source_cycles.extend(selected_for_source)
+            selected_for_source: list[CycleDiscovery] = []
+            for discovery in discoveries:
+                cycle_key = (source_id, cycle_id_for(source_id, discovery.cycle_time))
+                if cycle_key in seen_cycles:
+                    evidence.append(_duplicate_cycle_evidence(discovery, reason="duplicate_source_cycle"))
+                    continue
+                seen_cycles.add(cycle_key)
+                if len(selected_for_source) < self.config.max_cycles_per_source:
+                    selected_for_source.append(discovery)
             for discovery in selected_for_source:
-                evidence.append(_source_cycle_evidence(discovery))
+                horizon = _source_horizon_metadata(discovery, adapter)
+                source_cycles.append(SchedulerSourceCycle(discovery=discovery, horizon=horizon))
+                evidence.append(_source_cycle_evidence(discovery, horizon=horizon))
 
-        source_order = {source_id: index for index, source_id in enumerate(self.config.sources)}
-        source_cycles.sort(key=lambda item: (source_order.get(item.source_id, 999), item.cycle_time, item.cycle_hour))
+        source_cycles.sort(
+            key=lambda item: (
+                source_order.get(item.discovery.source_id, 999),
+                item.discovery.cycle_time,
+                item.discovery.cycle_hour,
+            )
+        )
         return source_cycles, evidence
 
     def _discover_source_window(
         self,
         adapter: CycleDiscoveryAdapter,
         *,
+        source_id: str,
         start_time: datetime,
         end_time: datetime,
     ) -> list[CycleDiscovery]:
@@ -399,6 +542,16 @@ class ProductionScheduler:
                 daily = adapter.discover_cycles(current_date)
             except TypeError:
                 daily = adapter.discover_cycles(current_date, None)
+            if len(discoveries) + len(daily) > MAX_DISCOVERED_CYCLES:
+                raise SchedulerResourceLimitError(
+                    "cycle_discovery_limit_exceeded",
+                    {
+                        "max_discovered_cycles": MAX_DISCOVERED_CYCLES,
+                        "discovered_cycle_count": len(discoveries) + len(daily),
+                        "source_id": source_id,
+                        "cycle_date": current_date.isoformat(),
+                    },
+                )
             discoveries.extend(daily)
             current_date += timedelta(days=1)
         return discoveries
@@ -407,14 +560,36 @@ class ProductionScheduler:
         self,
         *,
         models: Sequence[RegisteredSchedulerModel],
-        cycles: Sequence[CycleDiscovery],
-    ) -> tuple[list[SchedulerCandidate], list[SchedulerCandidate], list[dict[str, Any]]]:
+        cycles: Sequence[SchedulerSourceCycle],
+    ) -> tuple[list[SchedulerCandidate], list[SchedulerCandidate], list[dict[str, Any]], list[dict[str, Any]]]:
         candidates: list[SchedulerCandidate] = []
         blocked: list[SchedulerCandidate] = []
         skipped: list[dict[str, Any]] = []
-        for discovery in cycles:
+        duplicate_exclusions: list[dict[str, Any]] = []
+        seen_candidate_ids: set[str] = set()
+        for cycle in cycles:
+            discovery = cycle.discovery
             for model in models:
-                candidate = _candidate_for(discovery=discovery, model=model)
+                if len(candidates) + len(blocked) + len(skipped) >= MAX_CANDIDATES:
+                    raise SchedulerResourceLimitError(
+                        "candidate_limit_exceeded",
+                        {
+                            "max_candidates": MAX_CANDIDATES,
+                            "source_cycle_count": len(cycles),
+                            "selected_model_count": len(models),
+                        },
+                    )
+                candidate = _candidate_for(discovery=discovery, model=model, horizon=cycle.horizon)
+                if candidate.candidate_id in seen_candidate_ids:
+                    exclusion = {
+                        **candidate.to_dict(),
+                        "status": "excluded",
+                        "reason": "duplicate_candidate_identity",
+                    }
+                    skipped.append(exclusion)
+                    duplicate_exclusions.append({"type": "candidate", **exclusion})
+                    continue
+                seen_candidate_ids.add(candidate.candidate_id)
                 if not discovery.available:
                     blocked.append(_blocked_candidate(candidate, "source_cycle_unavailable"))
                     continue
@@ -426,69 +601,183 @@ class ProductionScheduler:
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                     continue
                 candidates.append(candidate)
-        return candidates, blocked, skipped
+        return candidates, blocked, skipped, duplicate_exclusions
 
     def _write_evidence(self, pass_id: str, evidence: Mapping[str, Any]) -> Path | None:
         evidence_dir = Path(self.config.evidence_dir)
+        _require_safe_directory_final_component(evidence_dir, Path(self.config.workspace_root), "evidence_dir")
         evidence_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = evidence_dir / f"{pass_id}.json"
+        _require_under_workspace(artifact_path.parent.resolve(), Path(self.config.workspace_root), "evidence_dir")
         payload = dict(evidence)
         payload["artifact_path"] = str(artifact_path)
-        artifact_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        serialized = json.dumps(payload, indent=2, sort_keys=True)
+        if len(serialized.encode("utf-8")) > MAX_EVIDENCE_BYTES:
+            payload = _bounded_evidence_payload(payload, reason="evidence_size_limit_exceeded")
+            serialized = json.dumps(payload, indent=2, sort_keys=True)
+            if isinstance(evidence, dict):
+                evidence.clear()
+                evidence.update(payload)
+        artifact_path.write_text(serialized, encoding="utf-8")
         evidence.setdefault("artifact_path", str(artifact_path)) if isinstance(evidence, dict) else None
         return artifact_path
 
 
 class FileSchedulerLease:
-    def __init__(self, lock_path: Path, *, ttl_seconds: int) -> None:
+    def __init__(self, lock_path: Path, *, ttl_seconds: int, workspace_root: Path | None = None) -> None:
         self.lock_path = lock_path
         self.ttl_seconds = ttl_seconds
+        self.workspace_root = workspace_root
         self.acquired = False
+        self.lease_token: str | None = None
 
     def acquire(self, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        token = uuid4().hex
         payload = {
+            "owner": LOCK_OWNER,
+            "schema_version": LOCK_SCHEMA_VERSION,
             "pass_id": pass_id,
+            "lease_token": token,
             "pid": os.getpid(),
             "started_at": _format_utc(started_at),
             "lock_path": str(self.lock_path),
         }
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         try:
-            fd = os.open(self.lock_path, flags, 0o644)
-        except FileExistsError:
-            if self._is_stale(started_at):
-                self.lock_path.unlink(missing_ok=True)
-                return self.acquire(pass_id=pass_id, started_at=started_at)
+            with self._guarded() as parent_fd:
+                return self._acquire_locked(
+                    pass_id=pass_id,
+                    started_at=started_at,
+                    payload=payload,
+                    parent_fd=parent_fd,
+                )
+        except UnsafeSchedulerLockError as error:
             return {
                 "acquired": False,
                 "contention": True,
                 "lock_path": str(self.lock_path),
-                "existing_lock": self._read_existing_lock(),
+                "reason": error.reason,
+                "existing_lock": {"raw": None},
             }
+
+    def _acquire_locked(
+        self,
+        *,
+        pass_id: str,
+        started_at: datetime,
+        payload: Mapping[str, Any],
+        parent_fd: int,
+    ) -> dict[str, Any]:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.lock_path.name, flags, 0o644, dir_fd=parent_fd)
+        except FileExistsError:
+            state = self._existing_lock_state(started_at, parent_fd=parent_fd)
+            if state["unsafe"]:
+                return {
+                    "acquired": False,
+                    "contention": True,
+                    "lock_path": str(self.lock_path),
+                    "reason": state["reason"],
+                    "existing_lock": state["existing_lock"],
+                }
+            if state["stale"]:
+                _unlink_lock_file(self.lock_path.name, parent_fd=parent_fd)
+                return self._acquire_locked(
+                    pass_id=pass_id,
+                    started_at=started_at,
+                    payload=payload,
+                    parent_fd=parent_fd,
+                )
+            return {
+                "acquired": False,
+                "contention": True,
+                "lock_path": str(self.lock_path),
+                "existing_lock": state["existing_lock"],
+            }
+        except OSError as error:
+            if error.errno in {ELOOP, ENOTDIR}:
+                raise UnsafeSchedulerLockError("unsafe_lock_symlink") from error
+            raise
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, sort_keys=True)
         self.acquired = True
-        return {"acquired": True, "contention": False, "lock_path": str(self.lock_path), "lease": payload}
+        self.lease_token = str(payload.get("lease_token"))
+        return {"acquired": True, "contention": False, "lock_path": str(self.lock_path), "lease": dict(payload)}
 
     def release(self, *, pass_id: str) -> None:
         if not self.acquired:
             return
-        existing = self._read_existing_lock()
-        if existing.get("pass_id") == pass_id:
-            self.lock_path.unlink(missing_ok=True)
+        try:
+            with self._guarded() as parent_fd:
+                existing = self._read_existing_lock(parent_fd=parent_fd)
+                if existing.get("pass_id") == pass_id and existing.get("lease_token") == self.lease_token:
+                    _unlink_lock_file(self.lock_path.name, parent_fd=parent_fd)
+        except UnsafeSchedulerLockError:
+            pass
         self.acquired = False
+        self.lease_token = None
 
-    def _is_stale(self, now: datetime) -> bool:
+    @contextmanager
+    def _guarded(self) -> Any:
+        import fcntl
+
+        parent_fd = _open_lock_parent_directory(self.lock_path.parent, self.workspace_root)
+        guard_fd = _open_regular_guard_file(f"{self.lock_path.name}.guard", dir_fd=parent_fd)
         try:
-            mtime = datetime.fromtimestamp(self.lock_path.stat().st_mtime, tz=UTC)
+            fcntl.flock(guard_fd, fcntl.LOCK_EX)
+            yield parent_fd
+        finally:
+            fcntl.flock(guard_fd, fcntl.LOCK_UN)
+            os.close(guard_fd)
+            os.close(parent_fd)
+
+    def _existing_lock_state(self, now: datetime | None = None, *, parent_fd: int) -> dict[str, Any]:
+        now = now or datetime.now(UTC)
+        try:
+            lock_stat = os.stat(self.lock_path.name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
-            return False
-        return (now - mtime).total_seconds() > self.ttl_seconds
+            return {"unsafe": False, "stale": False, "reason": None, "existing_lock": {}}
+        if stat.S_ISLNK(lock_stat.st_mode):
+            return {
+                "unsafe": True,
+                "stale": False,
+                "reason": "unsafe_lock_symlink",
+                "existing_lock": {"raw": None},
+            }
+        if not stat.S_ISREG(lock_stat.st_mode):
+            return {
+                "unsafe": True,
+                "stale": False,
+                "reason": "unsafe_lock_not_regular_file",
+                "existing_lock": {"raw": None},
+            }
+        existing = self._read_existing_lock(parent_fd=parent_fd)
+        scheduler_owned = (
+            existing.get("owner") == LOCK_OWNER
+            and existing.get("schema_version") == LOCK_SCHEMA_VERSION
+            and existing.get("lease_token") not in (None, "")
+            and existing.get("pass_id") not in (None, "")
+        )
+        mtime = datetime.fromtimestamp(lock_stat.st_mtime, tz=UTC)
+        stale = (now - mtime).total_seconds() > self.ttl_seconds
+        if stale and not scheduler_owned:
+            return {
+                "unsafe": True,
+                "stale": True,
+                "reason": "unsafe_lock_not_scheduler_owned",
+                "existing_lock": existing,
+            }
+        return {"unsafe": False, "stale": stale, "reason": None, "existing_lock": existing}
 
-    def _read_existing_lock(self) -> dict[str, Any]:
+    def _read_existing_lock(self, *, parent_fd: int) -> dict[str, Any]:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            value = json.loads(self.lock_path.read_text(encoding="utf-8"))
+            fd = os.open(self.lock_path.name, flags, dir_fd=parent_fd)
+        except (OSError, json.JSONDecodeError):
+            return {"raw": None}
+        try:
+            with os.fdopen(fd, encoding="utf-8") as handle:
+                value = json.loads(handle.read())
         except (OSError, json.JSONDecodeError):
             return {"raw": None}
         return dict(value) if isinstance(value, Mapping) else {"raw": value}
@@ -498,10 +787,22 @@ def _fetch_active_model_details(registry: ModelRegistryReader) -> list[Mapping[s
     rows: list[Mapping[str, Any]] = []
     offset = 0
     limit = 500
+    pages = 0
     while True:
+        pages += 1
+        if pages > MAX_REGISTRY_PAGES:
+            raise SchedulerResourceLimitError(
+                "registry_page_limit_exceeded",
+                {"max_registry_pages": MAX_REGISTRY_PAGES, "model_count": len(rows)},
+            )
         page = registry.list_models(basin_version_id=None, active=True, limit=limit, offset=offset)
         items = list(page.get("items") or [])
         for item in items:
+            if len(rows) >= MAX_DISCOVERED_MODELS:
+                raise SchedulerResourceLimitError(
+                    "model_limit_exceeded",
+                    {"max_discovered_models": MAX_DISCOVERED_MODELS, "model_count": len(rows)},
+                )
             model_id = str(item.get("model_id") or "")
             rows.append(registry.get_model(model_id) if model_id else item)
         total = int(page.get("total") or len(rows))
@@ -597,21 +898,41 @@ def _filter_expression(model_ids: Sequence[str], basin_ids: Sequence[str]) -> st
     return " and ".join(parts) if parts else None
 
 
-def _source_cycle_evidence(discovery: CycleDiscovery) -> dict[str, Any]:
+def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, Any]) -> dict[str, Any]:
     available = bool(discovery.available)
     return {
         "source_id": discovery.source_id,
         "cycle_id": discovery.cycle_id,
         "cycle_time_utc": _format_utc(discovery.cycle_time),
         "cycle_hour": discovery.cycle_hour,
+        "horizon": dict(horizon),
         "available": available,
         "status": discovery.status or ("discovered" if available else "unavailable"),
         "reason": None if available else "source_cycle_unavailable",
-        "db_cycle_status_written": None if not available else "discovered",
+        "db_cycle_status_written": None,
+        "cycle_status_candidate": "discovered" if available else "unavailable",
     }
 
 
-def _candidate_for(*, discovery: CycleDiscovery, model: RegisteredSchedulerModel) -> SchedulerCandidate:
+def _duplicate_cycle_evidence(discovery: CycleDiscovery, *, reason: str) -> dict[str, Any]:
+    return {
+        "type": "source_cycle",
+        "source_id": discovery.source_id,
+        "cycle_id": cycle_id_for(discovery.source_id, discovery.cycle_time),
+        "cycle_time_utc": _format_utc(discovery.cycle_time),
+        "cycle_hour": discovery.cycle_hour,
+        "available": discovery.available,
+        "status": "excluded",
+        "reason": reason,
+    }
+
+
+def _candidate_for(
+    *,
+    discovery: CycleDiscovery,
+    model: RegisteredSchedulerModel,
+    horizon: Mapping[str, Any],
+) -> SchedulerCandidate:
     source_id = normalize_source_id(discovery.source_id)
     cycle_time = _ensure_utc(discovery.cycle_time)
     compact_cycle = format_cycle_time(cycle_time)
@@ -625,6 +946,12 @@ def _candidate_for(*, discovery: CycleDiscovery, model: RegisteredSchedulerModel
         model_id=model.model_id,
         basin_id=model.basin_id,
         basin_version_id=model.basin_version_id,
+        river_network_version_id=model.river_network_version_id,
+        model_package_uri=model.model_package_uri,
+        resource_profile=model.resource_profile_summary,
+        display_capabilities=model.display_capabilities,
+        frequency_capabilities=model.frequency_capabilities,
+        horizon=horizon,
         scenario_id=scenario_id,
         run_id=f"fcst_{source_id.lower()}_{compact_cycle}_{model.model_id}",
         forcing_version_id=f"forc_{source_id.lower()}_{compact_cycle}_{model.model_id}",
@@ -641,6 +968,12 @@ def _blocked_candidate(candidate: SchedulerCandidate, reason: str) -> SchedulerC
         model_id=candidate.model_id,
         basin_id=candidate.basin_id,
         basin_version_id=candidate.basin_version_id,
+        river_network_version_id=candidate.river_network_version_id,
+        model_package_uri=candidate.model_package_uri,
+        resource_profile=candidate.resource_profile,
+        display_capabilities=candidate.display_capabilities,
+        frequency_capabilities=candidate.frequency_capabilities,
+        horizon=candidate.horizon,
         scenario_id=candidate.scenario_id,
         run_id=candidate.run_id,
         forcing_version_id=candidate.forcing_version_id,
@@ -680,6 +1013,187 @@ def _empty_model_discovery() -> dict[str, Any]:
         "excluded_model_count": 0,
         "models": [],
         "exclusions": [],
+        "operator_filters": {"expression": None, "excluded_runnable_count": 0},
+    }
+
+
+def _normalize_sources(sources: Sequence[str]) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
+    normalized: list[str] = []
+    exclusions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_source in sources:
+        source_id = normalize_source_id(raw_source)
+        if source_id in seen:
+            exclusions.append(
+                {
+                    "type": "source",
+                    "source_id": source_id,
+                    "status": "excluded",
+                    "reason": "duplicate_source",
+                }
+            )
+            continue
+        seen.add(source_id)
+        normalized.append(source_id)
+    return tuple(normalized), exclusions
+
+
+def _confined_path(value: Path | str, workspace_root: Path, field_name: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = workspace_root / path
+    resolved_parent = path.parent.resolve()
+    candidate = resolved_parent / path.name
+    _require_under_workspace(resolved_parent, workspace_root, field_name)
+    return candidate
+
+
+def _require_under_workspace(path: Path, workspace_root: Path, field_name: str) -> None:
+    try:
+        path.relative_to(workspace_root)
+    except ValueError as error:
+        raise ValueError(f"production scheduler {field_name} must be under workspace_root") from error
+
+
+def _require_safe_directory_final_component(path: Path, workspace_root: Path, field_name: str) -> None:
+    _require_under_workspace(path.parent.resolve(), workspace_root, field_name)
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(path_stat.st_mode):
+        resolved = path.resolve(strict=False)
+        _require_under_workspace(resolved, workspace_root, field_name)
+        if resolved.exists() and not resolved.is_dir():
+            raise ValueError(f"production scheduler {field_name} must be a directory")
+        return
+    if not stat.S_ISDIR(path_stat.st_mode):
+        raise ValueError(f"production scheduler {field_name} must be a directory")
+
+
+def _open_lock_parent_directory(lock_parent: Path, workspace_root: Path | None) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    if workspace_root is None:
+        lock_parent.mkdir(parents=True, exist_ok=True)
+        try:
+            return os.open(lock_parent, directory_flags)
+        except OSError as error:
+            if error.errno in {ELOOP, ENOTDIR}:
+                raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
+            raise
+
+    workspace_root = workspace_root.resolve()
+    try:
+        relative_parent = lock_parent.relative_to(workspace_root)
+    except ValueError as error:
+        raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
+
+    try:
+        root_fd = os.open(workspace_root, directory_flags)
+    except OSError as error:
+        if error.errno in {ELOOP, ENOTDIR}:
+            raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
+        raise
+
+    parent_fd = root_fd
+    try:
+        for component in relative_parent.parts:
+            if component in ("", "."):
+                continue
+            if component == "..":
+                raise UnsafeSchedulerLockError("unsafe_lock_parent_directory")
+            try:
+                child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o755, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+                child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            except OSError as error:
+                if error.errno in {ELOOP, ENOTDIR}:
+                    raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
+                raise
+            os.close(parent_fd)
+            parent_fd = child_fd
+    except Exception:
+        os.close(parent_fd)
+        raise
+    return parent_fd
+
+
+def _open_regular_guard_file(guard_name: str, *, dir_fd: int) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(guard_name, os.O_CREAT | os.O_RDWR | nofollow, 0o644, dir_fd=dir_fd)
+    except OSError as error:
+        if error.errno in {EEXIST, EISDIR, ELOOP, ENOTDIR}:
+            raise UnsafeSchedulerLockError("unsafe_lock_guard_not_regular_file") from error
+        raise
+    try:
+        guard_stat = os.fstat(fd)
+        if not stat.S_ISREG(guard_stat.st_mode):
+            raise UnsafeSchedulerLockError("unsafe_lock_guard_not_regular_file")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _unlink_lock_file(lock_name: str, *, parent_fd: int) -> None:
+    try:
+        os.unlink(lock_name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+
+
+def _source_horizon_metadata(discovery: CycleDiscovery, adapter: CycleDiscoveryAdapter) -> dict[str, Any]:
+    source_id = normalize_source_id(discovery.source_id)
+    cycle_time = _ensure_utc(discovery.cycle_time)
+    config = getattr(adapter, "config", None)
+    max_lead_hours: int | None = None
+    if config is not None and hasattr(config, "forecast_end_hour_for_cycle"):
+        max_lead_hours = int(config.forecast_end_hour_for_cycle(cycle_time.hour))
+    elif config is not None and hasattr(config, "forecast_end_hour"):
+        max_lead_hours = int(getattr(config, "forecast_end_hour"))
+    elif source_id == "IFS":
+        max_lead_hours = 144 if cycle_time.hour in {6, 18} else 168
+    elif source_id == "gfs":
+        max_lead_hours = 168
+    return {
+        "max_lead_hours": max_lead_hours,
+        "forecast_horizon_hours": max_lead_hours,
+        "policy": "source_cycle",
+    }
+
+
+def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+    return {
+        "pass_id": payload.get("pass_id"),
+        "started_at": payload.get("started_at"),
+        "finished_at": payload.get("finished_at"),
+        "status": "resource_limit_blocked",
+        "limit": {"reason": reason, "max_evidence_bytes": MAX_EVIDENCE_BYTES},
+        "counts": payload.get("counts", _empty_counts()),
+        "candidates": [],
+        "blocked_candidates": [],
+        "skipped_candidates": [],
+        "duplicate_exclusions": payload.get("duplicate_exclusions", []),
+        "source_cycles": [],
+        "model_discovery": _empty_model_discovery(),
+        "artifact_path": payload.get("artifact_path"),
+        "execution_boundary": payload.get("execution_boundary", "planning_only"),
+        "no_mutation_proof": payload.get(
+            "no_mutation_proof",
+            {
+                "adapter_download_called": False,
+                "slurm_submit_called": False,
+                "shud_runtime_called": False,
+                "hydro_result_table_writes": False,
+                "met_result_table_writes": False,
+            },
+        ),
     }
 
 
