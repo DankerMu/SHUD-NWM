@@ -174,6 +174,20 @@ async function fulfill(route: Route, data: unknown) {
   })
 }
 
+function readyFloodProductQuality(rows: number) {
+  return {
+    flood_return_period: {
+      quality_state: 'ready',
+      max_over_window: true,
+      result_rows: rows,
+      return_period_rows: rows,
+      warning_rows: rows,
+      unavailable_products: [],
+      residual_blockers: [],
+    },
+  }
+}
+
 function isLocalRequest(url: URL) {
   return ['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
 }
@@ -288,10 +302,25 @@ const runs = [
     status: 'frequency_done',
     start_time: '2026-05-18T00:00:00Z',
     end_time: '2026-05-18T06:00:00Z',
+    product_quality: readyFloodProductQuality(2),
     created_at: '2026-05-18T00:00:00Z',
     updated_at: '2026-05-18T06:20:00Z',
   },
 ]
+
+function readyRunsForQuery(url: URL) {
+  if (url.searchParams.get('flood_product_ready') && url.searchParams.get('flood_product_ready') !== 'true') return []
+
+  const status = url.searchParams.get('status')
+  const source = url.searchParams.get('source')
+  const cycleTime = url.searchParams.get('cycle_time')
+  return runs.filter((run) => {
+    if (status && run.status !== status) return false
+    if (source && run.source_id.toLowerCase() !== source.toLowerCase()) return false
+    if (cycleTime && new Date(run.cycle_time).toISOString() !== new Date(cycleTime).toISOString()) return false
+    return true
+  })
+}
 
 const riverSegments = {
   type: 'FeatureCollection',
@@ -414,7 +443,15 @@ async function mockM15Apis(page: Page) {
       if (state === 'model-error') return fulfillError(route, 'model detail /secret/basins/package.zip must not leak')
       return fulfill(route, model)
     }
-    if (url.pathname === '/api/v1/runs') return fulfill(route, { items: runs, total: 1, limit: Number(url.searchParams.get('limit') ?? 20), offset: Number(url.searchParams.get('offset') ?? 0) })
+    if (url.pathname === '/api/v1/runs') {
+      const items = readyRunsForQuery(url)
+      return fulfill(route, {
+        items,
+        total: items.length,
+        limit: Number(url.searchParams.get('limit') ?? 20),
+        offset: Number(url.searchParams.get('offset') ?? 0),
+      })
+    }
     if (url.pathname === '/api/v1/layers') {
       return fulfill(route, [
         { layer_id: 'discharge', layer_name: 'River discharge', layer_type: 'hydrology', variables: ['q_down'] },
