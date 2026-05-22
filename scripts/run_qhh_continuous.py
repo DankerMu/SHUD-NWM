@@ -7,15 +7,18 @@ import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow
 from packages.common.source_identity import normalize_source_id
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +28,16 @@ TERMINAL_SUCCESS = {"frequency_done", "published", "already_done"}
 RETRYABLE_STATE = {"failed", "unavailable"}
 ACTIVE_STATE = {"submitted", "running"}
 SLURM_TERMINAL_SUCCESS = {"COMPLETED"}
-SLURM_TERMINAL_FAILURE = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL"}
+SLURM_TERMINAL_FAILURE = {
+    "FAILED",
+    "CANCELLED",
+    "TIMEOUT",
+    "OUT_OF_MEMORY",
+    "NODE_FAIL",
+    "PREEMPTED",
+    "BOOT_FAIL",
+    "DEADLINE",
+}
 SLURM_ACCOUNTING_UNKNOWN = "UNKNOWN_ACCOUNTING_UNAVAILABLE"
 SLURM_WAIT_TIMEOUT = "UNKNOWN_WAIT_TIMEOUT"
 SLURM_UNKNOWN_ACTIVE = {SLURM_ACCOUNTING_UNKNOWN, SLURM_WAIT_TIMEOUT}
@@ -34,6 +46,8 @@ DEFAULT_SLURM_SQUEUE_POLL_SECONDS = 30
 DEFAULT_SLURM_ACCOUNTING_TIMEOUT_SECONDS = 300
 DEFAULT_SLURM_ACCOUNTING_POLL_SECONDS = 10
 SLURM_EXPORT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PRIVATE_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+PRIVATE_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 SLURM_EXPLICIT_ENV_NAMES = {
     "FORCING_MIN_LEAD_HOURS",
     "GFS_FORECAST_END_HOUR",
@@ -274,7 +288,7 @@ def _submit_slurm_cycle(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     slurm_root = run_root / "slurm-logs" / candidate.source_segment / candidate.token
-    slurm_root.mkdir(parents=True, exist_ok=True)
+    _ensure_private_slurm_log_dir(slurm_root, run_root=run_root)
     env_exports = _slurm_exports(candidate, run_root)
     env_file = _write_slurm_env_file(slurm_root / "qhh-cycle.env", env_exports)
     command = [
@@ -412,11 +426,86 @@ def _format_slurm_export(values: Mapping[str, str]) -> str:
 
 
 def _write_slurm_env_file(path: Path, values: Mapping[str, str]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(path.parent)
     lines = [f"export {key}={shlex.quote(value)}" for key, value in sorted(values.items())]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    path.chmod(0o600)
+    content = ("\n".join(lines) + "\n").encode("utf-8")
+    parent_fd = _open_private_directory(path.parent)
+    temp_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    file_fd: int | None = None
+    try:
+        _reject_existing_symlink(parent_fd, path.name, path)
+        file_fd = os.open(temp_name, PRIVATE_FILE_FLAGS, 0o600, dir_fd=parent_fd)
+        os.fchmod(file_fd, 0o600)
+        view = memoryview(content)
+        while view:
+            written = os.write(file_fd, view)
+            view = view[written:]
+        os.fsync(file_fd)
+        os.close(file_fd)
+        file_fd = None
+        _reject_existing_symlink(parent_fd, path.name, path)
+        os.replace(temp_name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass
+    except OSError as error:
+        if file_fd is not None:
+            os.close(file_fd)
+        try:
+            os.unlink(temp_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        raise RuntimeError(f"Failed to write private Slurm env file {path}: {error}") from error
+    finally:
+        os.close(parent_fd)
     return path
+
+
+def _ensure_private_slurm_log_dir(slurm_root: Path, *, run_root: Path) -> None:
+    slurm_logs_root = run_root / "slurm-logs"
+    relative = slurm_root.relative_to(slurm_logs_root)
+    current = slurm_logs_root
+    _ensure_private_directory(current)
+    for part in relative.parts:
+        current = current / part
+        _ensure_private_directory(current)
+
+
+def _ensure_private_directory(path: Path) -> None:
+    try:
+        ensure_directory_no_follow(path)
+    except SafeFilesystemError as error:
+        raise RuntimeError(f"Slurm credential directory is unsafe: {path}: {error}") from error
+    fd = _open_private_directory(path)
+    try:
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
+def _open_private_directory(path: Path) -> int:
+    try:
+        fd = os.open(path, PRIVATE_DIR_FLAGS)
+    except OSError as error:
+        raise RuntimeError(f"Slurm credential directory is unsafe: {path}: {error}") from error
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise RuntimeError(f"Slurm credential directory is not a directory: {path}")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _reject_existing_symlink(parent_fd: int, name: str, path: Path) -> None:
+    try:
+        existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(existing.st_mode):
+        raise RuntimeError(f"Refusing to write Slurm env file through symlink: {path}")
 
 
 def _wait_for_slurm_job(

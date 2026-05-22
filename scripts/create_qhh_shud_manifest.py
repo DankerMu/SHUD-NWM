@@ -51,7 +51,14 @@ def main() -> int:
         model = _one(cur.fetchone(), f"model_instance not found: {MODEL_ID}")
         cur.execute(
             """
-            SELECT forcing_version_id, model_id, source_id, cycle_time, start_time, end_time, forcing_package_uri
+            SELECT forcing_version_id,
+                   model_id,
+                   source_id,
+                   cycle_time,
+                   start_time,
+                   end_time,
+                   forcing_package_uri,
+                   checksum
             FROM met.forcing_version
             WHERE forcing_version_id = %s
             """,
@@ -65,9 +72,16 @@ def main() -> int:
     _validate_model_package_uri_matches_published(model_package_uri, expected_package_uri)
     published_package_manifest = _published_package_manifest(PACKAGE_MANIFEST)
     _validate_model_package_checksum_matches_published(model, published_package_manifest)
-    forcing_manifest = _forcing_package_manifest(forcing, object_store)
+    forcing_manifest_uri = _forcing_package_manifest_uri(forcing)
+    forcing_manifest_checksum = _validate_forcing_package_checksum_matches_db(
+        forcing,
+        forcing_manifest_uri,
+        object_store,
+    )
+    forcing_manifest = _forcing_package_manifest(forcing_manifest_uri, object_store)
     station_count = _forcing_manifest_station_count(forcing_manifest)
     _validate_shud_forcing_header(forcing_manifest, object_store, station_count)
+    forcing_files = _forcing_file_checksums(forcing_manifest)
     start_time = _format_time(forcing["start_time"])
     end_time = _format_time(forcing["end_time"])
     manifest = {
@@ -98,6 +112,9 @@ def main() -> int:
         "forcing": {
             "forcing_version_id": forcing["forcing_version_id"],
             "forcing_uri": forcing["forcing_package_uri"],
+            "package_manifest_uri": forcing_manifest_uri,
+            "package_manifest_checksum": forcing_manifest_checksum,
+            "files": forcing_files,
             "station_count": station_count,
             "station_source": "qhh.tsd.forc",
             "shud_forcing_layout": "standard_multi_station",
@@ -204,13 +221,63 @@ def _model_resource_profile(model: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _forcing_package_manifest(forcing: dict[str, Any], object_store: LocalObjectStore) -> dict[str, Any]:
+def _forcing_package_manifest_uri(forcing: dict[str, Any]) -> str:
     package_uri = str(forcing.get("forcing_package_uri") or "")
-    manifest_uri = _ensure_directory_uri(package_uri) + "forcing_package.json"
+    return _ensure_directory_uri(package_uri) + "forcing_package.json"
+
+
+def _validate_forcing_package_checksum_matches_db(
+    forcing: dict[str, Any],
+    manifest_uri: str,
+    object_store: LocalObjectStore,
+) -> str:
+    db_checksum = str(forcing.get("checksum") or "").strip()
+    if not db_checksum or db_checksum.lower() == "pending":
+        raise RuntimeError(
+            "forcing_version checksum is missing or pending. Finalize forcing before creating the runtime manifest."
+        )
+    try:
+        actual_checksum = object_store.checksum(manifest_uri)
+    except Exception as error:
+        raise RuntimeError(f"forcing package manifest checksum is not readable: {manifest_uri}") from error
+    if actual_checksum != db_checksum:
+        raise RuntimeError(
+            "forcing_version checksum does not match forcing package manifest checksum: "
+            f"{db_checksum} != {actual_checksum}."
+        )
+    return actual_checksum
+
+
+def _forcing_package_manifest(manifest_uri: str, object_store: LocalObjectStore) -> dict[str, Any]:
     try:
         return json.loads(object_store.read_bytes(manifest_uri).decode("utf-8"))
     except Exception as error:
         raise RuntimeError(f"forcing package manifest is not readable: {manifest_uri}") from error
+
+
+def _forcing_file_checksums(manifest: dict[str, Any]) -> list[dict[str, str]]:
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        raise RuntimeError("forcing package manifest is missing files.")
+    selected: list[dict[str, str]] = []
+    for file_entry in files:
+        if not isinstance(file_entry, dict):
+            continue
+        uri = str(file_entry.get("uri") or "")
+        checksum = str(file_entry.get("checksum") or "")
+        if not uri or not checksum:
+            raise RuntimeError("forcing package manifest file entry is missing uri or checksum.")
+        selected.append(
+            {
+                "role": str(file_entry.get("role") or ""),
+                "relative_path": str(file_entry.get("relative_path") or ""),
+                "uri": uri,
+                "checksum": checksum,
+            }
+        )
+    if not selected:
+        raise RuntimeError("forcing package manifest has no checksum-bearing files.")
+    return selected
 
 
 def _forcing_manifest_station_count(manifest: dict[str, Any]) -> int:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from packages.common.object_store import LocalObjectStore
+from packages.common.object_store import LocalObjectStore, sha256_bytes
 from scripts import create_qhh_shud_manifest as qhh_manifest
 from scripts import seed_qhh_shud_output_segments as seed_segments
 
@@ -101,6 +102,58 @@ def test_qhh_manifest_validates_forcing_manifest_station_count_and_header(tmp_pa
     store.write_bytes_atomic(tsd_uri, b"1 20260507\nshud\n")
     with pytest.raises(RuntimeError, match="station header"):
         qhh_manifest._validate_shud_forcing_header(manifest, store, 2)
+
+
+def test_qhh_manifest_rejects_forcing_package_checksum_mismatch(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    manifest_uri = "forcing/gfs/2026050700/basin_v1/demo_model/forcing_package.json"
+    store.write_bytes_atomic(manifest_uri, b'{"station_count":1}\n')
+
+    with pytest.raises(RuntimeError, match="forcing_version checksum does not match"):
+        qhh_manifest._validate_forcing_package_checksum_matches_db(
+            {"checksum": "stale-db-checksum"},
+            manifest_uri,
+            store,
+        )
+
+
+def test_qhh_manifest_accepts_forcing_package_checksum_and_exports_file_evidence(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    manifest_uri = "forcing/gfs/2026050700/basin_v1/demo_model/forcing_package.json"
+    tsd_uri = "forcing/gfs/2026050700/basin_v1/demo_model/shud/qhh.tsd.forc"
+    tsd_content = b"1 20260507\n/data\nID Lon Lat X Y Z Filename\n1 100 30 1 1 1 forcing.csv\n"
+    store.write_bytes_atomic(tsd_uri, tsd_content)
+    package_manifest = {
+        "station_count": 1,
+        "files": [
+            {
+                "role": "shud_forcing",
+                "relative_path": "shud/qhh.tsd.forc",
+                "uri": tsd_uri,
+                "checksum": sha256_bytes(tsd_content),
+            }
+        ],
+        "lineage": {"station_signature": {"station_count": 1}},
+    }
+    package_content = json.dumps(package_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    store.write_bytes_atomic(manifest_uri, package_content)
+
+    checksum = qhh_manifest._validate_forcing_package_checksum_matches_db(
+        {"checksum": sha256_bytes(package_content)},
+        manifest_uri,
+        store,
+    )
+    files = qhh_manifest._forcing_file_checksums(package_manifest)
+
+    assert checksum == sha256_bytes(package_content)
+    assert files == [
+        {
+            "role": "shud_forcing",
+            "relative_path": "shud/qhh.tsd.forc",
+            "uri": tsd_uri,
+            "checksum": sha256_bytes(tsd_content),
+        }
+    ]
 
 
 def test_seed_qhh_shud_output_segments_ignores_existing_output_rows_for_order_offset() -> None:

@@ -342,7 +342,7 @@ class ForcingProducer:
             )
             lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
             station_signature = _station_signature(stations)
-            canonical_input_signature = _canonical_input_signature(products_by_variable, parsed_cycle_time)
+            canonical_input_signature = self._canonical_input_signature(products_by_variable, parsed_cycle_time)
             if self._existing_forcing_version_is_current(
                 existing,
                 lead_window=lead_window,
@@ -1077,7 +1077,7 @@ class ForcingProducer:
             "station_signature": station_signature or _station_signature(stations),
             "grid_signatures": _format_grid_signatures(grid_signature_by_source_grid or {}),
             "canonical_input_signature": canonical_input_signature
-            or _canonical_input_signature(products_by_variable, cycle_time),
+            or self._canonical_input_signature(products_by_variable, cycle_time),
             "forcing_variables": list(self.config.output_variables),
             "canonical_product_ids": sorted(
                 product.canonical_product_id
@@ -1207,6 +1207,17 @@ class ForcingProducer:
         except (OSError, ObjectStoreError, ValueError):
             LOGGER.warning("Existing forcing package checksum could not be verified for %s", package_uri)
             return False
+
+    def _canonical_input_signature(
+        self,
+        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+        cycle_time: datetime,
+    ) -> dict[str, Any]:
+        return _canonical_input_signature(
+            products_by_variable,
+            cycle_time,
+            object_store=self.object_store,
+        )
 
     def _mark_failed(self, source_id: str, cycle_time: datetime, error: Exception) -> None:
         if self.repository is None:
@@ -1556,6 +1567,8 @@ def _station_signature_matches(existing: Any, current: Mapping[str, Any]) -> boo
 def _canonical_input_signature(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
     cycle_time: datetime,
+    *,
+    object_store: LocalObjectStore | None = None,
 ) -> dict[str, Any]:
     product_rows = [
         {
@@ -1573,6 +1586,7 @@ def _canonical_input_signature(
             "object_uri": product.object_uri,
             "checksum": product.checksum,
             "quality_flag": product.quality_flag,
+            "grid_definition_content_signature": _grid_definition_content_signature(product, object_store),
         }
         for products_for_variable in products_by_variable.values()
         for product in products_for_variable.values()
@@ -1587,12 +1601,77 @@ def _canonical_input_signature(
     )
     checksum = sha256_bytes(_json_bytes({"products": product_rows}))
     return {
-        "schema_version": "nhms.forcing_canonical_input_signature.v1",
+        "schema_version": "nhms.forcing_canonical_input_signature.v2",
         "product_count": len(product_rows),
         "canonical_product_ids": [str(row["canonical_product_id"]) for row in product_rows],
         "checksum": checksum,
         "products": product_rows,
     }
+
+
+def _grid_definition_content_signature(
+    product: CanonicalProduct,
+    object_store: LocalObjectStore | None,
+) -> dict[str, Any] | None:
+    if object_store is None or not product.grid_definition_uri:
+        return None
+    try:
+        content = object_store.read_bytes(product.grid_definition_uri)
+        definition = json.loads(content.decode("utf-8"))
+    except (ObjectStoreError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    grid_signature = _grid_definition_signature(definition)
+    if grid_signature is None:
+        return None
+    return {
+        "schema_version": "nhms.grid_definition_content_signature.v1",
+        "uri": product.grid_definition_uri,
+        "checksum": sha256_bytes(content),
+        "grid_signature": grid_signature,
+    }
+
+
+def _grid_definition_signature(definition: Any) -> dict[str, Any] | None:
+    if not isinstance(definition, Mapping):
+        return None
+    if definition.get("layout") == "rectilinear":
+        try:
+            y_count, x_count = (int(value) for value in definition["shape"])
+            longitudes = tuple(round(_normalize_longitude(float(value)), 12) for value in definition["longitudes"])
+            latitudes = tuple(round(float(value), 12) for value in definition["latitudes"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if len(longitudes) != x_count or len(latitudes) != y_count:
+            return None
+        return {
+            "layout": "rectilinear",
+            "shape": [y_count, x_count],
+            "longitudes": list(longitudes),
+            "latitudes": list(latitudes),
+        }
+
+    cells = definition.get("cells") or definition.get("points")
+    if not isinstance(cells, list):
+        return None
+    signed_cells: list[dict[str, Any]] = []
+    for index, cell in enumerate(cells):
+        if not isinstance(cell, Mapping):
+            return None
+        try:
+            longitude = _normalize_longitude(float(cell.get("lon", cell.get("longitude"))))
+            latitude = float(cell.get("lat", cell.get("latitude")))
+        except (TypeError, ValueError):
+            return None
+        if not _valid_geographic_coordinate(longitude, latitude):
+            return None
+        signed_cells.append(
+            {
+                "grid_cell_id": str(cell.get("grid_cell_id", cell.get("id", index))),
+                "longitude": round(longitude, 12),
+                "latitude": round(latitude, 12),
+            }
+        )
+    return {"layout": "cells", "cells": signed_cells}
 
 
 def _canonical_input_signature_matches(existing: Any, current: Mapping[str, Any]) -> bool:

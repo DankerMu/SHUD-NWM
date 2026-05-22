@@ -491,6 +491,46 @@ def test_existing_forcing_version_not_reused_when_canonical_inputs_change_under_
     assert manifest["lineage"]["canonical_input_signature"] == updated_lineage["canonical_input_signature"]
 
 
+def test_existing_forcing_version_not_reused_when_same_grid_definition_uri_content_changes(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path, include_geographic_coords=False)
+    grid_definition_uri = "canonical/gfs/grid/grid_a/grid.json"
+    _write_grid_definition(
+        store,
+        grid_definition_uri,
+        longitudes=(-75.0, -74.5, -74.0),
+        latitudes=(40.0, 40.2, 40.4),
+    )
+    repository.products = tuple(
+        _replace_product_grid_definition(product, grid_definition_uri) for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    first_lineage = repository.forcing_versions[first.forcing_version_id]["lineage_json"]
+    _write_grid_definition(
+        store,
+        grid_definition_uri,
+        longitudes=(-75.0, -74.5, -73.0),
+        latitudes=(40.0, 40.2, 40.4),
+    )
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "forcing_ready"
+    assert second.status != "already_done"
+    assert repository.upsert_count == 2
+    updated_lineage = repository.forcing_versions[second.forcing_version_id]["lineage_json"]
+    assert (
+        updated_lineage["canonical_input_signature"]["checksum"]
+        != first_lineage["canonical_input_signature"]["checksum"]
+    )
+    grid_signature = updated_lineage["canonical_input_signature"]["products"][0][
+        "grid_definition_content_signature"
+    ]
+    assert grid_signature["uri"] == grid_definition_uri
+    assert grid_signature["grid_signature"]["cells"][2]["longitude"] == -73.0
+
+
 def test_existing_forcing_version_not_reused_when_forcing_grid_station_set_changes(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
     proxy = MetStation(
@@ -965,6 +1005,46 @@ def _replace_product_quality(product: CanonicalProduct, quality_flag: str) -> Ca
         quality_flag=quality_flag,
         lead_time_hours=product.lead_time_hours,
     )
+
+
+def _replace_product_grid_definition(product: CanonicalProduct, grid_definition_uri: str) -> CanonicalProduct:
+    return CanonicalProduct(
+        canonical_product_id=product.canonical_product_id,
+        source_id=product.source_id,
+        cycle_time=product.cycle_time,
+        valid_time=product.valid_time,
+        variable=product.variable,
+        unit=product.unit,
+        grid_id=product.grid_id,
+        object_uri=product.object_uri,
+        checksum=product.checksum,
+        grid_definition_uri=grid_definition_uri,
+        native_time_resolution=product.native_time_resolution,
+        native_spatial_resolution=product.native_spatial_resolution,
+        quality_flag=product.quality_flag,
+        lead_time_hours=product.lead_time_hours,
+    )
+
+
+def _write_grid_definition(
+    store: LocalObjectStore,
+    uri: str,
+    *,
+    longitudes: tuple[float, float, float],
+    latitudes: tuple[float, float, float],
+) -> str:
+    content = json.dumps(
+        {
+            "schema_version": "nhms.grid_definition.v1",
+            "grid_id": "grid_a",
+            "cells": [
+                {"id": index, "lon": longitude, "lat": latitude}
+                for index, (longitude, latitude) in enumerate(zip(longitudes, latitudes, strict=True))
+            ],
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    return store.write_bytes_atomic(uri, content)
 
 
 def _write_replacement_canonical_product(

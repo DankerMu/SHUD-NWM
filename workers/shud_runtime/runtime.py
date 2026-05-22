@@ -326,7 +326,9 @@ class SHUDRuntime:
         model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
         model_input_dir.mkdir(parents=True, exist_ok=True)
         self._stage_artifact(manifest["model"]["model_package_uri"], model_input_dir)
+        self._verify_forcing_manifest_checksums(manifest)
         self._stage_artifact(manifest["forcing"]["forcing_uri"], model_input_dir)
+        self._verify_staged_forcing_checksums(manifest, model_input_dir)
         self._stage_initial_state(manifest, model_input_dir)
         if _is_shud_project_mode(manifest, self.config.command_style):
             self._prepare_shud_project_forcing(manifest, model_input_dir)
@@ -721,6 +723,68 @@ class SHUDRuntime:
         target = destination / source.name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+
+    def _verify_forcing_manifest_checksums(self, manifest: dict[str, Any]) -> None:
+        forcing = manifest.get("forcing") or {}
+        package_manifest_uri = str(forcing.get("package_manifest_uri") or "").strip()
+        expected_package_checksum = str(forcing.get("package_manifest_checksum") or "").strip()
+        if package_manifest_uri or expected_package_checksum:
+            if not package_manifest_uri or not expected_package_checksum:
+                raise SHUDRuntimeError(
+                    "FORCING_CHECKSUM_MISSING",
+                    "Forcing package manifest URI and checksum must be provided together.",
+                )
+            actual_checksum = self._object_checksum(package_manifest_uri)
+            if actual_checksum != expected_package_checksum:
+                raise SHUDRuntimeError(
+                    "FORCING_PACKAGE_CHECKSUM_MISMATCH",
+                    "Forcing package manifest checksum mismatch: "
+                    f"expected {expected_package_checksum}, got {actual_checksum}.",
+                )
+
+        for file_entry in _forcing_checksum_entries(manifest):
+            uri = str(file_entry["uri"])
+            expected_checksum = str(file_entry["checksum"])
+            actual_checksum = self._object_checksum(uri)
+            if actual_checksum != expected_checksum:
+                raise SHUDRuntimeError(
+                    "FORCING_FILE_CHECKSUM_MISMATCH",
+                    f"Forcing file checksum mismatch for {uri}: expected {expected_checksum}, got {actual_checksum}.",
+                )
+
+    def _verify_staged_forcing_checksums(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
+        forcing_root = _object_key(manifest["forcing"]["forcing_uri"], self.config.object_store_prefix).rstrip("/")
+        for file_entry in _forcing_checksum_entries(manifest):
+            relative_path = str(file_entry.get("relative_path") or "").strip()
+            if not relative_path:
+                file_key = _object_key(str(file_entry["uri"]), self.config.object_store_prefix)
+                if forcing_root and file_key.startswith(f"{forcing_root}/"):
+                    relative_path = file_key[len(forcing_root) + 1 :]
+                else:
+                    relative_path = Path(file_key).name
+            staged_path = _resolve_staged_forcing_path(model_input_dir, relative_path)
+            if not staged_path.exists() or not staged_path.is_file():
+                raise SHUDRuntimeError(
+                    "FORCING_FILE_NOT_STAGED",
+                    f"Forcing checksum entry was not staged: {relative_path}",
+                )
+            actual_checksum = sha256_bytes(staged_path.read_bytes())
+            expected_checksum = str(file_entry["checksum"])
+            if actual_checksum != expected_checksum:
+                raise SHUDRuntimeError(
+                    "FORCING_FILE_CHECKSUM_MISMATCH",
+                    f"Staged forcing file checksum mismatch for {relative_path}: "
+                    f"expected {expected_checksum}, got {actual_checksum}.",
+                )
+
+    def _object_checksum(self, uri_or_key: str) -> str:
+        try:
+            return self.object_store.checksum(uri_or_key)
+        except Exception as error:
+            raise SHUDRuntimeError(
+                "FORCING_CHECKSUM_READ_FAILED",
+                f"Failed to read forcing artifact checksum for {uri_or_key}: {error}",
+            ) from error
 
     def _upload_directory(self, directory: Path, key_prefix: str) -> None:
         for file in directory.rglob("*"):
@@ -1179,6 +1243,52 @@ def _initial_state_quality(manifest: dict[str, Any]) -> str | None:
     initial_state = manifest.get("initial_state") or {}
     quality = initial_state.get("quality") or manifest.get("init_state_quality")
     return str(quality) if quality else None
+
+
+def _forcing_checksum_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:
+    forcing = manifest.get("forcing") or {}
+    files = forcing.get("files") or forcing.get("file_checksums") or []
+    if not files:
+        return []
+    if not isinstance(files, list):
+        raise SHUDRuntimeError("FORCING_CHECKSUM_INVALID", "Forcing checksum entries must be a list.")
+    entries: list[dict[str, str]] = []
+    for file_entry in files:
+        if not isinstance(file_entry, dict):
+            raise SHUDRuntimeError("FORCING_CHECKSUM_INVALID", "Forcing checksum entries must be objects.")
+        uri = str(file_entry.get("uri") or "").strip()
+        checksum = str(file_entry.get("checksum") or "").strip()
+        if not uri or not checksum:
+            raise SHUDRuntimeError("FORCING_CHECKSUM_MISSING", "Forcing file checksum entry is missing uri/checksum.")
+        entries.append(
+            {
+                "role": str(file_entry.get("role") or ""),
+                "relative_path": str(file_entry.get("relative_path") or ""),
+                "uri": uri,
+                "checksum": checksum,
+            }
+        )
+    return entries
+
+
+def _resolve_staged_forcing_path(model_input_dir: Path, relative_path: str) -> Path:
+    candidate = Path(relative_path)
+    if candidate == Path(".") or candidate.is_absolute() or ".." in candidate.parts:
+        raise SHUDRuntimeError(
+            "FORCING_FILE_PATH_INVALID",
+            f"Forcing checksum relative_path escapes model input directory: {relative_path}",
+        )
+
+    root = model_input_dir.resolve()
+    staged_path = (root / candidate).resolve(strict=False)
+    try:
+        staged_path.relative_to(root)
+    except ValueError as error:
+        raise SHUDRuntimeError(
+            "FORCING_FILE_PATH_INVALID",
+            f"Forcing checksum relative_path escapes model input directory: {relative_path}",
+        ) from error
+    return staged_path
 
 
 def _set_initial_state_from_snapshot(manifest: dict[str, Any], snapshot: StateSnapshot, *, quality: str) -> None:
