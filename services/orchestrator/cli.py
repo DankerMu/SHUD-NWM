@@ -93,7 +93,7 @@ def _plan_production(
         lock_path=lock_path,
         evidence_dir=evidence_dir,
     )
-    scheduler = ProductionScheduler(config)
+    scheduler = ProductionScheduler.from_env(config)
     if continuous:
         results = scheduler.run_continuous(max_passes=max_passes)
         return {

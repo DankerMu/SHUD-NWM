@@ -247,6 +247,10 @@ def test_plan_production_cli_uses_fresh_default_workspace_path(
         def __init__(self, config: ProductionSchedulerConfig) -> None:
             captured["config"] = config
 
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
         def run_once(self) -> SimpleResult:
             return SimpleResult({"status": "planned"})
 
@@ -396,6 +400,29 @@ def test_lock_guard_symlink_is_not_opened_or_written(tmp_path: Path) -> None:
     assert not lock_path.exists()
 
 
+def test_lock_guard_open_failure_closes_parent_fd(monkeypatch: Any, tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    closed: list[int] = []
+    real_close = os.close
+
+    def failing_guard(_guard_name: str, *, dir_fd: int) -> int:
+        raise RuntimeError(f"guard failed for {dir_fd}")
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr("services.orchestrator.scheduler._open_regular_guard_file", failing_guard)
+    monkeypatch.setattr(os, "close", tracking_close)
+
+    with pytest.raises(RuntimeError, match="guard failed"):
+        with lease._guarded():
+            raise AssertionError("guarded body should not run")
+
+    assert len(closed) == 1
+
+
 def test_lock_parent_symlink_is_rejected_at_acquire_without_outside_files(tmp_path: Path) -> None:
     outside_locks = tmp_path.parent / f"{tmp_path.name}-outside-locks"
     outside_locks.mkdir()
@@ -520,6 +547,10 @@ def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
         def __init__(self, config: ProductionSchedulerConfig) -> None:
             self.config = config
 
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
         def run_continuous(self, *, max_passes: int | None = None) -> list[SchedulerPassResult]:
             assert max_passes == 1
             return [result]
@@ -579,10 +610,68 @@ def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) 
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
+def test_public_from_env_wires_active_repository(monkeypatch: Any, tmp_path: Path) -> None:
+    active_repository = FakeActiveRepository(active=False)
+    monkeypatch.setattr("services.orchestrator.scheduler._active_repository_from_env", lambda: active_repository)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", lambda: FakeRegistry([]))
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", lambda: {})
+
+    scheduler = ProductionScheduler.from_env(_config(tmp_path, now=_dt("2026-05-21T12:00:00Z")))
+
+    assert scheduler.active_repository is active_repository
+
+
+def test_plan_production_cli_public_path_skips_active_duplicate(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=True),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model("model_a", "basin_a")]),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=str(tmp_path),
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["candidates"] == []
+    assert payload["skipped_candidates"][0]["reason"] == "active_duplicate_pipeline"
+    assert payload["counts"]["skipped_candidate_count"] == 1
+    assert payload["counts"]["submitted_count"] == 0
+
+
 def test_plan_production_cli_smoke_with_injected_scheduler(monkeypatch: Any, tmp_path: Path) -> None:
     class FakeScheduler:
         def __init__(self, config: ProductionSchedulerConfig) -> None:
             self.config = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
 
         def run_once(self) -> Any:
             return SimpleResult(

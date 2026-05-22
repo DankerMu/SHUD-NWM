@@ -266,7 +266,10 @@ class ProductionScheduler:
 
     @classmethod
     def from_env(cls, config: ProductionSchedulerConfig | None = None) -> ProductionScheduler:
-        return cls(config=config or ProductionSchedulerConfig())
+        return cls(
+            config=config or ProductionSchedulerConfig(),
+            active_repository=_active_repository_from_env(),
+        )
 
     def run_once(self) -> SchedulerPassResult:
         started_at = _now(self.config)
@@ -756,7 +759,11 @@ class FileSchedulerLease:
         import fcntl
 
         parent_fd = _open_lock_parent_directory(self.lock_path.parent, self.workspace_root)
-        guard_fd = _open_regular_guard_file(f"{self.lock_path.name}.guard", dir_fd=parent_fd)
+        try:
+            guard_fd = _open_regular_guard_file(f"{self.lock_path.name}.guard", dir_fd=parent_fd)
+        except Exception:
+            os.close(parent_fd)
+            raise
         try:
             fcntl.flock(guard_fd, fcntl.LOCK_EX)
             yield parent_fd
@@ -1046,6 +1053,12 @@ def _default_adapters() -> Mapping[str, CycleDiscoveryAdapter]:
         "gfs": GFSAdapter(config=GFSAdapterConfig(), repository=None),
         "IFS": IFSAdapter(config=IFSAdapterConfig(), repository=None),
     }
+
+
+def _active_repository_from_env() -> ActiveCandidateRepository:
+    from services.orchestrator.chain import PsycopgOrchestratorRepository
+
+    return PsycopgOrchestratorRepository.from_env()
 
 
 def _empty_counts() -> dict[str, int]:
