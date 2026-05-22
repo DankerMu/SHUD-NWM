@@ -212,7 +212,15 @@ class PsycopgForcingRepository:
     ) -> tuple[InterpolationWeight, ...]:
         rows = self._fetch_all(
             """
-            SELECT source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method
+            SELECT source_id,
+                   grid_id,
+                   model_id,
+                   station_id,
+                   variable,
+                   grid_cell_id,
+                   weight,
+                   method,
+                   grid_signature
             FROM met.interp_weight
             WHERE source_id = %s
               AND grid_id = %s
@@ -231,6 +239,7 @@ class PsycopgForcingRepository:
                 grid_cell_id=str(row["grid_cell_id"]),
                 weight=float(row["weight"]),
                 method=str(row["method"]),
+                grid_signature=row.get("grid_signature"),
             )
             for row in rows
         )
@@ -248,19 +257,21 @@ class PsycopgForcingRepository:
                 weight.grid_cell_id,
                 weight.weight,
                 weight.method,
+                weight.grid_signature,
             )
             for weight in weights
         ]
         self._execute_values(
             """
             INSERT INTO met.interp_weight (
-                source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method
+                source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method, grid_signature
             )
             VALUES %s
             ON CONFLICT (source_id, grid_id, model_id, station_id, variable, grid_cell_id)
             DO UPDATE SET
                 weight = EXCLUDED.weight,
-                method = EXCLUDED.method
+                method = EXCLUDED.method,
+                grid_signature = EXCLUDED.grid_signature
             """,
             rows,
         )

@@ -100,23 +100,38 @@ PY
 }
 
 registry_ready() {
-  uv run python - "$MODEL_ID" <<'PY'
+  uv run python - "$MODEL_ID" "$PACKAGE_MANIFEST" <<'PY'
+import json
 import os
 import sys
 import psycopg2
 
-model_id = sys.argv[1]
+model_id, package_manifest_path = sys.argv[1:3]
+with open(package_manifest_path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+incoming_uri = str(manifest.get("model_package_uri") or "").rstrip("/") + "/"
+incoming_checksum = str(manifest.get("package_checksum") or "")
 with psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=3) as conn, conn.cursor() as cur:
     cur.execute(
         """
-        SELECT 1
+        SELECT model_package_uri, resource_profile
         FROM core.model_instance
         WHERE model_id = %s
         LIMIT 1
         """,
         (model_id,),
     )
-    print("1" if cur.fetchone() else "0")
+    row = cur.fetchone()
+    if not row:
+        print("0")
+        raise SystemExit
+    model_package_uri, resource_profile = row
+    profile = resource_profile or {}
+    if isinstance(profile, str):
+        profile = json.loads(profile)
+    existing_uri = str(model_package_uri or "").rstrip("/") + "/"
+    existing_checksum = str((profile or {}).get("package_checksum") or "")
+    print("1" if existing_uri == incoming_uri and existing_checksum == incoming_checksum else "0")
 PY
 }
 

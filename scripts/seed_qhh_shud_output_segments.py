@@ -36,6 +36,7 @@ def main() -> int:
             SELECT COALESCE(MAX(segment_order), 0)
             FROM core.river_segment
             WHERE river_network_version_id = %s
+              AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
             """,
             (river_network_version_id,),
         )

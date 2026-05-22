@@ -59,6 +59,35 @@ def test_slurm_exports_filters_continuous_and_comma_values(monkeypatch: pytest.M
     assert ",QHH_CONTINUOUS_SOURCES=" not in formatted
 
 
+def test_slurm_exports_excludes_extra_database_and_credential_urls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:required@10.0.2.100:55432/nhms")
+    monkeypatch.setenv("NHMS_INTEGRATION_DATABASE_URL", "postgresql://nhms:other-secret@db.example/integration")
+    monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:pipeline-secret@db.example/pipeline")
+    monkeypatch.setenv("QHH_AUX_DATABASE_URL", "postgresql://nhms:qhh-secret@db.example/qhh")
+    monkeypatch.setenv("OBJECT_STORE_SECRET_ACCESS_KEY", "do-not-export")
+    monkeypatch.setenv("OBJECT_STORE_SESSION_TOKEN", "do-not-export")
+    monkeypatch.setenv("SHUD_LICENSE_TOKEN", "do-not-export")
+    monkeypatch.setenv("SHUD_EXECUTABLE", "/opt/shud/bin/shud")
+    monkeypatch.setenv("NHMS_BASINS_ROOT", "/data/Basins")
+    monkeypatch.setenv("QHH_PACKAGE_VERSION", "v0.0.1-qhh-smoke-lake2")
+
+    exports = runner._slurm_exports(_candidate(), tmp_path)
+
+    assert exports["DATABASE_URL"] == "postgresql://nhms:required@10.0.2.100:55432/nhms"
+    assert exports["SHUD_EXECUTABLE"] == "/opt/shud/bin/shud"
+    assert exports["NHMS_BASINS_ROOT"] == "/data/Basins"
+    assert exports["QHH_PACKAGE_VERSION"] == "v0.0.1-qhh-smoke-lake2"
+    assert "NHMS_INTEGRATION_DATABASE_URL" not in exports
+    assert "PIPELINE_DATABASE_URL" not in exports
+    assert "QHH_AUX_DATABASE_URL" not in exports
+    assert "OBJECT_STORE_SECRET_ACCESS_KEY" not in exports
+    assert "OBJECT_STORE_SESSION_TOKEN" not in exports
+    assert "SHUD_LICENSE_TOKEN" not in exports
+
+
 def test_slurm_submit_uses_env_file_not_full_submit_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -130,6 +159,58 @@ def test_slurm_wait_is_bounded_when_sacct_has_no_rows(
 
     assert status == runner.SLURM_ACCOUNTING_UNKNOWN
     assert sleeps
+
+
+def test_slurm_wait_timeout_while_job_active_returns_nonterminal_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monotonic_values = iter([0.0, 0.0, 0.0, 2.0])
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert command[0] == "squeue"
+        return subprocess.CompletedProcess(command, 0, stdout="RUNNING\n", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+
+    status = runner._wait_for_slurm_job("5743", wait_timeout_seconds=1, accounting_timeout_seconds=1)
+
+    assert status == runner.SLURM_WAIT_TIMEOUT
+    assert calls == [["squeue", "-h", "-j", "5743", "-o", "%T"]]
+
+
+def test_slurm_submit_wait_timeout_keeps_submitted_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout="5743\n", stderr="")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55432/nhms")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_wait_for_slurm_job", lambda *_args, **_kwargs: runner.SLURM_WAIT_TIMEOUT)
+    args = Namespace(
+        slurm_partition="CPU",
+        slurm_cpus=2,
+        slurm_mem="4G",
+        slurm_time="00:30:00",
+        slurm_wait=True,
+        slurm_wait_timeout_seconds=1,
+        slurm_accounting_timeout_seconds=1,
+    )
+    state_file = tmp_path / "state.json"
+
+    result = runner._submit_slurm_cycle(_candidate(), run_root=tmp_path, state_file=state_file, args=args)
+    state = runner._read_json(state_file)
+
+    assert result["status"] == "submitted"
+    assert result["slurm_status"] == runner.SLURM_WAIT_TIMEOUT
+    assert state["status"] == "submitted"
+    assert state["slurm_job_id"] == "5743"
+    assert "finished_at" not in state
 
 
 def test_slurm_wait_signal_cancels_job(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,4 +301,40 @@ def test_run_pass_does_not_resubmit_active_slurm_job(tmp_path: Path, monkeypatch
     summary = runner.run_pass(args=args, run_root=tmp_path, state_root=state_root)
 
     assert summary["status"] == "completed"
+    assert summary["results"][0]["reason"] == "slurm job 5743 is still active"
+
+
+def test_run_pass_does_not_resubmit_wait_timeout_slurm_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_root = tmp_path / "state"
+    state_file = runner._state_file(state_root, _candidate())
+    runner._write_state(
+        state_file,
+        {
+            "status": "submitted",
+            "source_id": "gfs",
+            "cycle_time": "2026052106",
+            "slurm_job_id": "5743",
+            "slurm_status": runner.SLURM_WAIT_TIMEOUT,
+        },
+    )
+    monkeypatch.setattr(runner, "_candidate_cycles", lambda **_: [_candidate()])
+    monkeypatch.setattr(runner, "_slurm_job_is_active", lambda job_id: job_id == "5743")
+    monkeypatch.setattr(
+        runner,
+        "_submit_slurm_cycle",
+        lambda *_args, **_kwargs: pytest.fail("wait-timeout job should not be resubmitted while active"),
+    )
+    args = Namespace(
+        sources="gfs",
+        lookback_hours=24,
+        max_cycles_per_source=1,
+        cycle_lag_hours=6,
+        dry_run=False,
+        executor="slurm",
+    )
+
+    summary = runner.run_pass(args=args, run_root=tmp_path, state_root=state_root)
+
+    assert summary["status"] == "completed"
+    assert summary["results"][0]["status"] == "submitted"
     assert summary["results"][0]["reason"] == "slurm job 5743 is still active"

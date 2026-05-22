@@ -113,6 +113,7 @@ class InterpolationWeight:
     grid_cell_id: str
     weight: float
     method: str = "idw"
+    grid_signature: str | None = None
 
 
 @dataclass(frozen=True)
@@ -329,7 +330,12 @@ class ForcingProducer:
                 min_lead_hours=_min_lead_hours_from_env(),
             )
             lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
-            if self._existing_forcing_version_is_current(existing, lead_window=lead_window):
+            station_signature = _station_signature(stations)
+            if self._existing_forcing_version_is_current(
+                existing,
+                lead_window=lead_window,
+                station_signature=station_signature,
+            ):
                 return ForcingProductionResult(
                     status="already_done",
                     forcing_version_id=str(existing["forcing_version_id"]),
@@ -353,10 +359,15 @@ class ForcingProducer:
             grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
             grid_ids = tuple(sorted({grid_id for _, grid_id in grid_points_by_source_grid}))
             grid_id = grid_ids[0] if len(grid_ids) == 1 else "mixed"
+            grid_signature_by_source_grid = {
+                source_grid: _grid_signature_hash(grid_points)
+                for source_grid, grid_points in grid_points_by_source_grid.items()
+            }
             weights = self._load_or_create_weights(
                 model_id=model_id,
                 stations=stations,
                 grid_points_by_source_grid=grid_points_by_source_grid,
+                grid_signature_by_source_grid=grid_signature_by_source_grid,
             )
             forcing_version_id = (
                 str(existing["forcing_version_id"])
@@ -387,6 +398,8 @@ class ForcingProducer:
                 products_by_variable=products_by_variable,
                 fallback_lineage=fallback_lineage,
                 lead_window=lead_window,
+                station_signature=station_signature,
+                grid_signature_by_source_grid=grid_signature_by_source_grid,
             )
             self.repository.update_forecast_cycle(
                 source_id=resolved_source_id,
@@ -449,7 +462,7 @@ class ForcingProducer:
         for product in products:
             if product.variable not in products_by_variable:
                 continue
-            if product.quality_flag == "fail" or not product.checksum:
+            if product.quality_flag != "ok" or not product.checksum:
                 continue
             products_by_variable[product.variable][product.valid_time] = product
 
@@ -556,15 +569,18 @@ class ForcingProducer:
         model_id: str,
         stations: Sequence[MetStation],
         grid_points_by_source_grid: Mapping[tuple[str, str], Sequence[GridPoint]],
+        grid_signature_by_source_grid: Mapping[tuple[str, str], str],
     ) -> dict[tuple[str, str], tuple[InterpolationWeight, ...]]:
         assert self.repository is not None
         weights_by_source_grid: dict[tuple[str, str], tuple[InterpolationWeight, ...]] = {}
         for (source_id, grid_id), grid_points in sorted(grid_points_by_source_grid.items()):
+            grid_signature = grid_signature_by_source_grid[(source_id, grid_id)]
             existing = self.repository.load_interp_weights(source_id=source_id, grid_id=grid_id, model_id=model_id)
             if _weights_cover(existing, stations, self.config.output_variables):
                 _validate_weight_sums(existing)
-                weights_by_source_grid[(source_id, grid_id)] = tuple(existing)
-                continue
+                if _weights_match_grid_signature(existing, grid_signature):
+                    weights_by_source_grid[(source_id, grid_id)] = tuple(existing)
+                    continue
 
             computed = compute_idw_weights(
                 stations=stations,
@@ -575,6 +591,7 @@ class ForcingProducer:
                 model_id=model_id,
                 neighbors=self.config.idw_neighbors,
                 power=self.config.idw_power,
+                grid_signature=grid_signature,
             )
             self.repository.upsert_interp_weights(computed)
             weights_by_source_grid[(source_id, grid_id)] = computed
@@ -1006,6 +1023,8 @@ class ForcingProducer:
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
         fallback_lineage: FallbackLineage | None = None,
         lead_window: Mapping[str, int | None] | None = None,
+        station_signature: Mapping[str, Any] | None = None,
+        grid_signature_by_source_grid: Mapping[tuple[str, str], str] | None = None,
     ) -> ForcingProductionResult:
         assert self.repository is not None
         compact_cycle = format_cycle_time(cycle_time)
@@ -1046,7 +1065,10 @@ class ForcingProducer:
             "model_id": model_id,
             "basin_version_id": basin_version_id,
             "grid_id": grid_id,
+            "station_count": len(stations),
             "station_ids": [station.station_id for station in stations],
+            "station_signature": station_signature or _station_signature(stations),
+            "grid_signatures": _format_grid_signatures(grid_signature_by_source_grid or {}),
             "forcing_variables": list(self.config.output_variables),
             "canonical_product_ids": sorted(
                 product.canonical_product_id
@@ -1126,6 +1148,7 @@ class ForcingProducer:
         existing: Mapping[str, Any] | None,
         *,
         lead_window: Mapping[str, int | None],
+        station_signature: Mapping[str, Any],
     ) -> bool:
         if not existing:
             return False
@@ -1145,9 +1168,25 @@ class ForcingProducer:
             return False
         if _optional_int(lineage.get("max_lead_hours")) != lead_window.get("max_lead_hours"):
             return False
+        if not _station_signature_matches(lineage.get("station_signature"), station_signature):
+            return False
+        if list(lineage.get("station_ids") or []) != list(station_signature["station_ids"]):
+            return False
+        if _optional_int(existing.get("station_count")) != int(station_signature["station_count"]):
+            return False
         try:
             manifest_uri = _package_manifest_uri(package_uri, self.config.package_manifest_filename)
-            return self.object_store.exists(manifest_uri) and self.object_store.checksum(manifest_uri) == checksum
+            if not self.object_store.exists(manifest_uri) or self.object_store.checksum(manifest_uri) != checksum:
+                return False
+            manifest = json.loads(self.object_store.read_bytes(manifest_uri).decode("utf-8"))
+            if _optional_int(manifest.get("station_count")) != int(station_signature["station_count"]):
+                return False
+            manifest_lineage = manifest.get("lineage")
+            if not isinstance(manifest_lineage, Mapping):
+                return False
+            if not _station_signature_matches(manifest_lineage.get("station_signature"), station_signature):
+                return False
+            return True
         except (OSError, ObjectStoreError, ValueError):
             LOGGER.warning("Existing forcing package checksum could not be verified for %s", package_uri)
             return False
@@ -1180,6 +1219,7 @@ def compute_idw_weights(
     model_id: str,
     neighbors: int = 4,
     power: float = 2.0,
+    grid_signature: str | None = None,
 ) -> tuple[InterpolationWeight, ...]:
     if not grid_points:
         raise ForcingProductionError("Cannot compute IDW weights without grid points.")
@@ -1225,6 +1265,7 @@ def compute_idw_weights(
                     grid_cell_id=point.grid_cell_id,
                     weight=weight,
                     method="idw",
+                    grid_signature=grid_signature,
                 )
                 for point, weight in selected
             ]
@@ -1454,6 +1495,47 @@ def _grid_signature(grid_points: Sequence[GridPoint]) -> tuple[tuple[str, float,
     )
 
 
+def _grid_signature_hash(grid_points: Sequence[GridPoint]) -> str:
+    return sha256_bytes(_json_bytes({"grid_points": _grid_signature(grid_points)}))
+
+
+def _format_grid_signatures(signatures: Mapping[tuple[str, str], str]) -> dict[str, str]:
+    return {f"{source_id}:{grid_id}": signature for (source_id, grid_id), signature in sorted(signatures.items())}
+
+
+def _station_signature(stations: Sequence[MetStation]) -> dict[str, Any]:
+    station_rows = [
+        {
+            "station_id": station.station_id,
+            "station_role": station.station_role,
+            "longitude": round(float(station.longitude), 12),
+            "latitude": round(float(station.latitude), 12),
+            "elevation_m": round(float(station.elevation_m), 6),
+            "shud_forcing_index": _station_properties(station).get("shud_forcing_index"),
+            "forcing_filename": _station_forcing_filename(station, _station_forcing_index(station)),
+        }
+        for station in sorted(stations, key=lambda item: item.station_id)
+    ]
+    checksum = sha256_bytes(_json_bytes({"stations": station_rows}))
+    return {
+        "schema_version": "nhms.forcing_station_signature.v1",
+        "station_count": len(station_rows),
+        "station_ids": [row["station_id"] for row in station_rows],
+        "checksum": checksum,
+        "stations": station_rows,
+    }
+
+
+def _station_signature_matches(existing: Any, current: Mapping[str, Any]) -> bool:
+    if not isinstance(existing, Mapping):
+        return False
+    return (
+        _optional_int(existing.get("station_count")) == int(current["station_count"])
+        and list(existing.get("station_ids") or []) == list(current["station_ids"])
+        and str(existing.get("checksum") or "") == str(current["checksum"])
+    )
+
+
 def _validate_field_values(
     values: Sequence[float],
     grid_points: Sequence[GridPoint],
@@ -1619,7 +1701,7 @@ def _fallback_products_by_required_variable(
     grouped: dict[str, dict[datetime, CanonicalProduct]] = {variable: {} for variable in required_variables}
     for product in products:
         required_variable = reverse_variables.get(product.variable)
-        if required_variable is None or product.quality_flag == "fail" or not product.checksum:
+        if required_variable is None or product.quality_flag != "ok" or not product.checksum:
             continue
         grouped[required_variable][product.valid_time] = product
     return grouped
@@ -1686,6 +1768,12 @@ def _weights_cover(
     covered = {(weight.station_id, weight.variable) for weight in weights}
     required = {(station.station_id, variable) for station in stations for variable in variables}
     return required.issubset(covered)
+
+
+def _weights_match_grid_signature(weights: Sequence[InterpolationWeight], grid_signature: str) -> bool:
+    if not weights:
+        return False
+    return all(str(weight.grid_signature or "") == grid_signature for weight in weights)
 
 
 def _validate_weight_sums(weights: Sequence[InterpolationWeight]) -> None:

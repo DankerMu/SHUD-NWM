@@ -14,6 +14,7 @@ from packages.common.source_identity import normalize_source_id
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_ROOT = Path(os.getenv("QHH_RUN_ROOT", ROOT / ".nhms-runs" / "qhh-continuous")).resolve()
+PACKAGE_MANIFEST = Path(os.getenv("PACKAGE_MANIFEST", RUN_ROOT / "qhh-package-manifest.json")).expanduser().resolve()
 OBJECT_STORE_ROOT = Path(os.getenv("OBJECT_STORE_ROOT", str(RUN_ROOT))).expanduser().resolve()
 OBJECT_STORE_PREFIX = os.getenv("OBJECT_STORE_PREFIX", "")
 MODEL_ID = os.getenv("QHH_MODEL_ID", "basins_qhh_shud")
@@ -36,7 +37,12 @@ def main() -> int:
     with psycopg2.connect(database_url) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT model_id, basin_version_id, river_network_version_id, mesh_version_id, model_package_uri
+            SELECT model_id,
+                   basin_version_id,
+                   river_network_version_id,
+                   mesh_version_id,
+                   model_package_uri,
+                   resource_profile
             FROM core.model_instance
             WHERE model_id = %s
             """,
@@ -52,19 +58,16 @@ def main() -> int:
             (forcing_version_id,),
         )
         forcing = _one(cur.fetchone(), f"forcing_version not found: {forcing_version_id}")
-        cur.execute(
-            """
-            SELECT count(*) AS station_count
-            FROM met.met_station
-            WHERE basin_version_id = %s
-              AND station_role = 'forcing_grid'
-              AND active_flag
-            """,
-            (model["basin_version_id"],),
-        )
-        station_count = int((cur.fetchone() or {}).get("station_count") or 0)
 
     segment_count = _first_int(RUN_ROOT / "models" / MODEL_ID / PACKAGE_VERSION / "package" / f"{PROJECT_NAME}.sp.riv")
+    expected_package_uri = _directory_uri(object_store, f"models/{MODEL_ID}/{PACKAGE_VERSION}/package")
+    model_package_uri = _model_package_uri(model, object_store)
+    _validate_model_package_uri_matches_published(model_package_uri, expected_package_uri)
+    published_package_manifest = _published_package_manifest(PACKAGE_MANIFEST)
+    _validate_model_package_checksum_matches_published(model, published_package_manifest)
+    forcing_manifest = _forcing_package_manifest(forcing, object_store)
+    station_count = _forcing_manifest_station_count(forcing_manifest)
+    _validate_shud_forcing_header(forcing_manifest, object_store, station_count)
     start_time = _format_time(forcing["start_time"])
     end_time = _format_time(forcing["end_time"])
     manifest = {
@@ -80,7 +83,7 @@ def main() -> int:
             "basin_version_id": model["basin_version_id"],
             "river_network_version_id": model["river_network_version_id"],
             "mesh_version_id": model["mesh_version_id"],
-            "model_package_uri": _model_package_uri(model, object_store),
+            "model_package_uri": model_package_uri,
             "project_name": PROJECT_NAME,
             "segment_count": segment_count,
             "segment_source": "shud_sp_riv",
@@ -145,6 +148,106 @@ def _model_package_uri(model: dict[str, Any], object_store: LocalObjectStore) ->
         object_store.normalize_key(configured_uri)
         return _ensure_directory_uri(configured_uri)
     return _directory_uri(object_store, f"models/{MODEL_ID}/{PACKAGE_VERSION}/package")
+
+
+def _validate_model_package_uri_matches_published(model_package_uri: str, expected_package_uri: str) -> None:
+    if _ensure_directory_uri(model_package_uri) != _ensure_directory_uri(expected_package_uri):
+        raise RuntimeError(
+            "model_instance model_package_uri does not match the published QHH package version: "
+            f"{model_package_uri} != {expected_package_uri}. Import the just-published registry package before "
+            "creating the runtime manifest."
+        )
+
+
+def _published_package_manifest(path: Path) -> dict[str, Any]:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise RuntimeError(f"published QHH package manifest is not readable: {path}") from error
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"published QHH package manifest must be a JSON object: {path}")
+    return manifest
+
+
+def _validate_model_package_checksum_matches_published(
+    model: dict[str, Any],
+    published_manifest: dict[str, Any],
+) -> None:
+    published_checksum = str(published_manifest.get("package_checksum") or "")
+    if not published_checksum:
+        raise RuntimeError("published QHH package manifest is missing package_checksum.")
+
+    resource_profile = _model_resource_profile(model)
+    model_checksum = str(resource_profile.get("package_checksum") or "")
+    if not model_checksum:
+        raise RuntimeError(
+            "model_instance resource_profile is missing package_checksum. Import the just-published registry package "
+            "before creating the runtime manifest."
+        )
+    if model_checksum != published_checksum:
+        raise RuntimeError(
+            "model_instance resource_profile package_checksum does not match the published QHH package manifest: "
+            f"{model_checksum} != {published_checksum}. Import the just-published registry package before creating "
+            "the runtime manifest."
+        )
+
+
+def _model_resource_profile(model: dict[str, Any]) -> dict[str, Any]:
+    profile = model.get("resource_profile") or {}
+    if isinstance(profile, str):
+        try:
+            profile = json.loads(profile)
+        except json.JSONDecodeError:
+            return {}
+    if isinstance(profile, dict):
+        return dict(profile)
+    return {}
+
+
+def _forcing_package_manifest(forcing: dict[str, Any], object_store: LocalObjectStore) -> dict[str, Any]:
+    package_uri = str(forcing.get("forcing_package_uri") or "")
+    manifest_uri = _ensure_directory_uri(package_uri) + "forcing_package.json"
+    try:
+        return json.loads(object_store.read_bytes(manifest_uri).decode("utf-8"))
+    except Exception as error:
+        raise RuntimeError(f"forcing package manifest is not readable: {manifest_uri}") from error
+
+
+def _forcing_manifest_station_count(manifest: dict[str, Any]) -> int:
+    station_count = int(manifest.get("station_count") or 0)
+    lineage = manifest.get("lineage")
+    if not isinstance(lineage, dict):
+        raise RuntimeError("forcing package manifest is missing lineage.")
+    station_signature = lineage.get("station_signature")
+    if not isinstance(station_signature, dict):
+        raise RuntimeError("forcing package manifest is missing station_signature.")
+    signature_count = int(station_signature.get("station_count") or 0)
+    if station_count <= 0 or station_count != signature_count:
+        raise RuntimeError("forcing package station_count does not match station_signature.")
+    return station_count
+
+
+def _validate_shud_forcing_header(
+    manifest: dict[str, Any],
+    object_store: LocalObjectStore,
+    station_count: int,
+) -> None:
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        raise RuntimeError("forcing package manifest is missing files.")
+    tsd_uri = ""
+    for file_entry in files:
+        if isinstance(file_entry, dict) and file_entry.get("relative_path") == "shud/qhh.tsd.forc":
+            tsd_uri = str(file_entry.get("uri") or "")
+            break
+    if not tsd_uri:
+        raise RuntimeError("forcing package manifest is missing shud/qhh.tsd.forc.")
+    first_line = object_store.read_bytes(tsd_uri).decode("utf-8").splitlines()[0]
+    header_count = int(first_line.split()[0])
+    if header_count != station_count:
+        raise RuntimeError(
+            f"qhh.tsd.forc station header {header_count} does not match forcing manifest {station_count}."
+        )
 
 
 def _directory_uri(object_store: LocalObjectStore, key: str) -> str:

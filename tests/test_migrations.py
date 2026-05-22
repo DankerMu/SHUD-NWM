@@ -26,6 +26,7 @@ EXPECTED_MIGRATIONS = [
     "000020_valid_time_discovery_indexes.sql",
     "000021_latest_ready_run_discovery_idx.sql",
     "000022_model_asset_lifecycle.sql",
+    "000023_interp_weight_grid_signature.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}

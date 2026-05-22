@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -260,11 +261,43 @@ def test_ifs_shortwave_rejects_nonfinite_accumulated_values() -> None:
         convert_ifs_shortwave_down_values([float("nan")], [0.0], forecast_hour=3, previous_forecast_hour=0)
 
 
-def test_ifs_shortwave_negative_delta_is_explicitly_clipped_to_zero() -> None:
-    values, step_hours = convert_ifs_shortwave_down_values([100.0], [200.0], forecast_hour=6, previous_forecast_hour=3)
+def test_ifs_precipitation_rejects_nonfinite_accumulated_values() -> None:
+    with pytest.raises(Exception, match="finite"):
+        convert_ifs_precipitation_with_metadata([math.nan], [0.0], forecast_hour=3, previous_forecast_hour=0)
+
+
+def test_ifs_shortwave_negative_delta_is_warn_lineage_not_silent_ok() -> None:
+    conversion, step_hours = convert_ifs_shortwave_down_values(
+        [100.0],
+        [200.0],
+        forecast_hour=6,
+        previous_forecast_hour=3,
+    )
 
     assert step_hours == 3.0
-    assert values == pytest.approx((0.0,))
+    assert conversion.values == pytest.approx((0.0,))
+    assert conversion.quality_flag == "warn"
+    assert conversion.anomalies[0]["type"] == "negative_ifs_shortwave_delta"
+
+
+def test_ifs_shortwave_negative_delta_writes_warn_product_with_lineage(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_ifs_manifest(
+        tmp_path,
+        forecast_hours=(3, 6),
+        overrides={
+            ("ssr", 3): [200.0],
+            ("ssr", 6): [100.0],
+        },
+    )
+    converter = build_converter(tmp_path, repository=repository)
+
+    converter.convert_manifest(manifest)
+
+    shortwave = repository.products["IFS_2026050100_shortwave_down_f006"]
+    assert shortwave["quality_flag"] == "warn"
+    anomalies = shortwave["lineage_json"]["conversion_params"]["anomalies"]
+    assert anomalies[0]["type"] == "negative_ifs_shortwave_delta"
 
 
 def test_ifs_convert_manifest_streams_by_group_without_read_records(

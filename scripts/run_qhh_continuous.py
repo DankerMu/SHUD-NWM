@@ -27,11 +27,41 @@ ACTIVE_STATE = {"submitted", "running"}
 SLURM_TERMINAL_SUCCESS = {"COMPLETED"}
 SLURM_TERMINAL_FAILURE = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL"}
 SLURM_ACCOUNTING_UNKNOWN = "UNKNOWN_ACCOUNTING_UNAVAILABLE"
+SLURM_WAIT_TIMEOUT = "UNKNOWN_WAIT_TIMEOUT"
 DEFAULT_SLURM_WAIT_TIMEOUT_SECONDS = 12 * 60 * 60
 DEFAULT_SLURM_SQUEUE_POLL_SECONDS = 30
 DEFAULT_SLURM_ACCOUNTING_TIMEOUT_SECONDS = 300
 DEFAULT_SLURM_ACCOUNTING_POLL_SECONDS = 10
 SLURM_EXPORT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SLURM_EXPLICIT_ENV_NAMES = {
+    "FORCING_MIN_LEAD_HOURS",
+    "GFS_FORECAST_END_HOUR",
+    "GFS_FORECAST_START_HOUR",
+    "IFS_FORECAST_END_HOUR",
+    "IFS_FORECAST_START_HOUR",
+    "NHMS_BASINS_ROOT",
+    "OBJECT_STORE_PREFIX",
+    "OBJECT_STORE_ROOT",
+    "PATH",
+    "QHH_AUTH_ACTOR_ID",
+    "QHH_AUTH_ROLE",
+    "QHH_ECCODES_RUNTIME",
+    "QHH_FORCING_MIN_LEAD_HOURS",
+    "QHH_GFS_FORECAST_END_HOUR",
+    "QHH_GFS_FORECAST_START_HOUR",
+    "QHH_IFS_FORECAST_END_HOUR",
+    "QHH_IFS_FORECAST_START_HOUR",
+    "QHH_MAX_LEAD_HOURS",
+    "QHH_MODEL_ID",
+    "QHH_MODEL_OUTPUT_INTERVAL",
+    "QHH_PACKAGE_VERSION",
+    "QHH_PROJECT_NAME",
+    "QHH_SHUD_COMMAND_STYLE",
+    "QHH_SHUD_THREADS",
+    "QHH_SKIP_COMPLETED",
+    "QHH_USE_SMOKE_MIGRATIONS",
+    "SHUD_EXECUTABLE",
+}
 
 
 @dataclass(frozen=True)
@@ -322,6 +352,19 @@ def _submit_slurm_cycle(
             "slurm_job_id": job_id,
             "elapsed_seconds": elapsed_seconds,
         }
+    if status == SLURM_WAIT_TIMEOUT:
+        result = {
+            "source_id": candidate.source_id,
+            "cycle_time": candidate.token,
+            "run_id": candidate.run_id,
+            "status": "submitted",
+            "slurm_status": status,
+            "slurm_job_id": job_id,
+            "elapsed_seconds": elapsed_seconds,
+            "reason": "slurm wait timed out while job may still be active",
+        }
+        _write_state(state_file, {**state, **result, "last_checked_at": _now_iso()})
+        return result
     result = {
         "source_id": candidate.source_id,
         "cycle_time": candidate.token,
@@ -341,7 +384,6 @@ def _slurm_exports(candidate: CandidateCycle, run_root: Path) -> dict[str, str]:
         for key, value in os.environ.items()
         if _slurm_env_allowed(key)
         and not _slurm_env_sensitive(key)
-        and not key.startswith("QHH_CONTINUOUS_")
         and _slurm_export_value_allowed(value)
     }
     inherited.update(
@@ -433,7 +475,7 @@ def _wait_for_slurm_job(
             if time.monotonic() >= accounting_deadline:
                 return SLURM_ACCOUNTING_UNKNOWN
             time.sleep(min(max(accounting_poll_seconds, 1), max(accounting_deadline - time.monotonic(), 0.0)))
-        return "UNKNOWN_WAIT_TIMEOUT"
+        return SLURM_WAIT_TIMEOUT
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
@@ -446,9 +488,13 @@ def _cancel_slurm_job(job_id: str) -> None:
 def _slurm_env_allowed(key: str) -> bool:
     if SLURM_EXPORT_NAME_RE.fullmatch(key) is None:
         return False
-    if key == "PATH":
-        return True
-    return key.startswith(("QHH_", "GFS_", "IFS_", "FORCING_", "OBJECT_STORE_", "SHUD_", "NHMS_"))
+    if key == "DATABASE_URL":
+        return False
+    if key.upper().endswith("_DATABASE_URL"):
+        return False
+    if "URL" in key.upper() and key != "DATABASE_URL":
+        return False
+    return key in SLURM_EXPLICIT_ENV_NAMES
 
 
 def _slurm_env_sensitive(key: str) -> bool:

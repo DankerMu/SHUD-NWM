@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ CanonicalConverterConfig = converter_module.CanonicalConverterConfig
 VARIABLE_MAPPING = converter_module.VARIABLE_MAPPING
 compute_time_axis = converter_module.compute_time_axis
 convert_units = converter_module.convert_units
+convert_units_with_metadata = converter_module.convert_units_with_metadata
+convert_era5_precipitation_with_metadata = converter_module.convert_era5_precipitation_with_metadata
 map_variable = converter_module.map_variable
 parse_cycle_time = converter_module.parse_cycle_time
 
@@ -281,6 +284,48 @@ def test_negative_apcp_delta_marks_product_warn(tmp_path: Path) -> None:
     conversion_params = prcp_f003["lineage_json"]["conversion_params"]
     assert conversion_params["negative_delta_forecast_hours"] == [3]
     assert conversion_params["anomalies"][0]["min_delta"] == -2.0
+
+
+def test_gfs_apcp_rejects_nonfinite_accumulated_values() -> None:
+    with pytest.raises(CanonicalConversionError, match="finite"):
+        convert_units_with_metadata("apcp", [math.nan], [0.0], forecast_hour=3, previous_forecast_hour=0)
+
+
+def test_era5_precipitation_rejects_nonfinite_accumulated_values() -> None:
+    with pytest.raises(CanonicalConversionError, match="finite"):
+        convert_era5_precipitation_with_metadata([math.nan], [0.0], forecast_hour=3, previous_forecast_hour=0)
+
+
+def test_grid_definition_mismatch_for_same_configured_uri_fails_conversion(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    store, manifest = build_raw_manifest(tmp_path, forecast_hours=(0,))
+    import xarray as xr
+
+    for entry in manifest["entries"]:
+        values = [float(entry["forecast_hour"])]
+        variable = entry["variable"]
+        if variable == "dswrf":
+            longitudes = [1.0, 0.0]
+            latitudes = [1.0, 0.0]
+        else:
+            longitudes = [0.0, 1.0]
+            latitudes = [0.0, 1.0]
+        dataset = xr.Dataset(
+            data_vars={variable: ("point", values * 2)},
+            coords={
+                "point": [0, 1],
+                "longitude": ("point", longitudes),
+                "latitude": ("point", latitudes),
+            },
+        )
+        try:
+            store.write_bytes_atomic(entry["local_key"], _netcdf_dataset_bytes(dataset))
+        finally:
+            dataset.close()
+    converter = build_converter(tmp_path, repository=repository)
+
+    with pytest.raises(CanonicalConversionError, match="different longitude/latitude definition"):
+        converter.convert_manifest(manifest)
 
 
 def test_missing_required_variable_marks_cycle_failed_and_records_fail_product(tmp_path: Path) -> None:

@@ -296,6 +296,7 @@ def convert_units_with_metadata(
         )
         if len(previous) != len(current):
             raise CanonicalConversionError("APCP previous/current value arrays must have the same length.")
+        _validate_finite_values((*current, *previous), "APCP precipitation")
         deltas = tuple(current_value - previous_value for current_value, previous_value in zip(current, previous))
         negative_deltas = tuple(delta for delta in deltas if delta < 0.0)
         anomalies: tuple[dict[str, Any], ...] = ()
@@ -356,6 +357,7 @@ def convert_era5_precipitation_with_metadata(
     )
     if len(previous) != len(current):
         raise CanonicalConversionError("ERA5 precipitation previous/current arrays must have the same length.")
+    _validate_finite_values((*current, *previous), "ERA5 precipitation")
 
     step_hours = _step_hours(forecast_hour, previous_forecast_hour)
     deltas = tuple(current_value - previous_value for current_value, previous_value in zip(current, previous))
@@ -398,6 +400,7 @@ def convert_era5_radiation_values(
     lengths = {len(ssr), len(str_), len(previous_ssr), len(previous_str)}
     if len(lengths) != 1:
         raise CanonicalConversionError("ERA5 radiation arrays must have the same length.")
+    _validate_finite_values((*ssr, *str_, *previous_ssr, *previous_str), "ERA5 radiation")
 
     step_seconds = _step_hours(forecast_hour, previous_forecast_hour) * 3600.0
     return tuple(
@@ -435,6 +438,7 @@ def convert_ifs_precipitation_with_metadata(
     )
     if len(previous) != len(current):
         raise CanonicalConversionError("IFS precipitation previous/current arrays must have the same length.")
+    _validate_finite_values((*current, *previous), "IFS precipitation")
 
     step_hours = _ifs_step_hours(forecast_hour, previous_forecast_hour)
     deltas_mm = tuple(
@@ -519,7 +523,7 @@ def convert_ifs_shortwave_down_values(
     *,
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
-) -> tuple[tuple[float, ...], float]:
+) -> tuple[UnitConversionResult, float]:
     ssr = _finite_float_tuple(ssr_values, "IFS ssr")
     previous_ssr = (
         _finite_float_tuple(previous_ssr_values, "previous IFS ssr")
@@ -532,19 +536,39 @@ def convert_ifs_shortwave_down_values(
     step_hours = _ifs_step_hours(forecast_hour, previous_forecast_hour)
     step_seconds = step_hours * 3600.0
     values: list[float] = []
+    negative_deltas: list[float] = []
     for current_ssr, prior_ssr in zip(ssr, previous_ssr):
         delta = current_ssr - prior_ssr
         if not math.isfinite(delta):
             raise CanonicalConversionError("IFS shortwave radiation deltas must be finite.")
+        if delta < 0.0:
+            negative_deltas.append(delta)
         values.append(max(0.0, delta / step_seconds))
-    return tuple(values), step_hours
+    anomalies: tuple[dict[str, Any], ...] = ()
+    quality_flag = "ok"
+    if negative_deltas:
+        quality_flag = "warn"
+        anomalies = (
+            {
+                "type": "negative_ifs_shortwave_delta",
+                "forecast_hour": forecast_hour,
+                "previous_forecast_hour": previous_forecast_hour,
+                "negative_count": len(negative_deltas),
+                "min_delta_j_m2": min(negative_deltas),
+            },
+        )
+    return UnitConversionResult(tuple(values), quality_flag, anomalies), step_hours
 
 
 def _finite_float_tuple(values: Iterable[float], label: str) -> tuple[float, ...]:
     parsed = tuple(float(value) for value in values)
-    if not all(math.isfinite(value) for value in parsed):
-        raise CanonicalConversionError(f"{label} values must be finite.")
+    _validate_finite_values(parsed, label)
     return parsed
+
+
+def _validate_finite_values(values: Iterable[float], label: str) -> None:
+    if not all(math.isfinite(value) for value in values):
+        raise CanonicalConversionError(f"{label} values must be finite.")
 
 
 def _step_hours(forecast_hour: int | None, previous_forecast_hour: int | None) -> float:
@@ -560,6 +584,39 @@ def _normalize_longitude(longitude: float) -> float:
     while value < -180.0:
         value += 360.0
     return value
+
+
+def _grid_definition_signature(definition: Mapping[str, Any]) -> tuple[Any, ...]:
+    if definition.get("layout") == "rectilinear":
+        try:
+            shape = tuple(int(value) for value in definition["shape"])
+            longitudes = tuple(round(_normalize_longitude(float(value)), 12) for value in definition["longitudes"])
+            latitudes = tuple(round(float(value), 12) for value in definition["latitudes"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise CanonicalConversionError("Grid definition is invalid.") from error
+        return ("rectilinear", shape, longitudes, latitudes)
+
+    cells = definition.get("cells") or definition.get("points")
+    if isinstance(cells, list):
+        signature: list[tuple[str, float, float]] = []
+        for index, cell in enumerate(cells):
+            if not isinstance(cell, Mapping):
+                raise CanonicalConversionError("Grid definition cell is invalid.")
+            try:
+                longitude = _normalize_longitude(float(cell.get("lon", cell.get("longitude"))))
+                latitude = float(cell.get("lat", cell.get("latitude")))
+            except (TypeError, ValueError) as error:
+                raise CanonicalConversionError("Grid definition cell coordinates are invalid.") from error
+            signature.append(
+                (
+                    str(cell.get("grid_cell_id", cell.get("id", index))),
+                    round(longitude, 12),
+                    round(latitude, 12),
+                )
+            )
+        return ("cells", tuple(signature))
+
+    raise CanonicalConversionError("Grid definition layout is unsupported.")
 
 
 def _ifs_step_hours(forecast_hour: int | None, previous_forecast_hour: int | None) -> float:
@@ -1031,6 +1088,12 @@ class CanonicalConverter:
             return
         try:
             if self.object_store.exists(self.config.grid_definition_uri):
+                existing = json.loads(self.object_store.read_bytes(self.config.grid_definition_uri).decode("utf-8"))
+                if _grid_definition_signature(existing) != _grid_definition_signature(payload):
+                    raise CanonicalConversionError(
+                        f"Grid definition {self.config.grid_definition_uri} already exists with a different "
+                        "longitude/latitude definition or cell order."
+                    )
                 return
             self.object_store.write_bytes_atomic(
                 self.config.grid_definition_uri,
@@ -1368,7 +1431,6 @@ class ERA5CanonicalConverter(CanonicalConverter):
         for record in records:
             if record.longitudes and record.latitudes:
                 self._ensure_grid_definition(record)
-                return
 
     def _write_product(
         self,
@@ -1708,7 +1770,7 @@ class IFSCanonicalConverter(CanonicalConverter):
                         ssr.source_file,
                         str_.source_file,
                     ]
-                shortwave_values, shortwave_step_hours = convert_ifs_shortwave_down_values(
+                shortwave_conversion, shortwave_step_hours = convert_ifs_shortwave_down_values(
                     ssr.values,
                     previous_ssr.values if previous_ssr is not None else None,
                     forecast_hour=forecast_hour,
@@ -1717,21 +1779,25 @@ class IFSCanonicalConverter(CanonicalConverter):
                 shortwave_sources = [ssr.source_file]
                 if previous_ssr is not None:
                     shortwave_sources.insert(0, previous_ssr.source_file)
+                shortwave_params: dict[str, Any] = {
+                    "native_variable": ssr.native_variable,
+                    "operation": "cumulative_j_m2_to_w_m2_downward_shortwave",
+                    "accumulation_type": "since_cycle",
+                    "step_hours": shortwave_step_hours,
+                }
+                if shortwave_conversion.anomalies:
+                    shortwave_params["anomalies"] = list(shortwave_conversion.anomalies)
                 products.append(
                     self._write_product(
                         source_id=source_id,
                         cycle_time=cycle_time,
                         standard_variable="shortwave_down",
                         forecast_hour=forecast_hour,
-                        values=shortwave_values,
+                        values=shortwave_conversion.values,
                         unit=self._unit_for_standard_variable("shortwave_down"),
                         source_files=shortwave_sources,
-                        conversion_params={
-                            "native_variable": ssr.native_variable,
-                            "operation": "cumulative_j_m2_to_w_m2_downward_shortwave",
-                            "accumulation_type": "since_cycle",
-                            "step_hours": shortwave_step_hours,
-                        },
+                        conversion_params=shortwave_params,
+                        quality_flag=shortwave_conversion.quality_flag,
                     )
                 )
                 products.append(
@@ -1816,7 +1882,6 @@ class IFSCanonicalConverter(CanonicalConverter):
         for record in records:
             if record.longitudes and record.latitudes:
                 self._ensure_grid_definition(record)
-                return
 
     def _write_product(
         self,
