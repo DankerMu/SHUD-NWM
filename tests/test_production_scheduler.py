@@ -12,7 +12,9 @@ from services.orchestrator import cli
 from services.orchestrator.scheduler import (
     LOCK_OWNER,
     LOCK_SCHEMA_VERSION,
+    MAX_CONTINUOUS_JSON_PASSES,
     MAX_DISCOVERED_CYCLES,
+    MAX_LOCK_PAYLOAD_BYTES,
     FileSchedulerLease,
     ProductionScheduler,
     ProductionSchedulerConfig,
@@ -119,6 +121,35 @@ def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path
     assert result.evidence["lock"]["contention"] is True
     assert result.evidence["candidates"] == []
     assert result.evidence["counts"]["submitted_count"] == 0
+
+
+def test_oversized_existing_lock_is_rejected_without_full_read(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    with lock_path.open("wb") as handle:
+        handle.truncate(MAX_LOCK_PAYLOAD_BYTES + 1)
+    before_stat = lock_path.stat()
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    after_stat = lock_path.stat()
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["contention"] is True
+    assert result.evidence["lock"]["reason"] == "unsafe_lock_too_large"
+    assert result.evidence["lock"]["existing_lock"] == {
+        "raw": None,
+        "size_bytes": MAX_LOCK_PAYLOAD_BYTES + 1,
+        "max_bytes": MAX_LOCK_PAYLOAD_BYTES,
+    }
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert after_stat.st_size == before_stat.st_size
+    assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
 
 
 def test_dry_run_is_non_mutating_and_does_not_call_execution_clients(tmp_path: Path) -> None:
@@ -590,6 +621,26 @@ def test_run_continuous_unbounded_keeps_only_latest_result(tmp_path: Path) -> No
     assert scheduler.snapshots == [1, 1, 1]
 
 
+def test_run_continuous_finite_within_cap_returns_pass_results(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    scheduler = CountingScheduler(config, stop_after=10)
+
+    results = scheduler.run_continuous(max_passes=3)
+
+    assert [result.pass_id for result in results] == ["pass_1", "pass_2", "pass_3"]
+    assert scheduler.pass_count == 3
+
+
+def test_run_continuous_rejects_excessive_finite_passes(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    scheduler = CountingScheduler(config, stop_after=10)
+
+    with pytest.raises(ValueError, match="max_passes exceeds finite JSON output limit"):
+        scheduler.run_continuous(max_passes=MAX_CONTINUOUS_JSON_PASSES + 1)
+
+    assert scheduler.pass_count == 0
+
+
 def test_cli_rejects_unbounded_json_continuous_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="--continuous JSON output requires --max-passes"):
         cli._plan_production(
@@ -603,6 +654,31 @@ def test_cli_rejects_unbounded_json_continuous_mode(tmp_path: Path) -> None:
             continuous=True,
             interval_seconds=300.0,
             max_passes=None,
+            workspace_root=str(tmp_path),
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
+def test_cli_rejects_excessive_continuous_json_passes(monkeypatch: Any, tmp_path: Path) -> None:
+    class FailingScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            raise AssertionError("scheduler must not be constructed for excessive finite JSON output")
+
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    with pytest.raises(ValueError, match="max_passes exceeds limit"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=True,
+            interval_seconds=300.0,
+            max_passes=MAX_CONTINUOUS_JSON_PASSES + 1,
             workspace_root=str(tmp_path),
             lock_path=None,
             evidence_dir=None,

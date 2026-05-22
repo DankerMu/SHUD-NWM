@@ -9,7 +9,7 @@ from services.tile_publisher import PublishError, TilePublisher
 from services.tile_publisher.publisher import failure_payload
 
 from .chain import AnalysisOrchestrator, OrchestratorError
-from .scheduler import ProductionScheduler, ProductionSchedulerConfig
+from .scheduler import MAX_CONTINUOUS_JSON_PASSES, ProductionScheduler, ProductionSchedulerConfig
 
 
 def _trigger_analysis(*, model_id: str, date_range: str) -> dict[str, object]:
@@ -71,6 +71,14 @@ def _plan_production(
     lock_path: str | None,
     evidence_dir: str | None,
 ) -> dict[str, object]:
+    if continuous:
+        if max_passes is None:
+            raise ValueError("plan-production --continuous JSON output requires --max-passes")
+        if max_passes > MAX_CONTINUOUS_JSON_PASSES:
+            raise ValueError(
+                "plan-production --continuous JSON output max_passes exceeds limit "
+                f"{MAX_CONTINUOUS_JSON_PASSES}"
+            )
     config = ProductionSchedulerConfig(
         workspace_root=workspace_root or ".nhms-workspace",
         sources=tuple(sources) if sources else ("gfs", "IFS"),
@@ -85,9 +93,6 @@ def _plan_production(
         lock_path=lock_path,
         evidence_dir=evidence_dir,
     )
-    if continuous:
-        if max_passes is None:
-            raise ValueError("plan-production --continuous JSON output requires --max-passes")
     scheduler = ProductionScheduler(config)
     if continuous:
         results = scheduler.run_continuous(max_passes=max_passes)

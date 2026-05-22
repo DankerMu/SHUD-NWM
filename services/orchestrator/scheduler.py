@@ -31,6 +31,8 @@ MAX_DISCOVERED_CYCLES = 10000
 MAX_CANDIDATES = 10000
 MAX_REGISTRY_PAGES = 20
 MAX_EVIDENCE_BYTES = 5_000_000
+MAX_LOCK_PAYLOAD_BYTES = 16_384
+MAX_CONTINUOUS_JSON_PASSES = 100
 LOCK_OWNER = "production_scheduler"
 LOCK_SCHEMA_VERSION = 1
 
@@ -390,6 +392,13 @@ class ProductionScheduler:
             lock.release(pass_id=pass_id)
 
     def run_continuous(self, *, max_passes: int | None = None) -> list[SchedulerPassResult]:
+        if max_passes is not None:
+            max_passes = int(max_passes)
+            if max_passes > MAX_CONTINUOUS_JSON_PASSES:
+                raise ValueError(
+                    "production scheduler max_passes exceeds finite JSON output limit "
+                    f"{MAX_CONTINUOUS_JSON_PASSES}"
+                )
         results: list[SchedulerPassResult] = []
         completed = 0
         while max_passes is None or completed < max_passes:
@@ -776,6 +785,17 @@ class FileSchedulerLease:
                 "reason": "unsafe_lock_not_regular_file",
                 "existing_lock": {"raw": None},
             }
+        if lock_stat.st_size > MAX_LOCK_PAYLOAD_BYTES:
+            return {
+                "unsafe": True,
+                "stale": False,
+                "reason": "unsafe_lock_too_large",
+                "existing_lock": {
+                    "raw": None,
+                    "size_bytes": lock_stat.st_size,
+                    "max_bytes": MAX_LOCK_PAYLOAD_BYTES,
+                },
+            }
         existing = self._read_existing_lock(parent_fd=parent_fd)
         scheduler_owned = (
             existing.get("owner") == LOCK_OWNER
@@ -798,13 +818,24 @@ class FileSchedulerLease:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(self.lock_path.name, flags, dir_fd=parent_fd)
-        except (OSError, json.JSONDecodeError):
+        except OSError:
             return {"raw": None}
         try:
-            with os.fdopen(fd, encoding="utf-8") as handle:
-                value = json.loads(handle.read())
-        except (OSError, json.JSONDecodeError):
+            lock_stat = os.fstat(fd)
+            if not stat.S_ISREG(lock_stat.st_mode):
+                return {"raw": None}
+            if lock_stat.st_size > MAX_LOCK_PAYLOAD_BYTES:
+                raise UnsafeSchedulerLockError("unsafe_lock_too_large")
+            raw = os.read(fd, MAX_LOCK_PAYLOAD_BYTES + 1)
+            if len(raw) > MAX_LOCK_PAYLOAD_BYTES:
+                raise UnsafeSchedulerLockError("unsafe_lock_too_large")
+            value = json.loads(raw.decode("utf-8"))
+        except UnsafeSchedulerLockError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return {"raw": None}
+        finally:
+            os.close(fd)
         return dict(value) if isinstance(value, Mapping) else {"raw": value}
 
 
