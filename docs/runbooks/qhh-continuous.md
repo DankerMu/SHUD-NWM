@@ -65,7 +65,12 @@ export QHH_SLURM_TIME=08:00:00
 uv run python scripts/run_qhh_continuous.py --once --executor slurm
 ```
 
-`--executor slurm` 会通过 `scripts/run_qhh_cycle.sbatch` 为每个 source/cycle 提交一个独立作业，并等待 `sacct` 返回结果。作业执行的是完整 `scripts/run_qhh_cycle.sh`，因此下载、canonical、forcing、`nhms-shud-runtime execute`、parse 和 display product 发布都在 compute node 内完成。该模式要求 `DATABASE_URL` 不能指向 `localhost`，否则 compute node 无法写回 `met.*`、`hydro.*` 和展示产品表，runner 会在提交前拒绝执行。
+`--executor slurm` 会通过 `scripts/run_qhh_cycle.sbatch` 为每个 source/cycle
+提交一个独立作业，并等待 `sacct` 返回结果。作业执行完整
+`scripts/run_qhh_cycle.sh`，因此下载、canonical、forcing、
+`nhms-shud-runtime execute`、parse 和 display product 发布都在 compute node
+内完成。该模式要求 `DATABASE_URL` 不能指向 `localhost`，否则 compute node
+无法写回 `met.*`、`hydro.*` 和展示产品表，runner 会在提交前拒绝执行。
 
 常驻轮询：
 
