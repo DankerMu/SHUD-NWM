@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
+import tarfile
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -334,6 +336,117 @@ def test_runtime_staging_accepts_forcing_checksums_without_relative_path(tmp_pat
     assert (input_dir / "alias-a" / "forcing.csv").exists()
 
 
+def test_runtime_staging_rejects_forcing_checksum_symlink_relative_path(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    target_content = b"target forcing\n"
+    manifest["forcing"]["files"] = [
+        {
+            "role": "shud_forcing_csv",
+            "relative_path": "shud/link.csv",
+            "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/link.csv",
+            "checksum": sha256_bytes(target_content),
+        }
+    ]
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_dir = input_dir / "shud"
+    staged_dir.mkdir(parents=True)
+    (staged_dir / "target.csv").write_bytes(target_content)
+    (staged_dir / "link.csv").symlink_to("target.csv")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._verify_staged_forcing_checksums(manifest, input_dir)
+
+    assert exc_info.value.error_code == "FORCING_FILE_NOT_STAGED"
+    assert "symlink" in exc_info.value.message
+
+
+def test_runtime_staging_rejects_object_store_source_symlink_descendant(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    outside_secret = tmp_path / "outside-secret.txt"
+    outside_secret.write_text("secret\n", encoding="utf-8")
+    (object_root / "models" / "demo_model" / "package" / "leaked.mesh").symlink_to(outside_secret)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "ARTIFACT_UNSAFE"
+    assert "symlink" in exc_info.value.message
+    assert not (input_dir / "leaked.mesh").exists()
+
+
+def test_runtime_staging_rejects_preexisting_destination_symlink_escape(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    outside_target = tmp_path / "outside-target.txt"
+    outside_target.write_text("keep\n", encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+    (input_dir / "demo.mesh").symlink_to(outside_target)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
+    assert outside_target.read_text(encoding="utf-8") == "keep\n"
+    assert (input_dir / "demo.mesh").is_symlink()
+
+
+@pytest.mark.parametrize("member_name", ["../evil.mesh", "/tmp/evil.mesh"])
+def test_runtime_tar_artifact_staging_rejects_traversal_member(tmp_path: Path, member_name: str) -> None:
+    object_root = tmp_path / "object-store"
+    package_tar = object_root / "models" / "demo_model" / "package.tar"
+    package_tar.parent.mkdir(parents=True)
+    with tarfile.open(package_tar, "w") as archive:
+        payload = b"mesh\n"
+        info = tarfile.TarInfo(member_name)
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    input_dir = tmp_path / "workspace" / "runs" / "run-a" / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._stage_artifact("s3://nhms/models/demo_model/package.tar", input_dir)
+
+    assert exc_info.value.error_code == "ARTIFACT_TAR_UNSAFE"
+    assert not (tmp_path / "evil.mesh").exists()
+
+
+def test_runtime_tar_artifact_staging_rejects_symlink_member(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    package_tar = object_root / "models" / "demo_model" / "package.tar"
+    package_tar.parent.mkdir(parents=True)
+    with tarfile.open(package_tar, "w") as archive:
+        info = tarfile.TarInfo("leaked.mesh")
+        info.type = tarfile.SYMTYPE
+        info.linkname = str(tmp_path / "outside-secret.txt")
+        archive.addfile(info)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    input_dir = tmp_path / "workspace" / "runs" / "run-a" / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._stage_artifact("s3://nhms/models/demo_model/package.tar", input_dir)
+
+    assert exc_info.value.error_code == "ARTIFACT_TAR_UNSAFE"
+    assert not (input_dir / "leaked.mesh").exists()
+
+
 def test_output_verification_rejects_wrong_row_count(tmp_path: Path) -> None:
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
@@ -344,6 +457,35 @@ def test_output_verification_rejects_wrong_row_count(tmp_path: Path) -> None:
 
     with pytest.raises(SHUDRuntimeError, match="expected 3 data rows"):
         runtime.verify_output(manifest, output_dir)
+
+
+def test_upload_directory_rejects_object_target_symlink_to_workspace_file(tmp_path: Path) -> None:
+    config = SHUDRuntimeConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        upload_retries=1,
+    )
+    runtime = SHUDRuntime(
+        config=config,
+        repository=FakeHydroRunRepository(),
+        object_store=LocalObjectStore(config.object_store_root, config.object_store_prefix),
+    )
+    output_dir = Path(config.workspace_root) / "runs" / "run-a" / "output"
+    output_dir.mkdir(parents=True)
+    output_file = output_dir / "demo.rivqdown"
+    output_file.write_bytes(b"workspace output\n")
+    object_target = Path(config.object_store_root) / "runs" / "run-a" / "output" / "demo.rivqdown"
+    object_target.parent.mkdir(parents=True)
+    object_target.symlink_to(output_file)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._upload_directory(output_dir, "runs/run-a/output")
+
+    assert exc_info.value.error_code == "UPLOAD_FAILED"
+    assert "Target file must not be a symlink" in exc_info.value.message
+    assert output_file.read_bytes() == b"workspace output\n"
+    assert object_target.is_symlink()
 
 
 def test_workspace_failure_marks_run_failed(tmp_path: Path) -> None:

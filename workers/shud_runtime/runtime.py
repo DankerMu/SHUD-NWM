@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import os
 import re
-import shutil
+import stat as stat_module
 import subprocess
 import sys
 import tarfile
 import time
 from dataclasses import InitVar, dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    read_bytes_no_follow,
+    stat_no_follow,
+    unlink_no_follow,
+)
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateSnapshot, assess_freshness
 
 
@@ -273,7 +282,7 @@ class SHUDRuntime:
         return cls(config=config)
 
     def execute_manifest_path(self, manifest_path: str | Path) -> SHUDExecutionResult:
-        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        manifest = json.loads(_read_text_no_follow(Path(manifest_path), containment_root=Path(manifest_path).parent))
         return self.execute(manifest)
 
     def execute(self, manifest: dict[str, Any]) -> SHUDExecutionResult:
@@ -286,9 +295,14 @@ class SHUDRuntime:
         input_dir = workspace / "input"
         output_dir = workspace / "output"
         log_dir = workspace / "logs"
+        ensure_directory_no_follow(Path(self.config.workspace_root))
         for directory in (input_dir, output_dir, log_dir):
-            directory.mkdir(parents=True, exist_ok=True)
-        (input_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+            _ensure_directory(directory, containment_root=Path(self.config.workspace_root))
+        _write_text_no_follow(
+            input_dir / "manifest.json",
+            json.dumps(manifest, indent=2, sort_keys=True),
+            containment_root=input_dir,
+        )
 
         try:
             self.prepare_workspace(manifest, input_dir)
@@ -323,8 +337,9 @@ class SHUDRuntime:
             raise runtime_error from error
 
     def prepare_workspace(self, manifest: dict[str, Any], input_dir: Path) -> None:
+        _ensure_directory(input_dir)
         model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
-        model_input_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(model_input_dir, containment_root=input_dir)
         self._stage_artifact(manifest["model"]["model_package_uri"], model_input_dir)
         self._verify_forcing_manifest_checksums(manifest)
         self._stage_artifact(manifest["forcing"]["forcing_uri"], model_input_dir)
@@ -334,13 +349,11 @@ class SHUDRuntime:
             self._prepare_shud_project_forcing(manifest, model_input_dir)
 
         for suffix in (".mesh", ".para", ".calib", ".tsd.forc"):
-            matches = [
-                path for path in model_input_dir.rglob(f"*{suffix}") if path.is_file() and path.stat().st_size > 0
-            ]
+            matches = _find_regular_files(model_input_dir, suffix=suffix, non_empty=True)
             if not matches:
                 raise SHUDRuntimeError("WORKSPACE_INCOMPLETE", f"Missing required staged file: *{suffix}")
         if _initial_state_uri(manifest):
-            matches = [path for path in model_input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0]
+            matches = _find_regular_files(model_input_dir, pattern="*.cfg.ic", non_empty=True)
             if not matches:
                 raise SHUDRuntimeError(
                     "INIT_STATE_INCOMPLETE",
@@ -354,7 +367,7 @@ class SHUDRuntime:
             raise SHUDRuntimeError("CFG_TEMPLATE_MISSING", "No .para template found in staged model package.")
 
         output_path = model_input_dir / f"{_project_name(manifest)}.cfg.para"
-        content = template_path.read_text(encoding="utf-8")
+        content = _read_text_no_follow(template_path, containment_root=model_input_dir)
 
         init_mode = _init_mode(manifest)
         replacements = _cfg_replacements(manifest, output_dir, init_mode, self.config.output_interval_minutes)
@@ -379,7 +392,7 @@ class SHUDRuntime:
                 value,
                 separator="\t" if _is_shud_project_mode(manifest, self.config.command_style) else " = ",
             )
-        output_path.write_text(content.rstrip() + "\n", encoding="utf-8")
+        _write_text_no_follow(output_path, content.rstrip() + "\n", containment_root=model_input_dir)
         return output_path
 
     def run_shud(
@@ -408,28 +421,36 @@ class SHUDRuntime:
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
-            (log_dir / "shud_stdout.log").write_text(_subprocess_output_text(error.stdout), encoding="utf-8")
-            (log_dir / "shud_stderr.log").write_text(_subprocess_output_text(error.stderr), encoding="utf-8")
+            _write_text_no_follow(
+                log_dir / "shud_stdout.log",
+                _subprocess_output_text(error.stdout),
+                containment_root=log_dir,
+            )
+            _write_text_no_follow(
+                log_dir / "shud_stderr.log",
+                _subprocess_output_text(error.stderr),
+                containment_root=log_dir,
+            )
             message = f"SHUD executable timed out after {self.config.timeout_seconds}s"
             raise SHUDRuntimeError("SHUD_TIMEOUT", message) from error
 
-        (log_dir / "shud_stdout.log").write_text(completed.stdout or "", encoding="utf-8")
-        (log_dir / "shud_stderr.log").write_text(completed.stderr or "", encoding="utf-8")
+        _write_text_no_follow(log_dir / "shud_stdout.log", completed.stdout or "", containment_root=log_dir)
+        _write_text_no_follow(log_dir / "shud_stderr.log", completed.stderr or "", containment_root=log_dir)
         if completed.returncode != 0:
             detail = _last_lines(completed.stderr or "", 50)
             raise SHUDRuntimeError(
                 f"SHUD_EXIT_{completed.returncode}",
                 f"SHUD executable exited with code {completed.returncode}: {detail}",
             )
-        output_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(output_dir)
 
     def _prepare_shud_project_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
         if self._stage_standard_shud_forcing(manifest, model_input_dir):
             return
         source = model_input_dir / "forcing_debug.csv"
-        if not source.exists():
+        if not _regular_file_exists(source, containment_root=model_input_dir):
             source = model_input_dir / "forcing.tsd.forc"
-        if not source.exists():
+        if not _regular_file_exists(source, containment_root=model_input_dir):
             raise SHUDRuntimeError(
                 "FORCING_DEBUG_MISSING",
                 "SHUD project mode requires forcing_debug.csv or internal forcing.tsd.forc in the forcing package.",
@@ -448,7 +469,7 @@ class SHUDRuntime:
     def _stage_standard_shud_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> bool:
         shud_dir = model_input_dir / "shud"
         source_tsd = shud_dir / "qhh.tsd.forc"
-        if not source_tsd.exists():
+        if not _regular_file_exists(source_tsd, containment_root=model_input_dir):
             return False
         rows = _read_shud_forcing_station_rows(source_tsd)
         if not rows:
@@ -458,41 +479,50 @@ class SHUDRuntime:
         _shift_project_time_inputs(model_input_dir, _project_name(manifest), first_time)
         start_date = first_time.strftime("%Y%m%d")
         target_tsd = model_input_dir / f"{_project_name(manifest)}.tsd.forc"
-        with target_tsd.open("w", encoding="utf-8", newline="") as handle:
-            handle.write(f"{len(rows)} {start_date}\n")
-            handle.write(f"{model_input_dir}\n")
-            handle.write("ID\tLon\tLat\tX\tY\tZ\tFilename\n")
-            for row in rows:
-                filename = str(row["filename"])
-                source_csv = shud_dir / filename
-                if not source_csv.exists():
-                    raise SHUDRuntimeError("SHUD_FORCING_CSV_MISSING", f"Missing SHUD forcing CSV: {source_csv}")
-                shutil.copy2(source_csv, model_input_dir / filename)
-                handle.write(
-                    "\t".join(
-                        [
-                            str(row["id"]),
-                            _format_float(float(row["longitude"])),
-                            _format_float(float(row["latitude"])),
-                            _format_float(float(row["x"])),
-                            _format_float(float(row["y"])),
-                            _format_float(float(row["z"])),
-                            filename,
-                        ]
-                    )
-                    + "\n"
+        output_lines = [
+            f"{len(rows)} {start_date}",
+            str(model_input_dir),
+            "ID\tLon\tLat\tX\tY\tZ\tFilename",
+        ]
+        for row in rows:
+            filename = str(row["filename"])
+            source_csv = shud_dir / filename
+            if not _regular_file_exists(source_csv, containment_root=model_input_dir):
+                raise SHUDRuntimeError("SHUD_FORCING_CSV_MISSING", f"Missing SHUD forcing CSV: {source_csv}")
+            _copy_staged_file_no_follow(source_csv, model_input_dir / filename, root=model_input_dir)
+            output_lines.append(
+                "\t".join(
+                    [
+                        str(row["id"]),
+                        _format_float(float(row["longitude"])),
+                        _format_float(float(row["latitude"])),
+                        _format_float(float(row["x"])),
+                        _format_float(float(row["y"])),
+                        _format_float(float(row["z"])),
+                        filename,
+                    ]
                 )
+            )
+        _write_text_no_follow(target_tsd, "\n".join(output_lines) + "\n", containment_root=model_input_dir)
         return True
 
     def verify_output(self, manifest: dict[str, Any], output_dir: Path) -> Path:
-        files = sorted([*output_dir.glob("*.rivqdown"), *output_dir.glob("*.rivqdown.csv")])
+        files = sorted(
+            path
+            for path in _find_regular_files(output_dir)
+            if path.name.endswith((".rivqdown", ".rivqdown.csv"))
+        )
         if not files:
             raise SHUDRuntimeError(
                 "OUTPUT_MISSING",
                 "Output verification failed: .rivqdown file not found",
             )
         rivqdown = files[0]
-        lines = [line.strip() for line in rivqdown.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lines = [
+            line.strip()
+            for line in _read_staged_bytes(rivqdown, root=output_dir).decode("utf-8").splitlines()
+            if line.strip()
+        ]
         if not lines:
             raise SHUDRuntimeError("OUTPUT_EMPTY", "Output verification failed: .rivqdown file is empty")
 
@@ -530,22 +560,20 @@ class SHUDRuntime:
 
     def _persist_manifest(self, manifest: dict[str, Any], input_dir: Path) -> None:
         content = json.dumps(manifest, indent=2, sort_keys=True)
-        (input_dir / "manifest.json").write_text(content, encoding="utf-8")
+        _write_text_no_follow(input_dir / "manifest.json", content, containment_root=input_dir)
         run_manifest_uri = _run_manifest_uri(manifest)
         self.object_store.write_bytes_atomic(run_manifest_uri, content.encode("utf-8"))
 
     def _stage_initial_state(self, manifest: dict[str, Any], input_dir: Path) -> None:
         if not _initial_state_id(manifest) and not _initial_state_uri(manifest):
             if str(manifest.get("runtime", {}).get("init_mode", "")) == "3":
-                packaged_states = sorted(
-                    path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0
-                )
+                packaged_states = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
                 if packaged_states:
                     manifest["initial_state"] = {
                         "state_id": manifest.get("runtime", {}).get("packaged_init_state_id", "packaged_initial_state"),
                         "ic_file_uri": None,
                         "valid_time": manifest.get("start_time"),
-                        "checksum": sha256_bytes(packaged_states[0].read_bytes()),
+                        "checksum": sha256_bytes(_read_staged_bytes(packaged_states[0], root=input_dir)),
                         "quality": _initial_state_quality(manifest) or "packaged_calibrated_state",
                     }
                     _set_runtime_init_mode(manifest, 3)
@@ -555,15 +583,13 @@ class SHUDRuntime:
             self._sync_init_state_id(manifest)
             return
         if str(manifest.get("runtime", {}).get("init_mode", "")) == "3" and not _initial_state_uri(manifest):
-            packaged_states = sorted(
-                path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0
-            )
+            packaged_states = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
             if packaged_states:
                 manifest["initial_state"] = {
                     "state_id": _initial_state_id(manifest) or "packaged_initial_state",
                     "ic_file_uri": None,
                     "valid_time": manifest.get("start_time"),
-                    "checksum": sha256_bytes(packaged_states[0].read_bytes()),
+                    "checksum": sha256_bytes(_read_staged_bytes(packaged_states[0], root=input_dir)),
                     "quality": _initial_state_quality(manifest) or "packaged_calibrated_state",
                 }
                 _set_runtime_init_mode(manifest, 3)
@@ -642,13 +668,15 @@ class SHUDRuntime:
         except SHUDRuntimeError as error:
             return None, None, error.message
 
-        matches = sorted(path for path in input_dir.rglob("*.cfg.ic") if path.is_file() and path.stat().st_size > 0)
+        matches = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
         if not matches:
             return None, None, "Initial state URI did not stage a non-empty *.cfg.ic file."
 
         staged_path = matches[0]
         try:
-            return staged_path, sha256_bytes(staged_path.read_bytes()), None
+            return staged_path, sha256_bytes(_read_staged_bytes(staged_path, root=input_dir)), None
+        except SHUDRuntimeError as error:
+            return None, None, error.message
         except OSError as error:
             return None, None, f"Failed to read staged initial state {staged_path}: {error}"
 
@@ -692,9 +720,14 @@ class SHUDRuntime:
             cursor_time = state.valid_time - timedelta(microseconds=1)
 
     def _clear_staged_initial_states(self, input_dir: Path) -> None:
-        for path in input_dir.rglob("*.cfg.ic"):
-            if path.is_file():
-                path.unlink()
+        for path in _find_regular_files(input_dir, pattern="*.cfg.ic"):
+            try:
+                unlink_no_follow(path, containment_root=input_dir, missing_ok=True)
+            except SafeFilesystemError as error:
+                raise SHUDRuntimeError(
+                    "WORKSPACE_PATH_UNSAFE",
+                    f"Unsafe staged initial state path {path}: {error}",
+                ) from error
 
     def _sync_init_state_id(self, manifest: dict[str, Any]) -> None:
         update_init_state = getattr(self.repository, "update_init_state", None)
@@ -703,26 +736,48 @@ class SHUDRuntime:
 
     def _stage_artifact(self, uri: str, destination: Path) -> None:
         source = self._object_store_path(uri)
-        if not source.exists():
+        try:
+            source_stat = stat_no_follow(source, containment_root=Path(self.config.object_store_root))
+        except FileNotFoundError:
             raise SHUDRuntimeError("ARTIFACT_NOT_FOUND", f"Object storage artifact not found: {uri}")
+        except SafeFilesystemError as error:
+            raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Unsafe object storage artifact {uri}: {error}") from error
 
-        if source.is_dir():
-            for file in source.rglob("*"):
-                if file.is_file():
-                    relative = file.relative_to(source)
-                    target = destination / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(file, target)
+        _ensure_directory(destination)
+        if stat_module.S_ISDIR(source_stat.st_mode):
+            self._stage_directory_artifact(source, destination)
             return
 
-        if tarfile.is_tarfile(source):
-            with tarfile.open(source) as archive:
-                archive.extractall(destination, filter="data")
+        if not stat_module.S_ISREG(source_stat.st_mode):
+            raise SHUDRuntimeError(
+                "ARTIFACT_UNSAFE",
+                f"Object storage artifact must be a regular file or directory: {uri}",
+            )
+
+        content = self._read_object_artifact_bytes(source, uri)
+        if _stage_tar_artifact_bytes(content, destination):
             return
 
         target = destination / source.name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        _write_staged_bytes(target, content, root=destination)
+
+    def _stage_directory_artifact(self, source: Path, destination: Path) -> None:
+        object_root = Path(self.config.object_store_root)
+        for source_file in _iter_regular_descendant_files_no_follow(source, containment_root=object_root):
+            relative = source_file.relative_to(source)
+            content = self._read_object_artifact_bytes(source_file, str(source_file))
+            _write_staged_bytes(destination / relative, content, root=destination)
+
+    def _read_object_artifact_bytes(self, source: Path, label: str) -> bytes:
+        try:
+            return read_bytes_no_follow(source, containment_root=Path(self.config.object_store_root))
+        except SafeFilesystemError as error:
+            raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Unsafe object storage artifact {label}: {error}") from error
+        except OSError as error:
+            raise SHUDRuntimeError(
+                "ARTIFACT_READ_FAILED",
+                f"Failed to read object storage artifact {label}: {error}",
+            ) from error
 
     def _verify_forcing_manifest_checksums(self, manifest: dict[str, Any]) -> None:
         forcing = manifest.get("forcing") or {}
@@ -763,12 +818,24 @@ class SHUDRuntime:
                 else:
                     relative_path = Path(file_key).name
             staged_path = _resolve_staged_forcing_path(model_input_dir, relative_path)
-            if not staged_path.exists() or not staged_path.is_file():
+            try:
+                staged_stat = stat_no_follow(staged_path, containment_root=model_input_dir)
+            except FileNotFoundError:
                 raise SHUDRuntimeError(
                     "FORCING_FILE_NOT_STAGED",
                     f"Forcing checksum entry was not staged: {relative_path}",
                 )
-            actual_checksum = sha256_bytes(staged_path.read_bytes())
+            except SafeFilesystemError as error:
+                raise SHUDRuntimeError(
+                    "FORCING_FILE_NOT_STAGED",
+                    f"Unsafe staged forcing checksum path {relative_path}: {error}",
+                ) from error
+            if not stat_module.S_ISREG(staged_stat.st_mode):
+                raise SHUDRuntimeError(
+                    "FORCING_FILE_NOT_STAGED",
+                    f"Forcing checksum entry is not a regular staged file: {relative_path}",
+                )
+            actual_checksum = sha256_bytes(_read_staged_bytes(staged_path, root=model_input_dir))
             expected_checksum = str(file_entry["checksum"])
             if actual_checksum != expected_checksum:
                 raise SHUDRuntimeError(
@@ -787,16 +854,14 @@ class SHUDRuntime:
             ) from error
 
     def _upload_directory(self, directory: Path, key_prefix: str) -> None:
-        for file in directory.rglob("*"):
-            if not file.is_file():
-                continue
+        for file in _find_regular_files(directory):
             relative = file.relative_to(directory)
             key = f"{key_prefix.rstrip('/')}/{relative.as_posix()}"
-            content = file.read_bytes()
+            content = _read_staged_bytes(file, root=directory)
             for attempt in range(self.config.upload_retries):
                 try:
                     target = self.object_store.resolve_path(key)
-                    if file.resolve() == target.resolve():
+                    if _absolute_lexical_path(file) == _absolute_lexical_path(target):
                         break
                     self.object_store.write_bytes_atomic(key, content)
                     break
@@ -806,13 +871,20 @@ class SHUDRuntime:
                     time.sleep(0.1 * (2**attempt))
 
     def _object_store_path(self, uri_or_key: str) -> Path:
-        key = _object_key(uri_or_key, self.config.object_store_prefix)
-        path = (Path(self.config.object_store_root) / key).resolve()
         try:
-            path.relative_to(Path(self.config.object_store_root))
+            key = self.object_store.normalize_key(uri_or_key)
         except ValueError as error:
-            message = f"Object key escapes object store root: {uri_or_key}"
-            raise SHUDRuntimeError("INVALID_OBJECT_KEY", message) from error
+            raise SHUDRuntimeError("INVALID_OBJECT_KEY", str(error)) from error
+        if any(part in {"", ".", ".."} for part in Path(key).parts):
+            raise SHUDRuntimeError("INVALID_OBJECT_KEY", f"Unsafe object key: {uri_or_key}")
+        path = Path(self.config.object_store_root) / key
+        try:
+            _ensure_relative_to_root(path, Path(self.config.object_store_root))
+        except SafeFilesystemError as error:
+            raise SHUDRuntimeError(
+                "INVALID_OBJECT_KEY",
+                f"Object key escapes object store root: {uri_or_key}",
+            ) from error
         return path
 
     def _directory_uri(self, key_prefix: str) -> str:
@@ -822,8 +894,232 @@ class SHUDRuntime:
         return f"{prefix}/{key_prefix.strip('/')}/"
 
     def _write_failure_log(self, log_dir: Path, error: SHUDRuntimeError) -> None:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "runtime_error.log").write_text(f"{error.error_code}: {error.message}\n", encoding="utf-8")
+        _ensure_directory(log_dir)
+        _write_text_no_follow(
+            log_dir / "runtime_error.log",
+            f"{error.error_code}: {error.message}\n",
+            containment_root=log_dir,
+        )
+
+
+def _ensure_directory(path: Path, *, containment_root: Path | None = None) -> Path:
+    try:
+        return ensure_directory_no_follow(path, containment_root=containment_root)
+    except SafeFilesystemError as error:
+        raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace directory {path}: {error}") from error
+
+
+def _write_text_no_follow(path: Path, content: str, *, containment_root: Path) -> Path:
+    return _write_staged_bytes(path, content.encode("utf-8"), root=containment_root)
+
+
+def _write_staged_bytes(path: Path, content: bytes, *, root: Path) -> Path:
+    try:
+        _ensure_relative_to_root(path, root)
+        return atomic_write_bytes_no_follow(path, content, containment_root=root, temp_suffix="part")
+    except SafeFilesystemError as error:
+        raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace file target {path}: {error}") from error
+    except OSError as error:
+        raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: {error}") from error
+
+
+def _read_text_no_follow(path: Path, *, containment_root: Path) -> str:
+    return _read_staged_bytes(path, root=containment_root).decode("utf-8")
+
+
+def _read_staged_bytes(path: Path, *, root: Path) -> bytes:
+    try:
+        _ensure_relative_to_root(path, root)
+        return read_bytes_no_follow(path, containment_root=root)
+    except SafeFilesystemError as error:
+        raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace file source {path}: {error}") from error
+    except OSError as error:
+        raise SHUDRuntimeError("WORKSPACE_READ_FAILED", f"Failed to read staged file {path}: {error}") from error
+
+
+def _copy_staged_file_no_follow(source: Path, target: Path, *, root: Path) -> None:
+    _write_staged_bytes(target, _read_staged_bytes(source, root=root), root=root)
+
+
+def _regular_file_exists(path: Path, *, containment_root: Path) -> bool:
+    try:
+        result = _stat_path_no_follow(path, containment_root=containment_root)
+    except FileNotFoundError:
+        return False
+    except SafeFilesystemError as error:
+        raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace file {path}: {error}") from error
+    return stat_module.S_ISREG(result.st_mode)
+
+
+def _stat_path_no_follow(path: Path, *, containment_root: Path) -> os.stat_result:
+    target = _absolute_lexical_path(path)
+    root = _absolute_lexical_path(containment_root)
+    _ensure_relative_to_root(target, root)
+    if target == root:
+        try:
+            result = target.lstat()
+        except OSError as error:
+            raise SafeFilesystemError(f"Failed to stat {target}: {error}", kind="io") from error
+        if stat_module.S_ISLNK(result.st_mode):
+            raise SafeFilesystemError(f"Target path must not be a symlink: {target}")
+        return result
+    return stat_no_follow(target, containment_root=root)
+
+
+def _find_regular_files(
+    directory: Path,
+    *,
+    pattern: str | None = None,
+    suffix: str | None = None,
+    non_empty: bool = False,
+) -> list[Path]:
+    matches: list[Path] = []
+    for path in _iter_regular_descendant_files_no_follow(directory, containment_root=directory):
+        name = path.name
+        if pattern is not None and not path.match(pattern):
+            continue
+        if suffix is not None and not name.endswith(suffix):
+            continue
+        try:
+            result = stat_no_follow(path, containment_root=directory)
+        except SafeFilesystemError as error:
+            raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace file {path}: {error}") from error
+        if non_empty and result.st_size <= 0:
+            continue
+        matches.append(path)
+    return sorted(matches)
+
+
+def _iter_regular_descendant_files_no_follow(directory: Path, *, containment_root: Path) -> list[Path]:
+    try:
+        root_stat = _stat_path_no_follow(directory, containment_root=containment_root)
+    except SafeFilesystemError as error:
+        raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Unsafe directory artifact {directory}: {error}") from error
+    if not stat_module.S_ISDIR(root_stat.st_mode):
+        raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Directory artifact is not a directory: {directory}")
+
+    files: list[Path] = []
+    dir_fd = _open_directory_no_follow(directory)
+    try:
+        _walk_regular_descendants_fd(dir_fd, directory, files)
+    finally:
+        os.close(dir_fd)
+    return sorted(files)
+
+
+def _open_directory_no_follow(directory: Path) -> int:
+    try:
+        return os.open(
+            directory,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Failed to open artifact directory {directory}: {error}") from error
+
+
+def _walk_regular_descendants_fd(dir_fd: int, directory: Path, files: list[Path]) -> None:
+    for name in os.listdir(dir_fd):
+        entry_path = directory / name
+        entry_stat = _stat_child_no_follow(dir_fd, name, entry_path)
+        if stat_module.S_ISLNK(entry_stat.st_mode):
+            raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Artifact directory contains a symlink: {entry_path}")
+        if stat_module.S_ISDIR(entry_stat.st_mode):
+            child_fd = _open_child_directory_no_follow(dir_fd, name, entry_path, expected=entry_stat)
+            try:
+                _walk_regular_descendants_fd(child_fd, entry_path, files)
+            finally:
+                os.close(child_fd)
+            continue
+        if stat_module.S_ISREG(entry_stat.st_mode):
+            files.append(entry_path)
+            continue
+        raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Artifact directory contains a non-regular file: {entry_path}")
+
+
+def _open_child_directory_no_follow(
+    dir_fd: int,
+    name: str,
+    path_label: Path,
+    *,
+    expected: os.stat_result,
+) -> int:
+    try:
+        child_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=dir_fd,
+        )
+    except OSError as error:
+        raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Failed to open artifact directory {path_label}: {error}") from error
+    try:
+        opened = os.fstat(child_fd)
+        if expected.st_dev != opened.st_dev or expected.st_ino != opened.st_ino:
+            raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Artifact directory changed while being opened: {path_label}")
+        return child_fd
+    except Exception:
+        os.close(child_fd)
+        raise
+
+
+def _stat_child_no_follow(dir_fd: int, name: str, path_label: Path) -> os.stat_result:
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError as error:
+        raise SHUDRuntimeError("ARTIFACT_UNSAFE", f"Failed to inspect artifact entry {path_label}: {error}") from error
+
+
+def _stage_tar_artifact_bytes(content: bytes, destination: Path) -> bool:
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(content), mode="r:*")
+    except tarfile.ReadError:
+        return False
+    except tarfile.TarError as error:
+        raise SHUDRuntimeError("ARTIFACT_TAR_INVALID", f"Failed to inspect tar artifact: {error}") from error
+
+    with archive:
+        for member in archive:
+            relative = _safe_tar_member_path(member)
+            target = destination / relative
+            if member.isdir():
+                _ensure_directory(target, containment_root=destination)
+                continue
+            if not member.isfile():
+                raise SHUDRuntimeError(
+                    "ARTIFACT_TAR_UNSAFE",
+                    f"Tar artifact member must be a regular file or directory: {member.name}",
+                )
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise SHUDRuntimeError("ARTIFACT_TAR_INVALID", f"Failed to read tar member: {member.name}")
+            with extracted:
+                _write_staged_bytes(target, extracted.read(), root=destination)
+    return True
+
+
+def _safe_tar_member_path(member: tarfile.TarInfo) -> Path:
+    if member.issym() or member.islnk() or member.isdev():
+        raise SHUDRuntimeError("ARTIFACT_TAR_UNSAFE", f"Tar artifact member is unsafe: {member.name}")
+    name = str(member.name)
+    candidate = PurePosixPath(name)
+    if not name or candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+        raise SHUDRuntimeError("ARTIFACT_TAR_UNSAFE", f"Tar artifact member path escapes destination: {name}")
+    return Path(*candidate.parts)
+
+
+def _ensure_relative_to_root(path: Path, root: Path) -> None:
+    target = _absolute_lexical_path(path)
+    containment_root = _absolute_lexical_path(root)
+    try:
+        relative = target.relative_to(containment_root)
+    except ValueError as error:
+        raise SafeFilesystemError(f"Path must stay under containment root: {target}") from error
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise SafeFilesystemError(f"Unsafe path component under containment root: {target}")
+
+
+def _absolute_lexical_path(path: Path) -> Path:
+    expanded = Path(path).expanduser()
+    return expanded if expanded.is_absolute() else Path.cwd() / expanded
 
 
 _SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -925,7 +1221,7 @@ def _shud_start_minute(manifest: dict[str, Any]) -> float:
 
 def _read_internal_forcing_rows(path: Path) -> list[dict[str, Any]]:
     buckets: dict[datetime, dict[str, float]] = {}
-    with path.open("r", encoding="utf-8", newline="") as handle:
+    with io.StringIO(_read_text_no_follow(path, containment_root=path.parent), newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             return []
@@ -969,40 +1265,41 @@ def _write_shud_forcing_files(
     last_time = _ensure_utc(rows[-1]["valid_time"])
     end_date = last_time.strftime("%Y%m%d")
     forcing_csv = model_input_dir / "forcing.csv"
-    with forcing_csv.open("w", encoding="utf-8", newline="") as handle:
-        handle.write(f"{len(rows)}\t6\t{start_date}\t{end_date}\n")
-        handle.write("Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n")
-        for row in rows:
-            valid_time = _ensure_utc(row["valid_time"])
-            time_days = start_minute / 1440.0 + (valid_time - first_time).total_seconds() / 86_400.0
-            handle.write(
-                "\t".join(
-                    [
-                        _format_float(time_days),
-                        _format_float(float(row.get("PRCP", 0.0))),
-                        _format_float(float(row.get("TEMP", 0.0))),
-                        _format_float(float(row.get("RH", 0.0))),
-                        _format_float(float(row.get("wind", 0.0))),
-                        _format_float(float(row.get("Rn", 0.0))),
-                    ]
-                )
-                + "\n"
+    forcing_lines = [
+        f"{len(rows)}\t6\t{start_date}\t{end_date}",
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN",
+    ]
+    for row in rows:
+        valid_time = _ensure_utc(row["valid_time"])
+        time_days = start_minute / 1440.0 + (valid_time - first_time).total_seconds() / 86_400.0
+        forcing_lines.append(
+            "\t".join(
+                [
+                    _format_float(time_days),
+                    _format_float(float(row.get("PRCP", 0.0))),
+                    _format_float(float(row.get("TEMP", 0.0))),
+                    _format_float(float(row.get("RH", 0.0))),
+                    _format_float(float(row.get("wind", 0.0))),
+                    _format_float(float(row.get("Rn", 0.0))),
+                ]
             )
+        )
+    _write_text_no_follow(forcing_csv, "\n".join(forcing_lines) + "\n", containment_root=model_input_dir)
 
     tsd_forc = model_input_dir / f"{project_name}.tsd.forc"
-    with tsd_forc.open("w", encoding="utf-8", newline="") as handle:
-        handle.write(f"1 {start_date}\n")
-        handle.write(f"{model_input_dir}\n")
-        handle.write("ID\tLon\tLat\tX\tY\tZ\tFilename\n")
-        handle.write(
-            "1\t"
-            f"{_format_float(float(station.get('longitude', 0.0)))}\t"
-            f"{_format_float(float(station.get('latitude', 0.0)))}\t"
-            f"{_format_float(float(station.get('x', 0.0)))}\t"
-            f"{_format_float(float(station.get('y', 0.0)))}\t"
-            f"{_format_float(float(station.get('z', 0.0)))}\t"
-            "forcing.csv\n"
-        )
+    tsd_content = (
+        f"1 {start_date}\n"
+        f"{model_input_dir}\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t"
+        f"{_format_float(float(station.get('longitude', 0.0)))}\t"
+        f"{_format_float(float(station.get('latitude', 0.0)))}\t"
+        f"{_format_float(float(station.get('x', 0.0)))}\t"
+        f"{_format_float(float(station.get('y', 0.0)))}\t"
+        f"{_format_float(float(station.get('z', 0.0)))}\t"
+        "forcing.csv\n"
+    )
+    _write_text_no_follow(tsd_forc, tsd_content, containment_root=model_input_dir)
 
 
 def _shift_project_time_inputs(model_input_dir: Path, project_name: str, first_time: datetime) -> None:
@@ -1014,7 +1311,11 @@ def _shift_project_time_inputs(model_input_dir: Path, project_name: str, first_t
 
 
 def _read_shud_forcing_station_rows(path: Path) -> list[dict[str, Any]]:
-    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in _read_text_no_follow(path, containment_root=path.parent).splitlines()
+        if line.strip()
+    ]
     if len(lines) < 4:
         return []
     rows: list[dict[str, Any]] = []
@@ -1037,7 +1338,11 @@ def _read_shud_forcing_station_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _first_shud_forcing_time(path: Path) -> datetime:
-    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in _read_text_no_follow(path, containment_root=path.parent).splitlines()
+        if line.strip()
+    ]
     if len(lines) < 3:
         raise SHUDRuntimeError("SHUD_FORCING_CSV_EMPTY", f"Invalid SHUD forcing CSV: {path}")
     header = lines[0].split()
@@ -1058,9 +1363,9 @@ def _first_shud_forcing_time(path: Path) -> datetime:
 
 
 def _remap_sp_att_forcing(path: Path, *, forcing_index: int) -> None:
-    if not path.exists():
+    if not _regular_file_exists(path, containment_root=path.parent):
         return
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _read_text_no_follow(path, containment_root=path.parent).splitlines()
     if len(lines) < 3:
         return
     header_tokens = lines[1].split()
@@ -1074,13 +1379,13 @@ def _remap_sp_att_forcing(path: Path, *, forcing_index: int) -> None:
             continue
         parts[forcing_column] = str(forcing_index)
         lines[index] = "\t".join(parts)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _write_text_no_follow(path, "\n".join(lines) + "\n", containment_root=path.parent)
 
 
 def _shift_tsd_time_axis(path: Path, start_time: datetime, *, start_minute: float) -> None:
-    if not path.exists():
+    if not _regular_file_exists(path, containment_root=path.parent):
         return
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _read_text_no_follow(path, containment_root=path.parent).splitlines()
     if not lines:
         return
     header = lines[0].split()
@@ -1099,20 +1404,20 @@ def _shift_tsd_time_axis(path: Path, start_time: datetime, *, start_minute: floa
                 continue
             parts[0] = _format_float(start_minute / 1440.0 + original_day)
             lines[index] = "\t".join(parts)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _write_text_no_follow(path, "\n".join(lines) + "\n", containment_root=path.parent)
 
 
 def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
-    if not path.exists():
+    if not _regular_file_exists(path, containment_root=path.parent):
         return
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _read_text_no_follow(path, containment_root=path.parent).splitlines()
     if not lines:
         return
     header = lines[0].split()
     if len(header) >= 3:
         header[2] = f"{_ensure_utc(start_time).timestamp() / 60.0:.6f}"
         lines[0] = "\t".join(header)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _write_text_no_follow(path, "\n".join(lines) + "\n", containment_root=path.parent)
 
 
 def _shud_forcing_station(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1153,7 +1458,7 @@ def _replace_or_append(content: str, key: str, value: str, *, separator: str = "
 
 
 def _first_file(directory: Path, pattern: str) -> Path | None:
-    matches = sorted(path for path in directory.rglob(pattern) if path.is_file())
+    matches = _find_regular_files(directory, pattern=pattern)
     return matches[0] if matches else None
 
 
@@ -1278,17 +1583,7 @@ def _resolve_staged_forcing_path(model_input_dir: Path, relative_path: str) -> P
             "FORCING_FILE_PATH_INVALID",
             f"Forcing checksum relative_path escapes model input directory: {relative_path}",
         )
-
-    root = model_input_dir.resolve()
-    staged_path = (root / candidate).resolve(strict=False)
-    try:
-        staged_path.relative_to(root)
-    except ValueError as error:
-        raise SHUDRuntimeError(
-            "FORCING_FILE_PATH_INVALID",
-            f"Forcing checksum relative_path escapes model input directory: {relative_path}",
-        ) from error
-    return staged_path
+    return model_input_dir / candidate
 
 
 def _set_initial_state_from_snapshot(manifest: dict[str, Any], snapshot: StateSnapshot, *, quality: str) -> None:
