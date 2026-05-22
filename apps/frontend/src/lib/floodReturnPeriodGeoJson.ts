@@ -40,6 +40,7 @@ export interface FloodReturnPeriodFeature {
 export interface FloodReturnPeriodFeatureCollection {
   type: 'FeatureCollection'
   features: FloodReturnPeriodFeature[]
+  product_quality?: Record<string, unknown> | null
 }
 
 export type FloodReturnPeriodFeatureProperties = Record<string, unknown> & {
@@ -192,7 +193,17 @@ export function validateFloodReturnPeriodFeatureCollection(
     return rejection(sanitizedFeature.code, sanitizedFeature.reason, payload.features.length, state.coordinateCount, serializedBytes)
   }
 
-  return { ok: true, data: { type: 'FeatureCollection', features }, featureCount: features.length, coordinateCount: state.coordinateCount, serializedBytes }
+  return {
+    ok: true,
+    data: {
+      type: 'FeatureCollection',
+      features,
+      product_quality: isRecord(payload.product_quality) ? { ...payload.product_quality } : null,
+    },
+    featureCount: features.length,
+    coordinateCount: state.coordinateCount,
+    serializedBytes,
+  }
 }
 
 function sanitizeFeature(

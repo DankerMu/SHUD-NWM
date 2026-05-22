@@ -6,11 +6,13 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+
+from workers.data_adapters.base import cycle_id_for
 
 RETURN_PERIODS: tuple[int, ...] = (2, 5, 10, 20, 50, 100)
 QUANTILE_KEYS: tuple[str, ...] = tuple(f"Q{return_period}" for return_period in RETURN_PERIODS)
@@ -53,6 +55,9 @@ class ReturnPeriodComputationStats:
     status: str = "succeeded"
     error_code: str | None = None
     error_message: str | None = None
+    quality_state: str = "ready"
+    unavailable_products: tuple[str, ...] = ()
+    residual_blockers: tuple[dict[str, Any], ...] = ()
 
 
 def extract_max_forecast_q(run_id: str, db_session: Session) -> dict[str, tuple[float, datetime]]:
@@ -214,10 +219,11 @@ def compute_return_periods(
     db_session: Session,
     *,
     graceful_degradation: bool = True,
+    quality_contract: Mapping[str, Any] | None = None,
 ) -> ReturnPeriodComputationStats:
     started_at = datetime.now(UTC)
     try:
-        stats = _compute_return_periods(run_id, db_session, started_at=started_at)
+        stats = _compute_return_periods(run_id, db_session, started_at=started_at, quality_contract=quality_contract)
         db_session.commit()
         return stats
     except Exception as error:
@@ -237,6 +243,17 @@ def compute_return_periods(
                 status="failed",
                 error_code=str(error_code),
                 error_message=str(error_message),
+                quality_state="unavailable",
+                unavailable_products=("return_period_result",),
+                residual_blockers=(
+                    {
+                        "code": str(error_code),
+                        "state": "unavailable",
+                        "quality_flag": "frequency_failed",
+                        "run_id": run_id,
+                        "residual_risk": str(error_message),
+                    },
+                ),
             )
         raise
 
@@ -246,8 +263,11 @@ def _compute_return_periods(
     db_session: Session,
     *,
     started_at: datetime,
+    quality_contract: Mapping[str, Any] | None = None,
 ) -> ReturnPeriodComputationStats:
     context = _load_run_context(run_id, db_session)
+    contract = _normalize_quality_contract(quality_contract)
+    warning_thresholds_available = "warning_thresholds" not in contract["unavailable_products"]
     max_values = extract_max_forecast_q(run_id, db_session)
     timestep_values = extract_timestep_q(run_id, db_session)
     segment_ids = sorted(
@@ -279,7 +299,12 @@ def _compute_return_periods(
     max_duration = _window_duration_label(context["start_time"], context["end_time"])
 
     for segment_id, (q_value, max_time) in max_values.items():
-        result = _evaluate_q(q_value, curves[segment_id], no_curve_quality.get(segment_id))
+        result = _evaluate_q(
+            q_value,
+            curves[segment_id],
+            no_curve_quality.get(segment_id),
+            warning_thresholds_available=warning_thresholds_available,
+        )
         warning_counts.update([result["warning_level"]] if result["warning_level"] else [])
         _upsert_return_period_result(
             db_session,
@@ -295,7 +320,12 @@ def _compute_return_periods(
 
     for valid_time, segment_values in timestep_values.items():
         for segment_id, q_value in segment_values.items():
-            result = _evaluate_q(q_value, curves[segment_id], no_curve_quality.get(segment_id))
+            result = _evaluate_q(
+                q_value,
+                curves[segment_id],
+                no_curve_quality.get(segment_id),
+                warning_thresholds_available=warning_thresholds_available,
+            )
             _upsert_return_period_result(
                 db_session,
                 context,
@@ -309,13 +339,24 @@ def _compute_return_periods(
             rows_written += 1
 
     _mark_frequency_succeeded(db_session, context, started_at)
-    register_flood_tile_layer(run_id, db_session)
+    unavailable_products = set(contract["unavailable_products"])
+    if any(curve is None for curve in curves.values()):
+        unavailable_products.add("frequency_curves")
+    blockers = [
+        *_frequency_residual_blockers(context, no_curve_quality),
+        *_quality_contract_residual_blockers(context, unavailable_products),
+    ]
+    if not unavailable_products:
+        register_flood_tile_layer(run_id, db_session)
     return ReturnPeriodComputationStats(
         total_segments=len(segment_ids),
         with_curve=sum(1 for curve in curves.values() if curve is not None),
         without_curve=sum(1 for curve in curves.values() if curve is None),
         warning_counts={level: int(warning_counts.get(level, 0)) for level in WARNING_LEVELS},
         rows_written=rows_written,
+        quality_state="ready" if not unavailable_products else "unavailable",
+        unavailable_products=tuple(sorted(unavailable_products)),
+        residual_blockers=tuple(blockers),
     )
 
 
@@ -377,6 +418,8 @@ def _evaluate_q(
     q_value: float,
     curve: FrequencyCurve | None,
     no_curve_quality_flag: str | None,
+    *,
+    warning_thresholds_available: bool = True,
 ) -> dict[str, Any]:
     if curve is None:
         return {
@@ -385,9 +428,13 @@ def _evaluate_q(
             "quality_flag": no_curve_quality_flag or "no_frequency_curve",
         }
     return_period = interpolate_return_period(q_value, curve.thresholds)
-    warning_level = map_warning_level(return_period, curve.sample_quality, curve.quality_flag)
-    raw_level = _raw_warning_level(return_period) if return_period is not None else None
-    quality_flag = "unreliable_threshold" if raw_level is not None and raw_level != warning_level else "ok"
+    if warning_thresholds_available:
+        warning_level = map_warning_level(return_period, curve.sample_quality, curve.quality_flag)
+        raw_level = _raw_warning_level(return_period) if return_period is not None else None
+        quality_flag = "unreliable_threshold" if raw_level is not None and raw_level != warning_level else "ok"
+    else:
+        warning_level = None
+        quality_flag = "warning_thresholds_unavailable"
     return {
         "return_period": return_period,
         "warning_level": warning_level,
@@ -575,6 +622,65 @@ def _any_frequency_curve_exists(context: dict[str, Any], segment_id: str, db_ses
     return row is not None
 
 
+def _frequency_residual_blockers(
+    context: Mapping[str, Any],
+    no_curve_quality: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for segment_id, quality_flag in sorted(no_curve_quality.items()):
+        blockers.append(
+            {
+                "code": "FREQUENCY_CURVE_UNAVAILABLE",
+                "state": "unavailable",
+                "quality_flag": quality_flag,
+                "run_id": context.get("run_id"),
+                "model_id": context.get("model_id"),
+                "river_network_version_id": context.get("river_network_version_id"),
+                "river_segment_id": segment_id,
+                "residual_risk": (
+                    "Return period and warning level are null for this segment; no values were fabricated."
+                ),
+            }
+        )
+    return blockers
+
+
+def _normalize_quality_contract(quality_contract: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(quality_contract, Mapping):
+        return {"unavailable_products": set()}
+    raw_products = quality_contract.get("unavailable_products")
+    products = {
+        str(item)
+        for item in raw_products or []
+        if item not in (None, "")
+    } if isinstance(raw_products, (list, tuple, set)) else set()
+    state = str(quality_contract.get("state") or "")
+    warning_thresholds = str(quality_contract.get("warning_thresholds") or "")
+    if state == "unavailable" and warning_thresholds == "unavailable":
+        products.add("warning_thresholds")
+    return {"unavailable_products": products}
+
+
+def _quality_contract_residual_blockers(
+    context: Mapping[str, Any],
+    unavailable_products: set[str],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    if "warning_thresholds" in unavailable_products:
+        blockers.append(
+            {
+                "code": "WARNING_THRESHOLDS_UNAVAILABLE",
+                "state": "unavailable",
+                "quality_flag": "warning_thresholds_unavailable",
+                "run_id": context.get("run_id"),
+                "model_id": context.get("model_id"),
+                "river_network_version_id": context.get("river_network_version_id"),
+                "residual_risk": "warning_level remains null because warning thresholds are unavailable.",
+            }
+        )
+    return blockers
+
+
 def _mark_frequency_succeeded(
     db_session: Session,
     context: dict[str, Any],
@@ -708,7 +814,7 @@ def _cycle_id(context: dict[str, Any]) -> str | None:
     cycle_time = context.get("cycle_time")
     if source_id is None or cycle_time is None:
         return None
-    return f"{source_id}_{cycle_time}"
+    return cycle_id_for(str(source_id), cycle_time)
 
 
 def _raw_warning_level(return_period: float) -> str:

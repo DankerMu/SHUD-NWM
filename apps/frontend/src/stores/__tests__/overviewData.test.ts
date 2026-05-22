@@ -102,6 +102,17 @@ const run = {
   log_uri: null,
   error_code: null,
   error_message: null,
+  product_quality: {
+    flood_return_period: {
+      quality_state: 'ready',
+      max_over_window: true,
+      result_rows: 2,
+      return_period_rows: 2,
+      warning_rows: 2,
+      unavailable_products: [],
+      residual_blockers: [],
+    },
+  },
   created_at: '2026-05-18T00:01:00Z',
   updated_at: '2026-05-18T01:00:00Z',
 }
@@ -272,11 +283,13 @@ describe('useOverviewDataStore', () => {
       source: 'GFS',
       cycle_time: '2026-05-18T00:00:00Z',
       status: 'frequency_done',
+      flood_product_ready: true,
     })
     expect(calls.find((call) => call.path === '/api/v1/runs' && call.query?.status === 'published')?.query).toMatchObject({
       source: 'GFS',
       cycle_time: '2026-05-18T00:00:00Z',
       status: 'published',
+      flood_product_ready: true,
     })
     expect(calls.find((call) => call.path === '/api/v1/flood-alerts/summary')?.query).toMatchObject({
       run_id: 'run-gfs-1',
@@ -469,6 +482,49 @@ describe('useOverviewDataStore', () => {
     expect(snapshot.summary.warningSegmentCount).toBe(1)
   })
 
+  it('does not select status-ready overview runs whose flood product quality is unavailable', async () => {
+    const unavailableRun = {
+      ...run,
+      run_id: 'run-warning-thresholds-unavailable',
+      product_quality: {
+        flood_return_period: {
+          quality_state: 'unavailable',
+          max_over_window: true,
+          result_rows: 2,
+          return_period_rows: 2,
+          warning_rows: 0,
+          unavailable_products: ['warning_thresholds'],
+          residual_blockers: [],
+        },
+      },
+    }
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query })
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/runs') {
+        return options?.params?.query?.status === 'frequency_done'
+          ? (success({ items: [unavailableRun], total: 1, limit: 20, offset: 0 }) as never)
+          : (success({ items: [], total: 0, limit: 20, offset: 0 }) as never)
+      }
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/queue/depth') return success({ running: 0, pending: 0, idle: 0 }) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadOverview(query)
+
+    expect(calls.filter((call) => call.path === '/api/v1/runs').every((call) => call.query?.flood_product_ready === true)).toBe(true)
+    expect(calls.map((call) => call.path)).not.toContain('/api/v1/flood-alerts/summary')
+    expect(calls.map((call) => call.path)).not.toContain('/api/v1/flood-alerts/ranking')
+    expect(snapshot.summary.freshness.runId).toBeNull()
+  })
+
   it('resolves default best overview surfaces to the latest concrete GFS or IFS run without unsupported source identifiers', async () => {
     const bestQuery = { ...query, source: 'best' as const, cycle: null }
     const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
@@ -501,6 +557,7 @@ describe('useOverviewDataStore', () => {
       source: undefined,
       cycle_time: undefined,
       status: 'frequency_done',
+      flood_product_ready: true,
     })
     expect(calls.find((call) => call.path === '/api/v1/pipeline/status')?.query).toMatchObject({
       source: 'IFS',
@@ -2397,6 +2454,7 @@ describe('useOverviewDataStore', () => {
       source: 'IFS',
       cycle_time: '2026-05-18T00:00:00Z',
       status: 'frequency_done',
+      flood_product_ready: true,
     })
     expect(calls.find((call) => call.path.endsWith('/forecast-series'))?.query).toMatchObject({
       issue_time: '2026-05-18T00:00:00Z',

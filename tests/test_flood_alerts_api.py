@@ -28,6 +28,8 @@ DUPLICATE_SEGMENT_RUN_ID = "fcst_gfs_2026050300_duplicate_segments"
 DUPLICATE_NETWORK_TIE_RUN_ID = "fcst_gfs_2026050300_duplicate_network_tie"
 TIMESTEP_DUPLICATE_RUN_ID = "fcst_gfs_2026050300_timestep_duplicates"
 RECOMPUTE_MOVED_PEAK_RUN_ID = "fcst_gfs_2026050300_recompute_moved_peak"
+PARTIAL_ROUTE_RUN_ID = "fcst_gfs_2026050300_partial_route"
+PARTIAL_ROUTE_WARNING_RUN_ID = "fcst_gfs_2026050300_partial_route_warning"
 VALID_TIME_1 = datetime(2026, 5, 3, 6, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 12, tzinfo=UTC)
 VALID_TIME_1_ISO = VALID_TIME_1.isoformat().replace("+00:00", "Z")
@@ -58,7 +60,7 @@ def test_summary_normal_threshold_and_valid_time() -> None:
         response = client.get(f"/api/v1/flood-alerts/summary?run_id={RUN_ID}&valid_time={_iso(VALID_TIME_1)}")
         assert response.status_code == 200
         valid_time_data = response.json()["data"]
-        assert valid_time_data["total_segments"] == 3
+        assert valid_time_data["total_segments"] == 2
         assert _level_count(valid_time_data, "elevated") == 2
         assert _level_count(valid_time_data, "warning") == 0
 
@@ -87,12 +89,12 @@ def test_summary_errors_and_zero_usable_curves() -> None:
         assert response.json()["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
 
         response = client.get("/api/v1/flood-alerts/summary?run_id=run_empty")
-        assert response.status_code == 200
-        data = response.json()["data"]
-        assert data["total_segments"] == 2
-        assert data["usable_curves"] == 0
-        assert data["quality_note"] == "No usable frequency curves available"
-        assert all(level["count"] == 0 for level in data["levels"])
+        assert response.status_code == 409
+        body = response.json()
+        assert body["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
+        assert body["error"]["details"]["quality_state"] == "unavailable"
+        assert body["error"]["details"]["unavailable_products"] == ["return_period_result"]
+        assert body["error"]["details"]["return_period_rows"] == 0
 
 
 def test_ready_status_set_is_explicit_contract() -> None:
@@ -147,6 +149,200 @@ def test_non_ready_with_stray_rows_is_rejected_before_data_query() -> None:
     body = response.json()
     assert body["error"]["code"] == "FREQUENCY_NOT_COMPUTED"
     assert body["error"]["details"]["status"] == "parsed"
+
+
+def test_warning_thresholds_unavailable_is_not_api_ready() -> None:
+    with _client() as client:
+        summary = client.get("/api/v1/flood-alerts/summary?run_id=run_warning_unavailable")
+        layers = client.get("/api/v1/layers?run_id=run_warning_unavailable")
+        tile = client.get(
+            "/api/v1/tiles/flood-return-period"
+            f"?run_id=run_warning_unavailable&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+        )
+
+    for response in (summary, layers):
+        body = response.json()
+        if response is summary:
+            assert response.status_code == 409
+            assert body["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
+            details = body["error"]["details"]
+        else:
+            assert response.status_code == 200
+            flood_layer = next(layer for layer in body["data"] if layer["layer_id"] == "flood-return-period")
+            details = flood_layer["metadata"]["product_quality"]
+        assert details["quality_state"] == "unavailable"
+        assert details["unavailable_products"] == ["warning_thresholds"]
+        assert details["return_period_rows"] > 0
+        assert details["warning_rows"] == 0
+    assert tile.status_code == 409
+    tile_body = tile.json()
+    assert tile_body["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
+    assert tile_body["error"]["details"]["unavailable_products"] == ["warning_thresholds"]
+    assert tile_body["error"]["details"]["return_period_rows"] > 0
+    assert tile_body["error"]["details"]["warning_rows"] == 0
+
+
+@pytest.mark.parametrize(
+    ("run_id", "unavailable_product", "expected_counts"),
+    [
+        (
+            PARTIAL_ROUTE_RUN_ID,
+            "frequency_curves",
+            {"result_rows": 2, "return_period_rows": 1, "warning_rows": 1},
+        ),
+        (
+            PARTIAL_ROUTE_WARNING_RUN_ID,
+            "warning_thresholds",
+            {"result_rows": 2, "return_period_rows": 2, "warning_rows": 1},
+        ),
+    ],
+)
+def test_flood_route_partial_product_rows_fail_before_geojson_serialization(
+    run_id: str,
+    unavailable_product: str,
+    expected_counts: dict[str, int],
+) -> None:
+    with _client() as client:
+        response = client.get(
+            f"/api/v1/tiles/flood-return-period?run_id={run_id}&duration=1h&valid_time={_iso(VALID_TIME_1)}"
+        )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
+    details = body["error"]["details"]
+    assert details["unavailable_products"] == [unavailable_product]
+    assert details[unavailable_product] == "unavailable"
+    for field, value in expected_counts.items():
+        assert details[field] == value
+    assert details["residual_blockers"][0]["code"] in {
+        "FREQUENCY_CURVES_UNAVAILABLE",
+        "WARNING_THRESHOLDS_UNAVAILABLE",
+    }
+
+
+@pytest.mark.parametrize(
+    ("run_id", "unavailable_product", "expected_counts"),
+    [
+        (
+            PARTIAL_ROUTE_RUN_ID,
+            "frequency_curves",
+            {"result_rows": 2, "return_period_rows": 1, "warning_rows": 1},
+        ),
+        (
+            PARTIAL_ROUTE_WARNING_RUN_ID,
+            "warning_thresholds",
+            {"result_rows": 2, "return_period_rows": 2, "warning_rows": 1},
+        ),
+    ],
+)
+def test_flood_mvt_partial_route_rows_fail_before_cache_lookup_or_live_sql(
+    monkeypatch: pytest.MonkeyPatch,
+    run_id: str,
+    unavailable_product: str,
+    expected_counts: dict[str, int],
+) -> None:
+    with _store() as session:
+        seed_tile = flood_alert_routes.TileInput(
+            layer_id="flood-return-period",
+            source_id=run_id,
+            source_version=flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, run_id)),
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="duration:1h",
+        )
+        flood_alert_routes.build_raw_tile_response(session, seed_tile, b"stale-partial-route-cache")
+
+        def fail_cache_lookup(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("flood MVT cache lookup should not run when route product gate fails")
+
+        def fail_live_fetch(*_args: Any, **_kwargs: Any) -> bytes:
+            raise AssertionError("flood MVT live SQL should not run when route product gate fails")
+
+        monkeypatch.setattr(flood_alert_routes, "read_cached_tile_response", fail_cache_lookup)
+        monkeypatch.setattr(flood_alert_routes, "_fetch_flood_mvt_tile_bytes", fail_live_fetch)
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(
+                    f"/api/v1/tiles/flood-return-period/{run_id}/1h/{VALID_TIME_1_ISO}/6/12/24.pbf"
+                )
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
+    details = body["error"]["details"]
+    assert details["unavailable_products"] == [unavailable_product]
+    assert details[unavailable_product] == "unavailable"
+    for field, value in expected_counts.items():
+        assert details[field] == value
+
+
+def test_flood_mvt_global_product_gate_fails_before_cache_lookup_or_live_sql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        seed_tile = flood_alert_routes.TileInput(
+            layer_id="flood-return-period",
+            source_id="run_empty",
+            source_version=flood_alert_routes._run_source_version(
+                flood_alert_routes._require_run(session, "run_empty")
+            ),
+            valid_time=VALID_TIME_1_ISO,
+            z=6,
+            x=12,
+            y=24,
+            variant_id="duration:1h",
+        )
+        flood_alert_routes.build_raw_tile_response(session, seed_tile, b"stale-global-cache")
+
+        def fail_route_gate(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("route gate should not run after the global flood product gate fails")
+
+        def fail_cache_lookup(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("flood MVT cache lookup should not run when global product gate fails")
+
+        def fail_live_fetch(*_args: Any, **_kwargs: Any) -> bytes:
+            raise AssertionError("flood MVT live SQL should not run when global product gate fails")
+
+        monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", fail_route_gate)
+        monkeypatch.setattr(flood_alert_routes, "read_cached_tile_response", fail_cache_lookup)
+        monkeypatch.setattr(flood_alert_routes, "_fetch_flood_mvt_tile_bytes", fail_live_fetch)
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get(
+                    f"/api/v1/tiles/flood-return-period/run_empty/1h/{VALID_TIME_1_ISO}/6/12/24.pbf"
+                )
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "FLOOD_PRODUCT_UNAVAILABLE"
+    assert body["error"]["details"]["unavailable_products"] == ["return_period_result"]
+
+
+def test_latest_ready_run_skips_degraded_frequency_products() -> None:
+    with _store() as session:
+        session.execute(
+            text("UPDATE hydro.hydro_run SET status = 'parsed' WHERE run_id <> :run_id"),
+            {"run_id": RUN_ID},
+        )
+        session.execute(
+            text("UPDATE hydro.hydro_run SET cycle_time = :cycle_time WHERE run_id = 'run_warning_unavailable'"),
+            {"cycle_time": datetime(2026, 5, 4, tzinfo=UTC)},
+        )
+        session.commit()
+
+        latest = flood_alert_routes.latest_ready_run(session)
+
+    assert latest is not None
+    assert latest["run_id"] == RUN_ID
 
 
 def test_ranking_pagination_basin_filter_and_valid_time() -> None:
@@ -438,7 +634,6 @@ def test_flood_tile_returns_geojson_feature_collection() -> None:
         assert {feature["properties"]["segment_id"] for feature in data["features"]} == {
             "seg_001",
             "seg_002",
-            "seg_no_curve",
         }
         assert data["features"][0]["geometry"]["type"] == "LineString"
 
@@ -585,13 +780,13 @@ def test_flood_tile_feature_budget_overflow_returns_413() -> None:
     with _client() as client:
         response = client.get(
             "/api/v1/tiles/flood-return-period"
-            f"?run_id={RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}&limit=2"
+            f"?run_id={RUN_ID}&duration=1h&valid_time={_iso(VALID_TIME_1)}&limit=1"
         )
 
     assert response.status_code == 413
     body = response.json()
     assert body["error"]["code"] == "FLOOD_RETURN_PERIOD_FEATURE_LIMIT_EXCEEDED"
-    assert body["error"]["details"] == {"limit": 2}
+    assert body["error"]["details"] == {"limit": 1}
 
 
 def test_flood_tile_geojson_coordinate_budget_overflow_returns_413_below_feature_cap() -> None:
@@ -761,6 +956,8 @@ def test_flood_tile_postgis_collection_overflow_sentinel_returns_413_before_payl
             return FakeRows()
 
     monkeypatch.setattr(flood_alert_routes, "_require_frequency_ready", lambda _session, _run_id: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_product_ready", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
 
     with pytest.raises(flood_alert_routes.ApiError) as exc:
         flood_alert_routes.flood_return_period_map(
@@ -831,6 +1028,8 @@ def test_flood_tile_postgis_feature_geometry_sentinel_returns_413_before_payload
             return FakeRows()
 
     monkeypatch.setattr(flood_alert_routes, "_require_frequency_ready", lambda _session, _run_id: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_product_ready", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
 
     with pytest.raises(flood_alert_routes.ApiError) as exc:
         flood_alert_routes.flood_return_period_map(
@@ -921,6 +1120,8 @@ def test_flood_mvt_live_postgis_returns_raw_bytes_and_binds_requested_xyz(monkey
         },
     )
     monkeypatch.setattr(flood_alert_routes, "_require_flood_mvt_source_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_product_ready", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
     app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
     try:
         with TestClient(app) as client:
@@ -1999,6 +2200,8 @@ def test_live_mvt_zero_feature_tile_returns_pbf_and_cache_headers(
             "updated_at": datetime(2026, 5, 3, 1, tzinfo=UTC),
         },
     )
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_product_ready", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
     app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
     try:
         with TestClient(app) as client:
@@ -2127,6 +2330,8 @@ def test_live_mvt_over_budget_stats_return_413_without_pbf(monkeypatch: pytest.M
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     monkeypatch.setattr(flood_alert_routes, "_require_flood_mvt_source_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_product_ready", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_frequency_ready",
@@ -2198,6 +2403,8 @@ def test_live_mvt_feature_coordinate_overflow_returns_413_without_pbf(monkeypatc
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     monkeypatch.setattr(flood_alert_routes, "_require_flood_mvt_source_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_product_ready", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_frequency_ready",
@@ -2266,6 +2473,8 @@ def test_live_mvt_invalid_required_properties_return_json_error(monkeypatch: pyt
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     monkeypatch.setattr(flood_alert_routes, "_require_hydro_mvt_source_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_product_ready", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_frequency_ready",
@@ -2376,6 +2585,7 @@ def test_hydro_and_river_network_live_postgis_bind_requested_xyz(
 
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     monkeypatch.setattr(flood_alert_routes, "_require_hydro_mvt_source_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_run",
@@ -2824,6 +3034,8 @@ def test_advertised_mvt_route_variables_are_accepted_by_route_validation(
     monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
     monkeypatch.setattr(flood_alert_routes, "_require_hydro_mvt_source_identity", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(flood_alert_routes, "_require_flood_mvt_source_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_product_ready", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(flood_alert_routes, "_require_flood_route_product_ready", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         flood_alert_routes,
         "_require_run",
@@ -3143,6 +3355,18 @@ def test_layer_catalog_explicit_missing_run_source_identity_returns_stable_error
                 "end_time": VALID_TIME_2,
             },
         )
+        _insert_result(
+            session,
+            "seg_001",
+            "basin_v1",
+            "rnv_v1",
+            VALID_TIME_1,
+            100.0,
+            2.0,
+            "normal",
+            True,
+            run_id=run_id,
+        )
         session.commit()
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
         try:
@@ -3192,6 +3416,18 @@ def test_layer_valid_times_explicit_missing_run_source_identity_returns_stable_e
                 "end_time": VALID_TIME_2,
             },
         )
+        _insert_result(
+            session,
+            "seg_001",
+            "basin_v1",
+            "rnv_v1",
+            VALID_TIME_1,
+            100.0,
+            2.0,
+            "normal",
+            True,
+            run_id=run_id,
+        )
         session.commit()
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
         try:
@@ -3239,6 +3475,18 @@ def test_layer_catalog_unscoped_latest_ready_missing_source_identity_returns_sta
                 "start_time": VALID_TIME_1,
                 "end_time": VALID_TIME_2,
             },
+        )
+        _insert_result(
+            session,
+            "seg_001",
+            "basin_v1",
+            "rnv_v1",
+            VALID_TIME_1,
+            100.0,
+            2.0,
+            "normal",
+            True,
+            run_id=run_id,
         )
         session.commit()
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
@@ -4599,6 +4847,9 @@ def _seed_data(connection: Any) -> None:
         ("run_pending", "parsed"),
         ("run_empty", "frequency_done"),
         ("run_stray", "parsed"),
+        ("run_warning_unavailable", "frequency_done"),
+        (PARTIAL_ROUTE_RUN_ID, "frequency_done"),
+        (PARTIAL_ROUTE_WARNING_RUN_ID, "frequency_done"),
     ]:
         connection.execute(
             text(
@@ -4672,12 +4923,110 @@ def _seed_data(connection: Any) -> None:
         "seg_no_curve",
         "basin_v1",
         "rnv_v1",
-        VALID_TIME_1,
+        VALID_TIME_2 + timedelta(hours=2),
         90.0,
         None,
         None,
         False,
         quality_flag="no_usable_frequency_curve",
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2,
+        100.0,
+        1.5,
+        "normal",
+        True,
+        run_id=PARTIAL_ROUTE_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_002",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2,
+        200.0,
+        4.0,
+        "watch",
+        True,
+        run_id=PARTIAL_ROUTE_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        110.0,
+        3.0,
+        "elevated",
+        False,
+        run_id=PARTIAL_ROUTE_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_002",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        210.0,
+        None,
+        None,
+        False,
+        run_id=PARTIAL_ROUTE_RUN_ID,
+        quality_flag="no_usable_frequency_curve",
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2,
+        100.0,
+        1.5,
+        "normal",
+        True,
+        run_id=PARTIAL_ROUTE_WARNING_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_002",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_2,
+        200.0,
+        4.0,
+        "watch",
+        True,
+        run_id=PARTIAL_ROUTE_WARNING_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        110.0,
+        3.0,
+        "elevated",
+        False,
+        run_id=PARTIAL_ROUTE_WARNING_RUN_ID,
+    )
+    _insert_result(
+        connection,
+        "seg_002",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        210.0,
+        4.0,
+        None,
+        False,
+        run_id=PARTIAL_ROUTE_WARNING_RUN_ID,
+        quality_flag="warning_thresholds_unavailable",
     )
     _insert_result(
         connection,
@@ -4872,6 +5221,32 @@ def _seed_data(connection: Any) -> None:
         True,
         run_id="run_empty",
         quality_flag="no_usable_frequency_curve",
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        180.0,
+        8.0,
+        None,
+        True,
+        run_id="run_warning_unavailable",
+        quality_flag="warning_thresholds_unavailable",
+    )
+    _insert_result(
+        connection,
+        "seg_001",
+        "basin_v1",
+        "rnv_v1",
+        VALID_TIME_1,
+        180.0,
+        8.0,
+        None,
+        False,
+        run_id="run_warning_unavailable",
+        quality_flag="warning_thresholds_unavailable",
     )
     _insert_timeseries_result(connection, "seg_001", RECOMPUTE_MOVED_PEAK_RUN_ID, VALID_TIME_1, 110.0)
     _insert_timeseries_result(connection, "seg_001", RECOMPUTE_MOVED_PEAK_RUN_ID, VALID_TIME_2, 260.0)

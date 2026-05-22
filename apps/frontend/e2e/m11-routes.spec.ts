@@ -13,6 +13,52 @@ async function fulfill(route: Route, data: unknown) {
   })
 }
 
+function readyFloodProductQuality(rows: number) {
+  return {
+    flood_return_period: {
+      quality_state: 'ready',
+      max_over_window: true,
+      result_rows: rows,
+      return_period_rows: rows,
+      warning_rows: rows,
+      unavailable_products: [],
+      residual_blockers: [],
+    },
+  }
+}
+
+function floodReturnPeriodLayer(runId: string, validTimes: string[], basinVersionId = 'basin-v1', riverNetworkVersionId = 'rivnet-v1') {
+  return {
+    layer_id: 'flood-return-period',
+    layer_name: 'Flood return period',
+    layer_type: 'hydrology',
+    variables: ['return_period'],
+    metadata: {
+      layer_id: 'flood-return-period',
+      tile_format: 'mvt',
+      url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+      tile_url_template: '/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf',
+      maplibre_source_layer: 'flood_return_period',
+      source_layer: 'flood_return_period',
+      fallback_available: true,
+      release_blocking: false,
+      required_placeholders: ['run_id', 'duration', 'valid_time', 'z', 'x', 'y'],
+      source_refs: {
+        run_id: runId,
+        source_version: riverNetworkVersionId,
+        basin_version_id: basinVersionId,
+        river_network_version_id: riverNetworkVersionId,
+        duration: '1h',
+      },
+      valid_times: validTimes,
+      cache_version: 'e2e-cache',
+      cache_etag: `${runId}-etag`,
+      property_schema_version: 'm16-v1',
+      schema_version: 'm16-v1',
+    },
+  }
+}
+
 const overviewBasinVersion = {
   basin_version_id: 'bv-001',
   basin_id: 'basin-demo',
@@ -152,6 +198,7 @@ async function mockOverviewApis(
                 status: 'frequency_done',
                 start_time: '2026-05-18T00:00:00Z',
                 end_time: '2026-05-18T03:00:00Z',
+                product_quality: readyFloodProductQuality(2),
                 created_at: '2026-05-18T00:00:00Z',
                 updated_at: '2026-05-18T04:00:00Z',
               },
@@ -313,6 +360,7 @@ async function mockFloodWorkflowApis(page: Page) {
     const url = new URL(route.request().url())
 
     if (url.pathname === '/api/v1/runs') {
+      expect(url.searchParams.get('flood_product_ready')).toBe('true')
       return fulfill(route, {
         items: [
           {
@@ -326,6 +374,7 @@ async function mockFloodWorkflowApis(page: Page) {
             status: 'frequency_done',
             start_time: '2026-05-12T00:00:00Z',
             end_time: '2026-05-12T03:00:00Z',
+            product_quality: readyFloodProductQuality(3),
             created_at: '2026-05-12T00:00:00Z',
             updated_at: '2026-05-12T04:00:00Z',
           },
@@ -334,6 +383,15 @@ async function mockFloodWorkflowApis(page: Page) {
         limit: 50,
         offset: 0,
       })
+    }
+    if (url.pathname === '/api/v1/layers/flood-return-period/valid-times') {
+      expect(url.searchParams.get('run_id')).toBe('run-flood-route')
+      expect(url.searchParams.get('duration')).toBe('1h')
+      return fulfill(route, ['2026-05-12T03:00:00Z'])
+    }
+    if (url.pathname === '/api/v1/layers') {
+      expect(url.searchParams.get('run_id')).toBe('run-flood-route')
+      return fulfill(route, [floodReturnPeriodLayer('run-flood-route', ['2026-05-12T03:00:00Z'])])
     }
     if (url.pathname === '/api/v1/flood-alerts/summary') {
       return fulfill(route, {

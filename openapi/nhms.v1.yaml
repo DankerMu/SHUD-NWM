@@ -611,6 +611,12 @@ paths:
           required: false
           schema:
             $ref: "#/components/schemas/RunStatus"
+        - name: flood_product_ready
+          in: query
+          required: false
+          description: When true, returns only frequency_done/published runs with ready flood return-period products and warning thresholds.
+          schema:
+            type: boolean
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
       responses:
@@ -2472,6 +2478,11 @@ components:
         error_message:
           type: string
           nullable: true
+        product_quality:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Product readiness evidence keyed by product family, including flood_return_period readiness.
         created_at:
           type: string
           format: date-time
@@ -3350,6 +3361,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FloodReturnPeriodFeature"
+        product_quality:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Flood return-period readiness evidence for the selected run.
     FloodReturnPeriodFeature:
       type: object
       required: [type, properties, geometry]

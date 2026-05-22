@@ -135,9 +135,9 @@ def _fit_curves(
         return output
 
 
-def _compute_return_period(run_id: str) -> dict[str, object]:
+def _compute_return_period(run_id: str, quality_contract: dict[str, object] | None = None) -> dict[str, object]:
     with _session_from_env() as session:
-        result = compute_return_periods(run_id, session)
+        result = compute_return_periods(run_id, session, quality_contract=quality_contract)
         return {
             "total_segments": result.total_segments,
             "with_curve": result.with_curve,
@@ -147,20 +147,66 @@ def _compute_return_period(run_id: str) -> dict[str, object]:
             "status": result.status,
             "error_code": result.error_code,
             "error_message": result.error_message,
+            "quality_state": result.quality_state,
+            "unavailable_products": list(result.unavailable_products),
+            "residual_blockers": list(result.residual_blockers),
         }
 
 
-def _resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:
+def _call_compute_return_period(
+    run_id: str,
+    quality_contract: dict[str, object] | None,
+) -> dict[str, object]:
+    try:
+        return _compute_return_period(run_id, quality_contract)
+    except TypeError as exc:
+        if quality_contract is None:
+            return _compute_return_period(run_id)
+        raise exc
+
+
+def _resolve_return_period_request(
+    run_id: str | None,
+    manifest_index: str | None,
+    task_id: int | None,
+) -> tuple[str, dict[str, object] | None]:
     if manifest_index is not None:
         resolved_task_id = resolve_task_id(task_id)
         entry = load_manifest_entry(manifest_index, resolved_task_id)
-        return str(entry["run_id"])
+        return str(entry["run_id"]), _quality_contract_from_manifest_entry(entry)
     if not run_id:
         raise ManifestValidationError(
             "Explicit return-period computation requires --run-id.",
             {"missing_fields": ["run_id"]},
         )
-    return run_id
+    return run_id, None
+
+
+def _resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:
+    resolved_run_id, _quality_contract = _resolve_return_period_request(run_id, manifest_index, task_id)
+    return resolved_run_id
+
+
+def _quality_contract_from_manifest_entry(entry: dict[str, object]) -> dict[str, object] | None:
+    quality_states = entry.get("quality_states")
+    if isinstance(quality_states, dict):
+        frequency_state = quality_states.get("frequency")
+        if isinstance(frequency_state, dict):
+            return dict(frequency_state)
+    assembly = entry.get("model_run_assembly")
+    if isinstance(assembly, dict):
+        assembly_quality = assembly.get("quality_states")
+        if isinstance(assembly_quality, dict):
+            frequency_state = assembly_quality.get("frequency")
+            if isinstance(frequency_state, dict):
+                return dict(frequency_state)
+        frequency_contract = assembly.get("frequency_contract")
+        if isinstance(frequency_contract, dict):
+            return dict(frequency_contract)
+    frequency_contract = entry.get("frequency_contract")
+    if isinstance(frequency_contract, dict):
+        return dict(frequency_contract)
+    return None
 
 
 def _cli_policy_decision(
@@ -390,9 +436,10 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--task-id", type=int, default=None)
     def compute_return_period_command(run_id: str | None, manifest_index: str | None, task_id: int | None) -> None:
         try:
+            resolved_run_id, quality_contract = _resolve_return_period_request(run_id, manifest_index, task_id)
             click.echo(
                 json.dumps(
-                    _compute_return_period(_resolve_run_id(run_id, manifest_index, task_id)),
+                    _call_compute_return_period(resolved_run_id, quality_contract),
                     sort_keys=True,
                     default=str,
                 )
@@ -489,9 +536,14 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(result))
             return 0
         if args.command == "compute-return-period":
+            resolved_run_id, quality_contract = _resolve_return_period_request(
+                args.run_id,
+                args.manifest_index,
+                args.task_id,
+            )
             print(
                 json.dumps(
-                    _compute_return_period(_resolve_run_id(args.run_id, args.manifest_index, args.task_id)),
+                    _call_compute_return_period(resolved_run_id, quality_contract),
                     default=str,
                 )
             )

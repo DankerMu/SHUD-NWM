@@ -1017,6 +1017,10 @@ export interface components {
             log_uri?: string | null;
             error_code?: string | null;
             error_message?: string | null;
+            /** @description Product readiness evidence keyed by product family, including flood_return_period readiness. */
+            product_quality?: {
+                [key: string]: unknown;
+            } | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -1379,6 +1383,10 @@ export interface components {
             /** @enum {string} */
             type: "FeatureCollection";
             features: components["schemas"]["FloodReturnPeriodFeature"][];
+            /** @description Flood return-period readiness evidence for the selected run. */
+            product_quality?: {
+                [key: string]: unknown;
+            } | null;
         };
         FloodReturnPeriodFeature: {
             /** @enum {string} */
@@ -2069,6 +2077,8 @@ export interface operations {
                 source?: string;
                 cycle_time?: string;
                 status?: components["schemas"]["RunStatus"];
+                /** @description When true, returns only frequency_done/published runs with ready flood return-period products and warning thresholds. */
+                flood_product_ready?: boolean;
                 limit?: components["parameters"]["Limit"];
                 offset?: components["parameters"]["Offset"];
             };

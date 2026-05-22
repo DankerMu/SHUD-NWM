@@ -31,6 +31,7 @@ class FakeCycleSlurmClient:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.poll_counts: dict[str, int] = {}
         self.next_job = 2000
+        self.fail_next_array_submission_stage: str | None = None
 
     def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._submit(payload["manifest"]["stage"], payload["run_id"], payload["model_id"], payload["manifest"])
@@ -45,6 +46,8 @@ class FakeCycleSlurmClient:
         manifest: dict[str, Any],
     ) -> dict[str, Any]:
         del job_type, cycle_id
+        if self.fail_next_array_submission_stage == stage_name:
+            raise RuntimeError(f"{stage_name} submission failed")
         payload = {"stage": stage_name, "tasks": tasks, "manifest": manifest}
         return self._submit(stage_name, manifest["run_id"], manifest["model_id"], payload)
 
@@ -239,6 +242,25 @@ class FakeCycleRepository:
         self.hydro_runs[run_id] = record
         return dict(record)
 
+    def update_hydro_run_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        slurm_job_id: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, Any]:
+        record = self.hydro_runs[run_id]
+        record["status"] = status
+        if slurm_job_id is not None:
+            record["slurm_job_id"] = slurm_job_id
+        if error_code is not None:
+            record["error_code"] = error_code
+        if error_message is not None:
+            record["error_message"] = error_message
+        return dict(record)
+
 
 class WriteFailingObjectStore(LocalObjectStore):
     def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
@@ -355,6 +377,431 @@ def test_forecast_stage_writes_runtime_manifests_and_manifest_index_paths(tmp_pa
     ]
 
 
+def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "forcing_version_id": "forc_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "station_count": 2,
+        "segment_count": 3,
+        "station_ids": ["sta_001", "sta_002"],
+        "frequency_capabilities": {
+            "return_periods": True,
+            "curves_available": False,
+            "warning_thresholds_available": False,
+        },
+        "display_capabilities": {"tiles": True, "optional_weather_available": False},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    parse_submission = next(submission for submission in client.submissions if submission["stage"] == "parse")
+    frequency_submission = next(submission for submission in client.submissions if submission["stage"] == "frequency")
+    publish_submission = next(submission for submission in client.submissions if submission["stage"] == "publish")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+
+    assert result.status == "complete"
+    assert runtime_manifest["identity"]["candidate_id"] == basin["candidate_id"]
+    assert runtime_manifest["identity"]["run_id"] == basin["run_id"]
+    assert runtime_manifest["identity"]["forcing_version_id"] == basin["forcing_version_id"]
+    assert runtime_manifest["model"]["model_package_uri"] == basin["model_package_uri"]
+    assert runtime_manifest["model"]["model_package_manifest_uri"] == "s3://nhms/models/model_0/v1/manifest.json"
+    assert runtime_manifest["forcing"]["station_count"] == 2
+    assert runtime_manifest["runtime"]["mode"] == "native_shud_project"
+    assert runtime_manifest["runtime"]["output_river"]["river_network_version_id"] == "river_v0"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+    assert runtime_manifest["quality_states"]["frequency"]["unavailable_products"] == [
+        "frequency_curves",
+        "warning_thresholds",
+    ]
+    assert runtime_manifest["quality_states"]["display"]["unavailable_products"] == ["optional_weather_products"]
+    assert {blocker["code"] for blocker in runtime_manifest["residual_blockers"]} == {
+        "FREQUENCY_CURVES_UNAVAILABLE",
+        "WARNING_THRESHOLDS_UNAVAILABLE",
+        "OPTIONAL_WEATHER_PRODUCTS_UNAVAILABLE",
+    }
+    parse_entry = parse_submission["tasks"][0]
+    frequency_entry = frequency_submission["tasks"][0]
+    assert parse_entry["model_run_assembly"]["identity"]["candidate_id"] == basin["candidate_id"]
+    assert frequency_entry["model_run_assembly"]["identity"]["run_id"] == basin["run_id"]
+    assert frequency_submission["manifest"]["quality_states"][0]["quality_flag"] == "frequency_inputs_unavailable"
+    assert publish_submission["metadata"]["residual_blockers"]
+    assert publish_submission["metadata"]["quality_states"][0]["run_id"] == basin["run_id"]
+
+
+def test_nested_forcing_station_metadata_reaches_runtime_manifest(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "resource_profile": {
+            "forcing_station_metadata": {
+                "station_count": 386,
+                "station_ids": ["sta_001", "sta_002"],
+                "source": "qhh_package_manifest",
+                "quality_flag": "ok",
+                "shud_station": "qhh.tsd.forc",
+            }
+        },
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    runtime_manifest = json.loads(Path(forecast_submission["tasks"][0]["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["forcing"]["station_metadata"] == {
+        "schema_version": "nhms.forcing_station_metadata.v1",
+        "state": "ready",
+        "station_count": 386,
+        "station_ids": ["sta_001", "sta_002"],
+        "source": "qhh_package_manifest",
+        "shud_station": "qhh.tsd.forc",
+        "quality_flag": "ok",
+    }
+    assert runtime_manifest["forcing"]["shud_station"] == "qhh.tsd.forc"
+
+
+def test_missing_station_forcing_is_quality_state_without_discarding_output_uri(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True, "optional_weather_available": False},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    publish_submission = next(submission for submission in client.submissions if submission["stage"] == "publish")
+    quality = publish_submission["metadata"]["quality_states"][0]
+    blockers = publish_submission["metadata"]["residual_blockers"]
+    assert result.status == "complete"
+    assert quality["quality_states"]["station_forcing"] == {
+        "state": "unavailable",
+        "quality_flag": "station_forcing_unavailable",
+    }
+    assert quality["output_uri"].endswith("runs/fcst_gfs_2026050100_model_0/output/")
+    assert any(blocker["code"] == "STATION_FORCING_UNAVAILABLE" for blocker in blockers)
+    assert any(blocker["code"] == "OPTIONAL_WEATHER_PRODUCTS_UNAVAILABLE" for blocker in blockers)
+
+
+def test_missing_output_river_metadata_is_unavailable_not_fabricated_ready_segment(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "station_count": 2,
+        "segment_count": None,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    runtime_manifest = json.loads(Path(forecast_submission["tasks"][0]["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["runtime"]["output_river"]["state"] == "unavailable"
+    assert runtime_manifest["runtime"]["output_river"]["segment_count"] == 0
+    assert runtime_manifest["identity"]["segment_count"] == 0
+    assert runtime_manifest["quality_states"]["output_river"] == {
+        "state": "unavailable",
+        "quality_flag": "output_river_unavailable",
+        "segment_count": 0,
+    }
+    assert any(blocker["code"] == "OUTPUT_RIVER_UNAVAILABLE" for blocker in runtime_manifest["residual_blockers"])
+
+
+def test_valid_output_river_metadata_remains_ready(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "station_count": 2,
+        "output_river": {
+            "segment_count": 2,
+            "river_segment_ids": ["seg_001", "seg_002"],
+            "identity_source": "package_manifest",
+        },
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    runtime_manifest = json.loads(Path(forecast_submission["tasks"][0]["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["runtime"]["output_river"]["state"] == "ready"
+    assert runtime_manifest["runtime"]["output_river"]["segment_count"] == 2
+    assert runtime_manifest["runtime"]["output_river"]["river_segment_ids"] == ["seg_001", "seg_002"]
+
+
+def test_scheduler_style_relative_output_key_does_not_downgrade_runtime_output_uri(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_key": "runs/fcst_gfs_2026050100_model_0/output/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+    assert task["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+
+
+def test_relative_output_uri_falls_back_to_object_store_output_uri(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "runs/fcst_gfs_2026050100_model_0/output/",
+        "log_uri": "runs/fcst_gfs_2026050100_model_0/logs/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+    assert runtime_manifest["outputs"]["log_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/logs/"
+
+
+def test_legacy_explicit_absolute_output_uri_is_preserved_outside_production_candidate_scope(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "s3://nhms/custom/fcst_gfs_2026050100_model_0/output",
+        "log_uri": "s3://nhms/custom/fcst_gfs_2026050100_model_0/logs",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/custom/fcst_gfs_2026050100_model_0/output/"
+    assert runtime_manifest["outputs"]["log_uri"] == "s3://nhms/custom/fcst_gfs_2026050100_model_0/logs/"
+
+
+def test_production_candidate_wrong_absolute_output_uri_rejected_before_manifest_writes(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "s3://wrong-bucket/prod/runs/fcst_gfs_2026050100_model_0/output/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    assert exc_info.value.error_code == "CANDIDATE_IDENTITY_MISMATCH"
+    assert exc_info.value.details["field"] == "output_uri"
+    assert client.submissions == []
+    assert repository.hydro_runs == {}
+    assert not (tmp_path / "workspace" / "runs").exists()
+
+
+def test_production_candidate_relative_output_uri_normalizes_to_canonical_uri(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "runs/fcst_gfs_2026050100_model_0/output",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    runtime_manifest = json.loads(Path(forecast_submission["tasks"][0]["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["outputs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/"
+
+
+@pytest.mark.parametrize("missing_field", ["basin_version_id", "river_network_version_id", "model_package_uri"])
+def test_production_candidate_missing_package_or_version_metadata_rejected_before_side_effects(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+    basin.pop(missing_field, None)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    assert exc_info.value.error_code == "PRODUCTION_CANDIDATE_METADATA_UNAVAILABLE"
+    assert exc_info.value.details["missing_fields"] == [missing_field]
+    assert client.submissions == []
+    assert repository.hydro_runs == {}
+    assert not (tmp_path / "workspace" / "runs").exists()
+
+
+def test_legacy_manual_basin_without_production_candidate_identity_keeps_default_metadata_compatibility(
+    tmp_path: Path,
+) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {"model_id": "manual_model", "station_count": 1, "segment_count": 1}
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    runtime_manifest = json.loads(Path(forecast_submission["tasks"][0]["manifest_path"]).read_text(encoding="utf-8"))
+    assert result.status == "complete"
+    assert runtime_manifest["model"]["basin_version_id"] == "manual_model_basin"
+    assert runtime_manifest["model"]["river_network_version_id"] == "manual_model_river"
+    assert runtime_manifest["model"]["model_package_uri"] == "models/manual_model/"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("candidate_id", "gfs:2026-05-01T00:00:00Z:model_0:wrong_scenario"),
+        ("run_id", "fcst_gfs_2026050100_other_model"),
+        ("forcing_version_id", "forc_gfs_2026050100_other_model"),
+        ("cycle_id", "gfs_2026050106"),
+        ("cycle_time", "2026050106"),
+        ("scenario_id", "wrong_scenario"),
+        ("output_uri", "s3://nhms/runs/fcst_gfs_2026050100_other_model/output/"),
+    ],
+)
+def test_prefilled_identity_mismatch_rejected_before_manifest_writes(
+    tmp_path: Path,
+    field_name: str,
+    field_value: str,
+) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+    }
+    basin[field_name] = field_value
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    assert exc_info.value.error_code == "CANDIDATE_IDENTITY_MISMATCH"
+    assert client.submissions == []
+    assert repository.hydro_runs == {}
+    assert not (tmp_path / "workspace" / "runs").exists()
+
+
+@pytest.mark.parametrize("field_name", ["candidate_id", "run_id", "run_manifest_uri", "output_uri", "model_id"])
+def test_duplicate_sibling_identity_rejected_before_manifest_writes(tmp_path: Path, field_name: str) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(2)
+    basins[0].update(
+        {
+            "run_id": "fcst_gfs_2026050100_model_0",
+            "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+            "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+            "run_manifest_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_0/input/manifest.json",
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/",
+        }
+    )
+    basins[1].update(
+        {
+            "run_id": "fcst_gfs_2026050100_model_1",
+            "candidate_id": "gfs:2026-05-01T00:00:00Z:model_1:forecast_gfs_deterministic",
+            "model_package_uri": "s3://nhms/models/model_1/v1/package/",
+            "run_manifest_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_1/input/manifest.json",
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_1/output/",
+        }
+    )
+    basins[1][field_name] = basins[0][field_name]
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert exc_info.value.error_code == "DUPLICATE_CANDIDATE_IDENTITY"
+    assert exc_info.value.details["field"] == field_name
+    assert client.submissions == []
+    assert repository.hydro_runs == {}
+    assert not (tmp_path / "workspace" / "runs").exists()
+
+
 def test_hydro_run_creation_is_idempotent_for_existing_created_status() -> None:
     repository = FakeCycleRepository()
     basin = _basins(1)[0]
@@ -437,6 +884,24 @@ def test_forecast_manifest_write_failure_marks_pipeline_failed(tmp_path: Path) -
     assert job["status"] == "submission_failed"
     assert job["error_code"] == "RUNTIME_MANIFEST_WRITE_FAILED"
     assert repository.cycle_statuses[-1] == "failed_run"
+
+
+def test_forecast_submission_failure_marks_staged_hydro_runs_failed(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    client.fail_next_array_submission_stage = "forecast"
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert {run["status"] for run in repository.hydro_runs.values()} == {"failed"}
+    assert {
+        run["error_code"]
+        for run in repository.hydro_runs.values()
+    } == {"SBATCH_SUBMISSION_FAILED"}
+    assert repository.jobs["job_cycle_gfs_2026050100_forecast"]["status"] == "submission_failed"
 
 
 def test_invalid_forecast_runtime_manifest_blocks_publish(tmp_path: Path) -> None:
@@ -632,7 +1097,11 @@ def test_partial_success_reindexes_downstream_and_keeps_partial_status(tmp_path:
         "total_basins": 3,
         "published_basins": 2,
         "excluded_basins": ["basin_1"],
+        "quality_states": publish_submission["metadata"]["quality_states"],
+        "residual_blockers": publish_submission["metadata"]["residual_blockers"],
     }
+    assert [item["model_id"] for item in publish_submission["basins"]] == ["model_0", "model_2"]
+    assert [item["model_id"] for item in publish_submission["metadata"]["quality_states"]] == ["model_0", "model_2"]
     assert repository.cycle_statuses[-1] == "parsed_partial"
 
 

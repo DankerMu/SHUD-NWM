@@ -146,3 +146,75 @@ Boundary-surface checklist:
 - Storage boundary: registry read queries, pass evidence, lock/lease storage.
 - Stale-state/idempotency boundary: deterministic candidate identity and repeated scan behavior.
 - Evidence boundary: deterministic fixture evidence cannot claim live readiness.
+
+## Issue #193 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM backend orchestration with SHUD runtime workers
+Repair intensity: high
+
+Change surface:
+- `services/orchestrator/scheduler.py` candidate metadata flowing into production execution.
+- `services/orchestrator/chain.py` cycle orchestration, model-run assembly, manifest indexes, runtime manifest generation, partial status handling, and publish/frequency handoff.
+- Worker contracts in `workers/forcing_producer`, `workers/shud_runtime`, `workers/output_parser`, `workers/flood_frequency`, and `services/tile_publisher` where existing tests require fixture-level compatibility.
+- qhh fixture tests and runbook boundaries proving production automation does not call qhh-specific continuous scripts.
+
+Must preserve:
+- #192 deterministic candidate identity, run id, forcing version id, source/scenario conventions, dry-run no-mutation evidence, and duplicate active model rejection.
+- Existing M3 array stage order: download, canonical, forcing[], forecast[], parse[], frequency[], then cycle-level publish.
+- Existing worker manifests remain compatible with current SHUD runtime, output parser, frequency, and publish tests.
+- qhh diagnostic shell scripts remain usable as diagnostic evidence only, never as a production scheduler dependency.
+
+Must add/change:
+- Production execution can assemble a reusable per-model run contract from registry/package metadata, source/cycle identity, forcing station metadata, SHUD project mode inputs, output URI, and parser/frequency/display handoff.
+- Candidate model/package/forcing/runtime identity is bound end to end across manifest index, runtime manifest, hydro run creation, worker handoff, parser input, and publish/frequency evidence.
+- Missing frequency curves, warning thresholds, station forcing, and optional weather/display inputs become explicit unavailable or quality states with residual blockers, not fabricated values.
+- A focused qhh fixture proves the production path plans and executes the same standard chain shape through generic contracts without invoking qhh-specific continuous scripts or requiring a live full-chain rerun.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - scheduler candidates transition from planning to production execution and qhh scripts must stay out of the production path.
+- Config / project setup: selected - workspace/object-store roots, source/model filters, model package URI, runtime paths, and worker command settings must remain explicit.
+- File IO / path safety / overwrite: selected - manifests, runtime inputs, outputs, and publish artifacts are assembled from package/forcing/output URIs.
+- Schema / columns / units / field names: selected - run manifest, forcing package, SHUD output river identity, parse rows, display/frequency state, and quality fields are contracts.
+- Geospatial / CRS / shapefile sidecars: not selected - #193 reuses registered package metadata; geometry parsing is not changed.
+- Time series / forcing / temporal boundaries: selected - source cycle time, forecast horizon, forcing station counts, and SHUD start/end windows must stay consistent.
+- Numerical stability / conservation / NaN: not selected - no solver algorithm change; live solver correctness is outside the deterministic fixture scope.
+- Solver runtime / performance / threading: selected - native SHUD project mode handoff, runtime manifest, and resource profile mapping affect worker execution.
+- Resource limits / large input / discovery: selected - manifest indexes and qhh fixtures must stay bounded and deterministic.
+- Legacy compatibility / examples: selected - qhh standard chain shape and existing worker/orchestrator tests must remain compatible.
+- Error handling / rollback / partial outputs: selected - missing optional inputs and partial basin success require stable unavailable/quality states and no fabricated downstream products.
+- Release / packaging / dependency compatibility: not selected - no dependency/package release change expected.
+- Documentation / migration notes: selected - production scheduler automation must be distinguished from qhh diagnostic scripts where touched.
+
+Invariant Matrix
+
+Governing invariant: one scheduler candidate's source/cycle/model identity must propagate unchanged through model package resolution, forcing production, SHUD runtime manifest, hydro run record, parser/frequency/display handoff, and evidence; unavailable optional products must be explicit state, never synthetic data.
+
+Source-of-truth identity/contract: `{source_id}:{cycle_time_utc}:{model_id}:{scenario_id}` candidate identity plus deterministic `run_id`, `forcing_version_id`, `model_package_uri`, `basin_version_id`, `river_network_version_id`, and output URI.
+
+Surfaces:
+- Producers: scheduler candidate builder; cycle basin/task manifest builders; runtime manifest builders.
+- Validators/preflight: manifest validation, package/forcing URI validation, source/scenario normalization, qhh fixture production-path assertions.
+- Storage/cache/query: object-store runtime manifests, workspace manifest indexes, `hydro.hydro_run`, forcing metadata, parsed/frequency/publish artifacts.
+- Public routes/entrypoints: production scheduler command/service path and existing orchestrator public methods used by tests.
+- Frontend/downstream consumers: output parser, flood frequency, tile publisher, monitoring/API consumers of hydro/pipeline status and display quality fields.
+- Failure paths/rollback/stale state: missing package/forcing/station metadata, missing frequency curves/warning thresholds, optional weather/display absence, partial basin failures, stale qhh diagnostic script assumptions.
+- Evidence/audit/readiness: scheduler/model-run evidence, qhh fixture evidence, quality/unavailable states, deterministic execution mode.
+
+Regression rows:
+- qhh active model candidate -> generic production chain shape uses registry/package metadata and does not invoke qhh-specific continuous scripts.
+- candidate model/package/forcing identity -> manifest index, runtime manifest, hydro run, parser input, frequency handoff, publish evidence all carry the same run/model/source/cycle identifiers.
+- missing frequency curves or warning thresholds -> explicit quality/unavailable state and residual blocker; no fabricated return periods or warning values.
+- missing station forcing or optional weather/display product -> stable unavailable/quality evidence while successful durable outputs remain reusable where valid.
+- partial model success in a cycle -> reduced downstream manifests and cycle-level publish over successful basins only.
+- unchanged non-qhh model fixture -> existing orchestrator and worker tests still pass with the same manifest schema and status contracts.
+
+Boundary-surface checklist:
+- Shared helper roots: scheduler candidate ids, cycle manifest builders, runtime manifest builders, output URI helpers.
+- Public entrypoints: scheduler production execution path and orchestrator cycle-run methods.
+- Read surfaces: registry package metadata, forcing package metadata, runtime manifest reads, parser/frequency input reads.
+- Write/delete/overwrite surfaces: workspace manifest indexes, object-store runtime manifests, hydro run records, parse/frequency/publish artifacts.
+- Staging/publish/rollback surfaces: SHUD runtime staging, parse/frequency stages, cycle-level tile publish, partial aggregate state.
+- Producer/consumer evidence boundaries: scheduler evidence, model-run evidence, worker manifests, quality/unavailable state fields.
+- Stale-state/idempotency boundaries: deterministic candidate/run/forcing ids and output URI reuse across repeated qhh fixture scans.
+- Unchanged downstream consumers: output parser, flood frequency, tile publisher, monitoring/API status readers.

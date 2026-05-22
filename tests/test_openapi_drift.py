@@ -202,6 +202,26 @@ def test_flood_return_period_feature_properties_document_stable_identity() -> No
     assert schema["properties"]["river_network_version_id"]["type"] == "string"
 
 
+def test_flood_return_period_collection_product_quality_matches_runtime_and_static_openapi() -> None:
+    static_spec = _openapi_spec()
+    fastapi_spec: dict[str, Any] = app.openapi()
+
+    static_schema = static_spec["components"]["schemas"]["FloodReturnPeriodFeatureCollection"]
+    runtime_response = fastapi_spec["paths"]["/api/v1/tiles/flood-return-period"]["get"]["responses"]["200"]
+    runtime_schema_ref = runtime_response["content"]["application/json"]["schema"]["$ref"]
+    runtime_schema = _resolve_ref(runtime_schema_ref, fastapi_spec)
+
+    assert static_schema["properties"]["product_quality"] == {
+        "type": "object",
+        "additionalProperties": True,
+        "nullable": True,
+        "description": "Flood return-period readiness evidence for the selected run.",
+    }
+    runtime_product_quality = runtime_schema["properties"]["product_quality"]
+    assert {"additionalProperties": True, "type": "object"} in runtime_product_quality["anyOf"]
+    assert {"type": "null"} in runtime_product_quality["anyOf"]
+
+
 def test_mvt_tile_z_openapi_maximum_matches_runtime_contract() -> None:
     static_spec = _openapi_spec()
     fastapi_spec: dict[str, Any] = app.openapi()

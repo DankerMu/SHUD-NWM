@@ -256,6 +256,10 @@ class SqlCaptureCursor:
             return []
         return self.rows_by_statement.pop(0)
 
+    def fetchone(self) -> dict[str, Any]:
+        rows = self.fetchall()
+        return rows[0] if rows else {}
+
 
 class _CursorTransaction:
     def __init__(self, cursor: SqlCaptureCursor) -> None:
@@ -700,6 +704,70 @@ async def test_run_list_uses_offset_limit_pagination_and_caps_limit(fake_store: 
     assert fake_store.run_calls[-1]["basin_id"] == "yangtze"
     assert fake_store.run_calls[-1]["source"] == "gfs"
     assert fake_store.run_calls[-1]["status"] == "parsed"
+
+
+@pytest.mark.asyncio
+async def test_run_list_forwards_flood_product_ready_filter(fake_store: FakeForecastStore) -> None:
+    response = await _get("/api/v1/runs?status=frequency_done&flood_product_ready=true&limit=50")
+
+    assert response.status_code == 200
+    assert fake_store.run_calls[-1]["flood_product_ready"] is True
+
+
+def test_list_runs_marks_and_filters_flood_product_readiness() -> None:
+    ready_run = {
+        "run_id": "run_ready",
+        "status": "frequency_done",
+        "cycle_time": _dt("2026-05-07T00:00:00Z"),
+        "created_at": _dt("2026-05-07T01:00:00Z"),
+        "flood_quality_max_over_window": True,
+        "flood_result_rows": 2,
+        "flood_return_period_rows": 2,
+        "flood_warning_rows": 2,
+    }
+    warning_unavailable_run = {
+        "run_id": "run_warning_unavailable",
+        "status": "frequency_done",
+        "cycle_time": _dt("2026-05-07T00:00:00Z"),
+        "created_at": _dt("2026-05-07T01:00:00Z"),
+        "flood_quality_max_over_window": True,
+        "flood_result_rows": 2,
+        "flood_return_period_rows": 2,
+        "flood_warning_rows": 0,
+    }
+    store = SqlCaptureForecastStore(
+        [[{"total_count": 1}], [ready_run], [{"total_count": 2}], [ready_run, warning_unavailable_run]]
+    )
+
+    ready_page = store.list_runs(
+        basin_id=None,
+        source=None,
+        cycle_time=None,
+        status="frequency_done",
+        flood_product_ready=True,
+        limit=50,
+        offset=0,
+    )
+    unfiltered_page = store.list_runs(
+        basin_id=None,
+        source=None,
+        cycle_time=None,
+        status="frequency_done",
+        limit=50,
+        offset=0,
+    )
+
+    ready_sql = store.cursor.executions[0][0]
+    assert "h.status IN ('frequency_done', 'published')" in ready_sql
+    assert "return_period_result" in ready_sql
+    assert ready_page["items"][0]["product_quality"]["flood_return_period"]["quality_state"] == "ready"
+    qualities = {
+        item["run_id"]: item["product_quality"]["flood_return_period"]
+        for item in unfiltered_page["items"]
+    }
+    assert qualities["run_ready"]["quality_state"] == "ready"
+    assert qualities["run_warning_unavailable"]["quality_state"] == "unavailable"
+    assert qualities["run_warning_unavailable"]["unavailable_products"] == ["warning_thresholds"]
 
 
 @pytest.mark.asyncio

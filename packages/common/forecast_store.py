@@ -594,16 +594,18 @@ class PsycopgForecastStore:
         with self._transaction() as cursor:
             row = self._fetch_optional(
                 cursor,
-                """
+                f"""
                 SELECT
                     h.*,
                     mi.river_network_version_id,
                     bv.basin_id,
-                    COALESCE(ds.adapter_name, h.source_id) AS source
+                    COALESCE(ds.adapter_name, h.source_id) AS source,
+                    {_flood_product_quality_select("fpq")}
                 FROM hydro.hydro_run h
                 LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
+                {_flood_product_quality_join("fpq")}
                 WHERE h.run_id = %s
                 """,
                 (run_id,),
@@ -615,7 +617,7 @@ class PsycopgForecastStore:
                 message=f"Run not found: {run_id}",
                 details={"run_id": run_id},
             )
-        return _json_ready(row)
+        return _hydro_run_response(row)
 
     def list_runs(
         self,
@@ -624,6 +626,7 @@ class PsycopgForecastStore:
         source: str | None,
         cycle_time: datetime | None,
         status: str | None,
+        flood_product_ready: bool | None = None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
@@ -641,6 +644,9 @@ class PsycopgForecastStore:
         if status is not None:
             clauses.append("h.status = %s")
             params.append(status)
+        if flood_product_ready is True:
+            clauses.append("h.status IN ('frequency_done', 'published')")
+            clauses.append(_flood_product_ready_sql("fpq"))
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._transaction() as cursor:
@@ -650,6 +656,7 @@ class PsycopgForecastStore:
                 FROM hydro.hydro_run h
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
+                {_flood_product_quality_join("fpq")}
                 {where}
                 """,
                 tuple(params),
@@ -662,11 +669,13 @@ class PsycopgForecastStore:
                     h.*,
                     mi.river_network_version_id,
                     bv.basin_id,
-                    COALESCE(ds.adapter_name, h.source_id) AS source
+                    COALESCE(ds.adapter_name, h.source_id) AS source,
+                    {_flood_product_quality_select("fpq")}
                 FROM hydro.hydro_run h
                 LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
+                {_flood_product_quality_join("fpq")}
                 {where}
                 ORDER BY h.cycle_time DESC NULLS LAST, h.created_at DESC, h.run_id
                 LIMIT %s OFFSET %s
@@ -675,7 +684,7 @@ class PsycopgForecastStore:
             )
         return {
             "total_count": total_count,
-            "items": [_json_ready(row) for row in rows],
+            "items": [_hydro_run_response(row) for row in rows],
             "limit": limit,
             "offset": offset,
         }
@@ -971,6 +980,136 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [_json_ready(item) for item in value]
     return value
+
+
+def _hydro_run_response(row: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    product_quality = _flood_product_quality_from_row(payload)
+    for key in (
+        "flood_result_rows",
+        "flood_return_period_rows",
+        "flood_warning_rows",
+        "flood_quality_max_over_window",
+    ):
+        payload.pop(key, None)
+    payload["product_quality"] = {"flood_return_period": product_quality}
+    return _json_ready(payload)
+
+
+def _flood_product_quality_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    result_rows = int(row.get("flood_result_rows") or 0)
+    return_period_rows = int(row.get("flood_return_period_rows") or 0)
+    warning_rows = int(row.get("flood_warning_rows") or 0)
+    unavailable_products: list[str] = []
+    residual_blockers: list[dict[str, Any]] = []
+    run_id = str(row.get("run_id") or "")
+
+    if return_period_rows <= 0:
+        unavailable_products.append("return_period_result")
+        residual_blockers.append(
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": "No non-null peak return-period rows are available for this run.",
+            }
+        )
+    elif result_rows > return_period_rows:
+        unavailable_products.append("frequency_curves")
+        residual_blockers.append(
+            {
+                "code": "FREQUENCY_CURVES_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": "Some peak rows have null return_period because frequency curves are unavailable.",
+            }
+        )
+    if return_period_rows > 0 and warning_rows < return_period_rows:
+        unavailable_products.append("warning_thresholds")
+        residual_blockers.append(
+            {
+                "code": "WARNING_THRESHOLDS_UNAVAILABLE",
+                "state": "unavailable",
+                "run_id": run_id,
+                "residual_risk": "warning_level remains null for peak return-period rows.",
+            }
+        )
+
+    quality_state = "ready"
+    if "warning_thresholds" in unavailable_products or "return_period_result" in unavailable_products:
+        quality_state = "unavailable"
+    elif unavailable_products:
+        quality_state = "degraded"
+
+    return {
+        "quality_state": quality_state,
+        "max_over_window": bool(row.get("flood_quality_max_over_window")) if result_rows > 0 else None,
+        "result_rows": result_rows,
+        "return_period_rows": return_period_rows,
+        "warning_rows": warning_rows,
+        "unavailable_products": unavailable_products,
+        "residual_blockers": residual_blockers,
+    }
+
+
+def _flood_product_quality_join(alias: str) -> str:
+    return f"""
+                LEFT JOIN (
+                    SELECT run_id,
+                           CASE
+                               WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) > 0
+                               THEN true
+                               WHEN COUNT(*) > 0
+                               THEN false
+                               ELSE NULL
+                           END AS quality_max_over_window,
+                           CASE
+                               WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) > 0
+                               THEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END)
+                               ELSE COUNT(*)
+                           END AS result_rows,
+                           CASE
+                               WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) > 0
+                               THEN SUM(
+                                   CASE
+                                       WHEN max_over_window = true AND return_period IS NOT NULL THEN 1
+                                       ELSE 0
+                                   END
+                               )
+                               ELSE SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END)
+                           END AS return_period_rows,
+                           CASE
+                               WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) > 0
+                               THEN SUM(
+                                   CASE
+                                       WHEN max_over_window = true AND warning_level IS NOT NULL THEN 1
+                                       ELSE 0
+                                   END
+                               )
+                               ELSE SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END)
+                           END AS warning_rows
+                    FROM flood.return_period_result
+                    GROUP BY run_id
+                ) {alias} ON {alias}.run_id = h.run_id
+    """
+
+
+def _flood_product_quality_select(alias: str) -> str:
+    return f"""
+                    COALESCE({alias}.quality_max_over_window, NULL) AS flood_quality_max_over_window,
+                    COALESCE({alias}.result_rows, 0) AS flood_result_rows,
+                    COALESCE({alias}.return_period_rows, 0) AS flood_return_period_rows,
+                    COALESCE({alias}.warning_rows, 0) AS flood_warning_rows
+    """
+
+
+def _flood_product_ready_sql(alias: str) -> str:
+    return f"""
+            COALESCE({alias}.result_rows, 0) > 0
+            AND COALESCE({alias}.return_period_rows, 0) > 0
+            AND COALESCE({alias}.return_period_rows, 0) = COALESCE({alias}.result_rows, 0)
+            AND COALESCE({alias}.warning_rows, 0) = COALESCE({alias}.return_period_rows, 0)
+    """
 
 
 def analysis_window_for_issue_time(issue_time: datetime) -> tuple[datetime, datetime]:

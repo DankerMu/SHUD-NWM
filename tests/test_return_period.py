@@ -63,6 +63,37 @@ def test_no_frequency_curve_writes_null_result() -> None:
         assert row["return_period"] is None
         assert row["warning_level"] is None
         assert row["quality_flag"] == "no_frequency_curve"
+        assert result.quality_state == "unavailable"
+        assert result.unavailable_products == ("frequency_curves",)
+        assert result.residual_blockers[0]["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
+        assert result.residual_blockers[0]["quality_flag"] == "no_frequency_curve"
+        assert _tile_layer_count(session) == 0
+
+
+def test_warning_thresholds_unavailable_keeps_warning_null_with_curve() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [260.0, 300.0]})
+
+        result = compute_return_periods(
+            "forecast_run",
+            session,
+            quality_contract={
+                "state": "unavailable",
+                "unavailable_products": ["warning_thresholds"],
+            },
+        )
+
+        row = _result_row(session, segment_id="seg_001", max_over_window=True)
+        assert result.with_curve == 1
+        assert row["return_period"] is not None
+        assert row["warning_level"] is None
+        assert row["quality_flag"] == "warning_thresholds_unavailable"
+        assert result.quality_state == "unavailable"
+        assert result.unavailable_products == ("warning_thresholds",)
+        assert result.residual_blockers[0]["code"] == "WARNING_THRESHOLDS_UNAVAILABLE"
+        assert "warning_level remains null" in result.residual_blockers[0]["residual_risk"]
+        assert _tile_layer_count(session) == 0
 
 
 def test_partial_sample_degrades_to_highest_reliable_warning_level() -> None:
@@ -164,8 +195,42 @@ def test_state_machine_success_transitions_parsed_to_frequency_done() -> None:
 
         run = _run_row(session)
         job = _pipeline_job_row(session)
-        assert run["status"] == "frequency_done"
-        assert job["status"] == "succeeded"
+        layer = _tile_layer_row(session)
+    assert run["status"] == "frequency_done"
+    assert job["status"] == "succeeded"
+    assert layer["published_flag"] in (True, 1)
+
+
+def test_frequency_pipeline_job_uses_canonical_cycle_id_for_datetime_cycle_time() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
+
+        compute_return_periods("forecast_run", session)
+
+        job = _pipeline_job_row(session)
+        assert job["cycle_id"] == "gfs_2026050100"
+
+
+def test_frequency_pipeline_job_uses_canonical_cycle_id_for_string_cycle_time() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
+        session.execute(
+            text(
+                """
+                UPDATE hydro.hydro_run
+                SET cycle_time = '2026-05-01T00:00:00Z'
+                WHERE run_id = 'forecast_run'
+                """
+            )
+        )
+        session.commit()
+
+        compute_return_periods("forecast_run", session)
+
+        job = _pipeline_job_row(session)
+        assert job["cycle_id"] == "gfs_2026050100"
 
 
 def test_state_machine_failure_keeps_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -352,6 +417,7 @@ def _attach_schemas(engine: Engine) -> None:
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS hydro")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS flood")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
 
 
 def _create_tables(connection: Any) -> None:
@@ -474,6 +540,28 @@ def _create_tables(connection: Any) -> None:
                 error_message TEXT,
                 created_at DATETIME,
                 updated_at DATETIME
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE map.tile_layer (
+                layer_id TEXT PRIMARY KEY,
+                layer_type TEXT NOT NULL,
+                source_run_id TEXT,
+                source_product_id TEXT,
+                variable TEXT,
+                valid_time DATETIME,
+                tile_format TEXT NOT NULL,
+                tile_uri_template TEXT NOT NULL,
+                min_zoom INTEGER NOT NULL DEFAULT 0,
+                max_zoom INTEGER NOT NULL DEFAULT 14,
+                style_json TEXT,
+                published_flag BOOLEAN NOT NULL DEFAULT 0,
+                publish_time DATETIME,
+                created_at DATETIME
             )
             """
         )
@@ -643,3 +731,11 @@ def _run_row(session: Session) -> dict[str, Any]:
 
 def _pipeline_job_row(session: Session) -> dict[str, Any]:
     return dict(session.execute(text("SELECT * FROM ops.pipeline_job")).mappings().one())
+
+
+def _tile_layer_count(session: Session) -> int:
+    return int(session.execute(text("SELECT COUNT(*) FROM map.tile_layer")).scalar_one())
+
+
+def _tile_layer_row(session: Session) -> dict[str, Any]:
+    return dict(session.execute(text("SELECT * FROM map.tile_layer")).mappings().one())

@@ -784,7 +784,38 @@ def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
                    mi.river_network_version_id
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
+            JOIN (
+                SELECT run_id,
+                       SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) AS max_result_rows,
+                       SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                           AS max_return_period_rows,
+                       SUM(CASE WHEN max_over_window = true AND warning_level IS NOT NULL THEN 1 ELSE 0 END)
+                           AS max_warning_rows,
+                       COUNT(*) AS result_rows,
+                       SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
+                       SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows
+                FROM flood.return_period_result
+                GROUP BY run_id
+            ) product_quality ON product_quality.run_id = h.run_id
             WHERE h.status IN ('frequency_done', 'published')
+              AND CASE
+                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_result_rows
+                    ELSE product_quality.result_rows
+                  END > 0
+              AND CASE
+                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_return_period_rows
+                    ELSE product_quality.return_period_rows
+                  END = CASE
+                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_result_rows
+                    ELSE product_quality.result_rows
+                  END
+              AND CASE
+                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_warning_rows
+                    ELSE product_quality.warning_rows
+                  END = CASE
+                    WHEN product_quality.max_result_rows > 0 THEN product_quality.max_return_period_rows
+                    ELSE product_quality.return_period_rows
+                  END
             ORDER BY h.cycle_time DESC, h.run_id DESC
             LIMIT 1
             """
