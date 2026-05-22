@@ -854,6 +854,7 @@ def flood_return_period_mvt_tile(
     _validate_supported_flood_duration(duration)
     validate_xyz(z, x, y)
     run = _require_frequency_ready(session, run_id)
+    _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
     _require_flood_route_product_ready(
         session,
         run_id=run_id,
@@ -1385,7 +1386,7 @@ def _require_flood_route_product_ready(
                 ),
             }
         )
-    if return_period_rows > 0 and warning_rows <= 0:
+    if return_period_rows > 0 and warning_rows < return_period_rows:
         unavailable_products.append("warning_thresholds")
         residual_blockers.append(
             {
@@ -1395,8 +1396,7 @@ def _require_flood_route_product_ready(
                 "residual_risk": "warning_level remains null for requested tile rows.",
             }
         )
-    blocking_products = [product for product in unavailable_products if product != "frequency_curves"]
-    if return_period_rows <= 0 or blocking_products:
+    if unavailable_products:
         raise ApiError(
             status_code=409,
             code="FLOOD_PRODUCT_UNAVAILABLE",
@@ -1410,6 +1410,13 @@ def _require_flood_route_product_ready(
                 "result_rows": result_rows,
                 "return_period_rows": return_period_rows,
                 "warning_rows": warning_rows,
+                "return_period_result": (
+                    "unavailable" if "return_period_result" in unavailable_products else "available"
+                ),
+                "frequency_curves": "unavailable" if "frequency_curves" in unavailable_products else "available",
+                "warning_thresholds": (
+                    "unavailable" if "warning_thresholds" in unavailable_products else "available"
+                ),
                 "unavailable_products": unavailable_products,
                 "residual_blockers": residual_blockers,
             },

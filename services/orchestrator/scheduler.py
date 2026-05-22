@@ -83,6 +83,9 @@ class CycleDiscoveryAdapter(Protocol):
 
 
 class ActiveCandidateRepository(Protocol):
+    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+        raise NotImplementedError
+
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         raise NotImplementedError
 
@@ -722,8 +725,19 @@ class ProductionScheduler:
         skipped: list[dict[str, Any]] = []
         duplicate_exclusions: list[dict[str, Any]] = []
         seen_candidate_ids: set[str] = set()
+        active_orchestration_provider = (
+            getattr(self.active_repository, "has_active_orchestration", None)
+            if self.active_repository is not None
+            else None
+        )
+        completed_provider = (
+            getattr(self.active_repository, "has_completed_pipeline", None)
+            if self.active_repository is not None
+            else None
+        )
         for cycle in cycles:
             discovery = cycle.discovery
+            has_active_orchestration: bool | None = None
             for model in models:
                 if len(candidates) + len(blocked) + len(skipped) >= MAX_CANDIDATES:
                     raise SchedulerResourceLimitError(
@@ -748,6 +762,17 @@ class ProductionScheduler:
                 if not discovery.available:
                     blocked.append(_blocked_candidate(candidate, "source_cycle_unavailable"))
                     continue
+                if has_active_orchestration is None:
+                    has_active_orchestration = bool(
+                        callable(active_orchestration_provider)
+                        and active_orchestration_provider(
+                            source_id=discovery.source_id,
+                            cycle_time=discovery.cycle_time,
+                        )
+                    )
+                if has_active_orchestration:
+                    skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
+                    continue
                 if self.active_repository is not None and self.active_repository.has_active_pipeline(
                     source_id=discovery.source_id,
                     cycle_time=discovery.cycle_time,
@@ -755,11 +780,6 @@ class ProductionScheduler:
                 ):
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                     continue
-                completed_provider = (
-                    getattr(self.active_repository, "has_completed_pipeline", None)
-                    if self.active_repository is not None
-                    else None
-                )
                 if callable(completed_provider) and completed_provider(
                     source_id=discovery.source_id,
                     cycle_time=discovery.cycle_time,

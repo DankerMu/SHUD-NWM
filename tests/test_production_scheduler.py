@@ -655,6 +655,152 @@ def test_completed_duplicate_pipeline_is_skipped_before_submission(tmp_path: Pat
     assert orchestrator.calls == []
 
 
+def test_active_cycle_orchestration_without_hydro_state_skips_all_candidates(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeActiveCycleOrchestrationRepository()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert [item["reason"] for item in result.evidence["skipped_candidates"]] == [
+        "active_duplicate_pipeline",
+        "active_duplicate_pipeline",
+    ]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert active_repository.orchestration_checks == [("gfs", _dt("2026-05-21T06:00:00Z"))]
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "frequency_done", "published", "complete"])
+def test_completed_hydro_state_is_skipped_as_completed_not_active(
+    tmp_path: Path,
+    hydro_status: str,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeHydroStateRepository(hydro_status=hydro_status)
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["skipped_candidates"][0]["reason"] == "completed_duplicate_pipeline"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize(
+    "hydro_status",
+    ["failed", "cancelled", "submission_failed", "permanently_failed"],
+)
+def test_terminal_failed_or_cancelled_hydro_state_remains_candidate(
+    tmp_path: Path,
+    hydro_status: str,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeHydroStateRepository(hydro_status=hydro_status)
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert len(result.evidence["candidates"]) == 1
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert len(orchestrator.calls) == 1
+
+
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+def test_active_hydro_state_is_skipped_as_active(
+    tmp_path: Path,
+    hydro_status: str,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeHydroStateRepository(hydro_status=hydro_status)
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["skipped_candidates"][0]["reason"] == "active_duplicate_pipeline"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize("job_status", ["pending", "submitted", "running"])
+def test_active_cycle_pipeline_job_is_skipped_as_active(tmp_path: Path, job_status: str) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeHydroStateRepository(hydro_status="failed", pipeline_status=job_status)
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["skipped_candidates"][0]["reason"] == "active_duplicate_pipeline"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize(
+    "job_status",
+    ["succeeded", "partially_failed", "failed", "cancelled", "submission_failed", "permanently_failed", None],
+)
+def test_terminal_or_missing_pipeline_job_is_not_active(tmp_path: Path, job_status: str | None) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeHydroStateRepository(hydro_status="failed", pipeline_status=job_status)
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert len(result.evidence["candidates"]) == 1
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert len(orchestrator.calls) == 1
+
+
 def test_default_non_dry_run_blocks_before_mutation_without_safe_preflight(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     scheduler = ProductionScheduler(
@@ -1198,6 +1344,10 @@ class FakeActiveRepository:
         self.active = active
         self.completed = completed
 
+    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+        del source_id, cycle_time
+        return False
+
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         del source_id, cycle_time, model_id
         return self.active
@@ -1205,6 +1355,50 @@ class FakeActiveRepository:
     def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         del source_id, cycle_time, model_id
         return self.completed
+
+
+class FakeActiveCycleOrchestrationRepository:
+    def __init__(self) -> None:
+        self.orchestration_checks: list[tuple[str, datetime]] = []
+
+    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+        self.orchestration_checks.append((source_id, cycle_time))
+        return True
+
+    def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        del source_id, cycle_time, model_id
+        raise AssertionError("cycle-level active orchestration must skip before per-model active checks")
+
+    def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        del source_id, cycle_time, model_id
+        raise AssertionError("cycle-level active orchestration must skip before per-model completed checks")
+
+
+class FakeHydroStateRepository:
+    active_statuses = {"created", "staged", "submitted", "running"}
+    completed_statuses = {"succeeded", "parsed", "frequency_done", "published", "complete"}
+    terminal_job_statuses = {
+        "succeeded",
+        "partially_failed",
+        "failed",
+        "cancelled",
+        "submission_failed",
+        "permanently_failed",
+    }
+
+    def __init__(self, *, hydro_status: str, pipeline_status: str | None = None) -> None:
+        self.hydro_status = hydro_status
+        self.pipeline_status = pipeline_status
+
+    def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        del source_id, cycle_time, model_id
+        if self.hydro_status in self.active_statuses:
+            return True
+        return self.pipeline_status is not None and self.pipeline_status not in self.terminal_job_statuses
+
+    def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        del source_id, cycle_time, model_id
+        return self.hydro_status in self.completed_statuses
 
 
 class FakeProductionOrchestrator:

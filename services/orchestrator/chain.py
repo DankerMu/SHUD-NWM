@@ -31,7 +31,7 @@ TERMINAL_JOB_STATUSES = {
     "submission_failed",
     "permanently_failed",
 }
-ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running", "succeeded"}
+ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}
 COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
@@ -3097,23 +3097,44 @@ class PsycopgOrchestratorRepository:
         return row is not None
 
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        cycle_id = cycle_id_for(source_id, cycle_time)
+        cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
         row = self._fetch_optional(
             """
             SELECT 1 AS active
             FROM hydro.hydro_run h
-            LEFT JOIN ops.pipeline_job pj ON pj.run_id = h.run_id
             WHERE h.source_id = %s
               AND h.cycle_time = %s
               AND h.model_id = %s
-              AND (
-                    h.status::text = ANY(%s)
-                 OR COALESCE(pj.status, 'pending') NOT IN (
-                    'succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed', 'permanently_failed'
-                 )
+              AND h.status::text = ANY(%s)
+            UNION ALL
+            SELECT 1 AS active
+            FROM hydro.hydro_run h
+            JOIN ops.pipeline_job pj
+              ON pj.run_id = h.run_id
+              OR (
+                pj.cycle_id = %s
+                AND (pj.run_id = %s OR pj.model_id IS NULL)
+              )
+            WHERE h.source_id = %s
+              AND h.cycle_time = %s
+              AND h.model_id = %s
+              AND pj.status NOT IN (
+                'succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed', 'permanently_failed'
               )
             LIMIT 1
             """,
-            (source_id, cycle_time, model_id, list(ACTIVE_HYDRO_STATUSES)),
+            (
+                source_id,
+                cycle_time,
+                model_id,
+                list(ACTIVE_HYDRO_STATUSES),
+                cycle_id,
+                cycle_run_id,
+                source_id,
+                cycle_time,
+                model_id,
+            ),
         )
         return row is not None
 
