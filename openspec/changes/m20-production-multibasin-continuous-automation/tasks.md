@@ -29,8 +29,21 @@
 - [ ] 3.3 Support array-capable forcing, forecast, parse, and frequency model stages with task-level manifest indexes; keep display publish cycle-level unless a new publish contract is added.
 - [ ] 3.4 Persist Slurm job id, array task id, state, exit code, and log URI in existing pipeline fields, and persist elapsed time, MaxRSS, and resource metrics in pipeline event details or scheduler evidence artifacts unless a migration adds dedicated columns.
 - [ ] 3.5 Add tests for Slurm preflight rejection, safe export/env handling, array partial success, and accounting evidence.
+- [ ] 3.6 For issue #194, include regression evidence for every row in the Issue #194 Invariant Matrix:
+  - Slurm enabled with missing or localhost `DATABASE_URL` -> preflight blocker before Slurm submit, with no active pipeline submission.
+  - Slurm enabled with missing or out-of-root workspace/object-store/log/runtime roots -> storage preflight blocker before Slurm submit.
+  - Allowed Slurm template/resource/env -> gateway submit receives allowlisted template and shell-safe bounded env without secret leakage.
+  - Array forcing/forecast/parse/frequency partial failure -> task-level state persists, downstream manifest is reduced to successful eligible model tasks, and aggregate status uses `_partial`.
+  - Slurm accounting available -> job id, array task id, state, exit code, log URI, elapsed, MaxRSS/resource metrics appear in pipeline event details or scheduler evidence.
+  - Slurm accounting unavailable/malformed -> stable evidence gap/blocker without fabricated metrics.
+  - Repeated scan with active Slurm job -> no duplicate submission.
+  - Cancellation -> Slurm cancel contract is called and no replacement work is submitted in the same pass.
+  - Unchanged non-Slurm/mock path -> existing dry-run, deterministic fixture, and worker/orchestrator tests still pass.
+- [ ] 3.7 Required verification for #194: `uv run pytest -q tests/test_production_slurm_validation.py tests/test_slurm_array_contract.py tests/test_production_scheduler.py tests/test_orchestration_chain.py` plus any Slurm gateway tests touched by the implementation, `uv run ruff check .`, and `openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive`.
 
 ## 4. State, Idempotency, and Retry
+
+Issue scope note: section 4 is implemented by #195. #194 may touch active Slurm skip or cancellation evidence only where required by section 3's Slurm submission invariant; full retry/cancellation policy belongs to #195.
 
 - [ ] 4.1 Persist candidate/stage state through `ops.pipeline_job`, `ops.pipeline_event`, `met.forecast_cycle`, `met.forcing_version`, and `hydro.hydro_run` where applicable.
 - [ ] 4.2 Implement skip behavior for terminal successful candidates, including `succeeded`, `parsed`, `frequency_done`, and `published` hydro runs, and active submitted/running Slurm jobs.
@@ -39,6 +52,8 @@
 - [ ] 4.5 Add tests for repeated scheduler scans, active-job skip, terminal skip, source unavailable retry, parse-after-SHUD retry, transient task retry, permanent failure guard, and cancellation.
 
 ## 5. Evidence, Operations, and Validation
+
+Issue scope note: section 5 is implemented by #196. #194 should emit only the Slurm preflight/submission/accounting evidence needed for section 3; operator docs, readiness ingestion, and deterministic-vs-live validation are completed by #196.
 
 - [ ] 5.1 Emit scheduler pass and model-run evidence with execution mode, candidate counts, selected model filters, skip/block reasons, artifact paths, forcing station counts, parsed row counts, segment counts, display states, quality flags, Slurm accounting, resource metrics, and residual blockers.
 - [ ] 5.2 Add dry-run output and operator-facing command documentation/runbook for production scheduler use, including explicit no-download/no-Slurm/no-SHUD/no-hydro-met-mutation behavior.

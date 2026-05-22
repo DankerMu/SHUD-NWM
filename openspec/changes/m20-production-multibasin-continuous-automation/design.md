@@ -218,3 +218,81 @@ Boundary-surface checklist:
 - Producer/consumer evidence boundaries: scheduler evidence, model-run evidence, worker manifests, quality/unavailable state fields.
 - Stale-state/idempotency boundaries: deterministic candidate/run/forcing ids and output URI reuse across repeated qhh fixture scans.
 - Unchanged downstream consumers: output parser, flood frequency, tile publisher, monitoring/API status readers.
+
+## Issue #194 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM backend orchestration with Slurm gateway integration
+Repair intensity: high
+
+Change surface:
+- `services/orchestrator/scheduler.py` Slurm-enabled candidate submission and preflight blockers.
+- `services/orchestrator/chain.py` stage submission, array-capable task manifests, partial downstream manifest reduction, and publish-stage aggregation.
+- `services/slurm_gateway/*` real/mock backend contracts, sbatch template allowlist, export/env handling, status/accounting parsing, and cancellation/status fields where touched.
+- `services/orchestrator/persistence.py` and `ops.pipeline_job` / `ops.pipeline_event` state and accounting evidence where existing fields support persistence.
+- Tests for Slurm preflight rejection, safe export/env handling, array partial success, and accounting/resource evidence.
+
+Must preserve:
+- #192 deterministic candidate identity, lock/dry-run no-mutation behavior, and source/model discovery semantics.
+- #193 model-run assembly identity/output URI/product-quality contracts and reduced-manifest partial behavior.
+- Existing M3 stage order: `download -> canonical -> forcing[] -> forecast[] -> parse[] -> frequency[] -> publish`.
+- Existing sbatch template allowlist and Slurm gateway security expectations; scheduler must not construct unsafe shell exports or bypass template validation.
+- Display/tile publish remains cycle-level unless this issue adds and tests a new per-model publish contract; default scope is cycle-level publish.
+
+Must add/change:
+- Slurm mode performs compute-node preflight before submission: `DATABASE_URL` must be present and not localhost-only; workspace/object-store/log/runtime dependency roots must be configured, contained under allowed project/production roots, and suitable for compute-node visibility.
+- Scheduler/orchestrator submit through the real/mock Slurm gateway when Slurm execution is enabled, with preflight blockers recorded as evidence and no Slurm job created on blocker.
+- Forcing, forecast, parse, and frequency stages support array/task-level status and manifest indexes; downstream stages receive only successful eligible model entries after partial failures.
+- Slurm job id, array task id, state, exit code, log URI, elapsed time, MaxRSS, and resource metrics are persisted in existing pipeline fields or `ops.pipeline_event.details` / scheduler evidence when no dedicated column exists.
+- Safe env/export handling rejects secret leakage, shell injection, unsafe template names, and unbounded user/config values.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - scheduler Slurm mode and operator-facing preflight/cancellation/status paths are public operational entrypoints.
+- Config / project setup: selected - database URL, workspace/object-store/log/runtime roots, Slurm templates, resource profiles, and compute-node visibility are configuration boundaries.
+- File IO / path safety / overwrite: selected - sbatch scripts, log roots, workspace/object-store roots, manifest indexes, and evidence artifacts cross storage trust boundaries.
+- Schema / columns / units / field names: selected - pipeline job/event details, Slurm ids, array task ids, state, exit code, elapsed, MaxRSS, and resource metric field names are persistent contracts.
+- Geospatial / CRS / shapefile sidecars: not selected - this issue routes existing model artifacts and does not parse or transform geometry.
+- Time series / forcing / temporal boundaries: selected - source/cycle identity and forcing/forecast task manifests must preserve cycle time and stage order.
+- Numerical stability / conservation / NaN: not selected - no solver algorithm or numerical output computation changes are required.
+- Solver runtime / performance / threading: selected - SHUD runtime is submitted under Slurm and resource/accounting evidence affects runtime operations.
+- Resource limits / large input / discovery: selected - array fan-out, manifest indexes, Slurm polling/accounting, and log/evidence reads must be bounded.
+- Legacy compatibility / examples: selected - qhh diagnostic scripts and existing non-Slurm/mock orchestrator tests must keep working.
+- Error handling / rollback / partial outputs: selected - preflight blockers, partial array failure, submission failure, accounting gaps, and cancellation need stable evidence and no duplicate submission.
+- Release / packaging / dependency compatibility: selected - compute-node runtime dependencies and sbatch template allowlist are deployment-sensitive.
+- Documentation / migration notes: selected - any new Slurm mode/config expectations must be discoverable through OpenSpec/runbook or inline operator evidence; full operator docs are completed in #196.
+
+Invariant Matrix
+
+Governing invariant: Slurm-enabled production scheduling must either reject unsafe/unreachable execution before submission or submit bounded, identity-preserving stage jobs whose task-level outcomes and accounting evidence drive downstream partial manifests without duplicate or fabricated success.
+
+Source-of-truth identity/contract: `{source_id}:{cycle_time_utc}:{model_id}:{scenario_id}` candidate identity plus deterministic `run_id`, `forcing_version_id`, stage name, Slurm job id, optional array task id, pipeline job id, and task manifest entry identity.
+
+Surfaces:
+- Producers: scheduler candidate execution; orchestrator stage manifest builders; Slurm job submission builders; mock/real gateway job records.
+- Validators/preflight: database reachability checks, root/path containment and visibility checks, sbatch template allowlist, safe env/export serialization, runtime dependency checks.
+- Storage/cache/query: `ops.pipeline_job`, `ops.pipeline_event.details`, scheduler evidence artifacts, workspace manifest indexes, Slurm log URI paths, object-store roots.
+- Public routes/entrypoints: scheduler CLI/service run-once/continuous Slurm mode; `ForecastOrchestrator.orchestrate_cycle`; Slurm gateway submit/status/accounting/cancel methods.
+- Frontend/downstream consumers: existing pipeline status readers, output parser/frequency/publisher consumers of reduced manifests, monitoring/API consumers of job status and accounting evidence.
+- Failure paths/rollback/stale state: localhost/missing DB, missing/out-of-root roots, unsafe template/env, submission failure, partial array failure, accounting unavailable, cancellation, repeated scans with active Slurm jobs.
+- Evidence/audit/readiness: preflight blocker evidence, submitted job/task evidence, partial aggregate evidence, Slurm accounting/resource metrics, deterministic fixture marker, no final live-readiness overclaim.
+
+Regression rows:
+- Slurm enabled + missing or localhost `DATABASE_URL` -> preflight blocker before Slurm submit, no pipeline job submitted as active.
+- Slurm enabled + workspace/object-store/log/runtime root missing or outside allowed roots -> storage preflight blocker before Slurm submit.
+- Slurm enabled + allowed template/resource profile/env -> gateway submit receives allowlisted template and shell-safe bounded env without leaking secrets.
+- forcing/forecast/parse/frequency array with one failed task and successful siblings -> task states persist, downstream manifest contains only successful eligible siblings, aggregate state uses `_partial`.
+- accounting available for job/array task -> pipeline job/event or scheduler evidence records job id, array task id, state, exit code, log URI, elapsed, MaxRSS/resource metrics.
+- accounting unavailable or malformed -> stable evidence gap/blocker without crashing or fabricating metrics.
+- repeated scan with active Slurm job for same candidate/stage -> skip/resume evidence, no duplicate submission.
+- cancellation for active Slurm job -> gateway cancel called, cancelled state/event recorded, no replacement work in the same pass.
+- unchanged non-Slurm/mock path -> existing dry-run, deterministic fixture, and mock-orchestrator tests keep passing.
+
+Boundary-surface checklist:
+- Shared helper roots: scheduler preflight/submission helpers, orchestrator stage submission helpers, Slurm gateway config/env/accounting parsers.
+- Public entrypoints: scheduler Slurm mode CLI/service path, orchestrator cycle-run methods, Slurm gateway submit/status/accounting/cancel.
+- Read surfaces: database URL/config, workspace/object-store/log/runtime roots, sbatch templates, resource profiles, Slurm status/accounting output, manifest indexes.
+- Write/delete/overwrite surfaces: pipeline jobs/events, scheduler evidence files, Slurm log paths, workspace task manifests.
+- Staging/publish/rollback surfaces: array stage task manifests, reduced downstream manifests, cycle-level publish after partial success, cancellation/failed submission evidence.
+- Producer/consumer evidence boundaries: job/task status, accounting metrics, resource evidence, preflight blockers, downstream manifest eligibility.
+- Stale-state/idempotency boundaries: active Slurm job detection, repeated scans, partial retry eligibility, cancellation no-replacement-in-pass.
+- Unchanged downstream consumers: qhh diagnostic lane, non-Slurm orchestrator tests, output parser, flood frequency, tile publisher, monitoring/API status readers.

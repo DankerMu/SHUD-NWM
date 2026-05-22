@@ -37,3 +37,10 @@ THEN job id, array task ids, state, exit code, elapsed time, MaxRSS when availab
 WHEN Slurm execution is enabled and workspace, object-store, runtime dependency, or log roots are missing, outside configured production/project roots, or not visible to compute nodes
 THEN the scheduler rejects submission before creating Slurm jobs
 AND records a storage preflight blocker.
+
+#### Scenario: safe template and environment export
+
+WHEN the scheduler submits through the real or mock Slurm gateway
+THEN the submitted job uses only an allowlisted sbatch template for the requested stage
+AND exported environment/config values are shell-safe, bounded, and redacted from evidence when sensitive
+AND secret leakage, shell metacharacter injection, and unrecognized template names are rejected before submission.
