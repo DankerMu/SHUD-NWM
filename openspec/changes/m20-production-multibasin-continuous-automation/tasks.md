@@ -5,6 +5,7 @@
 - [ ] 1.3 Implement active registered basin/model discovery from the registry with complete model, basin, river network, package URI, and resource profile metadata; default to all active runnable models and record explicit operator filters.
 - [ ] 1.4 Implement GFS/IFS cycle candidate discovery with source-specific availability, horizon, lag, and unavailable/block reason evidence without writing unsupported enum states.
 - [ ] 1.5 Add deterministic candidate identity, run id, forcing version id, duplicate active model rejection, lock contention, and dry-run no-mutation tests.
+- [ ] 1.6 For issue #192, include regression evidence for every row in the Issue #192 Invariant Matrix: all-active discovery, explicit filter evidence, lock contention, dry-run no-mutation, unavailable IFS reason storage, and duplicate active model rejection.
 
 ## 2. Full-Chain Model-Run Assembly
 
