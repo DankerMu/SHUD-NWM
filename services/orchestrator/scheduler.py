@@ -17,7 +17,14 @@ from uuid import uuid4
 
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.redaction import redact_payload
-from packages.common.slurm_env import is_sensitive_slurm_env_key, secret_bearing_url_reason
+from packages.common.slurm_env import (
+    is_sensitive_slurm_env_key,
+    iter_secret_manifest_findings,
+    reserved_slurm_env_reason,
+    secret_bearing_url_reason,
+    secret_manifest_key_reason,
+    secret_manifest_value_reason,
+)
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
@@ -250,9 +257,9 @@ class RegisteredSchedulerModel:
             "basin_version_id": self.basin_version_id,
             "river_network_version_id": self.river_network_version_id,
             "segment_count": self.segment_count,
-            "model_package_uri": self.model_package_uri,
+            "model_package_uri": _redact_secret_manifest_for_evidence(self.model_package_uri, "model_package_uri"),
             "shud_code_version": self.shud_code_version,
-            "resource_profile": dict(self.resource_profile_summary),
+            "resource_profile": _redact_secret_manifest_for_evidence(dict(self.resource_profile_summary)),
             "display_capabilities": dict(self.display_capabilities),
             "frequency_capabilities": dict(self.frequency_capabilities),
         }
@@ -291,8 +298,8 @@ class SchedulerCandidate:
             "basin_version_id": self.basin_version_id,
             "river_network_version_id": self.river_network_version_id,
             "segment_count": self.segment_count,
-            "model_package_uri": self.model_package_uri,
-            "resource_profile": dict(self.resource_profile),
+            "model_package_uri": _redact_secret_manifest_for_evidence(self.model_package_uri, "model_package_uri"),
+            "resource_profile": _redact_secret_manifest_for_evidence(dict(self.resource_profile)),
             "display_capabilities": dict(self.display_capabilities),
             "frequency_capabilities": dict(self.frequency_capabilities),
             "horizon": dict(self.horizon),
@@ -572,6 +579,36 @@ class ProductionScheduler:
                 basins.append(basin_manifest)
             if not basins:
                 continue
+            if self.config.slurm_execution_enabled:
+                safe_pairs: list[tuple[SchedulerCandidate, dict[str, Any]]] = []
+                for candidate, basin_manifest in zip(submitted_candidates, basins, strict=True):
+                    env_value = basin_manifest.get("slurm_env") or {}
+                    if env_value:
+                        env_check, env_blockers = _slurm_env_check(env_value)
+                        if env_blockers:
+                            evidence.append(
+                                _candidate_slurm_preflight_blocked_evidence(
+                                    candidate,
+                                    {
+                                        "status": "blocked",
+                                        "enabled": True,
+                                        "blockers": env_blockers,
+                                        "checks": {"environment": env_check},
+                                    },
+                                )
+                            )
+                            continue
+                    findings = iter_secret_manifest_findings(basin_manifest, "manifest")
+                    if findings:
+                        evidence.append(
+                            _candidate_secret_manifest_blocked_evidence(candidate, findings=findings)
+                        )
+                        continue
+                    safe_pairs.append((candidate, basin_manifest))
+                submitted_candidates = [candidate for candidate, _basin_manifest in safe_pairs]
+                basins = [basin_manifest for _candidate, basin_manifest in safe_pairs]
+                if not basins:
+                    continue
             try:
                 result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
             except Exception as error:
@@ -1374,7 +1411,7 @@ def _candidate_for(
         river_network_version_id=model.river_network_version_id,
         segment_count=model.segment_count,
         model_package_uri=model.model_package_uri,
-        resource_profile=model.resource_profile_summary,
+        resource_profile=model.resource_profile,
         display_capabilities=model.display_capabilities,
         frequency_capabilities=model.frequency_capabilities,
         horizon=horizon,
@@ -1421,8 +1458,11 @@ def _candidate_basin_manifest(candidate: SchedulerCandidate, *, output_uri: str)
         "basin_version_id": candidate.basin_version_id,
         "river_network_version_id": candidate.river_network_version_id,
         "segment_count": candidate.segment_count,
-        "model_package_uri": candidate.model_package_uri,
-        "model_package_manifest_uri": _model_package_manifest_uri(candidate),
+        "model_package_uri": _redact_secret_manifest_for_evidence(candidate.model_package_uri, "model_package_uri"),
+        "model_package_manifest_uri": _redact_secret_manifest_for_evidence(
+            _model_package_manifest_uri(candidate),
+            "model_package_manifest_uri",
+        ),
         "resource_profile": dict(candidate.resource_profile),
         "display_capabilities": dict(candidate.display_capabilities),
         "frequency_capabilities": dict(candidate.frequency_capabilities),
@@ -1474,8 +1514,11 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
         "scenario_id": candidate.scenario_id,
         "run_id": candidate.run_id,
         "forcing_version_id": candidate.forcing_version_id,
-        "model_package_uri": candidate.model_package_uri,
-        "model_package_manifest_uri": _model_package_manifest_uri(candidate),
+        "model_package_uri": _redact_secret_manifest_for_evidence(candidate.model_package_uri, "model_package_uri"),
+        "model_package_manifest_uri": _redact_secret_manifest_for_evidence(
+            _model_package_manifest_uri(candidate),
+            "model_package_manifest_uri",
+        ),
         "basin_version_id": candidate.basin_version_id,
         "river_network_version_id": candidate.river_network_version_id,
         "segment_count": candidate.segment_count,
@@ -1483,7 +1526,7 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
     }
     resolved_output_uri = output_uri or _candidate_output_uri(candidate)
     if resolved_output_uri is not None:
-        evidence["output_uri"] = resolved_output_uri
+        evidence["output_uri"] = _redact_secret_manifest_for_evidence(resolved_output_uri, "output_uri")
     return evidence
 
 
@@ -1550,6 +1593,51 @@ def _candidate_slurm_preflight_blocked_evidence(
             for blocker in blockers
         ],
     }
+
+
+def _candidate_secret_manifest_blocked_evidence(
+    candidate: SchedulerCandidate,
+    *,
+    findings: Sequence[Mapping[str, str]],
+) -> dict[str, Any]:
+    return {
+        **_candidate_identity_evidence(candidate),
+        "status": "preflight_blocked",
+        "submitted": False,
+        "mutation_occurred": False,
+        "execution_mode": "slurm_preflight",
+        "error_code": "SLURM_PREFLIGHT_SECRET_MANIFEST_REJECTED",
+        "error_message": "Slurm submission manifests reject secret-bearing fields and URL values.",
+        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+        "qhh_script_invoked": False,
+        "residual_blockers": [
+            {
+                "code": "SLURM_PREFLIGHT_SECRET_MANIFEST_REJECTED",
+                "field": finding.get("field"),
+                "state": "blocked",
+                "quality_flag": "slurm_preflight_blocked",
+                "residual_risk": "Secret-bearing manifest value was rejected before submission.",
+            }
+            for finding in findings
+        ],
+    }
+
+
+def _redact_secret_manifest_for_evidence(value: Any, path: str = "manifest") -> Any:
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key)
+            field_path = f"{path}.{key_text}"
+            if secret_manifest_key_reason(key_text) is not None:
+                continue
+            redacted[key_text] = _redact_secret_manifest_for_evidence(nested, field_path)
+        return redacted
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_redact_secret_manifest_for_evidence(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    if isinstance(value, str) and secret_manifest_value_reason(value) is not None:
+        return "[redacted]"
+    return value
 
 
 def _candidate_execution_evidence(
@@ -1921,6 +2009,18 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
                     "message": "Slurm exported environment keys must be uppercase shell identifiers.",
                 }
             )
+            continue
+        reserved_reason = reserved_slurm_env_reason(key_text)
+        if reserved_reason is not None:
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_ENV_RESERVED_REJECTED",
+                    "field": f"slurm_env.{key_text}",
+                    "reason": reserved_reason,
+                    "message": "Slurm exported environment cannot override reserved runtime variables.",
+                }
+            )
+            sanitized[key_text] = "[reserved]"
             continue
         if is_sensitive_slurm_env_key(key_text):
             blockers.append(

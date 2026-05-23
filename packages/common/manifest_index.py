@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePath
 from typing import Any
 
@@ -57,6 +57,41 @@ def resolve_task_id(explicit_task_id: int | None) -> int:
         ) from exc
     LOGGER.info("task_id resolved from SLURM_ARRAY_TASK_ID=%d", resolved)
     return resolved
+
+
+def validate_manifest_index_entry_count(entry_count: int, *, max_entries: int | None = None) -> None:
+    limit = MAX_MANIFEST_INDEX_ENTRIES if max_entries is None else max_entries
+    if entry_count > limit:
+        raise ManifestValidationError(
+            "Manifest index exceeds maximum entry count",
+            {"entry_count": entry_count, "entry_limit": limit},
+        )
+
+
+def serialize_manifest_index(entries: Sequence[Mapping[str, Any]], *, max_bytes: int | None = None) -> bytes:
+    """Serialize a manifest index while enforcing the worker-side read size limit."""
+
+    limit = MAX_MANIFEST_INDEX_BYTES if max_bytes is None else max_bytes
+    validate_manifest_index_entry_count(len(entries), max_entries=MAX_MANIFEST_INDEX_ENTRIES)
+    encoder = json.JSONEncoder(indent=2, sort_keys=True)
+    payload = bytearray()
+
+    def append(chunk: str) -> None:
+        payload.extend(chunk.encode("utf-8"))
+        if len(payload) > limit:
+            raise ManifestValidationError(
+                "Manifest index file exceeds size limit",
+                {"size": len(payload), "size_limit": limit},
+            )
+
+    append("[")
+    for index, entry in enumerate(entries):
+        if index:
+            append(", ")
+        for chunk in encoder.iterencode(entry):
+            append(chunk)
+    append("]")
+    return bytes(payload)
 
 
 def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any]:

@@ -3,9 +3,15 @@ from __future__ import annotations
 import random
 import threading
 from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
 
 from services.slurm_gateway.config import SlurmGatewaySettings
-from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
+from services.slurm_gateway.gateway import (
+    ManifestValidationError,
+    SlurmGateway,
+    SlurmGatewayError,
+    SlurmValidationError,
+)
 from services.slurm_gateway.models import (
     TERMINAL_STATUSES,
     ArraySubmitJobRequest,
@@ -17,6 +23,7 @@ from services.slurm_gateway.models import (
     SlurmLogsResponse,
     SubmitJobRequest,
 )
+from services.slurm_gateway.real_backend import RealSlurmGateway
 
 
 class MockSlurmGateway(SlurmGateway):
@@ -42,6 +49,10 @@ class MockSlurmGateway(SlurmGateway):
                 "Job manifest is missing required fields.",
                 {"missing_fields": missing_fields},
             )
+        manifest = request.normalized_manifest()
+        validator = self._validator()
+        validator._validate_slurm_env(manifest.get("slurm_env") or {})
+        validator._validate_manifest(manifest)
 
         now = self._now()
         with self._lock:
@@ -64,7 +75,7 @@ class MockSlurmGateway(SlurmGateway):
                 status=SlurmJobStatus.SUBMITTED,
                 submitted_at=now,
                 updated_at=now,
-                manifest=request.normalized_manifest(),
+                manifest=manifest,
             )
             self._jobs[job_id] = job
             self._refresh_job_locked(job, now)
@@ -93,12 +104,18 @@ class MockSlurmGateway(SlurmGateway):
 
         tasks = list(manifest.get("tasks") or manifest.get("basins") or [])
         if not tasks:
-            raise SlurmGatewayError(
-                422,
-                "VALIDATION_ERROR",
+            raise SlurmValidationError(
                 "Cannot submit array job with 0 tasks",
                 {"missing_fields": ["tasks"]},
             )
+        validator = self._validator()
+        validator._validate_slurm_env(manifest.get("slurm_env") or {})
+        validator._validate_manifest_index_bounds(tasks)
+        validator._validate_manifest(manifest)
+        for index, task in enumerate(tasks):
+            task_manifest = dict(_coerce_mapping(task))
+            task_manifest.setdefault("task_id", index)
+            validator._validate_manifest(task_manifest)
         first_task = dict(tasks[0])
         run_id = str(manifest.get("run_id") or first_task.get("run_id") or "")
         model_id = str(manifest.get("model_id") or first_task.get("model_id") or "")
@@ -249,6 +266,9 @@ class MockSlurmGateway(SlurmGateway):
     def _now() -> datetime:
         return datetime.now(timezone.utc)
 
+    def _validator(self) -> RealSlurmGateway:
+        return RealSlurmGateway(self.settings)
+
     @staticmethod
     def _format_dt(value: datetime | None) -> str:
         return value.isoformat() if value else "not reached"
@@ -274,3 +294,12 @@ class MockSlurmGateway(SlurmGateway):
         else:
             lines.append(f"Current state: {job.status.value}")
         return "\n".join(lines)
+
+
+def _coerce_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    raise ManifestValidationError(
+        "Array job task manifest must be a mapping.",
+        {"type": type(value).__name__},
+    )

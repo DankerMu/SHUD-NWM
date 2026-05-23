@@ -395,7 +395,7 @@ def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_p
         repository,
         client,
         slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
-        slurm_env={"NHMS_PROFILE": "prod/gfs_00", "OBJECT_STORE_PREFIX": "s3://bucket/prod"},
+        slurm_env={"NHMS_PROFILE": "prod/gfs_00", "NHMS_RUN_LABEL": "prod_gfs_00"},
     )
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
@@ -411,7 +411,7 @@ def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_p
         assert submission["slurm_job_type_templates"] == dict(DEFAULT_JOB_TYPE_TEMPLATES)
         assert submission["slurm_env"] == {
             "NHMS_PROFILE": "prod/gfs_00",
-            "OBJECT_STORE_PREFIX": "s3://bucket/prod",
+            "NHMS_RUN_LABEL": "prod_gfs_00",
         }
 
 
@@ -507,6 +507,50 @@ def test_cycle_manifest_index_write_rejects_symlink_target_without_stage_submiss
     forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
     assert forcing_job["status"] == "submission_failed"
     assert forcing_job["error_code"] == "CYCLE_MANIFEST_INDEX_WRITE_FAILED"
+
+
+def test_cycle_manifest_index_rejects_task_count_over_limit_before_stage_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from packages.common import manifest_index as manifest_index_module
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_ENTRIES", 1)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert"]
+    index_path = tmp_path / "workspace" / "runs" / "cycle_gfs_2026050100" / "input" / "forcing_manifest_index.json"
+    assert not index_path.exists()
+    forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
+    assert forcing_job["status"] == "submission_failed"
+    assert forcing_job["error_code"] == "CYCLE_MANIFEST_INDEX_INVALID"
+
+
+def test_cycle_manifest_index_rejects_serialized_size_over_limit_before_stage_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from packages.common import manifest_index as manifest_index_module
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_BYTES", 32)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert"]
+    index_path = tmp_path / "workspace" / "runs" / "cycle_gfs_2026050100" / "input" / "forcing_manifest_index.json"
+    assert not index_path.exists()
+    forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
+    assert forcing_job["status"] == "submission_failed"
+    assert forcing_job["error_code"] == "CYCLE_MANIFEST_INDEX_INVALID"
 
 
 def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(tmp_path: Path) -> None:

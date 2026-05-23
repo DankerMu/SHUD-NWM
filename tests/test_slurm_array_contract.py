@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from services.orchestrator import cli as orchestrator_cli
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
+from services.slurm_gateway.gateway import ManifestValidationError as GatewayManifestValidationError
 from services.slurm_gateway.real_backend import RealSlurmGateway
 from services.tile_publisher import publisher as tile_publisher_module
 from workers.canonical_converter import cli as canonical_cli
@@ -264,24 +265,43 @@ def test_publish_tiles_template_does_not_render_database_url_secret(tmp_path: Pa
         "database_url": secret_database_url,
     }
 
-    rendered = _gateway(tmp_path).render_template(
-        "publish_tiles",
-        manifest,
-        str(tmp_path / "manifest_index.json"),
+    with pytest.raises(GatewayManifestValidationError) as exc_info:
+        _gateway(tmp_path).render_template(
+            "publish_tiles",
+            manifest,
+            str(tmp_path / "manifest_index.json"),
     )
 
-    assert secret_database_url not in rendered
-    assert "DATABASE_URL" not in rendered
-    assert 'nhms-pipeline publish-tiles --cycle-id "$NHMS_CYCLE_ID"' in rendered
-    assert "set -euo pipefail" in rendered
+    assert secret_database_url not in json.dumps(exc_info.value.details)
+    assert exc_info.value.details["findings"][0]["field"] == "manifest.[redacted]"
 
 
-def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract_and_redacts(tmp_path: Path) -> None:
+def test_run_shud_forecast_template_rejects_secret_manifest_values_before_render(tmp_path: Path) -> None:
     secret_uri = "s3://user:pass@bucket/prod?token=secret&X-Amz-Signature=abc"
     manifest = {
         **_render_manifest(tmp_path, "run_shud_forecast_array"),
         "object_store_root": secret_uri,
         "object_store_prefix": "s3://user:pass@bucket/prefix?token=secret",
+        "account": "friends",
+    }
+
+    with pytest.raises(GatewayManifestValidationError) as exc_info:
+        _gateway(tmp_path).render_template(
+            "run_shud_forecast_array",
+            manifest,
+            str(tmp_path / "manifest_index.json"),
+        )
+
+    assert secret_uri not in json.dumps(exc_info.value.details)
+    assert "user:pass@" not in json.dumps(exc_info.value.details)
+    assert "token=secret" not in json.dumps(exc_info.value.details)
+
+
+def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract(tmp_path: Path) -> None:
+    manifest = {
+        **_render_manifest(tmp_path, "run_shud_forecast_array"),
+        "object_store_root": str(tmp_path / "object-store"),
+        "object_store_prefix": "forecast/cycle_001",
         "account": "friends",
     }
 
@@ -306,9 +326,6 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
         'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" '
         '--task-id "${SLURM_ARRAY_TASK_ID:-0}"'
     ) in rendered
-    assert "user:pass@" not in rendered
-    assert "token=secret" not in rendered
-    assert "X-Amz-Signature" not in rendered
 
 
 def test_download_source_cycle_cli_accepts_template_args(monkeypatch):

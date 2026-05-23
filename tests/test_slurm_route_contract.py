@@ -252,6 +252,257 @@ def test_single_submit_missing_job_type_returns_validation_error_without_sbatch(
     assert response.json()["error"]["code"] == "MANIFEST_VALIDATION_ERROR"
 
 
+@pytest.mark.parametrize(
+    "slurm_env",
+    [
+        {"NHMS_MANIFEST_INDEX": "/tmp/evil.json"},
+        {"WORKSPACE_ROOT": "/tmp/evil-workspace"},
+        {"SHUD_THREADS": "1"},
+        {"SLURM_ARRAY_TASK_ID": "99"},
+    ],
+)
+def test_single_submit_route_rejects_reserved_slurm_env_before_sbatch(monkeypatch, tmp_path, slurm_env):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir=str(_write_template(tmp_path, "#!/usr/bin/env bash\n")),
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates={"run_shud_analysis": "contract.sbatch"},
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for reserved slurm_env")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/jobs",
+            json={
+                "run_id": "run_001",
+                "model_id": "model_001",
+                "job_type": "run_shud_analysis",
+                "manifest": {"slurm_env": slurm_env},
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "MANIFEST_VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize(
+    "slurm_env",
+    [
+        {"NHMS_MANIFEST_INDEX": "/tmp/evil.json"},
+        {"OBJECT_STORE_ROOT": "/tmp/evil-objects"},
+        {"OMP_NUM_THREADS": "1"},
+        {"SLURM_ARRAY_TASK_ID": "99"},
+    ],
+)
+def test_array_submit_route_rejects_reserved_slurm_env_before_manifest_or_sbatch(monkeypatch, tmp_path, slurm_env):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for reserved slurm_env")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/job-arrays",
+            json={
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "forecast",
+                "tasks": [_array_task()],
+                "manifest": {"workspace_dir": str(tmp_path / "workspace"), "slurm_env": slurm_env},
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "MANIFEST_VALIDATION_ERROR"
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+@pytest.mark.parametrize(
+    "manifest_update",
+    [
+        {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"},
+        {"database_uri": "postgresql://nhms@db.prod.example/nhms"},
+        {"metadata": {"callback_uri": "https://user:supersecret@example.com/notify"}},
+        {"output_uri": "s3://bucket/prod?token=supersecret"},
+    ],
+)
+def test_single_submit_route_rejects_secret_manifest_fields_before_sbatch(monkeypatch, tmp_path, manifest_update):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir=str(_write_template(tmp_path, "#!/usr/bin/env bash\n")),
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates={"run_shud_analysis": "contract.sbatch"},
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret manifest fields")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/jobs",
+            json={
+                "run_id": "run_001",
+                "model_id": "model_001",
+                "job_type": "run_shud_analysis",
+                "manifest": manifest_update,
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "MANIFEST_VALIDATION_ERROR"
+    assert "supersecret" not in response.text
+
+
+@pytest.mark.parametrize(
+    "manifest_update",
+    [
+        {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"},
+        {"database_dsn": "postgresql://nhms@db.prod.example/nhms"},
+        {"metadata": {"callback_uri": "https://user:supersecret@example.com/notify"}},
+        {"object_store_root": "s3://bucket/prod?password=supersecret"},
+    ],
+)
+def test_array_submit_route_rejects_secret_manifest_fields_before_manifest_or_sbatch(
+    monkeypatch,
+    tmp_path,
+    manifest_update,
+):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret manifest fields")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/job-arrays",
+            json={
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "forecast",
+                "tasks": [_array_task()],
+                "manifest": {"workspace_dir": str(tmp_path / "workspace"), **manifest_update},
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "MANIFEST_VALIDATION_ERROR"
+    assert "supersecret" not in response.text
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+def test_array_submit_route_rejects_task_count_over_manifest_index_limit_before_manifest_or_sbatch(
+    monkeypatch,
+    tmp_path,
+):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        )
+    )
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_ENTRIES", 1)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for over-limit arrays")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/job-arrays",
+            json={
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "forecast",
+                "tasks": [_array_task(), {**_array_task(), "run_id": "run_task_2", "model_id": "model_task_2"}],
+                "manifest": {"workspace_dir": str(tmp_path / "workspace")},
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["entry_limit"] == 1
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+def test_array_submit_route_rejects_manifest_index_size_limit_before_manifest_or_sbatch(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        )
+    )
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_BYTES", 32)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for over-limit arrays")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/job-arrays",
+            json={
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "forecast",
+                "tasks": [_array_task()],
+                "manifest": {"workspace_dir": str(tmp_path / "workspace")},
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["size_limit"] == 32
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
 @pytest.mark.parametrize("payload", [{"cycle_id": "cycle_001", "tasks": []}, {"job_type": "run_shud_forecast_array"}])
 def test_array_submit_required_fields_validated_before_gateway(monkeypatch, payload):
     class GatewayShouldNotBeCalled:

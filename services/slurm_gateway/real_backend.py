@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -16,13 +15,20 @@ import yaml
 from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
+from packages.common.manifest_index import ManifestValidationError as CommonManifestValidationError
+from packages.common.manifest_index import serialize_manifest_index
 from packages.common.redaction import redact_payload
 from packages.common.safe_fs import (
     SafeFilesystemError,
     ensure_directory_no_follow,
     write_bytes_no_follow_exclusive,
 )
-from packages.common.slurm_env import is_sensitive_slurm_env_key, secret_bearing_url_reason
+from packages.common.slurm_env import (
+    is_sensitive_slurm_env_key,
+    iter_secret_manifest_findings,
+    reserved_slurm_env_reason,
+    secret_bearing_url_reason,
+)
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ConfigurationError,
@@ -165,6 +171,7 @@ class RealSlurmGateway(SlurmGateway):
         if job_type:
             manifest["job_type"] = job_type
         self._require_manifest_fields(manifest, ["run_id", "model_id", "job_type"])
+        manifest["slurm_env"] = self._validate_slurm_env(manifest.get("slurm_env") or {})
         self._validate_manifest(manifest)
 
         rendered_script = self.render_template(str(manifest["job_type"]), manifest)
@@ -203,6 +210,12 @@ class RealSlurmGateway(SlurmGateway):
             raise SlurmValidationError("Cannot submit array job with 0 tasks")
         self._validate_requested_template_mapping(job_type, base_manifest)
         slurm_env = self._validate_slurm_env(base_manifest.get("slurm_env") or {})
+        self._validate_manifest(base_manifest)
+        self._validate_manifest_index_bounds(task_list)
+        for index, task in enumerate(task_list):
+            task_manifest = dict(task)
+            task_manifest.setdefault("task_id", index)
+            self._validate_manifest(task_manifest)
 
         requested_workspace = str(base_manifest.get("workspace_dir") or "").strip()
         workspace_root = self._resolve_submission_workspace_dir(requested_workspace)
@@ -438,6 +451,7 @@ class RealSlurmGateway(SlurmGateway):
         if not tasks:
             raise SlurmValidationError("Cannot submit array job with 0 tasks")
         self._validate_manifest({"cycle_id": cycle_id, "stage_name": stage_name})
+        self._validate_manifest_index_bounds(tasks)
         workspace_root = self._resolve_submission_workspace_dir(workspace_dir)
 
         entries: list[dict[str, Any]] = []
@@ -454,6 +468,11 @@ class RealSlurmGateway(SlurmGateway):
             self._validate_manifest(entry)
             self._ensure_within_workspace(Path(str(entry["workspace_dir"])), workspace_dir=workspace_root)
             entries.append(entry)
+
+        try:
+            content = serialize_manifest_index(entries)
+        except CommonManifestValidationError as exc:
+            raise ManifestValidationError(exc.message, exc.details) from exc
 
         try:
             ensure_directory_no_follow(workspace_root)
@@ -473,7 +492,6 @@ class RealSlurmGateway(SlurmGateway):
                 {"cycle_id": cycle_id, "stage_name": stage_name, "error": str(exc)},
             ) from exc
 
-        content = json.dumps(entries, indent=2, sort_keys=True).encode("utf-8")
         for attempt in range(10):
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
             suffix = "" if attempt == 0 else f"_{attempt}"
@@ -511,8 +529,8 @@ class RealSlurmGateway(SlurmGateway):
         manifest_dict.setdefault("stage_name", manifest_dict.get("stage") or job_type)
         manifest_dict.setdefault("workspace_dir", str(Path(self.settings.workspace_dir)))
         manifest_dict.setdefault("manifest_index_path", manifest_index_path)
+        self._validate_manifest(manifest_dict)
         redacted_manifest = redact_payload(manifest_dict)
-        self._validate_manifest(redacted_manifest)
         slurm_env = self._validate_slurm_env(manifest_dict.get("slurm_env") or {})
 
         resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
@@ -648,6 +666,12 @@ class RealSlurmGateway(SlurmGateway):
                     "Slurm environment keys must be uppercase shell identifiers.",
                     {"field": f"slurm_env.{key_text}"},
                 )
+            reserved_reason = reserved_slurm_env_reason(key_text)
+            if reserved_reason is not None:
+                raise ManifestValidationError(
+                    "Slurm environment exports cannot override reserved runtime variables.",
+                    {"field": f"slurm_env.{key_text}", "reason": reserved_reason},
+                )
             if is_sensitive_slurm_env_key(key_text):
                 raise ManifestValidationError(
                     "Slurm environment exports reject secret-shaped keys.",
@@ -671,6 +695,12 @@ class RealSlurmGateway(SlurmGateway):
                 )
             result[key_text] = value_text
         return result
+
+    def _validate_manifest_index_bounds(self, tasks: Sequence[Mapping[str, Any]]) -> None:
+        try:
+            serialize_manifest_index(tasks)
+        except CommonManifestValidationError as exc:
+            raise ManifestValidationError(exc.message, exc.details) from exc
 
     def _submit_rendered_script(self, rendered_script: str, array_spec: str | None = None) -> str:
         script_path = self._write_temp_script(rendered_script)
@@ -991,6 +1021,13 @@ class RealSlurmGateway(SlurmGateway):
             raise ManifestValidationError(
                 "Manifest must be a mapping.",
                 {"field": path, "type": type(value).__name__},
+            )
+
+        secret_findings = iter_secret_manifest_findings(value, path)
+        if secret_findings:
+            raise ManifestValidationError(
+                "Manifest rejects secret-bearing fields and URL values.",
+                {"findings": secret_findings},
             )
 
         for key, nested in value.items():

@@ -28,6 +28,7 @@ from services.slurm_gateway.gateway import (
     TemplateSecurityError,
     create_gateway,
 )
+from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import RealSlurmGateway
 from workers.flood_frequency.config import HindcastConfig
@@ -942,13 +943,13 @@ def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_reject
     gateway = _production_gateway(tmp_path)
     manifest = {
         **_production_manifest(tmp_path, "download_source_cycle"),
-        "slurm_env": {"NHMS_PROFILE": "prod/gfs_00", "OBJECT_STORE_PREFIX": "s3://bucket/prod"},
+        "slurm_env": {"NHMS_PROFILE": "prod/gfs_00", "NHMS_RUN_LABEL": "prod_gfs_00"},
     }
 
     rendered = gateway.render_template("download_source_cycle", manifest)
 
     assert "export NHMS_PROFILE=prod/gfs_00" in rendered
-    assert "export OBJECT_STORE_PREFIX=s3://bucket/prod" in rendered
+    assert "export NHMS_RUN_LABEL=prod_gfs_00" in rendered
     with pytest.raises(ManifestValidationError):
         gateway.render_template(
             "download_source_cycle",
@@ -990,13 +991,13 @@ def test_safe_slurm_env_reaches_rendered_array_template_and_secret_is_rejected(t
         "manifest_index_path": str(tmp_path / "index.json"),
         "workspace_dir": str(tmp_path / "workspace"),
         "object_store_root": str(tmp_path / "object-store"),
-        "slurm_env": {"NHMS_PROFILE": "prod/gfs_00", "OBJECT_STORE_PREFIX": "s3://bucket/prod"},
+        "slurm_env": {"NHMS_PROFILE": "prod/gfs_00", "NHMS_RUN_LABEL": "prod_gfs_00"},
     }
 
     rendered = gateway.render_template("run_shud_forecast_array", manifest, str(tmp_path / "index.json"))
 
     assert "export NHMS_PROFILE=prod/gfs_00" in rendered
-    assert "export OBJECT_STORE_PREFIX=s3://bucket/prod" in rendered
+    assert "export NHMS_RUN_LABEL=prod_gfs_00" in rendered
     with pytest.raises(ManifestValidationError):
         gateway.render_template(
             "run_shud_forecast_array",
@@ -1089,6 +1090,193 @@ def test_submit_job_array_rejects_secret_slurm_env_before_manifest_or_sbatch(
             },
         )
     assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+@pytest.mark.parametrize(
+    "reserved_key",
+    [
+        "NHMS_MANIFEST_INDEX",
+        "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "NHMS_RUN_ID",
+        "NHMS_MODEL_ID",
+        "NHMS_CYCLE_ID",
+        "NHMS_JOB_TYPE",
+        "SHUD_THREADS",
+        "OMP_NUM_THREADS",
+        "SLURM_ARRAY_TASK_ID",
+        "OBJECT_STORE_PREFIX",
+    ],
+)
+def test_submit_job_rejects_reserved_slurm_env_before_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reserved_key: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for reserved slurm_env")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    "slurm_env": {reserved_key: "override"},
+                    "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                },
+            )
+        )
+
+    assert exc_info.value.details["field"] == f"slurm_env.{reserved_key}"
+
+
+def test_submit_job_array_rejects_reserved_slurm_env_before_manifest_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for reserved slurm_env")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                "slurm_env": {"NHMS_MANIFEST_INDEX": "/tmp/evil.json"},
+            },
+        )
+
+    assert exc_info.value.details["field"] == "slurm_env.NHMS_MANIFEST_INDEX"
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+@pytest.mark.parametrize(
+    ("manifest_update", "secret_text"),
+    [
+        (
+            {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"},
+            "supersecret",
+        ),
+        ({"database_dsn": "postgresql://nhms@db.prod.example/nhms"}, "database_dsn"),
+        ({"metadata": {"callback_uri": "https://user:supersecret@example.com/notify"}}, "supersecret"),
+        ({"output_uri": "s3://bucket/prod?token=supersecret"}, "supersecret"),
+    ],
+)
+def test_submit_job_rejects_secret_manifest_fields_before_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    manifest_update: dict[str, object],
+    secret_text: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret manifest fields")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **manifest_update,
+                    "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                },
+            )
+        )
+
+    assert secret_text not in json.dumps(exc_info.value.details)
+
+
+@pytest.mark.parametrize(
+    ("manifest_update", "secret_text"),
+    [
+        (
+            {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"},
+            "supersecret",
+        ),
+        ({"database_uri": "postgresql://nhms@db.prod.example/nhms"}, "database_uri"),
+        ({"metadata": {"callback_uri": "https://user:supersecret@example.com/notify"}}, "supersecret"),
+        ({"object_store_root": "s3://bucket/prod?signature=supersecret"}, "supersecret"),
+    ],
+)
+def test_submit_job_array_rejects_secret_manifest_fields_before_manifest_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    manifest_update: dict[str, object],
+    secret_text: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret manifest fields")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                **manifest_update,
+            },
+        )
+
+    assert secret_text not in json.dumps(exc_info.value.details)
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+def test_mock_gateway_rejects_array_over_entry_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = MockSlurmGateway(SlurmGatewaySettings(backend="mock", workspace_dir=str(tmp_path / "workspace")))
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_ENTRIES", 1)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            {
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "forecast",
+                "tasks": [
+                    _fake_array_task("run_001", "model_001"),
+                    _fake_array_task("run_002", "model_002"),
+                ],
+            }
+        )
+
+    assert exc_info.value.details["entry_limit"] == 1
 
 
 def test_manifest_injection_rejected(monkeypatch, tmp_path):

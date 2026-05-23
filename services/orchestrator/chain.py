@@ -12,6 +12,7 @@ from typing import Any, Mapping, Protocol, Sequence
 import httpx
 
 from packages.common.best_available import BestAvailableManager
+from packages.common.manifest_index import ManifestValidationError, serialize_manifest_index
 from packages.common.object_store import LocalObjectStore
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -1988,7 +1989,14 @@ class ForecastOrchestrator:
         stage: StageDefinition,
         tasks: list[dict[str, Any]],
     ) -> Path:
-        content = json.dumps(tasks, indent=2, sort_keys=True).encode("utf-8")
+        try:
+            content = serialize_manifest_index(tasks)
+        except ManifestValidationError as exc:
+            raise OrchestratorError(
+                "CYCLE_MANIFEST_INDEX_INVALID",
+                f"Cycle manifest index for stage {stage.stage} exceeds the Slurm array manifest contract.",
+                {"stage": stage.stage, **exc.details},
+            ) from exc
         manifest_path = self._workspace_path("runs", context.run_id, "input", f"{stage.stage}_manifest_index.json")
         try:
             self._safe_workspace_write_bytes(manifest_path, content)

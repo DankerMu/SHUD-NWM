@@ -9,7 +9,7 @@ import pytest
 
 from services.slurm_gateway import real_backend as real_backend_module
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
-from services.slurm_gateway.gateway import ConfigurationError, SlurmValidationError
+from services.slurm_gateway.gateway import ConfigurationError, ManifestValidationError, SlurmValidationError
 from services.slurm_gateway.real_backend import RealSlurmGateway
 
 
@@ -247,6 +247,32 @@ def test_array_validation_rejects_zero_tasks(monkeypatch, tmp_path):
         gateway.submit_job_array("run_shud_forecast_array", "cycle_001", "run_shud_forecast_array", [])
 
 
+def test_write_manifest_index_rejects_task_count_over_limit_before_file_creation(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_ENTRIES", 1)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(2))
+
+    assert exc_info.value.details["entry_limit"] == 1
+    assert not (tmp_path / "workspace").exists()
+
+
+def test_write_manifest_index_rejects_serialized_size_over_limit_before_file_creation(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_BYTES", 32)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(1))
+
+    assert exc_info.value.details["size_limit"] == 32
+    assert not (tmp_path / "workspace").exists()
+
+
 def test_array_validation_rejects_zero_max_concurrent(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path, _profiles(max_concurrent=0))
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
@@ -420,6 +446,66 @@ def test_array_submission_rejects_sibling_workspace_before_sbatch(monkeypatch, t
                 "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
             },
         )
+
+
+def test_submit_job_array_rejects_task_count_over_limit_before_manifest_or_sbatch(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_ENTRIES", 1)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for over-limit arrays")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=_tasks(2),
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+
+    assert exc_info.value.details["entry_limit"] == 1
+    assert not (tmp_path / "workspace").exists()
+
+
+def test_submit_job_array_rejects_serialized_size_over_limit_before_manifest_or_sbatch(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_BYTES", 32)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for over-limit arrays")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=_tasks(1),
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+
+    assert exc_info.value.details["size_limit"] == 32
+    assert not (tmp_path / "workspace").exists()
 
 
 def test_hindcast_production_array_submission_writes_required_manifest_fields(monkeypatch, tmp_path):
