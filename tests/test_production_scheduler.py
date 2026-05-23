@@ -642,10 +642,28 @@ def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) 
     [
         (None, "SLURM_PREFLIGHT_DATABASE_URL_MISSING"),
         ("postgresql://nhms:secret@localhost/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@localhost./nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@LOCALHOST/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@localhost.localdomain/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@localhost.localdomain./nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@ip6-localhost/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@ip6-loopback/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@foo.localhost/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
         ("postgresql://nhms:secret@127.0.0.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@127.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@2130706433/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@127.000.000.001/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
+        ("postgresql://nhms:secret@0177.0.0.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
         ("postgresql://nhms:secret@[::1]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
         ("postgresql://nhms:secret@[0:0:0:0:0:0:0:1]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
         ("postgresql://nhms:secret@0.0.0.0/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@[::]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@169.254.1.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
+        ("postgresql://nhms:secret@[fe80::1]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
+        ("postgresql://nhms:secret@bad::host/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
+        ("postgresql://nhms:secret@[::1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
+        ("postgresql://nhms:secret@bad host/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
+        ("postgresql://nhms:secret@9999999999/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
         ("sqlite:///tmp/nhms.db", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
     ],
 )
@@ -689,7 +707,54 @@ def test_slurm_preflight_blocks_missing_or_localhost_database_before_submission(
     assert orchestrator.calls == []
 
 
-def test_slurm_preflight_accepts_remote_database_without_db_blocker(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost.",
+        "LOCALHOST",
+        "[::1]",
+        "0:0:0:0:0:0:0:1",
+        "ip6-localhost",
+        "ip6-loopback",
+        "foo.localhost.",
+        "127.1",
+        "2130706433",
+        "0",
+    ],
+)
+def test_database_host_local_classifier_normalizes_localhost_equivalents(host: str) -> None:
+    assert scheduler_module._database_host_is_local(host) is True
+    assert scheduler_module._database_host_is_unsafe(host) is False
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.000.000.001",
+        "0177.0.0.1",
+        "169.254.1.1",
+        "fe80::1",
+        "bad host",
+        "bad::host",
+        "9999999999",
+    ],
+)
+def test_database_host_classifier_conservatively_blocks_unsafe_numeric_or_malformed_hosts(host: str) -> None:
+    assert scheduler_module._database_host_is_unsafe(host) is True
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://nhms:secret@db.prod.example/nhms",
+        "postgresql://nhms:secret@203.0.113.10/nhms",
+        "postgresql://nhms:secret@10.0.0.5/nhms",
+    ],
+)
+def test_slurm_preflight_accepts_remote_database_without_db_blocker(
+    tmp_path: Path,
+    database_url: str,
+) -> None:
     roots = _slurm_roots(tmp_path)
     orchestrator = FakeProductionOrchestrator()
     config = _config(
@@ -697,7 +762,7 @@ def test_slurm_preflight_accepts_remote_database_without_db_blocker(tmp_path: Pa
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        database_url=database_url,
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -720,6 +785,37 @@ def test_slurm_preflight_accepts_remote_database_without_db_blocker(tmp_path: Pa
     )
     assert result.evidence["counts"]["submitted_count"] == 1
     assert len(orchestrator.calls) == 1
+
+
+def test_slurm_preflight_blocks_localhost_database_in_continuous_mode(tmp_path: Path) -> None:
+    roots = _slurm_roots(tmp_path)
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        continuous=True,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@foo.localhost/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    results = scheduler.run_continuous(max_passes=1)
+
+    evidence = results[0].evidence["model_run_evidence"][0]
+    assert results[0].status == "preflight_blocked"
+    assert results[0].evidence["counts"]["submitted_count"] == 0
+    assert evidence["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"
+    assert orchestrator.calls == []
 
 
 def test_slurm_preflight_requires_database_url_not_pipeline_database_url(

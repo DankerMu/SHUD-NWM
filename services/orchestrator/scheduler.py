@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
-from ipaddress import ip_address
+from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -54,7 +54,17 @@ SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "frequency"}
 SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
-LOCALHOST_NAMES = {"localhost", "localhost.localdomain", "127.0.0.1", "::1", "0.0.0.0"}
+LOCALHOST_NAMES = {
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+    "127.0.0.1",
+    "::1",
+    "0.0.0.0",
+    "::",
+}
+DATABASE_HOST_ALLOWED_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 SLURM_RESOURCE_PROFILE_DIRECTIVE_FIELDS = {
     "partition",
     "account",
@@ -1940,6 +1950,13 @@ def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:
             "message": "Slurm execution requires a compute-node reachable DATABASE_URL before submission.",
         }
     host = _database_host(database_url)
+    if _database_host_is_unsafe(host):
+        return {
+            "code": "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST",
+            "field": "DATABASE_URL",
+            "message": "Slurm execution rejects malformed or unsafe DATABASE_URL hosts.",
+            "host": host,
+        }
     if _database_host_is_local(host):
         return {
             "code": "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST",
@@ -1953,23 +1970,132 @@ def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:
 def _database_host(database_url: str | None) -> str | None:
     if not database_url:
         return None
-    parsed = urlparse(database_url)
+    try:
+        parsed = urlparse(database_url)
+    except ValueError:
+        return None
     if parsed.scheme == "sqlite":
         return "localhost"
-    return parsed.hostname
+    try:
+        host = parsed.hostname
+        parsed.port
+    except ValueError:
+        return None
+    return host
 
 
 def _database_host_is_local(host: str | None) -> bool:
     if host is None:
         return True
-    normalized = host.strip().lower().strip("[]")
+    normalized = _normalize_database_host(host)
     if normalized in LOCALHOST_NAMES:
         return True
+    if normalized.endswith(".localhost"):
+        return True
+    noncanonical_address = _parse_noncanonical_ipv4_address(normalized)
+    if noncanonical_address is not None:
+        return noncanonical_address.is_loopback or noncanonical_address.is_unspecified
     try:
         address = ip_address(normalized)
     except ValueError:
         return False
     return address.is_loopback or address.is_unspecified
+
+
+def _database_host_is_unsafe(host: str | None) -> bool:
+    if host is None:
+        return True
+    normalized = _normalize_database_host(host)
+    if not normalized:
+        return True
+    if DATABASE_HOST_ALLOWED_RE.fullmatch(normalized) is None:
+        return True
+    try:
+        address = ip_address(normalized)
+    except ValueError:
+        address = None
+    if address is not None and address.is_link_local:
+        return True
+    if ":" in normalized:
+        if address is None:
+            return True
+    return _is_unsafe_numeric_ipv4_like_host(normalized)
+
+
+def _normalize_database_host(host: str) -> str:
+    normalized = host.strip().lower()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    return normalized.rstrip(".")
+
+
+def _parse_noncanonical_ipv4_address(host: str) -> IPv4Address | None:
+    if not _is_noncanonical_numeric_ipv4_host(host):
+        return None
+    parts = host.split(".")
+    values: list[int] = []
+    for part in parts:
+        if part == "":
+            return None
+        try:
+            values.append(int(part, 0))
+        except ValueError:
+            return None
+    if len(values) == 1:
+        value = values[0]
+    elif len(values) == 2:
+        value = (values[0] << 24) | values[1]
+    elif len(values) == 3:
+        value = (values[0] << 24) | (values[1] << 16) | values[2]
+    elif len(values) == 4:
+        value = (values[0] << 24) | (values[1] << 16) | (values[2] << 8) | values[3]
+    else:
+        return None
+    if value < 0 or value > 0xFFFFFFFF:
+        return None
+    return IPv4Address(value)
+
+
+def _is_noncanonical_numeric_ipv4_host(host: str) -> bool:
+    if not host:
+        return False
+    if not _is_numeric_ipv4_like_host(host):
+        return False
+    parts = host.split(".")
+    return len(parts) != 4 or any(_is_noncanonical_ipv4_part(part) for part in parts)
+
+
+def _is_numeric_ipv4_like_host(host: str) -> bool:
+    parts = host.split(".")
+    return all(_is_ipv4_number_part(part) for part in parts)
+
+
+def _is_ipv4_number_part(part: str) -> bool:
+    if part == "":
+        return False
+    if part.lower().startswith("0x"):
+        return len(part) > 2 and all(character in "0123456789abcdefABCDEF" for character in part[2:])
+    return part.isdigit()
+
+
+def _is_noncanonical_ipv4_part(part: str) -> bool:
+    if part == "":
+        return True
+    if part.lower().startswith("0x"):
+        return True
+    return len(part) > 1 and part.startswith("0")
+
+
+def _is_unsafe_numeric_ipv4_like_host(host: str) -> bool:
+    if not _is_numeric_ipv4_like_host(host):
+        return False
+    try:
+        ip_address(host)
+    except ValueError:
+        return _parse_noncanonical_ipv4_address(host) is None
+    if not _is_noncanonical_numeric_ipv4_host(host):
+        return False
+    return _parse_noncanonical_ipv4_address(host) is None
 
 
 def _preflight_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
