@@ -1877,6 +1877,63 @@ def test_slurm_scheduler_rejects_resource_profile_secret_key_before_orchestrator
     assert orchestrator.calls == []
 
 
+@pytest.mark.parametrize(
+    "resource_profile_update",
+    [
+        {"partition": "compute --account=vip"},
+        {"account": "friends --qos=high"},
+        {"nodes": "1 --exclusive"},
+        {"ntasks": "1 --exclusive"},
+        {"cpus_per_task": "2 --hint=nomultithread"},
+        {"memory_gb": "8 --mem-per-cpu=8G"},
+        {"walltime": "01:00:00 --qos=high"},
+        {"max_concurrent": "2 --array=0-999"},
+        {"shud_threads": "8 --export=ALL"},
+    ],
+)
+def test_slurm_scheduler_rejects_resource_profile_directive_injection_before_orchestrator_submission(
+    tmp_path: Path,
+    resource_profile_update: dict[str, Any],
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    model = _model("model_a", "basin_a")
+    model["resource_profile"] = {
+        **model["resource_profile"],
+        **resource_profile_update,
+    }
+    orchestrator = StrictNoSubmitOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    evidence = result.evidence["model_run_evidence"][0]
+    evidence_text = json.dumps(result.evidence)
+
+    assert result.status == "preflight_blocked"
+    assert evidence["error_code"] == "SLURM_PREFLIGHT_RESOURCE_PROFILE_INVALID"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert "--" not in evidence_text
+    assert "exclusive" not in evidence_text
+    assert orchestrator.calls == []
+
+
 def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path: Path) -> None:
     roots = _slurm_roots(tmp_path)
     safe_package_uri = "s3://nhms-safe/models/model_a/package/"

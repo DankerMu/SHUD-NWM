@@ -14,3 +14,14 @@ async def test_health():
     assert data["status"] == "ok"
     assert data["service"] == "nhms-api"
     assert data["version"] == "0.1.0"
+
+
+def test_api_errors_import_does_not_construct_slurm_gateway(monkeypatch):
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "invalid")
+    import apps.api.errors as errors
+
+    assert errors.ApiError(
+        status_code=400,
+        code="BAD_REQUEST",
+        message="bad request",
+    ).code == "BAD_REQUEST"

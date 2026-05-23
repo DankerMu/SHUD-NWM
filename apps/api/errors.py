@@ -8,7 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from services.slurm_gateway.routes import slurm_request_validation_error_response
+from services.slurm_gateway.validation_errors import slurm_request_validation_error_response
 
 
 class ApiError(RuntimeError):

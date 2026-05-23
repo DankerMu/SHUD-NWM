@@ -19,6 +19,11 @@ SECRET_URL_QUERY_KEY_RE = re.compile(
     r"access[-_]?key|session[-_]?key)$|^x-amz-signature$|^x-amz-credential$",
     re.IGNORECASE,
 )
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b[A-Za-z0-9_.-]*(?:token|password|passwd|pwd|secret|credential|api[-_]?key|"
+    r"access[-_]?key|session[-_]?key|signature)[A-Za-z0-9_.-]*\s*[:=]",
+    re.IGNORECASE,
+)
 RESERVED_SLURM_ENV_KEYS = frozenset(
     {
         "WORKSPACE_ROOT",
@@ -106,7 +111,12 @@ def secret_manifest_key_reason(key: str) -> str | None:
 def secret_manifest_value_reason(value: str) -> str | None:
     """Return why a manifest value is secret-bearing under the Slurm persistence contract."""
 
-    return secret_bearing_url_reason(value)
+    url_reason = secret_bearing_url_reason(value)
+    if url_reason is not None:
+        return url_reason
+    if SECRET_ASSIGNMENT_RE.search(value):
+        return "secret_assignment"
+    return None
 
 
 def iter_secret_manifest_findings(value: Any, path: str = "manifest") -> list[dict[str, str]]:

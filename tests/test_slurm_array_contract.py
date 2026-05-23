@@ -321,7 +321,7 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
     assert "#SBATCH --time=01:00:00" in rendered
     assert "export SHUD_THREADS=8" in rendered
     assert "export OMP_NUM_THREADS=8" in rendered
-    assert 'export NHMS_MANIFEST_INDEX="' in rendered
+    assert "export NHMS_MANIFEST_INDEX=" in rendered
     assert (
         'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" '
         '--task-id "${SLURM_ARRAY_TASK_ID:-0}"'

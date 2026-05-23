@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +123,11 @@ def test_real_templates_export_object_store_root(template_name: str) -> None:
         "max_concurrent": 1,
         "shud_threads": 1,
     }
+    context["export_lines"] = [
+        f"export WORKSPACE_ROOT={shlex.quote(context['workspace_dir'])}",
+        f"export OBJECT_STORE_ROOT={shlex.quote(context['workspace_dir'])}",
+        "export OBJECT_STORE_PREFIX=''",
+    ]
 
     rendered = (
         SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
@@ -129,8 +135,8 @@ def test_real_templates_export_object_store_root(template_name: str) -> None:
         .render(**context)
     )
 
-    assert 'export OBJECT_STORE_ROOT="/tmp/nhms-workspace"' in rendered
-    assert 'export OBJECT_STORE_PREFIX=""' in rendered
+    assert "export OBJECT_STORE_ROOT=/tmp/nhms-workspace" in rendered
+    assert "export OBJECT_STORE_PREFIX=''" in rendered
 
 
 def test_state_manager_uses_object_store_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

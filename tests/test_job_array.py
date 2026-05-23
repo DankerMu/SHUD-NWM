@@ -9,7 +9,12 @@ import pytest
 
 from services.slurm_gateway import real_backend as real_backend_module
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
-from services.slurm_gateway.gateway import ConfigurationError, ManifestValidationError, SlurmValidationError
+from services.slurm_gateway.gateway import (
+    ConfigurationError,
+    ManifestValidationError,
+    SlurmGatewayError,
+    SlurmValidationError,
+)
 from services.slurm_gateway.real_backend import RealSlurmGateway
 
 
@@ -277,7 +282,7 @@ def test_array_validation_rejects_zero_max_concurrent(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path, _profiles(max_concurrent=0))
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
 
-    with pytest.raises(SlurmValidationError, match="max_concurrent must be \u2265 1"):
+    with pytest.raises(SlurmGatewayError, match="resource profile"):
         gateway.submit_job_array("run_shud_forecast_array", "cycle_001", "run_shud_forecast_array", _tasks(2))
 
 
@@ -360,7 +365,7 @@ def test_array_submission_binds_manifest_index_under_submitted_workspace(monkeyp
     manifest_index = Path(record.manifest["manifest_index_path"])
     assert manifest_index.is_relative_to(submitted_workspace)
     assert str(manifest_index) in captured["script"]
-    assert f'export NHMS_MANIFEST_INDEX="{manifest_index}"' in captured["script"]
+    assert f"export NHMS_MANIFEST_INDEX={manifest_index}" in captured["script"]
     assert record.manifest["workspace_dir"] == str(submitted_workspace.resolve())
     tasks = json.loads(manifest_index.read_text(encoding="utf-8"))
     assert {entry["workspace_dir"] for entry in tasks} == {str(submitted_workspace.resolve())}
@@ -548,5 +553,5 @@ def test_hindcast_production_array_submission_writes_required_manifest_fields(mo
     assert "--array=0-1%2" in calls[0]
     assert tasks[0]["river_network_version_id"] == "rnv_v1"
     assert tasks[1]["river_network_version_id"] == "rnv_v1"
-    assert 'export NHMS_MANIFEST_INDEX="' in captured["script"]
+    assert "export NHMS_MANIFEST_INDEX=" in captured["script"]
     assert str(manifest_index) in captured["script"]

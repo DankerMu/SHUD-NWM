@@ -11,10 +11,9 @@
 
 set -euo pipefail
 
-export WORKSPACE_ROOT="{{workspace_dir}}"
-export OBJECT_STORE_ROOT="{{object_store_root | default(workspace_dir)}}"
-export OBJECT_STORE_PREFIX="{{object_store_prefix | default('')}}"
-export NHMS_MANIFEST_INDEX="{{manifest_index_path}}"
+{% for export_line in export_lines | default([]) %}
+{{ export_line }}
+{% endfor %}
 
 TASK_JSON="$(python - <<'PY'
 import json

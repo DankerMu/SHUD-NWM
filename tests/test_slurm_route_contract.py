@@ -236,8 +236,115 @@ def test_object_store_roots_exported_to_template(monkeypatch, tmp_path):
         )
 
     assert response.status_code == 201
-    assert 'export OBJECT_STORE_ROOT="/durable/object-store"' in captured["script"]
-    assert 'export OBJECT_STORE_PREFIX="forecast/cycle_001"' in captured["script"]
+    assert "export OBJECT_STORE_ROOT=/durable/object-store" in captured["script"]
+    assert "export OBJECT_STORE_PREFIX=forecast/cycle_001" in captured["script"]
+
+
+def test_route_object_store_prefix_quote_breakout_is_shell_quoted(monkeypatch, tmp_path):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        )
+    )
+    captured = _capture_sbatch(monkeypatch)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/job-arrays",
+            json={
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "run_shud_forecast_array",
+                "tasks": [_array_task()],
+                "manifest": {
+                    "object_store_root": "/durable/object-store",
+                    "object_store_prefix": 'prod" PYTHONPATH=/tmp/evil #',
+                },
+            },
+        )
+
+    assert response.status_code == 201
+    assert 'export OBJECT_STORE_PREFIX="prod" PYTHONPATH=/tmp/evil #' not in captured["script"]
+    assert 'export OBJECT_STORE_PREFIX=\'prod" PYTHONPATH=/tmp/evil #\'' in captured["script"]
+
+
+@pytest.mark.parametrize(
+    "resource_profiles",
+    [
+        """
+resource_profiles:
+  default:
+    partition: compute --account=vip
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    memory_gb: 32
+    walltime: "01:00:00"
+    max_concurrent: 2
+    shud_threads: 8
+  overrides: {}
+""",
+        """
+resource_profiles:
+  default:
+    partition: compute
+    account: "friends --qos=high"
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    memory_gb: 32
+    walltime: "01:00:00"
+    max_concurrent: 2
+    shud_threads: 8
+  overrides: {}
+""",
+    ],
+)
+def test_array_submit_route_rejects_resource_profile_injection_before_manifest_or_sbatch(
+    monkeypatch,
+    tmp_path,
+    resource_profiles,
+):
+    profiles_path = tmp_path / "resource_profiles.yaml"
+    profiles_path.write_text(resource_profiles.lstrip(), encoding="utf-8")
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(profiles_path),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for invalid resource profiles")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/job-arrays",
+            json={
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "forecast",
+                "tasks": [_array_task()],
+                "manifest": {"workspace_dir": str(tmp_path / "workspace")},
+            },
+        )
+
+    response_text = response.text
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "CONFIGURATION_ERROR"
+    assert "--account=vip" not in response_text
+    assert "--qos=high" not in response_text
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
 
 
 def test_single_submit_missing_job_type_returns_validation_error_without_sbatch(monkeypatch, tmp_path):

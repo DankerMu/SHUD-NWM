@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -3088,6 +3089,7 @@ class ForecastOrchestrator:
             "shud_threads": 1,
             "manifest_index_path": "",
         }
+        template_context["export_lines"] = _template_export_lines(template_context)
         template_text = template_path.read_text(encoding="utf-8")
         if "{{" in template_text or "{%" in template_text:
             from jinja2 import StrictUndefined
@@ -5185,6 +5187,32 @@ def _analysis_error_code(stage: StageDefinition, terminal: dict[str, Any]) -> st
     if stage.stage == "analysis_run" and str(raw_code or "").upper() in timeout_codes:
         return "SLURM_TIMEOUT"
     return str(raw_code or f"{stage.stage.upper()}_{terminal['status'].upper()}")
+
+
+def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
+    export_fields = {
+        "WORKSPACE_ROOT": context.get("workspace_dir", ""),
+        "OBJECT_STORE_ROOT": context.get("object_store_root", context.get("workspace_dir", "")),
+        "OBJECT_STORE_PREFIX": context.get("object_store_prefix", ""),
+        "NHMS_RUN_ID": context.get("run_id", ""),
+        "NHMS_MODEL_ID": context.get("model_id", ""),
+        "NHMS_SOURCE_ID": context.get("source_id", "GFS"),
+        "NHMS_CYCLE_ID": context.get("cycle_id", ""),
+        "NHMS_CYCLE_TIME": context.get("cycle_time", ""),
+        "NHMS_START_TIME": context.get("start_time", ""),
+        "NHMS_END_TIME": context.get("end_time", ""),
+        "NHMS_BASIN_VERSION_ID": context.get("basin_version_id", ""),
+        "NHMS_RIVER_NETWORK_VERSION_ID": context.get("river_network_version_id", ""),
+        "NHMS_FORCING_VERSION_ID": context.get("forcing_version_id", ""),
+        "NHMS_FORCING_PACKAGE_URI": context.get("forcing_package_uri", ""),
+        "NHMS_JOB_TYPE": context.get("job_type", ""),
+        "NHMS_RUN_MANIFEST_URI": context.get("run_manifest_uri", ""),
+        "NHMS_MANIFEST_INDEX": context.get("manifest_index_path", ""),
+        "NHMS_MAX_CONCURRENT": context.get("max_concurrent", ""),
+        "SHUD_THREADS": context.get("shud_threads", ""),
+        "OMP_NUM_THREADS": context.get("shud_threads", ""),
+    }
+    return [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
 
 
 def _response_json_or_text(response: httpx.Response) -> dict[str, Any] | str:

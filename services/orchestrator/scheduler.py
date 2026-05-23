@@ -27,6 +27,8 @@ from packages.common.slurm_env import (
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
+from services.slurm_gateway.gateway import ConfigurationError
+from services.slurm_gateway.resource_validation import ResourceProfileValidationError, validate_resource_profile
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 
 DEFAULT_PRODUCTION_SOURCES = ("gfs", "IFS")
@@ -258,7 +260,7 @@ class RegisteredSchedulerModel:
             "segment_count": self.segment_count,
             "model_package_uri": _redact_secret_manifest_for_evidence(self.model_package_uri, "model_package_uri"),
             "shud_code_version": self.shud_code_version,
-            "resource_profile": _redact_secret_manifest_for_evidence(dict(self.resource_profile_summary)),
+            "resource_profile": _resource_profile_evidence(self.resource_profile_summary),
             "display_capabilities": dict(self.display_capabilities),
             "frequency_capabilities": dict(self.frequency_capabilities),
         }
@@ -298,7 +300,7 @@ class SchedulerCandidate:
             "river_network_version_id": self.river_network_version_id,
             "segment_count": self.segment_count,
             "model_package_uri": _redact_secret_manifest_for_evidence(self.model_package_uri, "model_package_uri"),
-            "resource_profile": _redact_secret_manifest_for_evidence(dict(self.resource_profile)),
+            "resource_profile": _resource_profile_evidence(self.resource_profile),
             "display_capabilities": dict(self.display_capabilities),
             "frequency_capabilities": dict(self.frequency_capabilities),
             "horizon": dict(self.horizon),
@@ -601,6 +603,20 @@ class ProductionScheduler:
                     if findings:
                         evidence.append(
                             _candidate_secret_manifest_blocked_evidence(candidate, findings=findings)
+                        )
+                        continue
+                    resource_profile_blockers = _slurm_resource_profile_blockers(candidate.resource_profile)
+                    if resource_profile_blockers:
+                        evidence.append(
+                            _candidate_slurm_preflight_blocked_evidence(
+                                candidate,
+                                {
+                                    "status": "blocked",
+                                    "enabled": True,
+                                    "blockers": resource_profile_blockers,
+                                    "checks": {"resource_profile": {"valid": False}},
+                                },
+                            )
                         )
                         continue
                     safe_pairs.append((candidate, basin_manifest))
@@ -1619,6 +1635,46 @@ def _candidate_secret_manifest_blocked_evidence(
     }
 
 
+def _slurm_resource_profile_blockers(resource_profile: Mapping[str, Any]) -> list[dict[str, Any]]:
+    directive_fields = {
+        key: resource_profile[key]
+        for key in (
+            "partition",
+            "account",
+            "nodes",
+            "ntasks",
+            "cpus_per_task",
+            "memory_gb",
+            "walltime",
+            "max_concurrent",
+            "shud_threads",
+        )
+        if key in resource_profile
+    }
+    if not directive_fields:
+        return []
+    try:
+        validate_resource_profile(directive_fields, require_required=False)
+    except ResourceProfileValidationError as exc:
+        return [
+            {
+                "code": "SLURM_PREFLIGHT_RESOURCE_PROFILE_INVALID",
+                "field": exc.details.get("field"),
+                "message": "Slurm resource profile contains invalid directive values.",
+                "reason": exc.details.get("reason") or exc.details.get("type"),
+            }
+        ]
+    except ConfigurationError as exc:
+        return [
+            {
+                "code": "SLURM_PREFLIGHT_RESOURCE_PROFILE_INVALID",
+                "field": (exc.details or {}).get("field"),
+                "message": "Slurm resource profile contains invalid directive values.",
+            }
+        ]
+    return []
+
+
 def _redact_secret_manifest_for_evidence(value: Any, path: str = "manifest") -> Any:
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
@@ -1634,6 +1690,22 @@ def _redact_secret_manifest_for_evidence(value: Any, path: str = "manifest") -> 
     if isinstance(value, str) and secret_manifest_value_reason(value) is not None:
         return "[redacted]"
     return value
+
+
+def _resource_profile_evidence(resource_profile: Mapping[str, Any]) -> dict[str, Any]:
+    redacted = _redact_secret_manifest_for_evidence(dict(resource_profile), "resource_profile")
+    if not isinstance(redacted, Mapping):
+        return {}
+    evidence = dict(redacted)
+    invalid_fields = {
+        str(blocker.get("field", "")).removeprefix("resource_profile.")
+        for blocker in _slurm_resource_profile_blockers(resource_profile)
+        if blocker.get("field")
+    }
+    for field_name in invalid_fields:
+        if field_name in evidence:
+            evidence[field_name] = "[unsafe]"
+    return evidence
 
 
 def _candidate_execution_evidence(

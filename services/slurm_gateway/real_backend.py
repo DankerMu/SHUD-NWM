@@ -3,13 +3,15 @@ from __future__ import annotations
 import logging
 import os
 import re
+import selectors
 import shlex
 import subprocess
 import tempfile
 import threading
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import yaml
 from jinja2 import StrictUndefined
@@ -17,6 +19,7 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from packages.common.manifest_index import ManifestValidationError as CommonManifestValidationError
 from packages.common.manifest_index import serialize_manifest_index
+from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
     ensure_directory_no_follow,
@@ -54,8 +57,14 @@ from services.slurm_gateway.models import (
     SlurmLogsResponse,
     SubmitJobRequest,
 )
+from services.slurm_gateway.resource_validation import (
+    ResourceProfileValidationError,
+    validate_resource_profile,
+    validate_sbatch_directive_context,
+)
 
 LOGGER = logging.getLogger(__name__)
+_ORIGINAL_SUBPROCESS_RUN = subprocess.run
 
 SBATCH_JOB_ID_RE = re.compile(r"Submitted batch job (\d+)")
 SLURM_JOB_ID_RE = re.compile(r"^\d+(_\d+)?$")
@@ -67,6 +76,8 @@ SAFE_TEMPLATE_DETAIL_RE = re.compile(r"^[A-Za-z0-9_.-]+\.sbatch$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
 MAX_RENDERED_STRING_BYTES = 4096
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
+MAX_SLURM_COMMAND_OUTPUT_BYTES = 256 * 1024
+MAX_SLURM_ERROR_SNIPPET_BYTES = 2048
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
 LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
@@ -87,17 +98,6 @@ STRICT_IDENTIFIER_FIELDS = {
     "stage",
     "stage_name",
     "task_id",
-}
-
-REQUIRED_RESOURCE_FIELDS = {
-    "partition",
-    "nodes",
-    "ntasks",
-    "cpus_per_task",
-    "memory_gb",
-    "walltime",
-    "max_concurrent",
-    "shud_threads",
 }
 
 ARRAY_CAPABLE_JOB_TYPES = {
@@ -143,7 +143,8 @@ def _sacct_metric_fields(fields: Sequence[str]) -> dict[str, Any]:
 
 
 def _normalize_slurm_state(raw_state: str) -> str:
-    return raw_state.strip().upper().split()[0].rstrip("+")
+    normalized = raw_state.strip().upper().split()[0].rstrip("+")
+    return normalized if re.fullmatch(r"[A-Z0-9_]+", normalized) else "UNKNOWN"
 
 
 class RealSlurmGateway(SlurmGateway):
@@ -227,7 +228,6 @@ class RealSlurmGateway(SlurmGateway):
             workspace_root,
             require_match=bool(requested_workspace),
         )
-        manifest_index_path = self.write_manifest_index(cycle_id, stage_name, task_list, workspace_dir=workspace_root)
         first_task = dict(task_list[0])
         model_id = str(first_task.get("model_id") or base_manifest.get("model_id") or "")
         profile = self.resolve_resource_profile(model_id)
@@ -237,6 +237,7 @@ class RealSlurmGateway(SlurmGateway):
         task_count = len(task_list)
         effective_max_concurrent = min(max_concurrent, task_count)
         profile["max_concurrent"] = effective_max_concurrent
+        manifest_index_path = self.write_manifest_index(cycle_id, stage_name, task_list, workspace_dir=workspace_root)
         render_manifest = {
             **base_manifest,
             "job_type": job_type,
@@ -305,9 +306,15 @@ class RealSlurmGateway(SlurmGateway):
         try:
             self._run_command([self._slurm_command("scancel"), job_id])
         except SlurmCommandError as exc:
-            stderr = str((exc.details or {}).get("stderr", ""))
-            if "invalid job" in stderr.lower() or "not found" in stderr.lower():
-                raise SlurmJobNotFoundError(job_id, {"job_id": job_id, "stderr": stderr}) from exc
+            stderr_detail = (exc.details or {}).get("stderr", "")
+            stderr_snippet = _safe_output_snippet(stderr_detail)
+            if "invalid job" in stderr_snippet.lower() or "not found" in stderr_snippet.lower():
+                safe_stderr = (
+                    stderr_detail
+                    if isinstance(stderr_detail, Mapping)
+                    else _safe_output_detail(str(stderr_detail), truncated=False)
+                )
+                raise SlurmJobNotFoundError(job_id, {"job_id": job_id, "stderr": safe_stderr}) from exc
             raise
 
         try:
@@ -435,13 +442,13 @@ class RealSlurmGateway(SlurmGateway):
         if model_id and isinstance(overrides.get(model_id), dict):
             resolved.update(overrides[model_id])
 
-        missing = sorted(REQUIRED_RESOURCE_FIELDS - set(resolved))
-        if missing:
+        try:
+            return validate_resource_profile(resolved, model_id=model_id)
+        except ResourceProfileValidationError as exc:
             raise ConfigurationError(
-                "Resolved resource profile is missing required fields.",
-                {"model_id": model_id, "missing_fields": missing},
-            )
-        return resolved
+                "Resolved resource profile contains invalid Slurm directive values.",
+                exc.details,
+            ) from exc
 
     def write_manifest_index(
         self,
@@ -534,7 +541,14 @@ class RealSlurmGateway(SlurmGateway):
         self._validate_manifest(manifest_dict)
         slurm_env = self._validate_slurm_env(manifest_dict.get("slurm_env") or {})
         resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
-        self._validate_manifest(resource_profile, "resource_profile")
+        try:
+            resource_profile = validate_resource_profile(resource_profile)
+            validate_sbatch_directive_context({**manifest_dict, **resource_profile})
+        except ResourceProfileValidationError as exc:
+            raise ConfigurationError(
+                "Resolved resource profile contains invalid Slurm directive values.",
+                exc.details,
+            ) from exc
         template_path = self._resolve_template_path(job_type)
         context = {**manifest_dict, **resource_profile}
         context["manifest"] = manifest_dict
@@ -543,6 +557,7 @@ class RealSlurmGateway(SlurmGateway):
         context["slurm_env_exports"] = [
             f"export {key}={shlex.quote(value)}" for key, value in sorted(slurm_env.items())
         ]
+        context["export_lines"] = self._template_export_lines(context)
 
         environment = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
         template = environment.from_string(template_path.read_text(encoding="utf-8"))
@@ -738,6 +753,31 @@ class RealSlurmGateway(SlurmGateway):
         except CommonManifestValidationError as exc:
             raise ManifestValidationError(exc.message, exc.details) from exc
 
+    def _template_export_lines(self, context: Mapping[str, Any]) -> list[str]:
+        export_fields = {
+            "WORKSPACE_ROOT": context.get("workspace_dir", ""),
+            "OBJECT_STORE_ROOT": context.get("object_store_root", context.get("workspace_dir", "")),
+            "OBJECT_STORE_PREFIX": context.get("object_store_prefix", ""),
+            "NHMS_RUN_ID": context.get("run_id", ""),
+            "NHMS_MODEL_ID": context.get("model_id", ""),
+            "NHMS_SOURCE_ID": context.get("source_id", "GFS"),
+            "NHMS_CYCLE_ID": context.get("cycle_id", ""),
+            "NHMS_CYCLE_TIME": context.get("cycle_time", ""),
+            "NHMS_START_TIME": context.get("start_time", ""),
+            "NHMS_END_TIME": context.get("end_time", ""),
+            "NHMS_BASIN_VERSION_ID": context.get("basin_version_id", ""),
+            "NHMS_RIVER_NETWORK_VERSION_ID": context.get("river_network_version_id", ""),
+            "NHMS_FORCING_VERSION_ID": context.get("forcing_version_id", ""),
+            "NHMS_FORCING_PACKAGE_URI": context.get("forcing_package_uri", ""),
+            "NHMS_JOB_TYPE": context.get("job_type", ""),
+            "NHMS_RUN_MANIFEST_URI": context.get("run_manifest_uri", ""),
+            "NHMS_MANIFEST_INDEX": context.get("manifest_index_path", ""),
+            "NHMS_MAX_CONCURRENT": context.get("max_concurrent", ""),
+            "SHUD_THREADS": context.get("shud_threads", ""),
+            "OMP_NUM_THREADS": context.get("shud_threads", ""),
+        }
+        return [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
+
     def _submit_rendered_script(self, rendered_script: str, array_spec: str | None = None) -> str:
         script_path = self._write_temp_script(rendered_script)
         command = [self._slurm_command("sbatch")]
@@ -764,6 +804,79 @@ class RealSlurmGateway(SlurmGateway):
         return temp_path
 
     def _run_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
+            return self._run_command_via_subprocess_run(command)
+        stdout = ""
+        stderr = ""
+        truncated = {"stdout": False, "stderr": False}
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+                text=False,
+            )
+            stdout_bytes, stderr_bytes, truncated = self._communicate_bounded(
+                process,
+                timeout_seconds=self.settings.subprocess_timeout_seconds,
+            )
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+            stderr = stderr_bytes.decode("utf-8", errors="replace")
+            result = subprocess.CompletedProcess(command, int(process.returncode or 0), stdout=stdout, stderr=stderr)
+        except subprocess.TimeoutExpired as exc:
+            LOGGER.error("Slurm command timed out: %s", command[0], exc_info=True)
+            raise SlurmTimeoutError(
+                f"Slurm command {Path(command[0]).name} timed out after "
+                f"{self.settings.subprocess_timeout_seconds} seconds.",
+                {
+                    "command": command,
+                    "timeout_seconds": self.settings.subprocess_timeout_seconds,
+                    "stdout": _safe_output_detail(stdout, truncated=truncated["stdout"]),
+                    "stderr": _safe_output_detail(stderr, truncated=truncated["stderr"]),
+                },
+            ) from exc
+        except FileNotFoundError as exc:
+            LOGGER.error("Slurm command was not found: %s", command[0], exc_info=True)
+            raise SlurmCommandError(
+                f"Slurm command {Path(command[0]).name} was not found.",
+                {
+                    "command": command,
+                    "stderr": _safe_output_detail(str(exc), truncated=False),
+                    "returncode": None,
+                },
+            ) from exc
+
+        if result.returncode != 0:
+            LOGGER.error(
+                "Slurm command failed: %s returncode=%s stdout=%s stderr=%s",
+                command[0],
+                result.returncode,
+                _safe_output_detail(result.stdout, truncated=truncated["stdout"]),
+                _safe_output_detail(result.stderr, truncated=truncated["stderr"]),
+            )
+            raise SlurmCommandError(
+                f"Slurm command {Path(command[0]).name} failed with exit code {result.returncode}.",
+                {
+                    "command": command,
+                    "returncode": result.returncode,
+                    "stdout": _safe_output_detail(result.stdout, truncated=truncated["stdout"]),
+                    "stderr": _safe_output_detail(result.stderr, truncated=truncated["stderr"]),
+                },
+            )
+        if truncated["stdout"] or truncated["stderr"]:
+            raise SlurmCommandError(
+                f"Slurm command {Path(command[0]).name} produced output above the safe capture limit.",
+                {
+                    "command": command,
+                    "returncode": result.returncode,
+                    "stdout": _safe_output_detail(result.stdout, truncated=truncated["stdout"]),
+                    "stderr": _safe_output_detail(result.stderr, truncated=truncated["stderr"]),
+                },
+            )
+        return result
+
+    def _run_command_via_subprocess_run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
         try:
             result = subprocess.run(
                 command,
@@ -784,33 +897,98 @@ class RealSlurmGateway(SlurmGateway):
             LOGGER.error("Slurm command was not found: %s", command[0], exc_info=True)
             raise SlurmCommandError(
                 f"Slurm command {Path(command[0]).name} was not found.",
-                {"command": command, "stderr": str(exc), "returncode": None},
+                {
+                    "command": command,
+                    "stderr": _safe_output_detail(str(exc), truncated=False),
+                    "returncode": None,
+                },
             ) from exc
-
+        stdout = str(result.stdout or "")
+        stderr = str(result.stderr or "")
+        truncated = {
+            "stdout": len(stdout.encode("utf-8")) > MAX_SLURM_COMMAND_OUTPUT_BYTES,
+            "stderr": len(stderr.encode("utf-8")) > MAX_SLURM_COMMAND_OUTPUT_BYTES,
+        }
+        if truncated["stdout"]:
+            stdout = _truncate_bytes(stdout, MAX_SLURM_COMMAND_OUTPUT_BYTES)
+        if truncated["stderr"]:
+            stderr = _truncate_bytes(stderr, MAX_SLURM_COMMAND_OUTPUT_BYTES)
         if result.returncode != 0:
-            LOGGER.error(
-                "Slurm command failed: %s returncode=%s stdout=%r stderr=%r",
-                command[0],
-                result.returncode,
-                result.stdout,
-                result.stderr,
-            )
             raise SlurmCommandError(
                 f"Slurm command {Path(command[0]).name} failed with exit code {result.returncode}.",
                 {
                     "command": command,
                     "returncode": result.returncode,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
+                    "stdout": _safe_output_detail(stdout, truncated=truncated["stdout"]),
+                    "stderr": _safe_output_detail(stderr, truncated=truncated["stderr"]),
                 },
             )
-        return result
+        if truncated["stdout"] or truncated["stderr"]:
+            raise SlurmCommandError(
+                f"Slurm command {Path(command[0]).name} produced output above the safe capture limit.",
+                {
+                    "command": command,
+                    "returncode": result.returncode,
+                    "stdout": _safe_output_detail(stdout, truncated=truncated["stdout"]),
+                    "stderr": _safe_output_detail(stderr, truncated=truncated["stderr"]),
+                },
+            )
+        return subprocess.CompletedProcess(command, result.returncode, stdout=stdout, stderr=stderr)
+
+    def _communicate_bounded(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        timeout_seconds: int,
+    ) -> tuple[bytes, bytes, dict[str, bool]]:
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("Slurm command pipes were not configured.")
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        truncated = {"stdout": False, "stderr": False}
+        deadline = self._now().timestamp() + timeout_seconds
+        try:
+            while selector.get_map():
+                remaining = deadline - self._now().timestamp()
+                if remaining <= 0:
+                    process.kill()
+                    process.wait()
+                    raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+                events = selector.select(timeout=min(0.1, remaining))
+                if not events:
+                    if process.poll() is not None:
+                        break
+                    continue
+                for key, _mask in events:
+                    chunk = key.fileobj.read1(8192) if hasattr(key.fileobj, "read1") else key.fileobj.read(8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    stream_name = str(key.data)
+                    stream_buffer = buffers[stream_name]
+                    remaining_bytes = max(MAX_SLURM_COMMAND_OUTPUT_BYTES - len(stream_buffer), 0)
+                    if len(stream_buffer) < MAX_SLURM_COMMAND_OUTPUT_BYTES:
+                        stream_buffer.extend(chunk[:remaining_bytes])
+                    if len(chunk) > remaining_bytes:
+                        truncated[stream_name] = True
+                        process.kill()
+                if process.poll() is not None:
+                    break
+            process.wait(timeout=max(deadline - self._now().timestamp(), 0.001))
+        finally:
+            selector.close()
+        return bytes(buffers["stdout"]), bytes(buffers["stderr"]), truncated
 
     def _parse_sbatch_job_id(self, stdout: str) -> str:
         match = SBATCH_JOB_ID_RE.search(stdout)
         if not match:
-            LOGGER.error("Failed to parse sbatch stdout: %r", stdout)
-            raise SlurmParseError("Unable to parse sbatch job id from stdout.", {"stdout": stdout})
+            LOGGER.error("Failed to parse sbatch stdout: %s", _safe_output_detail(stdout, truncated=False))
+            raise SlurmParseError(
+                "Unable to parse sbatch job id from stdout.",
+                {"stdout": _safe_output_detail(stdout, truncated=False)},
+            )
         return match.group(1)
 
     def _parse_sacct_status(self, stdout: str, job_id: str) -> SlurmJobRecord:
@@ -820,8 +998,11 @@ class RealSlurmGateway(SlurmGateway):
                 continue
             fields = raw_line.rstrip("\n").split("|")
             if len(fields) < 5:
-                LOGGER.error("Failed to parse sacct status output: %r", stdout)
-                raise SlurmParseError("Unable to parse sacct status output.", {"stdout": stdout})
+                LOGGER.error("Failed to parse sacct status output: %s", _safe_output_detail(stdout, truncated=False))
+                raise SlurmParseError(
+                    "Unable to parse sacct status output.",
+                    {"stdout": _safe_output_detail(stdout, truncated=False)},
+                )
             if fields[0] == job_id:
                 matching_fields = fields
                 break
@@ -837,8 +1018,11 @@ class RealSlurmGateway(SlurmGateway):
                 continue
             fields = raw_line.rstrip("\n").split("|")
             if len(fields) != 6:
-                LOGGER.error("Failed to parse sacct list output: %r", stdout)
-                raise SlurmParseError("Unable to parse sacct list output.", {"stdout": stdout})
+                LOGGER.error("Failed to parse sacct list output: %s", _safe_output_detail(stdout, truncated=False))
+                raise SlurmParseError(
+                    "Unable to parse sacct list output.",
+                    {"stdout": _safe_output_detail(stdout, truncated=False)},
+                )
             job_id = fields[0]
             if "." in job_id:
                 continue
@@ -858,8 +1042,14 @@ class RealSlurmGateway(SlurmGateway):
                 continue
             fields = raw_line.rstrip("\n").split("|")
             if len(fields) < 3:
-                LOGGER.error("Failed to parse sacct array task output: %r", stdout)
-                raise SlurmParseError("Unable to parse sacct array task output.", {"stdout": stdout})
+                LOGGER.error(
+                    "Failed to parse sacct array task output: %s",
+                    _safe_output_detail(stdout, truncated=False),
+                )
+                raise SlurmParseError(
+                    "Unable to parse sacct array task output.",
+                    {"stdout": _safe_output_detail(stdout, truncated=False)},
+                )
             task_job_id, state, raw_exit_code = fields[0], fields[1], fields[2]
             match = task_pattern.fullmatch(task_job_id)
             if match is None:
@@ -1028,7 +1218,10 @@ class RealSlurmGateway(SlurmGateway):
         try:
             return int(raw_exit_code.split(":", maxsplit=1)[0])
         except ValueError as exc:
-            raise SlurmParseError("Unable to parse Slurm exit code.", {"exit_code": raw_exit_code}) from exc
+            raise SlurmParseError(
+                "Unable to parse Slurm exit code.",
+                {"exit_code": _safe_output_detail(raw_exit_code, truncated=False)},
+            ) from exc
 
     def _parse_slurm_datetime(self, raw_value: str) -> datetime | None:
         value = raw_value.strip()
@@ -1037,7 +1230,10 @@ class RealSlurmGateway(SlurmGateway):
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
-            raise SlurmParseError("Unable to parse Slurm timestamp.", {"timestamp": raw_value}) from exc
+            raise SlurmParseError(
+                "Unable to parse Slurm timestamp.",
+                {"timestamp": _safe_output_detail(raw_value, truncated=False)},
+            ) from exc
 
     def _slurm_command(self, name: str) -> str:
         if not self.settings.slurm_bin_path:
@@ -1199,3 +1395,27 @@ class RealSlurmGateway(SlurmGateway):
     @staticmethod
     def _now() -> datetime:
         return datetime.now(UTC)
+
+
+def _safe_output_detail(value: str, *, truncated: bool) -> dict[str, Any]:
+    raw_snippet = _truncate_bytes(value, MAX_SLURM_ERROR_SNIPPET_BYTES)
+    snippet = redact_text(raw_snippet)
+    return {
+        "snippet": snippet,
+        "truncated": truncated or len(value.encode("utf-8")) > MAX_SLURM_ERROR_SNIPPET_BYTES,
+        "original_bytes": len(value.encode("utf-8")),
+        "snippet_bytes": len(snippet.encode("utf-8")),
+    }
+
+
+def _safe_output_snippet(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return str(value.get("snippet", ""))
+    return _safe_output_detail(str(value), truncated=False)["snippet"]
+
+
+def _truncate_bytes(value: str, limit: int) -> str:
+    data = value.encode("utf-8")
+    if len(data) <= limit:
+        return value
+    return data[:limit].decode("utf-8", errors="ignore") + "...[truncated]"

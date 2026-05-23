@@ -434,6 +434,8 @@ def test_validate_slurm_submit_fake_conflict_fails_without_evidence(
         ("NHMS_PRODUCTION_SLURM_PARTITION", "CPU\n#SBATCH --nodes=99"),
         ("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends;rm"),
         ("NHMS_PRODUCTION_SLURM_WALLTIME", "00:99:00"),
+        ("NHMS_PRODUCTION_SLURM_WALLTIME", "31-00:00:00"),
+        ("NHMS_PRODUCTION_SLURM_WALLTIME", "00:00:00"),
         ("NHMS_PRODUCTION_SLURM_CPUS_PER_TASK", "0"),
         ("NHMS_PRODUCTION_SLURM_MEMORY_GB", "4097"),
     ],
@@ -562,7 +564,7 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
     rendered = (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8")
     workspace_manifest_index = tmp_path / "shared-workspace" / "runs" / "submit147" / "input" / "manifest_index.json"
     assert workspace_manifest_index.exists()
-    assert f'export NHMS_MANIFEST_INDEX="{workspace_manifest_index}"' in rendered
+    assert f"export NHMS_MANIFEST_INDEX={workspace_manifest_index}" in rendered
 
     partial = json.loads((lane_dir / "array_partial_success.json").read_text())
     assert partial["array_job_id"] == "7777"

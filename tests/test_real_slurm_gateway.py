@@ -19,6 +19,7 @@ from services.orchestrator.persistence import Base
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
+    ConfigurationError,
     ManifestValidationError,
     SlurmGatewayError,
     SlurmParseError,
@@ -70,6 +71,14 @@ resource_profiles:
 """.lstrip(),
         encoding="utf-8",
     )
+    return path
+
+
+def _write_resource_profiles_with_update(tmp_path: Path, update: dict[str, object]) -> Path:
+    path = _write_resource_profiles(tmp_path)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["resource_profiles"]["default"].update(update)
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     return path
 
 
@@ -487,7 +496,7 @@ def test_analysis_production_templates_submit_without_script_payload(monkeypatch
     assert record.job_id == "12345"
     assert record.manifest["script"] == "echo ignored"
     assert "echo ignored" not in captured["script"]
-    assert f'export NHMS_JOB_TYPE="{stage.job_type}"' in captured["script"]
+    assert f"export NHMS_JOB_TYPE={stage.job_type}" in captured["script"]
 
 
 def test_analysis_download_template_uses_configured_area(monkeypatch, tmp_path) -> None:
@@ -765,6 +774,180 @@ def test_manifest_export_values_reject_shell_meta_and_unbounded_strings(
     manifest.update(manifest_update)
     with pytest.raises(ManifestValidationError):
         gateway.submit_job(SubmitJobRequest(**manifest))
+
+
+def test_manifest_export_quote_breakout_is_shell_quoted_before_sbatch(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured["script"] = Path(command[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_001",
+            model_id="model_001",
+            job_type="download_source_cycle",
+            manifest={
+                **_production_manifest(tmp_path, "download_source_cycle"),
+                "object_store_prefix": 'prod" PYTHONPATH=/tmp/evil #',
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+    )
+
+    assert record.job_id == "12345"
+    assert "PYTHONPATH=/tmp/evil #" in captured["script"]
+    assert 'export OBJECT_STORE_PREFIX="prod" PYTHONPATH=/tmp/evil #' not in captured["script"]
+    assert 'export OBJECT_STORE_PREFIX=\'prod" PYTHONPATH=/tmp/evil #\'' in captured["script"]
+
+
+def test_submit_job_rejects_secret_quote_breakout_before_sbatch(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret breakout values")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    "object_store_prefix": 'prod" SECRET_TOKEN=supersecret #',
+                    "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                },
+            )
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert "supersecret" not in details
+    assert "SECRET_TOKEN" not in details
+
+
+@pytest.mark.parametrize(
+    "resource_update",
+    [
+        {"partition": "compute --account=vip"},
+        {"partition": "-compute"},
+        {"partition": 'compute"breakout'},
+        {"partition": "compute#debug"},
+        {"partition": "compute\\debug"},
+        {"account": "friends --qos=high"},
+        {"nodes": "1 --exclusive"},
+        {"nodes": 0},
+        {"nodes": 129},
+        {"ntasks": "1 --exclusive"},
+        {"ntasks": 0},
+        {"ntasks": 4097},
+        {"cpus_per_task": "1 --hint=nomultithread"},
+        {"cpus_per_task": 0},
+        {"cpus_per_task": 257},
+        {"memory_gb": "8 --mem-per-cpu=8G"},
+        {"memory_gb": 0},
+        {"memory_gb": 4097},
+        {"walltime": "01:00:00 --qos=high"},
+        {"walltime": "01:61:00"},
+        {"walltime": '01:00:00"'},
+        {"walltime": "31-00:00:00"},
+        {"walltime": "00:00:00"},
+        {"max_concurrent": "2 --array=0-999"},
+        {"max_concurrent": 0},
+        {"max_concurrent": 10001},
+        {"shud_threads": "8 --export=ALL"},
+        {"shud_threads": 0},
+        {"shud_threads": 257},
+    ],
+)
+def test_resource_profile_directive_values_reject_injection_before_sbatch(
+    monkeypatch,
+    tmp_path,
+    resource_update,
+):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles_with_update(tmp_path, resource_update)),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for invalid resource profiles")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                },
+            )
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert "--" not in details
+    assert "exclusive" not in details
+    assert "breakout" not in details
+
+
+def test_resource_profile_safe_account_and_day_walltime_render(monkeypatch, tmp_path):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(
+                _write_resource_profiles_with_update(
+                    tmp_path,
+                    {"partition": "compute-gpu.1", "account": "friends.team-1", "walltime": "2-01:00:00"},
+                )
+            ),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured["script"] = Path(command[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=[{**_fake_array_task("run_001", "model_001"), "workspace_dir": str(tmp_path / "workspace")}],
+        manifest={
+            "run_id": "cycle_001",
+            "model_id": "model_001",
+            "workspace_dir": str(tmp_path / "workspace"),
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
+
+    assert "#SBATCH --partition=compute-gpu.1" in captured["script"]
+    assert "#SBATCH --account=friends.team-1" in captured["script"]
+    assert "#SBATCH --time=2-01:00:00" in captured["script"]
 
 
 def test_scancel_invocation(monkeypatch, tmp_path):
@@ -2098,6 +2281,101 @@ def test_list_jobs_defaults_to_lookback_start_time(monkeypatch, tmp_path):
 
     assert gateway.list_jobs(limit=100, offset=0) == []
     assert any(arg.startswith("--starttime=") for arg in calls[0])
+
+
+def test_slurm_command_failure_details_are_bounded_and_redacted(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    secret_stdout = "token=supersecret " + ("x" * 300_000)
+    secret_stderr = "https://user:supersecret@example.com/path?token=abc " + ("y" * 300_000)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        return subprocess.CompletedProcess(command, 1, stdout=secret_stdout, stderr=secret_stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(SlurmGatewayError) as exc_info:
+        gateway.get_job_status("12345")
+
+    details_text = json.dumps(exc_info.value.details)
+    assert exc_info.value.code == "SLURM_COMMAND_ERROR"
+    assert len(details_text) < 8000
+    assert "supersecret" not in details_text
+    assert "token=abc" not in details_text
+    assert exc_info.value.details["stdout"]["truncated"] is True
+    assert exc_info.value.details["stderr"]["truncated"] is True
+
+
+def test_oversized_sacct_output_is_bounded_and_redacted_before_parse(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    malformed = "malformed|token=supersecret|" + ("x" * 300_000)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, stdout=malformed, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(SlurmGatewayError) as exc_info:
+        gateway.list_jobs(limit=1, offset=0)
+
+    details_text = json.dumps(exc_info.value.details)
+    assert exc_info.value.code == "SLURM_COMMAND_ERROR"
+    assert len(details_text) < 8000
+    assert "supersecret" not in details_text
+    assert exc_info.value.details["stdout"]["truncated"] is True
+
+
+def test_sacct_parse_error_details_are_bounded_and_redacted(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    malformed = "malformed|token=supersecret|"
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, stdout=malformed, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(SlurmParseError) as exc_info:
+        gateway.list_jobs(limit=1, offset=0)
+
+    details_text = json.dumps(exc_info.value.details)
+    assert len(details_text) < 8000
+    assert "supersecret" not in details_text
+    assert exc_info.value.details["stdout"]["truncated"] is False
+
+
+def test_sacct_status_and_array_normal_parsing_survives_output_bounding(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        if "--format=JobID,State,ExitCode,Start,End,Elapsed,MaxRSS,AveRSS,AllocTRES" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "12345|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|"
+                    "00:05:00|1024K|512K|cpu=2,mem=4G\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="12345_0|COMPLETED|0:0|00:01:00|256K|128K|cpu=1,mem=1G\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    status = gateway.get_job_status("12345")
+    tasks = gateway.get_array_task_results("12345")
+
+    assert status.status == SlurmJobStatus.SUCCEEDED
+    assert status.max_rss == "1024K"
+    assert tasks[0]["status"] == "succeeded"
+    assert tasks[0]["resource_metrics"]["alloc_tres"] == "cpu=1,mem=1G"
 
 
 def test_fake_slurm_command_matrix_for_production_job_types(monkeypatch, tmp_path) -> None:

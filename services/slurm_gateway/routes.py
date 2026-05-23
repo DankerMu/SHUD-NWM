@@ -8,9 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
-from packages.common.slurm_env import secret_manifest_key_reason
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
-from services.slurm_gateway.gateway import SlurmGatewayError, create_gateway
+from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError, create_gateway
 from services.slurm_gateway.models import (
     ArraySubmitJobRequest,
     ErrorBody,
@@ -18,6 +17,7 @@ from services.slurm_gateway.models import (
     ResetRequest,
     SubmitJobRequest,
 )
+from services.slurm_gateway.validation_errors import slurm_request_validation_error_response
 
 
 class SlurmSafeValidationRoute(APIRoute):
@@ -34,63 +34,26 @@ class SlurmSafeValidationRoute(APIRoute):
 
 
 router = APIRouter(prefix="/api/v1/slurm", tags=["slurm"], route_class=SlurmSafeValidationRoute)
-slurm_gateway = create_gateway()
 SLURM_ROUTE_JOB_ID_PATTERN = r"^(?:\d+(?:_\d+)?|mock_\d+)$"
 
 
-def _request_id_for(request: Request) -> str:
-    request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
-    if request_id:
-        return str(request_id)
-    request_id = f"req_{uuid4().hex}"
-    request.state.request_id = request_id
-    return request_id
+class LazySlurmGateway:
+    def __init__(self) -> None:
+        self._instance: SlurmGateway | None = None
+
+    def _get(self) -> SlurmGateway:
+        if self._instance is None:
+            self._instance = create_gateway()
+        return self._instance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
+
+    def reset_instance(self) -> None:
+        self._instance = None
 
 
-def _safe_validation_details(errors: list[dict[str, Any]]) -> list[dict[str, str]]:
-    details: list[dict[str, str]] = []
-    for error in errors:
-        error_type = str(error.get("type") or "value_error")
-        details.append(
-            {
-                "field": ".".join(_safe_validation_location_part(part) for part in error.get("loc", ())),
-                "reason": _safe_validation_reason(error_type),
-                "type": error_type,
-            }
-        )
-    return details
-
-
-def _safe_validation_location_part(part: Any) -> str:
-    if isinstance(part, int):
-        return str(part)
-    text = str(part)
-    if secret_manifest_key_reason(text) is not None:
-        return "[redacted]"
-    return text
-
-
-def _safe_validation_reason(error_type: str) -> str:
-    if error_type == "missing":
-        return "Field required."
-    return "Invalid request value."
-
-
-def slurm_request_validation_error_response(request: Request, exc: RequestValidationError) -> JSONResponse:
-    request_id = _request_id_for(request)
-    response = ErrorResponse(
-        request_id=request_id,
-        error=ErrorBody(
-            code="VALIDATION_ERROR",
-            message="Request validation failed.",
-            details={"validation_errors": _safe_validation_details(exc.errors())},
-        ),
-    )
-    return JSONResponse(
-        status_code=422,
-        content=response.model_dump(mode="json"),
-        headers={"X-Request-ID": request_id},
-    )
+slurm_gateway = LazySlurmGateway()
 
 
 def _gateway_error_response(exc: SlurmGatewayError) -> JSONResponse:
