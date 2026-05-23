@@ -954,6 +954,21 @@ def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_reject
             "download_source_cycle",
             {**manifest, "slurm_env": {"AWS_SECRET_ACCESS_KEY": "supersecret"}},
         )
+    with pytest.raises(ManifestValidationError):
+        gateway.render_template(
+            "download_source_cycle",
+            {**manifest, "slurm_env": {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"}},
+        )
+    with pytest.raises(ManifestValidationError):
+        gateway.render_template(
+            "download_source_cycle",
+            {**manifest, "slurm_env": {"OBJECT_STORE_PREFIX": "s3://bucket/prod?X-Amz-Signature=supersecret"}},
+        )
+    with pytest.raises(ManifestValidationError):
+        gateway.render_template(
+            "download_source_cycle",
+            {**manifest, "slurm_env": {"NHMS_PROFILE": "https://user:supersecret@example.com/profile"}},
+        )
 
 
 def test_safe_slurm_env_reaches_rendered_array_template_and_secret_is_rejected(tmp_path: Path) -> None:
@@ -988,6 +1003,92 @@ def test_safe_slurm_env_reaches_rendered_array_template_and_secret_is_rejected(t
             {**manifest, "slurm_env": {"AWS_SECRET_ACCESS_KEY": "supersecret"}},
             str(tmp_path / "index.json"),
         )
+    with pytest.raises(ManifestValidationError):
+        gateway.render_template(
+            "run_shud_forecast_array",
+            {**manifest, "slurm_env": {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"}},
+            str(tmp_path / "index.json"),
+        )
+    with pytest.raises(ManifestValidationError):
+        gateway.render_template(
+            "run_shud_forecast_array",
+            {**manifest, "slurm_env": {"OBJECT_STORE_PREFIX": "s3://bucket/prod?signature=supersecret"}},
+            str(tmp_path / "index.json"),
+        )
+
+
+@pytest.mark.parametrize(
+    "slurm_env",
+    [
+        {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"},
+        {"NHMS_PROFILE": "https://user:supersecret@example.com/profile"},
+        {"OBJECT_STORE_PREFIX": "s3://bucket/prod?token=supersecret"},
+    ],
+)
+def test_submit_job_rejects_secret_slurm_env_before_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    slurm_env: dict[str, str],
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for rejected slurm_env")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError):
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    "slurm_env": slurm_env,
+                    "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                },
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "slurm_env",
+    [
+        {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"},
+        {"NHMS_PROFILE": "https://user:supersecret@example.com/profile"},
+        {"OBJECT_STORE_PREFIX": "s3://bucket/prod?password=supersecret"},
+    ],
+)
+def test_submit_job_array_rejects_secret_slurm_env_before_manifest_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    slurm_env: dict[str, str],
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for rejected slurm_env")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError):
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                "slurm_env": slurm_env,
+            },
+        )
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
 
 
 def test_manifest_injection_rejected(monkeypatch, tmp_path):

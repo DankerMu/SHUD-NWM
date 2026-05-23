@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from services.slurm_gateway import real_backend as real_backend_module
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import ConfigurationError, SlurmValidationError
 from services.slurm_gateway.real_backend import RealSlurmGateway
@@ -161,6 +163,30 @@ def test_manifest_index_generation_uses_versioned_paths(tmp_path):
     assert second.exists()
 
 
+def test_manifest_index_timestamp_collision_does_not_overwrite_first_file(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    fixed_now = datetime(2026, 5, 21, 12, 0, 0, 123456, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(real_backend_module, "datetime", FrozenDatetime)
+
+    first = gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(1))
+    first_content = first.read_bytes()
+    second_tasks = _tasks(1)
+    second_tasks[0]["run_id"] = "run_collision_second"
+
+    second = gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", second_tasks)
+
+    assert second != first
+    assert first.read_bytes() == first_content
+    assert json.loads(first.read_text(encoding="utf-8"))[0]["run_id"] == "run_0"
+    assert json.loads(second.read_text(encoding="utf-8"))[0]["run_id"] == "run_collision_second"
+
+
 def test_resource_profile_loading_default_and_override(tmp_path):
     gateway = _gateway(tmp_path)
 
@@ -312,6 +338,64 @@ def test_array_submission_binds_manifest_index_under_submitted_workspace(monkeyp
     assert record.manifest["workspace_dir"] == str(submitted_workspace.resolve())
     tasks = json.loads(manifest_index.read_text(encoding="utf-8"))
     assert {entry["workspace_dir"] for entry in tasks} == {str(submitted_workspace.resolve())}
+
+
+def test_array_submission_timestamp_collision_keeps_first_manifest_index_immutable(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+    fixed_now = datetime(2026, 5, 21, 12, 0, 0, 123456, tzinfo=UTC)
+    captured_scripts: list[str] = []
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured_scripts.append(Path(command[-1]).read_text(encoding="utf-8"))
+        job_id = 12345 + len(captured_scripts)
+        return subprocess.CompletedProcess(command, 0, stdout=f"Submitted batch job {job_id}\n", stderr="")
+
+    monkeypatch.setattr(real_backend_module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    first_record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=_tasks(1),
+        manifest={
+            "run_id": "cycle_001",
+            "model_id": "model_001",
+            "workspace_dir": str(tmp_path / "workspace" / "scheduler"),
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
+    first_index = Path(first_record.manifest["manifest_index_path"])
+    first_content = first_index.read_bytes()
+    second_tasks = _tasks(1)
+    second_tasks[0]["run_id"] = "run_collision_second"
+
+    second_record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=second_tasks,
+        manifest={
+            "run_id": "cycle_001",
+            "model_id": "model_001",
+            "workspace_dir": str(tmp_path / "workspace" / "scheduler"),
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
+
+    second_index = Path(second_record.manifest["manifest_index_path"])
+    assert second_index != first_index
+    assert first_index.read_bytes() == first_content
+    assert json.loads(first_index.read_text(encoding="utf-8"))[0]["run_id"] == "run_0"
+    assert json.loads(second_index.read_text(encoding="utf-8"))[0]["run_id"] == "run_collision_second"
+    assert str(first_index) in captured_scripts[0]
+    assert str(second_index) in captured_scripts[1]
 
 
 def test_array_submission_rejects_sibling_workspace_before_sbatch(monkeypatch, tmp_path):

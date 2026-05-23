@@ -17,7 +17,12 @@ from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
 from packages.common.redaction import redact_payload
-from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    ensure_directory_no_follow,
+    write_bytes_no_follow_exclusive,
+)
+from packages.common.slurm_env import is_sensitive_slurm_env_key, secret_bearing_url_reason
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ConfigurationError,
@@ -53,10 +58,6 @@ SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SAFE_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
-SENSITIVE_ENV_KEY_RE = re.compile(
-    r"(TOKEN|PASSWORD|PASSWD|PWD|SECRET|CREDENTIAL|API_?KEY|ACCESS_?KEY|SESSION_?KEY|SIGNATURE)",
-    re.IGNORECASE,
-)
 MAX_RENDERED_STRING_BYTES = 4096
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_LIST_LOOKBACK_HOURS = 24
@@ -201,6 +202,7 @@ class RealSlurmGateway(SlurmGateway):
         if not task_list:
             raise SlurmValidationError("Cannot submit array job with 0 tasks")
         self._validate_requested_template_mapping(job_type, base_manifest)
+        slurm_env = self._validate_slurm_env(base_manifest.get("slurm_env") or {})
 
         requested_workspace = str(base_manifest.get("workspace_dir") or "").strip()
         workspace_root = self._resolve_submission_workspace_dir(requested_workspace)
@@ -219,8 +221,6 @@ class RealSlurmGateway(SlurmGateway):
         task_count = len(task_list)
         effective_max_concurrent = min(max_concurrent, task_count)
         profile["max_concurrent"] = effective_max_concurrent
-        slurm_env = self._validate_slurm_env(base_manifest.get("slurm_env") or {})
-
         render_manifest = {
             **base_manifest,
             "job_type": job_type,
@@ -473,15 +473,16 @@ class RealSlurmGateway(SlurmGateway):
                 {"cycle_id": cycle_id, "stage_name": stage_name, "error": str(exc)},
             ) from exc
 
-        for _ in range(10):
+        content = json.dumps(entries, indent=2, sort_keys=True).encode("utf-8")
+        for attempt in range(10):
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
-            output_path = output_dir / f"{stage_name}_index_{timestamp}.json"
+            suffix = "" if attempt == 0 else f"_{attempt}"
+            output_path = output_dir / f"{stage_name}_index_{timestamp}{suffix}.json"
             try:
-                atomic_write_bytes_no_follow(
+                write_bytes_no_follow_exclusive(
                     output_path,
-                    json.dumps(entries, indent=2, sort_keys=True).encode("utf-8"),
+                    content,
                     containment_root=workspace_root,
-                    temp_suffix="part",
                 )
                 return output_path
             except FileExistsError:
@@ -647,7 +648,7 @@ class RealSlurmGateway(SlurmGateway):
                     "Slurm environment keys must be uppercase shell identifiers.",
                     {"field": f"slurm_env.{key_text}"},
                 )
-            if SENSITIVE_ENV_KEY_RE.search(key_text):
+            if is_sensitive_slurm_env_key(key_text):
                 raise ManifestValidationError(
                     "Slurm environment exports reject secret-shaped keys.",
                     {"field": f"slurm_env.{key_text}"},
@@ -656,6 +657,12 @@ class RealSlurmGateway(SlurmGateway):
                 raise ManifestValidationError(
                     "Slurm environment values must be bounded.",
                     {"field": f"slurm_env.{key_text}", "max_length": MAX_SLURM_ENV_VALUE_LENGTH},
+                )
+            secret_url_reason = secret_bearing_url_reason(value_text)
+            if secret_url_reason is not None:
+                raise ManifestValidationError(
+                    "Slurm environment exports reject secret-bearing URL values.",
+                    {"field": f"slurm_env.{key_text}", "reason": secret_url_reason},
                 )
             if SHELL_META_RE.search(value_text) or not SAFE_ENV_VALUE_RE.fullmatch(value_text):
                 raise ManifestValidationError(

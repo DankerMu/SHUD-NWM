@@ -920,6 +920,18 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
         ({"slurm_env": {"NHMS_PROFILE": "prod;rm"}}, "SLURM_PREFLIGHT_ENV_VALUE_UNSAFE"),
         ({"slurm_env": {"NHMS_PROFILE": "x" * 1025}}, "SLURM_PREFLIGHT_ENV_VALUE_TOO_LONG"),
         ({"slurm_env": {"AWS_SECRET_ACCESS_KEY": "supersecret"}}, "SLURM_PREFLIGHT_ENV_SECRET_REJECTED"),
+        (
+            {"slurm_env": {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"}},
+            "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
+        ),
+        (
+            {"slurm_env": {"NHMS_PROFILE": "https://user:supersecret@example.com/profile"}},
+            "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
+        ),
+        (
+            {"slurm_env": {"OBJECT_STORE_PREFIX": "s3://bucket/prod?X-Amz-Signature=supersecret"}},
+            "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
+        ),
     ],
 )
 def test_slurm_preflight_rejects_unsafe_templates_and_environment_before_submission(
@@ -959,6 +971,41 @@ def test_slurm_preflight_rejects_unsafe_templates_and_environment_before_submiss
     assert expected_code in {blocker["code"] for blocker in evidence["slurm_preflight"]["blockers"]}
     assert result.evidence["counts"]["submitted_count"] == 0
     assert "supersecret" not in evidence_text
+    assert orchestrator.calls == []
+
+
+def test_slurm_preflight_redacts_secret_url_values_in_evidence(tmp_path: Path) -> None:
+    roots = _slurm_roots(tmp_path)
+    secret_value = "s3://bucket/prod?token=supersecret"
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        slurm_env={"OBJECT_STORE_PREFIX": secret_value},
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    evidence_text = json.dumps(result.evidence)
+    environment_check = result.evidence["slurm_preflight"]["checks"]["environment"]
+
+    assert result.status == "preflight_blocked"
+    assert environment_check["sanitized"] == {"OBJECT_STORE_PREFIX": "[redacted]"}
+    assert "supersecret" not in evidence_text
+    assert secret_value not in evidence_text
     assert orchestrator.calls == []
 
 

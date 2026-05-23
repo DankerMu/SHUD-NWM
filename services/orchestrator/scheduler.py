@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.redaction import redact_payload
+from packages.common.slurm_env import is_sensitive_slurm_env_key, secret_bearing_url_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
@@ -44,10 +45,6 @@ SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "frequency"}
 SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
-SENSITIVE_ENV_KEY_RE = re.compile(
-    r"(TOKEN|PASSWORD|PASSWD|PWD|SECRET|CREDENTIAL|API_?KEY|ACCESS_?KEY|SESSION_?KEY|SIGNATURE)",
-    re.IGNORECASE,
-)
 LOCALHOST_NAMES = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
@@ -1925,7 +1922,7 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
                 }
             )
             continue
-        if SENSITIVE_ENV_KEY_RE.search(key_text):
+        if is_sensitive_slurm_env_key(key_text):
             blockers.append(
                 {
                     "code": "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
@@ -1945,6 +1942,21 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
                 }
             )
             sanitized[key_text] = value_text[:64] + "...[truncated]"
+            continue
+        secret_url_reason = secret_bearing_url_reason(value_text)
+        if secret_url_reason is not None:
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
+                    "field": f"slurm_env.{key_text}",
+                    "reason": secret_url_reason,
+                    "message": (
+                        "Slurm exported environment values must not contain URL credentials "
+                        "or secret query parameters."
+                    ),
+                }
+            )
+            sanitized[key_text] = "[redacted]"
             continue
         if SHELL_META_RE.search(value_text) or not SAFE_SLURM_ENV_VALUE_RE.fullmatch(value_text):
             blockers.append(
