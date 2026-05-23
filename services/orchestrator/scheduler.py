@@ -1992,12 +1992,8 @@ def _database_host_is_local(host: str | None) -> bool:
         return True
     if normalized.endswith(".localhost"):
         return True
-    noncanonical_address = _parse_noncanonical_ipv4_address(normalized)
-    if noncanonical_address is not None:
-        return noncanonical_address.is_loopback or noncanonical_address.is_unspecified
-    try:
-        address = ip_address(normalized)
-    except ValueError:
+    address = _database_host_ip_address(normalized)
+    if address is None:
         return False
     return address.is_loopback or address.is_unspecified
 
@@ -2010,10 +2006,7 @@ def _database_host_is_unsafe(host: str | None) -> bool:
         return True
     if DATABASE_HOST_ALLOWED_RE.fullmatch(normalized) is None:
         return True
-    try:
-        address = ip_address(normalized)
-    except ValueError:
-        address = None
+    address = _database_host_ip_address(normalized)
     if address is not None and address.is_link_local:
         return True
     if ":" in normalized:
@@ -2027,6 +2020,13 @@ def _normalize_database_host(host: str) -> str:
     if normalized.startswith("[") and normalized.endswith("]"):
         normalized = normalized[1:-1]
     return normalized.rstrip(".")
+
+
+def _database_host_ip_address(host: str) -> Any | None:
+    try:
+        return ip_address(host)
+    except ValueError:
+        return _parse_noncanonical_ipv4_address(host)
 
 
 def _parse_noncanonical_ipv4_address(host: str) -> IPv4Address | None:
@@ -2089,13 +2089,7 @@ def _is_noncanonical_ipv4_part(part: str) -> bool:
 def _is_unsafe_numeric_ipv4_like_host(host: str) -> bool:
     if not _is_numeric_ipv4_like_host(host):
         return False
-    try:
-        ip_address(host)
-    except ValueError:
-        return _parse_noncanonical_ipv4_address(host) is None
-    if not _is_noncanonical_numeric_ipv4_host(host):
-        return False
-    return _parse_noncanonical_ipv4_address(host) is None
+    return _database_host_ip_address(host) is None
 
 
 def _preflight_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
