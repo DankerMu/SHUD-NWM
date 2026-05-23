@@ -119,6 +119,9 @@ def test_retry_event_records_trigger_and_previous_error() -> None:
         assert event.details["previous_job_id"] == failed.job_id
         assert event.details["previous_error"] == "SBATCH_SUBMISSION_FAILED"
         assert event.details["slurm_job_id"] is None
+        assert event.details["manual_retry_marker"] is True
+        assert event.details["prior_failure_reason"] == "SBATCH_SUBMISSION_FAILED"
+        assert event.details["failure"]["manual_retry_marker"] is True
 
 
 def test_characterization_cancel_writes_cancelled_to_forecast_cycle() -> None:

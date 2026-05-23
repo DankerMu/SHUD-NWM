@@ -59,9 +59,10 @@ def test_should_auto_retry_poll_timeout() -> None:
         assert service.should_auto_retry(job) is True
 
 
-def test_should_auto_retry_non_transient() -> None:
+@pytest.mark.parametrize("error_code", ["INVALID_MANIFEST", "MALFORMED_INPUT", "POLICY_BLOCKED"])
+def test_should_auto_retry_non_transient(error_code: str) -> None:
     with _store() as store:
-        job = _create_job(store, error_code="INVALID_MANIFEST")
+        job = _create_job(store, error_code=error_code)
         service = RetryService(store, RetryConfig(max_retries=3))
 
         assert service.should_auto_retry(job) is False
@@ -77,6 +78,27 @@ def test_should_auto_retry_max_reached() -> None:
         assert service.should_auto_retry(job) is False
         assert job.status == "failed"
         assert _events(store) == []
+
+
+def test_out_of_memory_auto_retries_within_retry_limit() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=2)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        policy = service.retry_policy_for_job(job)
+        retry = service.handle_failed_job(job)
+
+        assert policy["classifier"] == "transient_slurm_runtime"
+        assert policy["retryable"] is True
+        assert policy["permanent"] is False
+        assert policy["auto_retry"] is True
+        assert retry.status == "pending"
+        assert retry.retry_count == 3
+        event = _events(store)[0]
+        assert event.event_type == "retry"
+        assert event.details["previous_error"] == "OUT_OF_MEMORY"
+        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
+        assert event.details["failure"]["retryable"] is True
 
 
 def test_handle_failed_job_transient() -> None:
@@ -112,6 +134,22 @@ def test_handle_failed_job_exhausted() -> None:
         updated = service.handle_failed_job(job)
 
         assert updated.status == "permanently_failed"
+
+
+def test_out_of_memory_exhausted_retry_limit_becomes_permanent() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=3)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        event = _events(store)[0]
+        assert event.event_type == "permanently_failed"
+        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
+        assert event.details["failure"]["retryable"] is False
+        assert event.details["failure"]["permanent"] is True
+        assert event.details["failure"]["limit_exhausted"] is True
 
 
 def test_schedule_auto_retry() -> None:
@@ -153,7 +191,11 @@ def test_mark_permanently_failed() -> None:
         assert event.event_type == "permanently_failed"
         assert event.status_from == "failed"
         assert event.status_to == "permanently_failed"
-        assert event.details == {"final_retry_count": 3, "last_error": "SLURM_TIMEOUT"}
+        assert event.details["final_retry_count"] == 3
+        assert event.details["last_error"] == "SLURM_TIMEOUT"
+        assert event.details["automatic_retry_stopped"] is True
+        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
+        assert event.details["failure"]["limit_exhausted"] is True
 
 
 def test_manual_retry_creates_new_job() -> None:
@@ -334,14 +376,13 @@ def test_audit_event_auto() -> None:
         service.schedule_auto_retry(job)
 
         event = _events(store)[0]
-        assert event.details == {
-            "trigger": "auto",
-            "retry_count": 1,
-            "previous_error": "STORAGE_WRITE_FAILED",
-            "backoff_seconds": 60,
-            "previous_job_id": job.job_id,
-            "slurm_job_id": None,
-        }
+        assert event.details["trigger"] == "auto"
+        assert event.details["retry_count"] == 1
+        assert event.details["previous_error"] == "STORAGE_WRITE_FAILED"
+        assert event.details["backoff_seconds"] == 60
+        assert event.details["previous_job_id"] == job.job_id
+        assert event.details["slurm_job_id"] is None
+        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
 
 
 def test_audit_event_manual() -> None:
@@ -353,13 +394,14 @@ def test_audit_event_manual() -> None:
         service.attempt_manual_retry("run_1", gateway=gateway, trusted_internal=True)
 
         event = _events(store)[0]
-        assert event.details == {
-            "trigger": "manual",
-            "retry_count": 1,
-            "previous_error": "SBATCH_SUBMISSION_FAILED",
-            "previous_job_id": failed.job_id,
-            "slurm_job_id": None,
-        }
+        assert event.details["trigger"] == "manual"
+        assert event.details["retry_count"] == 1
+        assert event.details["previous_error"] == "SBATCH_SUBMISSION_FAILED"
+        assert event.details["previous_job_id"] == failed.job_id
+        assert event.details["slurm_job_id"] is None
+        assert event.details["manual_retry_marker"] is True
+        assert event.details["prior_failure_reason"] == "SBATCH_SUBMISSION_FAILED"
+        assert event.details["failure"]["manual_retry_marker"] is True
 
 
 def test_manual_retry_audit_has_previous_job_id() -> None:

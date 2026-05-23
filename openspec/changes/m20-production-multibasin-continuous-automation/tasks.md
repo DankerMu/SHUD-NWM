@@ -50,6 +50,17 @@ Issue scope note: section 4 is implemented by #195. #194 may touch active Slurm 
 - [ ] 4.3 Implement resumable retries after downstream parse/display failures without rerunning successful native SHUD output by default.
 - [ ] 4.4 Implement retry policy distinctions for source unavailable, adapter failure, forcing failure, SHUD failure, parse failure, publish/frequency failure, transient Slurm/runtime failure, non-transient permanent failure, manual retry, and cancellation.
 - [ ] 4.5 Add tests for repeated scheduler scans, active-job skip, terminal skip, source unavailable retry, parse-after-SHUD retry, transient task retry, permanent failure guard, and cancellation.
+- [ ] 4.6 For issue #195, include regression evidence for every row in the Issue #195 Invariant Matrix:
+  - Repeated scan with terminal pipeline/hydro success (`succeeded`, `parsed`, `frequency_done`, `published`) -> skip with terminal reason and no Slurm/orchestrator submission.
+  - Repeated scan with active submitted/running Slurm job -> active skip/resume evidence and no duplicate submission.
+  - Parse/display failure after durable SHUD output -> retry starts at parse/frequency/publish point and does not rerun native SHUD by default.
+  - Source unavailable candidate -> retryable unavailable evidence distinct from model/runtime failure and no unsupported DB enum state.
+  - Transient Slurm/runtime/task failure within retry limit -> retry scoped to failed candidate/task/stage while successful siblings/durable outputs are reused.
+  - Non-transient, malformed input, policy-blocked, or retry-limit-exhausted failure -> permanent failure evidence and automatic retry stops.
+  - Manual retry marker for permanent/blocked candidate -> explicit retry allowed, attempt evidence increments, and prior failure reason remains auditable.
+  - Cancellation request for active job -> Slurm cancel contract called, proof or gap recorded, local state preserved on unproven cancellation, and no replacement work submitted in same pass.
+  - Unchanged non-Slurm/mock/API consumers -> existing dry-run, mock gateway, retry route, cancel route, and monitoring tests keep passing.
+- [ ] 4.7 Required verification for #195: `uv run pytest -q tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py tests/test_orchestration_chain.py tests/test_job_array.py tests/test_api.py tests/test_gateway.py` plus any worker/orchestrator tests touched by the implementation, `uv run ruff check .`, and `openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive`.
 
 ## 5. Evidence, Operations, and Validation
 

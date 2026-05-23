@@ -20,17 +20,23 @@ TRANSIENT_ERROR_CODES: set[str] = {
     "SLURM_TIMEOUT",
     "SLURM_JOB_TIMEOUT",
     "NODE_FAILURE",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
     "STORAGE_WRITE_FAILED",
     "SBATCH_SUBMISSION_FAILED",
     "SLURM_UNAVAILABLE",
+    "SOURCE_CYCLE_UNAVAILABLE",
+    "SOURCE_UNAVAILABLE",
+    "ADAPTER_UNAVAILABLE",
 }
 NON_TRANSIENT_ERROR_CODES: set[str] = {
     "INVALID_MANIFEST",
+    "MALFORMED_INPUT",
+    "POLICY_BLOCKED",
     "PERMISSION_DENIED",
     "OUTPUT_INCOMPLETE",
     "TEMPLATE_NOT_ALLOWED",
     "MANIFEST_SCHEMA_INVALID",
-    "OUT_OF_MEMORY",
 }
 DEFAULT_BACKOFF_SCHEDULE = [60, 300, 900]
 ACTIVE_RETRY_STATUSES = {"pending", "submitted", "running"}
@@ -39,6 +45,66 @@ FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "per
 
 def is_transient_error(error_code: str | None) -> bool:
     return error_code in TRANSIENT_ERROR_CODES
+
+
+def classify_failure(
+    error_code: str | None,
+    *,
+    attempt: int = 0,
+    retry_limit: int | None = None,
+    manual: bool = False,
+) -> dict[str, Any]:
+    code = str(error_code or "UNKNOWN_FAILURE")
+    classifier = failure_classifier(code)
+    retryable = is_retryable_failure(code)
+    limit_exhausted = retry_limit is not None and attempt >= retry_limit
+    permanent = not manual and (not retryable or limit_exhausted)
+    return {
+        "classifier": classifier,
+        "reason_code": code,
+        "retryable": retryable and not limit_exhausted,
+        "permanent": permanent,
+        "attempt": attempt,
+        "retry_limit": retry_limit,
+        "limit_exhausted": limit_exhausted,
+        "manual_retry_marker": manual,
+    }
+
+
+def failure_classifier(error_code: str | None) -> str:
+    code = str(error_code or "").upper()
+    if code in {"SOURCE_CYCLE_UNAVAILABLE", "SOURCE_UNAVAILABLE", "ADAPTER_UNAVAILABLE"}:
+        return "source_unavailable"
+    if code in {"ADAPTER_FAILURE", "DATA_ADAPTER_FAILED", "DOWNLOAD_FAILED", "FAILED_DOWNLOAD"}:
+        return "adapter_failure"
+    if code in {"FORCING_FAILED", "FAILED_FORCING", "FORCING_TASK_FAILED"}:
+        return "forcing_failure"
+    if code in {"PARSE_FAILED", "FAILED_PARSE", "OUTPUT_INCOMPLETE"}:
+        return "parse_failure"
+    if code in {"PUBLISH_FAILED", "FAILED_PUBLISH", "FREQUENCY_FAILED", "NO_PUBLISHABLE_PRODUCTS"}:
+        return "publication_failure"
+    if code in {
+        "SLURM_TIMEOUT",
+        "SLURM_JOB_TIMEOUT",
+        "NODE_FAILURE",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "SLURM_UNAVAILABLE",
+        "SBATCH_SUBMISSION_FAILED",
+        "STORAGE_WRITE_FAILED",
+    }:
+        return "transient_slurm_runtime"
+    if code in {"SHUD_FAILED", "FAILED_RUN", "RUNTIME_FAILED"}:
+        return "shud_runtime_failure"
+    if code in {"INVALID_MANIFEST", "MANIFEST_SCHEMA_INVALID", "MALFORMED_INPUT"}:
+        return "malformed_input"
+    if code in {"POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}:
+        return "policy_blocked"
+    return "unknown_failure"
+
+
+def is_retryable_failure(error_code: str | None) -> bool:
+    return is_transient_error(error_code)
 
 
 def compute_backoff_seconds(retry_count: int, backoff_schedule: list[int] | None = None) -> int:
@@ -118,11 +184,21 @@ class RetryService:
         self.config = config
 
     def should_auto_retry(self, job: PipelineJob) -> bool:
-        if job.status == "permanently_failed":
-            return False
-        if not is_transient_error(job.error_code):
-            return False
-        return job.retry_count < self.config.max_retries
+        policy = self.retry_policy_for_job(job)
+        return bool(policy["auto_retry"])
+
+    def retry_policy_for_job(self, job: PipelineJob) -> dict[str, Any]:
+        classification = classify_failure(
+            job.error_code,
+            attempt=job.retry_count,
+            retry_limit=self.config.max_retries,
+        )
+        return {
+            **classification,
+            "auto_retry": job.status != "permanently_failed"
+            and classification["retryable"]
+            and not classification["permanent"],
+        }
 
     def handle_failed_job(self, job: PipelineJob) -> PipelineJob:
         if self.should_auto_retry(job):
@@ -132,6 +208,11 @@ class RetryService:
     def schedule_auto_retry(self, job: PipelineJob) -> PipelineJob:
         status_from = job.status
         previous_error = job.error_code
+        classification = classify_failure(
+            previous_error,
+            attempt=job.retry_count,
+            retry_limit=self.config.max_retries,
+        )
         next_retry_count = job.retry_count + 1
         backoff_seconds = compute_backoff_seconds(job.retry_count, self.config.backoff_schedule)
 
@@ -161,6 +242,7 @@ class RetryService:
                 "backoff_seconds": backoff_seconds,
                 "previous_job_id": job.job_id,
                 "slurm_job_id": retry_job.slurm_job_id,
+                "failure": classification,
             },
             commit=False,
         )
@@ -174,6 +256,11 @@ class RetryService:
 
         status_from = job.status
         last_error = job.error_code
+        classification = classify_failure(
+            last_error,
+            attempt=job.retry_count,
+            retry_limit=self.config.max_retries,
+        )
         job.status = "permanently_failed"
         job.updated_at = datetime.now(UTC)
         self.store.session.add(job)
@@ -187,6 +274,8 @@ class RetryService:
             details={
                 "final_retry_count": job.retry_count,
                 "last_error": last_error,
+                "failure": classification,
+                "automatic_retry_stopped": True,
             },
         )
         return job
@@ -254,6 +343,12 @@ class RetryService:
             status_from = failed_job.status
             previous_error = failed_job.error_code
             next_retry_count = failed_job.retry_count + 1
+            classification = classify_failure(
+                previous_error,
+                attempt=next_retry_count,
+                retry_limit=self.config.max_retries,
+                manual=True,
+            )
             retry_job = self.store.create_job(
                 job_id=f"{run_id}_retry_{uuid4().hex[:8]}",
                 run_id=failed_job.run_id,
@@ -279,6 +374,9 @@ class RetryService:
                     "previous_error": previous_error,
                     "previous_job_id": failed_job.job_id,
                     "slurm_job_id": retry_job.slurm_job_id,
+                    "manual_retry_marker": True,
+                    "prior_failure_reason": previous_error,
+                    "failure": classification,
                 },
                 commit=False,
             )
@@ -388,11 +486,12 @@ class RetryService:
                     "model_id": model_id,
                     "cycle_id": retry_job.cycle_id,
                     "job_type": retry_job.job_type,
-                    "stage": retry_job.stage,
-                    "pipeline_job_id": retry_job.job_id,
-                    "retry_count": retry_job.retry_count,
-                },
-            )
+                "stage": retry_job.stage,
+                "pipeline_job_id": retry_job.job_id,
+                "retry_count": retry_job.retry_count,
+                "manual_retry_marker": True,
+            },
+        )
         )
         return _coerce_gateway_payload(submitted)
 

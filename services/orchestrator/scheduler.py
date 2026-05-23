@@ -7,7 +7,7 @@ import stat
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
 from ipaddress import IPv4Address, ip_address
@@ -27,6 +27,7 @@ from packages.common.slurm_env import (
 )
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
+from services.orchestrator.retry import classify_failure
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from services.slurm_gateway.gateway import ConfigurationError
 from services.slurm_gateway.resource_validation import ResourceProfileValidationError, validate_resource_profile
@@ -84,6 +85,43 @@ SLURM_RESOURCE_PROFILE_TEMPLATE_IDENTITY_FIELDS = {
     "object_store_root",
     "object_store_prefix",
     "manifest_index_path",
+}
+ACTIVE_PIPELINE_STATUSES = {"pending", "submitted", "running"}
+ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
+DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
+TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
+TERMINAL_PIPELINE_STATUSES = {
+    "succeeded",
+    "partially_failed",
+    "failed",
+    "cancelled",
+    "submission_failed",
+    "permanently_failed",
+}
+FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+DOWNSTREAM_RESTART_STAGES = ("parse", "frequency", "publish")
+DOWNSTREAM_STAGE_ALIASES = {
+    "parse": "parse",
+    "parse_output": "parse",
+    "frequency": "frequency",
+    "compute_frequency": "frequency",
+    "publish": "publish",
+    "publish_tiles": "publish",
+}
+NATIVE_SHUD_STAGE_ALIASES = {"forecast", "run_shud_forecast", "forecast_run", "analysis_run"}
+PIPELINE_TERMINAL_SUCCESS_STAGES = {"parse", "frequency", "publish", "parse_output", "publish_tiles"}
+TRANSIENT_RETRY_REASON_CODES = {
+    "SLURM_TIMEOUT",
+    "SLURM_JOB_TIMEOUT",
+    "NODE_FAILURE",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
+    "STORAGE_WRITE_FAILED",
+    "SBATCH_SUBMISSION_FAILED",
+    "SLURM_UNAVAILABLE",
+    "SOURCE_CYCLE_UNAVAILABLE",
+    "SOURCE_UNAVAILABLE",
+    "ADAPTER_UNAVAILABLE",
 }
 
 
@@ -148,6 +186,18 @@ class ActiveCandidateRepository(Protocol):
         cycle_time: datetime,
         model_id: str,
     ) -> Sequence[Mapping[str, Any]]:
+        raise NotImplementedError
+
+    def candidate_state(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        run_id: str,
+        forcing_version_id: str,
+        candidate_id: str,
+    ) -> Mapping[str, Any] | None:
         raise NotImplementedError
 
 
@@ -318,9 +368,10 @@ class SchedulerCandidate:
     forcing_version_id: str
     status: str
     reason: str | None = None
+    state_evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "candidate_id": self.candidate_id,
             "source_id": self.source_id,
             "cycle_id": self.cycle_id,
@@ -341,6 +392,16 @@ class SchedulerCandidate:
             "status": self.status,
             "reason": self.reason,
         }
+        if self.state_evidence:
+            payload["state_evidence"] = _evidence_safe(self.state_evidence)
+        return payload
+
+
+@dataclass(frozen=True)
+class CandidateStateDecision:
+    action: str
+    reason: str | None
+    evidence: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -979,6 +1040,11 @@ class ProductionScheduler:
             if self.active_repository is not None
             else None
         )
+        state_provider = (
+            getattr(self.active_repository, "candidate_state", None)
+            if self.active_repository is not None
+            else None
+        )
         active_slurm_jobs_provider = (
             getattr(self.active_repository, "active_slurm_jobs", None)
             if self.active_repository is not None
@@ -1009,8 +1075,49 @@ class ProductionScheduler:
                     continue
                 seen_candidate_ids.add(candidate.candidate_id)
                 if not discovery.available:
-                    blocked.append(_blocked_candidate(candidate, "source_cycle_unavailable"))
+                    blocked.append(
+                        _blocked_candidate(
+                            candidate,
+                            "source_cycle_unavailable",
+                            state_evidence=_source_unavailable_retry_evidence(candidate),
+                        )
+                    )
                     continue
+                state_decision = (
+                    _candidate_state_decision(
+                        candidate,
+                        state_provider(
+                            source_id=discovery.source_id,
+                            cycle_time=discovery.cycle_time,
+                            model_id=model.model_id,
+                            run_id=candidate.run_id,
+                            forcing_version_id=candidate.forcing_version_id,
+                            candidate_id=candidate.candidate_id,
+                        ),
+                    )
+                    if callable(state_provider)
+                    else None
+                )
+                if state_decision is not None and state_decision.action == "skip":
+                    skipped.append(
+                        {
+                            **candidate.to_dict(),
+                            "reason": state_decision.reason,
+                            "state_evidence": _evidence_safe(state_decision.evidence),
+                        }
+                    )
+                    continue
+                if state_decision is not None and state_decision.action == "blocked":
+                    blocked.append(
+                        _blocked_candidate(
+                            candidate,
+                            state_decision.reason or "candidate_state_blocked",
+                            state_evidence=state_decision.evidence,
+                        )
+                    )
+                    continue
+                if state_decision is not None and state_decision.action == "retry":
+                    candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                 if has_active_orchestration is None:
                     has_active_orchestration = bool(
                         callable(active_orchestration_provider)
@@ -1422,6 +1529,35 @@ def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, A
     }
 
 
+def _source_unavailable_retry_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
+    return {
+        "decision": "blocked_retryable",
+        "reason": "source_cycle_unavailable",
+        "failure": {
+            "classifier": "source_unavailable",
+            "reason_code": "SOURCE_CYCLE_UNAVAILABLE",
+            "retryable": True,
+            "permanent": False,
+            "attempt": 0,
+            "retry_limit": None,
+        },
+        "retry_policy": {
+            "automatic_retry_allowed": True,
+            "enum_safe_storage": "scheduler_evidence",
+            "unsupported_db_enum_written": False,
+        },
+        "storage": {
+            "met_forecast_cycle_status_written": None,
+            "ops_pipeline_event_details": True,
+        },
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+            "forcing_version_id": candidate.forcing_version_id,
+        },
+    }
+
+
 def _duplicate_cycle_evidence(discovery: CycleDiscovery, *, reason: str) -> dict[str, Any]:
     return {
         "type": "source_cycle",
@@ -1432,6 +1568,577 @@ def _duplicate_cycle_evidence(discovery: CycleDiscovery, *, reason: str) -> dict
         "available": discovery.available,
         "status": "excluded",
         "reason": reason,
+    }
+
+
+def _candidate_state_decision(
+    candidate: SchedulerCandidate,
+    raw_state: Mapping[str, Any] | None,
+) -> CandidateStateDecision | None:
+    if raw_state is None:
+        return None
+    state = dict(raw_state)
+    evidence = _candidate_state_evidence(candidate, state)
+    if _manual_retry_requested(state):
+        return CandidateStateDecision(
+            "retry",
+            "manual_retry_requested",
+            _manual_retry_state_evidence(candidate, state, evidence),
+        )
+
+    active_jobs = _state_active_jobs(state)
+    if active_jobs:
+        return CandidateStateDecision(
+            "skip",
+            "active_slurm_job",
+            {
+                **evidence,
+                "decision": "skip_active",
+                "active_slurm_jobs": active_jobs,
+                "replacement_submitted": False,
+            },
+        )
+
+    hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
+    if hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES:
+        return CandidateStateDecision(
+            "skip",
+            "terminal_hydro_success",
+            {
+                **evidence,
+                "decision": "skip_terminal",
+                "terminal_source": "hydro_run",
+                "terminal_status": hydro_status,
+                "durable_hydro_status": hydro_status,
+                "durable_output_reused": bool(_state_output_uri(state)),
+                "native_shud_resubmitted": False,
+                "parse_resubmitted": False,
+                "frequency_resubmitted": False,
+                "publish_resubmitted": False,
+            },
+        )
+
+    pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
+    if pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+        return CandidateStateDecision(
+            "skip",
+            "terminal_pipeline_success",
+            {
+                **evidence,
+                "decision": "skip_terminal",
+                "terminal_source": "pipeline_job",
+                "terminal_status": pipeline_status,
+                "native_shud_resubmitted": False,
+            },
+        )
+
+    if hydro_status in ACTIVE_HYDRO_STATUSES or pipeline_status in ACTIVE_PIPELINE_STATUSES:
+        return CandidateStateDecision(
+            "skip",
+            "active_duplicate_pipeline",
+            {
+                **evidence,
+                "decision": "skip_active",
+                "active_status": hydro_status or pipeline_status,
+                "replacement_submitted": False,
+            },
+        )
+
+    downstream_retry = _downstream_retry_evidence(candidate, state, evidence)
+    if downstream_retry is not None:
+        return CandidateStateDecision("retry", "resume_downstream_after_durable_shud", downstream_retry)
+
+    permanent = _permanent_failure_evidence(candidate, state, evidence)
+    if permanent is not None:
+        return CandidateStateDecision(
+            "blocked",
+            str(permanent.get("reason") or "permanent_failure_guard"),
+            permanent,
+        )
+
+    if pipeline_status in FAILED_PIPELINE_STATUSES or hydro_status == "failed":
+        return CandidateStateDecision(
+            "retry",
+            "retry_failed_candidate",
+            _retry_failure_evidence(candidate, state, evidence),
+        )
+
+    return None
+
+
+def _candidate_state_evidence(candidate: SchedulerCandidate, state: Mapping[str, Any]) -> dict[str, Any]:
+    jobs = [_job_state_evidence(job) for job in _state_jobs(state)]
+    events = [_evidence_safe(event) for event in _state_events(state)]
+    return {
+        "candidate_identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+            "forcing_version_id": candidate.forcing_version_id,
+            "source_id": candidate.source_id,
+            "cycle_time_utc": _format_utc(candidate.cycle_time_utc),
+            "model_id": candidate.model_id,
+            "scenario_id": candidate.scenario_id,
+        },
+        "pipeline_jobs": jobs,
+        "pipeline_events": events,
+        "hydro_run": _optional_mapping_state(
+            state.get("hydro_run"),
+            defaults={
+                "run_id": state.get("run_id") or candidate.run_id,
+                "status": _state_status(state, "hydro_status", "hydro_run_status"),
+                "output_uri": _state_output_uri(state),
+                "error_code": state.get("hydro_error_code"),
+                "error_message": state.get("hydro_error_message"),
+            },
+        ),
+        "forcing_version": _optional_mapping_state(
+            state.get("forcing_version"),
+            defaults={
+                "forcing_version_id": state.get("forcing_version_id") or candidate.forcing_version_id,
+                "status": _state_status(state, "forcing_status", "forcing_version_status"),
+            },
+        ),
+        "forecast_cycle": _optional_mapping_state(
+            state.get("forecast_cycle"),
+            defaults={
+                "cycle_id": state.get("cycle_id") or candidate.cycle_id,
+                "status": _state_status(state, "cycle_status", "forecast_cycle_status"),
+            },
+        ),
+        "manual_retry": _manual_retry_payload(state),
+        "retry": {
+            "attempt": _state_retry_attempt(state),
+            "retry_limit": _state_retry_limit(state),
+        },
+    }
+
+
+def _state_jobs(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    value = state.get("pipeline_jobs") or state.get("jobs")
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [dict(item) for item in value if isinstance(item, Mapping)]
+    single = state.get("pipeline_job") or state.get("job")
+    if isinstance(single, Mapping):
+        return [dict(single)]
+    fields = {
+        "job_id",
+        "pipeline_job_id",
+        "run_id",
+        "cycle_id",
+        "job_type",
+        "slurm_job_id",
+        "array_task_id",
+        "model_id",
+        "status",
+        "pipeline_status",
+        "job_status",
+        "stage",
+        "exit_code",
+        "retry_count",
+        "error_code",
+        "error_message",
+        "log_uri",
+    }
+    if any(key in state for key in fields):
+        return [dict(state)]
+    return []
+
+
+def _state_events(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    value = state.get("pipeline_events") or state.get("events")
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [dict(item) for item in value if isinstance(item, Mapping)]
+    return []
+
+
+def _job_state_evidence(job: Mapping[str, Any]) -> dict[str, Any]:
+    kept = {
+        key: job.get(key)
+        for key in (
+            "job_id",
+            "pipeline_job_id",
+            "run_id",
+            "cycle_id",
+            "job_type",
+            "slurm_job_id",
+            "array_task_id",
+            "model_id",
+            "status",
+            "stage",
+            "exit_code",
+            "retry_count",
+            "error_code",
+            "error_message",
+            "log_uri",
+        )
+        if key in job and job.get(key) is not None
+    }
+    return _evidence_safe(kept)
+
+
+def _optional_mapping_state(value: Any, *, defaults: Mapping[str, Any]) -> dict[str, Any] | None:
+    payload = dict(value) if isinstance(value, Mapping) else {}
+    for key, fallback in defaults.items():
+        if fallback not in (None, ""):
+            payload.setdefault(key, fallback)
+    payload = {key: val for key, val in payload.items() if val not in (None, "")}
+    return _evidence_safe(payload) if payload else None
+
+
+def _state_status(state: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = state.get(key)
+        if value not in (None, ""):
+            return str(value)
+    for job in reversed(_state_jobs(state)):
+        for key in keys:
+            value = job.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _state_output_uri(state: Mapping[str, Any]) -> str | None:
+    for container_key in ("hydro_run", "outputs", "runtime_outputs"):
+        value = state.get(container_key)
+        if isinstance(value, Mapping) and value.get("output_uri") not in (None, ""):
+            return str(value["output_uri"])
+    value = state.get("output_uri") or state.get("durable_output_uri")
+    return str(value) if value not in (None, "") else None
+
+
+def _state_active_jobs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    explicit = state.get("active_slurm_jobs")
+    if isinstance(explicit, Sequence) and not isinstance(explicit, str | bytes | bytearray):
+        return [_evidence_safe(dict(job)) for job in explicit if isinstance(job, Mapping)]
+    active: list[dict[str, Any]] = []
+    for job in _state_jobs(state):
+        status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+        if job.get("slurm_job_id") and status in ACTIVE_PIPELINE_STATUSES:
+            active.append(_job_state_evidence(job))
+    return active
+
+
+def _manual_retry_requested(state: Mapping[str, Any]) -> bool:
+    marker = state.get("manual_retry") or state.get("manual_retry_marker")
+    if isinstance(marker, Mapping):
+        return bool(marker.get("marker") or marker.get("requested") or marker.get("enabled"))
+    if marker is not None:
+        return bool(marker)
+    for event in reversed(_state_events(state)):
+        details = event.get("details")
+        if event.get("event_type") in {"retry", "manual_retry"} and isinstance(details, Mapping):
+            if details.get("trigger") == "manual" or details.get("manual_retry_marker") is True:
+                return True
+    return False
+
+
+def _manual_retry_payload(state: Mapping[str, Any]) -> dict[str, Any]:
+    marker = state.get("manual_retry") or state.get("manual_retry_marker")
+    payload = dict(marker) if isinstance(marker, Mapping) else {}
+    if marker and not payload:
+        payload["marker"] = True
+    for key in ("requested_by", "request_id", "reason", "created_at"):
+        value = state.get(f"manual_retry_{key}") or state.get(key)
+        if value not in (None, ""):
+            payload.setdefault(key, value)
+    return _evidence_safe(payload)
+
+
+def _state_retry_attempt(state: Mapping[str, Any]) -> int:
+    for key in ("retry_attempt", "attempt", "retry_count"):
+        value = state.get(key)
+        if value not in (None, ""):
+            return _coerce_int(value, default=0)
+    jobs = _state_jobs(state)
+    if jobs:
+        return max(_coerce_int(job.get("retry_count"), default=0) for job in jobs)
+    return 0
+
+
+def _state_retry_limit(state: Mapping[str, Any]) -> int | None:
+    for key in ("retry_limit", "max_retries"):
+        value = state.get(key)
+        if value not in (None, ""):
+            return _coerce_int(value, default=0)
+    return None
+
+
+def _failed_stage(state: Mapping[str, Any]) -> str | None:
+    for key in ("failed_stage", "stage", "restart_stage"):
+        value = state.get(key)
+        if value not in (None, ""):
+            return str(value)
+    for job in reversed(_state_jobs(state)):
+        status = str(job.get("status") or "")
+        if status in FAILED_PIPELINE_STATUSES and job.get("stage") not in (None, ""):
+            return str(job["stage"])
+    return None
+
+
+def _canonical_downstream_stage(stage: str | None) -> str | None:
+    if stage is None:
+        return None
+    normalized = DOWNSTREAM_STAGE_ALIASES.get(stage)
+    if normalized in DOWNSTREAM_RESTART_STAGES:
+        return normalized
+    return None
+
+
+def _durable_shud_output_exists(state: Mapping[str, Any]) -> bool:
+    if state.get("durable_shud_output_exists") is not None:
+        return bool(state.get("durable_shud_output_exists"))
+    hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
+    if hydro_status in {"succeeded", "parsed", "frequency_done", "published", "complete"}:
+        return True
+    if _state_output_uri(state):
+        for job in _state_jobs(state):
+            stage = str(job.get("stage") or job.get("job_type") or "")
+            status = str(job.get("status") or "")
+            if stage in NATIVE_SHUD_STAGE_ALIASES and status in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+                return True
+    return False
+
+
+def _force_native_shud_rerun(state: Mapping[str, Any]) -> bool:
+    return bool(state.get("force_native_shud_rerun") or state.get("force_rerun") or state.get("force_shud_rerun"))
+
+
+def _failure_policy_payload(
+    state: Mapping[str, Any],
+    *,
+    default_error_code: str | None = None,
+    manual: bool = False,
+) -> dict[str, Any]:
+    error_code = _state_error_code(state) or default_error_code or "UNKNOWN_FAILURE"
+    attempt = _state_retry_attempt(state)
+    retry_limit = _state_retry_limit(state)
+    classification = classify_failure(error_code, attempt=attempt, retry_limit=retry_limit, manual=manual)
+    stage = _failed_stage(state)
+    explicit_classifier = state.get("failure_classifier") or state.get("classifier")
+    if explicit_classifier not in (None, ""):
+        classification["classifier"] = str(explicit_classifier)
+    if state.get("retryable") is True and not classification["limit_exhausted"]:
+        classification["retryable"] = True
+        classification["permanent"] = False
+    if state.get("permanent") is True:
+        classification["retryable"] = False
+        classification["permanent"] = True
+    return {
+        **classification,
+        "error_message": _state_error_message(state),
+        "stage": stage,
+        "task_identity": _state_task_identity(state),
+    }
+
+
+def _state_error_code(state: Mapping[str, Any]) -> str | None:
+    for key in ("error_code", "reason_code", "failure_reason", "last_error", "previous_error"):
+        value = state.get(key)
+        if value not in (None, ""):
+            return str(value)
+    for job in reversed(_state_jobs(state)):
+        value = job.get("error_code") or job.get("reason_code")
+        if value not in (None, ""):
+            return str(value)
+    for event in reversed(_state_events(state)):
+        details = event.get("details")
+        if isinstance(details, Mapping):
+            value = details.get("error_code") or details.get("last_error") or details.get("previous_error")
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _state_error_message(state: Mapping[str, Any]) -> str | None:
+    for key in ("error_message", "message"):
+        value = state.get(key)
+        if value not in (None, ""):
+            return str(value)
+    for job in reversed(_state_jobs(state)):
+        value = job.get("error_message")
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _state_task_identity(state: Mapping[str, Any]) -> dict[str, Any]:
+    identity: dict[str, Any] = {}
+    for key in ("task_id", "array_task_id", "original_task_id", "stage", "job_id", "slurm_job_id"):
+        value = state.get(key)
+        if value not in (None, ""):
+            identity[key] = value
+    if identity:
+        return _evidence_safe(identity)
+    for job in reversed(_state_jobs(state)):
+        for key in ("array_task_id", "stage", "job_id", "slurm_job_id"):
+            value = job.get(key)
+            if value not in (None, ""):
+                identity[key] = value
+        if identity:
+            return _evidence_safe(identity)
+    return {}
+
+
+def _permanent_reason(state: Mapping[str, Any], failure: Mapping[str, Any]) -> str:
+    pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
+    if pipeline_status == "permanently_failed":
+        return "permanent_failure_guard"
+    if failure.get("classifier") == "policy_blocked":
+        return "policy_blocked"
+    if failure.get("limit_exhausted") and failure.get("retryable") is False:
+        if str(failure.get("reason_code") or "") in TRANSIENT_RETRY_REASON_CODES:
+            return "retry_limit_exhausted"
+    return "permanent_failure_guard"
+
+
+def _prior_failure_reason(state: Mapping[str, Any]) -> str | None:
+    for key in ("prior_failure_reason", "previous_error", "last_error", "error_code"):
+        value = state.get(key)
+        if value not in (None, ""):
+            return str(value)
+    for event in reversed(_state_events(state)):
+        details = event.get("details")
+        if isinstance(details, Mapping):
+            value = details.get("prior_failure_reason") or details.get("previous_error") or details.get("last_error")
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _downstream_retry_evidence(
+    candidate: SchedulerCandidate,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not _durable_shud_output_exists(state):
+        return None
+    failed_stage = _canonical_downstream_stage(_failed_stage(state))
+    if failed_stage is None:
+        return None
+    if _force_native_shud_rerun(state):
+        return None
+    failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
+    return {
+        **base_evidence,
+        "decision": "retry_downstream",
+        "reason": "resume_downstream_after_durable_shud",
+        "restart_stage": failed_stage,
+        "restart_from_stage": failed_stage,
+        "native_shud_resubmitted": False,
+        "durable_shud_output_reused": True,
+        "durable_output_uri": _state_output_uri(state),
+        "force_native_shud_rerun": False,
+        "failure": failure,
+        "retry_policy": {
+            "automatic_retry_allowed": failure["retryable"],
+            "manual_retry_required": failure["permanent"],
+            "attempt": failure["attempt"],
+            "retry_limit": failure["retry_limit"],
+        },
+    }
+
+
+def _retry_failure_evidence(
+    candidate: SchedulerCandidate,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    failure = _failure_policy_payload(state)
+    return {
+        **base_evidence,
+        "decision": "retry_failed",
+        "reason": "retry_failed_candidate",
+        "stage": _failed_stage(state),
+        "task_identity": _state_task_identity(state),
+        "failure": failure,
+        "retry_policy": {
+            "automatic_retry_allowed": failure["retryable"],
+            "manual_retry_required": failure["permanent"],
+            "attempt": failure["attempt"],
+            "retry_limit": failure["retry_limit"],
+        },
+        "reuse": {
+            "successful_sibling_outputs_reused": bool(state.get("successful_sibling_outputs_reused")),
+            "durable_output_reused": _durable_shud_output_exists(state),
+        },
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
+
+
+def _permanent_failure_evidence(
+    candidate: SchedulerCandidate,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    failure = _failure_policy_payload(state)
+    if not failure["permanent"]:
+        return None
+    return {
+        **base_evidence,
+        "decision": "permanent_failure",
+        "reason": _permanent_reason(state, failure),
+        "stage": _failed_stage(state),
+        "task_identity": _state_task_identity(state),
+        "failure": failure,
+        "retry_policy": {
+            "automatic_retry_allowed": False,
+            "manual_retry_required": True,
+            "attempt": failure["attempt"],
+            "retry_limit": failure["retry_limit"],
+        },
+        "manual_retry_required": True,
+        "prior_failure_reason": failure["reason_code"],
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
+
+
+def _manual_retry_state_evidence(
+    candidate: SchedulerCandidate,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    failure = _failure_policy_payload(state, manual=True)
+    manual = _manual_retry_payload(state)
+    prior_failure = _prior_failure_reason(state) or failure["reason_code"]
+    return {
+        **base_evidence,
+        "decision": "manual_retry",
+        "reason": "manual_retry_requested",
+        "manual_retry": {
+            **manual,
+            "marker": True,
+            "allowed": True,
+        },
+        "failure": {
+            **failure,
+            "prior_failure_reason": prior_failure,
+        },
+        "retry_policy": {
+            "automatic_retry_allowed": False,
+            "manual_retry_required": False,
+            "manual_retry_marker": True,
+            "attempt": failure["attempt"],
+            "retry_limit": failure["retry_limit"],
+        },
+        "prior_failure_reason": prior_failure,
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
     }
 
 
@@ -1468,28 +2175,39 @@ def _candidate_for(
     )
 
 
-def _blocked_candidate(candidate: SchedulerCandidate, reason: str) -> SchedulerCandidate:
-    return SchedulerCandidate(
-        candidate_id=candidate.candidate_id,
-        source_id=candidate.source_id,
-        cycle_id=candidate.cycle_id,
-        cycle_time_utc=candidate.cycle_time_utc,
-        model_id=candidate.model_id,
-        basin_id=candidate.basin_id,
-        basin_version_id=candidate.basin_version_id,
-        river_network_version_id=candidate.river_network_version_id,
-        segment_count=candidate.segment_count,
-        model_package_uri=candidate.model_package_uri,
-        resource_profile=candidate.resource_profile,
-        display_capabilities=candidate.display_capabilities,
-        frequency_capabilities=candidate.frequency_capabilities,
-        horizon=candidate.horizon,
-        scenario_id=candidate.scenario_id,
-        run_id=candidate.run_id,
-        forcing_version_id=candidate.forcing_version_id,
-        status="blocked",
-        reason=reason,
+def _blocked_candidate(
+    candidate: SchedulerCandidate,
+    reason: str,
+    *,
+    state_evidence: Mapping[str, Any] | None = None,
+) -> SchedulerCandidate:
+    evidence = _merge_state_evidence(candidate.state_evidence, state_evidence)
+    return replace(candidate, status="blocked", reason=reason, state_evidence=evidence)
+
+
+def _candidate_with_state_evidence(
+    candidate: SchedulerCandidate,
+    state_evidence: Mapping[str, Any],
+) -> SchedulerCandidate:
+    return replace(
+        candidate,
+        state_evidence=_merge_state_evidence(candidate.state_evidence, state_evidence),
     )
+
+
+def _merge_state_evidence(
+    existing: Mapping[str, Any] | None,
+    extra: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(existing or {})
+    for key, value in dict(extra or {}).items():
+        if key in merged and isinstance(merged[key], Mapping) and isinstance(value, Mapping):
+            nested = dict(merged[key])
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+    return _evidence_safe(merged)
 
 
 def _candidate_basin_manifest(candidate: SchedulerCandidate, *, output_uri: str) -> dict[str, Any]:
@@ -1527,6 +2245,15 @@ def _candidate_basin_manifest(candidate: SchedulerCandidate, *, output_uri: str)
         "output_key": _candidate_output_key(candidate),
         "output_uri": output_uri,
     }
+    if candidate.state_evidence:
+        state_evidence = _evidence_safe(candidate.state_evidence)
+        manifest["state_evidence"] = state_evidence
+        restart_stage = state_evidence.get("restart_stage") if isinstance(state_evidence, Mapping) else None
+        if restart_stage:
+            manifest["restart_stage"] = restart_stage
+        if state_evidence.get("durable_shud_output_reused") is True:
+            manifest["durable_shud_output_reused"] = True
+            manifest["native_shud_resubmitted"] = False
     forcing_metadata = resource_profile.get("forcing_station_metadata")
     if isinstance(forcing_metadata, Mapping):
         manifest["forcing_station_metadata"] = dict(forcing_metadata)
@@ -1570,6 +2297,8 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
     resolved_output_uri = output_uri or _candidate_output_uri(candidate)
     if resolved_output_uri is not None:
         evidence["output_uri"] = _redact_secret_manifest_for_evidence(resolved_output_uri, "output_uri")
+    if candidate.state_evidence:
+        evidence["state_evidence"] = _evidence_safe(candidate.state_evidence)
     return evidence
 
 
@@ -2422,6 +3151,19 @@ def _empty_model_discovery() -> dict[str, Any]:
         "exclusions": [],
         "operator_filters": {"expression": None, "excluded_runnable_count": 0},
     }
+
+
+def _evidence_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return _format_utc(value)
+    if isinstance(value, Mapping):
+        return _redact_secret_manifest_for_evidence(
+            {str(key): _evidence_safe(nested) for key, nested in value.items()},
+            "evidence",
+        )
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_evidence_safe(item) for item in value]
+    return value
 
 
 def _normalize_sources(sources: Sequence[str]) -> tuple[tuple[str, ...], list[dict[str, Any]]]:

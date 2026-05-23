@@ -3580,6 +3580,150 @@ class PsycopgOrchestratorRepository:
         )
         return row is not None
 
+    def candidate_state(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        run_id: str,
+        forcing_version_id: str,
+        candidate_id: str,
+    ) -> dict[str, Any] | None:
+        cycle_id = cycle_id_for(source_id, cycle_time)
+        hydro_run = self._fetch_optional(
+            """
+            SELECT
+                run_id,
+                scenario_id,
+                model_id,
+                basin_version_id,
+                forcing_version_id,
+                source_id,
+                cycle_time,
+                status,
+                slurm_job_id,
+                output_uri,
+                log_uri,
+                error_code,
+                error_message,
+                updated_at
+            FROM hydro.hydro_run
+            WHERE run_id = %s
+               OR (
+                    source_id = %s
+                AND cycle_time = %s
+                AND model_id = %s
+               )
+            ORDER BY CASE WHEN run_id = %s THEN 0 ELSE 1 END, updated_at DESC
+            LIMIT 1
+            """,
+            (run_id, source_id, cycle_time, model_id, run_id),
+        )
+        jobs = self._fetch_all(
+            """
+            SELECT
+                job_id,
+                run_id,
+                cycle_id,
+                job_type,
+                slurm_job_id,
+                array_task_id,
+                model_id,
+                status,
+                stage,
+                submitted_at,
+                started_at,
+                finished_at,
+                exit_code,
+                retry_count,
+                error_code,
+                error_message,
+                log_uri,
+                created_at,
+                updated_at
+            FROM ops.pipeline_job
+            WHERE (
+                    run_id = %s
+                 OR (cycle_id = %s AND model_id = %s)
+                 OR (cycle_id = %s AND run_id = %s)
+                 OR (cycle_id = %s AND model_id IS NULL AND run_id = %s)
+                  )
+            ORDER BY submitted_at ASC NULLS LAST, created_at ASC
+            """,
+            (
+                run_id,
+                cycle_id,
+                model_id,
+                cycle_id,
+                run_id,
+                cycle_id,
+                f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}",
+            ),
+        )
+        forcing_version = self._fetch_optional(
+            """
+            SELECT
+                forcing_version_id,
+                model_id,
+                source_id,
+                cycle_time,
+                start_time,
+                end_time,
+                station_count,
+                forcing_package_uri,
+                checksum,
+                lineage_json,
+                created_at
+            FROM met.forcing_version
+            WHERE forcing_version_id = %s
+               OR (source_id = %s AND cycle_time = %s AND model_id = %s)
+            ORDER BY CASE WHEN forcing_version_id = %s THEN 0 ELSE 1 END, created_at DESC
+            LIMIT 1
+            """,
+            (forcing_version_id, source_id, cycle_time, model_id, forcing_version_id),
+        )
+        forecast_cycle = self._fetch_optional(
+            """
+            SELECT
+                cycle_id,
+                source_id,
+                cycle_time,
+                issue_time,
+                status,
+                manifest_uri,
+                retry_count,
+                error_code,
+                error_message,
+                created_at
+            FROM met.forecast_cycle
+            WHERE cycle_id = %s OR (source_id = %s AND cycle_time = %s)
+            ORDER BY CASE WHEN cycle_id = %s THEN 0 ELSE 1 END
+            LIMIT 1
+            """,
+            (cycle_id, source_id, cycle_time, cycle_id),
+        )
+        if hydro_run is None and not jobs and forcing_version is None and forecast_cycle is None:
+            return None
+        latest_failed_job = next((job for job in reversed(jobs) if str(job.get("status")) in TERMINAL_JOB_STATUSES), {})
+        latest_job = jobs[-1] if jobs else {}
+        return {
+            "candidate_id": candidate_id,
+            "run_id": run_id,
+            "forcing_version_id": forcing_version_id,
+            "hydro_run": hydro_run,
+            "hydro_status": hydro_run.get("status") if hydro_run else None,
+            "output_uri": hydro_run.get("output_uri") if hydro_run else None,
+            "forcing_version": forcing_version,
+            "forecast_cycle": forecast_cycle,
+            "pipeline_jobs": jobs,
+            "pipeline_status": latest_job.get("status"),
+            "stage": latest_failed_job.get("stage") or latest_job.get("stage"),
+            "error_code": latest_failed_job.get("error_code") or latest_job.get("error_code"),
+            "error_message": latest_failed_job.get("error_message") or latest_job.get("error_message"),
+            "retry_count": max((int(job.get("retry_count") or 0) for job in jobs), default=0),
+        }
+
     def active_slurm_jobs(
         self,
         *,

@@ -677,7 +677,8 @@ def test_cancelled_state_does_not_produce_error_code(monkeypatch, tmp_path) -> N
 def test_slurm_error_codes_align_with_retry_sets() -> None:
     assert "SLURM_TIMEOUT" in TRANSIENT_ERROR_CODES
     assert "NODE_FAILURE" in TRANSIENT_ERROR_CODES
-    assert "OUT_OF_MEMORY" in NON_TRANSIENT_ERROR_CODES
+    assert "OUT_OF_MEMORY" in TRANSIENT_ERROR_CODES
+    assert "OUT_OF_MEMORY" not in NON_TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in NON_TRANSIENT_ERROR_CODES
 
