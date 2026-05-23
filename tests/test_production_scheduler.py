@@ -1743,20 +1743,159 @@ def test_slurm_scheduler_rejects_secret_output_uri_before_orchestrator_submissio
     assert orchestrator.calls == []
 
 
+@pytest.mark.parametrize(
+    ("model_package_uri", "secret_text"),
+    [
+        (
+            "s3://user:supersecret@bucket/models/model_a/package/",
+            "s3://user:supersecret@bucket/models/model_a/package/",
+        ),
+        (
+            "s3://bucket/models/model_a/package/?token=supersecret",
+            "token=supersecret",
+        ),
+    ],
+)
+def test_slurm_scheduler_scans_raw_model_package_uri_before_orchestrator_submission(
+    tmp_path: Path,
+    model_package_uri: str,
+    secret_text: str,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    model = _model("model_a", "basin_a")
+    model["model_package_uri"] = model_package_uri
+    orchestrator = StrictNoSubmitOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    evidence_text = json.dumps(result.evidence)
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "SLURM_PREFLIGHT_SECRET_MANIFEST_REJECTED"
+    assert result.evidence["model_run_evidence"][0]["model_package_uri"] == "[redacted]"
+    assert result.evidence["model_run_evidence"][0]["model_package_manifest_uri"] == "[redacted]"
+    assert secret_text not in evidence_text
+    assert "supersecret" not in evidence_text
+    assert orchestrator.calls == []
+
+
+def test_slurm_scheduler_rejects_derived_secret_model_package_manifest_uri_before_orchestrator_submission(
+    tmp_path: Path,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    model = _model("model_a", "basin_a")
+    model["model_package_uri"] = "s3://bucket/models/model_a/package?X-Amz-Signature=supersecret"
+    orchestrator = StrictNoSubmitOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    evidence_text = json.dumps(result.evidence)
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "SLURM_PREFLIGHT_SECRET_MANIFEST_REJECTED"
+    assert result.evidence["model_run_evidence"][0]["model_package_uri"] == "[redacted]"
+    assert result.evidence["model_run_evidence"][0]["model_package_manifest_uri"] == "[redacted]"
+    assert "supersecret" not in evidence_text
+    assert "X-Amz-Signature" not in evidence_text
+    assert orchestrator.calls == []
+
+
+def test_slurm_scheduler_rejects_resource_profile_secret_key_before_orchestrator_submission(
+    tmp_path: Path,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    raw_key = "s3://bucket/path?token=supersecret"
+    model = _model("model_a", "basin_a")
+    model["resource_profile"] = {
+        **model["resource_profile"],
+        raw_key: "signed",
+    }
+    orchestrator = StrictNoSubmitOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    evidence_text = json.dumps(result.evidence)
+    blockers = result.evidence["model_run_evidence"][0]["residual_blockers"]
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "SLURM_PREFLIGHT_SECRET_MANIFEST_REJECTED"
+    assert any(blocker["field"].endswith("[redacted]") for blocker in blockers)
+    assert raw_key not in evidence_text
+    assert "supersecret" not in evidence_text
+    assert orchestrator.calls == []
+
+
 def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path: Path) -> None:
     roots = _slurm_roots(tmp_path)
+    safe_package_uri = "s3://nhms-safe/models/model_a/package/"
+    safe_resource_profile = {
+        "runnable": True,
+        "memory_gb": 8,
+        "station_count": 7,
+        "output_uri": "s3://nhms-safe/runs/model_a/output/",
+        "manifest_uri": "s3://nhms-safe/models/model_a/manifest.json",
+        "display_capabilities": {"tiles": True},
+        "frequency_capabilities": {"return_periods": True},
+        "custom_metadata": {"callback_uri": "https://example.com/notify", "safe_key": "safe/value"},
+    }
     model = _model(
         "model_a",
         "basin_a",
-        resource_profile={
-            "runnable": True,
-            "memory_gb": 8,
-            "station_count": 7,
-            "output_uri": "s3://nhms-safe/runs/model_a/output/",
-            "display_capabilities": {"tiles": True},
-            "frequency_capabilities": {"return_periods": True},
-        },
+        resource_profile=safe_resource_profile,
     )
+    model["model_package_uri"] = safe_package_uri
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         roots["workspace_root"],
@@ -1783,6 +1922,9 @@ def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert result.status == "submitted"
     assert submitted_basin["station_count"] == 7
+    assert submitted_basin["model_package_uri"] == safe_package_uri
+    assert submitted_basin["model_package_manifest_uri"] == "s3://nhms-safe/models/model_a/manifest.json"
+    assert submitted_basin["resource_profile"] == safe_resource_profile
     assert submitted_basin["output_uri"] == "s3://nhms-safe/runs/model_a/output/"
     assert submitted_basin["slurm_env"] == {"NHMS_PROFILE": "prod/gfs_00"}
     assert "DATABASE_URL" not in submitted_basin

@@ -939,6 +939,200 @@ def test_non_array_template_contract_rejects_swapped_allowlisted_template_before
         )
 
 
+@pytest.mark.parametrize(
+    "secret_template",
+    [
+        "s3://bucket/template.sbatch?token=supersecret",
+        "https://user:supersecret@example.com/template.sbatch",
+    ],
+)
+def test_submit_job_rejects_secret_template_mapping_before_contract_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    secret_template: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret template mappings")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    "slurm_job_type_templates": {
+                        **DEFAULT_JOB_TYPE_TEMPLATES,
+                        "download_source_cycle": secret_template,
+                    },
+                },
+            )
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert secret_template not in details
+    assert "supersecret" not in details
+
+
+@pytest.mark.parametrize(
+    "secret_job_type",
+    [
+        "s3://bucket/template.sbatch?token=supersecret",
+        "https://user:supersecret@example.com/template.sbatch",
+    ],
+)
+def test_submit_job_rejects_secret_top_level_job_type_before_template_lookup_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    secret_job_type: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret job_type")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type=secret_job_type,
+            )
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert secret_job_type not in details
+    assert "supersecret" not in details
+
+
+@pytest.mark.parametrize(
+    "secret_template",
+    [
+        "s3://bucket/template.sbatch?token=supersecret",
+        "https://user:supersecret@example.com/template.sbatch",
+    ],
+)
+def test_submit_job_array_rejects_secret_template_mapping_before_contract_manifest_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    secret_template: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret template mappings")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": {
+                    **DEFAULT_JOB_TYPE_TEMPLATES,
+                    "run_shud_forecast_array": secret_template,
+                },
+            },
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert secret_template not in details
+    assert "supersecret" not in details
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+@pytest.mark.parametrize(
+    "secret_job_type",
+    [
+        "s3://bucket/template.sbatch?token=supersecret",
+        "https://user:supersecret@example.com/template.sbatch",
+    ],
+)
+def test_submit_job_array_rejects_secret_direct_job_type_before_manifest_index_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    secret_job_type: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_write_manifest_index(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("write_manifest_index must not be called for secret job_type")
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret job_type")
+
+    monkeypatch.setattr(gateway, "write_manifest_index", fake_write_manifest_index)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type=secret_job_type,
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert secret_job_type not in details
+    assert "supersecret" not in details
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+@pytest.mark.parametrize(
+    "secret_job_type",
+    [
+        "s3://bucket/template.sbatch?token=supersecret",
+        "https://user:supersecret@example.com/template.sbatch",
+    ],
+)
+def test_render_template_rejects_secret_direct_job_type_before_template_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    secret_job_type: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_resolve_template_path(job_type: str):
+        del job_type
+        raise AssertionError("_resolve_template_path must not be called for secret job_type")
+
+    monkeypatch.setattr(gateway, "_resolve_template_path", fake_resolve_template_path)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.render_template(
+            secret_job_type,
+            _production_manifest(tmp_path, "download_source_cycle"),
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert secret_job_type not in details
+    assert "supersecret" not in details
+
+
 def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_rejected(tmp_path: Path) -> None:
     gateway = _production_gateway(tmp_path)
     manifest = {
@@ -1016,6 +1210,76 @@ def test_safe_slurm_env_reaches_rendered_array_template_and_secret_is_rejected(t
             {**manifest, "slurm_env": {"OBJECT_STORE_PREFIX": "s3://bucket/prod?signature=supersecret"}},
             str(tmp_path / "index.json"),
         )
+
+
+def test_render_template_preserves_safe_url_query_execution_input(tmp_path: Path) -> None:
+    safe_url = "https://example.com/notify?run=run_001&source=GFS"
+    template_dir = _write_template(
+        tmp_path,
+        name="safe_url.sbatch",
+        content='#!/usr/bin/env bash\necho "callback={{metadata.callback_uri}}"\n',
+    )
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir=str(template_dir),
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            job_type_templates={"run_shud_analysis": "safe_url.sbatch"},
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+
+    rendered = gateway.render_template(
+        "run_shud_analysis",
+        {
+            **_production_manifest(tmp_path, "run_shud_analysis"),
+            "metadata": {"callback_uri": safe_url},
+        },
+    )
+
+    assert f'echo "callback={safe_url}"' in rendered
+    assert "[redacted]" not in rendered
+
+
+def test_render_template_rejects_secret_url_value_before_render(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret_url = "https://user:supersecret@example.com/notify?token=secret-token"
+    template_dir = _write_template(
+        tmp_path,
+        name="secret_url.sbatch",
+        content='#!/usr/bin/env bash\necho "callback={{metadata.callback_uri}}"\n',
+    )
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir=str(template_dir),
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            job_type_templates={"run_shud_analysis": "secret_url.sbatch"},
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+
+    def fake_resolve_template_path(job_type: str):
+        del job_type
+        raise AssertionError("_resolve_template_path must not be called for secret URL values")
+
+    monkeypatch.setattr(gateway, "_resolve_template_path", fake_resolve_template_path)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.render_template(
+            "run_shud_analysis",
+            {
+                **_production_manifest(tmp_path, "run_shud_analysis"),
+                "metadata": {"callback_uri": secret_url},
+            },
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert secret_url not in details
+    assert "supersecret" not in details
+    assert "secret-token" not in details
 
 
 @pytest.mark.parametrize(
@@ -1216,6 +1480,118 @@ def test_submit_job_rejects_secret_manifest_fields_before_sbatch(
     ("manifest_update", "secret_text"),
     [
         (
+            {"https://user:supersecret@example.com/callback": "notify"},
+            "https://user:supersecret@example.com/callback",
+        ),
+        (
+            {"metadata": {"s3://bucket/path?token=supersecret": "signed"}},
+            "s3://bucket/path?token=supersecret",
+        ),
+        ({"metadata": {"database_dsn": "postgresql://nhms@db.prod.example/nhms"}}, "database_dsn"),
+    ],
+)
+def test_submit_job_rejects_secret_manifest_keys_without_raw_error_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    manifest_update: dict[str, object],
+    secret_text: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret manifest keys")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    **manifest_update,
+                    "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                },
+            )
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert exc_info.value.details["findings"][0]["field"].endswith("[redacted]")
+    assert secret_text not in details
+    assert "supersecret" not in details
+
+
+def test_submit_job_rejects_secret_unsafe_manifest_key_before_unsafe_field_echo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    raw_key = "https://user:supersecret@example.com/callback"
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret unsafe manifest keys")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    raw_key: "notify",
+                    "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                },
+            )
+        )
+
+    assert exc_info.value.message == "Manifest rejects secret-bearing fields and URL values."
+    details = json.dumps(exc_info.value.details)
+    assert raw_key not in details
+    assert "supersecret" not in details
+    assert exc_info.value.details["findings"][0] == {"field": "manifest.[redacted]", "reason": "url_userinfo"}
+
+
+def test_submit_job_allows_safe_nested_metadata_keys_and_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        assert Path(command[0]).name == "sbatch"
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_001",
+            model_id="model_001",
+            job_type="download_source_cycle",
+            manifest={
+                **_production_manifest(tmp_path, "download_source_cycle"),
+                "metadata": {"callback_uri": "https://example.com/notify", "safe_key": "safe/value"},
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+    )
+
+    assert record.job_id == "12345"
+    assert record.manifest["metadata"]["callback_uri"] == "https://example.com/notify"
+
+
+@pytest.mark.parametrize(
+    ("manifest_update", "secret_text"),
+    [
+        (
             {"DATABASE_URL": "postgresql://nhms:supersecret@db.prod.example/nhms"},
             "supersecret",
         ),
@@ -1255,6 +1631,97 @@ def test_submit_job_array_rejects_secret_manifest_fields_before_manifest_or_sbat
 
     assert secret_text not in json.dumps(exc_info.value.details)
     assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+@pytest.mark.parametrize(
+    ("manifest_update", "secret_text"),
+    [
+        (
+            {"https://user:supersecret@example.com/callback": "notify"},
+            "https://user:supersecret@example.com/callback",
+        ),
+        (
+            {"metadata": {"s3://bucket/path?token=supersecret": "signed"}},
+            "s3://bucket/path?token=supersecret",
+        ),
+        ({"metadata": {"database_uri": "postgresql://nhms@db.prod.example/nhms"}}, "database_uri"),
+    ],
+)
+def test_submit_job_array_rejects_secret_manifest_keys_before_manifest_or_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    manifest_update: dict[str, object],
+    secret_text: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for secret manifest keys")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[_fake_array_task("run_001", "model_001")],
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+                **manifest_update,
+            },
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert secret_text not in details
+    assert "supersecret" not in details
+    assert exc_info.value.details["findings"][0]["field"].endswith("[redacted]")
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+def test_mock_gateway_rejects_secret_manifest_keys_without_recording_job(tmp_path: Path) -> None:
+    gateway = MockSlurmGateway(SlurmGatewaySettings(backend="mock", workspace_dir=str(tmp_path / "workspace")))
+    raw_key = "s3://bucket/path?token=supersecret"
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="run_shud_analysis",
+                manifest={"run_id": "run_001", "model_id": "model_001", raw_key: "signed"},
+            )
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert raw_key not in details
+    assert "supersecret" not in details
+    assert gateway._jobs == {}
+
+
+def test_mock_gateway_rejects_array_secret_manifest_keys_without_recording_job(tmp_path: Path) -> None:
+    gateway = MockSlurmGateway(SlurmGatewaySettings(backend="mock", workspace_dir=str(tmp_path / "workspace")))
+    raw_key = "https://user:supersecret@example.com/callback"
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            {
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "forecast",
+                "tasks": [_fake_array_task("run_001", "model_001")],
+                "manifest": {"run_id": "cycle_001", "model_id": "model_001", "metadata": {raw_key: "notify"}},
+            }
+        )
+
+    details = json.dumps(exc_info.value.details)
+    assert raw_key not in details
+    assert "supersecret" not in details
+    assert gateway._jobs == {}
 
 
 def test_mock_gateway_rejects_array_over_entry_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

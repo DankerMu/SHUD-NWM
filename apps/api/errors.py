@@ -8,6 +8,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from services.slurm_gateway.routes import slurm_request_validation_error_response
+
 
 class ApiError(RuntimeError):
     def __init__(
@@ -46,6 +48,8 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        if request.url.path.startswith("/api/v1/slurm"):
+            return slurm_request_validation_error_response(request, exc)
         details = [
             {
                 "field": ".".join(str(part) for part in error.get("loc", ())),

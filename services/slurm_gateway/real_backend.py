@@ -17,7 +17,6 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from packages.common.manifest_index import ManifestValidationError as CommonManifestValidationError
 from packages.common.manifest_index import serialize_manifest_index
-from packages.common.redaction import redact_payload
 from packages.common.safe_fs import (
     SafeFilesystemError,
     ensure_directory_no_follow,
@@ -28,6 +27,7 @@ from packages.common.slurm_env import (
     iter_secret_manifest_findings,
     reserved_slurm_env_reason,
     secret_bearing_url_reason,
+    secret_manifest_key_reason,
 )
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
@@ -63,6 +63,7 @@ SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SAFE_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
+SAFE_TEMPLATE_DETAIL_RE = re.compile(r"^[A-Za-z0-9_.-]+\.sbatch$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
 MAX_RENDERED_STRING_BYTES = 4096
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
@@ -153,6 +154,7 @@ class RealSlurmGateway(SlurmGateway):
 
     def submit_job(self, request: SubmitJobRequest) -> SlurmJobRecord:
         manifest = request.normalized_manifest()
+        self._validate_manifest_secret_scan(manifest)
         run_id = request.resolved_run_id()
         model_id = request.resolved_model_id()
         job_type = request.resolved_job_type()
@@ -206,6 +208,7 @@ class RealSlurmGateway(SlurmGateway):
             manifests=manifests,
             manifest=manifest,
         )
+        self._validate_manifest_secret_scan(base_manifest)
         if not task_list:
             raise SlurmValidationError("Cannot submit array job with 0 tasks")
         self._validate_requested_template_mapping(job_type, base_manifest)
@@ -523,20 +526,19 @@ class RealSlurmGateway(SlurmGateway):
         manifest_index_path: str = "",
         profile: Mapping[str, Any] | None = None,
     ) -> str:
-        template_path = self._resolve_template_path(job_type)
         manifest_dict = dict(manifest)
-        manifest_dict.setdefault("job_type", job_type)
+        manifest_dict["job_type"] = job_type
         manifest_dict.setdefault("stage_name", manifest_dict.get("stage") or job_type)
         manifest_dict.setdefault("workspace_dir", str(Path(self.settings.workspace_dir)))
         manifest_dict.setdefault("manifest_index_path", manifest_index_path)
         self._validate_manifest(manifest_dict)
-        redacted_manifest = redact_payload(manifest_dict)
         slurm_env = self._validate_slurm_env(manifest_dict.get("slurm_env") or {})
-
         resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
-        context = redact_payload({**redacted_manifest, **resource_profile})
-        context["manifest"] = redacted_manifest
-        context["manifest_index_path"] = manifest_index_path or str(redacted_manifest.get("manifest_index_path") or "")
+        self._validate_manifest(resource_profile, "resource_profile")
+        template_path = self._resolve_template_path(job_type)
+        context = {**manifest_dict, **resource_profile}
+        context["manifest"] = manifest_dict
+        context["manifest_index_path"] = manifest_index_path or str(manifest_dict.get("manifest_index_path") or "")
         context["slurm_env"] = slurm_env
         context["slurm_env_exports"] = [
             f"export {key}={shlex.quote(value)}" for key, value in sorted(slurm_env.items())
@@ -608,6 +610,10 @@ class RealSlurmGateway(SlurmGateway):
                 "Array job request is missing stage_name.",
                 {"missing_fields": ["stage_name"]},
             )
+        base_manifest["job_type"] = resolved_job_type
+        base_manifest["cycle_id"] = resolved_cycle_id
+        base_manifest["stage_name"] = resolved_stage_name
+        base_manifest["tasks"] = task_list
 
         return resolved_job_type, str(resolved_cycle_id), str(resolved_stage_name), task_list, base_manifest
 
@@ -645,12 +651,36 @@ class RealSlurmGateway(SlurmGateway):
             raise TemplateSecurityError(
                 "Slurm template contract does not match the gateway template configured for this job type.",
                 {
-                    "job_type": job_type,
-                    "requested_template": requested_template,
-                    "configured_template": configured_template,
-                    "expected_template": expected_template,
+                    "job_type": self._safe_identifier_detail(job_type),
+                    "requested_template": self._safe_template_detail(requested_template),
+                    "configured_template": self._safe_template_detail(configured_template),
+                    "expected_template": self._safe_template_detail(expected_template),
+                    "requested_matches_configured": requested_template == configured_template,
+                    "requested_matches_expected": requested_template == expected_template,
                 },
             )
+
+    def _safe_identifier_detail(self, value: Any) -> str | None | dict[str, str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return {"type": type(value).__name__}
+        if secret_manifest_key_reason(value) is not None:
+            return "[redacted]"
+        if SAFE_IDENTIFIER_RE.fullmatch(value):
+            return value
+        return "[redacted]"
+
+    def _safe_template_detail(self, value: Any) -> str | None | dict[str, str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return {"type": type(value).__name__}
+        if secret_bearing_url_reason(value) is not None:
+            return "[redacted]"
+        if SAFE_TEMPLATE_DETAIL_RE.fullmatch(value):
+            return value
+        return "[redacted]"
 
     def _validate_slurm_env(self, value: Any) -> dict[str, str]:
         if value in (None, ""):
@@ -661,6 +691,12 @@ class RealSlurmGateway(SlurmGateway):
         for key, raw_value in value.items():
             key_text = str(key)
             value_text = str(raw_value)
+            key_secret_reason = secret_manifest_key_reason(key_text)
+            if key_secret_reason is not None:
+                raise ManifestValidationError(
+                    "Slurm environment exports reject secret-shaped keys.",
+                    {"field": "slurm_env.[redacted]", "reason": key_secret_reason},
+                )
             if not SAFE_ENV_KEY_RE.fullmatch(key_text):
                 raise ManifestValidationError(
                     "Slurm environment keys must be uppercase shell identifiers.",
@@ -1023,22 +1059,25 @@ class RealSlurmGateway(SlurmGateway):
                 {"field": path, "type": type(value).__name__},
             )
 
-        secret_findings = iter_secret_manifest_findings(value, path)
-        if secret_findings:
-            raise ManifestValidationError(
-                "Manifest rejects secret-bearing fields and URL values.",
-                {"findings": secret_findings},
-            )
+        self._validate_manifest_secret_scan(value, path)
 
         for key, nested in value.items():
             if not isinstance(key, str) or not SAFE_KEY_RE.fullmatch(key):
-                raise ManifestValidationError("Manifest contains an unsafe field name.", {"field": str(key)})
+                raise ManifestValidationError("Manifest contains an unsafe field name.", {"field": f"{path}.[unsafe]"})
 
             field_path = f"{path}.{key}"
             if key in STRICT_IDENTIFIER_FIELDS:
                 self._validate_identifier_field(nested, field_path)
             elif isinstance(nested, str) and key not in FREEFORM_STRING_FIELDS:
                 self._validate_rendered_string(nested, field_path)
+
+    def _validate_manifest_secret_scan(self, value: Any, path: str = "manifest") -> None:
+        secret_findings = iter_secret_manifest_findings(value, path)
+        if secret_findings:
+            raise ManifestValidationError(
+                "Manifest rejects secret-bearing fields and URL values.",
+                {"findings": secret_findings},
+            )
 
     def _validate_identifier_field(self, value: Any, path: str) -> None:
         if value is None or isinstance(value, bool | int | float):

@@ -18,7 +18,6 @@ from uuid import uuid4
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.redaction import redact_payload
 from packages.common.slurm_env import (
-    is_sensitive_slurm_env_key,
     iter_secret_manifest_findings,
     reserved_slurm_env_reason,
     secret_bearing_url_reason,
@@ -1458,11 +1457,8 @@ def _candidate_basin_manifest(candidate: SchedulerCandidate, *, output_uri: str)
         "basin_version_id": candidate.basin_version_id,
         "river_network_version_id": candidate.river_network_version_id,
         "segment_count": candidate.segment_count,
-        "model_package_uri": _redact_secret_manifest_for_evidence(candidate.model_package_uri, "model_package_uri"),
-        "model_package_manifest_uri": _redact_secret_manifest_for_evidence(
-            _model_package_manifest_uri(candidate),
-            "model_package_manifest_uri",
-        ),
+        "model_package_uri": candidate.model_package_uri,
+        "model_package_manifest_uri": _model_package_manifest_uri(candidate),
         "resource_profile": dict(candidate.resource_profile),
         "display_capabilities": dict(candidate.display_capabilities),
         "frequency_capabilities": dict(candidate.frequency_capabilities),
@@ -1616,7 +1612,7 @@ def _candidate_secret_manifest_blocked_evidence(
                 "field": finding.get("field"),
                 "state": "blocked",
                 "quality_flag": "slurm_preflight_blocked",
-                "residual_risk": "Secret-bearing manifest value was rejected before submission.",
+                "residual_risk": "Secret-bearing manifest field or URL value was rejected before submission.",
             }
             for finding in findings
         ],
@@ -2001,6 +1997,18 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
     for key, value in env.items():
         key_text = str(key)
         value_text = str(value)
+        key_secret_reason = secret_manifest_key_reason(key_text)
+        if key_secret_reason is not None:
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
+                    "field": "slurm_env.[redacted]",
+                    "reason": key_secret_reason,
+                    "message": "Slurm scheduler evidence and exports reject secret-shaped environment keys.",
+                }
+            )
+            sanitized["[redacted]"] = "[redacted]"
+            continue
         if not SAFE_SLURM_ENV_KEY_RE.fullmatch(key_text):
             blockers.append(
                 {
@@ -2021,16 +2029,6 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
                 }
             )
             sanitized[key_text] = "[reserved]"
-            continue
-        if is_sensitive_slurm_env_key(key_text):
-            blockers.append(
-                {
-                    "code": "SLURM_PREFLIGHT_ENV_SECRET_REJECTED",
-                    "field": f"slurm_env.{key_text}",
-                    "message": "Slurm scheduler evidence and exports reject secret-shaped environment keys.",
-                }
-            )
-            sanitized[key_text] = "[redacted]"
             continue
         if len(value_text) > MAX_SLURM_ENV_VALUE_LENGTH:
             blockers.append(

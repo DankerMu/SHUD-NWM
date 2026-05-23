@@ -94,7 +94,13 @@ def secret_bearing_url_reason(value: str) -> str | None:
 def secret_manifest_key_reason(key: str) -> str | None:
     """Return why a manifest key is secret-bearing under the Slurm persistence contract."""
 
-    return "secret_key" if is_sensitive_slurm_env_key(str(key)) else None
+    key_text = str(key)
+    url_reason = secret_bearing_url_reason(key_text)
+    if url_reason is not None:
+        return url_reason
+    if is_sensitive_slurm_env_key(key_text):
+        return "secret_key"
+    return None
 
 
 def secret_manifest_value_reason(value: str) -> str | None:
@@ -110,11 +116,11 @@ def iter_secret_manifest_findings(value: Any, path: str = "manifest") -> list[di
     if isinstance(value, Mapping):
         for key, nested in value.items():
             key_text = str(key)
-            field_path = f"{path}.{key_text}"
             key_reason = secret_manifest_key_reason(key_text)
             if key_reason is not None:
                 findings.append({"field": f"{path}.[redacted]", "reason": key_reason})
                 continue
+            field_path = f"{path}.{key_text}"
             findings.extend(iter_secret_manifest_findings(nested, field_path))
         return findings
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
