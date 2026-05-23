@@ -23,6 +23,9 @@ from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
     ensure_directory_no_follow,
+    list_directory_no_follow,
+    read_bytes_limited_no_follow,
+    stat_no_follow,
     write_bytes_no_follow_exclusive,
 )
 from packages.common.slurm_env import (
@@ -388,7 +391,7 @@ class RealSlurmGateway(SlurmGateway):
         log_path = self._resolve_log_path(job_id, run_id, record)
         logs = ""
         truncated = False
-        if log_path is not None and log_path.exists():
+        if log_path is not None:
             logs, truncated = self._read_log_file(log_path)
 
         array_task_logs = self._collect_array_task_logs(job_id, run_id, record)
@@ -1118,13 +1121,13 @@ class RealSlurmGateway(SlurmGateway):
         return status
 
     def _resolve_log_path(self, job_id: str, run_id: str, record: SlurmJobRecord | None) -> Path | None:
-        workspace_dir = Path(self.settings.workspace_dir)
+        workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
         candidates = [
             workspace_dir / run_id / "logs" / f"{job_id}.out",
             workspace_dir / "logs" / f"{job_id}.out",
         ]
         if record is None:
-            candidates.extend(sorted(workspace_dir.glob(f"*/logs/{job_id}.out")))
+            candidates.extend(self._discover_workspace_logs(job_id, "out"))
         if record is not None:
             manifest_run_id = record.manifest.get("run_id")
             if manifest_run_id and str(manifest_run_id) != run_id:
@@ -1139,7 +1142,7 @@ class RealSlurmGateway(SlurmGateway):
                     ]
                 )
         for candidate in candidates:
-            if candidate.exists():
+            if self._log_path_exists(candidate):
                 return candidate
         return candidates[0] if candidates else None
 
@@ -1151,13 +1154,13 @@ class RealSlurmGateway(SlurmGateway):
     ) -> list[dict[str, Any]] | None:
         if "_" in job_id:
             return None
-        workspace_dir = Path(self.settings.workspace_dir)
+        workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
         log_dirs = [workspace_dir / run_id / "logs", workspace_dir / "logs"]
         if record is None:
             discovered_dirs = {
-                candidate.parent for candidate in workspace_dir.glob(f"*/logs/{job_id}_*.out")
-            } | {
-                candidate.parent for candidate in workspace_dir.glob(f"*/logs/{job_id}_*.err")
+                candidate.parent
+                for suffix in ("out", "err")
+                for candidate in self._discover_workspace_logs(job_id, suffix, array_tasks=True)
             }
             log_dirs.extend(sorted(discovered_dirs))
         if record is not None:
@@ -1167,14 +1170,8 @@ class RealSlurmGateway(SlurmGateway):
 
         task_ids: set[int] = set()
         for log_dir in log_dirs:
-            if not log_dir.exists():
-                continue
-            for candidate in log_dir.glob(f"{job_id}_*.out"):
-                match = re.fullmatch(rf"{re.escape(job_id)}_(\d+)\.out", candidate.name)
-                if match:
-                    task_ids.add(int(match.group(1)))
-            for candidate in log_dir.glob(f"{job_id}_*.err"):
-                match = re.fullmatch(rf"{re.escape(job_id)}_(\d+)\.err", candidate.name)
+            for name in self._list_log_dir(log_dir):
+                match = re.fullmatch(rf"{re.escape(job_id)}_(\d+)\.(?:out|err)", name)
                 if match:
                     task_ids.add(int(match.group(1)))
 
@@ -1208,7 +1205,7 @@ class RealSlurmGateway(SlurmGateway):
         filename = f"{job_id}_{task_id}.{suffix}"
         for log_dir in log_dirs:
             candidate = log_dir / filename
-            if candidate.exists():
+            if self._log_path_exists(candidate):
                 return self._read_log_file(candidate)
         return "", False
 
@@ -1312,19 +1309,18 @@ class RealSlurmGateway(SlurmGateway):
         )
 
     def _read_log_file(self, log_path: Path) -> tuple[str, bool]:
-        if log_path.is_symlink():
-            LOGGER.warning("Refusing to read symlinked Slurm log path: %s", log_path)
-            return "", False
-
+        workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
         try:
-            resolved_log_path = log_path.resolve(strict=True)
-            self._ensure_within_workspace(resolved_log_path)
-        except (FileNotFoundError, SlurmGatewayError):
-            LOGGER.warning("Refusing to read Slurm log path outside workspace: %s", log_path)
+            data = read_bytes_limited_no_follow(
+                log_path,
+                max_bytes=MAX_LOG_BYTES,
+                containment_root=workspace_root,
+            )
+        except FileNotFoundError:
             return "", False
-
-        with resolved_log_path.open("rb") as handle:
-            data = handle.read(MAX_LOG_BYTES + 1)
+        except (OSError, SafeFilesystemError) as exc:
+            LOGGER.warning("Refusing to read unsafe Slurm log path %s: %s", log_path, exc)
+            return "", False
         truncated = len(data) > MAX_LOG_BYTES
         if truncated:
             data = data[:MAX_LOG_BYTES]
@@ -1332,6 +1328,37 @@ class RealSlurmGateway(SlurmGateway):
         if truncated:
             logs += LOG_TRUNCATION_MARKER
         return logs, truncated
+
+    def _log_path_exists(self, path: Path) -> bool:
+        workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
+        try:
+            path.relative_to(workspace_root)
+            stat_no_follow(path, containment_root=workspace_root)
+        except (FileNotFoundError, OSError, SafeFilesystemError, ValueError):
+            return False
+        return True
+
+    def _list_log_dir(self, log_dir: Path) -> list[str]:
+        workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
+        try:
+            return list_directory_no_follow(log_dir, containment_root=workspace_root)
+        except (FileNotFoundError, NotADirectoryError, OSError, SafeFilesystemError):
+            return []
+
+    def _discover_workspace_logs(self, job_id: str, suffix: str, *, array_tasks: bool = False) -> list[Path]:
+        workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
+        pattern = (
+            re.compile(rf"^{re.escape(job_id)}_\d+\.{re.escape(suffix)}$")
+            if array_tasks
+            else re.compile(rf"^{re.escape(job_id)}\.{re.escape(suffix)}$")
+        )
+        matches: list[Path] = []
+        for name in self._list_log_dir(workspace_root):
+            run_log_dir = workspace_root / name / "logs"
+            for log_name in self._list_log_dir(run_log_dir):
+                if pattern.fullmatch(log_name):
+                    matches.append(run_log_dir / log_name)
+        return sorted(matches)
 
     def _resolve_submission_workspace_dir(self, workspace_dir: Path | str | None = None) -> Path:
         requested = str(workspace_dir or "").strip()

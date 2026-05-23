@@ -21,6 +21,8 @@ REQUIRED_RESOURCE_FIELDS = {
     "max_concurrent",
     "shud_threads",
 }
+OPTIONAL_RESOURCE_FIELDS = {"account"}
+RESOURCE_PROFILE_FIELDS = REQUIRED_RESOURCE_FIELDS | OPTIONAL_RESOURCE_FIELDS
 
 RESOURCE_LIMITS = {
     "nodes": 128,
@@ -54,6 +56,16 @@ def validate_resource_profile(
         )
 
     normalized = dict(profile)
+    unknown_fields = sorted(str(field) for field in set(normalized) - RESOURCE_PROFILE_FIELDS)
+    if unknown_fields:
+        raise ResourceProfileValidationError(
+            "Resolved resource profile contains unsupported fields.",
+            {
+                "field": path,
+                "reason": "unsupported_resource_profile_fields",
+                "unsupported_fields": [_safe_resource_profile_field(field) for field in unknown_fields],
+            },
+        )
     if require_required:
         missing = sorted(REQUIRED_RESOURCE_FIELDS - set(normalized))
         if missing:
@@ -142,6 +154,12 @@ def validate_directive_token(value: Any, field: str) -> str:
             {"field": field, "reason": "invalid_identifier"},
         )
     return value
+
+
+def _safe_resource_profile_field(field: str) -> str:
+    if SAFE_SLURM_IDENTIFIER_RE.fullmatch(field):
+        return field
+    return "[redacted]"
 
 
 def validate_directive_path(value: Any, field: str) -> str:

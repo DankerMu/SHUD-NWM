@@ -642,6 +642,11 @@ def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) 
     [
         (None, "SLURM_PREFLIGHT_DATABASE_URL_MISSING"),
         ("postgresql://nhms:secret@localhost/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@127.0.0.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@[::1]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@[0:0:0:0:0:0:0:1]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("postgresql://nhms:secret@0.0.0.0/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
+        ("sqlite:///tmp/nhms.db", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
     ],
 )
 def test_slurm_preflight_blocks_missing_or_localhost_database_before_submission(
@@ -682,6 +687,39 @@ def test_slurm_preflight_blocks_missing_or_localhost_database_before_submission(
     assert expected_code in {blocker["code"] for blocker in evidence["slurm_preflight"]["blockers"]}
     assert "secret" not in json.dumps(evidence)
     assert orchestrator.calls == []
+
+
+def test_slurm_preflight_accepts_remote_database_without_db_blocker(tmp_path: Path) -> None:
+    roots = _slurm_roots(tmp_path)
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert result.evidence["slurm_preflight"]["status"] == "ready"
+    assert not any(
+        blocker["code"].startswith("SLURM_PREFLIGHT_DATABASE_URL")
+        for blocker in result.evidence["slurm_preflight"]["blockers"]
+    )
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert len(orchestrator.calls) == 1
 
 
 def test_slurm_preflight_requires_database_url_not_pipeline_database_url(
@@ -1931,6 +1969,64 @@ def test_slurm_scheduler_rejects_resource_profile_directive_injection_before_orc
     assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
     assert "--" not in evidence_text
     assert "exclusive" not in evidence_text
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize(
+    "collision_key",
+    [
+        "run_id",
+        "workspace_dir",
+        "stage_name",
+        "cycle_id",
+        "object_store_root",
+        "object_store_prefix",
+        "manifest_index_path",
+    ],
+)
+def test_slurm_scheduler_rejects_resource_profile_identity_collision_before_orchestrator_submission(
+    tmp_path: Path,
+    collision_key: str,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    model = _model("model_a", "basin_a")
+    model["resource_profile"] = {
+        **model["resource_profile"],
+        collision_key: "profile_override",
+    }
+    orchestrator = StrictNoSubmitOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    evidence = result.evidence["model_run_evidence"][0]
+
+    assert result.status == "preflight_blocked"
+    assert evidence["error_code"] == "SLURM_PREFLIGHT_RESOURCE_PROFILE_INVALID"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert {
+        "code": "SLURM_PREFLIGHT_RESOURCE_PROFILE_INVALID",
+        "field": f"resource_profile.{collision_key}",
+        "message": "Slurm resource profile cannot override manifest or template identity fields.",
+        "reason": "manifest_identity_collision",
+    } in evidence["slurm_preflight"]["blockers"]
     assert orchestrator.calls == []
 
 

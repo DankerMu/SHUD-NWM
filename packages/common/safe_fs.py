@@ -231,6 +231,48 @@ def read_bytes_limited_no_follow(path: Path, *, max_bytes: int, containment_root
         os.close(file_fd)
 
 
+def read_tail_bytes_limited_no_follow(
+    path: Path,
+    *,
+    max_bytes: int,
+    containment_root: Path | None = None,
+) -> bytes:
+    """Read at most the final max_bytes through a descriptor-bound no-follow open."""
+
+    file_fd = open_file_no_follow(path, containment_root=containment_root)
+    try:
+        size = os.fstat(file_fd).st_size
+        if size > max_bytes:
+            os.lseek(file_fd, size - max_bytes, os.SEEK_SET)
+        return os.read(file_fd, max_bytes)
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to read {path}: {error}", kind="io") from error
+    finally:
+        os.close(file_fd)
+
+
+def list_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> list[str]:
+    """List a directory through no-follow directory descriptors."""
+
+    target = _expand_path(path)
+    root, parts = _anchor_for(target, containment_root=containment_root)
+    root_fd = _open_verified_dir(root)
+    fd = root_fd
+    try:
+        for part in parts:
+            next_fd = _open_child_dir(fd, part, target)
+            if fd != root_fd:
+                os.close(fd)
+            fd = next_fd
+        return list(os.listdir(fd))
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to list directory {target}: {error}", kind="io") from error
+    finally:
+        if fd != root_fd:
+            os.close(fd)
+        os.close(root_fd)
+
+
 def unlink_no_follow(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False) -> None:
     """Unlink a non-directory path relative to a no-follow parent directory descriptor."""
 

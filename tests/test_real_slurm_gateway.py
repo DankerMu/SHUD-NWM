@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ from services.slurm_gateway.gateway import (
 )
 from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
-from services.slurm_gateway.real_backend import RealSlurmGateway
+from services.slurm_gateway.real_backend import LOG_TRUNCATION_MARKER, RealSlurmGateway
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.hindcast import submit_hindcast_slurm
 
@@ -906,6 +907,145 @@ def test_resource_profile_directive_values_reject_injection_before_sbatch(
     assert "--" not in details
     assert "exclusive" not in details
     assert "breakout" not in details
+
+
+@pytest.mark.parametrize(
+    "collision_key",
+    [
+        "run_id",
+        "workspace_dir",
+        "stage_name",
+        "cycle_id",
+        "object_store_root",
+        "object_store_prefix",
+        "manifest_index_path",
+        "custom_metadata",
+    ],
+)
+def test_resource_profile_closed_schema_rejects_manifest_context_collision_before_sbatch(
+    monkeypatch,
+    tmp_path,
+    collision_key,
+):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles_with_update(tmp_path, {collision_key: "override"})),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for invalid resource profiles")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        gateway.render_template(
+            "run_shud_forecast_array",
+            {
+                **_production_manifest(tmp_path, "run_shud_forecast_array"),
+                "run_id": "manifest_run",
+                "stage_name": "forecast",
+                "cycle_id": "cycle_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+            },
+            str(tmp_path / "workspace" / "cycle_001" / "manifests" / "index.json"),
+        )
+
+    assert exc_info.value.details["reason"] == "unsupported_resource_profile_fields"
+    assert collision_key in exc_info.value.details["unsupported_fields"]
+
+
+def test_resource_profile_context_collision_rejects_array_submit_before_manifest_index_or_sbatch(
+    monkeypatch,
+    tmp_path,
+):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles_with_update(tmp_path, {"run_id": "profile_run"})),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for invalid resource profiles")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=[{**_fake_array_task("run_001", "model_001"), "workspace_dir": str(tmp_path / "workspace")}],
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+
+    assert exc_info.value.details["reason"] == "unsupported_resource_profile_fields"
+    assert "run_id" in exc_info.value.details["unsupported_fields"]
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+def test_safe_resource_profile_renders_manifest_identity_unchanged(monkeypatch, tmp_path):
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(
+                _write_resource_profiles_with_update(
+                    tmp_path,
+                    {"partition": "compute-gpu.1", "account": "friends.team-1", "walltime": "2-01:00:00"},
+                )
+            ),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured["script"] = Path(command[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_manifest",
+        stage_name="forecast",
+        tasks=[{**_fake_array_task("run_manifest", "model_001"), "workspace_dir": str(tmp_path / "workspace")}],
+        manifest={
+            "run_id": "cycle_manifest",
+            "model_id": "model_001",
+            "workspace_dir": str(tmp_path / "workspace"),
+            "object_store_root": "/durable/object-store",
+            "object_store_prefix": "prod/gfs",
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
+
+    assert record.run_id == "run_manifest"
+    assert "#SBATCH --job-name=nhms_forecast" in captured["script"]
+    assert f"#SBATCH --output={tmp_path / 'workspace'}/run_manifest/logs/%A_%a.out" in captured["script"]
+    assert "export WORKSPACE_ROOT=" + shlex.quote(str(tmp_path / "workspace")) in captured["script"]
+    assert "export NHMS_RUN_ID=run_manifest" in captured["script"]
+    assert "export NHMS_CYCLE_ID=cycle_manifest" in captured["script"]
+    assert "export OBJECT_STORE_ROOT=/durable/object-store" in captured["script"]
+    assert "export OBJECT_STORE_PREFIX=prod/gfs" in captured["script"]
 
 
 def test_resource_profile_safe_account_and_day_walltime_render(monkeypatch, tmp_path):
@@ -2129,6 +2269,72 @@ def test_fetch_logs_refuses_symlink(monkeypatch, tmp_path):
 
     assert response.logs == ""
     assert response.truncated is False
+
+
+def test_fetch_logs_refuses_symlink_swap_between_validation_and_open(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_001",
+        model_id="model_001",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+    )
+    secret_path = tmp_path / "secret.txt"
+    secret_path.write_text("target-secret", encoding="utf-8")
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "12345.out"
+    log_path.write_text("safe log", encoding="utf-8")
+
+    original_stat = os.stat
+    swapped = False
+
+    def swapping_stat(path, *args, **kwargs):
+        nonlocal swapped
+        result = original_stat(path, *args, **kwargs)
+        if not swapped and path == log_path.name and kwargs.get("dir_fd") is not None:
+            swapped = True
+            log_path.unlink()
+            log_path.symlink_to(secret_path)
+        return result
+
+    monkeypatch.setattr(os, "stat", swapping_stat)
+
+    response = gateway.fetch_logs("12345")
+
+    assert swapped is True
+    assert response.logs == ""
+    assert response.truncated is False
+    assert "target-secret" not in response.model_dump_json()
+
+
+def test_fetch_logs_regular_file_is_bounded_and_marked_truncated(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    monkeypatch.setattr("services.slurm_gateway.real_backend.MAX_LOG_BYTES", 8)
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_001",
+        model_id="model_001",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+    )
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345.out").write_text("0123456789abcdef", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.logs == "01234567" + LOG_TRUNCATION_MARKER
+    assert response.truncated is True
 
 
 def test_fetch_logs_after_restart_uses_durable_workspace_path(monkeypatch, tmp_path) -> None:

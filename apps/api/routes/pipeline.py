@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.auth import PolicyDecision, require_action
 from apps.api.errors import ApiError
+from packages.common.safe_fs import SafeFilesystemError, read_tail_bytes_limited_no_follow
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryError, RetryNotFoundError, RetryService
@@ -1199,8 +1200,13 @@ def _raise_log_path_forbidden(log_uri: str, log_root: Path) -> None:
 
 
 def _read_log_tail(log_path: Path) -> str:
-    size = log_path.stat().st_size
-    with log_path.open("rb") as file:
-        if size > _MAX_LOG_BYTES:
-            file.seek(size - _MAX_LOG_BYTES)
-        return file.read(_MAX_LOG_BYTES).decode("utf-8", errors="replace")
+    try:
+        data = read_tail_bytes_limited_no_follow(log_path, max_bytes=_MAX_LOG_BYTES, containment_root=_log_root())
+    except (OSError, SafeFilesystemError) as exc:
+        raise ApiError(
+            status_code=403,
+            code="FORBIDDEN",
+            message="Job log path is outside the configured log root.",
+            details={"log_path": str(log_path), "log_root": str(_log_root())},
+        ) from exc
+    return data.decode("utf-8", errors="replace")

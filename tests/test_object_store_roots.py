@@ -9,7 +9,7 @@ from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
 from apps.api.errors import ApiError
-from apps.api.routes.pipeline import _local_log_path
+from apps.api.routes.pipeline import _local_log_path, _read_log_tail
 from packages.common.object_store import LocalObjectStore
 from packages.common.state_manager import StateManager, StateSnapshot
 from workers.forcing_producer.producer import ForcingProducer, ForcingProducerConfig
@@ -175,3 +175,12 @@ def test_log_path_rejects_traversal(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
     assert error.value.status_code == 403
     assert error.value.code == "FORBIDDEN"
+
+
+def test_log_tail_reads_regular_file_with_no_follow_bound(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    log_path = tmp_path / "bounded.log"
+    log_path.write_text("0123456789abcdef", encoding="utf-8")
+    monkeypatch.setattr("apps.api.routes.pipeline._MAX_LOG_BYTES", 8)
+
+    assert _read_log_tail(log_path) == "89abcdef"

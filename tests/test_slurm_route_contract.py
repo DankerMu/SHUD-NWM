@@ -347,6 +347,132 @@ def test_array_submit_route_rejects_resource_profile_injection_before_manifest_o
     assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
 
 
+@pytest.mark.parametrize(
+    "resource_profiles",
+    [
+        """
+resource_profiles:
+  default:
+    partition: compute
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    memory_gb: 32
+    walltime: "01:00:00"
+    max_concurrent: 2
+    shud_threads: 8
+    run_id: profile_run
+  overrides: {}
+""",
+        """
+resource_profiles:
+  default:
+    partition: compute
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    memory_gb: 32
+    walltime: "01:00:00"
+    max_concurrent: 2
+    shud_threads: 8
+    manifest_index_path: /tmp/profile-index.json
+  overrides: {}
+""",
+    ],
+)
+def test_array_submit_route_rejects_resource_profile_context_collision_before_manifest_or_sbatch(
+    monkeypatch,
+    tmp_path,
+    resource_profiles,
+):
+    profiles_path = tmp_path / "resource_profiles.yaml"
+    profiles_path.write_text(resource_profiles.lstrip(), encoding="utf-8")
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(profiles_path),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for invalid resource profiles")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/job-arrays",
+            json={
+                "job_type": "run_shud_forecast_array",
+                "cycle_id": "cycle_001",
+                "stage_name": "forecast",
+                "tasks": [_array_task()],
+                "manifest": {"workspace_dir": str(tmp_path / "workspace")},
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "CONFIGURATION_ERROR"
+    assert "profile_run" not in response.text
+    assert "/tmp/profile-index.json" not in response.text
+    assert not list((tmp_path / "workspace").glob("cycle_001/manifests/*.json"))
+
+
+def test_single_submit_route_rejects_resource_profile_context_collision_before_sbatch(monkeypatch, tmp_path):
+    profiles_path = tmp_path / "resource_profiles.yaml"
+    profiles_path.write_text(
+        """
+resource_profiles:
+  default:
+    partition: compute
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 8
+    memory_gb: 32
+    walltime: "01:00:00"
+    max_concurrent: 2
+    shud_threads: 8
+    workspace_dir: /tmp/profile-workspace
+  overrides: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir=str(_write_template(tmp_path, "#!/usr/bin/env bash\n")),
+            resource_profiles_path=str(profiles_path),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates={"run_shud_analysis": "contract.sbatch"},
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for invalid resource profiles")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/jobs",
+            json={
+                "run_id": "manifest_run",
+                "model_id": "model_001",
+                "job_type": "run_shud_analysis",
+                "manifest": {"workspace_dir": str(tmp_path / "workspace")},
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "CONFIGURATION_ERROR"
+    assert "/tmp/profile-workspace" not in response.text
+
+
 def test_single_submit_missing_job_type_returns_validation_error_without_sbatch(monkeypatch, tmp_path):
     gateway = RealSlurmGateway(
         SlurmGatewaySettings(

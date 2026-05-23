@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -53,7 +54,27 @@ SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "frequency"}
 SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
-LOCALHOST_NAMES = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+LOCALHOST_NAMES = {"localhost", "localhost.localdomain", "127.0.0.1", "::1", "0.0.0.0"}
+SLURM_RESOURCE_PROFILE_DIRECTIVE_FIELDS = {
+    "partition",
+    "account",
+    "nodes",
+    "ntasks",
+    "cpus_per_task",
+    "memory_gb",
+    "walltime",
+    "max_concurrent",
+    "shud_threads",
+}
+SLURM_RESOURCE_PROFILE_TEMPLATE_IDENTITY_FIELDS = {
+    "run_id",
+    "workspace_dir",
+    "stage_name",
+    "cycle_id",
+    "object_store_root",
+    "object_store_prefix",
+    "manifest_index_path",
+}
 
 
 class SchedulerResourceLimitError(ValueError):
@@ -1636,19 +1657,20 @@ def _candidate_secret_manifest_blocked_evidence(
 
 
 def _slurm_resource_profile_blockers(resource_profile: Mapping[str, Any]) -> list[dict[str, Any]]:
+    collision_fields = sorted(SLURM_RESOURCE_PROFILE_TEMPLATE_IDENTITY_FIELDS.intersection(resource_profile))
+    if collision_fields:
+        return [
+            {
+                "code": "SLURM_PREFLIGHT_RESOURCE_PROFILE_INVALID",
+                "field": f"resource_profile.{field}",
+                "message": "Slurm resource profile cannot override manifest or template identity fields.",
+                "reason": "manifest_identity_collision",
+            }
+            for field in collision_fields
+        ]
     directive_fields = {
         key: resource_profile[key]
-        for key in (
-            "partition",
-            "account",
-            "nodes",
-            "ntasks",
-            "cpus_per_task",
-            "memory_gb",
-            "walltime",
-            "max_concurrent",
-            "shud_threads",
-        )
+        for key in SLURM_RESOURCE_PROFILE_DIRECTIVE_FIELDS
         if key in resource_profile
     }
     if not directive_fields:
@@ -1918,7 +1940,7 @@ def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:
             "message": "Slurm execution requires a compute-node reachable DATABASE_URL before submission.",
         }
     host = _database_host(database_url)
-    if host is None or host.lower() in LOCALHOST_NAMES:
+    if _database_host_is_local(host):
         return {
             "code": "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST",
             "field": "DATABASE_URL",
@@ -1935,6 +1957,19 @@ def _database_host(database_url: str | None) -> str | None:
     if parsed.scheme == "sqlite":
         return "localhost"
     return parsed.hostname
+
+
+def _database_host_is_local(host: str | None) -> bool:
+    if host is None:
+        return True
+    normalized = host.strip().lower().strip("[]")
+    if normalized in LOCALHOST_NAMES:
+        return True
+    try:
+        address = ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
 
 
 def _preflight_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
