@@ -8,8 +8,15 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore
-from services.orchestrator.chain import M3_STAGES, ForecastOrchestrator, OrchestratorConfig, OrchestratorError
+from services.orchestrator.chain import (
+    M3_STAGES,
+    ForecastOrchestrator,
+    OrchestratorConfig,
+    OrchestratorError,
+    PsycopgOrchestratorRepository,
+)
 from services.orchestrator.retry import RetryConfig
+from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 
 
 class FakeCycleSlurmClient:
@@ -378,6 +385,48 @@ def test_m3_cycle_orchestration_submits_all_seven_stages_lazily(tmp_path: Path) 
     assert [stage.status for stage in result.stages] == ["succeeded"] * 7
     assert repository.cycle_statuses[-1] == "complete"
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
+
+
+def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        slurm_env={"NHMS_PROFILE": "prod/gfs_00", "OBJECT_STORE_PREFIX": "s3://bucket/prod"},
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "complete"
+    non_array_submissions = {
+        submission["stage"]: submission
+        for submission in client.submissions
+        if submission["stage"] in {"download", "convert", "publish"}
+    }
+    assert set(non_array_submissions) == {"download", "convert", "publish"}
+    for submission in non_array_submissions.values():
+        assert submission["slurm_job_type_templates"] == dict(DEFAULT_JOB_TYPE_TEMPLATES)
+        assert submission["slurm_env"] == {
+            "NHMS_PROFILE": "prod/gfs_00",
+            "OBJECT_STORE_PREFIX": "s3://bucket/prod",
+        }
+
+
+def test_array_pipeline_jobs_are_persisted_as_cycle_level_rows(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "complete"
+    for stage in ("forcing", "forecast", "parse", "frequency"):
+        job = repository.jobs[f"job_cycle_gfs_2026050100_{stage}"]
+        assert job["run_id"] == "cycle_gfs_2026050100"
+        assert job["model_id"] is None
 
 
 def test_forecast_stage_writes_runtime_manifests_and_manifest_index_paths(tmp_path: Path) -> None:
@@ -1420,6 +1469,47 @@ def test_cancel_active_cycle_jobs_conflict_records_gap_without_rewriting_cancell
     assert gap_event["details"]["slurm"]["cancellation_proven"] is False
 
 
+def test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model() -> None:
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            calls.append((statement, parameters))
+            return [
+                {
+                    "job_id": "job_cycle_gfs_2026050100_forecast",
+                    "run_id": "cycle_gfs_2026050100",
+                    "cycle_id": "gfs_2026050100",
+                    "job_type": "run_shud_forecast_array",
+                    "slurm_job_id": "3001",
+                    "model_id": "model_a",
+                    "status": "running",
+                    "stage": "forecast",
+                }
+            ]
+
+    repository = CapturingRepository("postgresql://example")
+
+    jobs = repository.active_slurm_jobs(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_b",
+    )
+
+    statement, parameters = calls[0]
+    assert "OR pj.run_id = %s" in statement
+    assert parameters == (
+        "gfs_2026050100",
+        "model_b",
+        "model_b",
+        "fcst_gfs_2026050100_model_b",
+        "cycle_gfs_2026050100",
+        "cycle_gfs_2026050100",
+    )
+    assert jobs[0]["run_id"] == "cycle_gfs_2026050100"
+    assert jobs[0]["model_id"] == "model_a"
+
+
 def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = PublishFailureSlurmClient()
@@ -1442,6 +1532,8 @@ def _orchestrator(
     retry_service: Any | None = None,
     object_store: LocalObjectStore | None = None,
     orchestrator_cls: type[ForecastOrchestrator] = ForecastOrchestrator,
+    slurm_job_type_templates: dict[str, str] | None = None,
+    slurm_env: dict[str, str] | None = None,
 ) -> ForecastOrchestrator:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "object-store"
@@ -1451,6 +1543,8 @@ def _orchestrator(
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
         job_timeout_seconds=5,
+        slurm_job_type_templates=slurm_job_type_templates or {},
+        slurm_env=slurm_env or {},
     )
     return orchestrator_cls(
         config=config,

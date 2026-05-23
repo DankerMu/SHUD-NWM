@@ -378,6 +378,39 @@ def test_hindcast_sbatch_uses_shared_manifest_loader(tmp_path: Path) -> None:
     assert 'entry = load_manifest_entry(os.environ["NHMS_MANIFEST_INDEX"], task_id)' in rendered
 
 
+def test_run_shud_forecast_sbatch_preflight_uses_shared_manifest_loader(tmp_path: Path) -> None:
+    manifest_index_path = _manifest_index(tmp_path)
+    rendered = _gateway(tmp_path).render_template(
+        "run_shud_forecast_array",
+        _render_manifest(tmp_path, "run_shud_forecast_array"),
+        str(manifest_index_path),
+    )
+
+    assert "from packages.common.manifest_index import load_manifest_entry, resolve_task_id" in rendered
+    assert "task_id = resolve_task_id(None)" in rendered
+    assert 'entry = load_manifest_entry(os.environ["NHMS_MANIFEST_INDEX"], task_id)' in rendered
+    assert 'with open(os.environ["NHMS_MANIFEST_INDEX"]' not in rendered
+    assert "json.load(" not in rendered
+
+
+@pytest.mark.parametrize(
+    "job_type",
+    ["produce_forcing_array", "run_shud_forecast_array", "parse_output_array", "compute_frequency_array"],
+)
+def test_production_array_templates_do_not_pre_read_manifest_index_with_plain_open(
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    rendered = _gateway(tmp_path).render_template(
+        job_type,
+        _render_manifest(tmp_path, job_type),
+        str(_manifest_index(tmp_path)),
+    )
+
+    assert 'with open(os.environ["NHMS_MANIFEST_INDEX"]' not in rendered
+    assert "json.load(" not in rendered
+
+
 @pytest.mark.parametrize(
     ("job_type", "expected_executable"),
     [

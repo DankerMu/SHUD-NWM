@@ -909,6 +909,53 @@ def test_array_template_contract_rejects_swapped_allowlisted_template(tmp_path: 
         )
 
 
+def test_non_array_template_contract_rejects_swapped_allowlisted_template_before_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for mismatched non-array template contract")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(TemplateSecurityError):
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="download_source_cycle",
+                manifest={
+                    **_production_manifest(tmp_path, "download_source_cycle"),
+                    "slurm_job_type_templates": {
+                        **DEFAULT_JOB_TYPE_TEMPLATES,
+                        "download_source_cycle": "convert_canonical.sbatch",
+                    },
+                },
+            )
+        )
+
+
+def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_rejected(tmp_path: Path) -> None:
+    gateway = _production_gateway(tmp_path)
+    manifest = {
+        **_production_manifest(tmp_path, "download_source_cycle"),
+        "slurm_env": {"NHMS_PROFILE": "prod/gfs_00", "OBJECT_STORE_PREFIX": "s3://bucket/prod"},
+    }
+
+    rendered = gateway.render_template("download_source_cycle", manifest)
+
+    assert "export NHMS_PROFILE=prod/gfs_00" in rendered
+    assert "export OBJECT_STORE_PREFIX=s3://bucket/prod" in rendered
+    with pytest.raises(ManifestValidationError):
+        gateway.render_template(
+            "download_source_cycle",
+            {**manifest, "slurm_env": {"AWS_SECRET_ACCESS_KEY": "supersecret"}},
+        )
+
+
 def test_safe_slurm_env_reaches_rendered_array_template_and_secret_is_rejected(tmp_path: Path) -> None:
     gateway = RealSlurmGateway(
         SlurmGatewaySettings(

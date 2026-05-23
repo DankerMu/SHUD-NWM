@@ -1077,6 +1077,98 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
 
 
+def test_filtered_cancel_active_slurm_finds_cycle_level_array_job_with_different_stored_model(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+
+    class FilteredCancelOrchestrator:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.cancel_calls: list[tuple[str, str]] = []
+
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            raise AssertionError("replacement orchestration must not be submitted while active Slurm job is cancelled")
+
+        def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
+            self.cancel_calls.append((cycle_id, reason))
+            return [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_forecast",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": "8888",
+                    "model_id": "model_a",
+                    "stage": "forecast",
+                    "status": "cancelled",
+                    "replacement_submitted": False,
+                }
+            ]
+
+    class FilteredCycleArrayRepository(FakeActiveRepository):
+        def __init__(self) -> None:
+            super().__init__(active=False, completed=False)
+            self.queries: list[dict[str, Any]] = []
+
+        def active_slurm_jobs(self, *, source_id: str, cycle_time: datetime, model_id: str) -> list[dict[str, Any]]:
+            self.queries.append({"source_id": source_id, "cycle_time": cycle_time, "model_id": model_id})
+            if model_id != "model_b":
+                return []
+            return [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_forecast",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "run_shud_forecast_array",
+                    "slurm_job_id": "8888",
+                    "model_id": "model_a",
+                    "stage": "forecast",
+                    "status": "running",
+                }
+            ]
+
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        cancel_active_slurm=True,
+        model_ids=("model_b",),
+    )
+    active_repository = FilteredCycleArrayRepository()
+    orchestrator = FilteredCancelOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    cancellation = result.evidence["slurm_cancellation_evidence"][0]
+    assert active_repository.queries == [
+        {"source_id": "gfs", "cycle_time": _dt("2026-05-21T06:00:00Z"), "model_id": "model_b"}
+    ]
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert skipped["reason"] == "cancel_requested_active_slurm"
+    assert skipped["active_slurm_jobs"][0]["model_id"] == "model_a"
+    assert skipped["active_slurm_jobs"][0]["run_id"] == "cycle_gfs_2026052106"
+    assert cancellation["cancelled_jobs"][0]["slurm_job_id"] == "8888"
+    assert cancellation["replacement_submitted"] is False
+    assert orchestrator.cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
+    assert orchestrator.calls == []
+
+
 def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
     monkeypatch: Any,
     tmp_path: Path,

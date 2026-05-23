@@ -1205,7 +1205,7 @@ class ForecastOrchestrator:
                             "run_id": context.run_id,
                             "model_id": _cycle_payload_model_id(context),
                             "job_type": stage.job_type,
-                            "manifest": stage_manifest,
+                            "manifest": self._slurm_submission_manifest(stage_manifest),
                         }
                     )
                 )
@@ -1222,6 +1222,15 @@ class ForecastOrchestrator:
         slurm_job_id = str(submitted["job_id"])
         log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
         submitted_status = _status_from_gateway_job(submitted)
+        submitted_manifest = submitted.get("manifest") if isinstance(submitted.get("manifest"), Mapping) else {}
+        submitted_manifest_index_path = (
+            str(submitted_manifest.get("manifest_index_path") or submitted.get("manifest_index_path") or "")
+            if isinstance(submitted_manifest, Mapping)
+            else str(submitted.get("manifest_index_path") or "")
+        )
+        actual_manifest_index_path = submitted_manifest_index_path or (
+            str(manifest_index_path) if manifest_index_path else ""
+        )
         self.repository.upsert_pipeline_job(
             {
                 "job_id": pipeline_job_id,
@@ -1229,7 +1238,7 @@ class ForecastOrchestrator:
                 "cycle_id": context.cycle_id,
                 "job_type": stage.job_type,
                 "slurm_job_id": slurm_job_id,
-                "model_id": None if not stage.is_array else _cycle_payload_model_id(context),
+                "model_id": None,
                 "status": submitted_status,
                 "stage": stage.stage,
                 "submitted_at": _parse_gateway_time(submitted.get("submitted_at")) or _utcnow(),
@@ -1259,7 +1268,7 @@ class ForecastOrchestrator:
                     "exit_code": submitted.get("exit_code"),
                     "log_uri": log_uri,
                 },
-                "manifest_index_path": str(manifest_index_path) if manifest_index_path else None,
+                "manifest_index_path": actual_manifest_index_path or None,
             },
         )
         terminal = self._poll_cycle_stage_until_terminal(
@@ -2631,7 +2640,7 @@ class ForecastOrchestrator:
             "run_id": context.run_id,
             "model_id": context.model_id,
             "job_type": stage.job_type,
-            "manifest": manifest,
+            "manifest": self._slurm_submission_manifest(manifest),
         }
         submitted = self.slurm_client.submit_job(payload)
         slurm_job_id = str(submitted["job_id"])
@@ -3599,6 +3608,7 @@ class PsycopgOrchestratorRepository:
                     h.model_id = %s
                  OR pj.model_id = %s
                  OR pj.run_id = %s
+                 OR pj.run_id = %s
                  OR (pj.model_id IS NULL AND pj.run_id = %s)
               )
             ORDER BY pj.submitted_at ASC NULLS LAST, pj.created_at ASC
@@ -3608,6 +3618,7 @@ class PsycopgOrchestratorRepository:
                 model_id,
                 model_id,
                 f"fcst_{source_id.lower()}_{format_cycle_time(cycle_time)}_{model_id}",
+                cycle_run_id,
                 cycle_run_id,
             ),
         )

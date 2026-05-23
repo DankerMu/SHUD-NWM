@@ -280,6 +280,64 @@ def test_array_sbatch_command_construction(monkeypatch, tmp_path):
     assert calls[0][2].endswith(".sbatch")
 
 
+def test_array_submission_binds_manifest_index_under_submitted_workspace(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+    submitted_workspace = tmp_path / "workspace" / "scheduler"
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured["script"] = Path(command[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=_tasks(2),
+        manifest={
+            "run_id": "cycle_001",
+            "model_id": "model_001",
+            "workspace_dir": str(submitted_workspace),
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
+
+    manifest_index = Path(record.manifest["manifest_index_path"])
+    assert manifest_index.is_relative_to(submitted_workspace)
+    assert str(manifest_index) in captured["script"]
+    assert f'export NHMS_MANIFEST_INDEX="{manifest_index}"' in captured["script"]
+    assert record.manifest["workspace_dir"] == str(submitted_workspace.resolve())
+    tasks = json.loads(manifest_index.read_text(encoding="utf-8"))
+    assert {entry["workspace_dir"] for entry in tasks} == {str(submitted_workspace.resolve())}
+
+
+def test_array_submission_rejects_sibling_workspace_before_sbatch(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called when submitted workspace is outside gateway root")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(SlurmValidationError):
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=_tasks(1),
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "sibling-workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+
+
 def test_hindcast_production_array_submission_writes_required_manifest_fields(monkeypatch, tmp_path):
     gateway = _production_gateway(tmp_path)
     captured: dict[str, str] = {}

@@ -156,6 +156,7 @@ class RealSlurmGateway(SlurmGateway):
                 "Array-capable job types must be submitted through the array endpoint.",
                 {"job_type": job_type, "endpoint": "/api/v1/slurm/job-arrays"},
             )
+        self._validate_requested_template_mapping(str(job_type or ""), manifest)
         if run_id:
             manifest["run_id"] = run_id
         if model_id:
@@ -201,7 +202,14 @@ class RealSlurmGateway(SlurmGateway):
             raise SlurmValidationError("Cannot submit array job with 0 tasks")
         self._validate_requested_template_mapping(job_type, base_manifest)
 
-        manifest_index_path = self.write_manifest_index(cycle_id, stage_name, task_list)
+        requested_workspace = str(base_manifest.get("workspace_dir") or "").strip()
+        workspace_root = self._resolve_submission_workspace_dir(requested_workspace)
+        task_list = self._tasks_with_submission_workspace(
+            task_list,
+            workspace_root,
+            require_match=bool(requested_workspace),
+        )
+        manifest_index_path = self.write_manifest_index(cycle_id, stage_name, task_list, workspace_dir=workspace_root)
         first_task = dict(task_list[0])
         model_id = str(first_task.get("model_id") or base_manifest.get("model_id") or "")
         profile = self.resolve_resource_profile(model_id)
@@ -211,10 +219,6 @@ class RealSlurmGateway(SlurmGateway):
         task_count = len(task_list)
         effective_max_concurrent = min(max_concurrent, task_count)
         profile["max_concurrent"] = effective_max_concurrent
-        requested_workspace = str(base_manifest.get("workspace_dir") or "").strip()
-        workspace_dir = requested_workspace or str(Path(self.settings.workspace_dir))
-        if requested_workspace:
-            self._ensure_within_workspace(Path(requested_workspace))
         slurm_env = self._validate_slurm_env(base_manifest.get("slurm_env") or {})
 
         render_manifest = {
@@ -225,7 +229,7 @@ class RealSlurmGateway(SlurmGateway):
             "run_id": first_task.get("run_id", base_manifest.get("run_id", f"{cycle_id}_{stage_name}")),
             "model_id": model_id,
             "manifest_index_path": str(manifest_index_path),
-            "workspace_dir": workspace_dir,
+            "workspace_dir": str(workspace_root),
             "slurm_env": slurm_env,
         }
         self._require_manifest_fields(render_manifest, ["run_id", "model_id", "job_type", "cycle_id", "stage_name"])
@@ -428,27 +432,29 @@ class RealSlurmGateway(SlurmGateway):
         cycle_id: str,
         stage_name: str,
         tasks: Sequence[Mapping[str, Any]],
+        *,
+        workspace_dir: Path | str | None = None,
     ) -> Path:
         if not tasks:
             raise SlurmValidationError("Cannot submit array job with 0 tasks")
         self._validate_manifest({"cycle_id": cycle_id, "stage_name": stage_name})
+        workspace_root = self._resolve_submission_workspace_dir(workspace_dir)
 
         entries: list[dict[str, Any]] = []
         for index, task in enumerate(tasks):
             entry = dict(task)
             entry["task_id"] = index
             if not entry.get("workspace_dir"):
-                entry["workspace_dir"] = str(Path(self.settings.workspace_dir))
+                entry["workspace_dir"] = str(workspace_root)
             self._require_manifest_fields(
                 entry,
                 ["task_id", "model_id", "basin_version_id", "river_network_version_id",
                  "run_id", "source_id", "cycle_time", "workspace_dir"],
             )
             self._validate_manifest(entry)
-            self._ensure_within_workspace(Path(str(entry["workspace_dir"])))
+            self._ensure_within_workspace(Path(str(entry["workspace_dir"])), workspace_dir=workspace_root)
             entries.append(entry)
 
-        workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
         try:
             ensure_directory_no_follow(workspace_root)
         except (OSError, SafeFilesystemError) as exc:
@@ -457,8 +463,8 @@ class RealSlurmGateway(SlurmGateway):
                 {"workspace_dir": str(workspace_root), "error": str(exc)},
             ) from exc
 
-        output_dir = Path(self.settings.workspace_dir) / cycle_id / "manifests"
-        self._ensure_within_workspace(output_dir)
+        output_dir = workspace_root / cycle_id / "manifests"
+        self._ensure_within_workspace(output_dir, workspace_dir=workspace_root)
         try:
             ensure_directory_no_follow(output_dir, containment_root=workspace_root)
         except (OSError, SafeFilesystemError) as exc:
@@ -1048,19 +1054,63 @@ class RealSlurmGateway(SlurmGateway):
             logs += LOG_TRUNCATION_MARKER
         return logs, truncated
 
-    def _ensure_within_workspace(self, path: Path) -> None:
-        workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
+    def _resolve_submission_workspace_dir(self, workspace_dir: Path | str | None = None) -> Path:
+        requested = str(workspace_dir or "").strip()
+        configured = Path(self.settings.workspace_dir).expanduser().resolve()
+        if not requested:
+            return configured
+        path = Path(requested).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        else:
+            path = path.resolve()
+        self._ensure_within_workspace(path, workspace_dir=configured)
+        return path
+
+    def _tasks_with_submission_workspace(
+        self,
+        tasks: Sequence[Mapping[str, Any]],
+        workspace_dir: Path,
+        *,
+        require_match: bool,
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for task in tasks:
+            entry = dict(task)
+            task_workspace = str(entry.get("workspace_dir") or "").strip()
+            if task_workspace:
+                resolved_task_workspace = Path(task_workspace).expanduser()
+                if not resolved_task_workspace.is_absolute():
+                    resolved_task_workspace = (Path.cwd() / resolved_task_workspace).resolve()
+                else:
+                    resolved_task_workspace = resolved_task_workspace.resolve()
+                if require_match and resolved_task_workspace != workspace_dir:
+                    raise SlurmValidationError(
+                        "Array task workspace_dir must match the submitted scheduler workspace.",
+                        {
+                            "task_workspace_dir": str(resolved_task_workspace),
+                            "workspace_dir": str(workspace_dir),
+                        },
+                    )
+                entry["workspace_dir"] = str(workspace_dir if require_match else resolved_task_workspace)
+            else:
+                entry["workspace_dir"] = str(workspace_dir)
+            normalized.append(entry)
+        return normalized
+
+    def _ensure_within_workspace(self, path: Path, *, workspace_dir: Path | None = None) -> None:
+        workspace_root = (workspace_dir or Path(self.settings.workspace_dir)).expanduser().resolve()
         resolved_path = path.expanduser()
         if not resolved_path.is_absolute():
             resolved_path = (Path.cwd() / resolved_path).resolve()
         else:
             resolved_path = resolved_path.resolve()
         try:
-            resolved_path.relative_to(workspace_dir)
+            resolved_path.relative_to(workspace_root)
         except ValueError as exc:
             raise SlurmValidationError(
                 "Resolved Slurm gateway path is outside the configured workspace directory.",
-                {"path": str(path), "workspace_dir": str(workspace_dir)},
+                {"path": str(path), "workspace_dir": str(workspace_root)},
             ) from exc
 
     @staticmethod

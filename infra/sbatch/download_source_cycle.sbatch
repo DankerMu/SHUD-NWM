@@ -23,6 +23,9 @@ export NHMS_JOB_TYPE="{{job_type}}"
 export NHMS_MAX_CONCURRENT={{max_concurrent}}
 export SHUD_THREADS={{shud_threads}}
 export OMP_NUM_THREADS={{shud_threads}}
+{% for export_line in slurm_env_exports | default([]) %}
+{{ export_line }}
+{% endfor %}
 NHMS_CYCLE_TIME="${NHMS_CYCLE_TIME:-${NHMS_CYCLE_ID:-}}"
 export NHMS_CYCLE_TIME
 
