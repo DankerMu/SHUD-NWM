@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, Path, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
-from services.slurm_gateway.gateway import SlurmGatewayError, create_gateway
+from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError, create_gateway
 from services.slurm_gateway.models import (
     ArraySubmitJobRequest,
     ErrorBody,
@@ -15,9 +17,43 @@ from services.slurm_gateway.models import (
     ResetRequest,
     SubmitJobRequest,
 )
+from services.slurm_gateway.validation_errors import slurm_request_validation_error_response
 
-router = APIRouter(prefix="/api/v1/slurm", tags=["slurm"])
-slurm_gateway = create_gateway()
+
+class SlurmSafeValidationRoute(APIRoute):
+    def get_route_handler(self) -> Any:
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Any:
+            try:
+                return await original_route_handler(request)
+            except RequestValidationError as exc:
+                return slurm_request_validation_error_response(request, exc)
+
+        return custom_route_handler
+
+
+router = APIRouter(prefix="/api/v1/slurm", tags=["slurm"], route_class=SlurmSafeValidationRoute)
+SLURM_ROUTE_JOB_ID_PATTERN = r"^(?:\d+(?:_\d+)?|mock_\d+)$"
+
+
+class LazySlurmGateway:
+    def __init__(self) -> None:
+        self._instance: SlurmGateway | None = None
+
+    def _get(self) -> SlurmGateway:
+        if self._instance is None:
+            self._instance = create_gateway()
+        return self._instance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
+
+    def reset_instance(self) -> None:
+        self._instance = None
+
+
+slurm_gateway = LazySlurmGateway()
 
 
 def _gateway_error_response(exc: SlurmGatewayError) -> JSONResponse:
@@ -62,7 +98,7 @@ async def list_jobs(
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
         return slurm_gateway.get_job_status(job_id)
     except SlurmGatewayError as exc:
@@ -70,7 +106,7 @@ async def get_job_status(job_id: str):
 
 
 @router.get("/jobs/{job_id}/array-tasks")
-async def get_array_task_results(job_id: str):
+async def get_array_task_results(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
         return slurm_gateway.get_array_task_results(job_id)
     except SlurmGatewayError as exc:
@@ -78,7 +114,7 @@ async def get_array_task_results(job_id: str):
 
 
 @router.delete("/jobs/{job_id}")
-async def cancel_job(job_id: str):
+async def cancel_job(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
         return slurm_gateway.cancel_job(job_id)
     except SlurmGatewayError as exc:
@@ -86,7 +122,7 @@ async def cancel_job(job_id: str):
 
 
 @router.get("/jobs/{job_id}/logs")
-async def fetch_logs(job_id: str):
+async def fetch_logs(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
         return slurm_gateway.fetch_logs(job_id)
     except SlurmGatewayError as exc:

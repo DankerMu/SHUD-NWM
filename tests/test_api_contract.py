@@ -544,6 +544,8 @@ def test_cancel_contract_documents_cancelled_jobs_and_slurm_failures() -> None:
         "cancelled",
         "failed_jobs",
         "slurm_failures",
+        "blocked_jobs",
+        "slurm_cancellation_gaps",
         "partial_failure",
         "idempotent_jobs",
         "hydro_run",
@@ -552,6 +554,8 @@ def test_cancel_contract_documents_cancelled_jobs_and_slurm_failures() -> None:
     assert data["run_id"] == "run_cancel_contract"
     assert data["failed_jobs"] == []
     assert data["slurm_failures"] == []
+    assert data["blocked_jobs"] == []
+    assert data["slurm_cancellation_gaps"] == []
     assert data["partial_failure"] is False
     assert data["cancelled"] == data["cancelled_jobs"]
     assert len(data["cancelled_jobs"]) == 1

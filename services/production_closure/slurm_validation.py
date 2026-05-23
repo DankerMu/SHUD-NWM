@@ -24,6 +24,7 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     unlink_no_follow,
 )
+from packages.common.slurm_env import secret_bearing_url_reason
 from services.orchestrator.retry import compute_backoff_seconds, is_transient_error
 from services.production_closure.e2e_validation import (
     ProductionE2EConfig,
@@ -67,6 +68,7 @@ SENSITIVE_URI_ASSIGNMENT_RE = re.compile(
     r"access[_-]?key|session[_-]?key|signature)[^/?&;\s=]*=[^/?&;\s]*",
     re.IGNORECASE,
 )
+MAX_WALLTIME_SECONDS = 30 * 24 * 60 * 60
 TERMINAL_SLURM_STATES = {
     "BOOT_FAIL",
     "CANCELLED",
@@ -519,10 +521,13 @@ def _validate_walltime(value: str) -> None:
         )
     days = int(match.group("days") or 0)
     hours = int(match.group("hours"))
-    if days == 0 and hours > 999:
+    minutes = int(match.group("minutes"))
+    seconds = int(match.group("seconds"))
+    total_seconds = ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+    if total_seconds < 1 or total_seconds > MAX_WALLTIME_SECONDS:
         raise ProductionValidationError(
             "PRODUCTION_SLURM_RESOURCE_INVALID",
-            "NHMS_PRODUCTION_SLURM_WALLTIME hours must be bounded.",
+            "NHMS_PRODUCTION_SLURM_WALLTIME must be a positive bounded duration.",
         )
 
 
@@ -836,11 +841,17 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
         "manifest_index_path": str(manifest_index),
         "workspace_dir": str(config.workspace_root),
         "object_store_root": config.object_store_root,
-        "object_store_prefix": config.object_store_prefix,
-        "model_package_uri": config.model_package_uri,
+        "object_store_prefix": _sanitized_object_store_prefix(config.object_store_prefix),
+        "model_package_uri": _safe_template_model_package_uri(config.model_package_uri),
         "controlled_failure_log_marker": CONTROLLED_FAILURE_LOG_MARKER,
     }
     return gateway.render_template("run_shud_forecast_array", manifest, str(manifest_index))
+
+
+def _safe_template_model_package_uri(value: str) -> str:
+    if not value:
+        return ""
+    return redact_text(value) if secret_bearing_url_reason(value) is not None else value
 
 
 def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str]]) -> dict[str, Any]:

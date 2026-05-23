@@ -2,20 +2,29 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlparse
 
 from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    ensure_directory_no_follow,
+    read_bytes_no_follow,
+    write_bytes_no_follow_exclusive,
+)
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import HttpSlurmGatewayClient
 from services.orchestrator.persistence import PipelineStore
+from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.flood_frequency.config import HindcastConfig
 
 HINDCAST_SCENARIO_ID = "hindcast_replay"
@@ -24,6 +33,7 @@ HINDCAST_FORCING_PACKAGE_UNAVAILABLE = "HINDCAST_FORCING_PACKAGE_UNAVAILABLE"
 TERMINAL_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
 ACTIVE_HINDCAST_STATUSES = {"created", "submitted", "running", "staged"}
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+_LOCALHOST_NAMES = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -454,6 +464,7 @@ def submit_hindcast_slurm(
     years = [int(year) for year in years]
     if not years:
         return HindcastSlurmResult(slurm_job_array_id=None, job_ids=[])
+    preflight = _hindcast_slurm_preflight(config)
     basin_version_id, river_network_version_id = _load_model_versions_for_slurm(
         config.db_session,
         model_id,
@@ -479,6 +490,7 @@ def submit_hindcast_slurm(
             "object_store_prefix": config.object_store_prefix,
             "workspace_dir": str(config.workspace_root),
             "workspace_root": str(config.workspace_root),
+            "slurm_job_type_templates": dict(preflight["slurm_job_type_templates"]),
         }
         for index, year in enumerate(years)
         for forcing_version_id in (forcing_version_id_for_year(model_id, year),)
@@ -505,14 +517,22 @@ def submit_hindcast_slurm(
             "object_store_prefix": config.object_store_prefix,
             "workspace_dir": str(config.workspace_root),
             "workspace_root": str(config.workspace_root),
+            "slurm_job_type_templates": dict(preflight["slurm_job_type_templates"]),
         },
         "tasks": tasks,
     }
     submit_job_array = getattr(slurm_client, "submit_job_array", None)
-    if callable(submit_job_array):
-        submitted = submit_job_array(payload)
-    else:
-        submitted = slurm_client.submit_job(payload)
+    if not callable(submit_job_array):
+        raise HindcastError(
+            "SLURM_ARRAY_SUBMIT_UNSUPPORTED",
+            "Hindcast Slurm submission requires an array-capable Slurm client.",
+            {
+                "job_type": "hindcast",
+                "cycle_id": payload["cycle_id"],
+                "no_submission_expected": True,
+            },
+        )
+    submitted = submit_job_array(payload)
     submitted = _mapping(submitted)
     slurm_job_id = str(submitted.get("job_id") or submitted.get("slurm_job_id"))
 
@@ -951,7 +971,6 @@ def _write_hindcast_manifest(run_id: str, model_id: str, source_id: str, year: i
     config = HindcastConfig.from_env()
     model = _load_model_context(db_session, model_id)
     run_dir = config.workspace_root / "runs" / run_id / "input"
-    run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = run_dir / "manifest.json"
     start_time, end_time = _year_bounds(year)
     forcing_version_id = _load_run_forcing_version_id(db_session, run_id) or forcing_version_id_for_year(model_id, year)
@@ -994,7 +1013,27 @@ def _write_hindcast_manifest(run_id: str, model_id: str, source_id: str, year: i
             "log_uri": _run_log_uri(run_id),
         },
     }
-    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    workspace_root = config.workspace_root.expanduser().resolve()
+    content = json.dumps(manifest, sort_keys=True).encode("utf-8")
+    try:
+        ensure_directory_no_follow(workspace_root)
+        ensure_directory_no_follow(run_dir, containment_root=workspace_root)
+        try:
+            write_bytes_no_follow_exclusive(manifest_path, content, containment_root=workspace_root)
+        except FileExistsError:
+            existing = read_bytes_no_follow(manifest_path, containment_root=workspace_root)
+            if existing != content:
+                raise HindcastError(
+                    "HINDCAST_MANIFEST_EXISTS",
+                    "Hindcast runtime manifest already exists with different content.",
+                    {"run_id": run_id, "manifest_path": str(manifest_path)},
+                ) from None
+    except (OSError, SafeFilesystemError) as exc:
+        raise HindcastError(
+            "HINDCAST_MANIFEST_UNSAFE",
+            "Unable to write hindcast runtime manifest safely.",
+            {"run_id": run_id, "manifest_path": str(manifest_path), "error": str(exc)},
+        ) from exc
     return manifest_path
 
 
@@ -1015,6 +1054,108 @@ def _load_forcing_package_uri(db_session: Session, forcing_version_id: str) -> s
     if row["forcing_package_uri"] in (None, ""):
         return None
     return str(row["forcing_package_uri"])
+
+
+def _hindcast_slurm_preflight(config: HindcastConfig) -> dict[str, Any]:
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    database_blocker = _hindcast_database_blocker(database_url)
+    if database_blocker is not None:
+        raise HindcastError(
+            str(database_blocker["code"]),
+            str(database_blocker["message"]),
+            {"slurm_preflight": database_blocker, "no_submission_expected": True},
+        )
+
+    workspace_root = config.workspace_root.expanduser().resolve()
+    object_store_root = config.object_store_root.expanduser().resolve()
+    for field_name, root in (
+        ("workspace_root", workspace_root),
+        ("object_store_root", object_store_root),
+    ):
+        blocker = _hindcast_root_blocker(field_name, root, workspace_root=workspace_root)
+        if blocker is not None:
+            raise HindcastError(
+                str(blocker["code"]),
+                str(blocker["message"]),
+                {"slurm_preflight": blocker, "no_submission_expected": True},
+            )
+
+    template_mapping = dict(DEFAULT_JOB_TYPE_TEMPLATES)
+    expected_template = DEFAULT_JOB_TYPE_TEMPLATES["hindcast"]
+    if template_mapping.get("hindcast") != expected_template:
+        raise HindcastError(
+            "SLURM_PREFLIGHT_TEMPLATE_MISMATCH",
+            "Hindcast Slurm submission must use the exact hindcast template mapping.",
+            {
+                "job_type": "hindcast",
+                "template_name": template_mapping.get("hindcast"),
+                "expected_template_name": expected_template,
+                "no_submission_expected": True,
+            },
+        )
+    return {
+        "database": {"configured": True, "host": _database_host(database_url)},
+        "workspace_root": str(workspace_root),
+        "object_store_root": str(object_store_root),
+        "slurm_job_type_templates": template_mapping,
+    }
+
+
+def _hindcast_database_blocker(database_url: str | None) -> dict[str, Any] | None:
+    if not database_url:
+        return {
+            "code": "SLURM_PREFLIGHT_DATABASE_URL_MISSING",
+            "field": "DATABASE_URL",
+            "message": "Hindcast Slurm submission requires a compute-node reachable DATABASE_URL.",
+        }
+    host = _database_host(database_url)
+    if host is None or host.lower() in _LOCALHOST_NAMES:
+        return {
+            "code": "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST",
+            "field": "DATABASE_URL",
+            "host": host,
+            "message": "Hindcast Slurm submission rejects localhost-only DATABASE_URL values.",
+        }
+    return None
+
+
+def _database_host(database_url: str | None) -> str | None:
+    if not database_url:
+        return None
+    parsed = urlparse(database_url)
+    if parsed.scheme == "sqlite":
+        return "localhost"
+    return parsed.hostname
+
+
+def _hindcast_root_blocker(field_name: str, root: Path, *, workspace_root: Path) -> dict[str, Any] | None:
+    if not root.exists() or not root.is_dir():
+        return {
+            "code": f"SLURM_PREFLIGHT_{field_name.upper()}_NOT_VISIBLE",
+            "field": field_name,
+            "path": str(root),
+            "message": f"Hindcast Slurm {field_name} must exist as a compute-node visible directory.",
+        }
+    if root.is_symlink():
+        return {
+            "code": f"SLURM_PREFLIGHT_{field_name.upper()}_UNSAFE",
+            "field": field_name,
+            "path": str(root),
+            "message": f"Hindcast Slurm {field_name} must not be a symlink.",
+        }
+    if field_name == "workspace_root":
+        return None
+    try:
+        root.relative_to(workspace_root)
+    except ValueError:
+        return {
+            "code": f"SLURM_PREFLIGHT_{field_name.upper()}_OUT_OF_ROOT",
+            "field": field_name,
+            "path": str(root),
+            "workspace_root": str(workspace_root),
+            "message": f"Hindcast Slurm {field_name} must stay under the configured workspace root.",
+        }
+    return None
 
 
 def _require_real_forcing_package_uri(db_session: Session, forcing_version_id: str) -> str:

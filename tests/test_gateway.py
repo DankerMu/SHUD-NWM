@@ -1,8 +1,12 @@
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel
 
+from apps.api.errors import register_error_handlers
 from apps.api.main import app
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
+from services.slurm_gateway.gateway import create_gateway
 from services.slurm_gateway.models import ResetRequest
 from services.slurm_gateway.routes import slurm_gateway
 
@@ -224,3 +228,49 @@ async def test_zero_delay_immediate_success(client):
 
     assert response.status_code == 201
     assert response.json()["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_non_slurm_validation_error_envelope_survives_invalid_slurm_backend(monkeypatch):
+    class ActivePayload(BaseModel):
+        active: bool
+
+    local_app = FastAPI()
+    register_error_handlers(local_app)
+
+    @local_app.put("/local/active")
+    async def local_active(payload: ActivePayload):
+        return {"active": payload.active}
+
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "invalid")
+    transport = ASGITransport(app=local_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        response = await async_client.put("/local/active", json={"active": {"not": "a-bool"}})
+
+    assert response.status_code == 422
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["error"]["code"] == "VALIDATION_ERROR"
+    assert data["error"]["details"][0]["field"] == "body.active"
+
+
+@pytest.mark.asyncio
+async def test_bare_slurm_router_validation_redacts_without_gateway_construction(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_create_gateway(*args, **kwargs):
+        del args, kwargs
+        calls["count"] += 1
+        return create_gateway(SlurmGatewaySettings(backend="mock"))
+
+    monkeypatch.setattr("services.slurm_gateway.routes.create_gateway", fake_create_gateway)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        response = await async_client.get("/api/v1/slurm/jobs/bad-id")
+
+    assert response.status_code == 422
+    response_text = response.text
+    assert "supersecret" not in response_text
+    assert '"input"' not in response_text
+    assert "rejected_value" not in response_text
+    assert calls["count"] == 0

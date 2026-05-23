@@ -11,18 +11,12 @@
 
 set -euo pipefail
 
-export WORKSPACE_ROOT="{{workspace_dir}}"
-export OBJECT_STORE_ROOT="{{object_store_root | default(workspace_dir)}}"
-export OBJECT_STORE_PREFIX="{{object_store_prefix | default('')}}"
-export NHMS_RUN_ID="{{run_id}}"
-export NHMS_MODEL_ID="{{model_id}}"
-export NHMS_SOURCE_ID="{{source_id | default('GFS')}}"
-export NHMS_CYCLE_ID="{{cycle_id | default('')}}"
-export NHMS_CYCLE_TIME="{{cycle_time | default('')}}"
-export NHMS_JOB_TYPE="{{job_type}}"
-export NHMS_MAX_CONCURRENT={{max_concurrent}}
-export SHUD_THREADS={{shud_threads}}
-export OMP_NUM_THREADS={{shud_threads}}
+{% for export_line in export_lines | default([]) %}
+{{ export_line }}
+{% endfor %}
+{% for export_line in slurm_env_exports | default([]) %}
+{{ export_line }}
+{% endfor %}
 NHMS_CYCLE_TIME="${NHMS_CYCLE_TIME:-${NHMS_CYCLE_ID:-}}"
 export NHMS_CYCLE_TIME
 

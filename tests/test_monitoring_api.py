@@ -243,6 +243,36 @@ def test_job_logs_tails_large_file(tmp_path: Path, monkeypatch) -> None:
         assert response.json()["data"]["content"] == "89abcdef"
 
 
+def test_job_logs_rejects_symlink_swap_between_path_check_and_open(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    with _store() as store:
+        secret_path = tmp_path / "secret.log"
+        secret_path.write_text("target-secret", encoding="utf-8")
+        log_path = tmp_path / "swap.log"
+        log_path.write_text("safe log", encoding="utf-8")
+        _create_job(store, job_id="job_swap_logs", log_uri="swap.log")
+
+        original_stat = os.stat
+        swapped = False
+
+        def swapping_stat(path, *args, **kwargs):
+            nonlocal swapped
+            result = original_stat(path, *args, **kwargs)
+            if not swapped and path == log_path.name and kwargs.get("dir_fd") is not None:
+                swapped = True
+                log_path.unlink()
+                log_path.symlink_to(secret_path)
+            return result
+
+        monkeypatch.setattr(os, "stat", swapping_stat)
+        with _client(store) as client:
+            response = client.get("/api/v1/jobs/job_swap_logs/logs")
+
+        assert swapped is True
+        assert response.status_code == 403
+        assert "target-secret" not in response.text
+
+
 def test_job_logs_path_traversal(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     with _store() as store:

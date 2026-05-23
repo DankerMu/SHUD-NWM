@@ -108,6 +108,42 @@ def atomic_write_bytes_no_follow(
     return target
 
 
+def write_bytes_no_follow_exclusive(
+    path: Path,
+    content: bytes,
+    *,
+    containment_root: Path | None = None,
+) -> Path:
+    """Create a file without following symlinked parents or targets, failing if it exists."""
+
+    target = _expand_path(path)
+    parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=True)
+    file_fd: int | None = None
+    try:
+        _verify_fd_matches_path(parent_fd, parent_path)
+        file_fd = os.open(target.name, _FILE_FLAGS, 0o666, dir_fd=parent_fd)
+        view = memoryview(content)
+        while view:
+            written = os.write(file_fd, view)
+            view = view[written:]
+        os.fsync(file_fd)
+        os.close(file_fd)
+        file_fd = None
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass
+    except FileExistsError:
+        _close_file_fd(file_fd)
+        raise
+    except OSError as error:
+        _close_file_fd(file_fd)
+        raise SafeFilesystemError(f"Failed to create {target}: {error}", kind="io") from error
+    finally:
+        os.close(parent_fd)
+    return target
+
+
 def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> int:
     """Open a file for reading without following symlinked parents or target."""
 
@@ -193,6 +229,48 @@ def read_bytes_limited_no_follow(path: Path, *, max_bytes: int, containment_root
         raise SafeFilesystemError(f"Failed to read {path}: {error}", kind="io") from error
     finally:
         os.close(file_fd)
+
+
+def read_tail_bytes_limited_no_follow(
+    path: Path,
+    *,
+    max_bytes: int,
+    containment_root: Path | None = None,
+) -> bytes:
+    """Read at most the final max_bytes through a descriptor-bound no-follow open."""
+
+    file_fd = open_file_no_follow(path, containment_root=containment_root)
+    try:
+        size = os.fstat(file_fd).st_size
+        if size > max_bytes:
+            os.lseek(file_fd, size - max_bytes, os.SEEK_SET)
+        return os.read(file_fd, max_bytes)
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to read {path}: {error}", kind="io") from error
+    finally:
+        os.close(file_fd)
+
+
+def list_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> list[str]:
+    """List a directory through no-follow directory descriptors."""
+
+    target = _expand_path(path)
+    root, parts = _anchor_for(target, containment_root=containment_root)
+    root_fd = _open_verified_dir(root)
+    fd = root_fd
+    try:
+        for part in parts:
+            next_fd = _open_child_dir(fd, part, target)
+            if fd != root_fd:
+                os.close(fd)
+            fd = next_fd
+        return list(os.listdir(fd))
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to list directory {target}: {error}", kind="io") from error
+    finally:
+        if fd != root_fd:
+            os.close(fd)
+        os.close(root_fd)
 
 
 def unlink_no_follow(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False) -> None:

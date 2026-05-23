@@ -3050,6 +3050,16 @@ components:
           description: Alias of failed_jobs for Slurm cancellation failures.
           items:
             $ref: "#/components/schemas/SlurmCancelFailure"
+        blocked_jobs:
+          type: array
+          description: Jobs whose Slurm cancellation could not be proven; local job state is preserved.
+          items:
+            $ref: "#/components/schemas/SlurmCancellationGap"
+        slurm_cancellation_gaps:
+          type: array
+          description: Alias of blocked_jobs for unproven Slurm cancellation gaps.
+          items:
+            $ref: "#/components/schemas/SlurmCancellationGap"
         partial_failure:
           type: boolean
         idempotent_jobs:
@@ -3090,6 +3100,38 @@ components:
             details:
               type: object
               additionalProperties: true
+    SlurmCancellationGap:
+      type: object
+      required: [job_id, run_id, status, slurm_job_id, cancellation_proven]
+      properties:
+        job_id:
+          type: string
+        run_id:
+          type: string
+        status:
+          type: string
+        slurm_job_id:
+          type: string
+          nullable: true
+        cancellation_proven:
+          type: boolean
+          enum: [false]
+        error:
+          type: object
+          required: [status_code, code, message, details]
+          properties:
+            status_code:
+              type: integer
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+        gateway_response:
+          type: object
+          additionalProperties: true
     IdempotentCancelJob:
       type: object
       required: [job_id, slurm_job_id, note]

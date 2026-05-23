@@ -11,19 +11,19 @@
 
 set -euo pipefail
 
-export WORKSPACE_ROOT="{{workspace_dir}}"
-export OBJECT_STORE_ROOT="{{object_store_root | default(workspace_dir)}}"
-export OBJECT_STORE_PREFIX="{{object_store_prefix | default('')}}"
-export NHMS_MANIFEST_INDEX="{{manifest_index_path}}"
+{% for export_line in export_lines | default([]) %}
+{{ export_line }}
+{% endfor %}
 
 TASK_JSON="$(python - <<'PY'
 import json
 import os
 
-task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", "0"))
-with open(os.environ["NHMS_MANIFEST_INDEX"], encoding="utf-8") as handle:
-    tasks = json.load(handle)
-print(json.dumps(tasks[task_id]))
+from packages.common.manifest_index import load_manifest_entry, resolve_task_id
+
+task_id = resolve_task_id(None)
+entry = load_manifest_entry(os.environ["NHMS_MANIFEST_INDEX"], task_id)
+print(json.dumps(entry, sort_keys=True))
 PY
 )"
 export TASK_JSON

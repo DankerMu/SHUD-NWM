@@ -1257,6 +1257,10 @@ export interface components {
             failed_jobs?: components["schemas"]["SlurmCancelFailure"][];
             /** @description Alias of failed_jobs for Slurm cancellation failures. */
             slurm_failures?: components["schemas"]["SlurmCancelFailure"][];
+            /** @description Jobs whose Slurm cancellation could not be proven; local job state is preserved. */
+            blocked_jobs?: components["schemas"]["SlurmCancellationGap"][];
+            /** @description Alias of blocked_jobs for unproven Slurm cancellation gaps. */
+            slurm_cancellation_gaps?: components["schemas"]["SlurmCancellationGap"][];
             partial_failure?: boolean;
             idempotent_jobs?: components["schemas"]["IdempotentCancelJob"][];
             /** @description hydro_run transition (CancelTransition shape), or null if not applicable */
@@ -1276,6 +1280,25 @@ export interface components {
                 details: {
                     [key: string]: unknown;
                 };
+            };
+        };
+        SlurmCancellationGap: {
+            job_id: string;
+            run_id: string;
+            status: string;
+            slurm_job_id: string | null;
+            /** @enum {boolean} */
+            cancellation_proven: false;
+            error?: {
+                status_code: number;
+                code: string;
+                message: string;
+                details: {
+                    [key: string]: unknown;
+                };
+            };
+            gateway_response?: {
+                [key: string]: unknown;
             };
         };
         IdempotentCancelJob: {

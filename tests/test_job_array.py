@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from services.slurm_gateway import real_backend as real_backend_module
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
-from services.slurm_gateway.gateway import ConfigurationError, SlurmValidationError
+from services.slurm_gateway.gateway import (
+    ConfigurationError,
+    ManifestValidationError,
+    SlurmGatewayError,
+    SlurmValidationError,
+)
 from services.slurm_gateway.real_backend import RealSlurmGateway
 
 
@@ -161,6 +168,30 @@ def test_manifest_index_generation_uses_versioned_paths(tmp_path):
     assert second.exists()
 
 
+def test_manifest_index_timestamp_collision_does_not_overwrite_first_file(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+    fixed_now = datetime(2026, 5, 21, 12, 0, 0, 123456, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(real_backend_module, "datetime", FrozenDatetime)
+
+    first = gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(1))
+    first_content = first.read_bytes()
+    second_tasks = _tasks(1)
+    second_tasks[0]["run_id"] = "run_collision_second"
+
+    second = gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", second_tasks)
+
+    assert second != first
+    assert first.read_bytes() == first_content
+    assert json.loads(first.read_text(encoding="utf-8"))[0]["run_id"] == "run_0"
+    assert json.loads(second.read_text(encoding="utf-8"))[0]["run_id"] == "run_collision_second"
+
+
 def test_resource_profile_loading_default_and_override(tmp_path):
     gateway = _gateway(tmp_path)
 
@@ -221,11 +252,37 @@ def test_array_validation_rejects_zero_tasks(monkeypatch, tmp_path):
         gateway.submit_job_array("run_shud_forecast_array", "cycle_001", "run_shud_forecast_array", [])
 
 
+def test_write_manifest_index_rejects_task_count_over_limit_before_file_creation(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_ENTRIES", 1)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(2))
+
+    assert exc_info.value.details["entry_limit"] == 1
+    assert not (tmp_path / "workspace").exists()
+
+
+def test_write_manifest_index_rejects_serialized_size_over_limit_before_file_creation(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_BYTES", 32)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.write_manifest_index("cycle_001", "run_shud_forecast_array", _tasks(1))
+
+    assert exc_info.value.details["size_limit"] == 32
+    assert not (tmp_path / "workspace").exists()
+
+
 def test_array_validation_rejects_zero_max_concurrent(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path, _profiles(max_concurrent=0))
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
 
-    with pytest.raises(SlurmValidationError, match="max_concurrent must be \u2265 1"):
+    with pytest.raises(SlurmGatewayError, match="resource profile"):
         gateway.submit_job_array("run_shud_forecast_array", "cycle_001", "run_shud_forecast_array", _tasks(2))
 
 
@@ -259,7 +316,7 @@ def test_single_basin_falls_back_to_non_array(monkeypatch, tmp_path):
 
     gateway.submit_job_array("run_shud_forecast_array", "cycle_001", "run_shud_forecast_array", _tasks(1))
 
-    assert all(not arg.startswith("--array=") for arg in calls[0])
+    assert "--array=0-0%1" in calls[0]
 
 
 def test_array_sbatch_command_construction(monkeypatch, tmp_path):
@@ -278,6 +335,182 @@ def test_array_sbatch_command_construction(monkeypatch, tmp_path):
     assert calls[0][0] == "sbatch"
     assert calls[0][1] == "--array=0-2%3"
     assert calls[0][2].endswith(".sbatch")
+
+
+def test_array_submission_binds_manifest_index_under_submitted_workspace(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+    submitted_workspace = tmp_path / "workspace" / "scheduler"
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured["script"] = Path(command[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=_tasks(2),
+        manifest={
+            "run_id": "cycle_001",
+            "model_id": "model_001",
+            "workspace_dir": str(submitted_workspace),
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
+
+    manifest_index = Path(record.manifest["manifest_index_path"])
+    assert manifest_index.is_relative_to(submitted_workspace)
+    assert str(manifest_index) in captured["script"]
+    assert f"export NHMS_MANIFEST_INDEX={manifest_index}" in captured["script"]
+    assert record.manifest["workspace_dir"] == str(submitted_workspace.resolve())
+    tasks = json.loads(manifest_index.read_text(encoding="utf-8"))
+    assert {entry["workspace_dir"] for entry in tasks} == {str(submitted_workspace.resolve())}
+
+
+def test_array_submission_timestamp_collision_keeps_first_manifest_index_immutable(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+    fixed_now = datetime(2026, 5, 21, 12, 0, 0, 123456, tzinfo=UTC)
+    captured_scripts: list[str] = []
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured_scripts.append(Path(command[-1]).read_text(encoding="utf-8"))
+        job_id = 12345 + len(captured_scripts)
+        return subprocess.CompletedProcess(command, 0, stdout=f"Submitted batch job {job_id}\n", stderr="")
+
+    monkeypatch.setattr(real_backend_module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    first_record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=_tasks(1),
+        manifest={
+            "run_id": "cycle_001",
+            "model_id": "model_001",
+            "workspace_dir": str(tmp_path / "workspace" / "scheduler"),
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
+    first_index = Path(first_record.manifest["manifest_index_path"])
+    first_content = first_index.read_bytes()
+    second_tasks = _tasks(1)
+    second_tasks[0]["run_id"] = "run_collision_second"
+
+    second_record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=second_tasks,
+        manifest={
+            "run_id": "cycle_001",
+            "model_id": "model_001",
+            "workspace_dir": str(tmp_path / "workspace" / "scheduler"),
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
+
+    second_index = Path(second_record.manifest["manifest_index_path"])
+    assert second_index != first_index
+    assert first_index.read_bytes() == first_content
+    assert json.loads(first_index.read_text(encoding="utf-8"))[0]["run_id"] == "run_0"
+    assert json.loads(second_index.read_text(encoding="utf-8"))[0]["run_id"] == "run_collision_second"
+    assert str(first_index) in captured_scripts[0]
+    assert str(second_index) in captured_scripts[1]
+
+
+def test_array_submission_rejects_sibling_workspace_before_sbatch(monkeypatch, tmp_path):
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called when submitted workspace is outside gateway root")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(SlurmValidationError):
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=_tasks(1),
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "sibling-workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+
+
+def test_submit_job_array_rejects_task_count_over_limit_before_manifest_or_sbatch(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_ENTRIES", 1)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for over-limit arrays")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=_tasks(2),
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+
+    assert exc_info.value.details["entry_limit"] == 1
+    assert not (tmp_path / "workspace").exists()
+
+
+def test_submit_job_array_rejects_serialized_size_over_limit_before_manifest_or_sbatch(monkeypatch, tmp_path):
+    from packages.common import manifest_index as manifest_index_module
+
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(manifest_index_module, "MAX_MANIFEST_INDEX_BYTES", 32)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for over-limit arrays")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManifestValidationError) as exc_info:
+        gateway.submit_job_array(
+            job_type="run_shud_forecast_array",
+            cycle_id="cycle_001",
+            stage_name="forecast",
+            tasks=_tasks(1),
+            manifest={
+                "run_id": "cycle_001",
+                "model_id": "model_001",
+                "workspace_dir": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            },
+        )
+
+    assert exc_info.value.details["size_limit"] == 32
+    assert not (tmp_path / "workspace").exists()
 
 
 def test_hindcast_production_array_submission_writes_required_manifest_fields(monkeypatch, tmp_path):
@@ -309,6 +542,7 @@ def test_hindcast_production_array_submission_writes_required_manifest_fields(mo
                 "object_store_prefix": "hindcast/prod",
                 "workspace_dir": str(tmp_path / "workspace"),
                 "workspace_root": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
             },
             "tasks": _hindcast_tasks(tmp_path),
         }
@@ -319,5 +553,5 @@ def test_hindcast_production_array_submission_writes_required_manifest_fields(mo
     assert "--array=0-1%2" in calls[0]
     assert tasks[0]["river_network_version_id"] == "rnv_v1"
     assert tasks[1]["river_network_version_id"] == "rnv_v1"
-    assert 'export NHMS_MANIFEST_INDEX="' in captured["script"]
+    assert "export NHMS_MANIFEST_INDEX=" in captured["script"]
     assert str(manifest_index) in captured["script"]

@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from services.orchestrator import cli as orchestrator_cli
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
+from services.slurm_gateway.gateway import ManifestValidationError as GatewayManifestValidationError
 from services.slurm_gateway.real_backend import RealSlurmGateway
 from services.tile_publisher import publisher as tile_publisher_module
 from workers.canonical_converter import cli as canonical_cli
@@ -98,6 +99,28 @@ def _manifest_index(tmp_path: Path) -> Path:
             "source_id": "IFS",
             "cycle_time": "2026051212",
         },
+    ]
+    path.write_text(json.dumps(entries), encoding="utf-8")
+    return path
+
+
+def _hindcast_manifest_index(tmp_path: Path) -> Path:
+    path = tmp_path / "hindcast_manifest_index.json"
+    entries = [
+        {
+            "task_id": 0,
+            "array_task_id": 0,
+            "model_id": "model_001",
+            "basin_version_id": "basin_001",
+            "river_network_version_id": "river_001",
+            "run_id": "hindcast_era5_model_001_1993",
+            "workspace_dir": str(tmp_path / "workspace"),
+            "source_id": "ERA5",
+            "cycle_time": "1993-01-01T00:00:00Z",
+            "year": 1993,
+            "forcing_version_id": "forc_era5_hindcast_model_001_1993",
+            "forcing_package_uri": "object://forcing/1993",
+        }
     ]
     path.write_text(json.dumps(entries), encoding="utf-8")
     return path
@@ -219,7 +242,10 @@ class _FakeParser:
             "convert_canonical",
             'nhms-canonical convert --source-id "${NHMS_SOURCE_ID:-GFS}" --cycle-time "$NHMS_CYCLE_TIME"',
         ),
-        ("hindcast", 'nhms-flood hindcast-year --model-id "$MODEL_ID" --source-id "$SOURCE_ID" --year "$YEAR"'),
+        (
+            "hindcast",
+            'nhms-flood hindcast-year --model-id "$MODEL_ID" --source-id "$SOURCE_ID" --year "$YEAR"',
+        ),
     ],
 )
 def test_real_templates_render_supported_cli_commands(tmp_path, job_type, expected_command):
@@ -239,24 +265,43 @@ def test_publish_tiles_template_does_not_render_database_url_secret(tmp_path: Pa
         "database_url": secret_database_url,
     }
 
-    rendered = _gateway(tmp_path).render_template(
-        "publish_tiles",
-        manifest,
-        str(tmp_path / "manifest_index.json"),
+    with pytest.raises(GatewayManifestValidationError) as exc_info:
+        _gateway(tmp_path).render_template(
+            "publish_tiles",
+            manifest,
+            str(tmp_path / "manifest_index.json"),
     )
 
-    assert secret_database_url not in rendered
-    assert "DATABASE_URL" not in rendered
-    assert 'nhms-pipeline publish-tiles --cycle-id "$NHMS_CYCLE_ID"' in rendered
-    assert "set -euo pipefail" in rendered
+    assert secret_database_url not in json.dumps(exc_info.value.details)
+    assert exc_info.value.details["findings"][0]["field"] == "manifest.[redacted]"
 
 
-def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract_and_redacts(tmp_path: Path) -> None:
+def test_run_shud_forecast_template_rejects_secret_manifest_values_before_render(tmp_path: Path) -> None:
     secret_uri = "s3://user:pass@bucket/prod?token=secret&X-Amz-Signature=abc"
     manifest = {
         **_render_manifest(tmp_path, "run_shud_forecast_array"),
         "object_store_root": secret_uri,
         "object_store_prefix": "s3://user:pass@bucket/prefix?token=secret",
+        "account": "friends",
+    }
+
+    with pytest.raises(GatewayManifestValidationError) as exc_info:
+        _gateway(tmp_path).render_template(
+            "run_shud_forecast_array",
+            manifest,
+            str(tmp_path / "manifest_index.json"),
+        )
+
+    assert secret_uri not in json.dumps(exc_info.value.details)
+    assert "user:pass@" not in json.dumps(exc_info.value.details)
+    assert "token=secret" not in json.dumps(exc_info.value.details)
+
+
+def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract(tmp_path: Path) -> None:
+    manifest = {
+        **_render_manifest(tmp_path, "run_shud_forecast_array"),
+        "object_store_root": str(tmp_path / "object-store"),
+        "object_store_prefix": "forecast/cycle_001",
         "account": "friends",
     }
 
@@ -276,14 +321,11 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
     assert "#SBATCH --time=01:00:00" in rendered
     assert "export SHUD_THREADS=8" in rendered
     assert "export OMP_NUM_THREADS=8" in rendered
-    assert 'export NHMS_MANIFEST_INDEX="' in rendered
+    assert "export NHMS_MANIFEST_INDEX=" in rendered
     assert (
         'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" '
         '--task-id "${SLURM_ARRAY_TASK_ID:-0}"'
     ) in rendered
-    assert "user:pass@" not in rendered
-    assert "token=secret" not in rendered
-    assert "X-Amz-Signature" not in rendered
 
 
 def test_download_source_cycle_cli_accepts_template_args(monkeypatch):
@@ -338,6 +380,52 @@ def test_hindcast_cli_accepts_template_args(monkeypatch):
         flood_cli.main,
         ["hindcast-year", "--model-id", "model_001", "--source-id", "gfs", "--year", "2020"],
     )
+
+
+def test_hindcast_sbatch_uses_shared_manifest_loader(tmp_path: Path) -> None:
+    manifest_index_path = _hindcast_manifest_index(tmp_path)
+    rendered = _gateway(tmp_path).render_template(
+        "hindcast",
+        _render_manifest(tmp_path, "hindcast"),
+        str(manifest_index_path),
+    )
+
+    assert "from packages.common.manifest_index import load_manifest_entry, resolve_task_id" in rendered
+    assert "task_id = resolve_task_id(None)" in rendered
+    assert 'entry = load_manifest_entry(os.environ["NHMS_MANIFEST_INDEX"], task_id)' in rendered
+
+
+def test_run_shud_forecast_sbatch_preflight_uses_shared_manifest_loader(tmp_path: Path) -> None:
+    manifest_index_path = _manifest_index(tmp_path)
+    rendered = _gateway(tmp_path).render_template(
+        "run_shud_forecast_array",
+        _render_manifest(tmp_path, "run_shud_forecast_array"),
+        str(manifest_index_path),
+    )
+
+    assert "from packages.common.manifest_index import load_manifest_entry, resolve_task_id" in rendered
+    assert "task_id = resolve_task_id(None)" in rendered
+    assert 'entry = load_manifest_entry(os.environ["NHMS_MANIFEST_INDEX"], task_id)' in rendered
+    assert 'with open(os.environ["NHMS_MANIFEST_INDEX"]' not in rendered
+    assert "json.load(" not in rendered
+
+
+@pytest.mark.parametrize(
+    "job_type",
+    ["produce_forcing_array", "run_shud_forecast_array", "parse_output_array", "compute_frequency_array"],
+)
+def test_production_array_templates_do_not_pre_read_manifest_index_with_plain_open(
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    rendered = _gateway(tmp_path).render_template(
+        job_type,
+        _render_manifest(tmp_path, job_type),
+        str(_manifest_index(tmp_path)),
+    )
+
+    assert 'with open(os.environ["NHMS_MANIFEST_INDEX"]' not in rendered
+    assert "json.load(" not in rendered
 
 
 @pytest.mark.parametrize(

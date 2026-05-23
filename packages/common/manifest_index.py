@@ -4,9 +4,11 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePath
 from typing import Any
+
+from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,23 +59,54 @@ def resolve_task_id(explicit_task_id: int | None) -> int:
     return resolved
 
 
+def validate_manifest_index_entry_count(entry_count: int, *, max_entries: int | None = None) -> None:
+    limit = MAX_MANIFEST_INDEX_ENTRIES if max_entries is None else max_entries
+    if entry_count > limit:
+        raise ManifestValidationError(
+            "Manifest index exceeds maximum entry count",
+            {"entry_count": entry_count, "entry_limit": limit},
+        )
+
+
+def serialize_manifest_index(entries: Sequence[Mapping[str, Any]], *, max_bytes: int | None = None) -> bytes:
+    """Serialize a manifest index while enforcing the worker-side read size limit."""
+
+    limit = MAX_MANIFEST_INDEX_BYTES if max_bytes is None else max_bytes
+    validate_manifest_index_entry_count(len(entries), max_entries=MAX_MANIFEST_INDEX_ENTRIES)
+    encoder = json.JSONEncoder(indent=2, sort_keys=True)
+    payload = bytearray()
+
+    def append(chunk: str) -> None:
+        payload.extend(chunk.encode("utf-8"))
+        if len(payload) > limit:
+            raise ManifestValidationError(
+                "Manifest index file exceeds size limit",
+                {"size": len(payload), "size_limit": limit},
+            )
+
+    append("[")
+    for index, entry in enumerate(entries):
+        if index:
+            append(", ")
+        for chunk in encoder.iterencode(entry):
+            append(chunk)
+    append("]")
+    return bytes(payload)
+
+
 def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any]:
     path = Path(manifest_index_path)
-    if path.is_symlink():
-        raise ManifestValidationError(
-            "Manifest index path is a symlink",
-            {"manifest_index_path": manifest_index_path},
-        )
     try:
-        if path.stat().st_size > MAX_MANIFEST_INDEX_BYTES:
+        raw = read_bytes_limited_no_follow(path, max_bytes=MAX_MANIFEST_INDEX_BYTES)
+        if len(raw) > MAX_MANIFEST_INDEX_BYTES:
             raise ManifestValidationError(
                 "Manifest index file exceeds size limit",
                 {"manifest_index_path": manifest_index_path, "size_limit": MAX_MANIFEST_INDEX_BYTES},
             )
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, SafeFilesystemError) as exc:
         raise ManifestValidationError(
-            "Unable to read manifest index.",
+            f"Unable to safely read manifest index: {exc}",
             {"manifest_index_path": manifest_index_path, "error": str(exc)},
         ) from exc
     except json.JSONDecodeError as exc:
