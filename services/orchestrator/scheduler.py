@@ -133,7 +133,7 @@ class ProductionSchedulerConfig:
         or os.getenv("SHUD_RUNTIME_ROOT")
     )
     database_url: str | None = field(
-        default_factory=lambda: os.getenv("PIPELINE_DATABASE_URL") or os.getenv("DATABASE_URL")
+        default_factory=lambda: os.getenv("DATABASE_URL")
     )
     slurm_execution_enabled: bool = field(
         default_factory=lambda: _env_flag("NHMS_PRODUCTION_SLURM_ENABLED")
@@ -569,7 +569,10 @@ class ProductionScheduler:
                     continue
                 candidate_output_uris[candidate.candidate_id] = output_uri
                 submitted_candidates.append(candidate)
-                basins.append(_candidate_basin_manifest(candidate, output_uri=output_uri))
+                basin_manifest = _candidate_basin_manifest(candidate, output_uri=output_uri)
+                if self.config.slurm_execution_enabled and self.config.slurm_env:
+                    basin_manifest["slurm_env"] = dict(self.config.slurm_env)
+                basins.append(basin_manifest)
             if not basins:
                 continue
             try:
@@ -645,16 +648,21 @@ class ProductionScheduler:
                     }
                 )
                 continue
+            cancellation_status = _scheduler_cancellation_status(cancelled)
+            cancellation_item: dict[str, Any] = {
+                "source_id": source_id,
+                "cycle_id": cycle_id,
+                "cycle_time_utc": cycle_time_text,
+                "status": cancellation_status,
+                "cancelled_jobs": cancelled,
+                "replacement_submitted": False,
+                "active_slurm_jobs": skipped.get("active_slurm_jobs", []),
+            }
+            if cancellation_status != "cancelled":
+                cancellation_item["error_code"] = "SLURM_CANCELLATION_GAP"
+                cancellation_item["cancellation_proven"] = False
             evidence.append(
-                {
-                    "source_id": source_id,
-                    "cycle_id": cycle_id,
-                    "cycle_time_utc": cycle_time_text,
-                    "status": "cancelled",
-                    "cancelled_jobs": cancelled,
-                    "replacement_submitted": False,
-                    "active_slurm_jobs": skipped.get("active_slurm_jobs", []),
-                }
+                cancellation_item
             )
         return evidence
 
@@ -662,6 +670,24 @@ class ProductionScheduler:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
         config = OrchestratorConfig.from_env()
+        if self.config.slurm_execution_enabled:
+            config = OrchestratorConfig(
+                workspace_root=self.config.workspace_root,
+                object_store_root=self.config.object_store_root or config.object_store_root,
+                object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", config.object_store_prefix),
+                slurm_gateway_url=config.slurm_gateway_url,
+                templates_dir=config.templates_dir,
+                poll_interval_seconds=config.poll_interval_seconds,
+                job_timeout_seconds=config.job_timeout_seconds,
+                source_id=config.source_id,
+                forecast_horizon_hours=config.forecast_horizon_hours,
+                scenario_id=config.scenario_id if config.scenario_id_explicit else None,
+                era5_area=config.era5_area,
+                state_soft_stale_threshold_days=config.state_soft_stale_threshold_days,
+                state_hard_stale_threshold_days=config.state_hard_stale_threshold_days,
+                slurm_job_type_templates=dict(self.config.slurm_job_type_templates or {}),
+                slurm_env=dict(self.config.slurm_env),
+            )
         if config.source_id != source_id:
             config = OrchestratorConfig(
                 workspace_root=config.workspace_root,
@@ -677,6 +703,8 @@ class ProductionScheduler:
                 era5_area=config.era5_area,
                 state_soft_stale_threshold_days=config.state_soft_stale_threshold_days,
                 state_hard_stale_threshold_days=config.state_hard_stale_threshold_days,
+                slurm_job_type_templates=config.slurm_job_type_templates,
+                slurm_env=config.slurm_env,
             )
         return ForecastOrchestrator(
             config=config,
@@ -911,9 +939,6 @@ class ProductionScheduler:
                             cycle_time=discovery.cycle_time,
                         )
                     )
-                if has_active_orchestration:
-                    skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
-                    continue
                 active_slurm_jobs = (
                     list(
                         active_slurm_jobs_provider(
@@ -925,6 +950,9 @@ class ProductionScheduler:
                     if callable(active_slurm_jobs_provider)
                     else []
                 )
+                if has_active_orchestration and not (self.config.cancel_active_slurm and active_slurm_jobs):
+                    skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
+                    continue
                 if active_slurm_jobs:
                     if self.config.cancel_active_slurm:
                         skipped.append(
@@ -1422,7 +1450,21 @@ def _candidate_basin_manifest(candidate: SchedulerCandidate, *, output_uri: str)
     forcing_metadata = resource_profile.get("forcing_station_metadata")
     if isinstance(forcing_metadata, Mapping):
         manifest["forcing_station_metadata"] = dict(forcing_metadata)
+    slurm_env = resource_profile.get("slurm_env")
+    if isinstance(slurm_env, Mapping):
+        manifest["slurm_env"] = {str(key): str(value) for key, value in slurm_env.items()}
     return manifest
+
+
+def _candidate_execution_attempted(outcome: Mapping[str, Any] | None, submitted: bool) -> bool:
+    if submitted and outcome is None:
+        return True
+    if not outcome:
+        return False
+    return any(
+        outcome.get(field) not in (None, "")
+        for field in ("slurm_job_id", "exit_code", "log_uri", "accounting", "task_id", "original_task_id")
+    )
 
 
 def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: str | None = None) -> dict[str, Any]:
@@ -1565,11 +1607,13 @@ def _candidate_execution_evidence_item(
         candidate_submitted = submitted
         mutation_occurred = submitted
         candidate_outcome: dict[str, Any] | None = None
+        execution_attempted = submitted
     else:
         outcome_status = str(outcome.get("status") or "")
         status = _candidate_status_from_outcome(result.status, outcome_status)
-        candidate_submitted = submitted and outcome_status == "active"
-        mutation_occurred = submitted and outcome_status == "active"
+        execution_attempted = _candidate_execution_attempted(outcome, submitted)
+        candidate_submitted = submitted and (outcome_status == "active" or execution_attempted)
+        mutation_occurred = candidate_submitted
         candidate_outcome = dict(outcome)
     item = {
         **_candidate_identity_evidence(
@@ -1578,6 +1622,10 @@ def _candidate_execution_evidence_item(
         ),
         "status": status,
         "submitted": candidate_submitted,
+        "execution_attempted": execution_attempted,
+        "final_candidate_success": (
+            status == result.status and not _is_non_submitted_terminal_or_unavailable_status(status)
+        ),
         "mutation_occurred": mutation_occurred,
         "pipeline_run_id": result.run_id,
         "standard_chain_shape": stage_names,
@@ -1834,6 +1882,20 @@ def _slurm_template_allowlist_check(config: ProductionSchedulerConfig) -> tuple[
                     "message": f"Slurm stage {stage_name} must use an allowlisted sbatch template.",
                 }
             )
+        expected_template = DEFAULT_JOB_TYPE_TEMPLATES.get(job_type)
+        if template_name in allowed_names and template_name != expected_template:
+            check["expected_template_name"] = expected_template
+            blockers.append(
+                {
+                    "code": "SLURM_PREFLIGHT_TEMPLATE_MISMATCH",
+                    "field": f"slurm_job_type_templates.{job_type}",
+                    "stage": stage_name,
+                    "job_type": job_type,
+                    "template_name": template_name,
+                    "expected_template_name": expected_template,
+                    "message": f"Slurm stage {stage_name} must use the template assigned to its job type.",
+                }
+            )
         if stage_name in SLURM_ARRAY_STAGE_NAMES and not str(template_name or "").endswith("_array.sbatch"):
             blockers.append(
                 {
@@ -1896,6 +1958,22 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
             continue
         sanitized[key_text] = value_text
     return {"count": len(env), "sanitized": sanitized}, blockers
+
+
+def _scheduler_cancellation_status(cancelled_jobs: Sequence[Mapping[str, Any]]) -> str:
+    if not cancelled_jobs:
+        return "blocked"
+    cancelled_count = 0
+    for job in cancelled_jobs:
+        status = str(job.get("status") or "").lower()
+        if job.get("error_code") or job.get("cancellation_proven") is False or status != "cancelled":
+            continue
+        cancelled_count += 1
+    if cancelled_count == len(cancelled_jobs):
+        return "cancelled"
+    if cancelled_count:
+        return "partially_cancelled"
+    return "blocked"
 
 
 def _nested_bool(mapping: Mapping[str, Any], key: str, *, fallback: bool | None = None) -> bool | None:
@@ -1971,7 +2049,7 @@ def _scheduler_pass_status_from_execution(execution_evidence: Sequence[Mapping[s
 
 
 def _scheduler_partial_count_from_execution(execution_evidence: Sequence[Mapping[str, Any]]) -> int:
-    if not any(item.get("submitted") is True for item in execution_evidence):
+    if not any(item.get("submitted") is True or item.get("execution_attempted") is True for item in execution_evidence):
         return 0
     return sum(1 for item in execution_evidence if _is_partial_candidate_evidence(item))
 

@@ -259,7 +259,7 @@ def test_single_basin_falls_back_to_non_array(monkeypatch, tmp_path):
 
     gateway.submit_job_array("run_shud_forecast_array", "cycle_001", "run_shud_forecast_array", _tasks(1))
 
-    assert all(not arg.startswith("--array=") for arg in calls[0])
+    assert "--array=0-0%1" in calls[0]
 
 
 def test_array_sbatch_command_construction(monkeypatch, tmp_path):
@@ -309,6 +309,7 @@ def test_hindcast_production_array_submission_writes_required_manifest_fields(mo
                 "object_store_prefix": "hindcast/prod",
                 "workspace_dir": str(tmp_path / "workspace"),
                 "workspace_root": str(tmp_path / "workspace"),
+                "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
             },
             "tasks": _hindcast_tasks(tmp_path),
         }

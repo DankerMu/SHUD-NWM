@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -16,7 +17,8 @@ from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
 from packages.common.redaction import redact_payload
-from services.slurm_gateway.config import SlurmGatewaySettings
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
+from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ConfigurationError,
     ManifestValidationError,
@@ -48,8 +50,15 @@ SBATCH_JOB_ID_RE = re.compile(r"Submitted batch job (\d+)")
 SLURM_JOB_ID_RE = re.compile(r"^\d+(_\d+)?$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SAFE_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+SAFE_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
+SENSITIVE_ENV_KEY_RE = re.compile(
+    r"(TOKEN|PASSWORD|PASSWD|PWD|SECRET|CREDENTIAL|API_?KEY|ACCESS_?KEY|SESSION_?KEY|SIGNATURE)",
+    re.IGNORECASE,
+)
 MAX_RENDERED_STRING_BYTES = 4096
+MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
 LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
@@ -81,6 +90,14 @@ REQUIRED_RESOURCE_FIELDS = {
     "walltime",
     "max_concurrent",
     "shud_threads",
+}
+
+ARRAY_CAPABLE_JOB_TYPES = {
+    "hindcast",
+    "produce_forcing_array",
+    "run_shud_forecast_array",
+    "parse_output_array",
+    "compute_frequency_array",
 }
 
 SLURM_STATE_MAP = {
@@ -134,6 +151,11 @@ class RealSlurmGateway(SlurmGateway):
         job_type = request.resolved_job_type()
         if job_type and job_type not in self.settings.job_type_templates:
             raise TemplateNotFoundError(job_type)
+        if job_type in ARRAY_CAPABLE_JOB_TYPES:
+            raise SlurmValidationError(
+                "Array-capable job types must be submitted through the array endpoint.",
+                {"job_type": job_type, "endpoint": "/api/v1/slurm/job-arrays"},
+            )
         if run_id:
             manifest["run_id"] = run_id
         if model_id:
@@ -177,6 +199,7 @@ class RealSlurmGateway(SlurmGateway):
         )
         if not task_list:
             raise SlurmValidationError("Cannot submit array job with 0 tasks")
+        self._validate_requested_template_mapping(job_type, base_manifest)
 
         manifest_index_path = self.write_manifest_index(cycle_id, stage_name, task_list)
         first_task = dict(task_list[0])
@@ -188,6 +211,11 @@ class RealSlurmGateway(SlurmGateway):
         task_count = len(task_list)
         effective_max_concurrent = min(max_concurrent, task_count)
         profile["max_concurrent"] = effective_max_concurrent
+        requested_workspace = str(base_manifest.get("workspace_dir") or "").strip()
+        workspace_dir = requested_workspace or str(Path(self.settings.workspace_dir))
+        if requested_workspace:
+            self._ensure_within_workspace(Path(requested_workspace))
+        slurm_env = self._validate_slurm_env(base_manifest.get("slurm_env") or {})
 
         render_manifest = {
             **base_manifest,
@@ -197,13 +225,14 @@ class RealSlurmGateway(SlurmGateway):
             "run_id": first_task.get("run_id", base_manifest.get("run_id", f"{cycle_id}_{stage_name}")),
             "model_id": model_id,
             "manifest_index_path": str(manifest_index_path),
-            "workspace_dir": str(Path(self.settings.workspace_dir)),
+            "workspace_dir": workspace_dir,
+            "slurm_env": slurm_env,
         }
         self._require_manifest_fields(render_manifest, ["run_id", "model_id", "job_type", "cycle_id", "stage_name"])
         self._validate_manifest(render_manifest)
         rendered_script = self.render_template(job_type, render_manifest, str(manifest_index_path), profile=profile)
 
-        array_spec = None if task_count == 1 else f"0-{task_count - 1}%{effective_max_concurrent}"
+        array_spec = f"0-{task_count - 1}%{effective_max_concurrent}"
         job_id = self._submit_rendered_script(rendered_script, array_spec=array_spec)
         now = self._now()
         record = SlurmJobRecord(
@@ -261,31 +290,38 @@ class RealSlurmGateway(SlurmGateway):
                 raise SlurmJobNotFoundError(job_id, {"job_id": job_id, "stderr": stderr}) from exc
             raise
 
-        now = self._now()
-        existing = self._jobs.get(job_id)
-        if existing is None:
-            existing = SlurmJobRecord(
-                job_id=job_id,
-                run_id="",
-                model_id="",
-                status=SlurmJobStatus.CANCELLED,
-                submitted_at=now,
-                finished_at=now,
-                updated_at=now,
-                exit_code=-1,
-            )
-        else:
-            existing = existing.model_copy(
-                update={
-                    "status": SlurmJobStatus.CANCELLED,
-                    "finished_at": now,
-                    "updated_at": now,
-                    "exit_code": -1,
+        try:
+            record = self.get_job_status(job_id)
+        except SlurmGatewayError as exc:
+            raise SlurmGatewayError(
+                409,
+                "SLURM_CANCELLATION_GAP",
+                "Slurm accepted scancel but cancellation could not be proven from authoritative job state.",
+                {"job_id": job_id, "reason": exc.code, "details": exc.details or {}},
+            ) from exc
+        if record.status != SlurmJobStatus.CANCELLED:
+            raise SlurmGatewayError(
+                409,
+                "SLURM_CANCELLATION_PENDING",
+                "Slurm accepted scancel but the job has not reached CANCELLED state.",
+                {
+                    "job_id": job_id,
+                    "status": record.status.value,
+                    "slurm_raw_state": record.manifest.get("slurm_raw_state"),
+                    "cancellation_proven": False,
                 },
-                deep=True,
             )
-        self._jobs[job_id] = existing
-        return existing.model_copy(deep=True)
+        proven = record.model_copy(
+            update={
+                "manifest": {
+                    **dict(record.manifest),
+                    "cancellation_proven": True,
+                }
+            },
+            deep=True,
+        )
+        self._jobs[job_id] = proven
+        return proven.model_copy(deep=True)
 
     def list_jobs(
         self,
@@ -401,29 +437,54 @@ class RealSlurmGateway(SlurmGateway):
         for index, task in enumerate(tasks):
             entry = dict(task)
             entry["task_id"] = index
-            entry.setdefault("workspace_dir", str(Path(self.settings.workspace_dir)))
+            if not entry.get("workspace_dir"):
+                entry["workspace_dir"] = str(Path(self.settings.workspace_dir))
             self._require_manifest_fields(
                 entry,
                 ["task_id", "model_id", "basin_version_id", "river_network_version_id",
                  "run_id", "source_id", "cycle_time", "workspace_dir"],
             )
             self._validate_manifest(entry)
+            self._ensure_within_workspace(Path(str(entry["workspace_dir"])))
             entries.append(entry)
+
+        workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
+        try:
+            ensure_directory_no_follow(workspace_root)
+        except (OSError, SafeFilesystemError) as exc:
+            raise SlurmValidationError(
+                "Unable to create a safe Slurm gateway workspace directory.",
+                {"workspace_dir": str(workspace_root), "error": str(exc)},
+            ) from exc
 
         output_dir = Path(self.settings.workspace_dir) / cycle_id / "manifests"
         self._ensure_within_workspace(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        self._ensure_within_workspace(output_dir)
+        try:
+            ensure_directory_no_follow(output_dir, containment_root=workspace_root)
+        except (OSError, SafeFilesystemError) as exc:
+            raise SlurmValidationError(
+                "Unable to create a safe manifest index directory.",
+                {"cycle_id": cycle_id, "stage_name": stage_name, "error": str(exc)},
+            ) from exc
 
         for _ in range(10):
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
             output_path = output_dir / f"{stage_name}_index_{timestamp}.json"
             try:
-                with output_path.open("x", encoding="utf-8") as handle:
-                    handle.write(json.dumps(entries, indent=2, sort_keys=True))
+                atomic_write_bytes_no_follow(
+                    output_path,
+                    json.dumps(entries, indent=2, sort_keys=True).encode("utf-8"),
+                    containment_root=workspace_root,
+                    temp_suffix="part",
+                )
                 return output_path
             except FileExistsError:
                 continue
+            except (OSError, SafeFilesystemError) as exc:
+                raise SlurmValidationError(
+                    "Unable to create a safe manifest index path.",
+                    {"cycle_id": cycle_id, "stage_name": stage_name, "path": str(output_path), "error": str(exc)},
+                ) from exc
 
         raise SlurmValidationError(
             "Unable to create a unique manifest index path.",
@@ -445,11 +506,16 @@ class RealSlurmGateway(SlurmGateway):
         manifest_dict.setdefault("manifest_index_path", manifest_index_path)
         redacted_manifest = redact_payload(manifest_dict)
         self._validate_manifest(redacted_manifest)
+        slurm_env = self._validate_slurm_env(manifest_dict.get("slurm_env") or {})
 
         resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
         context = redact_payload({**redacted_manifest, **resource_profile})
         context["manifest"] = redacted_manifest
         context["manifest_index_path"] = manifest_index_path or str(redacted_manifest.get("manifest_index_path") or "")
+        context["slurm_env"] = slurm_env
+        context["slurm_env_exports"] = [
+            f"export {key}={shlex.quote(value)}" for key, value in sorted(slurm_env.items())
+        ]
 
         environment = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
         template = environment.from_string(template_path.read_text(encoding="utf-8"))
@@ -537,6 +603,61 @@ class RealSlurmGateway(SlurmGateway):
         if not candidate.exists() or not candidate.is_file():
             raise TemplateNotFoundError(job_type)
         return candidate
+
+    def _validate_requested_template_mapping(self, job_type: str, manifest: Mapping[str, Any]) -> None:
+        mapping = manifest.get("slurm_job_type_templates")
+        if mapping in (None, ""):
+            return
+        if not isinstance(mapping, Mapping):
+            raise ManifestValidationError(
+                "Slurm job type template contract must be a mapping.",
+                {"field": "slurm_job_type_templates", "job_type": job_type},
+            )
+        requested_template = mapping.get(job_type)
+        configured_template = self.settings.job_type_templates.get(job_type)
+        expected_template = DEFAULT_JOB_TYPE_TEMPLATES.get(job_type)
+        if requested_template != configured_template or requested_template != expected_template:
+            raise TemplateSecurityError(
+                "Slurm template contract does not match the gateway template configured for this job type.",
+                {
+                    "job_type": job_type,
+                    "requested_template": requested_template,
+                    "configured_template": configured_template,
+                    "expected_template": expected_template,
+                },
+            )
+
+    def _validate_slurm_env(self, value: Any) -> dict[str, str]:
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, Mapping):
+            raise ManifestValidationError("slurm_env must be a mapping.", {"field": "slurm_env"})
+        result: dict[str, str] = {}
+        for key, raw_value in value.items():
+            key_text = str(key)
+            value_text = str(raw_value)
+            if not SAFE_ENV_KEY_RE.fullmatch(key_text):
+                raise ManifestValidationError(
+                    "Slurm environment keys must be uppercase shell identifiers.",
+                    {"field": f"slurm_env.{key_text}"},
+                )
+            if SENSITIVE_ENV_KEY_RE.search(key_text):
+                raise ManifestValidationError(
+                    "Slurm environment exports reject secret-shaped keys.",
+                    {"field": f"slurm_env.{key_text}"},
+                )
+            if len(value_text) > MAX_SLURM_ENV_VALUE_LENGTH:
+                raise ManifestValidationError(
+                    "Slurm environment values must be bounded.",
+                    {"field": f"slurm_env.{key_text}", "max_length": MAX_SLURM_ENV_VALUE_LENGTH},
+                )
+            if SHELL_META_RE.search(value_text) or not SAFE_ENV_VALUE_RE.fullmatch(value_text):
+                raise ManifestValidationError(
+                    "Slurm environment values must be shell-safe.",
+                    {"field": f"slurm_env.{key_text}"},
+                )
+            result[key_text] = value_text
+        return result
 
     def _submit_rendered_script(self, rendered_script: str, array_spec: str | None = None) -> str:
         script_path = self._write_temp_script(rendered_script)
@@ -929,7 +1050,11 @@ class RealSlurmGateway(SlurmGateway):
 
     def _ensure_within_workspace(self, path: Path) -> None:
         workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
-        resolved_path = path.expanduser().resolve()
+        resolved_path = path.expanduser()
+        if not resolved_path.is_absolute():
+            resolved_path = (Path.cwd() / resolved_path).resolve()
+        else:
+            resolved_path = resolved_path.resolve()
         try:
             resolved_path.relative_to(workspace_dir)
         except ValueError as exc:

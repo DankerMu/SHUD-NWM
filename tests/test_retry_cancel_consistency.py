@@ -217,10 +217,51 @@ def test_cancel_idempotent_for_terminal_slurm_job() -> None:
 
         assert response.status_code == 200
         data = response.json()["data"]
-        assert data["partial_failure"] is False
+        assert data["partial_failure"] is True
         assert data["idempotent_jobs"][0]["job_id"] == "job_terminal_slurm"
-        assert store.get_job("job_terminal_slurm").status == "cancelled"
-        assert _hydro_status(store, "run_terminal_slurm") == "cancelled"
+        assert data["slurm_cancellation_gaps"][0]["job_id"] == "job_terminal_slurm"
+        assert data["slurm_cancellation_gaps"][0]["cancellation_proven"] is False
+        assert store.get_job("job_terminal_slurm").status == "running"
+        assert _hydro_status(store, "run_terminal_slurm") == "running"
+        assert _cycle_status(store, "cycle_terminal_slurm") == "forecast_running"
+        event = next(event for event in _events(store) if event.event_type == "slurm_cancellation_gap")
+        assert event.status_to == "blocked"
+        assert event.details["cancellation_proven"] is False
+
+
+def test_cancel_conflict_terminal_slurm_job_preserves_local_state() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_conflict_terminal_slurm", status="running")
+        _insert_forecast_cycle(store, "cycle_conflict_terminal_slurm", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_conflict_terminal_slurm",
+            run_id="run_conflict_terminal_slurm",
+            cycle_id="cycle_conflict_terminal_slurm",
+            status="submitted",
+            slurm_job_id="slurm_terminal",
+        )
+        gateway = _MockGateway(
+            failures={
+                "slurm_terminal": SlurmGatewayError(
+                    409,
+                    "JOB_ALREADY_TERMINAL",
+                    "Job is already terminal with status succeeded.",
+                    {"job_id": "slurm_terminal", "status": "succeeded"},
+                )
+            }
+        )
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_conflict_terminal_slurm/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["partial_failure"] is True
+        assert data["cancelled_jobs"] == []
+        assert data["slurm_cancellation_gaps"][0]["error"]["code"] == "JOB_ALREADY_TERMINAL"
+        assert store.get_job("job_conflict_terminal_slurm").status == "submitted"
+        assert _hydro_status(store, "run_conflict_terminal_slurm") == "running"
+        assert _cycle_status(store, "cycle_conflict_terminal_slurm") == "forecast_running"
 
 
 def test_cancel_event_records_slurm_context() -> None:

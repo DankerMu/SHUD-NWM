@@ -103,6 +103,28 @@ def _manifest_index(tmp_path: Path) -> Path:
     return path
 
 
+def _hindcast_manifest_index(tmp_path: Path) -> Path:
+    path = tmp_path / "hindcast_manifest_index.json"
+    entries = [
+        {
+            "task_id": 0,
+            "array_task_id": 0,
+            "model_id": "model_001",
+            "basin_version_id": "basin_001",
+            "river_network_version_id": "river_001",
+            "run_id": "hindcast_era5_model_001_1993",
+            "workspace_dir": str(tmp_path / "workspace"),
+            "source_id": "ERA5",
+            "cycle_time": "1993-01-01T00:00:00Z",
+            "year": 1993,
+            "forcing_version_id": "forc_era5_hindcast_model_001_1993",
+            "forcing_package_uri": "object://forcing/1993",
+        }
+    ]
+    path.write_text(json.dumps(entries), encoding="utf-8")
+    return path
+
+
 def _invoke_main(main: Callable[[Sequence[str]], int], argv: Sequence[str]) -> None:
     try:
         result = main(argv)
@@ -219,7 +241,10 @@ class _FakeParser:
             "convert_canonical",
             'nhms-canonical convert --source-id "${NHMS_SOURCE_ID:-GFS}" --cycle-time "$NHMS_CYCLE_TIME"',
         ),
-        ("hindcast", 'nhms-flood hindcast-year --model-id "$MODEL_ID" --source-id "$SOURCE_ID" --year "$YEAR"'),
+        (
+            "hindcast",
+            'nhms-flood hindcast-year --model-id "$MODEL_ID" --source-id "$SOURCE_ID" --year "$YEAR"',
+        ),
     ],
 )
 def test_real_templates_render_supported_cli_commands(tmp_path, job_type, expected_command):
@@ -338,6 +363,19 @@ def test_hindcast_cli_accepts_template_args(monkeypatch):
         flood_cli.main,
         ["hindcast-year", "--model-id", "model_001", "--source-id", "gfs", "--year", "2020"],
     )
+
+
+def test_hindcast_sbatch_uses_shared_manifest_loader(tmp_path: Path) -> None:
+    manifest_index_path = _hindcast_manifest_index(tmp_path)
+    rendered = _gateway(tmp_path).render_template(
+        "hindcast",
+        _render_manifest(tmp_path, "hindcast"),
+        str(manifest_index_path),
+    )
+
+    assert "from packages.common.manifest_index import load_manifest_entry, resolve_task_id" in rendered
+    assert "task_id = resolve_task_id(None)" in rendered
+    assert 'entry = load_manifest_entry(os.environ["NHMS_MANIFEST_INDEX"], task_id)' in rendered
 
 
 @pytest.mark.parametrize(

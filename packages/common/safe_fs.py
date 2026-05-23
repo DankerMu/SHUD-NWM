@@ -108,6 +108,42 @@ def atomic_write_bytes_no_follow(
     return target
 
 
+def write_bytes_no_follow_exclusive(
+    path: Path,
+    content: bytes,
+    *,
+    containment_root: Path | None = None,
+) -> Path:
+    """Create a file without following symlinked parents or targets, failing if it exists."""
+
+    target = _expand_path(path)
+    parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=True)
+    file_fd: int | None = None
+    try:
+        _verify_fd_matches_path(parent_fd, parent_path)
+        file_fd = os.open(target.name, _FILE_FLAGS, 0o666, dir_fd=parent_fd)
+        view = memoryview(content)
+        while view:
+            written = os.write(file_fd, view)
+            view = view[written:]
+        os.fsync(file_fd)
+        os.close(file_fd)
+        file_fd = None
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass
+    except FileExistsError:
+        _close_file_fd(file_fd)
+        raise
+    except OSError as error:
+        _close_file_fd(file_fd)
+        raise SafeFilesystemError(f"Failed to create {target}: {error}", kind="io") from error
+    finally:
+        os.close(parent_fd)
+    return target
+
+
 def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> int:
     """Open a file for reading without following symlinked parents or target."""
 

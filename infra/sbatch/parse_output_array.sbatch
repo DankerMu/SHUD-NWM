@@ -22,6 +22,9 @@ export NHMS_MANIFEST_INDEX="{{manifest_index_path}}"
 export NHMS_MAX_CONCURRENT={{max_concurrent}}
 export SHUD_THREADS={{shud_threads}}
 export OMP_NUM_THREADS={{shud_threads}}
+{% for export_line in slurm_env_exports | default([]) %}
+{{ export_line }}
+{% endfor %}
 
 mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
 nhms-parse shud-output --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"

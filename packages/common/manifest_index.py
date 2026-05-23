@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from pathlib import Path, PurePath
 from typing import Any
 
+from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
+
 LOGGER = logging.getLogger(__name__)
 
 REQUIRED_MANIFEST_ENTRY_FIELDS = (
@@ -59,21 +61,17 @@ def resolve_task_id(explicit_task_id: int | None) -> int:
 
 def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any]:
     path = Path(manifest_index_path)
-    if path.is_symlink():
-        raise ManifestValidationError(
-            "Manifest index path is a symlink",
-            {"manifest_index_path": manifest_index_path},
-        )
     try:
-        if path.stat().st_size > MAX_MANIFEST_INDEX_BYTES:
+        raw = read_bytes_limited_no_follow(path, max_bytes=MAX_MANIFEST_INDEX_BYTES)
+        if len(raw) > MAX_MANIFEST_INDEX_BYTES:
             raise ManifestValidationError(
                 "Manifest index file exceeds size limit",
                 {"manifest_index_path": manifest_index_path, "size_limit": MAX_MANIFEST_INDEX_BYTES},
             )
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, SafeFilesystemError) as exc:
         raise ManifestValidationError(
-            "Unable to read manifest index.",
+            f"Unable to safely read manifest index: {exc}",
             {"manifest_index_path": manifest_index_path, "error": str(exc)},
         ) from exc
     except json.JSONDecodeError as exc:

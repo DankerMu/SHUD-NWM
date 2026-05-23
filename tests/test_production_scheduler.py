@@ -684,6 +684,40 @@ def test_slurm_preflight_blocks_missing_or_localhost_database_before_submission(
     assert orchestrator.calls == []
 
 
+def test_slurm_preflight_requires_database_url_not_pipeline_database_url(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    evidence = result.evidence["model_run_evidence"][0]
+    assert config.database_url is None
+    assert result.status == "preflight_blocked"
+    assert evidence["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
+    assert orchestrator.calls == []
+
+
 @pytest.mark.parametrize(
     ("root_overrides", "expected_code"),
     [
@@ -781,6 +815,11 @@ def test_slurm_preflight_allows_safe_template_env_and_submits_through_orchestrat
     assert forcing_template["template_name"] == "produce_forcing_array.sbatch"
     assert forcing_template["allowlisted"] is True
     assert len(orchestrator.calls) == 1
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert submitted_basin["slurm_env"] == {
+        "NHMS_PROFILE": "prod/gfs_00",
+        "OBJECT_STORE_PREFIX": "s3://bucket/prod",
+    }
 
 
 def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
@@ -859,7 +898,9 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     assert constructed[0]["repository"] == "repository-from-env"
     assert constructed[0]["state_manager"] is None
     assert constructed[0]["config"].source_id == "gfs"
+    assert constructed[0]["config"].workspace_root == roots["workspace_root"].resolve()
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
+    assert constructed[0]["config"].slurm_job_type_templates == dict(DEFAULT_JOB_TYPE_TEMPLATES)
     assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
     assert calls[0]["source"] == "gfs"
     assert calls[0]["basins"][0]["output_uri"].startswith("s3://nhms/default/runs/")
@@ -871,6 +912,10 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
         (
             {"slurm_job_type_templates": {"produce_forcing_array": "legacy_forcing.sbatch"}},
             "SLURM_PREFLIGHT_TEMPLATE_NOT_ALLOWLISTED",
+        ),
+        (
+            {"slurm_job_type_templates": {"produce_forcing_array": "run_shud_forecast_array.sbatch"}},
+            "SLURM_PREFLIGHT_TEMPLATE_MISMATCH",
         ),
         ({"slurm_env": {"NHMS_PROFILE": "prod;rm"}}, "SLURM_PREFLIGHT_ENV_VALUE_UNSAFE"),
         ({"slurm_env": {"NHMS_PROFILE": "x" * 1025}}, "SLURM_PREFLIGHT_ENV_VALUE_TOO_LONG"),
@@ -1030,6 +1075,122 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     assert constructed[0]["config"].source_id == "gfs"
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
     assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
+
+
+def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    cancel_calls: list[tuple[str, str]] = []
+
+    class DefaultPathCancelOrchestrator:
+        stages = M3_STAGES
+
+        def __init__(self, *, config: Any, repository: Any, state_manager: Any) -> None:
+            del config, repository, state_manager
+
+        def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
+            cancel_calls.append((cycle_id, reason))
+            return [
+                {
+                    "job_id": "job_forcing",
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": "7777",
+                    "status": "cancelled",
+                    "replacement_submitted": False,
+                }
+            ]
+
+    class ActiveCycleAndSlurmRepository(FakeSlurmActiveRepository):
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            del source_id, cycle_time
+            return True
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(roots["workspace_root"]))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
+    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathCancelOrchestrator)
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        cancel_active_slurm=True,
+    )
+    active_repository = ActiveCycleAndSlurmRepository(
+        active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["skipped_candidates"][0]["reason"] == "cancel_requested_active_slurm"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["slurm_cancellation_evidence"][0]["replacement_submitted"] is False
+    assert cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
+
+
+def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+
+    class GapCancelOrchestrator:
+        stages = M3_STAGES
+
+        def __init__(self, *, config: Any, repository: Any, state_manager: Any) -> None:
+            del config, repository, state_manager
+
+        def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
+            del reason
+            return [
+                {
+                    "job_id": "job_forcing",
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": "7777",
+                    "status": "running",
+                    "error_code": "JOB_ALREADY_TERMINAL",
+                    "cancellation_proven": False,
+                    "replacement_submitted": False,
+                }
+            ]
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(roots["workspace_root"]))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
+    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", GapCancelOrchestrator)
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        cancel_active_slurm=True,
+    )
+    active_repository = FakeSlurmActiveRepository(
+        active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+    )
+
+    result = scheduler.run_once()
+
+    cancellation = result.evidence["slurm_cancellation_evidence"][0]
+    assert cancellation["status"] == "blocked"
+    assert cancellation["error_code"] == "SLURM_CANCELLATION_GAP"
+    assert cancellation["cancellation_proven"] is False
+    assert cancellation["replacement_submitted"] is False
 
 
 def test_active_cycle_orchestration_without_hydro_state_skips_all_candidates(
@@ -1356,8 +1517,10 @@ def test_non_dry_run_partial_cycle_marks_failed_candidate_without_fanning_succes
     assert evidence_by_model["model_a"]["submitted"] is True
     assert evidence_by_model["model_a"]["candidate_outcome"]["status"] == "active"
     assert evidence_by_model["model_b"]["status"] == "failed"
-    assert evidence_by_model["model_b"]["submitted"] is False
-    assert evidence_by_model["model_b"]["mutation_occurred"] is False
+    assert evidence_by_model["model_b"]["submitted"] is True
+    assert evidence_by_model["model_b"]["execution_attempted"] is True
+    assert evidence_by_model["model_b"]["final_candidate_success"] is False
+    assert evidence_by_model["model_b"]["mutation_occurred"] is True
     assert evidence_by_model["model_b"]["error_code"] == "FORCING_TASK_FAILED"
     assert evidence_by_model["model_b"]["candidate_outcome"] == {
         "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
@@ -1413,16 +1576,69 @@ def test_non_dry_run_partial_cycle_marks_unavailable_or_cancelled_candidate_as_p
     evidence_by_model = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
     assert result.status == "submitted_partial"
     assert result.evidence["status"] == "submitted_partial"
-    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["counts"]["submitted_count"] == 2
     assert result.evidence["counts"]["partial_count"] == 1
     assert evidence_by_model["model_a"]["status"] == "parsed_partial"
     assert evidence_by_model["model_a"]["submitted"] is True
     assert evidence_by_model["model_a"]["candidate_outcome"]["status"] == "active"
     assert evidence_by_model["model_b"]["status"] == outcome_status
-    assert evidence_by_model["model_b"]["submitted"] is False
-    assert evidence_by_model["model_b"]["mutation_occurred"] is False
+    assert evidence_by_model["model_b"]["submitted"] is True
+    assert evidence_by_model["model_b"]["execution_attempted"] is True
+    assert evidence_by_model["model_b"]["final_candidate_success"] is False
+    assert evidence_by_model["model_b"]["mutation_occurred"] is True
     assert evidence_by_model["model_b"]["error_code"] == sibling_reason.upper()
     assert evidence_by_model["model_b"]["candidate_outcome"]["status"] == outcome_status
+
+
+def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "1")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("SLURM_SHARED_LOG_ROOT", str(roots["log_root"]))
+    monkeypatch.setenv("NHMS_RUNTIME_ROOT", str(roots["runtime_root"]))
+    monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model("model_a", "basin_a")]),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_now",
+        lambda _config: _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=False,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=str(roots["workspace_root"]),
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["model_run_evidence"][0]["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
 
 
 def test_public_from_env_wires_active_repository(monkeypatch: Any, tmp_path: Path) -> None:

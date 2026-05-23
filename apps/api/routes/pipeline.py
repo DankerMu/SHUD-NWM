@@ -333,45 +333,85 @@ def cancel_run(
     active_jobs = [job for job in store.query_jobs_by_run(run_id) if job.status in _ACTIVE_JOB_STATUSES]
     cancelled_jobs: list[dict[str, Any]] = []
     failed_jobs: list[dict[str, Any]] = []
+    blocked_jobs: list[dict[str, Any]] = []
     idempotent_jobs: list[dict[str, Any]] = []
     now = datetime.now(UTC)
     for job in active_jobs:
         previous_status = job.status
-        idempotent = False
         if job.slurm_job_id:
             try:
-                gateway.cancel_job(job.slurm_job_id)
+                cancellation = _coerce_mapping(gateway.cancel_job(job.slurm_job_id))
             except SlurmGatewayError as error:
-                if not _is_idempotent_slurm_cancel_error(error):
-                    failure = {
-                        "job_id": job.job_id,
-                        "run_id": run_id,
-                        "status": job.status,
-                        "slurm_job_id": job.slurm_job_id,
-                        "error": {
-                            "status_code": error.status_code,
-                            "code": error.code,
-                            "message": error.message,
-                            "details": error.details or {},
-                        },
-                    }
-                    failed_jobs.append(failure)
+                gap = _slurm_cancellation_gap_payload(job, run_id, error)
+                if _is_unproven_slurm_cancel_error(error):
+                    blocked_jobs.append(gap)
+                    idempotent_jobs.append(
+                        {
+                            "job_id": job.job_id,
+                            "slurm_job_id": job.slurm_job_id,
+                            "note": "Slurm cancellation was not proven; local job state was preserved.",
+                            "error_code": error.code,
+                        }
+                    )
                     store.insert_event(
                         entity_type="pipeline_job",
                         entity_id=job.job_id,
-                        event_type="cancel_failed",
+                        event_type="slurm_cancellation_gap",
                         status_from=previous_status,
-                        status_to=previous_status,
-                        message=f"Failed to cancel run {run_id}.",
+                        status_to="blocked",
+                        message=(
+                            f"Slurm cancellation for run {run_id} was not proven; "
+                            "local job state was preserved."
+                        ),
                         details={
                             "run_id": run_id,
                             "slurm_job_id": job.slurm_job_id,
                             "previous_status": previous_status,
-                            "error": failure["error"],
+                            "error": gap["error"],
+                            "cancellation_proven": False,
                         },
                     )
                     continue
-                idempotent = True
+
+                failed_jobs.append(gap)
+                store.insert_event(
+                    entity_type="pipeline_job",
+                    entity_id=job.job_id,
+                    event_type="cancel_failed",
+                    status_from=previous_status,
+                    status_to=previous_status,
+                    message=f"Failed to cancel run {run_id}.",
+                    details={
+                        "run_id": run_id,
+                        "slurm_job_id": job.slurm_job_id,
+                        "previous_status": previous_status,
+                        "error": gap["error"],
+                        "cancellation_proven": False,
+                    },
+                )
+                continue
+            if not _cancellation_payload_proven(cancellation):
+                gap = _unproven_slurm_cancellation_payload(job, run_id, cancellation)
+                blocked_jobs.append(gap)
+                store.insert_event(
+                    entity_type="pipeline_job",
+                    entity_id=job.job_id,
+                    event_type="slurm_cancellation_gap",
+                    status_from=previous_status,
+                    status_to="blocked",
+                    message=(
+                        f"Slurm cancellation for run {run_id} did not return terminal cancelled evidence; "
+                        "local job state was preserved."
+                    ),
+                    details={
+                        "run_id": run_id,
+                        "slurm_job_id": job.slurm_job_id,
+                        "previous_status": previous_status,
+                        "gateway_response": cancellation,
+                        "cancellation_proven": False,
+                    },
+                )
+                continue
 
         updated = store.update_job_status(job.job_id, "cancelled", finished_at=now)
         store.insert_event(
@@ -385,23 +425,16 @@ def cancel_run(
                 "run_id": run_id,
                 "slurm_job_id": job.slurm_job_id,
                 "previous_status": previous_status,
-                "idempotent": idempotent,
+                "cancellation_proven": True,
             },
         )
         payload = _job_payload(updated)
         cancelled_jobs.append(payload)
-        if idempotent:
-            idempotent_jobs.append(
-                {
-                    "job_id": job.job_id,
-                    "slurm_job_id": job.slurm_job_id,
-                    "note": "Slurm job was already terminal or absent; local job was marked cancelled.",
-                }
-            )
 
     hydro_transition = None
     forecast_cycle_transition = None
-    if not failed_jobs:
+    cancellation_gaps = [*blocked_jobs, *failed_jobs]
+    if not cancellation_gaps:
         hydro_transition = _cancel_hydro_run(store, run_id)
         if hydro_transition is not None:
             store.insert_event(
@@ -443,7 +476,9 @@ def cancel_run(
             "cancelled": cancelled_jobs,
             "failed_jobs": failed_jobs,
             "slurm_failures": failed_jobs,
-            "partial_failure": bool(failed_jobs),
+            "blocked_jobs": blocked_jobs,
+            "slurm_cancellation_gaps": blocked_jobs,
+            "partial_failure": bool(cancellation_gaps),
             "idempotent_jobs": idempotent_jobs,
             "hydro_run": hydro_transition,
             "forecast_cycle": forecast_cycle_transition,
@@ -593,10 +628,67 @@ def _retry_execution_status(status: str) -> str:
     return status
 
 
-def _is_idempotent_slurm_cancel_error(error: SlurmGatewayError) -> bool:
+def _is_unproven_slurm_cancel_error(error: SlurmGatewayError) -> bool:
     code = error.code.lower()
     message = error.message.lower()
-    return error.status_code == 404 or "not found" in code or "not found" in message or "invalid job" in message
+    return (
+        error.status_code in {404, 409}
+        or "not found" in code
+        or "not found" in message
+        or "invalid job" in message
+        or "already_terminal" in code
+        or "terminal" in message
+        or "conflict" in code
+    )
+
+
+def _slurm_cancellation_gap_payload(job: PipelineJob, run_id: str, error: SlurmGatewayError) -> dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "run_id": run_id,
+        "status": job.status,
+        "slurm_job_id": job.slurm_job_id,
+        "cancellation_proven": False,
+        "error": {
+            "status_code": error.status_code,
+            "code": error.code,
+            "message": error.message,
+            "details": error.details or {},
+        },
+    }
+
+
+def _unproven_slurm_cancellation_payload(
+    job: PipelineJob,
+    run_id: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "run_id": run_id,
+        "status": job.status,
+        "slurm_job_id": job.slurm_job_id,
+        "cancellation_proven": False,
+        "gateway_response": response,
+    }
+
+
+def _cancellation_payload_proven(response: dict[str, Any]) -> bool:
+    status = str(response.get("status") or "").lower()
+    if response.get("error_code"):
+        return False
+    if response.get("cancellation_proven") is False:
+        return False
+    return status == "cancelled"
+
+
+def _coerce_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return dict(model_dump(mode="json"))
+    return dict(value)
 
 
 def _cancel_hydro_run(store: PipelineStore, run_id: str) -> dict[str, Any] | None:

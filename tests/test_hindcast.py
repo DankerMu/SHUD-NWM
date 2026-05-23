@@ -32,6 +32,7 @@ from workers.flood_frequency.hindcast import (
     HindcastForcingResult,
     _write_hindcast_manifest,
     calendar_years,
+    forcing_version_id_for_year,
     hindcast_year,
     produce_hindcast_forcing,
     run_id_for_year,
@@ -430,6 +431,7 @@ def test_hindcast_submit_cli_marks_created_run_failed_when_forcing_preflight_fai
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with _store() as session:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
         monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
         monkeypatch.setattr(
             HindcastConfig,
@@ -627,6 +629,7 @@ def test_argparse_hindcast_submit_with_cli_operator_policy_succeeds(
 ) -> None:
     with _store() as session:
         _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
         monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
         monkeypatch.setattr(
             HindcastConfig,
@@ -741,12 +744,20 @@ def test_argparse_hindcast_submit_saml_blocks_cli_flag_auth_before_mutation(
         assert _count(session, "hydro.hydro_run") == 0
 
 
-def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path) -> None:
+def test_submit_hindcast_slurm_manifest_includes_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     with _store() as session:
         _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
+        workspace_root = tmp_path / "workspace"
+        object_store_root = workspace_root / "object-store"
+        workspace_root.mkdir()
+        object_store_root.mkdir()
         config = HindcastConfig(
-            workspace_root=tmp_path / "workspace",
-            object_store_root=tmp_path / "object-store",
+            workspace_root=workspace_root,
+            object_store_root=object_store_root,
             object_store_prefix="hindcast/prod",
             db_session=session,
             slurm_client=_FakeSlurmClient(),
@@ -758,12 +769,20 @@ def test_submit_hindcast_slurm_manifest_includes_runtime_context(tmp_path: Path)
         assert result.job_ids == ["hindcast_era5_yangtze_shud_v12_1993_hindcast_0"]
 
 
-def test_submit_hindcast_slurm_requires_real_forcing_before_submission(tmp_path: Path) -> None:
+def test_submit_hindcast_slurm_requires_real_forcing_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     with _store() as session:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
         slurm_client = _FakeSlurmClient()
+        workspace_root = tmp_path / "workspace"
+        object_store_root = workspace_root / "object-store"
+        workspace_root.mkdir()
+        object_store_root.mkdir()
         config = HindcastConfig(
-            workspace_root=tmp_path / "workspace",
-            object_store_root=tmp_path / "object-store",
+            workspace_root=workspace_root,
+            object_store_root=object_store_root,
             object_store_prefix="hindcast/prod",
             db_session=session,
             slurm_client=slurm_client,
@@ -776,13 +795,21 @@ def test_submit_hindcast_slurm_requires_real_forcing_before_submission(tmp_path:
         assert slurm_client.submissions == 0
 
 
-def test_submit_hindcast_slurm_rejects_metadata_only_forcing_before_submission(tmp_path: Path) -> None:
+def test_submit_hindcast_slurm_rejects_metadata_only_forcing_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     with _store() as session:
         _insert_forcing_version(session, 1993, forcing_package_uri="")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
         slurm_client = _FakeSlurmClient()
+        workspace_root = tmp_path / "workspace"
+        object_store_root = workspace_root / "object-store"
+        workspace_root.mkdir()
+        object_store_root.mkdir()
         config = HindcastConfig(
-            workspace_root=tmp_path / "workspace",
-            object_store_root=tmp_path / "object-store",
+            workspace_root=workspace_root,
+            object_store_root=object_store_root,
             object_store_prefix="hindcast/prod",
             db_session=session,
             slurm_client=slurm_client,
@@ -792,6 +819,89 @@ def test_submit_hindcast_slurm_rejects_metadata_only_forcing_before_submission(t
             submit_hindcast_slurm("yangtze_shud_v12", "ERA5", [1993], config)
 
         assert exc_info.value.error_code == HINDCAST_FORCING_PACKAGE_UNAVAILABLE
+        assert slurm_client.submissions == 0
+
+
+def test_submit_hindcast_slurm_requires_array_capable_client_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
+        slurm_client = _SubmitJobOnlySlurmClient()
+        workspace_root = tmp_path / "workspace"
+        object_store_root = workspace_root / "object-store"
+        workspace_root.mkdir()
+        object_store_root.mkdir()
+        config = HindcastConfig(
+            workspace_root=workspace_root,
+            object_store_root=object_store_root,
+            object_store_prefix="hindcast/prod",
+            db_session=session,
+            slurm_client=slurm_client,
+        )
+
+        with pytest.raises(HindcastError) as exc_info:
+            submit_hindcast_slurm("yangtze_shud_v12", "ERA5", [1993], config)
+
+        assert exc_info.value.error_code == "SLURM_ARRAY_SUBMIT_UNSUPPORTED"
+        assert exc_info.value.details["no_submission_expected"] is True
+        assert slurm_client.submissions == 0
+        assert list(session.scalars(select(PipelineJob))) == []
+
+
+def test_submit_hindcast_slurm_requires_database_url_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        slurm_client = _FakeSlurmClient()
+        workspace_root = tmp_path / "workspace"
+        object_store_root = workspace_root / "object-store"
+        workspace_root.mkdir()
+        object_store_root.mkdir()
+        config = HindcastConfig(
+            workspace_root=workspace_root,
+            object_store_root=object_store_root,
+            object_store_prefix="hindcast/prod",
+            db_session=session,
+            slurm_client=slurm_client,
+        )
+
+        with pytest.raises(HindcastError) as exc_info:
+            submit_hindcast_slurm("yangtze_shud_v12", "ERA5", [1993], config)
+
+        assert exc_info.value.error_code == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
+        assert slurm_client.submissions == 0
+
+
+def test_submit_hindcast_slurm_rejects_object_root_outside_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with _store() as session:
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
+        slurm_client = _FakeSlurmClient()
+        workspace_root = tmp_path / "workspace"
+        object_store_root = tmp_path / "object-store"
+        workspace_root.mkdir()
+        object_store_root.mkdir()
+        config = HindcastConfig(
+            workspace_root=workspace_root,
+            object_store_root=object_store_root,
+            object_store_prefix="hindcast/prod",
+            db_session=session,
+            slurm_client=slurm_client,
+        )
+
+        with pytest.raises(HindcastError) as exc_info:
+            submit_hindcast_slurm("yangtze_shud_v12", "ERA5", [1993], config)
+
+        assert exc_info.value.error_code == "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_OUT_OF_ROOT"
         assert slurm_client.submissions == 0
 
 
@@ -899,6 +1009,91 @@ def test_hindcast_manifest_uses_shud_nested_schema(monkeypatch: pytest.MonkeyPat
         assert not manifest["outputs"]["run_manifest_uri"].startswith("object://")
 
 
+def test_hindcast_manifest_rejects_symlink_target_without_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with _store() as session:
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        run_id = run_id_for_year("yangtze_shud_v12", 1993)
+        _insert_hydro_run(session, run_id, 1993, status="running")
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        session.execute(
+            text("UPDATE hydro.hydro_run SET forcing_version_id = :forcing_version_id WHERE run_id = :run_id"),
+            {"run_id": run_id, "forcing_version_id": forcing_version_id_for_year("yangtze_shud_v12", 1993)},
+        )
+        session.commit()
+        manifest_path = tmp_path / "runs" / run_id / "input" / "manifest.json"
+        manifest_path.parent.mkdir(parents=True)
+        target = tmp_path / "outside_manifest.json"
+        target.write_text("do-not-change", encoding="utf-8")
+        try:
+            manifest_path.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlink creation is not supported: {exc}")
+
+        with pytest.raises(HindcastError) as exc_info:
+            _write_hindcast_manifest(run_id, "yangtze_shud_v12", "ERA5", 1993, session)
+
+        assert exc_info.value.error_code == "HINDCAST_MANIFEST_UNSAFE"
+        assert target.read_text(encoding="utf-8") == "do-not-change"
+
+
+def test_hindcast_manifest_rejects_symlink_parent_without_writing_outside(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with _store() as session:
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        run_id = run_id_for_year("yangtze_shud_v12", 1993)
+        _insert_hydro_run(session, run_id, 1993, status="running")
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        session.execute(
+            text("UPDATE hydro.hydro_run SET forcing_version_id = :forcing_version_id WHERE run_id = :run_id"),
+            {"run_id": run_id, "forcing_version_id": forcing_version_id_for_year("yangtze_shud_v12", 1993)},
+        )
+        session.commit()
+        parent_dir = tmp_path / "runs" / run_id
+        parent_dir.mkdir(parents=True)
+        outside_input = tmp_path / "outside-input"
+        outside_input.mkdir()
+        try:
+            (parent_dir / "input").symlink_to(outside_input, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink creation is not supported: {exc}")
+
+        with pytest.raises(HindcastError) as exc_info:
+            _write_hindcast_manifest(run_id, "yangtze_shud_v12", "ERA5", 1993, session)
+
+        assert exc_info.value.error_code == "HINDCAST_MANIFEST_UNSAFE"
+        assert not (outside_input / "manifest.json").exists()
+
+
+def test_hindcast_manifest_existing_file_is_not_overwritten(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with _store() as session:
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        run_id = run_id_for_year("yangtze_shud_v12", 1993)
+        _insert_hydro_run(session, run_id, 1993, status="running")
+        _insert_forcing_version(session, 1993, forcing_package_uri="object://forcing/package/1993")
+        session.execute(
+            text("UPDATE hydro.hydro_run SET forcing_version_id = :forcing_version_id WHERE run_id = :run_id"),
+            {"run_id": run_id, "forcing_version_id": forcing_version_id_for_year("yangtze_shud_v12", 1993)},
+        )
+        session.commit()
+        manifest_path = tmp_path / "runs" / run_id / "input" / "manifest.json"
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text("existing-manifest", encoding="utf-8")
+
+        with pytest.raises(HindcastError) as exc_info:
+            _write_hindcast_manifest(run_id, "yangtze_shud_v12", "ERA5", 1993, session)
+
+        assert exc_info.value.error_code == "HINDCAST_MANIFEST_EXISTS"
+        assert manifest_path.read_text(encoding="utf-8") == "existing-manifest"
+
+
 def test_metadata_only_hindcast_forcing_cannot_enter_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -965,11 +1160,22 @@ class _FakeSlurmClient:
         assert "object_store_root" in payload["tasks"][0]
         assert "object_store_prefix" in payload["tasks"][0]
         assert "workspace_dir" in payload["tasks"][0]
+        assert payload["tasks"][0]["slurm_job_type_templates"]["hindcast"] == "hindcast.sbatch"
         assert payload["manifest"]["basin_version_id"] == "basin_v1"
         assert payload["manifest"]["river_network_version_id"] == "rnv_v1"
         assert payload["manifest"]["object_store_root"]
         assert "object_store_prefix" in payload["manifest"]
+        assert payload["manifest"]["slurm_job_type_templates"]["hindcast"] == "hindcast.sbatch"
         return {"job_id": "slurm_array_1", "status": "submitted"}
+
+
+class _SubmitJobOnlySlurmClient:
+    def __init__(self) -> None:
+        self.submissions = 0
+
+    def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.submissions += 1
+        raise AssertionError("Hindcast must not fall back to non-array Slurm submission")
 
 
 def _fail_slurm_submission(*_args: Any, **_kwargs: Any) -> None:
@@ -1025,16 +1231,21 @@ def _hindcast_submit_argv() -> list[str]:
 
 @contextmanager
 def _api_client(session: Session) -> Iterator[TestClient]:
+    workspace_root = Path(".").resolve()
+    object_store_root = workspace_root / "object-store"
+    object_store_root.mkdir(exist_ok=True)
     config = HindcastConfig(
-        workspace_root=Path(".").resolve(),
-        object_store_root=Path(".").resolve(),
+        workspace_root=workspace_root,
+        object_store_root=object_store_root,
         slurm_client=_FakeSlurmClient(),
     )
     app.dependency_overrides[hindcast_routes.get_hindcast_session] = lambda: session
     app.dependency_overrides[hindcast_routes.get_hindcast_config] = lambda: config
     app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: PipelineStore(session)
     previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    previous_database_url = os.environ.get("DATABASE_URL")
     os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+    os.environ["DATABASE_URL"] = "postgresql://nhms:secret@db.prod.example/nhms"
     try:
         with TestClient(app) as client:
             yield client
@@ -1043,6 +1254,10 @@ def _api_client(session: Session) -> Iterator[TestClient]:
             os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
         else:
             os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
         app.dependency_overrides.pop(hindcast_routes.get_hindcast_session, None)
         app.dependency_overrides.pop(hindcast_routes.get_hindcast_config, None)
         app.dependency_overrides.pop(pipeline_routes.get_pipeline_store, None)

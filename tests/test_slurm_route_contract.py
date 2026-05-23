@@ -87,7 +87,7 @@ echo "run={{run_id}} model={{model_id}} job={{job_type}} extra={{extra_value}}"
             template_dir=str(template_dir),
             resource_profiles_path=str(_write_resource_profiles(tmp_path)),
             workspace_dir=str(tmp_path / "workspace"),
-            job_type_templates={"run_shud_forecast_array": "contract.sbatch"},
+            job_type_templates={"run_shud_analysis": "contract.sbatch"},
         )
     )
     captured = _capture_sbatch(monkeypatch)
@@ -98,7 +98,7 @@ echo "run={{run_id}} model={{model_id}} job={{job_type}} extra={{extra_value}}"
             json={
                 "run_id": "run_top",
                 "model_id": "model_top",
-                "job_type": "run_shud_forecast_array",
+                "job_type": "run_shud_analysis",
                 "manifest": {
                     "run_id": "run_nested",
                     "model_id": "model_nested",
@@ -109,10 +109,45 @@ echo "run={{run_id}} model={{model_id}} job={{job_type}} extra={{extra_value}}"
         )
 
     assert response.status_code == 201
-    assert 'echo "run=run_top model=model_top job=run_shud_forecast_array extra=manifest_value"' in captured["script"]
+    assert 'echo "run=run_top model=model_top job=run_shud_analysis extra=manifest_value"' in captured["script"]
     assert "run_nested" not in captured["script"]
     assert "model_nested" not in captured["script"]
     assert "job=hindcast" not in captured["script"]
+
+
+def test_single_job_rejects_array_capable_job_type_before_sbatch(monkeypatch, tmp_path):
+    template_dir = _write_template(
+        tmp_path,
+        """
+#!/usr/bin/env bash
+#SBATCH --partition={{partition}}
+echo "job={{job_type}}"
+""".lstrip(),
+    )
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir=str(template_dir),
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            job_type_templates={"run_shud_forecast_array": "contract.sbatch"},
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        raise AssertionError("subprocess.run must not be called for array-capable single submit")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/jobs",
+            json={"run_id": "run_001", "model_id": "model_001", "job_type": "run_shud_forecast_array"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_array_job_manifest_survives_route_boundary(monkeypatch, tmp_path):

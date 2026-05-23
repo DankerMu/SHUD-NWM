@@ -13,6 +13,12 @@ import httpx
 
 from packages.common.best_available import BestAvailableManager
 from packages.common.object_store import LocalObjectStore
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    read_bytes_no_follow,
+)
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.orchestrator.persistence import PipelineJob, PipelineStore
@@ -207,6 +213,8 @@ class OrchestratorConfig:
     era5_area: str = "55,70,15,140"
     state_soft_stale_threshold_days: int = 7
     state_hard_stale_threshold_days: int = 30
+    slurm_job_type_templates: Mapping[str, str] = field(default_factory=dict)
+    slurm_env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace_root", Path(self.workspace_root).expanduser().resolve())
@@ -221,6 +229,12 @@ class OrchestratorConfig:
             object.__setattr__(self, "templates_dir", repo_root / "infra" / "sbatch")
         else:
             object.__setattr__(self, "templates_dir", Path(self.templates_dir).expanduser().resolve())
+        object.__setattr__(
+            self,
+            "slurm_job_type_templates",
+            {str(key): str(value) for key, value in dict(self.slurm_job_type_templates).items()},
+        )
+        object.__setattr__(self, "slurm_env", {str(key): str(value) for key, value in dict(self.slurm_env).items()})
 
     @classmethod
     def from_env(cls) -> OrchestratorConfig:
@@ -607,7 +621,7 @@ class HttpSlurmGatewayClient:
         return self._request("GET", f"/api/v1/slurm/jobs/{job_id}/logs", expected=(200,))
 
     def cancel_job(self, job_id: str) -> dict[str, Any]:
-        return self._request("DELETE", f"/api/v1/slurm/jobs/{job_id}", expected=(200, 409))
+        return self._request("DELETE", f"/api/v1/slurm/jobs/{job_id}", expected=(200,))
 
     def _request(
         self,
@@ -768,7 +782,51 @@ class ForecastOrchestrator:
             slurm_job_id = job.get("slurm_job_id")
             if status in TERMINAL_JOB_STATUSES or not slurm_job_id:
                 continue
-            cancelled_payload = _coerce_mapping(cancel_job(str(slurm_job_id)))
+            try:
+                cancelled_payload = _coerce_mapping(cancel_job(str(slurm_job_id)))
+            except SlurmClientError as error:
+                details = dict(error.details or {})
+                response = details.get("response")
+                response_mapping = response if isinstance(response, Mapping) else {}
+                error_mapping = response_mapping.get("error") if isinstance(response_mapping, Mapping) else None
+                gateway_details = dict(error_mapping.get("details") or {}) if isinstance(error_mapping, Mapping) else {}
+                if error.error_code == "JOB_ALREADY_TERMINAL":
+                    self.repository.insert_pipeline_event(
+                        entity_type="pipeline_job",
+                        entity_id=str(job["job_id"]),
+                        event_type="slurm_cancellation_gap",
+                        status_from=status,
+                        status_to="blocked",
+                        message=(
+                            f"Slurm job {slurm_job_id} was already terminal at the gateway; "
+                            "pipeline state was not rewritten to cancelled."
+                        ),
+                        details={
+                            "cycle_id": cycle_id,
+                            "stage": job.get("stage"),
+                            "job_type": job.get("job_type"),
+                            "reason": reason,
+                            "replacement_submitted": False,
+                            "error_code": error.error_code,
+                            "gateway_status": gateway_details.get("status"),
+                            "slurm": {
+                                "job_id": slurm_job_id,
+                                "state": gateway_details.get("status"),
+                                "cancellation_proven": False,
+                            },
+                        },
+                    )
+                    cancelled.append(
+                        {
+                            **dict(job),
+                            "status": status,
+                            "error_code": error.error_code,
+                            "cancellation_proven": False,
+                            "replacement_submitted": False,
+                        }
+                    )
+                    continue
+                raise
             previous_status, record = self.repository.update_pipeline_job_status(
                 str(job["job_id"]),
                 "cancelled",
@@ -1459,19 +1517,22 @@ class ForecastOrchestrator:
                     cycle_id=context.cycle_id,
                     stage_name=stage.stage,
                     tasks=tasks,
-                    manifest=manifest,
+                    manifest=self._slurm_submission_manifest(manifest),
                 )
             )
-        return _coerce_mapping(
-            self.slurm_client.submit_job(
-                {
-                    "run_id": context.run_id,
-                    "model_id": _cycle_payload_model_id(context),
-                    "job_type": stage.job_type,
-                    "manifest": {**manifest, "tasks": tasks},
-                }
-            )
+        raise SlurmClientError(
+            "SLURM_ARRAY_SUBMIT_UNSUPPORTED",
+            f"Slurm client does not support array submission for {stage.stage}.",
+            {"stage": stage.stage, "job_type": stage.job_type, "cycle_id": context.cycle_id},
         )
+
+    def _slurm_submission_manifest(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        submission = dict(manifest)
+        if self.config.slurm_job_type_templates:
+            submission["slurm_job_type_templates"] = dict(self.config.slurm_job_type_templates)
+        if self.config.slurm_env:
+            submission["slurm_env"] = dict(self.config.slurm_env)
+        return submission
 
     def _aggregate_array_stage(
         self,
@@ -1498,11 +1559,17 @@ class ForecastOrchestrator:
                 raw_results = None
             if raw_results is not None:
                 try:
-                    return _coerce_array_aggregation(
+                    aggregation = _coerce_array_aggregation(
                         raw_results,
                         slurm_job_id,
                         context=context,
                         object_store=self.object_store,
+                    )
+                    return self._require_complete_array_accounting(
+                        aggregation,
+                        stage=stage,
+                        context=context,
+                        slurm_job_id=slurm_job_id,
                     )
                 except (TypeError, ValueError, OrchestratorError) as error:
                     self._record_cycle_stage_accounting_gap(
@@ -1518,11 +1585,17 @@ class ForecastOrchestrator:
         stdout_provider = getattr(self.slurm_client, "get_array_sacct_output", None)
         if callable(stdout_provider):
             try:
-                return parse_sacct_array_results(
+                aggregation = parse_sacct_array_results(
                     str(stdout_provider(slurm_job_id)),
                     slurm_job_id,
                     context=context,
                     object_store=self.object_store,
+                )
+                return self._require_complete_array_accounting(
+                    aggregation,
+                    stage=stage,
+                    context=context,
+                    slurm_job_id=slurm_job_id,
                 )
             except OrchestratorError as error:
                 self._record_cycle_stage_accounting_gap(
@@ -1534,20 +1607,46 @@ class ForecastOrchestrator:
                     details={"error": error.message, "error_code": error.error_code},
                 )
 
-        status = _status_from_gateway_job(terminal)
-        task_status = "succeeded" if status == "succeeded" else "cancelled" if status == "cancelled" else "failed"
-        results = tuple(
-            ArrayTaskResult(
-                task_id=index,
-                slurm_job_id=f"{slurm_job_id}_{index}",
-                status=task_status,
-                exit_code=terminal.get("exit_code"),
-                log_uri=_array_task_log_uri(self.object_store, context.run_id, slurm_job_id, index),
-                accounting={},
-            )
-            for index, _basin in enumerate(context.active_basins)
+        self._record_cycle_stage_accounting_gap(
+            stage,
+            context,
+            _pipeline_job_id(context.run_id, stage.stage),
+            slurm_job_id=slurm_job_id,
+            message="Slurm array accounting was unavailable or incomplete.",
+            details={
+                "reason": "array_task_accounting_unavailable",
+                "master_status": _status_from_gateway_job(terminal),
+                "expected_task_count": len(context.active_basins),
+            },
         )
-        return _aggregation_from_task_results(results)
+        return ArrayAggregation(total=0, succeeded=0, failed=0, cancelled=0, task_results=())
+
+    def _require_complete_array_accounting(
+        self,
+        aggregation: ArrayAggregation,
+        *,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        slurm_job_id: str,
+    ) -> ArrayAggregation:
+        expected_task_ids = set(range(len(context.active_basins)))
+        observed_task_ids = {task.task_id for task in aggregation.task_results}
+        if observed_task_ids == expected_task_ids:
+            return aggregation
+        missing_task_ids = sorted(expected_task_ids - observed_task_ids)
+        unexpected_task_ids = sorted(observed_task_ids - expected_task_ids)
+        raise OrchestratorError(
+            "SLURM_ARRAY_ACCOUNTING_INCOMPLETE",
+            "Slurm array accounting did not include exactly the submitted task ids.",
+            {
+                "slurm_job_id": slurm_job_id,
+                "stage": stage.stage,
+                "expected_task_count": len(context.active_basins),
+                "observed_task_count": len(observed_task_ids),
+                "missing_task_ids": missing_task_ids,
+                "unexpected_task_ids": unexpected_task_ids,
+            },
+        )
 
     def _record_cycle_stage_status_override(
         self,
@@ -1880,10 +1979,16 @@ class ForecastOrchestrator:
         stage: StageDefinition,
         tasks: list[dict[str, Any]],
     ) -> Path:
-        manifest_dir = self._workspace_path("runs", context.run_id, "input")
-        manifest_dir.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(tasks, indent=2, sort_keys=True).encode("utf-8")
         manifest_path = self._workspace_path("runs", context.run_id, "input", f"{stage.stage}_manifest_index.json")
-        manifest_path.write_text(json.dumps(tasks, indent=2, sort_keys=True), encoding="utf-8")
+        try:
+            self._safe_workspace_write_bytes(manifest_path, content)
+        except (OSError, SafeFilesystemError) as exc:
+            raise OrchestratorError(
+                "CYCLE_MANIFEST_INDEX_WRITE_FAILED",
+                f"Failed to write cycle manifest index safely for stage {stage.stage}: {exc}",
+                {"manifest_path": str(manifest_path), "stage": stage.stage},
+            ) from exc
         return manifest_path
 
     def _prepare_forecast_runtime_manifests(
@@ -1909,13 +2014,12 @@ class ForecastOrchestrator:
                 ) from exc
 
             manifest_path = self._workspace_path("runs", str(basin["run_id"]), "input", "manifest.json")
-            manifest_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                manifest_path.write_bytes(content)
-            except OSError as exc:
+                self._safe_workspace_write_bytes(manifest_path, content)
+            except (OSError, SafeFilesystemError) as exc:
                 raise OrchestratorError(
                     "RUNTIME_MANIFEST_WRITE_FAILED",
-                    f"Failed to write runtime manifest for task {index}: {exc}",
+                    f"Failed to write runtime manifest safely for task {index}: {exc}",
                     {"task_id": index, "manifest_path": str(manifest_path)},
                 ) from exc
 
@@ -2031,17 +2135,17 @@ class ForecastOrchestrator:
                 {"manifest_path": str(manifest_path), "task_id": task_index},
             )
         try:
-            persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+            persisted = json.loads(self._safe_workspace_read_bytes(manifest_path).decode("utf-8"))
         except json.JSONDecodeError as exc:
             raise OrchestratorError(
                 "RUNTIME_MANIFEST_INVALID_JSON",
                 f"Forecast runtime manifest is not valid JSON for task {task_index}.",
                 {"manifest_path": str(manifest_path), "task_id": task_index, "error": str(exc)},
             ) from exc
-        except OSError as exc:
+        except (OSError, SafeFilesystemError) as exc:
             raise OrchestratorError(
                 "RUNTIME_MANIFEST_READ_FAILED",
-                f"Forecast runtime manifest cannot be read for task {task_index}: {exc}",
+                f"Forecast runtime manifest cannot be safely read for task {task_index}: {exc}",
                 {"manifest_path": str(manifest_path), "task_id": task_index},
             ) from exc
         required_paths = (
@@ -3107,12 +3211,24 @@ class ForecastOrchestrator:
         content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
         self.object_store.write_bytes_atomic(context.run_manifest_uri, content)
         workspace_manifest = self._workspace_path("runs", context.run_id, "input", "manifest.json")
-        workspace_manifest.parent.mkdir(parents=True, exist_ok=True)
-        workspace_manifest.write_bytes(content)
+        try:
+            self._safe_workspace_write_bytes(workspace_manifest, content)
+        except (OSError, SafeFilesystemError) as exc:
+            raise OrchestratorError(
+                "RUNTIME_MANIFEST_WRITE_FAILED",
+                f"Failed to write run manifest safely: {exc}",
+                {"manifest_path": str(workspace_manifest), "run_id": context.run_id},
+            ) from exc
 
     def _workspace_path(self, *parts: str) -> Path:
         workspace_root = Path(self.config.workspace_root).expanduser().resolve()
-        resolved = workspace_root.joinpath(*parts).resolve()
+        if any(Path(part).is_absolute() or ".." in Path(part).parts for part in parts):
+            raise OrchestratorError(
+                "WORKSPACE_PATH_ESCAPE",
+                "Workspace path components must be relative and must not contain traversal segments.",
+                {"parts": list(parts), "workspace_root": str(workspace_root)},
+            )
+        resolved = workspace_root.joinpath(*parts)
         try:
             resolved.relative_to(workspace_root)
         except ValueError as exc:
@@ -3122,6 +3238,18 @@ class ForecastOrchestrator:
                 {"path": str(resolved), "workspace_root": str(workspace_root)},
             ) from exc
         return resolved
+
+    def _safe_workspace_write_bytes(self, path: Path, content: bytes) -> Path:
+        workspace_root = Path(self.config.workspace_root).expanduser().resolve()
+        _workspace_relative_parts(path, workspace_root)
+        ensure_directory_no_follow(workspace_root)
+        ensure_directory_no_follow(path.parent, containment_root=workspace_root)
+        return atomic_write_bytes_no_follow(path, content, containment_root=workspace_root, temp_suffix="part")
+
+    def _safe_workspace_read_bytes(self, path: Path) -> bytes:
+        workspace_root = Path(self.config.workspace_root).expanduser().resolve()
+        _workspace_relative_parts(path, workspace_root)
+        return read_bytes_no_follow(path, containment_root=workspace_root)
 
 
 class AnalysisOrchestrator(ForecastOrchestrator):
@@ -4711,6 +4839,17 @@ def _nested_value(value: Mapping[str, Any], path: Sequence[str]) -> Any:
             return None
         current = current.get(part)
     return current
+
+
+def _workspace_relative_parts(path: Path, workspace_root: Path) -> tuple[str, ...]:
+    try:
+        relative = path.relative_to(workspace_root)
+    except ValueError as exc:
+        raise SafeFilesystemError(f"Path must stay under workspace root: {path}") from exc
+    parts = tuple(relative.parts)
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise SafeFilesystemError(f"Unsafe workspace path: {path}")
+    return parts
 
 
 def parse_sacct_array_results(

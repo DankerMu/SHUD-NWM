@@ -144,6 +144,23 @@ class FakeCycleSlurmClient:
         return dict(job)
 
 
+class SubmitJobOnlyCycleSlurmClient:
+    def __init__(self) -> None:
+        self._delegate = FakeCycleSlurmClient()
+        self.submissions = self._delegate.submissions
+        self.submit_job_payloads: list[dict[str, Any]] = []
+
+    def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.submit_job_payloads.append(payload)
+        return self._delegate.submit_job(payload)
+
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        return self._delegate.get_job_status(job_id)
+
+    def fetch_logs(self, job_id: str) -> dict[str, Any]:
+        return self._delegate.fetch_logs(job_id)
+
+
 class PublishFailureSlurmClient(FakeCycleSlurmClient):
     def get_job_status(self, job_id: str) -> dict[str, Any]:
         job = self.jobs[job_id]
@@ -397,6 +414,50 @@ def test_forecast_stage_writes_runtime_manifests_and_manifest_index_paths(tmp_pa
         str(tmp_path / "workspace" / "runs" / "run_0" / "input" / "manifest.json"),
         str(tmp_path / "workspace" / "runs" / "run_1" / "input" / "manifest.json"),
     ]
+
+
+def test_forecast_runtime_manifest_write_rejects_symlink_target_without_submission(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    workspace = tmp_path / "workspace"
+    target = workspace / "runs" / "run_1" / "input" / "manifest.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("untouched", encoding="utf-8")
+    link = workspace / "runs" / "run_0" / "input" / "manifest.json"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
+    assert target.read_text(encoding="utf-8") == "untouched"
+    forecast_job = repository.jobs["job_cycle_gfs_2026050100_forecast"]
+    assert forecast_job["status"] == "submission_failed"
+    assert forecast_job["error_code"] == "RUNTIME_MANIFEST_WRITE_FAILED"
+
+
+def test_cycle_manifest_index_write_rejects_symlink_target_without_stage_submission(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    workspace = tmp_path / "workspace"
+    target = workspace / "runs" / "sibling" / "input" / "forcing_manifest_index.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("untouched", encoding="utf-8")
+    link = workspace / "runs" / "cycle_gfs_2026050100" / "input" / "forcing_manifest_index.json"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert"]
+    assert target.read_text(encoding="utf-8") == "untouched"
+    forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
+    assert forcing_job["status"] == "submission_failed"
+    assert forcing_job["error_code"] == "CYCLE_MANIFEST_INDEX_WRITE_FAILED"
 
 
 def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(tmp_path: Path) -> None:
@@ -888,6 +949,28 @@ def test_stage_three_failure_blocks_downstream_stages(tmp_path: Path) -> None:
     assert repository.cycle_statuses[-1] == "failed_forcing"
 
 
+def test_array_stage_requires_array_submit_contract_before_submission(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = SubmitJobOnlyCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    forcing_result = result.stages[-1]
+    forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
+    assert result.status == "failed"
+    assert forcing_result.stage == "forcing"
+    assert forcing_result.status == "submission_failed"
+    assert forcing_result.error_code == "SLURM_ARRAY_SUBMIT_UNSUPPORTED"
+    assert forcing_job["status"] == "submission_failed"
+    assert forcing_job["slurm_job_id"] is None
+    assert forcing_job["error_code"] == "SLURM_ARRAY_SUBMIT_UNSUPPORTED"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert"]
+    assert all(payload["job_type"] != "produce_forcing_array" for payload in client.submit_job_payloads)
+    assert "forecast" not in [submission["stage"] for submission in client.submissions]
+    assert repository.cycle_statuses[-1] == "failed_forcing"
+
+
 def test_forecast_manifest_write_failure_marks_pipeline_failed(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
@@ -1092,7 +1175,30 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
             "error_message": None,
             "log_uri": None,
         }
-    client = FakeCycleSlurmClient()
+    client = FakeCycleSlurmClient(
+        array_results_by_stage={
+            "forcing": ["succeeded", "succeeded"],
+            "forecast": ["succeeded", "succeeded"],
+        }
+    )
+    client.jobs["3002"] = {
+        "job_id": "3002",
+        "run_id": run_id,
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "succeeded",
+        "submitted_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+        "payload": {"tasks": [{}, {}]},
+    }
+    client.jobs["3003"] = {
+        "job_id": "3003",
+        "run_id": run_id,
+        "model_id": "model_0",
+        "stage": "forecast",
+        "status": "succeeded",
+        "submitted_at": _fmt(_dt("2026-05-01T00:03:00Z")),
+        "payload": {"tasks": [{}, {}]},
+    }
     orchestrator = _orchestrator(tmp_path, repository, client)
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
@@ -1203,12 +1309,13 @@ def test_malformed_array_accounting_records_gap_without_fabricating_metrics(tmp_
         event
         for event in repository.events
         if event["entity_id"] == "job_cycle_gfs_2026050100_forcing"
-        and event["status_to"] == "succeeded"
+        and event["status_to"] == "failed"
     )
-    assert result.status == "complete"
+    assert result.status == "failed"
+    assert [submission["stage"] for submission in client.submissions] == ["download", "convert", "forcing"]
     assert gap_event["details"]["fabricated_metrics"] is False
     assert gap_event["details"]["gap"]["error"]
-    assert forcing_event["details"]["task_results"][0]["accounting"] == {}
+    assert forcing_event["details"]["task_results"] == ()
 
 
 def test_cancel_active_cycle_jobs_calls_gateway_and_records_no_replacement(tmp_path: Path) -> None:
@@ -1261,6 +1368,58 @@ def test_cancel_active_cycle_jobs_calls_gateway_and_records_no_replacement(tmp_p
     assert client.submissions == []
 
 
+def test_cancel_active_cycle_jobs_conflict_records_gap_without_rewriting_cancelled(tmp_path: Path) -> None:
+    class ConflictCancelClient(FakeCycleSlurmClient):
+        def cancel_job(self, job_id: str) -> dict[str, Any]:
+            from services.orchestrator.chain import SlurmClientError
+
+            raise SlurmClientError(
+                "JOB_ALREADY_TERMINAL",
+                "Slurm Gateway returned HTTP 409.",
+                {
+                    "response": {
+                        "error": {
+                            "code": "JOB_ALREADY_TERMINAL",
+                            "details": {"job_id": job_id, "status": "succeeded"},
+                        }
+                    }
+                },
+            )
+
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    repository.jobs["job_cycle_gfs_2026050100_forcing"] = {
+        "job_id": "job_cycle_gfs_2026050100_forcing",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3001",
+        "model_id": "model_0",
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": "s3://nhms/runs/cycle_gfs_2026050100/logs/forcing.log",
+    }
+    client = ConflictCancelClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    cancelled = orchestrator.cancel_active_cycle_jobs(cycle_id, reason="scheduler_cancel_requested")
+
+    assert repository.jobs["job_cycle_gfs_2026050100_forcing"]["status"] == "running"
+    assert cancelled[0]["status"] == "running"
+    assert cancelled[0]["error_code"] == "JOB_ALREADY_TERMINAL"
+    gap_event = repository.events[-1]
+    assert gap_event["event_type"] == "slurm_cancellation_gap"
+    assert gap_event["status_to"] == "blocked"
+    assert gap_event["details"]["replacement_submitted"] is False
+    assert gap_event["details"]["slurm"]["cancellation_proven"] is False
+
+
 def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = PublishFailureSlurmClient()
@@ -1278,7 +1437,7 @@ def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Pat
 def _orchestrator(
     tmp_path: Path,
     repository: FakeCycleRepository,
-    client: FakeCycleSlurmClient,
+    client: Any,
     *,
     retry_service: Any | None = None,
     object_store: LocalObjectStore | None = None,
