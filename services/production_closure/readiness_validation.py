@@ -2843,6 +2843,7 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
     skipped_candidates = _scheduler_collection_identity_records(payload, "skipped_candidates")
     model_run_rows = _mapping_sequence(payload.get("model_run_evidence"))
     model_run_outcomes = [_scheduler_model_run_outcome(record) for record in model_run_rows]
+    has_submitted_or_attempted_work = _scheduler_has_submitted_or_attempted_model_run(model_run_rows)
 
     candidate_count = _count_value(payload, "candidate_count")
     if candidate_count is not None:
@@ -2871,7 +2872,11 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
     status = str(payload.get("status") or "").strip().lower()
     count_expectations_by_field = {
         "failed_count": _scheduler_failed_count_model_run_rows(model_run_outcomes),
-        "partial_count": _scheduler_partial_count_model_run_rows(model_run_outcomes, pass_status=status),
+        "partial_count": _scheduler_partial_count_model_run_rows(
+            model_run_outcomes,
+            pass_status=status,
+            has_submitted_or_attempted_work=has_submitted_or_attempted_work,
+        ),
     }
     for count_field, error_prefix in (
         ("failed_count", "failed_count"),
@@ -2880,7 +2885,14 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
         value = _count_value(payload, count_field)
         if value is None:
             continue
-        if value > model_run_capacity or value > len(model_run_rows):
+        count_capacity = _scheduler_count_model_run_capacity(
+            count_field,
+            pass_status=status,
+            model_run_capacity=model_run_capacity,
+            model_run_row_count=len(model_run_rows),
+            has_submitted_or_attempted_work=has_submitted_or_attempted_work,
+        )
+        if value > count_capacity or value > len(model_run_rows):
             errors.append(f"{error_prefix}_exceeds_model_run_evidence")
             continue
         matching_rows = count_expectations_by_field[count_field]
@@ -2900,12 +2912,34 @@ def _scheduler_failed_count_model_run_rows(model_run_outcomes: Sequence[_Schedul
     return sum(1 for outcome in model_run_outcomes if outcome.failed)
 
 
+def _scheduler_has_submitted_or_attempted_model_run(model_run_rows: Sequence[Mapping[str, Any]]) -> bool:
+    return any(
+        record.get("submitted") is True or record.get("execution_attempted") is True for record in model_run_rows
+    )
+
+
+def _scheduler_count_model_run_capacity(
+    count_field: str,
+    *,
+    pass_status: str,
+    model_run_capacity: int,
+    model_run_row_count: int,
+    has_submitted_or_attempted_work: bool,
+) -> int:
+    if count_field == "partial_count" and pass_status == "submitted_partial" and has_submitted_or_attempted_work:
+        return model_run_row_count
+    return model_run_capacity
+
+
 def _scheduler_partial_count_model_run_rows(
     model_run_outcomes: Sequence[_SchedulerModelRunOutcome],
     *,
     pass_status: str,
+    has_submitted_or_attempted_work: bool,
 ) -> int:
     if pass_status == "submitted_partial":
+        if not has_submitted_or_attempted_work:
+            return 0
         return sum(1 for outcome in model_run_outcomes if outcome.producer_partial)
     return sum(
         1
@@ -2970,9 +3004,7 @@ def _scheduler_model_run_outcome(record: Mapping[str, Any]) -> _SchedulerModelRu
     failed = any(_scheduler_model_run_failed_status(status) for status in status_values)
     partial = any(_scheduler_model_run_partial_status(status) for status in status_values)
     blocked = any(_scheduler_model_run_blocked_status(status) for status in status_values)
-    producer_partial = submitted and any(
-        _scheduler_model_run_producer_partial_status(status) for status in status_values
-    )
+    producer_partial = any(_scheduler_model_run_producer_partial_status(status) for status in status_values)
     return _SchedulerModelRunOutcome(
         status_values=status_values,
         has_status_evidence=bool(status_values),
@@ -2989,28 +3021,33 @@ def _scheduler_model_run_status_values(record: Mapping[str, Any]) -> set[str]:
     values: set[str] = set()
     for key in ("status", "outcome", "result", "state", "candidate_outcome"):
         value = record.get(key)
-        if isinstance(value, str) and value.strip():
-            values.add(value.strip().lower())
-        elif isinstance(value, Mapping):
-            values.update(_nested_scheduler_status_values(value))
+        values.update(_nested_scheduler_status_values(value, is_status_value=True))
     return values
 
 
-def _nested_scheduler_status_values(value: Mapping[str, Any]) -> set[str]:
+def _nested_scheduler_status_values(value: Any, *, is_status_value: bool = False) -> set[str]:
     values: set[str] = set()
-    stack: list[Any] = [value]
+    stack: list[tuple[Any, bool]] = [(value, is_status_value)]
+    seen_containers: set[int] = set()
     while stack:
-        current = stack.pop()
+        current, current_is_status_value = stack.pop()
+        if isinstance(current, str):
+            if current_is_status_value and current.strip():
+                values.add(current.strip().lower())
+            continue
         if isinstance(current, Mapping):
+            current_id = id(current)
+            if current_id in seen_containers:
+                continue
+            seen_containers.add(current_id)
             for key, nested in current.items():
-                if str(key) in SCHEDULER_MODEL_RUN_STATUS_KEYS and isinstance(nested, str) and nested.strip():
-                    values.add(nested.strip().lower())
-                elif isinstance(nested, Mapping) or (
-                    isinstance(nested, Sequence) and not isinstance(nested, (str, bytes, bytearray))
-                ):
-                    stack.append(nested)
+                stack.append((nested, str(key) in SCHEDULER_MODEL_RUN_STATUS_KEYS))
         elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
-            stack.extend(current)
+            current_id = id(current)
+            if current_id in seen_containers:
+                continue
+            seen_containers.add(current_id)
+            stack.extend((item, current_is_status_value) for item in current)
     return values
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from services.orchestrator.scheduler import ProductionScheduler
 from services.production_closure import slurm_validation
 from services.production_closure.readiness_validation import (
     ALLOWED_STATUS_EXECUTION_MODES,
@@ -15,6 +16,20 @@ from services.production_closure.readiness_validation import (
     ProductionReadinessValidationError,
     validate_readiness,
     validate_readiness_item,
+)
+from tests.test_production_scheduler import (
+    FakeAdapter,
+    FakeProductionOrchestrator,
+    FakeRegistry,
+)
+from tests.test_production_scheduler import (
+    _config as _scheduler_config,
+)
+from tests.test_production_scheduler import (
+    _dt as _scheduler_dt,
+)
+from tests.test_production_scheduler import (
+    _model as _scheduler_model,
 )
 
 LIVE_SCHEMA = "nhms.production_readiness.live_proof.v1"
@@ -1481,6 +1496,35 @@ def _submitted_partial_scheduler_payload_with_failed_sibling() -> dict[str, obje
     return payload
 
 
+def _scheduler_output_uri_unavailable_sibling_artifact(tmp_path: Path) -> Path:
+    submitted_model = _scheduler_model("model_a", "basin_a")
+    submitted_model["resource_profile"] = {
+        **submitted_model["resource_profile"],
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+    }
+    orchestrator = FakeProductionOrchestrator(expose_object_store=False)
+    scheduler = ProductionScheduler(
+        _scheduler_config(tmp_path / "scheduler-workspace", now=_scheduler_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([submitted_model, _scheduler_model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted_partial"
+    assert result.evidence["status"] == "submitted_partial"
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["counts"]["partial_count"] == 1
+    evidence_by_model = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    assert evidence_by_model["model_a"]["submitted"] is True
+    assert evidence_by_model["model_b"]["status"] == "blocked"
+    assert evidence_by_model["model_b"]["submitted"] is False
+    assert evidence_by_model["model_b"]["error_code"] == "OUTPUT_URI_UNAVAILABLE"
+    assert result.artifact_path is not None
+    return Path(result.artifact_path)
+
+
 @pytest.mark.parametrize(
     ("mutator", "expected_error"),
     [
@@ -1754,6 +1798,32 @@ def test_scheduler_hidden_nested_failed_or_partial_aliases_block_live_binding(
 
 
 @pytest.mark.parametrize(
+    "nested_status",
+    [
+        {"candidate_outcome": [{"status": "submitted"}, {"state": "failed"}]},
+        {"outcome": [{"status": "submitted"}, {"result": "failed"}]},
+        {"result": [{"status": "submitted"}, {"outcome": "partial"}]},
+    ],
+)
+def test_scheduler_hidden_sequence_failed_or_partial_aliases_block_live_binding(
+    tmp_path: Path,
+    nested_status: dict[str, object],
+) -> None:
+    payload = _submitted_scheduler_payload()
+    payload["model_run_evidence"][0] |= nested_status
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert scheduler_item["status"] == "blocked"
+    assert "live_status_model_run_blocked_outcome" in errors
+    assert "submitted_status_model_run_status_mismatch" in errors
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
     ("count_field", "expected_error"),
     [
         ("failed_count", "live_status_failed_count_nonzero"),
@@ -1986,6 +2056,41 @@ def test_scheduler_submitted_partial_count_accepts_failed_submitted_sibling(tmp_
     assert live_item["status"] == "release_blocked"
     assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
     assert summary["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_submitted_partial_count_accepts_output_uri_unavailable_blocked_sibling(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = _scheduler_output_uri_unavailable_sibling_artifact(tmp_path)
+    payload = json.loads(scheduler_path.read_text(encoding="utf-8"))
+    receipt = _scheduler_proof_bound_to_evidence(
+        scheduler_path,
+        producer_artifact_ref=f"scheduler:{scheduler_path.name}",
+        producer_run_id=str(payload["pass_id"]),
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert scheduler_item["status"] == "blocked"
+    assert scheduler_item["required_for_final"] is False
+    assert "partial_count_status_cardinality_mismatch" not in errors
+    assert errors == []
+    assert scheduler_item["details"]["submitted_count"] == 1
+    assert scheduler_item["details"]["partial_count"] == 1
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 @pytest.mark.parametrize("status", ["preflight_blocked", "blocked"])
