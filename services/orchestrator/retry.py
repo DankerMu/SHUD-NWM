@@ -42,6 +42,8 @@ NON_TRANSIENT_ERROR_CODES: set[str] = {
 DEFAULT_BACKOFF_SCHEDULE = [60, 300, 900]
 ACTIVE_RETRY_STATUSES = {"pending", "submitted", "running"}
 FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
+TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
 
 
 def is_transient_error(error_code: str | None) -> bool:
@@ -332,17 +334,24 @@ class RetryService:
             if not locked_jobs:
                 raise RetryNotFoundError(run_id)
 
-            jobs = self.store.query_jobs_by_run(run_id)
+            jobs = _jobs_by_truth_time(self.store.query_jobs_by_run(run_id))
             active_job = next((job for job in jobs if job.status in ACTIVE_RETRY_STATUSES), None)
             if active_job is not None:
                 raise RetryConflictError(run_id, active_job)
 
-            failed_job = next((job for job in reversed(jobs) if job.status in FAILED_RETRY_STATUSES), None)
+            latest_truth_job = jobs[-1]
+            if latest_truth_job.status in TERMINAL_SUCCESS_RETRY_STATUSES:
+                raise RetryNotFoundError(run_id)
+            failed_job = (
+                latest_truth_job
+                if latest_truth_job.status in MANUAL_RETRY_SOURCE_STATUSES
+                else next((job for job in reversed(jobs) if job.status in MANUAL_RETRY_SOURCE_STATUSES), None)
+            )
             if failed_job is None:
                 raise RetryNotFoundError(run_id)
 
             status_from = failed_job.status
-            previous_error = failed_job.error_code
+            previous_error = failed_job.error_code or ("cancelled" if failed_job.status == "cancelled" else None)
             next_retry_count = failed_job.retry_count + 1
             classification = classify_failure(
                 previous_error,
@@ -417,7 +426,7 @@ class RetryService:
                             error_code = NULL,
                             error_message = NULL
                         WHERE run_id = :run_id
-                          AND status = 'failed'
+                          AND status IN ('failed', 'cancelled')
                         """
                     ),
                     {"run_id": retry_run_id},
@@ -554,6 +563,21 @@ class RetryService:
         if retry_job.model_id:
             return retry_job.model_id
         return _model_id_from_hydro_run(self.store, retry_job.run_id) or _model_id_from_run_id(retry_job.run_id)
+
+
+def _jobs_by_truth_time(jobs: list[PipelineJob]) -> list[PipelineJob]:
+    return sorted(
+        jobs,
+        key=lambda job: (
+            _job_truth_timestamp(job) or datetime.min.replace(tzinfo=UTC),
+            job.created_at or datetime.min.replace(tzinfo=UTC),
+            job.job_id,
+        ),
+    )
+
+
+def _job_truth_timestamp(job: PipelineJob) -> datetime | None:
+    return job.updated_at or job.finished_at or job.submitted_at or job.started_at or job.created_at
 
 
 def _has_hydro_run_table(store: PipelineStore) -> bool:

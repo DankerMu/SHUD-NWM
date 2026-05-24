@@ -584,7 +584,15 @@ def queue_depth(
 ) -> dict[str, Any]:
     queue_depth_method = getattr(gateway, "queue_depth", None)
     if callable(queue_depth_method):
-        depth = dict(queue_depth_method())
+        try:
+            depth = dict(queue_depth_method())
+        except SlurmGatewayError as error:
+            raise ApiError(
+                status_code=error.status_code,
+                code=error.code,
+                message=_safe_redacted_text(error.message),
+                details=_safe_redacted_payload(error.details),
+            ) from error
     else:
         try:
             records = gateway.list_jobs(limit=1000, offset=0)
@@ -592,8 +600,8 @@ def queue_depth(
             raise ApiError(
                 status_code=error.status_code,
                 code=error.code,
-                message=error.message,
-                details=error.details,
+                message=_safe_redacted_text(error.message),
+                details=_safe_redacted_payload(error.details),
             ) from error
         depth = {"running": 0, "pending": 0, "idle": 0}
         for record in records:

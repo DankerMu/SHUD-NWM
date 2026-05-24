@@ -494,6 +494,40 @@ def test_cancelled_run_does_not_block_active_guard() -> None:
         assert _has_active_pipeline(store, source_id="gfs", cycle_time=_cycle_time(), model_id="model_a") is False
 
 
+def test_cancelled_run_manual_retry_submits_marker_and_pending_hydro() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_retry_cancelled", status="cancelled")
+        cancelled = _create_job(
+            store,
+            job_id="job_cancelled",
+            run_id="run_retry_cancelled",
+            cycle_id="cycle_retry_cancelled",
+            status="cancelled",
+            error_code=None,
+        )
+        cancelled.retry_count = 2
+        store.session.add(cancelled)
+        store.session.commit()
+        gateway = _MockGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("run_retry_cancelled", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submitted"
+        assert retry.retry_count == 3
+        assert _hydro_status(store, "run_retry_cancelled") == "pending"
+        assert _hydro_status(store, "run_retry_cancelled") in HYDRO_RUN_STATUS_ENUM
+        events = _events(store)
+        retry_event = next(event for event in events if event.event_type == "retry")
+        assert retry_event.status_from == "cancelled"
+        assert retry_event.details["manual_retry_marker"] is True
+        assert retry_event.details["previous_job_id"] == "job_cancelled"
+        assert retry_event.details["previous_error"] == "cancelled"
+        assert retry_event.details["prior_failure_reason"] == "cancelled"
+        assert retry_event.details["retry_count"] == 3
+        assert gateway.submissions
+
+
 def test_retry_status_is_valid_hydro_enum() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_retry_valid_enum", status="failed")

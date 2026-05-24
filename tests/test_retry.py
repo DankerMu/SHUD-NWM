@@ -367,6 +367,34 @@ def test_manual_retry_no_failed_job() -> None:
             service.attempt_manual_retry("run_1", gateway=gateway, trusted_internal=True)
 
 
+def test_manual_retry_rejects_older_failure_when_latest_truth_succeeded() -> None:
+    with _store() as store:
+        failed = _create_job(store, job_id="job_failed", run_id="run_latest_success", status="failed")
+        succeeded = _create_job(
+            store,
+            job_id="job_succeeded",
+            run_id="run_latest_success",
+            status="succeeded",
+            error_code=None,
+        )
+        failed.updated_at = datetime(2026, 5, 1, 6, 20, tzinfo=UTC)
+        succeeded.updated_at = datetime(2026, 5, 1, 6, 40, tzinfo=UTC)
+        store.session.add_all([failed, succeeded])
+        store.session.commit()
+        gateway = _RecordingGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with pytest.raises(RetryNotFoundError):
+            service.attempt_manual_retry("run_latest_success", gateway=gateway, trusted_internal=True)
+
+        assert gateway.submissions == []
+        assert [job.job_id for job in store.query_jobs_by_run("run_latest_success")] == [
+            "job_failed",
+            "job_succeeded",
+        ]
+        assert _events(store) == []
+
+
 def test_expire_stale_retries_allows_new_retry() -> None:
     with _store() as store:
         _create_job(store, job_id="job_failed", run_id="run_1", status="failed", error_code="NODE_FAILURE")

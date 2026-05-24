@@ -764,6 +764,7 @@ class ProductionScheduler:
         try:
             result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
         except Exception as error:
+            safe_error_message = _evidence_safe(getattr(error, "message", str(error)))
             for candidate in submitted_candidates:
                 output_uri = candidate_output_uris.get(candidate.candidate_id)
                 evidence.append(
@@ -774,7 +775,7 @@ class ProductionScheduler:
                         "mutation_occurred": False,
                         "cycle_id": cycle_id,
                         "error_code": getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"),
-                        "error_message": getattr(error, "message", str(error)),
+                        "error_message": safe_error_message,
                         "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
                         "qhh_script_invoked": False,
                     }
@@ -1258,7 +1259,6 @@ class ProductionScheduler:
                     state_decision is not None
                     and state_decision.action == "skip"
                     and not (self.config.cancel_active_slurm and state_decision.reason == "active_slurm_job")
-                    and not (state_decision.reason == "active_slurm_job" and not active_slurm_jobs)
                 ):
                     skipped.append(
                         {
@@ -1268,7 +1268,14 @@ class ProductionScheduler:
                         }
                     )
                     continue
-                if has_active_orchestration and not (self.config.cancel_active_slurm and active_slurm_jobs):
+                cycle_active_blocks_candidate = has_active_orchestration and not (
+                    self.config.cancel_active_slurm and active_slurm_jobs
+                )
+                if cycle_active_blocks_candidate and _candidate_state_is_candidate_scoped_retry(
+                    state_decision,
+                ):
+                    cycle_active_blocks_candidate = False
+                if cycle_active_blocks_candidate:
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                     continue
                 if active_slurm_jobs:
@@ -1762,13 +1769,6 @@ def _candidate_state_decision(
             },
         )
 
-    if _manual_retry_requested(state):
-        return CandidateStateDecision(
-            "retry",
-            "manual_retry_requested",
-            _manual_retry_state_evidence(candidate, state, evidence),
-        )
-
     if hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES and _terminal_hydro_truth_supersedes_failure(state):
         return CandidateStateDecision(
             "skip",
@@ -1785,6 +1785,29 @@ def _candidate_state_decision(
                 "frequency_resubmitted": False,
                 "publish_resubmitted": False,
             },
+        )
+
+    if pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES and _pipeline_terminal_success_is_candidate_scoped(
+        candidate,
+        state,
+    ):
+        return CandidateStateDecision(
+            "skip",
+            "terminal_pipeline_success",
+            {
+                **evidence,
+                "decision": "skip_terminal",
+                "terminal_source": "pipeline_job",
+                "terminal_status": pipeline_status,
+                "native_shud_resubmitted": False,
+            },
+        )
+
+    if _manual_retry_requested(state):
+        return CandidateStateDecision(
+            "retry",
+            "manual_retry_requested",
+            _manual_retry_state_evidence(candidate, state, evidence),
         )
 
     downstream_retry = _downstream_retry_evidence(candidate, state, evidence)
@@ -1805,22 +1828,6 @@ def _candidate_state_decision(
             "blocked",
             str(cancelled.get("reason") or "manual_retry_required_after_cancelled"),
             cancelled,
-        )
-
-    if pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES and _pipeline_terminal_success_is_candidate_scoped(
-        candidate,
-        state,
-    ):
-        return CandidateStateDecision(
-            "skip",
-            "terminal_pipeline_success",
-            {
-                **evidence,
-                "decision": "skip_terminal",
-                "terminal_source": "pipeline_job",
-                "terminal_status": pipeline_status,
-                "native_shud_resubmitted": False,
-            },
         )
 
     if pipeline_status in FAILED_PIPELINE_STATUSES or hydro_status == "failed":
@@ -1877,6 +1884,25 @@ def _call_candidate_state_provider(
     payload.setdefault("job_limit", job_limit)
     payload.setdefault("event_limit", event_limit)
     return payload
+
+
+def _candidate_state_is_candidate_scoped_retry(decision: CandidateStateDecision | None) -> bool:
+    if decision is None or decision.action != "retry":
+        return False
+    evidence = decision.evidence
+    if not isinstance(evidence, Mapping):
+        return False
+    identity = evidence.get("identity")
+    if not isinstance(identity, Mapping):
+        identity = evidence.get("candidate_identity")
+    restart_stage = evidence.get("restart_stage")
+    task_identity = evidence.get("task_identity")
+    return bool(
+        isinstance(identity, Mapping)
+        and identity.get("candidate_id")
+        and identity.get("run_id")
+        and (restart_stage not in (None, "") or (isinstance(task_identity, Mapping) and bool(task_identity)))
+    )
 
 
 def _call_active_slurm_jobs_provider(

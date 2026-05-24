@@ -3616,6 +3616,7 @@ class PsycopgOrchestratorRepository:
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         cycle_id = cycle_id_for(source_id, cycle_time)
         cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+        candidate_run_id = f"fcst_{source_id.lower()}_{format_cycle_time(cycle_time)}_{model_id}"
         row = self._fetch_optional(
             """
             SELECT 1 AS active
@@ -3626,18 +3627,16 @@ class PsycopgOrchestratorRepository:
               AND h.status::text = ANY(%s)
             UNION ALL
             SELECT 1 AS active
-            FROM hydro.hydro_run h
-            JOIN ops.pipeline_job pj
-              ON pj.run_id = h.run_id
-              OR (
-                pj.cycle_id = %s
-                AND (pj.run_id = %s OR pj.model_id IS NULL)
-              )
-            WHERE h.source_id = %s
-              AND h.cycle_time = %s
-              AND h.model_id = %s
+            FROM ops.pipeline_job pj
+            WHERE pj.cycle_id = %s
               AND pj.status NOT IN (
                 'succeeded', 'partially_failed', 'failed', 'cancelled', 'submission_failed', 'permanently_failed'
+              )
+              AND (
+                    pj.run_id = %s
+                 OR pj.run_id = %s
+                 OR pj.model_id = %s
+                 OR (pj.run_id = %s AND pj.model_id IS NULL)
               )
             LIMIT 1
             """,
@@ -3647,10 +3646,10 @@ class PsycopgOrchestratorRepository:
                 model_id,
                 list(ACTIVE_HYDRO_STATUSES),
                 cycle_id,
+                candidate_run_id,
                 cycle_run_id,
-                source_id,
-                cycle_time,
                 model_id,
+                cycle_run_id,
             ),
         )
         return row is not None
@@ -3745,7 +3744,9 @@ class PsycopgOrchestratorRepository:
                  OR (cycle_id = %s AND run_id = %s)
                  OR (cycle_id = %s AND model_id IS NULL AND run_id = %s)
                   )
-            ORDER BY COALESCE(submitted_at, created_at) DESC, created_at DESC
+            ORDER BY
+                COALESCE(updated_at, finished_at, submitted_at, started_at, created_at) DESC NULLS LAST,
+                created_at DESC
             LIMIT %s
             """,
             (
@@ -3764,7 +3765,7 @@ class PsycopgOrchestratorRepository:
         jobs = sorted(
             jobs[:job_limit],
             key=lambda job: (
-                _datetime_sort_key(job.get("submitted_at") or job.get("created_at")),
+                _pipeline_job_truth_sort_key(job),
                 _datetime_sort_key(job.get("created_at")),
             ),
         )
@@ -3863,7 +3864,13 @@ class PsycopgOrchestratorRepository:
         if hydro_run is None and not jobs and forcing_version is None and forecast_cycle is None:
             return None
         candidate_jobs = [job for job in jobs if _job_belongs_to_candidate(job, run_id=run_id, model_id=model_id)]
-        failed_task = _candidate_failed_task_from_events(events, model_id=model_id)
+        failed_task = _candidate_failed_task_from_events(
+            events,
+            model_id=model_id,
+            candidate_id=candidate_id,
+            run_id=run_id,
+            cycle_id=cycle_id,
+        )
         relevant_jobs = candidate_jobs or ([failed_task["job"]] if failed_task and failed_task.get("job") else [])
         latest_job = (relevant_jobs or jobs)[-1] if (relevant_jobs or jobs) else {}
         latest_shared_cycle_aggregate = bool(
@@ -4634,6 +4641,10 @@ def _first_pipeline_truth_timestamp(job: Mapping[str, Any]) -> Any:
     return None
 
 
+def _pipeline_job_truth_sort_key(job: Mapping[str, Any]) -> datetime:
+    return _datetime_sort_key(_first_pipeline_truth_timestamp(job))
+
+
 def _datetime_sort_key(value: Any) -> datetime:
     parsed = _parse_gateway_time(value)
     if parsed is None:
@@ -4658,15 +4669,24 @@ def _task_candidate_id(task: Mapping[str, Any]) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
-def _task_identity_key(task: Mapping[str, Any], *, model_id: str) -> tuple[str, str, str] | None:
-    candidate_id = _task_candidate_id(task)
+def _task_identity_key(
+    task: Mapping[str, Any],
+    *,
+    model_id: str,
+    candidate_id: str | None = None,
+) -> tuple[str, str, str] | None:
+    task_candidate_id = _task_candidate_id(task)
     task_model_id = _task_model_id(task)
-    if candidate_id is None and task_model_id != model_id:
+    if task_candidate_id is not None and candidate_id is not None and task_candidate_id != candidate_id:
+        return None
+    if task_candidate_id is not None and task_model_id is not None and task_model_id != model_id:
+        return None
+    if task_candidate_id is None and task_model_id != model_id:
         return None
     task_id = task.get("original_task_id", task.get("array_task_id", task.get("task_id")))
     if task_id in (None, ""):
         return None
-    return (candidate_id or task_model_id or model_id, str(task_id), str(task.get("stage") or ""))
+    return (task_candidate_id or task_model_id or model_id, str(task_id), str(task.get("stage") or ""))
 
 
 def _event_task_truth_sort_key(
@@ -4695,6 +4715,9 @@ def _candidate_failed_task_from_events(
     events: Sequence[Mapping[str, Any]],
     *,
     model_id: str,
+    candidate_id: str | None = None,
+    run_id: str | None = None,
+    cycle_id: str | None = None,
 ) -> dict[str, Any] | None:
     latest_by_identity: dict[
         tuple[str, str, str],
@@ -4710,7 +4733,7 @@ def _candidate_failed_task_from_events(
         for task_order, task in enumerate(task_results):
             if not isinstance(task, Mapping):
                 continue
-            key = _task_identity_key(task, model_id=model_id)
+            key = _task_identity_key(task, model_id=model_id, candidate_id=candidate_id)
             if key is None:
                 continue
             truth_key = _event_task_truth_sort_key(event, task, order=order, task_order=task_order)
@@ -4731,6 +4754,9 @@ def _candidate_failed_task_from_events(
     return {
         "job": {
             "job_id": event.get("entity_id"),
+            "run_id": run_id,
+            "cycle_id": cycle_id,
+            "model_id": model_id,
             "status": event.get("status_to") or task.get("status") or task.get("state"),
             "stage": stage,
             "job_type": details.get("job_type"),

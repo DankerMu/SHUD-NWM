@@ -13,7 +13,9 @@ from sqlalchemy.pool import StaticPool
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.chain import (
     M3_STAGES,
+    ForcingContext,
     ForecastOrchestrator,
+    ModelContext,
     OrchestratorConfig,
     OrchestratorError,
     PsycopgOrchestratorRepository,
@@ -1263,6 +1265,29 @@ def test_cycle_orchestration_rejects_db_active_duplicate(tmp_path: Path) -> None
     assert client.submissions == []
 
 
+def test_trigger_forecast_rejects_candidate_scoped_active_restart(tmp_path: Path) -> None:
+    class ActiveRestartRepository(FakeCycleRepository):
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+        def load_model_context(self, model_id: str) -> ModelContext:
+            raise AssertionError(f"active guard must run before loading {model_id}")
+
+        def find_forcing_context(self, *, source_id: str, cycle_time: datetime, model_id: str) -> ForcingContext:
+            raise AssertionError("active guard must run before forcing lookup")
+
+    repository = ActiveRestartRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="model_a")
+
+    assert exc_info.value.error_code == "PIPELINE_ALREADY_ACTIVE"
+    assert client.submissions == []
+
+
 def test_cycle_orchestration_rejects_unsafe_source_and_basin_ids(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
@@ -2156,7 +2181,7 @@ def test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scop
     job_call = next(call for call in calls if "FROM ops.pipeline_job" in call[0])
     event_call = next(call for call in calls if "FROM ops.pipeline_event" in call[0])
     assert "LIMIT %s" in job_call[0]
-    assert "ORDER BY COALESCE(submitted_at, created_at) DESC, created_at DESC" in job_call[0]
+    assert "COALESCE(updated_at, finished_at, submitted_at, started_at, created_at) DESC" in job_call[0]
     assert job_call[1][-1] == 3
     assert "SELECT pj.job_id" in event_call[0]
     assert "ORDER BY pe.created_at DESC, pe.event_id DESC" in event_call[0]
@@ -2175,6 +2200,74 @@ def test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scop
     assert state["failed_stage"] == "forcing"
     assert state["array_task_id"] == 1
     assert state["successful_sibling_outputs_reused"] is True
+    assert state["pipeline_jobs_total"] == 3
+    assert state["state_truncated"] is True
+
+
+def test_psycopg_candidate_state_latest_truth_timestamp_selects_terminal_success() -> None:
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            del statement, parameters
+            return None
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            del parameters
+            if "FROM ops.pipeline_job" in statement:
+                return [
+                    {
+                        "job_id": "job_success",
+                        "run_id": "fcst_gfs_2026050100_model_b",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": "model_b",
+                        "status": "succeeded",
+                        "stage": "publish",
+                        "submitted_at": "2026-05-01T06:00:00Z",
+                        "finished_at": "2026-05-01T06:40:00Z",
+                        "updated_at": "2026-05-01T06:40:00Z",
+                    },
+                    {
+                        "job_id": "job_failed",
+                        "run_id": "fcst_gfs_2026050100_model_b",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": "model_b",
+                        "status": "failed",
+                        "stage": "parse",
+                        "error_code": "FAILED_PARSE",
+                        "submitted_at": "2026-05-01T06:10:00Z",
+                        "finished_at": "2026-05-01T06:20:00Z",
+                        "updated_at": "2026-05-01T06:20:00Z",
+                    },
+                    {
+                        "job_id": "old_overflow",
+                        "run_id": "fcst_gfs_2026050100_model_b",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": "model_b",
+                        "status": "failed",
+                        "stage": "parse",
+                        "error_code": "FAILED_PARSE",
+                        "updated_at": "2026-05-01T05:00:00Z",
+                    },
+                ]
+            return []
+
+    repository = CapturingRepository("postgresql://example")
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_b",
+        run_id="fcst_gfs_2026050100_model_b",
+        forcing_version_id="forc_gfs_2026050100_model_b",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=2,
+        event_limit=10,
+    )
+
+    assert state is not None
+    assert state["pipeline_status"] == "succeeded"
+    assert state["failed_stage"] is None
+    assert state["pipeline_truth_timestamp"] == "2026-05-01T06:40:00Z"
     assert state["pipeline_jobs_total"] == 3
     assert state["state_truncated"] is True
 
@@ -2250,6 +2343,155 @@ def test_psycopg_candidate_state_rejects_ambiguous_array_task_identity() -> None
     assert state["original_task_id"] is None
     assert state["successful_sibling_outputs_reused"] is False
     assert state["successful_sibling_task_count"] == 0
+
+
+def test_psycopg_candidate_state_ignores_sibling_candidate_only_task_failure() -> None:
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            del statement, parameters
+            return None
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            del parameters
+            if "FROM ops.pipeline_event" in statement:
+                return [
+                    {
+                        "event_id": 1,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forecast",
+                        "event_type": "status_change",
+                        "status_to": "partially_failed",
+                        "created_at": "2026-05-01T00:05:00Z",
+                        "details": {
+                            "stage": "forecast",
+                            "task_results": [
+                                {
+                                    "task_id": 1,
+                                    "original_task_id": 1,
+                                    "candidate_id": "gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+                                    "status": "failed",
+                                    "error_code": "NODE_FAILURE",
+                                }
+                            ],
+                        },
+                    }
+                ]
+            if "FROM ops.pipeline_job" in statement:
+                return [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_forecast",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "partially_failed",
+                        "stage": "forecast",
+                    }
+                ]
+            return []
+
+    repository = CapturingRepository("postgresql://example")
+    common = {
+        "source_id": "gfs",
+        "cycle_time": _dt("2026-05-01T00:00:00Z"),
+        "forcing_version_id": "forc_gfs_2026050100_model_a",
+        "retry_limit": 3,
+        "job_limit": 10,
+        "event_limit": 10,
+    }
+
+    model_a = repository.candidate_state(
+        **common,
+        model_id="model_a",
+        run_id="fcst_gfs_2026050100_model_a",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_a:forecast_gfs_deterministic",
+    )
+    model_b = repository.candidate_state(
+        **{**common, "forcing_version_id": "forc_gfs_2026050100_model_b"},
+        model_id="model_b",
+        run_id="fcst_gfs_2026050100_model_b",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+    )
+
+    assert model_a is not None
+    assert model_a["pipeline_status"] is None
+    assert model_a["array_task_id"] is None
+    assert model_b is not None
+    assert model_b["pipeline_status"] == "partially_failed"
+    assert model_b["failed_stage"] == "forecast"
+    assert model_b["original_task_id"] == 1
+
+
+def test_psycopg_candidate_state_ignores_conflicting_candidate_and_model_task_payload() -> None:
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            del statement, parameters
+            return None
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            del parameters
+            if "FROM ops.pipeline_event" in statement:
+                return [
+                    {
+                        "event_id": 1,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forecast",
+                        "event_type": "status_change",
+                        "status_to": "partially_failed",
+                        "created_at": "2026-05-01T00:05:00Z",
+                        "details": {
+                            "stage": "forecast",
+                            "task_results": [
+                                {
+                                    "task_id": 1,
+                                    "original_task_id": 1,
+                                    "candidate_id": "gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+                                    "model_id": "model_a",
+                                    "status": "failed",
+                                    "error_code": "NODE_FAILURE",
+                                },
+                                {
+                                    "task_id": 2,
+                                    "original_task_id": 2,
+                                    "candidate_id": "gfs:2026-05-01T00:00:00Z:model_a:forecast_gfs_deterministic",
+                                    "model_id": "model_a",
+                                    "status": "failed",
+                                    "error_code": "OUT_OF_MEMORY",
+                                },
+                            ],
+                        },
+                    }
+                ]
+            if "FROM ops.pipeline_job" in statement:
+                return [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_forecast",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "partially_failed",
+                        "stage": "forecast",
+                    }
+                ]
+            return []
+
+    repository = CapturingRepository("postgresql://example")
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_a",
+        run_id="fcst_gfs_2026050100_model_a",
+        forcing_version_id="forc_gfs_2026050100_model_a",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_a:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=10,
+        event_limit=10,
+    )
+
+    assert state is not None
+    assert state["pipeline_status"] == "partially_failed"
+    assert state["original_task_id"] == 2
+    assert state["error_code"] == "OUT_OF_MEMORY"
 
 
 def test_psycopg_candidate_state_later_retry_success_supersedes_older_failed_task() -> None:
