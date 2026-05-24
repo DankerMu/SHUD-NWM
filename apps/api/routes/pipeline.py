@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.auth import PolicyDecision, require_action
 from apps.api.errors import ApiError
+from packages.common.redaction import redact_payload
 from packages.common.safe_fs import SafeFilesystemError, read_tail_bytes_limited_no_follow
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineJob, PipelineStore
@@ -235,20 +236,21 @@ def job_logs(
             details={"job_id": job_id},
         )
 
+    safe_log_uri = _safe_redacted_text(job.log_uri)
     log_path = _local_log_path(job.log_uri)
     if log_path is None or not log_path.is_file():
         raise ApiError(
             status_code=404,
             code="JOB_LOG_NOT_FOUND",
             message="Job log file was not found.",
-            details={"job_id": job_id, "log_uri": job.log_uri},
+            details={"job_id": job_id, "log_uri": safe_log_uri},
         )
 
     return _ok(
         request,
         {
             "job_id": job.job_id,
-            "log_uri": job.log_uri,
+            "log_uri": safe_log_uri,
             "content": _read_log_tail(log_path),
         },
     )
@@ -287,10 +289,11 @@ def retry_run(
         raise _api_error(error) from error
 
     if job.status == "submission_failed":
+        error_message = _safe_redacted_text(job.error_message or "Retry submission failed.")
         raise ApiError(
             status_code=503,
             code=job.error_code or "RETRY_SUBMISSION_FAILED",
-            message=job.error_message or "Retry submission failed.",
+            message=error_message,
             details={
                 "run_id": job.run_id,
                 "job_id": job.job_id,
@@ -298,7 +301,7 @@ def retry_run(
                 "status": job.status,
                 "slurm_job_id": job.slurm_job_id,
                 "error_code": job.error_code,
-                "error_message": job.error_message,
+                "error_message": error_message,
             },
         )
 
@@ -408,7 +411,7 @@ def cancel_run(
                         "run_id": run_id,
                         "slurm_job_id": job.slurm_job_id,
                         "previous_status": previous_status,
-                        "gateway_response": cancellation,
+                        "gateway_response": _safe_redacted_payload(cancellation),
                         "cancellation_proven": False,
                     },
                 )
@@ -581,7 +584,15 @@ def queue_depth(
 ) -> dict[str, Any]:
     queue_depth_method = getattr(gateway, "queue_depth", None)
     if callable(queue_depth_method):
-        depth = dict(queue_depth_method())
+        try:
+            depth = dict(queue_depth_method())
+        except SlurmGatewayError as error:
+            raise ApiError(
+                status_code=error.status_code,
+                code=error.code,
+                message=_safe_redacted_text(error.message),
+                details=_safe_redacted_payload(error.details),
+            ) from error
     else:
         try:
             records = gateway.list_jobs(limit=1000, offset=0)
@@ -589,8 +600,8 @@ def queue_depth(
             raise ApiError(
                 status_code=error.status_code,
                 code=error.code,
-                message=error.message,
-                details=error.details,
+                message=_safe_redacted_text(error.message),
+                details=_safe_redacted_payload(error.details),
             ) from error
         depth = {"running": 0, "pending": 0, "idle": 0}
         for record in records:
@@ -616,8 +627,8 @@ def _api_error(error: RetryError) -> ApiError:
     return ApiError(
         status_code=error.status_code,
         code=error.code,
-        message=error.message,
-        details=error.details,
+        message=_safe_redacted_text(error.message),
+        details=_safe_redacted_payload(error.details),
     )
 
 
@@ -653,8 +664,8 @@ def _slurm_cancellation_gap_payload(job: PipelineJob, run_id: str, error: SlurmG
         "error": {
             "status_code": error.status_code,
             "code": error.code,
-            "message": error.message,
-            "details": error.details or {},
+            "message": _safe_redacted_text(error.message),
+            "details": _safe_redacted_payload(error.details or {}),
         },
     }
 
@@ -670,8 +681,17 @@ def _unproven_slurm_cancellation_payload(
         "status": job.status,
         "slurm_job_id": job.slurm_job_id,
         "cancellation_proven": False,
-        "gateway_response": response,
+        "gateway_response": _safe_redacted_payload(response),
     }
+
+
+def _safe_redacted_payload(value: Any) -> Any:
+    return redact_payload(value)
+
+
+def _safe_redacted_text(value: str) -> str:
+    redacted = redact_payload(value)
+    return redacted if isinstance(redacted, str) else str(redacted)
 
 
 def _cancellation_payload_proven(response: dict[str, Any]) -> bool:
@@ -1119,7 +1139,7 @@ def _basin_result(job: PipelineJob) -> dict[str, Any]:
         "basin_id": None,
         "status": job.status,
         "error_code": job.error_code,
-        "error_message": job.error_message,
+        "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
     }
 
 
@@ -1142,8 +1162,8 @@ def _job_payload(job: PipelineJob, run_metadata: dict[str, str | None] | None = 
         "exit_code": job.exit_code,
         "retry_count": job.retry_count,
         "error_code": job.error_code,
-        "error_message": job.error_message,
-        "log_uri": job.log_uri,
+        "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
+        "log_uri": _safe_redacted_text(job.log_uri) if job.log_uri is not None else None,
         "duration_seconds": _duration_seconds(job.started_at, job.finished_at),
     }
 
@@ -1195,7 +1215,7 @@ def _raise_log_path_forbidden(log_uri: str, log_root: Path) -> None:
         status_code=403,
         code="FORBIDDEN",
         message="Job log path is outside the configured log root.",
-        details={"log_uri": log_uri, "log_root": str(log_root)},
+        details={"log_uri": _safe_redacted_text(log_uri), "log_root": str(log_root)},
     )
 
 

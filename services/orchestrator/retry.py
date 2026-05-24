@@ -11,6 +11,7 @@ from sqlalchemy import inspect, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from packages.common.redaction import redact_payload
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
@@ -20,25 +21,94 @@ TRANSIENT_ERROR_CODES: set[str] = {
     "SLURM_TIMEOUT",
     "SLURM_JOB_TIMEOUT",
     "NODE_FAILURE",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
     "STORAGE_WRITE_FAILED",
     "SBATCH_SUBMISSION_FAILED",
     "SLURM_UNAVAILABLE",
+    "SOURCE_CYCLE_UNAVAILABLE",
+    "SOURCE_UNAVAILABLE",
+    "ADAPTER_UNAVAILABLE",
 }
 NON_TRANSIENT_ERROR_CODES: set[str] = {
     "INVALID_MANIFEST",
+    "MALFORMED_INPUT",
+    "POLICY_BLOCKED",
     "PERMISSION_DENIED",
     "OUTPUT_INCOMPLETE",
     "TEMPLATE_NOT_ALLOWED",
     "MANIFEST_SCHEMA_INVALID",
-    "OUT_OF_MEMORY",
 }
 DEFAULT_BACKOFF_SCHEDULE = [60, 300, 900]
 ACTIVE_RETRY_STATUSES = {"pending", "submitted", "running"}
 FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
+TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
+DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published"}
 
 
 def is_transient_error(error_code: str | None) -> bool:
     return error_code in TRANSIENT_ERROR_CODES
+
+
+def classify_failure(
+    error_code: str | None,
+    *,
+    attempt: int = 0,
+    retry_limit: int | None = None,
+    manual: bool = False,
+) -> dict[str, Any]:
+    code = str(error_code or "UNKNOWN_FAILURE")
+    classifier = failure_classifier(code)
+    retryable = is_retryable_failure(code)
+    limit_exhausted = retry_limit is not None and attempt >= retry_limit
+    permanent = not manual and (not retryable or limit_exhausted)
+    return {
+        "classifier": classifier,
+        "reason_code": code,
+        "retryable": retryable and not limit_exhausted,
+        "permanent": permanent,
+        "attempt": attempt,
+        "retry_limit": retry_limit,
+        "limit_exhausted": limit_exhausted,
+        "manual_retry_marker": manual,
+    }
+
+
+def failure_classifier(error_code: str | None) -> str:
+    code = str(error_code or "").upper()
+    if code in {"SOURCE_CYCLE_UNAVAILABLE", "SOURCE_UNAVAILABLE", "ADAPTER_UNAVAILABLE"}:
+        return "source_unavailable"
+    if code in {"ADAPTER_FAILURE", "DATA_ADAPTER_FAILED", "DOWNLOAD_FAILED", "FAILED_DOWNLOAD"}:
+        return "adapter_failure"
+    if code in {"FORCING_FAILED", "FAILED_FORCING", "FORCING_TASK_FAILED"}:
+        return "forcing_failure"
+    if code in {"PARSE_FAILED", "FAILED_PARSE", "OUTPUT_INCOMPLETE"}:
+        return "parse_failure"
+    if code in {"PUBLISH_FAILED", "FAILED_PUBLISH", "FREQUENCY_FAILED", "NO_PUBLISHABLE_PRODUCTS"}:
+        return "publication_failure"
+    if code in {
+        "SLURM_TIMEOUT",
+        "SLURM_JOB_TIMEOUT",
+        "NODE_FAILURE",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "SLURM_UNAVAILABLE",
+        "SBATCH_SUBMISSION_FAILED",
+        "STORAGE_WRITE_FAILED",
+    }:
+        return "transient_slurm_runtime"
+    if code in {"SHUD_FAILED", "FAILED_RUN", "RUNTIME_FAILED"}:
+        return "shud_runtime_failure"
+    if code in {"INVALID_MANIFEST", "MANIFEST_SCHEMA_INVALID", "MALFORMED_INPUT"}:
+        return "malformed_input"
+    if code in {"POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}:
+        return "policy_blocked"
+    return "unknown_failure"
+
+
+def is_retryable_failure(error_code: str | None) -> bool:
+    return is_transient_error(error_code)
 
 
 def compute_backoff_seconds(retry_count: int, backoff_schedule: list[int] | None = None) -> int:
@@ -118,11 +188,21 @@ class RetryService:
         self.config = config
 
     def should_auto_retry(self, job: PipelineJob) -> bool:
-        if job.status == "permanently_failed":
-            return False
-        if not is_transient_error(job.error_code):
-            return False
-        return job.retry_count < self.config.max_retries
+        policy = self.retry_policy_for_job(job)
+        return bool(policy["auto_retry"])
+
+    def retry_policy_for_job(self, job: PipelineJob) -> dict[str, Any]:
+        classification = classify_failure(
+            job.error_code,
+            attempt=job.retry_count,
+            retry_limit=self.config.max_retries,
+        )
+        return {
+            **classification,
+            "auto_retry": job.status != "permanently_failed"
+            and classification["retryable"]
+            and not classification["permanent"],
+        }
 
     def handle_failed_job(self, job: PipelineJob) -> PipelineJob:
         if self.should_auto_retry(job):
@@ -132,6 +212,11 @@ class RetryService:
     def schedule_auto_retry(self, job: PipelineJob) -> PipelineJob:
         status_from = job.status
         previous_error = job.error_code
+        classification = classify_failure(
+            previous_error,
+            attempt=job.retry_count,
+            retry_limit=self.config.max_retries,
+        )
         next_retry_count = job.retry_count + 1
         backoff_seconds = compute_backoff_seconds(job.retry_count, self.config.backoff_schedule)
 
@@ -161,6 +246,7 @@ class RetryService:
                 "backoff_seconds": backoff_seconds,
                 "previous_job_id": job.job_id,
                 "slurm_job_id": retry_job.slurm_job_id,
+                "failure": classification,
             },
             commit=False,
         )
@@ -174,6 +260,11 @@ class RetryService:
 
         status_from = job.status
         last_error = job.error_code
+        classification = classify_failure(
+            last_error,
+            attempt=job.retry_count,
+            retry_limit=self.config.max_retries,
+        )
         job.status = "permanently_failed"
         job.updated_at = datetime.now(UTC)
         self.store.session.add(job)
@@ -187,6 +278,8 @@ class RetryService:
             details={
                 "final_retry_count": job.retry_count,
                 "last_error": last_error,
+                "failure": classification,
+                "automatic_retry_stopped": True,
             },
         )
         return job
@@ -242,18 +335,34 @@ class RetryService:
             if not locked_jobs:
                 raise RetryNotFoundError(run_id)
 
-            jobs = self.store.query_jobs_by_run(run_id)
+            if has_hydro_run_table and _hydro_run_status(self.store, run_id) in DURABLE_HYDRO_SUCCESS_STATUSES:
+                raise RetryNotFoundError(run_id)
+
+            jobs = _jobs_by_truth_time(self.store.query_jobs_by_run(run_id))
             active_job = next((job for job in jobs if job.status in ACTIVE_RETRY_STATUSES), None)
             if active_job is not None:
                 raise RetryConflictError(run_id, active_job)
 
-            failed_job = next((job for job in reversed(jobs) if job.status in FAILED_RETRY_STATUSES), None)
+            latest_truth_job = jobs[-1]
+            if latest_truth_job.status in TERMINAL_SUCCESS_RETRY_STATUSES:
+                raise RetryNotFoundError(run_id)
+            failed_job = (
+                latest_truth_job
+                if latest_truth_job.status in MANUAL_RETRY_SOURCE_STATUSES
+                else next((job for job in reversed(jobs) if job.status in MANUAL_RETRY_SOURCE_STATUSES), None)
+            )
             if failed_job is None:
                 raise RetryNotFoundError(run_id)
 
             status_from = failed_job.status
-            previous_error = failed_job.error_code
+            previous_error = failed_job.error_code or ("cancelled" if failed_job.status == "cancelled" else None)
             next_retry_count = failed_job.retry_count + 1
+            classification = classify_failure(
+                previous_error,
+                attempt=next_retry_count,
+                retry_limit=self.config.max_retries,
+                manual=True,
+            )
             retry_job = self.store.create_job(
                 job_id=f"{run_id}_retry_{uuid4().hex[:8]}",
                 run_id=failed_job.run_id,
@@ -279,6 +388,9 @@ class RetryService:
                     "previous_error": previous_error,
                     "previous_job_id": failed_job.job_id,
                     "slurm_job_id": retry_job.slurm_job_id,
+                    "manual_retry_marker": True,
+                    "prior_failure_reason": previous_error,
+                    "failure": classification,
                 },
                 commit=False,
             )
@@ -318,7 +430,7 @@ class RetryService:
                             error_code = NULL,
                             error_message = NULL
                         WHERE run_id = :run_id
-                          AND status = 'failed'
+                          AND status IN ('failed', 'cancelled')
                         """
                     ),
                     {"run_id": retry_run_id},
@@ -388,18 +500,20 @@ class RetryService:
                     "model_id": model_id,
                     "cycle_id": retry_job.cycle_id,
                     "job_type": retry_job.job_type,
-                    "stage": retry_job.stage,
-                    "pipeline_job_id": retry_job.job_id,
-                    "retry_count": retry_job.retry_count,
-                },
-            )
+                "stage": retry_job.stage,
+                "pipeline_job_id": retry_job.job_id,
+                "retry_count": retry_job.retry_count,
+                "manual_retry_marker": True,
+            },
+        )
         )
         return _coerce_gateway_payload(submitted)
 
     def _record_retry_submission_failure(self, retry_job: PipelineJob, error: Exception) -> None:
+        error_message = _safe_error_message(str(getattr(error, "message", None) or error))
         retry_job.status = "submission_failed"
         retry_job.error_code = _retry_submission_error_code(error)
-        retry_job.error_message = str(getattr(error, "message", None) or error)
+        retry_job.error_message = error_message
         retry_job.finished_at = datetime.now(UTC)
         retry_job.updated_at = retry_job.finished_at
         self.store.session.add(retry_job)
@@ -409,11 +523,11 @@ class RetryService:
             event_type="submission",
             status_from="pending",
             status_to="submission_failed",
-            message=f"Manual retry submission failed: {retry_job.error_message}",
+            message=f"Manual retry submission failed: {error_message}",
             details={
                 "trigger": "manual",
                 "error_code": retry_job.error_code,
-                "error_message": retry_job.error_message,
+                "error_message": error_message,
             },
             commit=False,
         )
@@ -455,6 +569,21 @@ class RetryService:
         return _model_id_from_hydro_run(self.store, retry_job.run_id) or _model_id_from_run_id(retry_job.run_id)
 
 
+def _jobs_by_truth_time(jobs: list[PipelineJob]) -> list[PipelineJob]:
+    return sorted(
+        jobs,
+        key=lambda job: (
+            _job_truth_timestamp(job) or datetime.min.replace(tzinfo=UTC),
+            job.created_at or datetime.min.replace(tzinfo=UTC),
+            job.job_id,
+        ),
+    )
+
+
+def _job_truth_timestamp(job: PipelineJob) -> datetime | None:
+    return job.updated_at or job.finished_at or job.submitted_at or job.started_at or job.created_at
+
+
 def _has_hydro_run_table(store: PipelineStore) -> bool:
     try:
         return inspect(store.session.get_bind()).has_table("hydro_run", schema="hydro")
@@ -472,6 +601,19 @@ def _model_id_from_hydro_run(store: PipelineStore, run_id: str | None) -> str | 
             return None
         value = store.session.execute(
             text("SELECT model_id FROM hydro.hydro_run WHERE run_id = :run_id LIMIT 1"),
+            {"run_id": run_id},
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        return None
+    return str(value) if value else None
+
+
+def _hydro_run_status(store: PipelineStore, run_id: str | None) -> str | None:
+    if not run_id:
+        return None
+    try:
+        value = store.session.execute(
+            text("SELECT status FROM hydro.hydro_run WHERE run_id = :run_id LIMIT 1"),
             {"run_id": run_id},
         ).scalar_one_or_none()
     except SQLAlchemyError:
@@ -519,3 +661,8 @@ def _retry_submission_error_code(error: Exception) -> str:
     if isinstance(error, SlurmGatewayError):
         return error.code
     return "SBATCH_SUBMISSION_FAILED"
+
+
+def _safe_error_message(message: str) -> str:
+    redacted = redact_payload(message)
+    return redacted if isinstance(redacted, str) else str(redacted)

@@ -1570,6 +1570,1591 @@ def test_completed_hydro_state_is_skipped_as_completed_not_active(
     assert orchestrator.calls == []
 
 
+@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "frequency_done", "published"])
+def test_candidate_state_terminal_hydro_success_records_durable_skip_reason(
+    tmp_path: Path,
+    hydro_status: str,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": hydro_status,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    state = skipped["state_evidence"]
+    assert result.evidence["candidates"] == []
+    assert skipped["reason"] == "terminal_hydro_success"
+    assert state["decision"] == "skip_terminal"
+    assert state["durable_hydro_status"] == hydro_status
+    assert state["native_shud_resubmitted"] is False
+    assert state["parse_resubmitted"] is False
+    assert state["frequency_resubmitted"] is False
+    assert state["publish_resubmitted"] is False
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_without_native_rerun(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "failed",
+            "durable_shud_output_exists": True,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_forecast",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "succeeded",
+                    "stage": "forecast",
+                    "slurm_job_id": "7001",
+                },
+                {
+                    "job_id": "job_parse",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "failed",
+                    "stage": "parse",
+                    "error_code": "FAILED_PARSE",
+                    "retry_count": 1,
+                },
+            ],
+            "failed_stage": "parse",
+            "error_code": "FAILED_PARSE",
+            "retry_count": 1,
+            "retry_limit": 3,
+            "retryable": True,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    candidate = result.evidence["candidates"][0]
+    state = candidate["state_evidence"]
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert state["decision"] == "retry_downstream"
+    assert state["restart_stage"] == "parse"
+    assert state["durable_shud_output_reused"] is True
+    assert state["native_shud_resubmitted"] is False
+    assert state["failure"]["classifier"] == "parse_failure"
+    assert submitted_basin["restart_stage"] == "parse"
+    assert submitted_basin["durable_shud_output_reused"] is True
+    assert submitted_basin["native_shud_resubmitted"] is False
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("stage", "error_code", "expected_classifier"),
+    [
+        ("frequency", "FREQUENCY_FAILED", "publication_failure"),
+        ("publish", "PUBLISH_FAILED", "publication_failure"),
+    ],
+)
+def test_db_shaped_downstream_failure_after_shud_success_restarts_without_retryable_flag(
+    tmp_path: Path,
+    stage: str,
+    error_code: str,
+    expected_classifier: str,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "succeeded",
+            "durable_shud_output_exists": True,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            "pipeline_status": "failed",
+            "failed_stage": stage,
+            "error_code": error_code,
+            "retry_count": 1,
+            "retry_limit": 3,
+            "pipeline_jobs": [
+                {
+                    "job_id": f"job_{stage}",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "failed",
+                    "stage": stage,
+                    "error_code": error_code,
+                    "retry_count": 1,
+                }
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert state["decision"] == "retry_downstream"
+    assert state["restart_stage"] == stage
+    assert state["failure"]["classifier"] == expected_classifier
+    assert state["retry_policy"]["automatic_retry_allowed"] is True
+    assert "retryable" not in active_repository.state
+    assert submitted_basin["restart_stage"] == stage
+    assert submitted_basin["native_shud_resubmitted"] is False
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_newer_terminal_hydro_success_skips_older_failed_parse_job(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "published",
+            "hydro_run": {
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "status": "published",
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+                "updated_at": "2026-05-21T07:00:00Z",
+            },
+            "pipeline_status": "failed",
+            "failed_stage": "parse",
+            "error_code": "FAILED_PARSE",
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_parse_old",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "failed",
+                    "stage": "parse",
+                    "error_code": "FAILED_PARSE",
+                    "updated_at": "2026-05-21T06:00:00Z",
+                }
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    assert skipped["reason"] == "terminal_hydro_success"
+    assert skipped["state_evidence"]["durable_hydro_status"] == "published"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize("marker_created_at", [None, "2026-05-21T06:00:00Z", "2026-05-21T07:00:00Z"])
+def test_terminal_pipeline_success_is_not_overridden_by_manual_retry_marker(
+    tmp_path: Path,
+    marker_created_at: str | None,
+) -> None:
+    events: list[dict[str, Any]] = []
+    if marker_created_at is not None:
+        events.append(
+            {
+                "event_id": 10,
+                "event_type": "retry",
+                "created_at": marker_created_at,
+                "details": {
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "retry_count": 3,
+                    "previous_job_id": "job_failed",
+                },
+            }
+        )
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "published",
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_failed",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "model_id": "model_a",
+                    "status": "failed",
+                    "stage": "parse",
+                    "error_code": "FAILED_PARSE",
+                    "updated_at": "2026-05-21T05:50:00Z",
+                },
+                {
+                    "job_id": "job_publish_success",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "model_id": "model_a",
+                    "status": "published",
+                    "stage": "publish",
+                    "updated_at": "2026-05-21T06:30:00Z",
+                },
+            ],
+            "pipeline_events": events,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    assert skipped["reason"] == "terminal_pipeline_success"
+    assert skipped["state_evidence"]["decision"] == "skip_terminal"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_terminal_hydro_success_is_not_overridden_by_manual_retry_marker(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "published",
+            "hydro_run": {
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "status": "published",
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+                "updated_at": "2026-05-21T06:30:00Z",
+            },
+            "pipeline_events": [
+                {
+                    "event_id": 20,
+                    "event_type": "retry",
+                    "created_at": "2026-05-21T07:00:00Z",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": 2,
+                        "previous_job_id": "job_old_failed",
+                    },
+                }
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    assert skipped["reason"] == "terminal_hydro_success"
+    assert skipped["state_evidence"]["durable_hydro_status"] == "published"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_mixed_restart_and_fresh_candidates_are_executed_in_restart_compatible_cohorts(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = PerModelCandidateStateRepository(
+        {
+            "model_a": {
+                "hydro_status": "succeeded",
+                "durable_shud_output_exists": True,
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+                "pipeline_status": "failed",
+                "failed_stage": "parse",
+                "error_code": "FAILED_PARSE",
+                "retry_count": 1,
+                "retry_limit": 3,
+            },
+            "model_b": None,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert len(orchestrator.calls) == 2
+    calls_by_model = {
+        call["basins"][0]["model_id"]: call
+        for call in orchestrator.calls
+    }
+    assert calls_by_model["model_a"]["basins"][0]["restart_stage"] == "parse"
+    assert calls_by_model["model_a"]["basins"][0]["orchestration_run_id"].endswith("_parse_model_a")
+    assert "restart_stage" not in calls_by_model["model_b"]["basins"][0]
+    assert "orchestration_run_id" not in calls_by_model["model_b"]["basins"][0]
+
+
+def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_sees_active_truth(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    restart_states = {
+        "model_a": {
+            "hydro_status": "succeeded",
+            "durable_shud_output_exists": True,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            "pipeline_status": "failed",
+            "failed_stage": "parse",
+            "error_code": "FAILED_PARSE",
+            "retry_count": 1,
+            "retry_limit": 3,
+        },
+        "model_b": {
+            "hydro_status": "succeeded",
+            "durable_shud_output_exists": True,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_b/output/",
+            "pipeline_status": "failed",
+            "failed_stage": "parse",
+            "error_code": "FAILED_PARSE",
+            "retry_count": 1,
+            "retry_limit": 3,
+        },
+    }
+    active_states = {
+        model_id: {
+            "pipeline_status": "running",
+            "pipeline_jobs": [
+                {
+                    "job_id": f"job_cycle_gfs_2026052106_parse_{model_id}_parse",
+                    "run_id": f"cycle_gfs_2026052106_parse_{model_id}",
+                    "cycle_id": "gfs_2026052106",
+                    "model_id": model_id,
+                    "status": "running",
+                    "stage": "parse",
+                    "slurm_job_id": f"slurm_{model_id}",
+                    "updated_at": "2026-05-21T06:20:00Z",
+                }
+            ],
+        }
+        for model_id in ("model_a", "model_b")
+    }
+    active_repository = SequencedPerModelCandidateStateRepository(
+        first_states=restart_states,
+        second_states={},
+    )
+
+    class PersistingRestartOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            for basin in basins:
+                model_id = str(basin["model_id"])
+                active_repository.second_states[model_id] = active_states[model_id]
+                active_repository.second_states[model_id]["pipeline_jobs"][0]["run_id"] = str(
+                    basin["orchestration_run_id"]
+                )
+                active_repository.second_states[model_id]["pipeline_jobs"][0]["model_id"] = model_id
+            return super().orchestrate_cycle(source, cycle_time, basins)
+
+    orchestrator = PersistingRestartOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [(cycle_time.isoformat(), True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    first = scheduler.run_once()
+    active_repository.use_second_scan = True
+    second = scheduler.run_once()
+
+    assert first.evidence["counts"]["submitted_count"] == 2
+    assert len(orchestrator.calls) == 2
+    first_run_ids = [call["basins"][0]["orchestration_run_id"] for call in orchestrator.calls]
+    assert first_run_ids == [
+        "cycle_gfs_2026052106_parse_model_a",
+        "cycle_gfs_2026052106_parse_model_b",
+    ]
+    assert all(call["basins"][0]["restart_stage"] == "parse" for call in orchestrator.calls)
+    assert second.evidence["counts"]["submitted_count"] == 0
+    assert [item["reason"] for item in second.evidence["skipped_candidates"]] == [
+        "active_slurm_job",
+        "active_slurm_job",
+    ]
+    assert len(orchestrator.calls) == 2
+
+
+def test_sibling_active_restart_does_not_block_downstream_retry_candidate(tmp_path: Path) -> None:
+    class SiblingActiveRestartRepository(PerModelCandidateStateRepository):
+        def __init__(self) -> None:
+            super().__init__(
+                {
+                    "model_a": {
+                        "pipeline_status": "running",
+                        "pipeline_jobs": [
+                            {
+                                "job_id": "job_cycle_gfs_2026052106_parse_model_a",
+                                "run_id": "cycle_gfs_2026052106_parse_model_a",
+                                "cycle_id": "gfs_2026052106",
+                                "model_id": "model_a",
+                                "status": "running",
+                                "stage": "parse",
+                                "slurm_job_id": "slurm_model_a",
+                            }
+                        ],
+                    },
+                    "model_b": {
+                        "hydro_status": "succeeded",
+                        "durable_shud_output_exists": True,
+                        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_b/output/",
+                        "pipeline_status": "failed",
+                        "failed_stage": "parse",
+                        "error_code": "FAILED_PARSE",
+                        "retry_count": 1,
+                        "retry_limit": 3,
+                    },
+                }
+            )
+            self.orchestration_checks: list[tuple[str, datetime]] = []
+
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            self.orchestration_checks.append((source_id, cycle_time))
+            return True
+
+    repository = SiblingActiveRestartRepository()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["skipped_candidates"][0]["model_id"] == "model_a"
+    assert result.evidence["skipped_candidates"][0]["reason"] == "active_slurm_job"
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert submitted_basin["model_id"] == "model_b"
+    assert submitted_basin["restart_stage"] == "parse"
+    assert submitted_basin["orchestration_run_id"] == "cycle_gfs_2026052106_parse_model_b"
+
+
+def test_candidate_state_source_unavailable_is_retryable_enum_safe_evidence(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",))
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"IFS": FakeAdapter("IFS", [("2026-05-21T06:00:00Z", False)])},
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["blocked_candidates"][0]["state_evidence"]
+    assert state["failure"]["classifier"] == "source_unavailable"
+    assert state["failure"]["retryable"] is True
+    assert state["storage"]["met_forecast_cycle_status_written"] is None
+    assert state["retry_policy"]["unsupported_db_enum_written"] is False
+    assert result.evidence["source_cycles"][0]["db_cycle_status_written"] is None
+
+
+@pytest.mark.parametrize("error_code", ["NODE_FAILURE", "OUT_OF_MEMORY"])
+def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reuse_evidence(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "forecast",
+            "error_code": error_code,
+            "retry_count": 1,
+            "retry_limit": 3,
+            "array_task_id": 2,
+            "successful_sibling_outputs_reused": True,
+            "durable_shud_output_exists": False,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "retry_failed"
+    assert state["failure"]["classifier"] == "transient_slurm_runtime"
+    assert state["failure"]["retryable"] is True
+    assert state["task_identity"]["array_task_id"] == 2
+    assert state["reuse"]["successful_sibling_outputs_reused"] is True
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_reason"),
+    [
+        ("INVALID_MANIFEST", "permanent_failure_guard"),
+        ("POLICY_BLOCKED", "policy_blocked"),
+        ("SLURM_TIMEOUT", "retry_limit_exhausted"),
+        ("OUT_OF_MEMORY", "retry_limit_exhausted"),
+    ],
+)
+def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
+    tmp_path: Path,
+    error_code: str,
+    expected_reason: str,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "forecast",
+            "error_code": error_code,
+            "retry_count": 3,
+            "retry_limit": 3,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state = blocked["state_evidence"]
+    assert result.evidence["candidates"] == []
+    assert blocked["reason"] == expected_reason
+    assert state["decision"] == "permanent_failure"
+    assert state["retry_policy"]["automatic_retry_allowed"] is False
+    assert state["manual_retry_required"] is True
+    assert state["failure"]["permanent"] is True
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preserves_prior_reason(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "permanently_failed",
+            "failed_stage": "forecast",
+            "error_code": "INVALID_MANIFEST",
+            "retry_count": 3,
+            "retry_limit": 3,
+            "manual_retry": {"marker": True, "requested_by": "operator"},
+            "prior_failure_reason": "INVALID_MANIFEST",
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert result.evidence["blocked_candidates"] == []
+    assert state["decision"] == "manual_retry"
+    assert state["manual_retry"]["marker"] is True
+    assert state["manual_retry"]["allowed"] is True
+    assert state["prior_failure_reason"] == "INVALID_MANIFEST"
+    assert state["failure"]["previous_attempt"] == 3
+    assert state["failure"]["new_attempt"] == 4
+    assert state["failure"]["manual_retry_marker"] is True
+    assert state["retry_policy"]["previous_attempt"] == 3
+    assert state["retry_policy"]["new_attempt"] == 4
+    assert state["retry_policy"]["attempt"] == 4
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_db_shaped_transient_failure_uses_scheduler_retry_limit_without_state_retry_limit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, retry_limit=3)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "forecast",
+            "error_code": "SLURM_TIMEOUT",
+            "retry_count": 3,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state = blocked["state_evidence"]
+    assert blocked["reason"] == "retry_limit_exhausted"
+    assert state["retry_policy"]["retry_limit"] == 3
+    assert state["retry_policy"]["automatic_retry_allowed"] is False
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize("error_code", ["POLICY_BLOCKED", "INVALID_MANIFEST", "SLURM_TIMEOUT"])
+def test_durable_downstream_permanent_or_exhausted_failure_blocks_until_manual_retry(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    retry_count = 3 if error_code == "SLURM_TIMEOUT" else 1
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, retry_limit=3)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "succeeded",
+            "durable_shud_output_exists": True,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            "pipeline_status": "failed",
+            "failed_stage": "parse",
+            "error_code": error_code,
+            "retry_count": retry_count,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["blocked_candidates"][0]["state_evidence"]
+    assert state["decision"] == "permanent_failure"
+    assert state["retry_policy"]["automatic_retry_allowed"] is False
+    assert state["manual_retry_required"] is True
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_cancelled_candidate_requires_manual_retry_and_manual_marker_allows_retry(tmp_path: Path) -> None:
+    cancelled_state = {
+        "pipeline_status": "cancelled",
+        "hydro_status": "cancelled",
+        "retry_count": 1,
+    }
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    blocked_orchestrator = FakeProductionOrchestrator()
+    blocked_scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeCandidateStateRepository(cancelled_state),
+        orchestrator_factory=lambda _source_id: blocked_orchestrator,
+    )
+
+    blocked = blocked_scheduler.run_once()
+
+    assert blocked.evidence["blocked_candidates"][0]["reason"] == "manual_retry_required_after_cancelled"
+    assert blocked.evidence["blocked_candidates"][0]["state_evidence"]["replacement_submitted"] is False
+    assert blocked.evidence["counts"]["submitted_count"] == 0
+    assert blocked_orchestrator.calls == []
+
+    retry_orchestrator = FakeProductionOrchestrator()
+    retry_scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeCandidateStateRepository(
+            {**cancelled_state, "manual_retry": {"marker": True}, "prior_failure_reason": "cancelled"}
+        ),
+        orchestrator_factory=lambda _source_id: retry_orchestrator,
+    )
+
+    retried = retry_scheduler.run_once()
+
+    assert retried.evidence["blocked_candidates"] == []
+    assert retried.evidence["candidates"][0]["state_evidence"]["decision"] == "manual_retry"
+    assert retried.evidence["counts"]["submitted_count"] == 1
+    assert retry_orchestrator.calls
+
+
+def test_candidate_state_cycle_aggregate_success_does_not_skip_failed_model_and_reuses_sibling(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    task_results = [
+        {"task_id": 0, "array_task_id": 0, "model_id": "model_a", "status": "succeeded"},
+        {
+            "task_id": 1,
+            "array_task_id": 1,
+            "model_id": "model_b",
+            "status": "failed",
+            "error_code": "NODE_FAILURE",
+            "error_message": "node lost",
+        },
+    ]
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_forcing",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "model_id": None,
+                    "status": "partially_failed",
+                    "stage": "forcing",
+                    "error_code": "NODE_FAILURE",
+                },
+                {
+                    "job_id": "job_cycle_gfs_2026052106_publish",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "model_id": None,
+                    "status": "succeeded",
+                    "stage": "publish",
+                },
+            ],
+            "pipeline_events": [
+                {
+                    "event_type": "status_change",
+                    "entity_id": "job_cycle_gfs_2026052106_forcing",
+                    "status_to": "partially_failed",
+                    "details": {
+                        "stage": "forcing",
+                        "job_type": "produce_forcing_array",
+                        "task_results": task_results,
+                    },
+                }
+            ],
+            "pipeline_status": "failed",
+            "failed_stage": "forcing",
+            "error_code": "NODE_FAILURE",
+            "array_task_id": 1,
+            "original_task_id": 1,
+            "successful_sibling_outputs_reused": True,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert state["decision"] == "retry_failed"
+    assert state["task_identity"]["array_task_id"] == 1
+    assert state["task_identity"]["original_task_id"] == 1
+    assert state["reuse"]["successful_sibling_outputs_reused"] is True
+    assert submitted_basin["state_evidence"]["task_identity"]["array_task_id"] == 1
+    assert result.evidence["skipped_candidates"] == []
+
+
+def test_ambiguous_array_task_events_do_not_drive_retry_or_sibling_reuse(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    task_results = [
+        {"task_id": 0, "array_task_id": 0, "status": "succeeded"},
+        {
+            "task_id": 1,
+            "array_task_id": 1,
+            "status": "failed",
+            "error_code": "NODE_FAILURE",
+        },
+    ]
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_forcing",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "model_id": None,
+                    "status": "partially_failed",
+                    "stage": "forcing",
+                    "error_code": "NODE_FAILURE",
+                },
+                {
+                    "job_id": "job_cycle_gfs_2026052106_publish",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "model_id": None,
+                    "status": "succeeded",
+                    "stage": "publish",
+                },
+            ],
+            "pipeline_events": [
+                {
+                    "event_type": "status_change",
+                    "entity_id": "job_cycle_gfs_2026052106_forcing",
+                    "status_to": "partially_failed",
+                    "details": {
+                        "stage": "forcing",
+                        "job_type": "produce_forcing_array",
+                        "task_results": task_results,
+                    },
+                }
+            ],
+            "pipeline_status": None,
+            "failed_stage": None,
+            "error_code": None,
+            "array_task_id": None,
+            "original_task_id": None,
+            "successful_sibling_outputs_reused": False,
+            "shared_cycle_aggregate": True,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert "state_evidence" not in result.evidence["candidates"][0]
+    assert "state_evidence" not in result.evidence["model_run_evidence"][0]
+    assert "state_evidence" not in submitted_basin
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_manual_retry_event_in_candidate_state_preserves_prior_reason_and_attempts(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "permanently_failed",
+            "failed_stage": "parse",
+            "error_code": "INVALID_MANIFEST",
+            "retry_count": 3,
+            "pipeline_events": [
+                {
+                    "event_type": "retry",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": 4,
+                        "prior_failure_reason": "INVALID_MANIFEST",
+                        "previous_error": "INVALID_MANIFEST",
+                        "previous_job_id": "job_parse",
+                    },
+                }
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "manual_retry"
+    assert state["manual_retry"]["marker"] is True
+    assert state["manual_retry"]["previous_attempt"] == 3
+    assert state["manual_retry"]["new_attempt"] == 4
+    assert state["manual_retry"]["prior_failure_reason"] == "INVALID_MANIFEST"
+    assert state["prior_failure_reason"] == "INVALID_MANIFEST"
+    assert state["retry_policy"]["attempt"] == 4
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_candidate_state_rows_and_events_are_bounded_before_evidence_amplification(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        candidate_state_job_limit=2,
+        candidate_state_event_limit=1,
+    )
+    jobs = [
+        {
+            "job_id": f"job_{index}",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "status": "failed",
+            "stage": "forecast",
+            "error_code": "NODE_FAILURE",
+        }
+        for index in range(5)
+    ]
+    events = [
+        {
+            "event_type": "status_change",
+            "details": {"stage": "forecast", "payload": "x" * 1000},
+        }
+        for _ in range(4)
+    ]
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_jobs": jobs,
+            "pipeline_events": events,
+            "pipeline_jobs_total": len(jobs),
+            "pipeline_events_total": len(events),
+            "pipeline_status": "failed",
+            "failed_stage": "forecast",
+            "error_code": "NODE_FAILURE",
+        }
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert len(state["pipeline_jobs"]) == 2
+    assert len(state["pipeline_events"]) == 1
+    assert state["state_bounds"]["overflow"] is True
+    assert state["state_bounds"]["pipeline_jobs_total"] == 5
+    assert state["state_bounds"]["pipeline_events_total"] == 4
+
+
+@pytest.mark.parametrize(
+    ("latest_status", "expected_reason"),
+        [
+            ("permanently_failed", "permanent_failure_guard"),
+            ("cancelled", "manual_retry_required_after_cancelled"),
+            ("running", "active_slurm_job"),
+        ],
+)
+def test_latest_bounded_candidate_state_row_wins_over_older_truncated_rows(
+    tmp_path: Path,
+    latest_status: str,
+    expected_reason: str,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        candidate_state_job_limit=2,
+    )
+    jobs = [
+        {
+            "job_id": "job_old_failed",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "status": "failed",
+            "stage": "forecast",
+            "retry_count": 1,
+            "error_code": "NODE_FAILURE",
+            "submitted_at": "2026-05-21T06:00:00Z",
+        },
+        {
+            "job_id": "job_old_retry",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "status": "failed",
+            "stage": "forecast",
+            "retry_count": 2,
+            "error_code": "NODE_FAILURE",
+            "submitted_at": "2026-05-21T06:10:00Z",
+        },
+        {
+            "job_id": "job_latest",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "status": latest_status,
+            "stage": "forecast",
+            "retry_count": 3,
+            "error_code": "INVALID_MANIFEST" if latest_status == "permanently_failed" else None,
+            "slurm_job_id": "999" if latest_status == "running" else None,
+            "submitted_at": "2026-05-21T06:20:00Z",
+        },
+    ]
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_jobs": jobs[-2:],
+            "pipeline_jobs_total": len(jobs),
+            "state_truncated": True,
+            "pipeline_status": latest_status,
+            "failed_stage": "forecast" if latest_status == "permanently_failed" else None,
+            "error_code": "INVALID_MANIFEST" if latest_status == "permanently_failed" else None,
+            "retry_count": 3,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped_or_blocked = [*result.evidence["blocked_candidates"], *result.evidence["skipped_candidates"]]
+    assert skipped_or_blocked[0]["reason"] == expected_reason
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_latest_manual_retry_event_outside_oldest_first_cap_allows_candidate(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        candidate_state_event_limit=1,
+    )
+    older_events = [
+        {
+            "event_type": "status_change",
+            "created_at": f"2026-05-21T06:0{index}:00Z",
+            "details": {"stage": "forecast", "error_code": "INVALID_MANIFEST"},
+        }
+        for index in range(4)
+    ]
+    latest_manual_retry = {
+        "event_type": "retry",
+        "created_at": "2026-05-21T06:10:00Z",
+        "details": {
+            "trigger": "manual",
+            "manual_retry_marker": True,
+            "retry_count": 4,
+            "prior_failure_reason": "INVALID_MANIFEST",
+        },
+    }
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "permanently_failed",
+            "failed_stage": "forecast",
+            "error_code": "INVALID_MANIFEST",
+            "retry_count": 3,
+            "pipeline_events": [latest_manual_retry],
+            "pipeline_events_total": len(older_events) + 1,
+            "state_truncated": True,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "manual_retry"
+    assert state["manual_retry"]["new_attempt"] == 4
+    assert state["state_bounds"]["pipeline_events_overflow"] is True
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+
+
+@pytest.mark.parametrize(
+    ("latest_status", "expected_reason"),
+    [
+        ("permanently_failed", "permanent_failure_guard"),
+        ("cancelled", "manual_retry_required_after_cancelled"),
+        ("running", "active_slurm_job"),
+    ],
+)
+def test_stale_manual_retry_marker_does_not_override_newer_blocking_truth(
+    tmp_path: Path,
+    latest_status: str,
+    expected_reason: str,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    latest_job = {
+        "job_id": "job_latest",
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "status": latest_status,
+        "stage": "forecast",
+        "retry_count": 3,
+        "error_code": "INVALID_MANIFEST" if latest_status == "permanently_failed" else None,
+        "slurm_job_id": "999" if latest_status == "running" else None,
+        "submitted_at": "2026-05-21T06:20:00Z",
+        "updated_at": "2026-05-21T06:21:00Z",
+    }
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": latest_status,
+            "failed_stage": "forecast" if latest_status == "permanently_failed" else None,
+            "error_code": "INVALID_MANIFEST" if latest_status == "permanently_failed" else None,
+            "retry_count": 3,
+            "pipeline_jobs": [latest_job],
+            "pipeline_events": [
+                {
+                    "event_id": 1,
+                    "event_type": "retry",
+                    "created_at": "2026-05-21T06:10:00Z",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": 3,
+                        "previous_job_id": "job_old_failed",
+                        "prior_failure_reason": "NODE_FAILURE",
+                    },
+                },
+                {
+                    "event_id": 2,
+                    "event_type": "status_change",
+                    "entity_id": "job_latest",
+                    "status_to": latest_status,
+                    "created_at": "2026-05-21T06:21:00Z",
+                    "details": {
+                        "stage": "forecast",
+                        "error_code": "INVALID_MANIFEST" if latest_status == "permanently_failed" else None,
+                    },
+                },
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped_or_blocked = [*result.evidence["blocked_candidates"], *result.evidence["skipped_candidates"]]
+    assert skipped_or_blocked[0]["reason"] == expected_reason
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_newer_manual_retry_after_terminal_truth_allows_candidate_and_preserves_attempts(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "permanently_failed",
+            "failed_stage": "forecast",
+            "error_code": "INVALID_MANIFEST",
+            "retry_count": 3,
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_latest",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "permanently_failed",
+                    "stage": "forecast",
+                    "retry_count": 3,
+                    "error_code": "INVALID_MANIFEST",
+                    "updated_at": "2026-05-21T06:20:00Z",
+                }
+            ],
+            "pipeline_events": [
+                {
+                    "event_id": 5,
+                    "event_type": "retry",
+                    "entity_id": "job_retry",
+                    "created_at": "2026-05-21T06:30:00Z",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": 4,
+                        "previous_job_id": "job_latest",
+                        "prior_failure_reason": "INVALID_MANIFEST",
+                    },
+                }
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "manual_retry"
+    assert state["manual_retry"]["previous_attempt"] == 3
+    assert state["manual_retry"]["new_attempt"] == 4
+    assert state["manual_retry"]["prior_failure_reason"] == "INVALID_MANIFEST"
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_reason"),
+    [
+        (
+            {
+                "pipeline_status": "running",
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_running",
+                        "run_id": "fcst_gfs_2026052106_model_a",
+                        "status": "running",
+                        "stage": "forecast",
+                        "slurm_job_id": "999",
+                        "updated_at": "2026-05-21T06:20:00Z",
+                    }
+                ],
+            },
+            "active_slurm_job",
+        ),
+        (
+            {
+                "pipeline_status": "running",
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_running_no_slurm",
+                        "run_id": "fcst_gfs_2026052106_model_a",
+                        "status": "running",
+                        "stage": "forecast",
+                        "updated_at": "2026-05-21T06:20:00Z",
+                    }
+                ],
+            },
+            "active_duplicate_pipeline",
+        ),
+        (
+            {
+                "pipeline_events": [
+                    {
+                        "event_id": 8,
+                        "event_type": "status_change",
+                        "entity_id": "job_event_only_running",
+                        "status_to": "running",
+                        "created_at": "2026-05-21T06:20:00Z",
+                        "details": {"stage": "forecast"},
+                    }
+                ],
+            },
+            "active_duplicate_pipeline",
+        ),
+    ],
+)
+def test_newer_manual_retry_marker_does_not_override_active_truth(
+    tmp_path: Path,
+    state: dict[str, Any],
+    expected_reason: str,
+) -> None:
+    state = dict(state)
+    pipeline_events = list(state.pop("pipeline_events", []))
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            **state,
+            "pipeline_events": [
+                *pipeline_events,
+                {
+                    "event_id": 9,
+                    "event_type": "retry",
+                    "entity_id": "job_manual_retry",
+                    "created_at": "2026-05-21T06:30:00Z",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": 4,
+                        "previous_job_id": "job_old_failed",
+                    },
+                }
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    assert skipped["reason"] == expected_reason
+    assert skipped["state_evidence"]["decision"] == "skip_active"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+
+
+def test_manual_retry_marker_override_helper_never_overrides_active_blocker() -> None:
+    assert (
+        scheduler_module._manual_retry_marker_overrides_blocker(
+            {
+                "timestamp": _dt("2026-05-21T06:30:00Z"),
+                "attempt": 4,
+                "previous_job_id": "job_running",
+            },
+            {
+                "timestamp": _dt("2026-05-21T06:20:00Z"),
+                "attempt": 3,
+                "job_id": "job_running",
+                "active": True,
+            },
+        )
+        is False
+    )
+
+
+def test_active_skip_and_cancel_evidence_redacts_secret_urls_and_error_messages(tmp_path: Path) -> None:
+    secret_uri = "s3://bucket/logs/job.out?token=supersecret"
+    secret_message = "failed callback https://user:pass@example.test/log?signature=abc token=rawsecret"
+    active_jobs = [
+        {
+            "job_id": "job_forcing",
+            "slurm_job_id": "7777",
+            "stage": "forcing",
+            "status": "running",
+            "log_uri": secret_uri,
+            "error_message": secret_message,
+        }
+    ]
+    skip_scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(active_jobs=active_jobs),
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    skipped = skip_scheduler.run_once()
+
+    skipped_json = json.dumps(skipped.evidence)
+    assert "supersecret" not in skipped_json
+    assert "rawsecret" not in skipped_json
+    assert "user:pass" not in skipped_json
+    assert "s3://bucket/logs/job.out?token" not in skipped_json
+
+    cancel_orchestrator = FakeProductionOrchestrator(
+        cancel_payload=[
+            {
+                **active_jobs[0],
+                "status": "cancelled",
+                "replacement_submitted": False,
+            }
+        ]
+    )
+    cancel_scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, cancel_active_slurm=True),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(active_jobs=active_jobs),
+        orchestrator_factory=lambda _source_id: cancel_orchestrator,
+    )
+
+    cancelled = cancel_scheduler.run_once()
+
+    cancelled_json = json.dumps(cancelled.evidence)
+    assert "supersecret" not in cancelled_json
+    assert "rawsecret" not in cancelled_json
+    assert "user:pass" not in cancelled_json
+    assert "s3://bucket/logs/job.out?token" not in cancelled_json
+
+
+def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_path: Path) -> None:
+    class SecretFailureOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            raise RuntimeError(
+                "failed https://user:pass@example.test/log?signature=sig123 "
+                "token=tok123 password=pass123"
+            )
+
+    orchestrator = SecretFailureOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    artifact_text = Path(result.artifact_path or "").read_text(encoding="utf-8")
+    evidence_text = json.dumps(result.evidence, sort_keys=True)
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+    for raw_secret in ("user:pass", "sig123", "tok123", "pass123", "signature=sig123", "token=tok123"):
+        assert raw_secret not in evidence_text
+        assert raw_secret not in artifact_text
+    assert "[redacted]" in evidence_text
+    assert "[redacted]" in artifact_text
+
+
+def test_active_db_job_cancel_requested_calls_cancel_before_active_skip(tmp_path: Path) -> None:
+    active_state = {
+        "pipeline_jobs": [
+            {
+                "job_id": "job_forcing",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "status": "running",
+                "stage": "forcing",
+                "slurm_job_id": "7777",
+            }
+        ],
+        "pipeline_status": "running",
+    }
+    active_jobs = [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}]
+    active_repository = CandidateAndActiveRepository(active_state, active_jobs)
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, cancel_active_slurm=True),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"][0]["reason"] == "cancel_requested_active_slurm"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
+    assert orchestrator.calls == []
+
+
+def test_stale_active_db_job_terminal_slurm_sync_does_not_skip_forever(tmp_path: Path) -> None:
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            self.synced = False
+            super().__init__(
+                {
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": "fcst_gfs_2026052106_model_a",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                    "pipeline_status": "running",
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            if self.synced:
+                return {
+                    "pipeline_status": "failed",
+                    "failed_stage": "forcing",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 0,
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": kwargs["run_id"],
+                            "status": "failed",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                            "error_code": "NODE_FAILURE",
+                        }
+                    ],
+                }
+            return super().candidate_state(**kwargs)
+
+        def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if self.synced else super().active_slurm_jobs(**kwargs)
+
+    repository = SyncingRepository()
+
+    class SyncingOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            repository.synced = True
+            return [
+                {
+                    "job_id": "job_forcing",
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": "7777",
+                    "status": "failed",
+                    "error_code": "NODE_FAILURE",
+                }
+            ]
+
+    orchestrator = SyncingOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "retry_failed"
+    assert state["slurm_state_sync"]["terminal_updates"][0]["status"] == "failed"
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
 @pytest.mark.parametrize(
     "hydro_status",
     ["failed", "cancelled", "submission_failed", "permanently_failed"],
@@ -2304,6 +3889,40 @@ def test_non_dry_run_partial_cycle_marks_unavailable_or_cancelled_candidate_as_p
     assert evidence_by_model["model_b"]["candidate_outcome"]["status"] == outcome_status
 
 
+def test_scheduler_evidence_redacts_signed_candidate_outcome_log_uri(tmp_path: Path) -> None:
+    secret_log_uri = "s3://nhms/runs/cycle/logs/2003_0.out?X-Amz-Signature=supersecret"
+    orchestrator = FakeProductionOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "failed",
+                "stage": "forcing",
+                "reason": "forcing_task_failed",
+                "log_uri": secret_log_uri,
+                "error_message": "failed token=rawsecret url=https://user:pass@example.test/log?signature=abc",
+            },
+        ),
+        result_status="parsed_partial",
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    outcome = result.evidence["model_run_evidence"][0]["candidate_outcome"]
+    evidence_text = json.dumps(result.evidence)
+    assert outcome["log_uri"] == "s3://nhms/runs/cycle/logs/2003_0.out"
+    assert "supersecret" not in evidence_text
+    assert "rawsecret" not in evidence_text
+    assert "user:pass" not in evidence_text
+
+
 def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
     monkeypatch: Any,
     tmp_path: Path,
@@ -2674,6 +4293,122 @@ class FakeSlurmActiveRepository(FakeActiveRepository):
         return [dict(job) for job in self.active_jobs]
 
 
+class FakeCandidateStateRepository(FakeActiveRepository):
+    def __init__(self, state: dict[str, Any]) -> None:
+        super().__init__(active=False, completed=False)
+        self.state = state
+        self.queries: list[dict[str, Any]] = []
+
+    def candidate_state(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        run_id: str,
+        forcing_version_id: str,
+        candidate_id: str,
+    ) -> dict[str, Any]:
+        self.queries.append(
+            {
+                "source_id": source_id,
+                "cycle_time": cycle_time,
+                "model_id": model_id,
+                "run_id": run_id,
+                "forcing_version_id": forcing_version_id,
+                "candidate_id": candidate_id,
+            }
+        )
+        return {
+            **dict(self.state),
+            "run_id": run_id,
+            "forcing_version_id": forcing_version_id,
+            "candidate_id": candidate_id,
+        }
+
+
+class CandidateAndActiveRepository(FakeCandidateStateRepository):
+    def __init__(self, state: dict[str, Any], active_jobs: list[dict[str, Any]]) -> None:
+        super().__init__(state)
+        self.active_jobs = active_jobs
+
+    def active_slurm_jobs(self, *, source_id: str, cycle_time: datetime, model_id: str) -> list[dict[str, Any]]:
+        del source_id, cycle_time, model_id
+        return [dict(job) for job in self.active_jobs]
+
+
+class PerModelCandidateStateRepository(FakeActiveRepository):
+    def __init__(self, states: dict[str, dict[str, Any] | None]) -> None:
+        super().__init__(active=False, completed=False)
+        self.states = states
+
+    def candidate_state(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        run_id: str,
+        forcing_version_id: str,
+        candidate_id: str,
+    ) -> dict[str, Any] | None:
+        del source_id, cycle_time
+        state = self.states.get(model_id)
+        if state is None:
+            return None
+        return {
+            **dict(state),
+            "run_id": run_id,
+            "forcing_version_id": forcing_version_id,
+            "candidate_id": candidate_id,
+        }
+
+
+class SequencedPerModelCandidateStateRepository(FakeActiveRepository):
+    def __init__(
+        self,
+        *,
+        first_states: dict[str, dict[str, Any] | None],
+        second_states: dict[str, dict[str, Any] | None],
+    ) -> None:
+        super().__init__(active=False, completed=False)
+        self.first_states = first_states
+        self.second_states = second_states
+        self.use_second_scan = False
+        self.queries: list[dict[str, Any]] = []
+
+    def candidate_state(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        run_id: str,
+        forcing_version_id: str,
+        candidate_id: str,
+    ) -> dict[str, Any] | None:
+        self.queries.append(
+            {
+                "source_id": source_id,
+                "cycle_time": cycle_time,
+                "model_id": model_id,
+                "run_id": run_id,
+                "forcing_version_id": forcing_version_id,
+                "candidate_id": candidate_id,
+                "scan": "second" if self.use_second_scan else "first",
+            }
+        )
+        state = (self.second_states if self.use_second_scan else self.first_states).get(model_id)
+        if state is None:
+            return None
+        return {
+            **dict(state),
+            "run_id": run_id,
+            "forcing_version_id": forcing_version_id,
+            "candidate_id": candidate_id,
+        }
+
+
 class FakeActiveCycleOrchestrationRepository:
     def __init__(self) -> None:
         self.orchestration_checks: list[tuple[str, datetime]] = []
@@ -2725,6 +4460,7 @@ class FakeProductionOrchestrator:
         candidate_outcomes: tuple[dict[str, Any], ...] = (),
         result_status: str = "complete",
         expose_object_store: bool = True,
+        cancel_payload: list[dict[str, Any]] | None = None,
     ) -> None:
         self.calls: list[dict[str, Any]] = []
         self.cancel_calls: list[tuple[str, str]] = []
@@ -2732,6 +4468,7 @@ class FakeProductionOrchestrator:
             self.object_store = LocalObjectStore("/tmp/nhms-test-object-store", "s3://nhms")
         self.candidate_outcomes = candidate_outcomes
         self.result_status = result_status
+        self.cancel_payload = cancel_payload
 
     def orchestrate_cycle(
         self,
@@ -2760,6 +4497,8 @@ class FakeProductionOrchestrator:
 
     def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
         self.cancel_calls.append((cycle_id, reason))
+        if self.cancel_payload is not None:
+            return [dict(item) for item in self.cancel_payload]
         return [
             {
                 "job_id": "job_forcing",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
+from services.slurm_gateway.gateway import SlurmGatewayError
 from workers.data_adapters.base import cycle_id_for
 
 
@@ -897,6 +899,51 @@ def test_queue_depth() -> None:
 
         assert response.status_code == 200
         assert response.json()["data"] == {"running": 2, "pending": 3, "idle": 1}
+
+
+def test_queue_depth_direct_method_error_redacts_secret_gateway_payload() -> None:
+    class QueueDepthSecretGateway:
+        def queue_depth(self) -> dict[str, int]:
+            raise SlurmGatewayError(
+                502,
+                "SLURM_ERROR",
+                "squeue failed token=tok123 for https://user:pass@example.test/log?signature=sig123",
+                {"stderr": "password=pass123 X-Amz-Signature=sig123 token=tok123"},
+            )
+
+    with _store() as store:
+        with _client(store, QueueDepthSecretGateway()) as client:
+            response = client.get("/api/v1/queue/depth")
+
+    response_text = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "SLURM_ERROR"
+    for raw_secret in ("user:pass", "tok123", "sig123", "pass123", "signature=sig123"):
+        assert raw_secret not in response_text
+    assert "[redacted]" in response_text
+
+
+def test_queue_depth_list_jobs_error_redacts_secret_gateway_payload() -> None:
+    class ListJobsSecretGateway:
+        def list_jobs(self, *, limit: int, offset: int) -> list[Any]:
+            del limit, offset
+            raise SlurmGatewayError(
+                502,
+                "SLURM_ERROR",
+                "squeue failed token=tok123 for https://user:pass@example.test/log?signature=sig123",
+                {"stderr": "password=pass123 X-Amz-Signature=sig123 token=tok123"},
+            )
+
+    with _store() as store:
+        with _client(store, ListJobsSecretGateway()) as client:
+            response = client.get("/api/v1/queue/depth")
+
+    response_text = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "SLURM_ERROR"
+    for raw_secret in ("user:pass", "tok123", "sig123", "pass123", "signature=sig123"):
+        assert raw_secret not in response_text
+    assert "[redacted]" in response_text
 
 
 def test_response_wrapper() -> None:

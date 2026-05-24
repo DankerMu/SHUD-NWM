@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime
 
@@ -59,9 +60,10 @@ def test_should_auto_retry_poll_timeout() -> None:
         assert service.should_auto_retry(job) is True
 
 
-def test_should_auto_retry_non_transient() -> None:
+@pytest.mark.parametrize("error_code", ["INVALID_MANIFEST", "MALFORMED_INPUT", "POLICY_BLOCKED"])
+def test_should_auto_retry_non_transient(error_code: str) -> None:
     with _store() as store:
-        job = _create_job(store, error_code="INVALID_MANIFEST")
+        job = _create_job(store, error_code=error_code)
         service = RetryService(store, RetryConfig(max_retries=3))
 
         assert service.should_auto_retry(job) is False
@@ -77,6 +79,27 @@ def test_should_auto_retry_max_reached() -> None:
         assert service.should_auto_retry(job) is False
         assert job.status == "failed"
         assert _events(store) == []
+
+
+def test_out_of_memory_auto_retries_within_retry_limit() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=2)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        policy = service.retry_policy_for_job(job)
+        retry = service.handle_failed_job(job)
+
+        assert policy["classifier"] == "transient_slurm_runtime"
+        assert policy["retryable"] is True
+        assert policy["permanent"] is False
+        assert policy["auto_retry"] is True
+        assert retry.status == "pending"
+        assert retry.retry_count == 3
+        event = _events(store)[0]
+        assert event.event_type == "retry"
+        assert event.details["previous_error"] == "OUT_OF_MEMORY"
+        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
+        assert event.details["failure"]["retryable"] is True
 
 
 def test_handle_failed_job_transient() -> None:
@@ -112,6 +135,22 @@ def test_handle_failed_job_exhausted() -> None:
         updated = service.handle_failed_job(job)
 
         assert updated.status == "permanently_failed"
+
+
+def test_out_of_memory_exhausted_retry_limit_becomes_permanent() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=3)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        event = _events(store)[0]
+        assert event.event_type == "permanently_failed"
+        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
+        assert event.details["failure"]["retryable"] is False
+        assert event.details["failure"]["permanent"] is True
+        assert event.details["failure"]["limit_exhausted"] is True
 
 
 def test_schedule_auto_retry() -> None:
@@ -153,7 +192,11 @@ def test_mark_permanently_failed() -> None:
         assert event.event_type == "permanently_failed"
         assert event.status_from == "failed"
         assert event.status_to == "permanently_failed"
-        assert event.details == {"final_retry_count": 3, "last_error": "SLURM_TIMEOUT"}
+        assert event.details["final_retry_count"] == 3
+        assert event.details["last_error"] == "SLURM_TIMEOUT"
+        assert event.details["automatic_retry_stopped"] is True
+        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
+        assert event.details["failure"]["limit_exhausted"] is True
 
 
 def test_manual_retry_creates_new_job() -> None:
@@ -228,6 +271,49 @@ def test_manual_retry_submission_failure_marks_submission_failed() -> None:
         assert _events(store)[-1].status_to == "submission_failed"
 
 
+def test_manual_retry_submission_failure_redacts_persisted_event_and_api_error() -> None:
+    secret_message = (
+        "sbatch failed for https://alice:pass123@slurm.example/sbatch?"
+        "X-Amz-Signature=sig123&token=tok123 token=tok123 password=pass123"
+    )
+    with _store() as store:
+        _create_job(store, run_id="run_api_secret", error_code="SLURM_UNAVAILABLE")
+        service = RetryService(store, RetryConfig(max_retries=3))
+        gateway = _RecordingGateway(error=RuntimeError(secret_message))
+        app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+        try:
+            client = TestClient(app)
+
+            response = client.post("/api/v1/runs/run_api_secret/retry", headers={"X-User-Role": "operator"})
+
+            assert response.status_code == 503
+            error = response.json()["error"]
+            assert error["code"] == "SBATCH_SUBMISSION_FAILED"
+            assert error["details"]["run_id"] == "run_api_secret"
+            assert error["details"]["status"] == "submission_failed"
+            assert error["details"]["job_id"] == error["details"]["pipeline_job_id"]
+            event = _events(store)[-1]
+            assert event.status_to == "submission_failed"
+            assert event.details["error_code"] == "SBATCH_SUBMISSION_FAILED"
+            persisted = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
+            response_body = json.dumps(response.json(), sort_keys=True)
+            for raw_secret in ("alice:pass123", "pass123", "sig123", "tok123"):
+                assert raw_secret not in persisted
+                assert raw_secret not in response_body
+            assert "[redacted]" in persisted
+            assert "[redacted]" in response_body
+        finally:
+            if previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+            app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
+            app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
+
+
 def test_manual_retry_conflict_409() -> None:
     with _store() as store:
         _create_job(store, job_id="job_failed", run_id="run_1", status="failed")
@@ -279,6 +365,34 @@ def test_manual_retry_no_failed_job() -> None:
 
         with pytest.raises(RetryNotFoundError):
             service.attempt_manual_retry("run_1", gateway=gateway, trusted_internal=True)
+
+
+def test_manual_retry_rejects_older_failure_when_latest_truth_succeeded() -> None:
+    with _store() as store:
+        failed = _create_job(store, job_id="job_failed", run_id="run_latest_success", status="failed")
+        succeeded = _create_job(
+            store,
+            job_id="job_succeeded",
+            run_id="run_latest_success",
+            status="succeeded",
+            error_code=None,
+        )
+        failed.updated_at = datetime(2026, 5, 1, 6, 20, tzinfo=UTC)
+        succeeded.updated_at = datetime(2026, 5, 1, 6, 40, tzinfo=UTC)
+        store.session.add_all([failed, succeeded])
+        store.session.commit()
+        gateway = _RecordingGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with pytest.raises(RetryNotFoundError):
+            service.attempt_manual_retry("run_latest_success", gateway=gateway, trusted_internal=True)
+
+        assert gateway.submissions == []
+        assert [job.job_id for job in store.query_jobs_by_run("run_latest_success")] == [
+            "job_failed",
+            "job_succeeded",
+        ]
+        assert _events(store) == []
 
 
 def test_expire_stale_retries_allows_new_retry() -> None:
@@ -334,14 +448,13 @@ def test_audit_event_auto() -> None:
         service.schedule_auto_retry(job)
 
         event = _events(store)[0]
-        assert event.details == {
-            "trigger": "auto",
-            "retry_count": 1,
-            "previous_error": "STORAGE_WRITE_FAILED",
-            "backoff_seconds": 60,
-            "previous_job_id": job.job_id,
-            "slurm_job_id": None,
-        }
+        assert event.details["trigger"] == "auto"
+        assert event.details["retry_count"] == 1
+        assert event.details["previous_error"] == "STORAGE_WRITE_FAILED"
+        assert event.details["backoff_seconds"] == 60
+        assert event.details["previous_job_id"] == job.job_id
+        assert event.details["slurm_job_id"] is None
+        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
 
 
 def test_audit_event_manual() -> None:
@@ -353,13 +466,14 @@ def test_audit_event_manual() -> None:
         service.attempt_manual_retry("run_1", gateway=gateway, trusted_internal=True)
 
         event = _events(store)[0]
-        assert event.details == {
-            "trigger": "manual",
-            "retry_count": 1,
-            "previous_error": "SBATCH_SUBMISSION_FAILED",
-            "previous_job_id": failed.job_id,
-            "slurm_job_id": None,
-        }
+        assert event.details["trigger"] == "manual"
+        assert event.details["retry_count"] == 1
+        assert event.details["previous_error"] == "SBATCH_SUBMISSION_FAILED"
+        assert event.details["previous_job_id"] == failed.job_id
+        assert event.details["slurm_job_id"] is None
+        assert event.details["manual_retry_marker"] is True
+        assert event.details["prior_failure_reason"] == "SBATCH_SUBMISSION_FAILED"
+        assert event.details["failure"]["manual_retry_marker"] is True
 
 
 def test_manual_retry_audit_has_previous_job_id() -> None:
