@@ -374,3 +374,78 @@ Boundary-surface checklist:
 - Producer/consumer evidence boundaries: skip/retry/cancel reason codes, attempt counts, classifier details, durable output reuse, cancellation proof/gap.
 - Stale-state/idempotency boundaries: repeated scans, concurrent/active jobs, retry exhaustion, manual retry, cancellation no-replacement-in-pass.
 - Unchanged downstream consumers: qhh diagnostic lane, non-Slurm orchestrator tests, output parser, flood frequency, tile publisher, monitoring/API status readers.
+
+## Issue #196 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM backend orchestration evidence and readiness validation
+Repair intensity: high
+
+Change surface:
+- `services/orchestrator/scheduler.py` scheduler pass/model-run evidence shaping, artifact writing, execution-mode labeling, redaction, and dry-run no-mutation proof where evidence is emitted.
+- `services/production_closure/readiness_validation.py` readiness evidence ingestion, deterministic/live truth table, release-blocker summary, and final readiness claim calculation where scheduler evidence is consumed.
+- Scheduler CLI/operator documentation in `docs/VALIDATION.md`, `docs/runbooks/qhh-continuous.md`, and `progress.md`.
+- Tests for structured scheduler evidence, readiness ingestion, deterministic-vs-live no-overclaim behavior, dry-run documentation/output expectations, and unchanged qhh diagnostic boundaries.
+
+Must preserve:
+- #192 deterministic candidate identity, pass locking, dry-run no-download/no-Slurm/no-SHUD/no-hydro-met-mutation evidence, source/model discovery, and explicit operator filter evidence.
+- #193 model-run identity, durable output URI reuse, quality/unavailable state handling, qhh diagnostic script boundary, reduced-manifest partial behavior, and no fabricated optional products.
+- #194 Slurm preflight, array task accounting/resource evidence, safe env/template/resource/log boundaries, cancellation proof/no-replacement behavior, and non-Slurm/mock compatibility.
+- #195 terminal/active skip, retry/manual retry/cancellation semantics, retry evidence, and durable upstream reuse.
+- M19 readiness truth table: deterministic, dry-run, simulated, or production-like scheduler evidence never sets `final_production_readiness_claimed=true`; final readiness requires accepted live proof receipts.
+
+Must add/change:
+- Scheduler pass and per-model evidence include execution mode, deterministic/live receipt references only when applicable, pass/candidate/model counts, filters, skip/block/retry/cancel reasons, artifact paths, forcing station counts, canonical counts, parsed row counts, segment counts, display/frequency quality states, Slurm accounting/resource metrics, and residual blockers.
+- Evidence artifacts are bounded, redacted, stable-schema JSON and remain under configured evidence/workspace roots.
+- Readiness validation can ingest scheduler evidence as deterministic review evidence without requiring live multi-cycle reruns and without treating it as accepted live proof.
+- Fast validation and docs clearly separate deterministic scheduler evidence, qhh diagnostic script evidence, opt-in live scheduler receipts, and final production readiness.
+- Operator docs describe dry-run command/output and its explicit no-download/no-Slurm/no-SHUD/no-hydro-met-mutation contract.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - scheduler CLI output and readiness validation command are operator/release-review entrypoints.
+- Config / project setup: selected - evidence roots, execution mode, live receipt references, validation inputs, and dry-run/continuous options are config boundaries.
+- File IO / path safety / overwrite: selected - scheduler/readiness evidence artifacts are written/read from configured roots and must be bounded, no-clobber safe, redacted, and contained.
+- Schema / columns / units / field names: selected - evidence schemas, counts, execution modes, readiness item fields, release blocker fields, resource metric names, and truth-table booleans are persistent review contracts.
+- Geospatial / CRS / shapefile sidecars: not selected - #196 does not parse or transform geometry sidecars.
+- Time series / forcing / temporal boundaries: selected - source/cycle windows, UTC cycle times, forcing station counts, parsed row counts, and deterministic/live cycle evidence must not collapse across cycles.
+- Numerical stability / conservation / NaN: not selected - no solver math or hydrologic computation changes are required.
+- Solver runtime / performance / threading: selected - evidence must report SHUD/runtime/resource state without rerunning live solver in fast validation.
+- Resource limits / large input / discovery: selected - evidence ingestion, artifact reads, JSON payloads, candidate lists, and docs examples must stay bounded.
+- Legacy compatibility / examples: selected - qhh continuous scripts remain diagnostic; M10/M19 validation docs and existing tests remain interpretable.
+- Error handling / rollback / partial outputs: selected - residual blockers, partial model/cycle states, evidence gaps, malformed evidence, and missing live receipts need stable statuses without fabricated success.
+- Release / packaging / dependency compatibility: selected - readiness validation and docs are release-decision surfaces.
+- Documentation / migration notes: selected - this issue primarily updates operator docs, validation docs, progress, and runbook boundaries.
+
+Invariant Matrix
+
+Governing invariant: scheduler evidence may prove deterministic production-automation contracts and support release review, but only accepted live receipts bound to the readiness run may satisfy final production readiness; every evidence item must preserve source/cycle/model identity, execution mode, blockers, and artifact provenance without leaking secrets or fabricating live success.
+
+Source-of-truth identity/contract: `{source_id}:{cycle_time_utc}:{model_id}:{scenario_id}` candidate identity plus scheduler `pass_id`, deterministic `run_id`, `forcing_version_id`, evidence schema/version, execution mode, artifact path/ref, live receipt id/checksum where applicable, readiness item `required_for_final`, and `live_proof_accepted`.
+
+Surfaces:
+- Producers: scheduler pass evidence builder/writer; model-run evidence builder; orchestrator/Slurm/accounting evidence producers where surfaced.
+- Validators/preflight: dry-run no-mutation proof, evidence payload/root containment checks, readiness item schema validation, live receipt binding checks, deterministic-vs-live mode validation.
+- Storage/cache/query: scheduler evidence files, `ops.pipeline_job`/`ops.pipeline_event.details` evidence references, readiness evidence bundle, consumed scheduler summary/root paths.
+- Public routes/entrypoints: `nhms-pipeline plan-production` dry-run/plan/continuous output; `nhms-production validate-readiness`; operator docs and runbook commands.
+- Frontend/downstream consumers: monitoring/API status readers remain compatible; release reviewers consume `docs/VALIDATION.md`, `progress.md`, runbooks, and readiness summary.
+- Failure paths/rollback/stale state: malformed/oversized scheduler evidence, missing artifact, stale or mismatched run/cycle/model identity, missing live receipt, partial cycle, accounting gap, residual blocker, dry-run or deterministic evidence attempting to claim live readiness.
+- Evidence/audit/readiness: scheduler pass artifacts, model-run artifacts, readiness items, release blockers, live proof receipts, deterministic summary ingestion, docs truth table.
+
+Regression rows:
+- scheduler dry-run pass -> evidence reports selected candidates, filters, skip/block reasons, artifact path, and no download/Slurm/SHUD/hydro-met mutation proof.
+- scheduler submitted/partial/blocked pass -> pass and model-run evidence include execution mode, counts, source/cycle/model ids, artifact refs, stage/resource/accounting metrics where available, and residual blockers without leaking secrets.
+- deterministic scheduler evidence consumed by readiness validation -> readiness item is deterministic/non-final and `final_production_readiness_claimed=false` when live receipts are absent.
+- scheduler evidence with accepted live receipt binding -> readiness records receipt refs/checksum as live proof input only when schema, run id, target environment, producer artifact/ref, and execution mode match the M19 live proof contract.
+- malformed, oversized, stale, or identity-mismatched scheduler evidence -> stable blocked/release_blocked evidence with redacted reason and no final readiness claim.
+- qhh continuous script evidence/runbook -> remains diagnostic and must not be described as the production scheduler dependency or as final readiness proof.
+- unchanged M19 readiness producer summaries -> existing Slurm/object-store/source/E2E/MVT deterministic summaries still ingest with the same final readiness truth table.
+- unchanged monitoring/API/orchestrator consumers -> existing scheduler/orchestrator/retry/cancel tests keep passing with the same evidence/status contracts.
+
+Boundary-surface checklist:
+- Shared helper roots: scheduler evidence builder/writer, readiness dependency/evidence ingestion, redaction and bounded JSON helpers.
+- Public entrypoints: scheduler CLI dry-run/plan/continuous output, readiness validation command, docs/runbook commands.
+- Read surfaces: scheduler evidence roots/files, readiness dependency roots, live receipt files, pipeline event details, Slurm accounting/resource evidence.
+- Write/delete/overwrite surfaces: scheduler evidence artifacts and readiness bundle files; no overwrite without existing force/no-clobber semantics.
+- Producer/consumer evidence boundaries: scheduler pass/model evidence -> readiness ingestion -> release blockers/summary/docs.
+- Stale-state/idempotency boundaries: pass id/run id/candidate id/cycle/model identity and stale receipt/evidence mismatch handling.
+- Unchanged downstream consumers: M19 readiness tests/docs, qhh diagnostic lane, monitoring/API status readers, orchestrator retry/cancel behavior.
