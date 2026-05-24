@@ -11,6 +11,7 @@ from sqlalchemy import inspect, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from packages.common.redaction import redact_payload
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
@@ -496,9 +497,10 @@ class RetryService:
         return _coerce_gateway_payload(submitted)
 
     def _record_retry_submission_failure(self, retry_job: PipelineJob, error: Exception) -> None:
+        error_message = _safe_error_message(str(getattr(error, "message", None) or error))
         retry_job.status = "submission_failed"
         retry_job.error_code = _retry_submission_error_code(error)
-        retry_job.error_message = str(getattr(error, "message", None) or error)
+        retry_job.error_message = error_message
         retry_job.finished_at = datetime.now(UTC)
         retry_job.updated_at = retry_job.finished_at
         self.store.session.add(retry_job)
@@ -508,11 +510,11 @@ class RetryService:
             event_type="submission",
             status_from="pending",
             status_to="submission_failed",
-            message=f"Manual retry submission failed: {retry_job.error_message}",
+            message=f"Manual retry submission failed: {error_message}",
             details={
                 "trigger": "manual",
                 "error_code": retry_job.error_code,
-                "error_message": retry_job.error_message,
+                "error_message": error_message,
             },
             commit=False,
         )
@@ -618,3 +620,8 @@ def _retry_submission_error_code(error: Exception) -> str:
     if isinstance(error, SlurmGatewayError):
         return error.code
     return "SBATCH_SUBMISSION_FAILED"
+
+
+def _safe_error_message(message: str) -> str:
+    redacted = redact_payload(message)
+    return redacted if isinstance(redacted, str) else str(redacted)

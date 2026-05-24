@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.auth import PolicyDecision, require_action
 from apps.api.errors import ApiError
+from packages.common.redaction import redact_payload
 from packages.common.safe_fs import SafeFilesystemError, read_tail_bytes_limited_no_follow
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineJob, PipelineStore
@@ -287,10 +288,11 @@ def retry_run(
         raise _api_error(error) from error
 
     if job.status == "submission_failed":
+        error_message = _safe_redacted_text(job.error_message or "Retry submission failed.")
         raise ApiError(
             status_code=503,
             code=job.error_code or "RETRY_SUBMISSION_FAILED",
-            message=job.error_message or "Retry submission failed.",
+            message=error_message,
             details={
                 "run_id": job.run_id,
                 "job_id": job.job_id,
@@ -298,7 +300,7 @@ def retry_run(
                 "status": job.status,
                 "slurm_job_id": job.slurm_job_id,
                 "error_code": job.error_code,
-                "error_message": job.error_message,
+                "error_message": error_message,
             },
         )
 
@@ -408,7 +410,7 @@ def cancel_run(
                         "run_id": run_id,
                         "slurm_job_id": job.slurm_job_id,
                         "previous_status": previous_status,
-                        "gateway_response": cancellation,
+                        "gateway_response": _safe_redacted_payload(cancellation),
                         "cancellation_proven": False,
                     },
                 )
@@ -616,8 +618,8 @@ def _api_error(error: RetryError) -> ApiError:
     return ApiError(
         status_code=error.status_code,
         code=error.code,
-        message=error.message,
-        details=error.details,
+        message=_safe_redacted_text(error.message),
+        details=_safe_redacted_payload(error.details),
     )
 
 
@@ -653,8 +655,8 @@ def _slurm_cancellation_gap_payload(job: PipelineJob, run_id: str, error: SlurmG
         "error": {
             "status_code": error.status_code,
             "code": error.code,
-            "message": error.message,
-            "details": error.details or {},
+            "message": _safe_redacted_text(error.message),
+            "details": _safe_redacted_payload(error.details or {}),
         },
     }
 
@@ -670,8 +672,17 @@ def _unproven_slurm_cancellation_payload(
         "status": job.status,
         "slurm_job_id": job.slurm_job_id,
         "cancellation_proven": False,
-        "gateway_response": response,
+        "gateway_response": _safe_redacted_payload(response),
     }
+
+
+def _safe_redacted_payload(value: Any) -> Any:
+    return redact_payload(value)
+
+
+def _safe_redacted_text(value: str) -> str:
+    redacted = redact_payload(value)
+    return redacted if isinstance(redacted, str) else str(redacted)
 
 
 def _cancellation_payload_proven(response: dict[str, Any]) -> bool:

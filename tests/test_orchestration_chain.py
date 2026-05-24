@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.chain import (
@@ -15,7 +18,8 @@ from services.orchestrator.chain import (
     OrchestratorError,
     PsycopgOrchestratorRepository,
 )
-from services.orchestrator.retry import RetryConfig
+from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
+from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 
 
@@ -44,6 +48,8 @@ class FakeCycleSlurmClient:
         self.cancelled_jobs: list[str] = []
         self.next_job = 2000
         self.fail_next_array_submission_stage: str | None = None
+        self.task_log_uri_by_stage: dict[str, list[str]] = {}
+        self.task_error_message_by_stage: dict[str, list[str]] = {}
 
     def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._submit(payload["manifest"]["stage"], payload["run_id"], payload["model_id"], payload["manifest"])
@@ -101,7 +107,18 @@ class FakeCycleSlurmClient:
                 "job_id": f"{job_id}_{index}",
                 "status": status,
                 "exit_code": 0 if status == "succeeded" else 1,
-                "log_uri": f"s3://nhms/runs/{job['run_id']}/logs/{job_id}_{index}.out",
+                "log_uri": self._task_field(
+                    self.task_log_uri_by_stage,
+                    job["stage"],
+                    index,
+                    f"s3://nhms/runs/{job['run_id']}/logs/{job_id}_{index}.out",
+                ),
+                "error_message": self._task_field(
+                    self.task_error_message_by_stage,
+                    job["stage"],
+                    index,
+                    None,
+                ),
                 "accounting": {
                     "elapsed": f"00:0{index + 1}:00",
                     "max_rss": f"{index + 1}024K",
@@ -149,6 +166,11 @@ class FakeCycleSlurmClient:
         self.jobs[job_id] = job
         self.poll_counts[job_id] = 0
         return dict(job)
+
+    @staticmethod
+    def _task_field(fields_by_stage: dict[str, list[str]], stage: str, index: int, default: str | None) -> str | None:
+        fields = fields_by_stage.get(stage) or []
+        return fields[index] if index < len(fields) else default
 
 
 class SubmitJobOnlyCycleSlurmClient:
@@ -306,6 +328,130 @@ class FakeCycleRepository:
         if error_message is not None:
             record["error_message"] = error_message
         return dict(record)
+
+
+class StoreBackedCycleRepository(FakeCycleRepository):
+    def __init__(self, store: PipelineStore, *, active: bool = False) -> None:
+        super().__init__(active=active)
+        self.store = store
+
+    def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        existing = self.store.get_job(record["job_id"])
+        if existing is None:
+            job = self.store.create_job(
+                job_id=record["job_id"],
+                run_id=record.get("run_id"),
+                cycle_id=record.get("cycle_id"),
+                job_type=record["job_type"],
+                slurm_job_id=record.get("slurm_job_id"),
+                model_id=record.get("model_id"),
+                stage=record.get("stage"),
+                status=record.get("status", "pending"),
+                commit=False,
+            )
+        else:
+            job = existing
+            job.run_id = record.get("run_id")
+            job.cycle_id = record.get("cycle_id")
+            job.job_type = record["job_type"]
+            job.slurm_job_id = record.get("slurm_job_id")
+            job.model_id = record.get("model_id")
+            job.stage = record.get("stage")
+            job.status = record.get("status", job.status)
+        job.submitted_at = record.get("submitted_at")
+        job.started_at = record.get("started_at")
+        job.finished_at = record.get("finished_at")
+        job.exit_code = record.get("exit_code")
+        job.retry_count = int(record.get("retry_count") or getattr(job, "retry_count", 0) or 0)
+        job.error_code = record.get("error_code")
+        job.error_message = record.get("error_message")
+        job.log_uri = record.get("log_uri")
+        self.store.session.add(job)
+        self.store.session.commit()
+        self.store.session.refresh(job)
+        self.jobs[record["job_id"]] = self._job_to_dict(job)
+        return dict(self.jobs[record["job_id"]])
+
+    def update_pipeline_job_status(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        exit_code: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        log_uri: str | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        job = self.store.get_job(job_id)
+        if job is None:
+            previous, record = super().update_pipeline_job_status(
+                job_id,
+                status,
+                started_at=started_at,
+                finished_at=finished_at,
+                exit_code=exit_code,
+                error_code=error_code,
+                error_message=error_message,
+                log_uri=log_uri,
+            )
+            return previous, record
+        previous = job.status
+        job.status = status
+        if started_at is not None:
+            job.started_at = started_at
+        if finished_at is not None:
+            job.finished_at = finished_at
+        if exit_code is not None:
+            job.exit_code = exit_code
+        if error_code is not None:
+            job.error_code = error_code
+        if error_message is not None:
+            job.error_message = error_message
+        if log_uri is not None:
+            job.log_uri = log_uri
+        self.store.session.add(job)
+        self.store.session.commit()
+        self.store.session.refresh(job)
+        record = self._job_to_dict(job)
+        self.jobs[job_id] = record
+        return previous, dict(record)
+
+    def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
+        job = self.store.get_job(job_id)
+        return self._job_to_dict(job) if job is not None else None
+
+    def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
+        jobs = [
+            self._job_to_dict(job)
+            for job in self.store.query_jobs_by_cycle(cycle_id)
+        ]
+        return jobs or super().query_pipeline_jobs_by_cycle(cycle_id)
+
+    @staticmethod
+    def _job_to_dict(job: PipelineJob) -> dict[str, Any]:
+        return {
+            "job_id": job.job_id,
+            "run_id": job.run_id,
+            "cycle_id": job.cycle_id,
+            "job_type": job.job_type,
+            "slurm_job_id": job.slurm_job_id,
+            "array_task_id": job.array_task_id,
+            "model_id": job.model_id,
+            "status": job.status,
+            "stage": job.stage,
+            "submitted_at": job.submitted_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "exit_code": job.exit_code,
+            "retry_count": job.retry_count,
+            "error_code": job.error_code,
+            "error_message": job.error_message,
+            "log_uri": job.log_uri,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+        }
 
 
 class WriteFailingObjectStore(LocalObjectStore):
@@ -1246,6 +1392,79 @@ def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -
     assert [task["model_id"] for task in client.submissions[4]["tasks"]] == ["model_0", "model_1", "model_2"]
 
 
+def test_partial_array_retry_persists_submission_under_retry_job_id_with_real_retry_service(
+    tmp_path: Path,
+) -> None:
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    client = FakeCycleSlurmClient(
+        array_results_by_stage={"forcing": [["succeeded", "failed", "succeeded"], ["succeeded"]]}
+    )
+    retry_service = RetryService(store, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    retry_job = store.get_job("job_cycle_gfs_2026050100_forcing_retry_1")
+    forcing_submissions = [submission for submission in client.submissions if submission["stage"] == "forcing"]
+    pending_retry_jobs = [
+        job.job_id
+        for job in store.session.scalars(select(PipelineJob).where(PipelineJob.status == "pending"))
+    ]
+    assert result.status == "complete"
+    assert retry_job is not None
+    assert retry_job.status == "succeeded"
+    assert retry_job.slurm_job_id == "2004"
+    assert retry_job.retry_count == 1
+    assert pending_retry_jobs == []
+    assert repository.jobs["job_cycle_gfs_2026050100_forcing_retry_1"]["slurm_job_id"] == "2004"
+    assert repository.jobs["job_cycle_gfs_2026050100_forcing_retry_1"]["status"] == "succeeded"
+    assert repository.jobs["job_cycle_gfs_2026050100_forcing"]["status"] == "partially_failed"
+    assert [task["model_id"] for task in forcing_submissions[1]["tasks"]] == ["model_1"]
+    retry_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_forcing_retry_1"
+        and event["status_to"] == "succeeded"
+    )
+    assert retry_event["details"]["task_results"][0]["array_task_id"] == 0
+    assert retry_event["details"]["task_results"][0]["original_task_id"] == 1
+    assert retry_event["details"]["task_results"][0]["model_id"] == "model_1"
+    assert retry_event["details"]["task_results"][0]["run_id"] == "run_1"
+    assert result.stages[2].pipeline_job_id == "job_cycle_gfs_2026050100_forcing_retry_1"
+    assert result.stages[2].task_results[1]["array_task_id"] == 1
+    assert result.stages[2].task_results[1]["original_task_id"] == 1
+    assert result.stages[2].task_results[1]["model_id"] == "model_1"
+    assert result.stages[2].task_results[1]["run_id"] == "run_1"
+    assert result.stages[2].task_results[1]["status"] == "succeeded"
+
+
+def test_restart_stage_parse_skips_durable_upstream_stages_without_existing_upstream_rows(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+        "restart_stage": "parse",
+        "durable_shud_output_reused": True,
+        "native_shud_resubmitted": False,
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    assert result.status == "complete"
+    assert [submission["stage"] for submission in client.submissions] == ["parse", "frequency", "publish"]
+    assert "job_cycle_gfs_2026050100_download" not in repository.jobs
+    assert "job_cycle_gfs_2026050100_forecast" not in repository.jobs
+
+
 def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     cycle_id = "gfs_2026050100"
@@ -1348,15 +1567,62 @@ def test_array_partial_success_records_task_accounting_and_reduces_downstream_ma
     assert forcing_result.status == "partially_failed"
     assert forcing_result.task_results == tuple(task_results)
     assert task_results[0]["array_task_id"] == 0
+    assert task_results[0]["model_id"] == "model_0"
+    assert task_results[0]["candidate_id"] == (
+        "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic"
+    )
+    assert task_results[0]["run_id"] == "run_0"
+    assert task_results[0]["original_task_id"] == 0
     assert task_results[0]["slurm_job_id"].endswith("_0")
     assert task_results[0]["exit_code"] == 0
     assert task_results[0]["log_uri"].endswith("_0.out")
     assert task_results[0]["accounting"]["elapsed"] == "00:01:00"
     assert task_results[0]["resource_metrics"]["max_rss"] == "1024K"
     assert task_results[1]["status"] == "failed"
+    assert task_results[1]["model_id"] == "model_1"
+    assert task_results[1]["candidate_id"] == (
+        "gfs:2026-05-01T00:00:00Z:model_1:forecast_gfs_deterministic"
+    )
+    assert task_results[1]["run_id"] == "run_1"
+    assert task_results[1]["original_task_id"] == 1
     assert task_results[1]["exit_code"] == 1
     assert [task["model_id"] for task in forecast_submission["tasks"]] == ["model_0", "model_2"]
     assert repository.cycle_statuses[-1] == "parsed_partial"
+
+
+def test_array_task_result_events_redact_signed_log_uri_and_secret_error_text(tmp_path: Path) -> None:
+    secret_log_uri = "s3://nhms/runs/cycle/logs/2003_0.out?X-Amz-Signature=supersecret"
+    secret_error = "failed callback https://user:pass@example.test/log?token=rawsecret"
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": ["failed"]})
+    client.task_log_uri_by_stage["forcing"] = [secret_log_uri]
+    client.task_error_message_by_stage["forcing"] = [secret_error]
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_forcing"
+        and event["event_type"] == "status_change"
+        and event["status_to"] == "failed"
+    )
+    event_text = json.dumps(event["details"])
+    event_record_text = json.dumps(event)
+    task_result = event["details"]["task_results"][0]
+    assert task_result["model_id"] == "model_0"
+    assert task_result["candidate_id"] == "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic"
+    assert task_result["run_id"] == "run_0"
+    assert task_result["status"] == "failed"
+    assert task_result["error_code"] == "NODE_FAILURE"
+    assert task_result["log_uri"] == "s3://nhms/runs/cycle/logs/2003_0.out"
+    assert "supersecret" not in event_record_text
+    assert "rawsecret" not in event_record_text
+    assert "user:pass" not in event_record_text
+    assert "X-Amz-Signature" not in event_record_text
+    assert "token=" not in event_record_text
+    assert "No error message provided" not in event_text
 
 
 def test_slurm_accounting_available_is_recorded_in_pipeline_event_details(tmp_path: Path) -> None:
@@ -1461,6 +1727,55 @@ def test_cancel_active_cycle_jobs_calls_gateway_and_records_no_replacement(tmp_p
     assert client.submissions == []
 
 
+def test_cancel_active_cycle_jobs_redacts_credential_bearing_log_uri(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    secret_log_uri = "https://user:pass@example.test/logs/forcing.log?token=supersecret"
+    repository.jobs["job_cycle_gfs_2026050100_forcing"] = {
+        "job_id": "job_cycle_gfs_2026050100_forcing",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3001",
+        "model_id": "model_0",
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": secret_log_uri,
+    }
+    client = FakeCycleSlurmClient()
+    client.jobs["3001"] = {
+        "job_id": "3001",
+        "run_id": "cycle_gfs_2026050100",
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "payload": {},
+        "stage_attempt": 0,
+    }
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    orchestrator.cancel_active_cycle_jobs(cycle_id, reason="scheduler_cancel_requested")
+
+    cancel_event = repository.events[-1]
+    event_text = json.dumps(cancel_event["details"])
+    assert cancel_event["details"]["slurm"]["log_uri"] == "https://example.test/logs/forcing.log"
+    assert "supersecret" not in event_text
+    assert "user:pass" not in event_text
+    assert "token=" not in event_text
+
+
 def test_cancel_active_cycle_jobs_conflict_records_gap_without_rewriting_cancelled(tmp_path: Path) -> None:
     class ConflictCancelClient(FakeCycleSlurmClient):
         def cancel_job(self, job_id: str) -> dict[str, Any]:
@@ -1513,6 +1828,35 @@ def test_cancel_active_cycle_jobs_conflict_records_gap_without_rewriting_cancell
     assert gap_event["details"]["slurm"]["cancellation_proven"] is False
 
 
+def test_accounting_gap_event_redacts_secret_gateway_error_text(tmp_path: Path) -> None:
+    class SecretAccountingClient(FakeCycleSlurmClient):
+        def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
+            raise ValueError(
+                "gateway failed https://user:pass@example.test/accounting?token=rawsecret password=hunter2"
+            )
+
+    repository = FakeCycleRepository()
+    client = SecretAccountingClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    gap_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_forcing"
+        and event["event_type"] == "slurm_accounting_gap"
+    )
+    event_text = json.dumps(gap_event["details"])
+    assert gap_event["details"]["gap"]["error_code"] is None
+    assert "rawsecret" not in event_text
+    assert "hunter2" not in event_text
+    assert "user:pass" not in event_text
+    assert "token=" not in event_text
+    assert "password=hunter2" not in event_text
+    assert "password=[redacted]" in event_text
+
+
 def test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model() -> None:
     calls: list[tuple[str, tuple[Any, ...]]] = []
 
@@ -1549,9 +1893,201 @@ def test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_mod
         "fcst_gfs_2026050100_model_b",
         "cycle_gfs_2026050100",
         "cycle_gfs_2026050100",
+        100,
     )
     assert jobs[0]["run_id"] == "cycle_gfs_2026050100"
     assert jobs[0]["model_id"] == "model_a"
+
+
+def test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope() -> None:
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            calls.append((statement, parameters))
+            if "FROM hydro.hydro_run" in statement:
+                return {
+                    "run_id": "fcst_gfs_2026050100_model_b",
+                    "status": "failed",
+                    "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_b/output/",
+                }
+            return None
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            calls.append((statement, parameters))
+            if "FROM ops.pipeline_event" in statement:
+                return [
+                    {
+                        "event_id": 1,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forcing",
+                        "event_type": "status_change",
+                        "status_from": "running",
+                        "status_to": "partially_failed",
+                        "details": {
+                            "stage": "forcing",
+                            "task_results": [
+                                {"task_id": 0, "model_id": "model_a", "status": "succeeded"},
+                                {
+                                    "task_id": 1,
+                                    "model_id": "model_b",
+                                    "status": "failed",
+                                    "error_code": "NODE_FAILURE",
+                                },
+                            ],
+                        },
+                    },
+                    {
+                        "event_id": 2,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forcing",
+                        "event_type": "retry",
+                        "details": {"trigger": "manual", "manual_retry_marker": True, "retry_count": 2},
+                    },
+                ]
+            if "FROM ops.pipeline_job" in statement:
+                return [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_forcing",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "partially_failed",
+                        "stage": "forcing",
+                        "error_code": "NODE_FAILURE",
+                        "retry_count": 1,
+                    },
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_publish",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "succeeded",
+                        "stage": "publish",
+                        "retry_count": 0,
+                    },
+                    {
+                        "job_id": "overflow",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "succeeded",
+                        "stage": "publish",
+                    },
+                ]
+            return []
+
+    repository = CapturingRepository("postgresql://example")
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_b",
+        run_id="fcst_gfs_2026050100_model_b",
+        forcing_version_id="forc_gfs_2026050100_model_b",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=2,
+        event_limit=1,
+    )
+
+    job_call = next(call for call in calls if "FROM ops.pipeline_job" in call[0])
+    event_call = next(call for call in calls if "FROM ops.pipeline_event" in call[0])
+    assert "LIMIT %s" in job_call[0]
+    assert "ORDER BY COALESCE(submitted_at, created_at) DESC, created_at DESC" in job_call[0]
+    assert job_call[1][-1] == 3
+    assert "SELECT pj.job_id" in event_call[0]
+    assert "ORDER BY pe.created_at DESC, pe.event_id DESC" in event_call[0]
+    assert event_call[1] == (
+        "fcst_gfs_2026050100_model_b",
+        "gfs_2026050100",
+        "model_b",
+        "gfs_2026050100",
+        "fcst_gfs_2026050100_model_b",
+        "gfs_2026050100",
+        "cycle_gfs_2026050100",
+        2,
+    )
+    assert state is not None
+    assert state["pipeline_status"] == "partially_failed"
+    assert state["failed_stage"] == "forcing"
+    assert state["array_task_id"] == 1
+    assert state["successful_sibling_outputs_reused"] is True
+    assert state["pipeline_jobs_total"] == 3
+    assert state["state_truncated"] is True
+
+
+def test_psycopg_candidate_state_rejects_ambiguous_array_task_identity() -> None:
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            del statement, parameters
+            return None
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            del parameters
+            if "FROM ops.pipeline_job" in statement:
+                return [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_forcing",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "partially_failed",
+                        "stage": "forcing",
+                        "error_code": "NODE_FAILURE",
+                        "retry_count": 1,
+                    },
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_publish",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "succeeded",
+                        "stage": "publish",
+                        "retry_count": 0,
+                    },
+                ]
+            if "FROM ops.pipeline_event" in statement:
+                return [
+                    {
+                        "event_id": 1,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forcing",
+                        "event_type": "status_change",
+                        "status_from": "running",
+                        "status_to": "partially_failed",
+                        "details": {
+                            "stage": "forcing",
+                            "task_results": [
+                                {"task_id": 0, "status": "succeeded"},
+                                {"task_id": 1, "status": "failed", "error_code": "NODE_FAILURE"},
+                            ],
+                        },
+                    }
+                ]
+            return []
+
+    repository = CapturingRepository("postgresql://example")
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_b",
+        run_id="fcst_gfs_2026050100_model_b",
+        forcing_version_id="forc_gfs_2026050100_model_b",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=10,
+        event_limit=10,
+    )
+
+    assert state is not None
+    assert state["shared_cycle_aggregate"] is True
+    assert state["pipeline_status"] is None
+    assert state["array_task_id"] is None
+    assert state["original_task_id"] is None
+    assert state["successful_sibling_outputs_reused"] is False
+    assert state["successful_sibling_task_count"] == 0
 
 
 def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Path) -> None:
@@ -1597,6 +2133,22 @@ def _orchestrator(
         object_store=object_store or LocalObjectStore(object_root, "s3://nhms"),
         retry_service=retry_service,
     )
+
+
+def _pipeline_store() -> PipelineStore:
+    engine = create_engine(
+        "sqlite://",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _attach_schemas(dbapi_connection: Any, _connection_record: Any) -> None:
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
+
+    Base.metadata.create_all(engine)
+    return PipelineStore(Session(engine))
 
 
 def _basins(count: int) -> list[dict[str, Any]]:

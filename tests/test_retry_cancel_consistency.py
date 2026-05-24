@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
@@ -194,6 +195,62 @@ def test_partial_slurm_cancel_reflected_in_response() -> None:
         assert data["forecast_cycle"] is None
 
 
+def test_cancel_gateway_error_redacts_response_and_event_details() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_cancel_secret", status="running")
+        _insert_forecast_cycle(store, "cycle_cancel_secret", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_cancel_secret",
+            run_id="run_cancel_secret",
+            cycle_id="cycle_cancel_secret",
+            status="running",
+            slurm_job_id="slurm_secret",
+        )
+        gateway = _MockGateway(
+            failures={
+                "slurm_secret": SlurmGatewayError(
+                    502,
+                    "SLURM_ERROR",
+                    "scancel failed token=tok123 for https://alice:pass123@slurm.example/cancel?signature=sig123",
+                    {
+                        "code": "SCANCEL_FAILED",
+                        "status": "failed",
+                        "password": "pass123",
+                        "stderr": "token=tok123 url=https://alice:pass123@slurm.example/cancel?signature=sig123",
+                    },
+                )
+            }
+        )
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_cancel_secret/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        failure = data["failed_jobs"][0]
+        assert data["partial_failure"] is True
+        assert failure["job_id"] == "job_cancel_secret"
+        assert failure["status"] == "running"
+        assert failure["slurm_job_id"] == "slurm_secret"
+        assert failure["cancellation_proven"] is False
+        assert failure["error"]["status_code"] == 502
+        assert failure["error"]["code"] == "SLURM_ERROR"
+        assert failure["error"]["details"]["code"] == "SCANCEL_FAILED"
+        assert failure["error"]["details"]["status"] == "failed"
+        assert failure["error"]["details"]["password"] == "[redacted]"
+        event = next(event for event in _events(store) if event.event_type == "cancel_failed")
+        assert event.details["previous_status"] == "running"
+        assert event.details["cancellation_proven"] is False
+        assert event.details["error"]["code"] == "SLURM_ERROR"
+        response_body = json.dumps(response.json(), sort_keys=True)
+        event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
+        for raw_secret in ("alice:pass123", "pass123", "tok123", "sig123"):
+            assert raw_secret not in response_body
+            assert raw_secret not in event_body
+        assert "[redacted]" in response_body
+        assert "[redacted]" in event_body
+
+
 def test_cancel_idempotent_for_terminal_slurm_job() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_terminal_slurm", status="running")
@@ -230,6 +287,66 @@ def test_cancel_idempotent_for_terminal_slurm_job() -> None:
         event = next(event for event in _events(store) if event.event_type == "slurm_cancellation_gap")
         assert event.status_to == "blocked"
         assert event.details["cancellation_proven"] is False
+
+
+def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_unproven_secret", status="running")
+        _insert_forecast_cycle(store, "cycle_unproven_secret", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_unproven_secret",
+            run_id="run_unproven_secret",
+            cycle_id="cycle_unproven_secret",
+            status="submitted",
+            slurm_job_id="slurm_unproven_secret",
+        )
+        gateway = _MockGateway(
+            responses={
+                "slurm_unproven_secret": {
+                    "job_id": "slurm_unproven_secret",
+                    "status": "pending",
+                    "cancellation_proven": False,
+                    "token": "tok987",
+                    "callback_url": "https://bob:pass987@slurm.example/cancel?X-Amz-Signature=sig987",
+                    "details": {
+                        "code": "SCANCEL_PENDING",
+                        "status": "pending",
+                        "password": "pass987",
+                    },
+                }
+            }
+        )
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_unproven_secret/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        gap = data["slurm_cancellation_gaps"][0]
+        assert data["partial_failure"] is True
+        assert gap["job_id"] == "job_unproven_secret"
+        assert gap["run_id"] == "run_unproven_secret"
+        assert gap["status"] == "submitted"
+        assert gap["slurm_job_id"] == "slurm_unproven_secret"
+        assert gap["cancellation_proven"] is False
+        assert gap["gateway_response"]["job_id"] == "slurm_unproven_secret"
+        assert gap["gateway_response"]["status"] == "pending"
+        assert gap["gateway_response"]["cancellation_proven"] is False
+        assert gap["gateway_response"]["token"] == "[redacted]"
+        assert gap["gateway_response"]["details"]["code"] == "SCANCEL_PENDING"
+        assert gap["gateway_response"]["details"]["status"] == "pending"
+        assert gap["gateway_response"]["details"]["password"] == "[redacted]"
+        event = next(event for event in _events(store) if event.event_type == "slurm_cancellation_gap")
+        assert event.details["previous_status"] == "submitted"
+        assert event.details["cancellation_proven"] is False
+        assert event.details["gateway_response"]["status"] == "pending"
+        response_body = json.dumps(response.json(), sort_keys=True)
+        event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
+        for raw_secret in ("bob:pass987", "pass987", "tok987", "sig987"):
+            assert raw_secret not in response_body
+            assert raw_secret not in event_body
+        assert "[redacted]" in response_body
+        assert "[redacted]" in event_body
 
 
 def test_cancel_conflict_terminal_slurm_job_preserves_local_state() -> None:
@@ -424,10 +541,15 @@ class _ClosingStore(PipelineStore):
 
 
 class _MockGateway:
-    def __init__(self, failures: dict[str, SlurmGatewayError] | None = None) -> None:
+    def __init__(
+        self,
+        failures: dict[str, SlurmGatewayError] | None = None,
+        responses: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.cancelled: list[str] = []
         self.submissions: list[Any] = []
         self.failures = failures or {}
+        self.responses = responses or {}
 
     def submit_job(self, request: Any) -> dict[str, Any]:
         self.submissions.append(request)
@@ -444,6 +566,8 @@ class _MockGateway:
         if job_id in self.failures:
             raise self.failures[job_id]
         self.cancelled.append(job_id)
+        if job_id in self.responses:
+            return self.responses[job_id]
         return {"job_id": job_id, "status": "cancelled"}
 
 

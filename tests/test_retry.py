@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime
 
@@ -268,6 +269,49 @@ def test_manual_retry_submission_failure_marks_submission_failed() -> None:
         assert retry.error_code == "SBATCH_SUBMISSION_FAILED"
         assert retry.error_message == "sbatch unavailable"
         assert _events(store)[-1].status_to == "submission_failed"
+
+
+def test_manual_retry_submission_failure_redacts_persisted_event_and_api_error() -> None:
+    secret_message = (
+        "sbatch failed for https://alice:pass123@slurm.example/sbatch?"
+        "X-Amz-Signature=sig123&token=tok123 token=tok123 password=pass123"
+    )
+    with _store() as store:
+        _create_job(store, run_id="run_api_secret", error_code="SLURM_UNAVAILABLE")
+        service = RetryService(store, RetryConfig(max_retries=3))
+        gateway = _RecordingGateway(error=RuntimeError(secret_message))
+        app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+        try:
+            client = TestClient(app)
+
+            response = client.post("/api/v1/runs/run_api_secret/retry", headers={"X-User-Role": "operator"})
+
+            assert response.status_code == 503
+            error = response.json()["error"]
+            assert error["code"] == "SBATCH_SUBMISSION_FAILED"
+            assert error["details"]["run_id"] == "run_api_secret"
+            assert error["details"]["status"] == "submission_failed"
+            assert error["details"]["job_id"] == error["details"]["pipeline_job_id"]
+            event = _events(store)[-1]
+            assert event.status_to == "submission_failed"
+            assert event.details["error_code"] == "SBATCH_SUBMISSION_FAILED"
+            persisted = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
+            response_body = json.dumps(response.json(), sort_keys=True)
+            for raw_secret in ("alice:pass123", "pass123", "sig123", "tok123"):
+                assert raw_secret not in persisted
+                assert raw_secret not in response_body
+            assert "[redacted]" in persisted
+            assert "[redacted]" in response_body
+        finally:
+            if previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+            app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
+            app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
 
 
 def test_manual_retry_conflict_409() -> None:
