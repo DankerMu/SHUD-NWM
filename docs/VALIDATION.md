@@ -963,7 +963,137 @@ CLDAS and incomplete real national data are explicit M19 scoped exclusions.
 They are recorded as `not_executed` exclusions rather than failed deterministic
 checks and do not satisfy live proof.
 
-### Fast Regression Commands
+## M20 Production Scheduler Automation
+
+Issues #192-#196 move the qhh GFS/IFS proof from basin-specific scripts into
+the backend production scheduler. The scheduler evidence is operator-facing
+review evidence for discovery, dry-run planning, Slurm preflight, submitted or
+blocked candidates, task/accounting summaries, and readiness interpretation. It
+does not replace M19 live proof receipts and must not by itself set
+`final_production_readiness_claimed=true`.
+
+Fast scheduler dry-run validation is non-mutating. It reads registry and
+pipeline state through `DATABASE_URL`, discovers GFS/IFS cycle candidates, writes
+one scheduler evidence artifact, and exits without runtime side effects:
+
+```bash
+export DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
+uv run nhms-pipeline plan-production \
+  --dry-run \
+  --source gfs \
+  --source IFS \
+  --lookback-hours 24 \
+  --cycle-lag-hours 6 \
+  --max-cycles-per-source 1 \
+  --workspace-root .nhms-workspace
+```
+
+The JSON response includes `status`, `pass_id`, `artifact_path`, `counts`,
+`operator_filters`, `source_cycles`, `candidates`, `blocked_candidates`,
+`skipped_candidates`, `duplicate_exclusions`, `execution_boundary`, and
+`no_mutation_proof`. In dry-run mode the expected proof is:
+
+```json
+{
+  "adapter_download_called": false,
+  "slurm_submit_called": false,
+  "shud_runtime_called": false,
+  "hydro_result_table_writes": false,
+  "met_result_table_writes": false
+}
+```
+
+That means no download, no Slurm submit, no SHUD run, and no hydro/met result
+mutation. Dry-run output can still include blocked or skipped candidates, for
+example unavailable IFS cycles, duplicate active model identities, active Slurm
+jobs, terminal completed runs, explicit operator filters, and source/model
+exclusions. These are scheduler evidence states, not fabricated `met.*` enum
+values.
+
+Evidence layout:
+
+- Lock: `<workspace_root>/scheduler/production-scheduler.lock`.
+- Pass artifacts: `<workspace_root>/scheduler/evidence/<pass_id>.json`.
+- Candidate identity:
+  `{source_id}:{cycle_time_utc}:{model_id}:{scenario_id}`.
+- Deterministic run and forcing IDs:
+  `fcst_{source_lower}_{YYYYMMDDHH}_{model_id}` and
+  `forc_{source_lower}_{YYYYMMDDHH}_{model_id}`.
+- Runtime/model-run evidence: `model_run_evidence[]` records submitted,
+  partial, blocked, failed, skipped, restart, Slurm job/task, log URI,
+  accounting/resource, station-count, parser/frequency/display quality, and
+  residual blocker details when available.
+- Slurm preflight evidence: `slurm_preflight` records compute-node reachable
+  `DATABASE_URL`, workspace/object-store/log/runtime roots, allowlisted sbatch
+  templates, bounded safe env/export values, and blockers. Secret-shaped fields
+  are redacted.
+- Readiness marker: scheduler artifacts include deterministic readiness context
+  and `production_ready=false`; accepted live receipts remain the only final
+  production readiness proof.
+
+Production submission uses the same backend scheduler entrypoint with dry-run
+disabled. The current CLI flag for that is `--plan`, so run it only after the
+Slurm/database/storage preflight values point at the target environment:
+
+```bash
+export DATABASE_URL=postgresql://nhms:<strong-password>@pg.cluster.example:5432/nhms
+export NHMS_PRODUCTION_SLURM_ENABLED=1
+export WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production
+export OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
+export SLURM_SHARED_LOG_ROOT=/scratch/frd_muziyao/nhms-production/slurm-logs
+export NHMS_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
+
+uv run nhms-pipeline plan-production \
+  --plan \
+  --source gfs \
+  --source IFS \
+  --lookback-hours 24 \
+  --cycle-lag-hours 6 \
+  --max-cycles-per-source 1 \
+  --workspace-root "$WORKSPACE_ROOT"
+```
+
+Slurm mode rejects missing or localhost-only `DATABASE_URL`, missing or
+out-of-root storage roots, unsafe templates, unsafe env/export values, and
+secret-shaped model/package/output evidence before submission. A preflight
+blocker produces scheduler evidence with `submitted_count=0` and no active
+Slurm job.
+
+Readiness validation remains M19-style. A fast readiness report can be generated
+alongside scheduler evidence:
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
+  --evidence-root artifacts/production-closure \
+  --run-id local-m20-scheduler-readiness \
+  --force
+```
+
+This report writes `readiness/summary.json`,
+`readiness/readiness_items.json`, `readiness/release_blockers.json`, and
+`readiness/live_proof_receipts.json`. Deterministic scheduler evidence is useful
+for release review and can be referenced from live-proof receipt provenance, but
+fast evidence alone remains non-final. The final readiness live-proof boundary
+is unchanged: `final_production_readiness_claimed=true` requires accepted target
+environment live receipts for the required M19 surfaces, with matching schema,
+run id, target environment, producer artifact/ref/checksum, and live execution
+mode. Malformed, oversized, stale, identity-mismatched, or deterministic-only
+scheduler evidence is interpreted as blocked or release-blocked review evidence,
+not final production readiness.
+
+Focused fast commands for #196 documentation and evidence review:
+
+```bash
+uv run pytest -q tests/test_production_scheduler.py tests/test_production_readiness_validation.py
+uv run ruff check .
+openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive
+NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
+  --evidence-root artifacts/production-closure \
+  --run-id local-m20-scheduler-readiness \
+  --force
+```
+
+## Legacy Production Ops Fast Regression Commands
 
 Local #152 verification uses these fast regression commands:
 

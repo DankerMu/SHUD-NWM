@@ -17,10 +17,12 @@ from services.production_closure.readiness_validation import (
 )
 
 LIVE_SCHEMA = "nhms.production_readiness.live_proof.v1"
+SCHEDULER_SCHEMA = "nhms.production_scheduler.pass_evidence.v1"
 PROOF_SURFACES = {
     "auth": "live_backend_auth",
     "alert": "live_alert_sink_delivery",
     "rollback": "live_rollback_execution",
+    "scheduler": "live_scheduler_evidence_proof",
     "slurm": "live_slurm_dependency_proof",
     "object_store": "live_object_store_dependency_proof",
     "source": "live_source_weather_dependency_proof",
@@ -69,7 +71,13 @@ def _base_item(status: str, execution_mode: str) -> dict[str, object]:
 def _bound_proof(proof_key: str, *, run_id: str = "m19", **extra: object) -> str:
     payload: dict[str, object] = {
         "schema": LIVE_SCHEMA,
-        "proof_type": "dependency" if proof_key in DEPENDENCY_PROOFS else proof_key,
+        "proof_type": (
+            "dependency"
+            if proof_key in DEPENDENCY_PROOFS
+            else "scheduler_evidence"
+            if proof_key == "scheduler"
+            else proof_key
+        ),
         "surface": PROOF_SURFACES[proof_key],
         "run_id": run_id,
         "target_environment": "production",
@@ -216,6 +224,116 @@ def _dependency_proof_with_artifact_paths(
     payload["producer_artifact_path"] = top_level_path
     payload["provenance"].pop("producer_artifact_ref", None)
     payload["provenance"]["producer_artifact_path"] = provenance_path
+    return json.dumps(payload)
+
+
+def _scheduler_evidence_payload(
+    *,
+    pass_id: str = "scheduler_20260521120000_fixed",
+    status: str = "planned",
+    execution_mode: str = "dry_run",
+    final_claimed: bool = False,
+    no_mutation_proof: dict[str, bool] | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema": SCHEDULER_SCHEMA,
+        "pass_id": pass_id,
+        "status": status,
+        "execution_mode": execution_mode,
+        "started_at": "2026-05-21T12:00:00Z",
+        "finished_at": "2026-05-21T12:00:01Z",
+        "sources": ["gfs", "IFS"],
+        "operator_filters": {
+            "model_ids": ["model_a"],
+            "basin_ids": [],
+            "expression": "model_id in [model_a]",
+            "excluded_runnable_count": 1,
+        },
+        "counts": {
+            "candidate_count": 2,
+            "blocked_candidate_count": 0,
+            "skipped_candidate_count": 1,
+            "selected_model_count": 1,
+            "source_cycle_count": 2,
+            "submitted_count": 0,
+            "failed_count": 0,
+            "partial_count": 0,
+        },
+        "candidates": [
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "source_id": "gfs",
+                "cycle_time_utc": "2026-05-21T06:00:00Z",
+                "model_id": "model_a",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "forcing_version_id": "forc_gfs_2026052106_model_a",
+            }
+        ],
+        "skipped_candidates": [
+            {
+                "candidate_id": "IFS:2026-05-21T06:00:00Z:model_a:forecast_ifs_deterministic",
+                "source_id": "IFS",
+                "cycle_time_utc": "2026-05-21T06:00:00Z",
+                "model_id": "model_a",
+                "reason": "source_cycle_unavailable",
+            }
+        ],
+        "model_run_evidence": [],
+        "artifact_path": "workspace/.nhms-workspace/scheduler/evidence/scheduler_20260521120000_fixed.json",
+        "execution_boundary": "planning_only",
+        "no_mutation_proof": no_mutation_proof
+        or {
+            "adapter_download_called": False,
+            "slurm_submit_called": False,
+            "shud_runtime_called": False,
+            "hydro_result_table_writes": False,
+            "met_result_table_writes": False,
+        },
+        "readiness": {
+            "deterministic_fixture": True,
+            "live_receipts": [],
+            "production_ready": final_claimed,
+        },
+        "final_production_readiness_claimed": final_claimed,
+    }
+    payload |= extra
+    return payload
+
+
+def _write_scheduler_evidence(path: Path, **overrides: object) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _scheduler_evidence_payload(**overrides)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _scheduler_proof_bound_to_evidence(
+    evidence_path: Path,
+    *,
+    run_id: str = "m19",
+    producer_artifact_ref: str = "scheduler:scheduler_20260521120000_fixed.json",
+    producer_run_id: str = "scheduler_20260521120000_fixed",
+    producer_schema: str = SCHEDULER_SCHEMA,
+    checksum: str | None = None,
+    **extra: object,
+) -> str:
+    receipt_checksum = checksum or "sha256:" + hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    payload = json.loads(_bound_proof("scheduler", run_id=run_id))
+    payload |= {
+        "producer_schema": producer_schema,
+        "producer_run_id": producer_run_id,
+        "producer_artifact_ref": producer_artifact_ref,
+        "scheduler_checksum": receipt_checksum,
+        "provenance": {
+            "producer_schema": producer_schema,
+            "producer_run_id": producer_run_id,
+            "producer_artifact_ref": producer_artifact_ref,
+            "scheduler_checksum": receipt_checksum,
+            "receipt_id": receipt_checksum,
+        },
+    }
+    payload |= extra
     return json.dumps(payload)
 
 
@@ -807,6 +925,244 @@ def test_dependency_receipt_accepts_agreeing_top_level_provenance_and_summary(tm
     item = next(item for item in _items(root) if item["surface"] == "live_slurm_dependency_proof")
     assert item["status"] == "passed"
     assert item["live_proof_accepted"] is True
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_dry_run_evidence_ingests_as_deterministic_non_final_review_evidence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(scheduler_path)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-readiness",
+            "--evidence-root",
+            str(root),
+            "--run-id",
+            "m19",
+            "--scheduler-evidence-file",
+            str(scheduler_path),
+        ]
+    )
+
+    assert exit_code == 0
+    rendered_summary = json.loads(capsys.readouterr().out)
+    assert rendered_summary["final_production_readiness_claimed"] is False
+    item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    assert item["status"] == "passed"
+    assert item["execution_mode"] == "deterministic"
+    assert item["required_for_final"] is False
+    assert item["live_proof_accepted"] is False
+    assert item["details"]["scheduler_pass_id"] == "scheduler_20260521120000_fixed"
+    assert item["details"]["scheduler_execution_mode"] == "dry_run"
+    assert item["details"]["scheduler_artifact_ref"] == "scheduler:scheduler_20260521120000_fixed.json"
+    assert item["details"]["scheduler_checksum"].startswith("sha256:")
+
+    live_scheduler_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert live_scheduler_item["status"] == "release_blocked"
+    assert live_scheduler_item["execution_mode"] == "not_executed"
+    assert live_scheduler_item["required_for_final"] is True
+    assert live_scheduler_item["live_proof_accepted"] is False
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(scheduler_path, status="submitted", execution_mode="production_orchestration")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=_scheduler_proof_bound_to_evidence(scheduler_path),
+        )
+    )
+
+    scheduler_review = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert scheduler_review["status"] == "passed"
+    assert scheduler_review["live_proof_accepted"] is False
+    assert live_item["status"] == "passed"
+    assert live_item["execution_mode"] == "live_proof"
+    assert live_item["live_proof_accepted"] is True
+    assert live_item["details"]["payload"]["producer_artifact_ref"] == "scheduler:scheduler_20260521120000_fixed.json"
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_error"),
+    [
+        ({"schema": "nhms.production_readiness.live_proof.v0"}, "schema_mismatch"),
+        ({"run_id": "stale-run"}, "run_id_mismatch"),
+        ({"target_environment": "staging"}, "target_environment_mismatch"),
+        ({"execution_mode": "deterministic"}, "execution_mode_not_live_proof"),
+        ({"producer_schema": "nhms.production_scheduler.pass_evidence.v0"}, "producer_schema_mismatch"),
+        ({"producer_run_id": "stale-pass"}, "producer_run_id_mismatch"),
+        ({"producer_artifact_ref": "scheduler:sibling.json"}, "producer_artifact_ref_mismatch"),
+        ({"scheduler_checksum": "sha256:stale"}, "producer_checksum_mismatch"),
+        (
+            {"scheduler_checksum": "", "provenance": {"producer_schema": SCHEDULER_SCHEMA}},
+            "missing_producer_checksum_or_receipt_id",
+        ),
+    ],
+)
+def test_scheduler_live_receipt_rejects_stale_or_identity_mismatched_binding(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_error: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(scheduler_path)
+    receipt = _scheduler_proof_bound_to_evidence(scheduler_path, **override)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    errors = item["details"]["acceptance_errors"]["errors"]
+    assert item["status"] == "release_blocked"
+    assert item["execution_mode"] == "live_proof"
+    assert item["live_proof_accepted"] is False
+    assert expected_error in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("writer", "expected_error"),
+    [
+        (
+            lambda path: path.write_text("{not-json token=secret", encoding="utf-8"),
+            "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_READ_FAILED",
+        ),
+        (
+            lambda path: path.write_text(
+                json.dumps(_scheduler_evidence_payload(stale=True)),
+                encoding="utf-8",
+            ),
+            "stale_scheduler_evidence",
+        ),
+        (
+            lambda path: path.write_text(
+                json.dumps(_scheduler_evidence_payload(pass_id="../private-scheduler-pass")),
+                encoding="utf-8",
+            ),
+            "unsafe_scheduler_identity",
+        ),
+        (
+            lambda path: path.write_text(
+                json.dumps(_scheduler_evidence_payload(final_claimed=True)),
+                encoding="utf-8",
+            ),
+            "scheduler_evidence_claimed_final_readiness",
+        ),
+    ],
+)
+def test_scheduler_malformed_stale_or_unsafe_evidence_is_blocked_and_redacted(
+    tmp_path: Path,
+    writer: object,
+    expected_error: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "private" / "scheduler" / "scheduler_20260521120000_fixed.json"
+    scheduler_path.parent.mkdir(parents=True)
+    writer(scheduler_path)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_file=scheduler_path)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    assert item["status"] == "blocked"
+    assert item["execution_mode"] == "not_executed"
+    assert item["live_proof_accepted"] is False
+    rendered = json.dumps(item, sort_keys=True)
+    assert expected_error in rendered
+    assert str(scheduler_path.parent) not in rendered
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_oversized_scheduler_evidence_is_bounded_blocked_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    scheduler_path.parent.mkdir(parents=True)
+    scheduler_path.write_text(json.dumps(_scheduler_evidence_payload(blob="x" * (260 * 1024))), encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_file=scheduler_path)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    assert item["status"] == "blocked"
+    assert item["details"]["error_code"] == "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_TOO_LARGE"
+    artifacts = "\n".join(path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").iterdir())
+    assert len(artifacts) < 80_000
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_existing_m19_dependency_summary_truth_table_unchanged_when_scheduler_absent(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    lanes = {
+        "slurm": ("nhms.production_closure.slurm.v1", 147, "ready"),
+        "object-store": ("nhms.production_closure.object_store.v1", 148, "ready"),
+        "source": ("nhms.production_closure.met.v1", 149, "ready"),
+        "e2e": ("nhms.production_closure.e2e.v1", 150, "ready"),
+        "mvt": ("nhms.production_closure.scale.v1", 151, "ready"),
+    }
+    for lane, (schema, issue, status) in lanes.items():
+        lane_root = tmp_path / lane
+        lane_root.mkdir()
+        (lane_root / "summary.json").write_text(
+            json.dumps(
+                {
+                    "schema": schema,
+                    "issue": issue,
+                    "run_id": f"{lane}-run",
+                    "status": status,
+                    "execution_mode": "deterministic_fixture",
+                    "final_production_readiness_claimed": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            slurm_evidence_root=tmp_path / "slurm",
+            object_store_evidence_root=tmp_path / "object-store",
+            source_evidence_root=tmp_path / "source",
+            e2e_evidence_root=tmp_path / "e2e",
+            mvt_evidence_root=tmp_path / "mvt",
+        )
+    )
+
+    items = _items(root)
+    consumed = [item for item in items if item["surface"].endswith("_production_like_evidence")]
+    assert len(consumed) == 5
+    assert {item["surface"] for item in consumed} == {
+        "slurm_production_like_evidence",
+        "object_store_production_like_evidence",
+        "source_production_like_evidence",
+        "e2e_production_like_evidence",
+        "mvt_production_like_evidence",
+    }
+    assert all(item["status"] == "passed" for item in consumed)
+    assert all(item["execution_mode"] == "deterministic" for item in consumed)
+    assert all(item["live_proof_accepted"] is False for item in consumed)
+    assert "live_scheduler_evidence_proof" not in {item["surface"] for item in items}
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
