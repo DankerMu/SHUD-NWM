@@ -18,6 +18,10 @@ from services.orchestrator.scheduler import (
     MAX_CONTINUOUS_JSON_PASSES,
     MAX_DISCOVERED_CYCLES,
     MAX_LOCK_PAYLOAD_BYTES,
+    MAX_MODEL_RUN_STAGE_TASK_ROWS,
+    MODEL_RUN_EVIDENCE_SCHEMA_VERSION,
+    SCHEDULER_EVIDENCE_GITHUB_ISSUE,
+    SCHEDULER_EVIDENCE_SCHEMA_VERSION,
     FileSchedulerLease,
     ProductionScheduler,
     ProductionSchedulerConfig,
@@ -634,6 +638,8 @@ def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) 
 
     assert result.evidence["candidates"] == []
     assert result.evidence["skipped_candidates"][0]["reason"] == "active_duplicate_pipeline"
+    assert result.evidence["counts"]["candidate_count"] == 1
+    assert result.evidence["counts"]["skipped_candidate_count"] == 1
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
@@ -3833,6 +3839,61 @@ def test_non_dry_run_partial_cycle_marks_failed_candidate_without_fanning_succes
     }
 
 
+@pytest.mark.parametrize("outcome_status", ["submission_failed", "permanently_failed"])
+def test_non_dry_run_partial_cycle_counts_failed_alias_candidate_as_failed(
+    tmp_path: Path,
+    outcome_status: str,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    sibling_reason = f"forcing_task_{outcome_status}"
+    orchestrator = FakeProductionOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forcing",
+            },
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_b",
+                "model_id": "model_b",
+                "status": outcome_status,
+                "stage": "forcing",
+                "reason": sibling_reason,
+                "slurm_job_id": "slurm_forcing_1",
+                "exit_code": 1,
+            },
+        ),
+        result_status="parsed_partial",
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted_partial"
+    assert result.evidence["status"] == "submitted_partial"
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert result.evidence["counts"]["failed_count"] == 1
+    assert result.evidence["counts"]["partial_count"] == 1
+    evidence_by_model = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    assert evidence_by_model["model_b"]["status"] == outcome_status
+    assert evidence_by_model["model_b"]["submitted"] is True
+    assert evidence_by_model["model_b"]["execution_attempted"] is True
+    assert evidence_by_model["model_b"]["candidate_outcome"]["status"] == outcome_status
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+    persisted_by_model = {item["model_id"]: item for item in persisted["model_run_evidence"]}
+    assert persisted["counts"]["failed_count"] == 1
+    assert persisted["counts"]["partial_count"] == 1
+    assert persisted_by_model["model_b"]["status"] == outcome_status
+
+
 @pytest.mark.parametrize("outcome_status", ["unavailable", "cancelled"])
 def test_non_dry_run_partial_cycle_marks_unavailable_or_cancelled_candidate_as_partial(
     tmp_path: Path,
@@ -3921,6 +3982,426 @@ def test_scheduler_evidence_redacts_signed_candidate_outcome_log_uri(tmp_path: P
     assert "supersecret" not in evidence_text
     assert "rawsecret" not in evidence_text
     assert "user:pass" not in evidence_text
+
+
+def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        model_ids=("model_a",),
+        basin_ids=("basin_a",),
+    )
+    adapter = FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": adapter},
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.evidence["schema_version"] == SCHEDULER_EVIDENCE_SCHEMA_VERSION
+    assert result.evidence["review_contract"]["github_issue"] == SCHEDULER_EVIDENCE_GITHUB_ISSUE
+    assert result.evidence["execution_mode"] == "dry_run"
+    assert result.evidence["readiness_interpretation"] == "deterministic_review_only"
+    assert result.evidence["readiness"]["production_ready"] is False
+    assert result.evidence["readiness"]["final_production_readiness_claimed"] is False
+    assert len(result.evidence["candidates"]) == 1
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"] == {
+        "candidate_count": 1,
+        "blocked_candidate_count": 0,
+        "skipped_candidate_count": 0,
+        "selected_model_count": 1,
+        "source_cycle_count": 1,
+        "submitted_count": 0,
+        "failed_count": 0,
+        "partial_count": 0,
+    }
+    assert result.evidence["filters"] == result.evidence["operator_filters"]
+    assert result.evidence["candidates"][0]["source_id"] == "gfs"
+    assert result.evidence["candidates"][0]["cycle_id"] == "gfs_2026052106"
+    assert result.evidence["candidates"][0]["model_id"] == "model_a"
+    assert result.evidence["artifact_path"] == str(result.artifact_path)
+    assert result.evidence["no_mutation_proof"] == {
+        "adapter_download_called": False,
+        "slurm_submit_called": False,
+        "shud_runtime_called": False,
+        "hydro_result_table_writes": False,
+        "met_result_table_writes": False,
+    }
+    assert adapter.download_calls == 0
+    assert persisted["schema_version"] == result.evidence["schema_version"]
+    assert persisted["readiness"]["final_production_readiness_claimed"] is False
+
+
+def test_issue_196_submitted_model_run_evidence_includes_artifacts_resources_and_quality(
+    tmp_path: Path,
+) -> None:
+    orchestrator = FakeProductionOrchestratorWithStageEvidence(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forecast",
+                "parsed_row_count": 21,
+                "accounting": {"elapsed": "00:03:00", "max_rss": "3072K"},
+            },
+        )
+    )
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry(
+            [
+                _model(
+                    "model_a",
+                    "basin_a",
+                    resource_profile={
+                        "runnable": True,
+                        "memory_gb": 16,
+                        "station_count": 2,
+                        "station_ids": ["sta_001", "sta_002"],
+                        "parsed_row_count": 10,
+                        "display_capabilities": {"tiles": True, "optional_weather_available": False},
+                        "frequency_capabilities": {
+                            "return_periods": True,
+                            "curves_available": False,
+                            "warning_thresholds_available": False,
+                        },
+                    },
+                )
+            ]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    model_evidence = result.evidence["model_run_evidence"][0]
+
+    assert result.status == "submitted"
+    assert model_evidence["schema_version"] == MODEL_RUN_EVIDENCE_SCHEMA_VERSION
+    assert model_evidence["review_contract"]["github_issue"] == SCHEDULER_EVIDENCE_GITHUB_ISSUE
+    assert model_evidence["artifact_refs"]["model_package_manifest_uri"] == "s3://nhms/models/model_a/manifest.json"
+    assert model_evidence["artifact_refs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/"
+    assert model_evidence["stage_statuses"][0]["accounting"]["elapsed"] == "00:03:00"
+    assert model_evidence["stage_statuses"][0]["resource_metrics"]["max_rss"] == "3072K"
+    assert model_evidence["resource_summary"]["candidate_resource_metrics"]["max_rss"] == "3072K"
+    assert model_evidence["forcing"]["station_count"] == 2
+    assert model_evidence["outputs"]["parsed_row_count"] == 21
+    assert model_evidence["outputs"]["segment_count"] == 3
+    assert model_evidence["display"]["unavailable_products"] == ["optional_weather_products"]
+    assert model_evidence["quality_states"]["frequency"]["unavailable_products"] == [
+        "return_period_curves",
+        "warning_thresholds",
+    ]
+    assert any(blocker["field"] == "frequency" for blocker in model_evidence["residual_blockers"])
+    assert result.evidence["readiness"]["final_production_readiness_claimed"] is False
+
+
+def test_issue_196_partial_and_blocked_model_run_evidence_redacts_secrets_and_records_blockers(
+    tmp_path: Path,
+) -> None:
+    secret_log_uri = "s3://nhms/logs/forcing.out?X-Amz-Signature=supersecret"
+    orchestrator = FakeProductionOrchestratorWithStageEvidence(
+        stage_status="partially_failed",
+        stage_error_message="failed token=rawsecret url=https://user:pass@example.test/log?signature=abc",
+        stage_log_uri=secret_log_uri,
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forcing",
+            },
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_b",
+                "model_id": "model_b",
+                "status": "failed",
+                "stage": "forcing",
+                "reason": "forcing_task_failed",
+                "slurm_job_id": "slurm_forcing_1",
+                "exit_code": 1,
+                "log_uri": secret_log_uri,
+                "error_message": "failed token=rawsecret",
+            },
+        ),
+        result_status="parsed_partial",
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    failed = next(item for item in result.evidence["model_run_evidence"] if item["model_id"] == "model_b")
+    evidence_text = json.dumps(result.evidence)
+    artifact_text = Path(result.artifact_path or "").read_text(encoding="utf-8")
+
+    assert result.status == "submitted_partial"
+    assert result.evidence["counts"]["partial_count"] == 1
+    assert failed["status"] == "failed"
+    assert failed["artifact_refs"]["output_uri"] == "s3://nhms/runs/fcst_gfs_2026052106_model_b/output/"
+    assert failed["candidate_outcome"]["log_uri"] == "s3://nhms/logs/forcing.out"
+    assert failed["stage_statuses"][0]["log_uri"] == "s3://nhms/logs/forcing.out"
+    assert failed["stage_statuses"][0]["task_results_summary"] == {
+        "total_count": 1,
+        "included_count": 0,
+        "omitted_count": 1,
+        "matched_count": 0,
+        "matching": "candidate_identity",
+        "limit": MAX_MODEL_RUN_STAGE_TASK_ROWS,
+        "status_counts": {"succeeded": 1},
+    }
+    assert failed["resource_summary"]["stage_accounting"][0]["accounting"]["max_rss"] == "3072K"
+    assert failed["resource_summary"]["task_accounting"] == []
+    assert any(blocker["code"] == "FORCING_TASK_FAILED" for blocker in failed["residual_blockers"])
+    for raw_secret in ("supersecret", "rawsecret", "user:pass", "signature=abc", "X-Amz-Signature"):
+        assert raw_secret not in evidence_text
+        assert raw_secret not in artifact_text
+
+
+def test_model_run_evidence_bounds_unmatched_large_array_task_rows(tmp_path: Path) -> None:
+    class LargeArrayOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            task_results = tuple(
+                {
+                    "task_id": index,
+                    "array_task_id": index,
+                    "status": "succeeded",
+                    "slurm_job_id": f"slurm_forcing_{index}",
+                    "accounting": {"elapsed": "00:01:00", "max_rss": f"{1024 + index}K"},
+                }
+                for index in range(200)
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=(
+                    StageRunResult(
+                        stage="forcing",
+                        job_type="produce_forcing_array",
+                        pipeline_job_id="job_forcing",
+                        slurm_job_id="slurm_forcing",
+                        status="succeeded",
+                        task_results=task_results,
+                    ),
+                ),
+            )
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry(
+            [
+                _model("model_a", "basin_a"),
+                _model("model_b", "basin_b"),
+                _model("model_c", "basin_c"),
+            ]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: LargeArrayOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    model_evidence = result.evidence["model_run_evidence"]
+    assert result.status == "submitted"
+    assert len(model_evidence) == 3
+    assert sum(len(item["stage_statuses"][0]["task_results"]) for item in model_evidence) == (
+        3 * MAX_MODEL_RUN_STAGE_TASK_ROWS
+    )
+    assert sum(len(item["resource_summary"]["task_accounting"]) for item in model_evidence) == (
+        3 * MAX_MODEL_RUN_STAGE_TASK_ROWS
+    )
+    for item in model_evidence:
+        stage = item["stage_statuses"][0]
+        summary = stage["task_results_summary"]
+        assert len(stage["task_results"]) == MAX_MODEL_RUN_STAGE_TASK_ROWS
+        assert summary["total_count"] == 200
+        assert summary["included_count"] == MAX_MODEL_RUN_STAGE_TASK_ROWS
+        assert summary["omitted_count"] == 200 - MAX_MODEL_RUN_STAGE_TASK_ROWS
+        assert summary["matching"] == "bounded_sample"
+        assert summary["limit"] == MAX_MODEL_RUN_STAGE_TASK_ROWS
+
+
+def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(tmp_path: Path) -> None:
+    class CandidateMatchedArrayOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            task_results = tuple(
+                {
+                    "task_id": index,
+                    "array_task_id": index,
+                    "candidate_id": basin["candidate_id"],
+                    "run_id": basin["run_id"],
+                    "model_id": basin["model_id"],
+                    "status": "succeeded",
+                    "slurm_job_id": f"slurm_forcing_{index}",
+                    "accounting": {"elapsed": "00:01:00", "max_rss": f"{2048 + index}K"},
+                }
+                for index, basin in enumerate(basins)
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=(
+                    StageRunResult(
+                        stage="forcing",
+                        job_type="produce_forcing_array",
+                        pipeline_job_id="job_forcing",
+                        slurm_job_id="slurm_forcing",
+                        status="succeeded",
+                        task_results=task_results,
+                    ),
+                ),
+            )
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry(
+            [
+                _model("model_a", "basin_a"),
+                _model("model_b", "basin_b"),
+                _model("model_c", "basin_c"),
+            ]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: CandidateMatchedArrayOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    model_evidence = result.evidence["model_run_evidence"]
+    assert len(model_evidence) == 3
+    for item in model_evidence:
+        stage = item["stage_statuses"][0]
+        summary = stage["task_results_summary"]
+        assert len(stage["task_results"]) == 1
+        assert stage["task_results"][0]["candidate_id"] == item["candidate_id"]
+        assert item["resource_summary"]["task_accounting"][0]["slurm_job_id"] == (
+            stage["task_results"][0]["slurm_job_id"]
+        )
+        assert summary["total_count"] == 3
+        assert summary["matched_count"] == 1
+        assert summary["matching"] == "candidate_identity"
+
+
+def test_model_run_evidence_caps_all_candidate_matched_array_task_rows(tmp_path: Path) -> None:
+    class ManyMatchedArrayOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            basin = basins[0]
+            task_count = MAX_MODEL_RUN_STAGE_TASK_ROWS + 9
+            task_results = tuple(
+                {
+                    "task_id": index,
+                    "array_task_id": index,
+                    "candidate_id": basin["candidate_id"],
+                    "run_id": basin["run_id"],
+                    "model_id": basin["model_id"],
+                    "status": "succeeded",
+                    "slurm_job_id": f"slurm_forcing_{index}",
+                    "accounting": {"elapsed": "00:01:00", "max_rss": f"{2048 + index}K"},
+                }
+                for index in range(task_count)
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=(
+                    StageRunResult(
+                        stage="forcing",
+                        job_type="produce_forcing_array",
+                        pipeline_job_id="job_forcing",
+                        slurm_job_id="slurm_forcing",
+                        status="succeeded",
+                        task_results=task_results,
+                    ),
+                ),
+            )
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: ManyMatchedArrayOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    model_evidence = result.evidence["model_run_evidence"][0]
+    stage = model_evidence["stage_statuses"][0]
+    summary = stage["task_results_summary"]
+    total_matching_rows = MAX_MODEL_RUN_STAGE_TASK_ROWS + 9
+    assert len(stage["task_results"]) == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert summary["total_count"] == total_matching_rows
+    assert summary["included_count"] == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert summary["matched_count"] == total_matching_rows
+    assert summary["omitted_count"] == total_matching_rows - MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert summary["matching"] == "candidate_identity"
+    assert len(model_evidence["resource_summary"]["task_accounting"]) == MAX_MODEL_RUN_STAGE_TASK_ROWS
+
+
+def test_issue_196_blocked_preflight_evidence_keeps_existing_consumers_stable(tmp_path: Path) -> None:
+    roots = _slurm_roots(tmp_path)
+    scheduler = ProductionScheduler(
+        _config(
+            roots["workspace_root"],
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            slurm_execution_enabled=True,
+            database_url=None,
+            object_store_root=roots["object_store_root"],
+            log_root=roots["log_root"],
+            runtime_root=roots["runtime_root"],
+            allowed_storage_roots=(tmp_path,),
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+    payload = result.to_dict()
+    model_evidence = payload["model_run_evidence"][0]
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["readiness"]["final_production_readiness_claimed"] is False
+    assert model_evidence["schema_version"] == MODEL_RUN_EVIDENCE_SCHEMA_VERSION
+    assert model_evidence["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
+    assert model_evidence["submitted"] is False
+    assert model_evidence["mutation_occurred"] is False
+    assert model_evidence["artifact_refs"]["output_key"] == "runs/fcst_gfs_2026052106_model_a/output/"
+    assert model_evidence["residual_blockers"][0]["quality_flag"] == "slurm_preflight_blocked"
 
 
 def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
@@ -4508,6 +4989,61 @@ class FakeProductionOrchestrator:
                 "replacement_submitted": False,
             }
         ]
+
+
+class FakeProductionOrchestratorWithStageEvidence(FakeProductionOrchestrator):
+    def __init__(
+        self,
+        *,
+        candidate_outcomes: tuple[dict[str, Any], ...] = (),
+        result_status: str = "complete",
+        stage_status: str = "succeeded",
+        stage_error_message: str | None = None,
+        stage_log_uri: str = "s3://nhms/logs/forcing.out",
+    ) -> None:
+        super().__init__(candidate_outcomes=candidate_outcomes, result_status=result_status)
+        self.stage_status = stage_status
+        self.stage_error_message = stage_error_message
+        self.stage_log_uri = stage_log_uri
+
+    def orchestrate_cycle(
+        self,
+        source: str,
+        cycle_time: datetime,
+        basins: list[dict[str, Any]],
+    ) -> PipelineResult:
+        self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        stage = StageRunResult(
+            stage="forcing",
+            job_type="produce_forcing_array",
+            pipeline_job_id="job_forcing",
+            slurm_job_id="slurm_forcing",
+            status=self.stage_status,
+            exit_code=0 if self.stage_status == "succeeded" else 1,
+            error_code=None if self.stage_status == "succeeded" else "NODE_FAILURE",
+            error_message=self.stage_error_message,
+            log_uri=self.stage_log_uri,
+            accounting={"elapsed": "00:03:00", "max_rss": "3072K", "alloc_tres": "cpu=2,mem=4G"},
+            task_results=(
+                {
+                    "task_id": 0,
+                    "array_task_id": 0,
+                    "model_id": basins[0]["model_id"] if basins else "model_a",
+                    "status": "succeeded",
+                    "slurm_job_id": "slurm_forcing_0",
+                    "exit_code": 0,
+                    "log_uri": self.stage_log_uri,
+                    "accounting": {"elapsed": "00:03:00", "max_rss": "3072K"},
+                },
+            ),
+        )
+        return PipelineResult(
+            run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+            cycle_id=cycle_id_for(source, cycle_time),
+            status=self.result_status,
+            stages=(stage,),
+            candidate_outcomes=self.candidate_outcomes,
+        )
 
 
 class StrictNoSubmitOrchestrator(FakeProductionOrchestrator):

@@ -48,12 +48,18 @@ MAX_REGISTRY_PAGES = 20
 MAX_EVIDENCE_BYTES = 5_000_000
 MAX_LOCK_PAYLOAD_BYTES = 16_384
 MAX_CONTINUOUS_JSON_PASSES = 100
+MAX_MODEL_RUN_STAGE_TASK_ROWS = 16
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_RETRY_LIMIT = 3
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 LOCK_OWNER = "production_scheduler"
 LOCK_SCHEMA_VERSION = 1
+SCHEDULER_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.pass_evidence.v1"
+MODEL_RUN_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.model_run_evidence.v1"
+SCHEDULER_EVIDENCE_CONTRACT_ID = "runtime-evidence-and-operations.scheduler-evidence.v1"
+SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE = "m20-production-multibasin-continuous-automation"
+SCHEDULER_EVIDENCE_GITHUB_ISSUE = 196
 SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "frequency"}
 SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
@@ -89,6 +95,8 @@ SLURM_RESOURCE_PROFILE_TEMPLATE_IDENTITY_FIELDS = {
     "object_store_prefix",
     "manifest_index_path",
 }
+TASK_RESULT_CANDIDATE_IDENTITY_FIELDS = ("candidate_id", "run_id", "forcing_version_id", "model_id")
+TASK_RESULT_INDEX_IDENTITY_FIELDS = ("task_id", "array_task_id", "original_task_id")
 ACTIVE_PIPELINE_STATUSES = {"pending", "submitted", "running"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
@@ -536,16 +544,18 @@ class ProductionScheduler:
                     "hydro_result_table_writes": submitted_count > 0,
                     "met_result_table_writes": submitted_count > 0,
                 }
-                failed_count = sum(1 for item in execution_evidence if item.get("status") == "failed")
+                failed_count = _scheduler_failed_count_from_execution(execution_evidence)
                 partial_count = _scheduler_partial_count_from_execution(execution_evidence)
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
             evidence["operator_filters"].update(model_evidence["operator_filters"])
+            evidence["filters"] = dict(evidence["operator_filters"])
             duplicate_exclusions = [
                 *self.config.source_exclusions,
                 *[item for item in source_cycle_evidence if item.get("status") == "excluded"],
                 *candidate_duplicate_exclusions,
             ]
+            total_candidate_count = len(candidates) + len(blocked_candidates) + len(skipped_candidates)
             evidence.update(
                 {
                     "status": pass_status,
@@ -558,7 +568,7 @@ class ProductionScheduler:
                     "skipped_candidates": skipped_candidates,
                     "duplicate_exclusions": duplicate_exclusions,
                     "counts": {
-                        "candidate_count": len(candidates),
+                        "candidate_count": total_candidate_count,
                         "blocked_candidate_count": len(blocked_candidates),
                         "skipped_candidate_count": len(skipped_candidates),
                         "selected_model_count": len(models),
@@ -700,6 +710,13 @@ class ProductionScheduler:
                             "Production orchestration requires an absolute deterministic output_uri "
                             "before runtime handoff."
                         ),
+                        **_candidate_model_run_review_evidence(
+                            candidate,
+                            output_uri=output_uri,
+                            outcome=None,
+                            status="blocked",
+                            stage_statuses=[],
+                        ),
                         "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
                         "qhh_script_invoked": False,
                     }
@@ -776,6 +793,13 @@ class ProductionScheduler:
                         "cycle_id": cycle_id,
                         "error_code": getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"),
                         "error_message": safe_error_message,
+                        **_candidate_model_run_review_evidence(
+                            candidate,
+                            output_uri=output_uri,
+                            outcome=None,
+                            status="blocked",
+                            stage_statuses=[],
+                        ),
                         "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
                         "qhh_script_invoked": False,
                     }
@@ -905,10 +929,28 @@ class ProductionScheduler:
     def _base_evidence(self, pass_id: str, started_at: datetime) -> dict[str, Any]:
         end_time = started_at - timedelta(hours=self.config.cycle_lag_hours)
         start_time = end_time - timedelta(hours=self.config.lookback_hours)
+        execution_mode = "dry_run" if self.config.dry_run else "production_orchestration"
+        readiness_interpretation = (
+            "deterministic_review_only" if self.config.dry_run else "non_final_scheduler_evidence"
+        )
+        operator_filters = {
+            "model_ids": list(self.config.model_ids),
+            "basin_ids": list(self.config.basin_ids),
+            "expression": _filter_expression(self.config.model_ids, self.config.basin_ids),
+            "excluded_runnable_count": 0,
+        }
         return {
+            "schema_version": SCHEDULER_EVIDENCE_SCHEMA_VERSION,
+            "review_contract": {
+                "contract_id": SCHEDULER_EVIDENCE_CONTRACT_ID,
+                "github_issue": SCHEDULER_EVIDENCE_GITHUB_ISSUE,
+                "openspec_change": SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE,
+                "scope": "scheduler_pass_evidence",
+            },
             "pass_id": pass_id,
             "started_at": _format_utc(started_at),
-            "execution_mode": "dry_run" if self.config.dry_run else "production_orchestration",
+            "execution_mode": execution_mode,
+            "readiness_interpretation": readiness_interpretation,
             "dry_run": self.config.dry_run,
             "sources": list(self.config.sources),
             "duplicate_exclusions": list(self.config.source_exclusions),
@@ -919,16 +961,18 @@ class ProductionScheduler:
                 "cycle_lag_hours": self.config.cycle_lag_hours,
                 "max_cycles_per_source": self.config.max_cycles_per_source,
             },
-            "operator_filters": {
-                "model_ids": list(self.config.model_ids),
-                "basin_ids": list(self.config.basin_ids),
-                "expression": _filter_expression(self.config.model_ids, self.config.basin_ids),
-                "excluded_runnable_count": 0,
-            },
+            "operator_filters": dict(operator_filters),
+            "filters": dict(operator_filters),
             "readiness": {
-                "deterministic_fixture": True,
+                "schema_version": "nhms.production_readiness.scheduler_input.v1",
+                "interpretation": readiness_interpretation,
+                "deterministic_fixture": self.config.dry_run,
+                "scheduler_evidence_accepted_for_review": True,
                 "live_receipts": [],
                 "production_ready": False,
+                "final_production_readiness_claimed": False,
+                "can_claim_final_production_readiness": False,
+                "reason": "scheduler evidence requires accepted live proof receipts for final readiness",
             },
         }
 
@@ -1332,7 +1376,9 @@ class ProductionScheduler:
         _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
         artifact_path = evidence_dir / f"{pass_id}.json"
         _require_under_workspace(artifact_path.parent.resolve(), workspace_root, "evidence_dir")
-        payload = dict(evidence)
+        payload = _evidence_safe(dict(evidence))
+        if not isinstance(payload, dict):
+            payload = {}
         payload["artifact_path"] = str(artifact_path)
         serialized = json.dumps(payload, indent=2, sort_keys=True)
         bounded_payload: dict[str, Any] | None = None
@@ -1353,6 +1399,9 @@ class ProductionScheduler:
             if bounded_payload is not None:
                 evidence.clear()
                 evidence.update(bounded_payload)
+            else:
+                evidence.clear()
+                evidence.update(payload)
             evidence.setdefault("artifact_path", str(artifact_path))
         return artifact_path
 
@@ -3223,6 +3272,13 @@ def _candidate_preflight_blocked_evidence(
         preflight = _slurm_preflight(config)
         return _candidate_slurm_preflight_blocked_evidence(candidate, preflight)
     return {
+        **_candidate_model_run_review_evidence(
+            candidate,
+            output_uri=None,
+            outcome=None,
+            status="preflight_blocked",
+            stage_statuses=[],
+        ),
         **_candidate_identity_evidence(candidate),
         "status": "preflight_blocked",
         "submitted": False,
@@ -3256,6 +3312,13 @@ def _candidate_slurm_preflight_blocked_evidence(
         "message": "Slurm preflight blocked submission.",
     }
     return {
+        **_candidate_model_run_review_evidence(
+            candidate,
+            output_uri=None,
+            outcome=None,
+            status="preflight_blocked",
+            stage_statuses=[],
+        ),
         **_candidate_identity_evidence(candidate),
         "status": "preflight_blocked",
         "submitted": False,
@@ -3285,6 +3348,13 @@ def _candidate_secret_manifest_blocked_evidence(
     findings: Sequence[Mapping[str, str]],
 ) -> dict[str, Any]:
     return {
+        **_candidate_model_run_review_evidence(
+            candidate,
+            output_uri=None,
+            outcome=None,
+            status="preflight_blocked",
+            stage_statuses=[],
+        ),
         **_candidate_identity_evidence(candidate),
         "status": "preflight_blocked",
         "submitted": False,
@@ -3389,13 +3459,7 @@ def _candidate_execution_evidence(
 ) -> list[dict[str, Any]]:
     stage_names = [stage.stage for stage in result.stages]
     stage_statuses = [
-        {
-            "stage": stage.stage,
-            "job_type": stage.job_type,
-            "status": stage.status,
-            "slurm_job_id": stage.slurm_job_id,
-            "error_code": stage.error_code,
-        }
+        _stage_run_evidence(stage)
         for stage in result.stages
     ]
     submitted = any(stage.slurm_job_id for stage in result.stages)
@@ -3441,11 +3505,15 @@ def _candidate_execution_evidence_item(
         candidate_submitted = submitted and (outcome_status == "active" or execution_attempted)
         mutation_occurred = candidate_submitted
         candidate_outcome = dict(outcome)
+    review_evidence = _candidate_model_run_review_evidence(
+        candidate,
+        output_uri=output_uri,
+        outcome=outcome,
+        status=status,
+        stage_statuses=stage_statuses,
+    )
     item = {
-        **_candidate_identity_evidence(
-            candidate,
-            output_uri=output_uri,
-        ),
+        **review_evidence,
         "status": status,
         "submitted": candidate_submitted,
         "execution_attempted": execution_attempted,
@@ -3455,7 +3523,6 @@ def _candidate_execution_evidence_item(
         "mutation_occurred": mutation_occurred,
         "pipeline_run_id": result.run_id,
         "standard_chain_shape": stage_names,
-        "stage_statuses": stage_statuses,
         "qhh_script_invoked": False,
     }
     if candidate_outcome is not None:
@@ -3466,6 +3533,16 @@ def _candidate_execution_evidence_item(
             item["error_message"] = (
                 f"Candidate {candidate.candidate_id} was {status} in the partial multi-basin cycle."
             )
+            if not any(blocker.get("code") == item["error_code"] for blocker in item["residual_blockers"]):
+                item["residual_blockers"].append(
+                    {
+                        "code": item["error_code"],
+                        "stage": candidate_outcome.get("stage") or candidate_outcome.get("failed_stage"),
+                        "state": "blocked",
+                        "quality_flag": "partial_candidate",
+                        "residual_risk": item["error_message"],
+                    }
+                )
     return item
 
 
@@ -3475,6 +3552,507 @@ def _candidate_status_from_outcome(result_status: str, outcome_status: str) -> s
     if _is_non_submitted_terminal_or_unavailable_status(outcome_status):
         return outcome_status
     return "unavailable"
+
+
+def _candidate_model_run_review_evidence(
+    candidate: SchedulerCandidate,
+    *,
+    output_uri: str | None,
+    outcome: Mapping[str, Any] | None,
+    status: str,
+    stage_statuses: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    stage_status_payload = _candidate_stage_evidence(candidate, stage_statuses, outcome=outcome)
+    quality_states = _candidate_quality_states(candidate, outcome=outcome, status=status)
+    artifact_refs = _candidate_artifact_refs(candidate, output_uri=output_uri)
+    return {
+        "schema_version": MODEL_RUN_EVIDENCE_SCHEMA_VERSION,
+        "review_contract": {
+            "contract_id": SCHEDULER_EVIDENCE_CONTRACT_ID,
+            "github_issue": SCHEDULER_EVIDENCE_GITHUB_ISSUE,
+            "openspec_change": SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE,
+            "scope": "model_run_evidence",
+        },
+        **_candidate_identity_evidence(candidate, output_uri=output_uri),
+        "stage_statuses": stage_status_payload,
+        "stage_evidence": stage_status_payload,
+        "artifact_refs": artifact_refs,
+        "artifact_locations": dict(artifact_refs),
+        "resource_profile": _resource_profile_evidence(candidate.resource_profile),
+        "resource_summary": _candidate_resource_summary(
+            candidate,
+            stage_statuses=stage_status_payload,
+            outcome=outcome,
+        ),
+        "forcing": _candidate_forcing_evidence(candidate),
+        "outputs": _candidate_output_evidence(candidate, output_uri=output_uri, outcome=outcome),
+        "display": _candidate_display_evidence(candidate),
+        "quality_states": quality_states,
+        "residual_blockers": _candidate_residual_blockers(
+            candidate,
+            outcome=outcome,
+            status=status,
+            quality_states=quality_states,
+        ),
+    }
+
+
+def _candidate_stage_evidence(
+    candidate: SchedulerCandidate,
+    stage_statuses: Sequence[Mapping[str, Any]],
+    *,
+    outcome: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    return [
+        _candidate_stage_evidence_item(candidate, _evidence_safe(dict(stage)), outcome=outcome)
+        for stage in stage_statuses
+    ]
+
+
+def _candidate_stage_evidence_item(
+    candidate: SchedulerCandidate,
+    stage: Mapping[str, Any],
+    *,
+    outcome: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    stage_payload = dict(stage)
+    task_results = _stage_task_results(stage_payload)
+    total_count = len(task_results)
+    status_counts = Counter(str(task.get("status") or task.get("state") or "unknown") for task in task_results)
+    matched_tasks = [
+        task
+        for task in task_results
+        if _task_result_matches_candidate(task, candidate, outcome=outcome)
+    ]
+    exact_match_available = _task_candidate_matching_available(task_results, outcome=outcome)
+    if exact_match_available:
+        selected_tasks = matched_tasks[:MAX_MODEL_RUN_STAGE_TASK_ROWS]
+    else:
+        selected_tasks = task_results[:MAX_MODEL_RUN_STAGE_TASK_ROWS]
+    selected_count = len(selected_tasks)
+    stage_payload["task_results"] = [_evidence_safe(dict(task)) for task in selected_tasks]
+    stage_payload["task_results_summary"] = _evidence_safe(
+        {
+            "total_count": total_count,
+            "included_count": selected_count,
+            "omitted_count": max(total_count - selected_count, 0),
+            "matched_count": len(matched_tasks),
+            "matching": "candidate_identity" if exact_match_available else "bounded_sample",
+            "limit": MAX_MODEL_RUN_STAGE_TASK_ROWS,
+            "status_counts": dict(sorted(status_counts.items())),
+        }
+    )
+    return _evidence_safe(stage_payload)
+
+
+def _stage_run_evidence(stage: Any) -> dict[str, Any]:
+    task_results = [
+        _task_result_evidence(task)
+        for task in tuple(getattr(stage, "task_results", ()) or ())
+        if isinstance(task, Mapping)
+    ]
+    payload = {
+        "stage": getattr(stage, "stage", None),
+        "job_type": getattr(stage, "job_type", None),
+        "pipeline_job_id": getattr(stage, "pipeline_job_id", None),
+        "slurm_job_id": getattr(stage, "slurm_job_id", None),
+        "status": getattr(stage, "status", None),
+        "exit_code": getattr(stage, "exit_code", None),
+        "error_code": getattr(stage, "error_code", None),
+        "error_message": getattr(stage, "error_message", None),
+        "log_uri": getattr(stage, "log_uri", None),
+        "accounting": getattr(stage, "accounting", {}) or {},
+        "resource_metrics": _resource_metrics_from_mapping(getattr(stage, "accounting", {}) or {}),
+        "task_results": task_results,
+    }
+    if not payload["accounting"]:
+        payload["accounting_gap"] = {
+            "available": False,
+            "reason": "accounting_unavailable",
+            "fabricated_metrics": False,
+        }
+    return _evidence_safe(payload)
+
+
+def _stage_task_results(stage: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    task_results = stage.get("task_results") or []
+    if not isinstance(task_results, Sequence) or isinstance(task_results, str | bytes | bytearray):
+        return []
+    return [task for task in task_results if isinstance(task, Mapping)]
+
+
+def _task_result_matches_candidate(
+    task: Mapping[str, Any],
+    candidate: SchedulerCandidate,
+    *,
+    outcome: Mapping[str, Any] | None,
+) -> bool:
+    identity_fields = {
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "model_id": candidate.model_id,
+    }
+    for field_name, expected in identity_fields.items():
+        if _normalized_identity(task.get(field_name)) == _normalized_identity(expected):
+            return True
+    if outcome is None:
+        return False
+    for field_name in TASK_RESULT_CANDIDATE_IDENTITY_FIELDS:
+        task_value = _normalized_identity(task.get(field_name))
+        outcome_value = _normalized_identity(outcome.get(field_name))
+        if task_value is not None and task_value == outcome_value:
+            return True
+    outcome_task_ids = {
+        _normalized_identity(outcome.get(field_name))
+        for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
+    }
+    outcome_task_ids.discard(None)
+    task_ids = {
+        _normalized_identity(task.get(field_name))
+        for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
+    }
+    task_ids.discard(None)
+    return bool(task_ids.intersection(outcome_task_ids))
+
+
+def _task_candidate_matching_available(
+    tasks: Sequence[Mapping[str, Any]],
+    *,
+    outcome: Mapping[str, Any] | None,
+) -> bool:
+    for task in tasks:
+        if any(task.get(field_name) not in (None, "") for field_name in TASK_RESULT_CANDIDATE_IDENTITY_FIELDS):
+            return True
+    if outcome is None:
+        return False
+    outcome_has_task_identity = any(
+        outcome.get(field_name) not in (None, "") for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
+    )
+    if not outcome_has_task_identity:
+        return False
+    return any(
+        any(task.get(field_name) not in (None, "") for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS)
+        for task in tasks
+    )
+
+
+def _normalized_identity(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _task_result_evidence(task: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(task)
+    payload["accounting"] = dict(_mapping_value(payload.get("accounting")))
+    metrics = _resource_metrics_from_mapping(payload.get("resource_metrics") or payload["accounting"])
+    if metrics:
+        payload["resource_metrics"] = metrics
+    elif "resource_metrics" not in payload:
+        payload["resource_metrics"] = {}
+    return _evidence_safe(payload)
+
+
+def _resource_metrics_from_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    aliases = {
+        "elapsed": ("elapsed", "elapsed_time"),
+        "max_rss": ("max_rss", "MaxRSS", "maxrss"),
+        "ave_rss": ("ave_rss", "AveRSS", "averss"),
+        "alloc_tres": ("alloc_tres", "AllocTRES", "tres"),
+        "max_disk_read": ("max_disk_read", "MaxDiskRead"),
+        "max_disk_write": ("max_disk_write", "MaxDiskWrite"),
+    }
+    metrics: dict[str, Any] = {}
+    for normalized, keys in aliases.items():
+        for key in keys:
+            if key in value and value[key] not in (None, ""):
+                metrics[normalized] = value[key]
+                break
+    return _evidence_safe(metrics)
+
+
+def _candidate_artifact_refs(candidate: SchedulerCandidate, *, output_uri: str | None) -> dict[str, Any]:
+    refs = {
+        "model_package_uri": _redact_secret_manifest_for_evidence(candidate.model_package_uri, "model_package_uri"),
+        "model_package_manifest_uri": _redact_secret_manifest_for_evidence(
+            _model_package_manifest_uri(candidate),
+            "model_package_manifest_uri",
+        ),
+        "output_key": _candidate_output_key(candidate),
+    }
+    resolved_output_uri = output_uri or _candidate_output_uri(candidate)
+    if resolved_output_uri is not None:
+        refs["output_uri"] = _redact_secret_manifest_for_evidence(resolved_output_uri, "output_uri")
+    manifest_uri = candidate.resource_profile.get("manifest_uri")
+    if manifest_uri not in (None, ""):
+        refs["resource_manifest_uri"] = _redact_secret_manifest_for_evidence(
+            str(manifest_uri),
+            "resource_manifest_uri",
+        )
+    return _evidence_safe(refs)
+
+
+def _candidate_resource_summary(
+    candidate: SchedulerCandidate,
+    *,
+    stage_statuses: Sequence[Mapping[str, Any]],
+    outcome: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    resource_profile = _resource_profile_evidence(candidate.resource_profile)
+    stage_accounting = [
+        {
+            "stage": stage.get("stage"),
+            "slurm_job_id": stage.get("slurm_job_id"),
+            "accounting": stage.get("accounting") or {},
+            "resource_metrics": stage.get("resource_metrics") or {},
+            "accounting_gap": stage.get("accounting_gap"),
+        }
+        for stage in stage_statuses
+    ]
+    task_accounting: list[dict[str, Any]] = []
+    for stage in stage_statuses:
+        for task in stage.get("task_results") or []:
+            if not isinstance(task, Mapping):
+                continue
+            task_accounting.append(
+                {
+                    "stage": stage.get("stage"),
+                    "task_id": task.get("task_id"),
+                    "array_task_id": task.get("array_task_id"),
+                    "slurm_job_id": task.get("slurm_job_id"),
+                    "status": task.get("status"),
+                    "accounting": task.get("accounting") or {},
+                    "resource_metrics": task.get("resource_metrics") or {},
+                }
+            )
+    payload = {
+        "resource_profile": resource_profile,
+        "requested": {
+            "memory_gb": resource_profile.get("memory_gb"),
+            "cpu": resource_profile.get("cpu"),
+            "cpus_per_task": resource_profile.get("cpus_per_task"),
+            "walltime": resource_profile.get("walltime"),
+            "max_concurrent": resource_profile.get("max_concurrent"),
+            "shud_threads": resource_profile.get("shud_threads"),
+        },
+        "stage_accounting": stage_accounting,
+        "task_accounting": task_accounting,
+        "candidate_accounting": dict(_mapping_value(outcome.get("accounting") if outcome is not None else None)),
+        "candidate_resource_metrics": _resource_metrics_from_mapping(
+            (outcome.get("resource_metrics") or outcome.get("accounting")) if outcome is not None else {}
+        ),
+    }
+    return _evidence_safe(payload)
+
+
+def _candidate_forcing_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
+    metadata = candidate.resource_profile.get("forcing_station_metadata")
+    station_count = _candidate_station_count(candidate)
+    station_ids = _candidate_station_ids(candidate)
+    payload = {
+        "station_count": station_count,
+        "station_ids": station_ids,
+        "state": "ready" if station_count and station_count > 0 else "unavailable",
+        "quality_flag": "ok" if station_count and station_count > 0 else "station_forcing_unavailable",
+    }
+    if isinstance(metadata, Mapping):
+        payload["station_metadata"] = dict(metadata)
+        if metadata.get("quality_flag") not in (None, ""):
+            payload["quality_flag"] = metadata.get("quality_flag")
+    return _evidence_safe(payload)
+
+
+def _candidate_output_evidence(
+    candidate: SchedulerCandidate,
+    *,
+    output_uri: str | None,
+    outcome: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    resolved_output_uri = output_uri or _candidate_output_uri(candidate)
+    parsed_row_count = _first_present_int(
+        outcome,
+        candidate.resource_profile,
+        "parsed_row_count",
+        "canonical_product_count",
+        "output_row_count",
+    )
+    segment_count = _first_present_int(outcome, candidate.resource_profile, "segment_count")
+    if segment_count is None:
+        segment_count = candidate.segment_count
+    payload = {
+        "output_uri": _redact_secret_manifest_for_evidence(
+            resolved_output_uri,
+            "output_uri",
+        )
+        if resolved_output_uri
+        else None,
+        "output_key": _candidate_output_key(candidate),
+        "shud_output_uri": _redact_secret_manifest_for_evidence(
+            _first_present_value(outcome, candidate.resource_profile, "shud_output_uri", "output_uri"),
+            "shud_output_uri",
+        ),
+        "parsed_row_count": parsed_row_count,
+        "segment_count": segment_count,
+        "canonical_product_counts": _candidate_product_counts(candidate, outcome=outcome),
+    }
+    return _evidence_safe(payload)
+
+
+def _candidate_display_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
+    tiles = _nested_bool(candidate.display_capabilities, "tiles", fallback=False)
+    optional_weather_available = _nested_bool(candidate.display_capabilities, "optional_weather_available")
+    unavailable_products: list[str] = []
+    if tiles is False:
+        unavailable_products.append("tiles")
+    if optional_weather_available is False:
+        unavailable_products.append("optional_weather_products")
+    payload = {
+        "state": "ready" if tiles else "unavailable",
+        "tiles": tiles,
+        "optional_weather_available": optional_weather_available,
+        "unavailable_products": unavailable_products,
+        "quality_flag": "ok" if not unavailable_products else "display_inputs_unavailable",
+    }
+    return _evidence_safe(payload)
+
+
+def _candidate_quality_states(
+    candidate: SchedulerCandidate,
+    *,
+    outcome: Mapping[str, Any] | None,
+    status: str,
+) -> dict[str, Any]:
+    forcing = _candidate_forcing_evidence(candidate)
+    display = _candidate_display_evidence(candidate)
+    frequency = _candidate_frequency_evidence(candidate)
+    output = _candidate_output_evidence(candidate, output_uri=None, outcome=outcome)
+    payload = {
+        "candidate": {
+            "state": status,
+            "quality_flag": "ok" if not _is_non_submitted_terminal_or_unavailable_status(status) else "blocked",
+        },
+        "station_forcing": {
+            "state": forcing.get("state"),
+            "quality_flag": forcing.get("quality_flag"),
+            "station_count": forcing.get("station_count"),
+        },
+        "output_river": {
+            "state": "ready" if (output.get("segment_count") or 0) > 0 else "unavailable",
+            "quality_flag": "ok" if (output.get("segment_count") or 0) > 0 else "output_river_unavailable",
+            "segment_count": output.get("segment_count"),
+        },
+        "frequency": frequency,
+        "display": display,
+    }
+    return _evidence_safe(payload)
+
+
+def _candidate_frequency_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
+    return_periods = _nested_bool(candidate.frequency_capabilities, "return_periods", fallback=False)
+    curves_available = _nested_bool(candidate.frequency_capabilities, "curves_available", fallback=return_periods)
+    warning_thresholds_available = _nested_bool(candidate.frequency_capabilities, "warning_thresholds_available")
+    unavailable_products: list[str] = []
+    if curves_available is False:
+        unavailable_products.append("return_period_curves")
+    if warning_thresholds_available is False:
+        unavailable_products.append("warning_thresholds")
+    return _evidence_safe(
+        {
+            "state": "ready" if not unavailable_products and return_periods else "unavailable",
+            "return_periods": return_periods,
+            "curves_available": curves_available,
+            "warning_thresholds_available": warning_thresholds_available,
+            "unavailable_products": unavailable_products,
+            "quality_flag": "ok" if not unavailable_products else "frequency_inputs_unavailable",
+        }
+    )
+
+
+def _candidate_residual_blockers(
+    candidate: SchedulerCandidate,
+    *,
+    outcome: Mapping[str, Any] | None,
+    status: str,
+    quality_states: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for key, state in quality_states.items():
+        if not isinstance(state, Mapping):
+            continue
+        state_value = str(state.get("state") or "")
+        if state_value not in {"blocked", "failed", "unavailable"}:
+            continue
+        blockers.append(
+            {
+                "code": str(state.get("quality_flag") or f"{key}_unavailable").upper(),
+                "field": key,
+                "state": state_value,
+                "quality_flag": state.get("quality_flag"),
+                "residual_risk": f"{key} is {state_value}; downstream readiness must keep this non-final.",
+            }
+        )
+    if _is_non_submitted_terminal_or_unavailable_status(status):
+        code = (
+            str(outcome.get("reason") or outcome.get("error_code") or f"CANDIDATE_{status}").upper()
+            if outcome is not None
+            else f"CANDIDATE_{status}".upper()
+        )
+        blockers.append(
+            {
+                "code": code,
+                "stage": (outcome.get("stage") or outcome.get("failed_stage")) if outcome is not None else None,
+                "state": "blocked",
+                "quality_flag": "candidate_not_successful",
+                "residual_risk": f"Candidate {candidate.candidate_id} ended with status {status}.",
+            }
+        )
+    return _evidence_safe(blockers)
+
+
+def _candidate_product_counts(candidate: SchedulerCandidate, *, outcome: Mapping[str, Any] | None) -> dict[str, Any]:
+    explicit = _first_present_value(outcome, candidate.resource_profile, "canonical_product_counts", "product_counts")
+    if isinstance(explicit, Mapping):
+        return _evidence_safe(dict(explicit))
+    parsed = _first_present_int(outcome, candidate.resource_profile, "parsed_row_count", "output_row_count")
+    counts: dict[str, Any] = {}
+    if parsed is not None:
+        counts["parsed_rows"] = parsed
+    if candidate.segment_count is not None:
+        counts["river_segments"] = candidate.segment_count
+    station_count = _candidate_station_count(candidate)
+    if station_count is not None:
+        counts["forcing_stations"] = station_count
+    return counts
+
+
+def _first_present_value(
+    outcome: Mapping[str, Any] | None,
+    profile: Mapping[str, Any],
+    *keys: str,
+) -> Any:
+    for source in (outcome, profile):
+        if not isinstance(source, Mapping):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _first_present_int(
+    outcome: Mapping[str, Any] | None,
+    profile: Mapping[str, Any],
+    *keys: str,
+) -> int | None:
+    value = _first_present_value(outcome, profile, *keys)
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _model_package_manifest_uri(candidate: SchedulerCandidate) -> str:
@@ -4033,6 +4611,14 @@ def _scheduler_partial_count_from_execution(execution_evidence: Sequence[Mapping
     return sum(1 for item in execution_evidence if _is_partial_candidate_evidence(item))
 
 
+def _scheduler_failed_count_from_execution(execution_evidence: Sequence[Mapping[str, Any]]) -> int:
+    return sum(1 for item in execution_evidence if _is_failed_candidate_evidence(item))
+
+
+def _is_failed_candidate_evidence(item: Mapping[str, Any]) -> bool:
+    return _is_failed_model_run_status(str(item.get("status") or ""))
+
+
 def _is_partial_candidate_evidence(item: Mapping[str, Any]) -> bool:
     status = str(item.get("status") or "")
     if item.get("submitted") is True:
@@ -4040,18 +4626,24 @@ def _is_partial_candidate_evidence(item: Mapping[str, Any]) -> bool:
     return _is_non_submitted_terminal_or_unavailable_status(status) or status.endswith("_partial")
 
 
+def _is_failed_model_run_status(status: str) -> bool:
+    normalized = status.strip().lower()
+    return normalized in {"failed", "permanently_failed", "submission_failed"} or normalized.endswith("_failed")
+
+
 def _is_non_submitted_terminal_or_unavailable_status(status: str) -> bool:
     normalized = status.strip().lower()
-    return normalized in {
-        "blocked",
-        "cancelled",
-        "failed",
-        "partially_failed",
-        "permanently_failed",
-        "preflight_blocked",
-        "submission_failed",
-        "unavailable",
-    } or normalized.endswith(("_blocked", "_cancelled", "_failed", "_unavailable"))
+    return (
+        _is_failed_model_run_status(normalized)
+        or normalized
+        in {
+            "blocked",
+            "cancelled",
+            "preflight_blocked",
+            "unavailable",
+        }
+        or normalized.endswith(("_blocked", "_cancelled", "_unavailable"))
+    )
 
 
 def _empty_model_discovery() -> dict[str, Any]:
@@ -4321,10 +4913,33 @@ def _source_horizon_metadata(discovery: CycleDiscovery, adapter: CycleDiscoveryA
 
 def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
     return {
+        "schema_version": payload.get("schema_version", SCHEDULER_EVIDENCE_SCHEMA_VERSION),
+        "review_contract": payload.get(
+            "review_contract",
+            {
+                "contract_id": SCHEDULER_EVIDENCE_CONTRACT_ID,
+                "github_issue": SCHEDULER_EVIDENCE_GITHUB_ISSUE,
+                "openspec_change": SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE,
+                "scope": "scheduler_pass_evidence",
+            },
+        ),
         "pass_id": payload.get("pass_id"),
         "started_at": payload.get("started_at"),
         "finished_at": payload.get("finished_at"),
         "status": "resource_limit_blocked",
+        "execution_mode": payload.get("execution_mode"),
+        "readiness_interpretation": payload.get("readiness_interpretation", "non_final_scheduler_evidence"),
+        "readiness": payload.get(
+            "readiness",
+            {
+                "schema_version": "nhms.production_readiness.scheduler_input.v1",
+                "interpretation": "non_final_scheduler_evidence",
+                "live_receipts": [],
+                "production_ready": False,
+                "final_production_readiness_claimed": False,
+                "can_claim_final_production_readiness": False,
+            },
+        ),
         "limit": {"reason": reason, "max_evidence_bytes": MAX_EVIDENCE_BYTES},
         "counts": payload.get("counts", _empty_counts()),
         "candidates": [],

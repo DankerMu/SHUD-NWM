@@ -1,10 +1,69 @@
 # QHH GFS/IFS 持续多周期自动运行
 
-最后更新：2026-05-21
+最后更新：2026-05-24
+
+## 生产调度边界
+
+`scripts/run_qhh_cycle.sh`、`scripts/run_qhh_cycle.sbatch` 和
+`scripts/run_qhh_continuous.py` 是 qhh 专用的诊断、回归复现和证据采集入口。
+它们用于证明 `data/Basins/qhh` 标准链路可以完成 GFS/IFS 下载、canonical
+转换、forcing、native SHUD、parse 和 display product 发布，但不是 backend
+production scheduler 的依赖。
+
+生产多流域连续调度入口在 backend orchestrator：
+
+```bash
+export DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
+uv run nhms-pipeline plan-production \
+  --dry-run \
+  --source gfs \
+  --source IFS \
+  --lookback-hours 24 \
+  --cycle-lag-hours 6 \
+  --max-cycles-per-source 1 \
+  --workspace-root .nhms-workspace
+```
+
+`nhms-pipeline plan-production --dry-run` 只做候选发现、跳过/阻塞判断和证据写入。
+输出包含 `pass_id`、`artifact_path`、`counts`、`source_cycles`、
+`candidates`、`blocked_candidates`、`skipped_candidates`、`operator_filters` 和
+`no_mutation_proof`。dry-run 明确保证：
+
+- no download：不调用 GFS/IFS adapter 下载。
+- no Slurm submit：不提交 Slurm job。
+- no SHUD run：不运行 native SHUD。
+- no hydro/met result mutation：不写 `hydro.*` 结果表，也不写 `met.*` 结果表。
+
+生产提交路径使用同一个 backend scheduler，在 Slurm/database/storage preflight
+通过后关闭 dry-run：
+
+```bash
+export DATABASE_URL=postgresql://nhms:<strong-password>@pg.cluster.example:5432/nhms
+export NHMS_PRODUCTION_SLURM_ENABLED=1
+export WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production
+export OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
+export SLURM_SHARED_LOG_ROOT=/scratch/frd_muziyao/nhms-production/slurm-logs
+export NHMS_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
+
+uv run nhms-pipeline plan-production \
+  --plan \
+  --source gfs \
+  --source IFS \
+  --lookback-hours 24 \
+  --cycle-lag-hours 6 \
+  --max-cycles-per-source 1 \
+  --workspace-root "$WORKSPACE_ROOT"
+```
+
+该生产路径负责所有 active runnable 注册模型的候选生成、锁、幂等跳过、
+Slurm preflight、提交、状态/重试/取消证据和 readiness 输入。qhh 脚本产生的
+证据可作为诊断或复现材料，不应写成生产 scheduler dependency，也不应作为最终
+production readiness proof。
 
 ## 目标
 
-在本机无 Docker、系统盘空间有限的约束下，以 `data/Basins/qhh` 已校准 SHUD 模型为固定模型资产，持续执行真实后端链路：
+在本机无 Docker、系统盘空间有限的约束下，以 `data/Basins/qhh` 已校准 SHUD
+模型为固定模型资产，复现真实 qhh 后端链路：
 
 1. Basins discovery、package publish、registry import。
 2. qhh 原始 386 个 forcing 站点与 SHUD output river identity 幂等 seed。
@@ -14,9 +73,13 @@
 6. 使用仓库内 `SHUD/shud` 运行模型。
 7. output parse、QC、结果摘要、return-period display product 发布。
 
-该入口不是简化 smoke：它会运行 native SHUD，并把结果写入 API/frontend 可消费的数据表。默认不会 reset DB，也不会删除已完成周期。
+该诊断入口不是简化 smoke：非 dry-run 时会运行 native SHUD，并把结果写入
+API/frontend 可消费的数据表。默认不会 reset DB，也不会删除已完成周期。用于生产
+多流域调度时，应优先使用上面的 backend scheduler 路径。
 
 ## 入口
+
+以下入口均为 qhh 诊断/复现入口，不是 backend production scheduler 依赖。
 
 单周期真实链路：
 
@@ -34,7 +97,7 @@ export DATABASE_URL=$(./scripts/local_pg.sh url)
 uv run python scripts/run_qhh_continuous.py --once
 ```
 
-Slurm 计算节点执行，一次扫描。`DATABASE_URL` 必须指向计算节点可达的生产或集群 PostgreSQL；不要把默认本地开发库暴露到集群网络：
+qhh 诊断脚本通过 Slurm 计算节点执行，一次扫描。`DATABASE_URL` 必须指向计算节点可达的生产或集群 PostgreSQL；不要把默认本地开发库暴露到集群网络：
 
 ```bash
 export DATABASE_URL="postgresql://nhms:<strong-password>@pg.cluster.example:5432/nhms"
@@ -83,6 +146,14 @@ uv run python scripts/run_qhh_continuous.py
 ```bash
 uv run python scripts/run_qhh_continuous.py --dry-run --once
 ```
+
+qhh 脚本 dry-run 输出每轮 JSON summary，核心字段为 `status`、
+`pass_started_at`、`pass_finished_at`、`run_root`、`candidate_count` 和
+`results[]`。`results[]` 中每个候选包含 `source_id`、`cycle_time`、`run_id`、
+`status=planned` 和 `reason="dry run"`，或已有状态的 skip reason。该 qhh dry-run
+不下载、不提交 Slurm、不运行 SHUD，也不写 hydro/met 结果表；它仍会写
+`state/qhh-continuous-summary.json` 作为诊断计划摘要。生产 scheduler dry-run 的
+正式 no-mutation evidence 见上方 `nhms-pipeline plan-production --dry-run`。
 
 ## 默认路径与关键环境变量
 
@@ -193,9 +264,9 @@ forc_{source_lower}_{YYYYMMDDHH}_basins_qhh_shud
   - GFS：`forecast_gfs_deterministic`
   - IFS：`forecast_ifs_deterministic`
 
-## 2026-05-21 实测结果
+## 2026-05-21 诊断实测结果
 
-已按标准链路完成 GFS 与 IFS 两个起报周期：
+已通过 qhh 诊断/复现入口按标准链路完成 GFS 与 IFS 两个起报周期：
 
 | Source | Cycle UTC | Run ID | 状态 | 执行位置 |
 |---|---:|---|---|---|
@@ -225,8 +296,8 @@ DB 验证：
 
 ## 当前边界
 
-- 连续 runner 目前按最近 UTC `00/06/12/18` 候选周期扫描，并依赖 GFS/IFS adapter 自身判断可用性。
+- qhh continuous runner 仍按最近 UTC `00/06/12/18` 候选周期扫描，并依赖 GFS/IFS adapter 自身判断可用性；该行为只用于 qhh 诊断/复现。
 - 重计算应默认使用 Slurm；本地入口只适合调试短链路、定位 adapter/DB 合同问题或复用已完成状态。
 - 本轮优化前 forcing/GRIB 处理是当前资源瓶颈，单周期峰值约 75-79GB RSS。已完成第一阶段 streaming 优化：forcing producer 先读取每个 source/grid 的代表网格定义生成 IDW 权重，再按 valid_time 逐时次读取 canonical field、只保留 IDW 权重需要的 grid cell 值、插值后释放字段缓存，避免把全周期所有变量/lead hour 同时挂在内存里。下一步仍需在新周期 Slurm 实测优化后 MaxRSS，并继续评估更细的 lead-hour array 化。
-- 当前 continuous runner 已能提交独立 Slurm 作业；正式 orchestrator/integration lane 后续应复用同样的 qhh manifest、forcing station、display publish 规则，并补齐 array 化、失败重试和长日志归档。
+- backend production scheduler 已承担正式多流域连续自动化路径：默认发现 active runnable 注册模型，按 GFS/IFS 周期生成确定性 candidate/run/forcing identity，记录 operator filters、skip/block reasons、Slurm preflight、array/task/accounting、retry/cancel 和 readiness 证据。qhh continuous runner 不应被服务端生产调度调用。
 - qhh 仍没有 flood frequency curve，发布结果继续使用 `no_frequency_curve` 质量标记，不生成虚假重现期或预警等级。

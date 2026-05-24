@@ -71,4 +71,13 @@ Issue scope note: section 5 is implemented by #196. #194 should emit only the Sl
 - [ ] 5.3 Extend production validation/readiness evidence to ingest the scheduler evidence without requiring full live multi-cycle reruns.
 - [ ] 5.4 Preserve deterministic-vs-live truth table semantics so fast scheduler evidence cannot set final production readiness true without accepted live receipts.
 - [ ] 5.5 Update `progress.md`, validation docs, and qhh continuous runbook to distinguish diagnostic qhh scripts from production scheduler automation.
-- [ ] 5.6 Run OpenSpec strict validation, ruff, focused scheduler/orchestrator/Slurm tests, worker regression tests touched by the change, and fast evidence validation.
+- [ ] 5.6 For issue #196, include regression evidence for every row in the Issue #196 Invariant Matrix:
+  - scheduler dry-run pass -> evidence reports selected candidates, filters, skip/block reasons, artifact path, and no download/Slurm/SHUD/hydro-met mutation proof.
+  - scheduler submitted/partial/blocked pass -> pass and model-run evidence include execution mode, counts, source/cycle/model ids, artifact refs, stage/resource/accounting metrics where available, and residual blockers without leaking secrets.
+  - deterministic scheduler evidence consumed by readiness validation -> readiness item is deterministic/non-final and `final_production_readiness_claimed=false` when live receipts are absent.
+  - scheduler evidence with accepted live receipt binding -> readiness records receipt refs/checksum as live proof input only when schema, run id, target environment, producer artifact/ref, and execution mode match the M19 live proof contract.
+  - malformed, oversized, stale, or identity-mismatched scheduler evidence -> stable blocked/release_blocked evidence with redacted reason and no final readiness claim.
+  - qhh continuous script evidence/runbook -> remains diagnostic and must not be described as the production scheduler dependency or as final readiness proof.
+  - unchanged M19 readiness producer summaries -> existing Slurm/object-store/source/E2E/MVT deterministic summaries still ingest with the same final readiness truth table.
+  - unchanged monitoring/API/orchestrator consumers -> existing scheduler/orchestrator/retry/cancel tests keep passing with the same evidence/status contracts.
+- [ ] 5.7 Required verification for #196: `uv run pytest -q tests/test_production_scheduler.py tests/test_production_readiness_validation.py tests/test_orchestration_chain.py tests/test_production_slurm_validation.py tests/test_retry_cancel_consistency.py tests/test_api.py tests/test_monitoring_api.py` plus any worker/orchestrator tests touched by the implementation, `uv run ruff check .`, `openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive`, and a fast readiness validation command that writes scheduler evidence without claiming final production readiness.

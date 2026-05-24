@@ -4,6 +4,8 @@
 
 Each scheduler pass SHALL emit structured evidence suitable for production operations and release review.
 
+The evidence SHALL distinguish execution modes from readiness claims. Deterministic, dry-run, simulated, or production-like scheduler evidence MAY support review and readiness lineage, but it SHALL NOT mark final production readiness true unless accepted live proof receipts satisfy the readiness proof contract.
+
 #### Scenario: pass summary evidence
 
 WHEN a scheduler pass finishes
@@ -13,6 +15,24 @@ THEN evidence includes pass id, started/finished timestamps, execution mode, liv
 
 WHEN a model candidate reaches a terminal state
 THEN evidence includes forcing station count, canonical product counts, SHUD output URI, parsed row count, segment count, display product state, quality flags, Slurm job/accounting details, and residual blockers.
+
+#### Scenario: bounded redacted evidence artifacts
+
+WHEN scheduler or readiness evidence is written or read
+THEN the payload is bounded, redacted, and stored under the configured evidence or workspace root
+AND malformed, oversized, stale, mismatched, or unsafe evidence is recorded as blocked/release_blocked evidence rather than accepted success.
+
+#### Scenario: deterministic evidence consumed by readiness validation
+
+WHEN readiness validation consumes scheduler evidence from deterministic, dry-run, simulated, or production-like execution
+THEN the resulting readiness item is non-final deterministic review evidence
+AND `final_production_readiness_claimed` remains false unless every required live proof item is accepted.
+
+#### Scenario: live scheduler receipt binding
+
+WHEN scheduler evidence is presented as live production proof
+THEN the live receipt must bind to the readiness run id, target environment, producer artifact reference, checksum or receipt id, schema, and live execution mode
+AND stale, mismatched, or deterministic receipts remain release blockers.
 
 ### Requirement: Operations controls and validation
 
@@ -35,3 +55,9 @@ AND final production readiness remains false unless accepted live receipts satis
 
 WHEN dry-run mode is executed
 THEN tests prove it does not download data, submit Slurm jobs, run SHUD, or mutate hydro/met result tables.
+
+#### Scenario: diagnostic qhh scripts remain non-production evidence
+
+WHEN docs or runbooks reference `scripts/run_qhh_continuous.py` or qhh-specific cycle scripts
+THEN they identify those scripts as diagnostic or reproduction evidence
+AND they identify the backend scheduler/orchestrator path as the production automation surface.

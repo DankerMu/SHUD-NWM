@@ -2128,12 +2128,16 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     @click.option("--source-evidence-root", type=click.Path(path_type=Path), default=None)
     @click.option("--e2e-evidence-root", type=click.Path(path_type=Path), default=None)
     @click.option("--mvt-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--scheduler-evidence-root", type=click.Path(path_type=Path), default=None)
+    @click.option("--scheduler-evidence-file", type=click.Path(path_type=Path), default=None)
     @click.option("--auth-proof", default=None)
     @click.option("--auth-proof-file", type=click.Path(path_type=Path), default=None)
     @click.option("--alert-proof", default=None)
     @click.option("--alert-proof-file", type=click.Path(path_type=Path), default=None)
     @click.option("--rollback-proof", default=None)
     @click.option("--rollback-proof-file", type=click.Path(path_type=Path), default=None)
+    @click.option("--scheduler-proof", default=None)
+    @click.option("--scheduler-proof-file", type=click.Path(path_type=Path), default=None)
     @click.option("--slurm-proof", default=None)
     @click.option("--slurm-proof-file", type=click.Path(path_type=Path), default=None)
     @click.option("--object-store-proof", default=None)
@@ -2155,12 +2159,16 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         source_evidence_root: Path | None,
         e2e_evidence_root: Path | None,
         mvt_evidence_root: Path | None,
+        scheduler_evidence_root: Path | None,
+        scheduler_evidence_file: Path | None,
         auth_proof: str | None,
         auth_proof_file: Path | None,
         alert_proof: str | None,
         alert_proof_file: Path | None,
         rollback_proof: str | None,
         rollback_proof_file: Path | None,
+        scheduler_proof: str | None,
+        scheduler_proof_file: Path | None,
         slurm_proof: str | None,
         slurm_proof_file: Path | None,
         object_store_proof: str | None,
@@ -2185,12 +2193,16 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                     source_evidence_root=source_evidence_root,
                     e2e_evidence_root=e2e_evidence_root,
                     mvt_evidence_root=mvt_evidence_root,
+                    scheduler_evidence_root=scheduler_evidence_root,
+                    scheduler_evidence_file=scheduler_evidence_file,
                     auth_proof=auth_proof,
                     auth_proof_file=auth_proof_file,
                     alert_proof=alert_proof,
                     alert_proof_file=alert_proof_file,
                     rollback_proof=rollback_proof,
                     rollback_proof_file=rollback_proof_file,
+                    scheduler_proof=scheduler_proof,
+                    scheduler_proof_file=scheduler_proof_file,
                     slurm_proof=slurm_proof,
                     slurm_proof_file=slurm_proof_file,
                     object_store_proof=object_store_proof,
@@ -2508,12 +2520,16 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                                 source_evidence_root=args.source_evidence_root,
                                 e2e_evidence_root=args.e2e_evidence_root,
                                 mvt_evidence_root=args.mvt_evidence_root,
+                                scheduler_evidence_root=args.scheduler_evidence_root,
+                                scheduler_evidence_file=args.scheduler_evidence_file,
                                 auth_proof=args.auth_proof,
                                 auth_proof_file=args.auth_proof_file,
                                 alert_proof=args.alert_proof,
                                 alert_proof_file=args.alert_proof_file,
                                 rollback_proof=args.rollback_proof,
                                 rollback_proof_file=args.rollback_proof_file,
+                                scheduler_proof=args.scheduler_proof,
+                                scheduler_proof_file=args.scheduler_proof_file,
                                 slurm_proof=args.slurm_proof,
                                 slurm_proof_file=args.slurm_proof_file,
                                 object_store_proof=args.object_store_proof,
@@ -2552,12 +2568,16 @@ def _add_readiness_argparse_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-evidence-root", type=Path, default=None)
     parser.add_argument("--e2e-evidence-root", type=Path, default=None)
     parser.add_argument("--mvt-evidence-root", type=Path, default=None)
+    parser.add_argument("--scheduler-evidence-root", type=Path, default=None)
+    parser.add_argument("--scheduler-evidence-file", type=Path, default=None)
     parser.add_argument("--auth-proof", default=None)
     parser.add_argument("--auth-proof-file", type=Path, default=None)
     parser.add_argument("--alert-proof", default=None)
     parser.add_argument("--alert-proof-file", type=Path, default=None)
     parser.add_argument("--rollback-proof", default=None)
     parser.add_argument("--rollback-proof-file", type=Path, default=None)
+    parser.add_argument("--scheduler-proof", default=None)
+    parser.add_argument("--scheduler-proof-file", type=Path, default=None)
     parser.add_argument("--slurm-proof", default=None)
     parser.add_argument("--slurm-proof-file", type=Path, default=None)
     parser.add_argument("--object-store-proof", default=None)
