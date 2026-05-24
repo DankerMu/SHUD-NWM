@@ -638,6 +638,8 @@ def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) 
 
     assert result.evidence["candidates"] == []
     assert result.evidence["skipped_candidates"][0]["reason"] == "active_duplicate_pipeline"
+    assert result.evidence["counts"]["candidate_count"] == 1
+    assert result.evidence["counts"]["skipped_candidate_count"] == 1
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
@@ -3950,6 +3952,9 @@ def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_pat
     assert result.evidence["readiness_interpretation"] == "deterministic_review_only"
     assert result.evidence["readiness"]["production_ready"] is False
     assert result.evidence["readiness"]["final_production_readiness_claimed"] is False
+    assert len(result.evidence["candidates"]) == 1
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
     assert result.evidence["counts"] == {
         "candidate_count": 1,
         "blocked_candidate_count": 0,

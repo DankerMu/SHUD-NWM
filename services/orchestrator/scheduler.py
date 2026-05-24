@@ -555,6 +555,7 @@ class ProductionScheduler:
                 *[item for item in source_cycle_evidence if item.get("status") == "excluded"],
                 *candidate_duplicate_exclusions,
             ]
+            total_candidate_count = len(candidates) + len(blocked_candidates) + len(skipped_candidates)
             evidence.update(
                 {
                     "status": pass_status,
@@ -567,7 +568,7 @@ class ProductionScheduler:
                     "skipped_candidates": skipped_candidates,
                     "duplicate_exclusions": duplicate_exclusions,
                     "counts": {
-                        "candidate_count": len(candidates),
+                        "candidate_count": total_candidate_count,
                         "blocked_candidate_count": len(blocked_candidates),
                         "skipped_candidate_count": len(skipped_candidates),
                         "selected_model_count": len(models),

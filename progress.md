@@ -168,6 +168,7 @@ uv run nhms-pipeline plan-production \
 NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
   --evidence-root artifacts/production-closure \
   --run-id local-m20-scheduler-readiness \
+  --scheduler-evidence-root .nhms-workspace/scheduler/evidence \
   --force
 ```
 

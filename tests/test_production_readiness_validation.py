@@ -10,6 +10,7 @@ from services.production_closure import slurm_validation
 from services.production_closure.readiness_validation import (
     ALLOWED_STATUS_EXECUTION_MODES,
     EXECUTION_MODE_VALUES,
+    MAX_SCHEDULER_EVIDENCE_FILES,
     ProductionReadinessConfig,
     ProductionReadinessValidationError,
     validate_readiness,
@@ -266,16 +267,19 @@ def _scheduler_evidence_payload(
                 "source_id": "gfs",
                 "cycle_time_utc": "2026-05-21T06:00:00Z",
                 "model_id": "model_a",
+                "scenario_id": "forecast_gfs_deterministic",
                 "run_id": "fcst_gfs_2026052106_model_a",
                 "forcing_version_id": "forc_gfs_2026052106_model_a",
             }
         ],
+        "blocked_candidates": [],
         "skipped_candidates": [
             {
                 "candidate_id": "IFS:2026-05-21T06:00:00Z:model_a:forecast_ifs_deterministic",
                 "source_id": "IFS",
                 "cycle_time_utc": "2026-05-21T06:00:00Z",
                 "model_id": "model_a",
+                "scenario_id": "forecast_ifs_deterministic",
                 "reason": "source_cycle_unavailable",
             }
         ],
@@ -1274,12 +1278,16 @@ def test_scheduler_candidate_and_model_run_identity_mismatch_blocks_evidence(tmp
     root = tmp_path / "artifacts"
     scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
     payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+    payload["counts"]["candidate_count"] = 1
+    payload["counts"]["skipped_candidate_count"] = 0
+    payload["counts"]["submitted_count"] = 1
     payload["candidates"] = [
         {
             "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
             "source_id": "IFS",
             "cycle_time_utc": "2026-05-21T06:00:00Z",
             "model_id": "model_a",
+            "scenario_id": "forecast_gfs_deterministic",
             "run_id": "fcst_gfs_2026052106_model_a",
             "forcing_version_id": "forc_gfs_2026052106_model_a",
         }
@@ -1291,6 +1299,7 @@ def test_scheduler_candidate_and_model_run_identity_mismatch_blocks_evidence(tmp
             "source_id": "gfs",
             "cycle_time_utc": "2026-05-21T06:00:00Z",
             "model_id": "model_a",
+            "scenario_id": "forecast_gfs_deterministic",
             "run_id": "fcst_gfs_2026052106_model_a",
             "forcing_version_id": "forc_gfs_2026052106_model_a",
             "hydro_run": {"run_id": "fcst_sibling"},
@@ -1310,6 +1319,313 @@ def test_scheduler_candidate_and_model_run_identity_mismatch_blocks_evidence(tmp
     assert "model_run_evidence_source_id_identity_mismatch" in errors
     assert "model_run_evidence_run_id_mismatch" in errors
     assert "model_run_evidence_forcing_version_id_mismatch" in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def _validate_scheduler_payload_with_matching_live_proof(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_payload(scheduler_path, payload)
+    receipt = _scheduler_proof_bound_to_evidence(scheduler_path)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    return _summary(root), scheduler_item, live_item
+
+
+def _submitted_scheduler_payload() -> dict[str, object]:
+    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+    payload["counts"]["candidate_count"] = 1
+    payload["counts"]["skipped_candidate_count"] = 0
+    payload["counts"]["submitted_count"] = 1
+    payload["skipped_candidates"] = []
+    payload["model_run_evidence"] = [
+        {
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "source_id": "gfs",
+            "cycle_time_utc": "2026-05-21T06:00:00Z",
+            "model_id": "model_a",
+            "scenario_id": "forecast_gfs_deterministic",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "forcing_version_id": "forc_gfs_2026052106_model_a",
+            "status": "submitted",
+            "submitted": True,
+        }
+    ]
+    return payload
+
+
+def _partial_scheduler_payload() -> dict[str, object]:
+    payload = _submitted_scheduler_payload()
+    payload["status"] = "submitted_partial"
+    payload["counts"]["partial_count"] = 1
+    payload["model_run_evidence"][0]["status"] = "failed"
+    payload["model_run_evidence"][0]["candidate_outcome"] = {"status": "failed"}
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_error"),
+    [
+        (
+            lambda payload: payload["candidates"][0].pop("scenario_id"),
+            "candidates_missing_scenario_id",
+        ),
+        (
+            lambda payload: payload["skipped_candidates"][0].pop("scenario_id"),
+            "skipped_candidates_missing_scenario_id",
+        ),
+        (
+            lambda payload: (
+                payload["blocked_candidates"].append(
+                    {
+                        "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+                        "source_id": "gfs",
+                        "cycle_time_utc": "2026-05-21T06:00:00Z",
+                        "model_id": "model_b",
+                        "reason": "operator_blocked",
+                    }
+                ),
+                payload["counts"].__setitem__("candidate_count", 3),
+                payload["counts"].__setitem__("blocked_candidate_count", 1),
+            ),
+            "blocked_candidates_missing_scenario_id",
+        ),
+        (
+            lambda payload: payload["model_run_evidence"].append(
+                {
+                    "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+                    "source_id": "gfs",
+                    "cycle_time_utc": "2026-05-21T06:00:00Z",
+                    "model_id": "model_b",
+                    "run_id": "fcst_gfs_2026052106_model_b",
+                    "forcing_version_id": "forc_gfs_2026052106_model_b",
+                }
+            ),
+            "model_run_evidence_missing_scenario_id",
+        ),
+    ],
+)
+def test_scheduler_missing_scenario_id_blocks_evidence_and_matching_live_proof(
+    tmp_path: Path,
+    mutator: object,
+    expected_error: str,
+) -> None:
+    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+    if "model_run_evidence" in expected_error:
+        payload["counts"]["submitted_count"] = 1
+    mutator(payload)
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert expected_error in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_error"),
+    [
+        (
+            lambda payload: payload["candidates"][0].__setitem__("scenario_id", "forecast_ifs_deterministic"),
+            "candidates_scenario_id_identity_mismatch",
+        ),
+        (
+            lambda payload: payload["skipped_candidates"][0].__setitem__(
+                "candidate_id",
+                "IFS:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            ),
+            "skipped_candidates_scenario_id_identity_mismatch",
+        ),
+        (
+            lambda payload: (
+                payload["blocked_candidates"].append(
+                    {
+                        "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+                        "source_id": "gfs",
+                        "cycle_time_utc": "2026-05-21T06:00:00Z",
+                        "model_id": "model_b",
+                        "scenario_id": "sibling_scenario",
+                        "reason": "operator_blocked",
+                    }
+                ),
+                payload["counts"].__setitem__("candidate_count", 3),
+                payload["counts"].__setitem__("blocked_candidate_count", 1),
+            ),
+            "blocked_candidates_scenario_id_identity_mismatch",
+        ),
+        (
+            lambda payload: payload["model_run_evidence"][0].__setitem__(
+                "candidate_id",
+                "gfs:2026-05-21T06:00:00Z:model_a:sibling_scenario",
+            ),
+            "model_run_evidence_scenario_id_identity_mismatch",
+        ),
+    ],
+)
+def test_scheduler_mismatched_scenario_id_blocks_evidence_and_matching_live_proof(
+    tmp_path: Path,
+    mutator: object,
+    expected_error: str,
+) -> None:
+    payload = _submitted_scheduler_payload()
+    if "skipped_candidates" in expected_error:
+        payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+    mutator(payload)
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert expected_error in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value", "expected_error"),
+    [
+        ("run_id", "fcst_ifs_2026052106_model_a", "candidates_run_id_derivation_mismatch"),
+        (
+            "forcing_version_id",
+            "forc_ifs_2026052106_model_a",
+            "candidates_forcing_version_id_derivation_mismatch",
+        ),
+    ],
+)
+def test_scheduler_candidate_run_or_forcing_derivation_blocks_even_when_model_run_repeats_wrong_value(
+    tmp_path: Path,
+    field: str,
+    wrong_value: str,
+    expected_error: str,
+) -> None:
+    payload = _submitted_scheduler_payload()
+    payload["candidates"][0][field] = wrong_value
+    payload["model_run_evidence"][0][field] = wrong_value
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert scheduler_item["status"] == "blocked"
+    assert expected_error in errors
+    assert f"model_run_evidence_{field}_derivation_mismatch" in errors
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_error"),
+    [
+        (
+            lambda payload: payload["counts"].__setitem__("candidate_count", 3),
+            "candidate_count_identity_cardinality_mismatch",
+        ),
+        (
+            lambda payload: payload["counts"].__setitem__("submitted_count", 2),
+            "submitted_count_model_run_evidence_mismatch",
+        ),
+        (
+            lambda payload: payload["counts"].__setitem__("blocked_candidate_count", 1),
+            "blocked_candidate_count_identity_cardinality_mismatch",
+        ),
+        (
+            lambda payload: payload["counts"].__setitem__("skipped_candidate_count", 1),
+            "skipped_candidate_count_identity_cardinality_mismatch",
+        ),
+        (
+            lambda payload: payload["counts"].__setitem__("partial_count", 1),
+            "partial_count_status_cardinality_mismatch",
+        ),
+        (
+            lambda payload: payload["counts"].__setitem__("partial_count", 2),
+            "partial_count_exceeds_model_run_evidence",
+        ),
+        (
+            lambda payload: payload["counts"].__setitem__("failed_count", 1),
+            "failed_count_status_cardinality_mismatch",
+        ),
+        (
+            lambda payload: payload["counts"].__setitem__("failed_count", 2),
+            "failed_count_exceeds_model_run_evidence",
+        ),
+    ],
+)
+def test_scheduler_count_list_cardinality_mismatch_blocks_evidence_and_matching_live_proof(
+    tmp_path: Path,
+    mutator: object,
+    expected_error: str,
+) -> None:
+    payload = _submitted_scheduler_payload()
+    mutator(payload)
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert expected_error in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_partial_count_accepts_matching_terminal_model_run_row(tmp_path: Path) -> None:
+    payload = _partial_scheduler_payload()
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert scheduler_item["details"]["acceptance_errors"] == []
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_root_file_limit_blocks_before_per_file_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler"
+    scheduler_root.mkdir()
+    for index in range(MAX_SCHEDULER_EVIDENCE_FILES + 1):
+        (scheduler_root / f"evidence_{index:02d}.json").write_text(
+            json.dumps(_scheduler_evidence_payload(pass_id=f"scheduler_20260521120000_{index:02d}")),
+            encoding="utf-8",
+        )
+
+    def fail_if_file_validation_runs(path: Path) -> Path:
+        raise AssertionError(f"unexpected per-file scheduler evidence validation: {path}")
+
+    monkeypatch.setattr(
+        "services.production_closure.readiness_validation._safe_scheduler_evidence_file",
+        fail_if_file_validation_runs,
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_root=scheduler_root)
+    )
+
+    scheduler_items = [item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence"]
+    assert len(scheduler_items) == 1
+    assert scheduler_items[0]["status"] == "blocked"
+    assert scheduler_items[0]["details"]["error_code"] == "PRODUCTION_READINESS_SCHEDULER_EVIDENCE_FILE_LIMIT"
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert live_item["status"] == "release_blocked"
+    assert live_item["live_proof_accepted"] is False
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 

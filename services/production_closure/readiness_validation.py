@@ -168,6 +168,21 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
         "partially_failed",
     }
 )
+SCHEDULER_PARTIAL_MODEL_RUN_STATUSES = frozenset(
+    {
+        "blocked",
+        "cancelled",
+        "failed",
+        "partial",
+        "partially_failed",
+        "permanently_failed",
+        "preflight_blocked",
+        "submission_failed",
+        "submitted_partial",
+        "unavailable",
+    }
+)
+SCHEDULER_FAILED_MODEL_RUN_STATUSES = frozenset({"failed"})
 SCHEDULER_BINDING_ALIAS_GROUPS: Mapping[str, tuple[str, ...]] = {
     "producer_schema": ("producer_schema", "scheduler_schema"),
     "producer_run_id": ("producer_run_id", "scheduler_pass_id", "pass_id"),
@@ -526,6 +541,14 @@ class ProductionReadinessConfig:
             },
             force=force,
         )
+
+
+@dataclass(frozen=True)
+class _SchedulerCandidateIdentity:
+    source_id: str
+    cycle_identity: str
+    model_id: str
+    scenario_id: str
 
 
 def validate_readiness(config: ProductionReadinessConfig) -> dict[str, Any]:
@@ -2475,7 +2498,14 @@ def _has_unsafe_scheduler_identity(payload: Mapping[str, Any]) -> bool:
                 if isinstance(item, Mapping):
                     identities.extend(
                         item.get(key)
-                        for key in ("candidate_id", "run_id", "forcing_version_id", "model_id", "source_id")
+                        for key in (
+                            "candidate_id",
+                            "run_id",
+                            "forcing_version_id",
+                            "model_id",
+                            "source_id",
+                            "scenario_id",
+                        )
                     )
     return any(isinstance(value, str) and _identity_value_looks_unsafe(value) for value in identities)
 
@@ -2483,8 +2513,18 @@ def _has_unsafe_scheduler_identity(payload: Mapping[str, Any]) -> bool:
 def _scheduler_identity_errors(payload: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
     candidate_count = _count_value(payload, "candidate_count")
-    identities = _scheduler_identity_records(payload)
-    if candidate_count is not None and candidate_count > 0 and not identities:
+    candidate_records = _scheduler_collection_identity_records(payload, "candidates")
+    blocked_records = _scheduler_collection_identity_records(payload, "blocked_candidates")
+    skipped_records = _scheduler_collection_identity_records(payload, "skipped_candidates")
+    model_run_records = _scheduler_model_run_identity_records(payload)
+    candidate_side_records = candidate_records + blocked_records + skipped_records
+    identities = (
+        [("candidates", record) for record in candidate_records]
+        + [("blocked_candidates", record) for record in blocked_records]
+        + [("skipped_candidates", record) for record in skipped_records]
+        + [("model_run_evidence", record) for record in model_run_records]
+    )
+    if candidate_count is not None and candidate_count > 0 and not candidate_side_records:
         return ["missing_scheduler_candidate_identity"]
 
     identity_by_candidate_id: dict[str, Mapping[str, Any]] = {}
@@ -2501,21 +2541,12 @@ def _scheduler_identity_errors(payload: Mapping[str, Any]) -> list[str]:
             for error in _scheduler_model_run_identity_errors(record, identity_by_candidate_id=identity_by_candidate_id)
             if error not in errors
         )
+    errors.extend(error for error in _scheduler_count_cardinality_errors(payload) if error not in errors)
     return errors
 
 
-def _scheduler_identity_records(payload: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
-    records: list[tuple[str, Mapping[str, Any]]] = []
-    for collection_name in ("candidates", "blocked_candidates", "skipped_candidates"):
-        records.extend(
-            (collection_name, record)
-            for record in _mapping_sequence(payload.get(collection_name))
-        )
-    records.extend(
-        ("model_run_evidence", record)
-        for record in _scheduler_model_run_identity_records(payload)
-    )
-    return records
+def _scheduler_collection_identity_records(payload: Mapping[str, Any], collection_name: str) -> list[Mapping[str, Any]]:
+    return _mapping_sequence(payload.get(collection_name))
 
 
 def _scheduler_model_run_identity_records(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -2523,9 +2554,6 @@ def _scheduler_model_run_identity_records(payload: Mapping[str, Any]) -> list[Ma
     for record in _mapping_sequence(payload.get("model_run_evidence")):
         records.append(record)
         nested = record.get("candidate_identity")
-        if isinstance(nested, Mapping):
-            records.append(nested)
-        nested = record.get("identity")
         if isinstance(nested, Mapping):
             records.append(nested)
     return records
@@ -2541,13 +2569,19 @@ def _scheduler_identity_record_errors(record: Mapping[str, Any], *, collection_n
         errors.append(f"{collection_name}_missing_cycle_identity")
     if not _identity_string(record.get("model_id")):
         errors.append(f"{collection_name}_missing_model_id")
+    if not _identity_string(record.get("scenario_id")):
+        errors.append(f"{collection_name}_missing_scenario_id")
     if collection_name in {"candidates", "model_run_evidence"}:
         if not _identity_string(record.get("run_id")):
             errors.append(f"{collection_name}_missing_run_id")
         if not _identity_string(record.get("forcing_version_id")):
             errors.append(f"{collection_name}_missing_forcing_version_id")
-    if _scheduler_candidate_id_components_mismatch(record):
+    parsed_identity = _parse_scheduler_candidate_identity(record.get("candidate_id"))
+    if parsed_identity is not None:
+        errors.extend(_scheduler_candidate_identity_mismatch_errors(record, parsed_identity, collection_name))
+    elif _identity_string(record.get("candidate_id")):
         errors.append(f"{collection_name}_candidate_id_identity_mismatch")
+    errors.extend(_scheduler_run_forcing_derivation_errors(record, parsed_identity, collection_name))
     return errors
 
 
@@ -2562,7 +2596,15 @@ def _scheduler_model_run_identity_errors(
         return errors
     candidate_record = identity_by_candidate_id.get(candidate_id)
     if candidate_record is not None:
-        for field in ("source_id", "cycle_time_utc", "cycle_id", "model_id", "run_id", "forcing_version_id"):
+        for field in (
+            "source_id",
+            "cycle_time_utc",
+            "cycle_id",
+            "model_id",
+            "scenario_id",
+            "run_id",
+            "forcing_version_id",
+        ):
             record_value = _identity_string(record.get(field))
             candidate_value = _identity_string(candidate_record.get(field))
             if record_value and candidate_value and record_value != candidate_value:
@@ -2600,30 +2642,208 @@ def _model_run_nested_value(record: Mapping[str, Any], field: str) -> str:
     return meaningful[0]
 
 
-def _scheduler_candidate_id_components_mismatch(record: Mapping[str, Any]) -> bool:
-    candidate_id = _identity_string(record.get("candidate_id"))
+def _parse_scheduler_candidate_identity(value: Any) -> _SchedulerCandidateIdentity | None:
+    candidate_id = _identity_string(value)
     if not candidate_id:
-        return False
+        return None
     parts = candidate_id.split(":")
-    if len(parts) < 4:
-        return False
-    source_id = parts[0]
+    if len(parts) < 4 or not all(parts):
+        return None
     cycle_identity = ":".join(parts[1:-2])
-    model_id = parts[-2]
+    if not cycle_identity:
+        return None
+    return _SchedulerCandidateIdentity(
+        source_id=parts[0],
+        cycle_identity=cycle_identity,
+        model_id=parts[-2],
+        scenario_id=parts[-1],
+    )
+
+
+def _scheduler_candidate_identity_mismatch_errors(
+    record: Mapping[str, Any],
+    parsed_identity: _SchedulerCandidateIdentity,
+    collection_name: str,
+) -> list[str]:
+    errors: list[str] = []
     explicit_source = _identity_string(record.get("source_id"))
-    if explicit_source and source_id != explicit_source:
-        return True
+    if explicit_source and parsed_identity.source_id != explicit_source:
+        errors.append(f"{collection_name}_candidate_id_identity_mismatch")
     explicit_model = _identity_string(record.get("model_id"))
-    if explicit_model and model_id != explicit_model:
-        return True
+    if explicit_model and parsed_identity.model_id != explicit_model:
+        errors.append(f"{collection_name}_candidate_id_identity_mismatch")
+    explicit_scenario = _identity_string(record.get("scenario_id"))
+    if explicit_scenario and parsed_identity.scenario_id != explicit_scenario:
+        errors.append(f"{collection_name}_scenario_id_identity_mismatch")
     explicit_cycle_time = _identity_string(record.get("cycle_time_utc"))
     explicit_cycle_id = _identity_string(record.get("cycle_id"))
     explicit_cycles: set[str] = set()
     explicit_cycles.update(_cycle_identity_aliases(explicit_cycle_time))
     explicit_cycles.update(_cycle_identity_aliases(explicit_cycle_id))
-    if explicit_cycles and cycle_identity not in explicit_cycles:
-        return True
-    return False
+    parsed_cycles = _cycle_identity_aliases(parsed_identity.cycle_identity)
+    if explicit_cycles and parsed_cycles.isdisjoint(explicit_cycles):
+        errors.append(f"{collection_name}_candidate_id_identity_mismatch")
+    return _dedupe_errors(errors)
+
+
+def _scheduler_run_forcing_derivation_errors(
+    record: Mapping[str, Any],
+    parsed_identity: _SchedulerCandidateIdentity | None,
+    collection_name: str,
+) -> list[str]:
+    expected = _scheduler_expected_run_forcing_ids(record, parsed_identity)
+    if expected is None:
+        return []
+    errors: list[str] = []
+    expected_run_id, expected_forcing_version_id = expected
+    run_id = _identity_string(record.get("run_id"))
+    if run_id and run_id != expected_run_id:
+        errors.append(f"{collection_name}_run_id_derivation_mismatch")
+    forcing_version_id = _identity_string(record.get("forcing_version_id"))
+    if forcing_version_id and forcing_version_id != expected_forcing_version_id:
+        errors.append(f"{collection_name}_forcing_version_id_derivation_mismatch")
+    return errors
+
+
+def _scheduler_expected_run_forcing_ids(
+    record: Mapping[str, Any],
+    parsed_identity: _SchedulerCandidateIdentity | None,
+) -> tuple[str, str] | None:
+    source_id = _scheduler_explicit_or_parsed_identity(record, "source_id", parsed_identity)
+    model_id = _scheduler_explicit_or_parsed_identity(record, "model_id", parsed_identity)
+    cycle_token = _scheduler_compact_cycle_token(record, parsed_identity)
+    if not source_id or not model_id or not cycle_token:
+        return None
+    source_lower = source_id.lower()
+    return (
+        f"fcst_{source_lower}_{cycle_token}_{model_id}",
+        f"forc_{source_lower}_{cycle_token}_{model_id}",
+    )
+
+
+def _scheduler_explicit_or_parsed_identity(
+    record: Mapping[str, Any],
+    field: str,
+    parsed_identity: _SchedulerCandidateIdentity | None,
+) -> str:
+    explicit = _identity_string(record.get(field))
+    if explicit:
+        return explicit
+    if parsed_identity is None:
+        return ""
+    if field == "source_id":
+        return parsed_identity.source_id
+    if field == "model_id":
+        return parsed_identity.model_id
+    if field == "scenario_id":
+        return parsed_identity.scenario_id
+    return ""
+
+
+def _scheduler_compact_cycle_token(
+    record: Mapping[str, Any],
+    parsed_identity: _SchedulerCandidateIdentity | None,
+) -> str:
+    for value in (
+        _identity_string(record.get("cycle_time_utc")),
+        _identity_string(record.get("cycle_id")),
+        parsed_identity.cycle_identity if parsed_identity is not None else "",
+    ):
+        token = _compact_cycle_token(value)
+        if token:
+            return token
+    return ""
+
+
+def _compact_cycle_token(value: str) -> str:
+    if not value:
+        return ""
+    compact = _compact_cycle_id_suffix(value)
+    if compact.isdigit() and len(compact) == 10:
+        return compact
+    parsed = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        return datetime.fromisoformat(parsed).astimezone(UTC).strftime("%Y%m%d%H")
+    except ValueError:
+        return ""
+
+
+def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    candidates = _scheduler_collection_identity_records(payload, "candidates")
+    blocked_candidates = _scheduler_collection_identity_records(payload, "blocked_candidates")
+    skipped_candidates = _scheduler_collection_identity_records(payload, "skipped_candidates")
+    model_run_rows = _mapping_sequence(payload.get("model_run_evidence"))
+
+    candidate_count = _count_value(payload, "candidate_count")
+    if candidate_count is not None and candidate_count > 0:
+        identity_count = len(candidates) + len(blocked_candidates) + len(skipped_candidates)
+        if candidate_count != identity_count:
+            errors.append("candidate_count_identity_cardinality_mismatch")
+
+    count_expectations = (
+        ("submitted_count", len(model_run_rows), "submitted_count_model_run_evidence_mismatch"),
+        ("blocked_candidate_count", len(blocked_candidates), "blocked_candidate_count_identity_cardinality_mismatch"),
+        ("skipped_candidate_count", len(skipped_candidates), "skipped_candidate_count_identity_cardinality_mismatch"),
+    )
+    for count_field, actual, error in count_expectations:
+        value = _count_value(payload, count_field)
+        if value is not None and value != actual:
+            errors.append(error)
+
+    submitted_count = _count_value(payload, "submitted_count")
+    model_run_capacity = submitted_count if submitted_count is not None else len(model_run_rows)
+    for count_field, statuses, error_prefix in (
+        ("partial_count", SCHEDULER_PARTIAL_MODEL_RUN_STATUSES, "partial_count"),
+        ("failed_count", SCHEDULER_FAILED_MODEL_RUN_STATUSES, "failed_count"),
+    ):
+        value = _count_value(payload, count_field)
+        if value is None:
+            continue
+        if value > model_run_capacity or value > len(model_run_rows):
+            errors.append(f"{error_prefix}_exceeds_model_run_evidence")
+            continue
+        matching_rows = _scheduler_model_run_rows_with_status(model_run_rows, statuses)
+        if matching_rows is not None and value > matching_rows:
+            errors.append(f"{error_prefix}_status_cardinality_mismatch")
+    return errors
+
+
+def _scheduler_model_run_rows_with_status(
+    model_run_rows: Sequence[Mapping[str, Any]],
+    statuses: frozenset[str],
+) -> int | None:
+    status_available = False
+    count = 0
+    for record in model_run_rows:
+        status_values = _scheduler_model_run_status_values(record)
+        if not status_values:
+            continue
+        status_available = True
+        if status_values & statuses:
+            count += 1
+    return count if status_available else None
+
+
+def _scheduler_model_run_status_values(record: Mapping[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("status", "outcome", "result", "state", "candidate_outcome"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            values.add(value.strip().lower())
+        elif isinstance(value, Mapping):
+            nested_status = value.get("status") or value.get("outcome") or value.get("result") or value.get("state")
+            if isinstance(nested_status, str) and nested_status.strip():
+                values.add(nested_status.strip().lower())
+    return values
+
+
+def _dedupe_errors(errors: Sequence[str]) -> list[str]:
+    unique: list[str] = []
+    for error in errors:
+        if error not in unique:
+            unique.append(error)
+    return unique
 
 
 def _cycle_identity_aliases(value: str) -> set[str]:
