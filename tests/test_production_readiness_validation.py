@@ -1525,6 +1525,55 @@ def _scheduler_output_uri_unavailable_sibling_artifact(tmp_path: Path) -> Path:
     return Path(result.artifact_path)
 
 
+def _scheduler_failed_alias_sibling_artifact(tmp_path: Path, *, outcome_status: str) -> Path:
+    sibling_reason = f"forcing_task_{outcome_status}"
+    orchestrator = FakeProductionOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forcing",
+            },
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_b",
+                "model_id": "model_b",
+                "status": outcome_status,
+                "stage": "forcing",
+                "reason": sibling_reason,
+                "slurm_job_id": "slurm_forcing_1",
+                "exit_code": 1,
+            },
+        ),
+        result_status="parsed_partial",
+    )
+    scheduler = ProductionScheduler(
+        _scheduler_config(
+            tmp_path / f"scheduler-workspace-{outcome_status}",
+            now=_scheduler_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+        ),
+        registry=FakeRegistry([_scheduler_model("model_a", "basin_a"), _scheduler_model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted_partial"
+    assert result.evidence["status"] == "submitted_partial"
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert result.evidence["counts"]["failed_count"] == 1
+    assert result.evidence["counts"]["partial_count"] == 1
+    evidence_by_model = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    assert evidence_by_model["model_b"]["status"] == outcome_status
+    assert evidence_by_model["model_b"]["candidate_outcome"]["status"] == outcome_status
+    assert result.artifact_path is not None
+    return Path(result.artifact_path)
+
+
 @pytest.mark.parametrize(
     ("mutator", "expected_error"),
     [
@@ -2087,6 +2136,45 @@ def test_scheduler_submitted_partial_count_accepts_output_uri_unavailable_blocke
     assert "partial_count_status_cardinality_mismatch" not in errors
     assert errors == []
     assert scheduler_item["details"]["submitted_count"] == 1
+    assert scheduler_item["details"]["partial_count"] == 1
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize("outcome_status", ["submission_failed", "permanently_failed"])
+def test_scheduler_submitted_partial_count_accepts_produced_failed_alias_sibling(
+    tmp_path: Path,
+    outcome_status: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = _scheduler_failed_alias_sibling_artifact(tmp_path, outcome_status=outcome_status)
+    payload = json.loads(scheduler_path.read_text(encoding="utf-8"))
+    receipt = _scheduler_proof_bound_to_evidence(
+        scheduler_path,
+        producer_artifact_ref=f"scheduler:{scheduler_path.name}",
+        producer_run_id=str(payload["pass_id"]),
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert scheduler_item["status"] == "blocked"
+    assert scheduler_item["required_for_final"] is False
+    assert "failed_count_status_cardinality_mismatch" not in errors
+    assert "partial_count_status_cardinality_mismatch" not in errors
+    assert errors == []
+    assert scheduler_item["details"]["submitted_count"] == 2
+    assert scheduler_item["details"]["failed_count"] == 1
     assert scheduler_item["details"]["partial_count"] == 1
     assert live_item["status"] == "release_blocked"
     assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]

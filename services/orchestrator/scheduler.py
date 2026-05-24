@@ -544,7 +544,7 @@ class ProductionScheduler:
                     "hydro_result_table_writes": submitted_count > 0,
                     "met_result_table_writes": submitted_count > 0,
                 }
-                failed_count = sum(1 for item in execution_evidence if item.get("status") == "failed")
+                failed_count = _scheduler_failed_count_from_execution(execution_evidence)
                 partial_count = _scheduler_partial_count_from_execution(execution_evidence)
             finished_at = _now(self.config)
             evidence = self._base_evidence(pass_id, started_at)
@@ -4611,6 +4611,14 @@ def _scheduler_partial_count_from_execution(execution_evidence: Sequence[Mapping
     return sum(1 for item in execution_evidence if _is_partial_candidate_evidence(item))
 
 
+def _scheduler_failed_count_from_execution(execution_evidence: Sequence[Mapping[str, Any]]) -> int:
+    return sum(1 for item in execution_evidence if _is_failed_candidate_evidence(item))
+
+
+def _is_failed_candidate_evidence(item: Mapping[str, Any]) -> bool:
+    return _is_failed_model_run_status(str(item.get("status") or ""))
+
+
 def _is_partial_candidate_evidence(item: Mapping[str, Any]) -> bool:
     status = str(item.get("status") or "")
     if item.get("submitted") is True:
@@ -4618,18 +4626,24 @@ def _is_partial_candidate_evidence(item: Mapping[str, Any]) -> bool:
     return _is_non_submitted_terminal_or_unavailable_status(status) or status.endswith("_partial")
 
 
+def _is_failed_model_run_status(status: str) -> bool:
+    normalized = status.strip().lower()
+    return normalized in {"failed", "permanently_failed", "submission_failed"} or normalized.endswith("_failed")
+
+
 def _is_non_submitted_terminal_or_unavailable_status(status: str) -> bool:
     normalized = status.strip().lower()
-    return normalized in {
-        "blocked",
-        "cancelled",
-        "failed",
-        "partially_failed",
-        "permanently_failed",
-        "preflight_blocked",
-        "submission_failed",
-        "unavailable",
-    } or normalized.endswith(("_blocked", "_cancelled", "_failed", "_unavailable"))
+    return (
+        _is_failed_model_run_status(normalized)
+        or normalized
+        in {
+            "blocked",
+            "cancelled",
+            "preflight_blocked",
+            "unavailable",
+        }
+        or normalized.endswith(("_blocked", "_cancelled", "_unavailable"))
+    )
 
 
 def _empty_model_discovery() -> dict[str, Any]:

@@ -3839,6 +3839,61 @@ def test_non_dry_run_partial_cycle_marks_failed_candidate_without_fanning_succes
     }
 
 
+@pytest.mark.parametrize("outcome_status", ["submission_failed", "permanently_failed"])
+def test_non_dry_run_partial_cycle_counts_failed_alias_candidate_as_failed(
+    tmp_path: Path,
+    outcome_status: str,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    sibling_reason = f"forcing_task_{outcome_status}"
+    orchestrator = FakeProductionOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forcing",
+            },
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_b",
+                "model_id": "model_b",
+                "status": outcome_status,
+                "stage": "forcing",
+                "reason": sibling_reason,
+                "slurm_job_id": "slurm_forcing_1",
+                "exit_code": 1,
+            },
+        ),
+        result_status="parsed_partial",
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted_partial"
+    assert result.evidence["status"] == "submitted_partial"
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert result.evidence["counts"]["failed_count"] == 1
+    assert result.evidence["counts"]["partial_count"] == 1
+    evidence_by_model = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    assert evidence_by_model["model_b"]["status"] == outcome_status
+    assert evidence_by_model["model_b"]["submitted"] is True
+    assert evidence_by_model["model_b"]["execution_attempted"] is True
+    assert evidence_by_model["model_b"]["candidate_outcome"]["status"] == outcome_status
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+    persisted_by_model = {item["model_id"]: item for item in persisted["model_run_evidence"]}
+    assert persisted["counts"]["failed_count"] == 1
+    assert persisted["counts"]["partial_count"] == 1
+    assert persisted_by_model["model_b"]["status"] == outcome_status
+
+
 @pytest.mark.parametrize("outcome_status", ["unavailable", "cancelled"])
 def test_non_dry_run_partial_cycle_marks_unavailable_or_cancelled_candidate_as_partial(
     tmp_path: Path,
