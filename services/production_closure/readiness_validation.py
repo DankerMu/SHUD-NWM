@@ -170,19 +170,22 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
 )
 SCHEDULER_PARTIAL_MODEL_RUN_STATUSES = frozenset(
     {
-        "blocked",
-        "cancelled",
-        "failed",
         "partial",
         "partially_failed",
-        "permanently_failed",
-        "preflight_blocked",
-        "submission_failed",
         "submitted_partial",
+    }
+)
+SCHEDULER_FAILED_MODEL_RUN_STATUSES = frozenset({"failed", "permanently_failed", "submission_failed"})
+SCHEDULER_BLOCKED_MODEL_RUN_STATUSES = frozenset(
+    {
+        "blocked",
+        "cancelled",
+        "lock_contended",
+        "preflight_blocked",
+        "resource_limit_blocked",
         "unavailable",
     }
 )
-SCHEDULER_FAILED_MODEL_RUN_STATUSES = frozenset({"failed"})
 SCHEDULER_REQUIRED_COUNT_FIELDS = (
     "candidate_count",
     "blocked_candidate_count",
@@ -212,6 +215,11 @@ SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY: Mapping[str, frozenset[str]] = {
     "succeeded": frozenset({"complete", "completed", "passed", "published", "succeeded", "success"}),
     "passed": frozenset({"complete", "completed", "passed", "published", "succeeded", "success"}),
 }
+SCHEDULER_LIVE_COMPATIBLE_MODEL_RUN_STATUSES = frozenset(
+    status
+    for statuses in SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY.values()
+    for status in statuses
+)
 SCHEDULER_BINDING_ALIAS_GROUPS: Mapping[str, tuple[str, ...]] = {
     "producer_schema": ("producer_schema", "scheduler_schema"),
     "producer_run_id": ("producer_run_id", "scheduler_pass_id", "pass_id"),
@@ -578,6 +586,17 @@ class _SchedulerCandidateIdentity:
     cycle_identity: str
     model_id: str
     scenario_id: str
+
+
+@dataclass(frozen=True)
+class _SchedulerModelRunOutcome:
+    status_values: frozenset[str]
+    has_status_evidence: bool
+    submitted: bool
+    submitted_explicitly_false: bool
+    failed: bool
+    partial: bool
+    blocked: bool
 
 
 def validate_readiness(config: ProductionReadinessConfig) -> dict[str, Any]:
@@ -2826,6 +2845,7 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
     blocked_candidates = _scheduler_collection_identity_records(payload, "blocked_candidates")
     skipped_candidates = _scheduler_collection_identity_records(payload, "skipped_candidates")
     model_run_rows = _mapping_sequence(payload.get("model_run_evidence"))
+    model_run_outcomes = [_scheduler_model_run_outcome(record) for record in model_run_rows]
 
     candidate_count = _count_value(payload, "candidate_count")
     if candidate_count is not None:
@@ -2836,7 +2856,11 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
             errors.append("candidate_count_identity_cardinality_mismatch")
 
     count_expectations = (
-        ("submitted_count", len(model_run_rows), "submitted_count_model_run_evidence_mismatch"),
+        (
+            "submitted_count",
+            sum(1 for outcome in model_run_outcomes if outcome.submitted),
+            "submitted_count_model_run_evidence_mismatch",
+        ),
         ("blocked_candidate_count", len(blocked_candidates), "blocked_candidate_count_identity_cardinality_mismatch"),
         ("skipped_candidate_count", len(skipped_candidates), "skipped_candidate_count_identity_cardinality_mismatch"),
     )
@@ -2857,33 +2881,31 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
         if value > model_run_capacity or value > len(model_run_rows):
             errors.append(f"{error_prefix}_exceeds_model_run_evidence")
             continue
-        matching_rows = _scheduler_model_run_rows_with_status(model_run_rows, statuses)
-        if matching_rows is not None and value != matching_rows:
+        matching_rows = _scheduler_model_run_rows_with_status(model_run_outcomes, statuses)
+        if value != matching_rows:
             errors.append(f"{error_prefix}_status_cardinality_mismatch")
-    errors.extend(_scheduler_live_status_count_errors(payload, model_run_rows=model_run_rows))
+    errors.extend(
+        _scheduler_live_status_count_errors(
+            payload,
+            model_run_rows=model_run_rows,
+            model_run_outcomes=model_run_outcomes,
+        )
+    )
     return errors
 
 
 def _scheduler_model_run_rows_with_status(
-    model_run_rows: Sequence[Mapping[str, Any]],
+    model_run_outcomes: Sequence[_SchedulerModelRunOutcome],
     statuses: frozenset[str],
-) -> int | None:
-    status_available = False
-    count = 0
-    for record in model_run_rows:
-        status_values = _scheduler_model_run_status_values(record)
-        if not status_values:
-            continue
-        status_available = True
-        if status_values & statuses:
-            count += 1
-    return count if status_available else None
+) -> int:
+    return sum(1 for outcome in model_run_outcomes if outcome.status_values & statuses)
 
 
 def _scheduler_live_status_count_errors(
     payload: Mapping[str, Any],
     *,
     model_run_rows: Sequence[Mapping[str, Any]],
+    model_run_outcomes: Sequence[_SchedulerModelRunOutcome],
 ) -> list[str]:
     execution_mode = _scheduler_evidence_mode(payload)
     status = str(payload.get("status") or "").strip().lower()
@@ -2892,35 +2914,58 @@ def _scheduler_live_status_count_errors(
 
     errors: list[str] = []
     submitted_count = _count_value(payload, "submitted_count")
+    failed_count = _count_value(payload, "failed_count")
+    partial_count = _count_value(payload, "partial_count")
+    submitted_rows = sum(1 for outcome in model_run_outcomes if outcome.submitted)
+    failed_rows = sum(1 for outcome in model_run_outcomes if outcome.failed)
+    partial_rows = sum(1 for outcome in model_run_outcomes if outcome.partial)
+    blocked_rows = sum(1 for outcome in model_run_outcomes if outcome.blocked)
+    allowed_statuses = SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY.get(status, frozenset())
+    incompatible_rows = sum(
+        1
+        for outcome in model_run_outcomes
+        if outcome.submitted_explicitly_false
+        or not outcome.has_status_evidence
+        or not outcome.status_values & allowed_statuses
+        or outcome.failed
+        or outcome.partial
+        or outcome.blocked
+    )
+
     if submitted_count is None or submitted_count <= 0 or not model_run_rows:
         errors.append("submitted_status_without_model_run_evidence")
-    elif submitted_count != len(model_run_rows):
+    elif submitted_count != submitted_rows:
         errors.append("submitted_count_model_run_evidence_mismatch")
 
-    compatible_rows = _scheduler_status_compatible_model_run_rows(model_run_rows, pass_status=status)
-    if compatible_rows is not None and submitted_count is not None and compatible_rows != submitted_count:
+    if failed_count != 0:
+        errors.append("live_status_failed_count_nonzero")
+    if partial_count != 0:
+        errors.append("live_status_partial_count_nonzero")
+    if failed_rows or partial_rows or blocked_rows:
+        errors.append("live_status_model_run_blocked_outcome")
+    if incompatible_rows:
         errors.append("submitted_status_model_run_status_mismatch")
     return errors
 
 
-def _scheduler_status_compatible_model_run_rows(
-    model_run_rows: Sequence[Mapping[str, Any]],
-    *,
-    pass_status: str,
-) -> int | None:
-    allowed_statuses = SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY.get(pass_status)
-    if not allowed_statuses:
-        return None
-    status_available = False
-    count = 0
-    for record in model_run_rows:
-        status_values = _scheduler_model_run_status_values(record)
-        if not status_values:
-            continue
-        status_available = True
-        if status_values & allowed_statuses:
-            count += 1
-    return count if status_available else None
+def _scheduler_model_run_outcome(record: Mapping[str, Any]) -> _SchedulerModelRunOutcome:
+    status_values = frozenset(_scheduler_model_run_status_values(record))
+    submitted_explicitly_false = record.get("submitted") is False
+    submitted = record.get("submitted") is True or bool(status_values & SCHEDULER_LIVE_COMPATIBLE_MODEL_RUN_STATUSES)
+    if submitted_explicitly_false:
+        submitted = False
+    failed = bool(status_values & SCHEDULER_FAILED_MODEL_RUN_STATUSES)
+    partial = bool(status_values & SCHEDULER_PARTIAL_MODEL_RUN_STATUSES)
+    blocked = bool(status_values & SCHEDULER_BLOCKED_MODEL_RUN_STATUSES)
+    return _SchedulerModelRunOutcome(
+        status_values=status_values,
+        has_status_evidence=bool(status_values),
+        submitted=submitted,
+        submitted_explicitly_false=submitted_explicitly_false,
+        failed=failed,
+        partial=partial,
+        blocked=blocked,
+    )
 
 
 def _scheduler_model_run_status_values(record: Mapping[str, Any]) -> set[str]:

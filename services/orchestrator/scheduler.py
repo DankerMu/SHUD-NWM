@@ -3626,7 +3626,7 @@ def _candidate_stage_evidence_item(
     ]
     exact_match_available = _task_candidate_matching_available(task_results, outcome=outcome)
     if exact_match_available:
-        selected_tasks = matched_tasks
+        selected_tasks = matched_tasks[:MAX_MODEL_RUN_STAGE_TASK_ROWS]
     else:
         selected_tasks = task_results[:MAX_MODEL_RUN_STAGE_TASK_ROWS]
     selected_count = len(selected_tasks)

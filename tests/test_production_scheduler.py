@@ -4253,6 +4253,68 @@ def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(t
         assert summary["matching"] == "candidate_identity"
 
 
+def test_model_run_evidence_caps_all_candidate_matched_array_task_rows(tmp_path: Path) -> None:
+    class ManyMatchedArrayOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            basin = basins[0]
+            task_count = MAX_MODEL_RUN_STAGE_TASK_ROWS + 9
+            task_results = tuple(
+                {
+                    "task_id": index,
+                    "array_task_id": index,
+                    "candidate_id": basin["candidate_id"],
+                    "run_id": basin["run_id"],
+                    "model_id": basin["model_id"],
+                    "status": "succeeded",
+                    "slurm_job_id": f"slurm_forcing_{index}",
+                    "accounting": {"elapsed": "00:01:00", "max_rss": f"{2048 + index}K"},
+                }
+                for index in range(task_count)
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=(
+                    StageRunResult(
+                        stage="forcing",
+                        job_type="produce_forcing_array",
+                        pipeline_job_id="job_forcing",
+                        slurm_job_id="slurm_forcing",
+                        status="succeeded",
+                        task_results=task_results,
+                    ),
+                ),
+            )
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: ManyMatchedArrayOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    model_evidence = result.evidence["model_run_evidence"][0]
+    stage = model_evidence["stage_statuses"][0]
+    summary = stage["task_results_summary"]
+    total_matching_rows = MAX_MODEL_RUN_STAGE_TASK_ROWS + 9
+    assert len(stage["task_results"]) == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert summary["total_count"] == total_matching_rows
+    assert summary["included_count"] == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert summary["matched_count"] == total_matching_rows
+    assert summary["omitted_count"] == total_matching_rows - MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert summary["matching"] == "candidate_identity"
+    assert len(model_evidence["resource_summary"]["task_accounting"]) == MAX_MODEL_RUN_STAGE_TASK_ROWS
+
+
 def test_issue_196_blocked_preflight_evidence_keeps_existing_consumers_stable(tmp_path: Path) -> None:
     roots = _slurm_roots(tmp_path)
     scheduler = ProductionScheduler(
