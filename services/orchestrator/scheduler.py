@@ -48,6 +48,7 @@ MAX_REGISTRY_PAGES = 20
 MAX_EVIDENCE_BYTES = 5_000_000
 MAX_LOCK_PAYLOAD_BYTES = 16_384
 MAX_CONTINUOUS_JSON_PASSES = 100
+MAX_MODEL_RUN_STAGE_TASK_ROWS = 16
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_RETRY_LIMIT = 3
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
@@ -94,6 +95,8 @@ SLURM_RESOURCE_PROFILE_TEMPLATE_IDENTITY_FIELDS = {
     "object_store_prefix",
     "manifest_index_path",
 }
+TASK_RESULT_CANDIDATE_IDENTITY_FIELDS = ("candidate_id", "run_id", "forcing_version_id", "model_id")
+TASK_RESULT_INDEX_IDENTITY_FIELDS = ("task_id", "array_task_id", "original_task_id")
 ACTIVE_PIPELINE_STATUSES = {"pending", "submitted", "running"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
@@ -3558,7 +3561,7 @@ def _candidate_model_run_review_evidence(
     status: str,
     stage_statuses: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    stage_status_payload = [_evidence_safe(dict(stage)) for stage in stage_statuses]
+    stage_status_payload = _candidate_stage_evidence(candidate, stage_statuses, outcome=outcome)
     quality_states = _candidate_quality_states(candidate, outcome=outcome, status=status)
     artifact_refs = _candidate_artifact_refs(candidate, output_uri=output_uri)
     return {
@@ -3593,6 +3596,54 @@ def _candidate_model_run_review_evidence(
     }
 
 
+def _candidate_stage_evidence(
+    candidate: SchedulerCandidate,
+    stage_statuses: Sequence[Mapping[str, Any]],
+    *,
+    outcome: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    return [
+        _candidate_stage_evidence_item(candidate, _evidence_safe(dict(stage)), outcome=outcome)
+        for stage in stage_statuses
+    ]
+
+
+def _candidate_stage_evidence_item(
+    candidate: SchedulerCandidate,
+    stage: Mapping[str, Any],
+    *,
+    outcome: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    stage_payload = dict(stage)
+    task_results = _stage_task_results(stage_payload)
+    total_count = len(task_results)
+    status_counts = Counter(str(task.get("status") or task.get("state") or "unknown") for task in task_results)
+    matched_tasks = [
+        task
+        for task in task_results
+        if _task_result_matches_candidate(task, candidate, outcome=outcome)
+    ]
+    exact_match_available = _task_candidate_matching_available(task_results, outcome=outcome)
+    if exact_match_available:
+        selected_tasks = matched_tasks
+    else:
+        selected_tasks = task_results[:MAX_MODEL_RUN_STAGE_TASK_ROWS]
+    selected_count = len(selected_tasks)
+    stage_payload["task_results"] = [_evidence_safe(dict(task)) for task in selected_tasks]
+    stage_payload["task_results_summary"] = _evidence_safe(
+        {
+            "total_count": total_count,
+            "included_count": selected_count,
+            "omitted_count": max(total_count - selected_count, 0),
+            "matched_count": len(matched_tasks),
+            "matching": "candidate_identity" if exact_match_available else "bounded_sample",
+            "limit": MAX_MODEL_RUN_STAGE_TASK_ROWS,
+            "status_counts": dict(sorted(status_counts.items())),
+        }
+    )
+    return _evidence_safe(stage_payload)
+
+
 def _stage_run_evidence(stage: Any) -> dict[str, Any]:
     task_results = [
         _task_result_evidence(task)
@@ -3620,6 +3671,75 @@ def _stage_run_evidence(stage: Any) -> dict[str, Any]:
             "fabricated_metrics": False,
         }
     return _evidence_safe(payload)
+
+
+def _stage_task_results(stage: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    task_results = stage.get("task_results") or []
+    if not isinstance(task_results, Sequence) or isinstance(task_results, str | bytes | bytearray):
+        return []
+    return [task for task in task_results if isinstance(task, Mapping)]
+
+
+def _task_result_matches_candidate(
+    task: Mapping[str, Any],
+    candidate: SchedulerCandidate,
+    *,
+    outcome: Mapping[str, Any] | None,
+) -> bool:
+    identity_fields = {
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "model_id": candidate.model_id,
+    }
+    for field_name, expected in identity_fields.items():
+        if _normalized_identity(task.get(field_name)) == _normalized_identity(expected):
+            return True
+    if outcome is None:
+        return False
+    for field_name in TASK_RESULT_CANDIDATE_IDENTITY_FIELDS:
+        task_value = _normalized_identity(task.get(field_name))
+        outcome_value = _normalized_identity(outcome.get(field_name))
+        if task_value is not None and task_value == outcome_value:
+            return True
+    outcome_task_ids = {
+        _normalized_identity(outcome.get(field_name))
+        for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
+    }
+    outcome_task_ids.discard(None)
+    task_ids = {
+        _normalized_identity(task.get(field_name))
+        for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
+    }
+    task_ids.discard(None)
+    return bool(task_ids.intersection(outcome_task_ids))
+
+
+def _task_candidate_matching_available(
+    tasks: Sequence[Mapping[str, Any]],
+    *,
+    outcome: Mapping[str, Any] | None,
+) -> bool:
+    for task in tasks:
+        if any(task.get(field_name) not in (None, "") for field_name in TASK_RESULT_CANDIDATE_IDENTITY_FIELDS):
+            return True
+    if outcome is None:
+        return False
+    outcome_has_task_identity = any(
+        outcome.get(field_name) not in (None, "") for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS
+    )
+    if not outcome_has_task_identity:
+        return False
+    return any(
+        any(task.get(field_name) not in (None, "") for field_name in TASK_RESULT_INDEX_IDENTITY_FIELDS)
+        for task in tasks
+    )
+
+
+def _normalized_identity(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 def _task_result_evidence(task: Mapping[str, Any]) -> dict[str, Any]:

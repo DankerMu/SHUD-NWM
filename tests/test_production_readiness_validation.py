@@ -308,6 +308,12 @@ def _write_scheduler_evidence(path: Path, **overrides: object) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _write_scheduler_payload(path: Path, payload: dict[str, object]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _scheduler_proof_bound_to_evidence(
     evidence_path: Path,
     *,
@@ -991,6 +997,384 @@ def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(tmp
     assert live_item["execution_mode"] == "live_proof"
     assert live_item["live_proof_accepted"] is True
     assert live_item["details"]["payload"]["producer_artifact_ref"] == "scheduler:scheduler_20260521120000_fixed.json"
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_schemaless_scheduler_evidence_blocks_live_scheduler_proof(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+    payload.pop("schema")
+    _write_scheduler_payload(scheduler_path, payload)
+    receipt = _scheduler_proof_bound_to_evidence(scheduler_path)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert scheduler_item["status"] == "blocked"
+    assert "schema_mismatch" in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    "execution_mode",
+    [
+        "dry_run",
+        "deterministic",
+        "deterministic_fixture",
+        "planning_only",
+        "production_like",
+        "simulated",
+    ],
+)
+def test_scheduler_live_receipt_rejects_non_live_producer_modes(
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(scheduler_path, status="submitted", execution_mode=execution_mode)
+    receipt = _scheduler_proof_bound_to_evidence(scheduler_path)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert scheduler_item["status"] == "passed"
+    assert live_item["status"] == "release_blocked"
+    assert live_item["execution_mode"] == "live_proof"
+    assert "scheduler_execution_mode_not_live_eligible" in live_item["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_all_other_live_receipts_accepted_with_scheduler_bound_to_dry_run_keeps_final_false(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    _write_scheduler_evidence(scheduler_path, status="submitted", execution_mode="dry_run")
+    proofs = _all_live_proofs()
+    proofs["scheduler_proof"] = _scheduler_proof_bound_to_evidence(scheduler_path)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            **proofs,
+        )
+    )
+
+    required_items = [item for item in _items(root) if item["required_for_final"]]
+    blocked = [item for item in required_items if item["status"] == "release_blocked"]
+    assert [item["surface"] for item in blocked] == ["live_scheduler_evidence_proof"]
+    assert "scheduler_execution_mode_not_live_eligible" in blocked[0]["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_root_binds_receipt_to_exact_matching_passed_artifact(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler"
+    first = scheduler_root / "first.json"
+    second = scheduler_root / "second.json"
+    _write_scheduler_evidence(
+        first,
+        pass_id="scheduler_20260521120000_first",
+        status="submitted",
+        execution_mode="production_orchestration",
+    )
+    _write_scheduler_evidence(
+        second,
+        pass_id="scheduler_20260521120000_second",
+        status="submitted",
+        execution_mode="production_orchestration",
+    )
+    receipt = _scheduler_proof_bound_to_evidence(
+        second,
+        producer_artifact_ref="scheduler:second.json",
+        producer_run_id="scheduler_20260521120000_second",
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_root=scheduler_root,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_items = [item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence"]
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert len([item for item in scheduler_items if item["status"] == "passed"]) == 2
+    assert live_item["status"] == "passed"
+    assert live_item["live_proof_accepted"] is True
+
+
+def test_scheduler_root_same_pass_and_checksum_with_distinct_artifact_ref_is_not_ambiguous(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler"
+    first = scheduler_root / "first.json"
+    second = scheduler_root / "second.json"
+    checksum = _write_scheduler_evidence(
+        first,
+        pass_id="scheduler_20260521120000_same",
+        status="submitted",
+        execution_mode="production_orchestration",
+    )
+    second.parent.mkdir(parents=True, exist_ok=True)
+    second.write_bytes(first.read_bytes())
+    receipt = _scheduler_proof_bound_to_evidence(
+        second,
+        producer_artifact_ref="scheduler:second.json",
+        producer_run_id="scheduler_20260521120000_same",
+        checksum=checksum,
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_root=scheduler_root,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_items = [item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence"]
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert len([item for item in scheduler_items if item["status"] == "passed"]) == 2
+    assert live_item["status"] == "passed"
+    assert live_item["live_proof_accepted"] is True
+    assert "acceptance_errors" not in live_item["details"]
+
+
+def test_scheduler_root_duplicate_exact_match_blocks_ambiguous_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler"
+    first = scheduler_root / "first.json"
+    duplicate = scheduler_root / "duplicate.json"
+    monkeypatch.setattr(
+        "services.production_closure.readiness_validation._scheduler_evidence_artifact_ref",
+        lambda path, *, config: "scheduler:same.json",
+    )
+    checksum = _write_scheduler_evidence(
+        first,
+        pass_id="scheduler_20260521120000_same",
+        status="submitted",
+        execution_mode="production_orchestration",
+    )
+    duplicate.parent.mkdir(parents=True, exist_ok=True)
+    duplicate.write_bytes(first.read_bytes())
+    receipt = _scheduler_proof_bound_to_evidence(
+        duplicate,
+        producer_artifact_ref="scheduler:same.json",
+        producer_run_id="scheduler_20260521120000_same",
+        checksum=checksum,
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_root=scheduler_root,
+            scheduler_proof=receipt,
+        )
+    )
+
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    assert live_item["status"] == "release_blocked"
+    assert "ambiguous_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("overflow", "expected_error"),
+    [
+        ("node", "json_node_limit_exceeded"),
+        ("depth", "json_depth_limit_exceeded"),
+    ],
+)
+def test_live_proof_json_traversal_limits_are_release_blockers_and_bounded(
+    tmp_path: Path,
+    overflow: str,
+    expected_error: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    payload = json.loads(_bound_proof("alert"))
+    payload["sink_metadata"]["webhook_url"] = "https://user:pass@alerts.example.invalid/hook?token=secret"
+    payload["local_path"] = "/tmp/private-live-proof/receipt.json"
+    if overflow == "node":
+        payload["node_overflow"] = [{"i": index} for index in range(1300)]
+    else:
+        nested: dict[str, object] = {"value": "too deep"}
+        for index in range(20):
+            nested = {f"level_{index}": nested}
+        payload["depth_overflow"] = nested
+    proof = json.dumps(payload)
+    assert len(proof.encode("utf-8")) < 64 * 1024
+
+    validate_readiness(ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", alert_proof=proof))
+
+    item = next(item for item in _items(root) if item["surface"] == "live_alert_sink_delivery")
+    assert item["status"] == "release_blocked"
+    assert item["execution_mode"] == "live_proof"
+    assert item["live_proof_accepted"] is False
+    assert item["details"]["parse_status"] == "json_limit_exceeded"
+    assert item["details"]["error_code"] == "PRODUCTION_READINESS_PROOF_JSON_LIMIT_EXCEEDED"
+    assert expected_error in item["details"]["json_limit_errors"]
+    receipts = (root / "m19" / "readiness" / "live_proof_receipts.json").read_text(encoding="utf-8")
+    assert "[truncated:max-" in receipts
+    assert "token=secret" not in receipts
+    assert "user:pass@" not in receipts
+    assert "/tmp/private-live-proof/receipt.json" not in receipts
+    assert "raw_payload" not in receipts
+    assert len(receipts.encode("utf-8")) < 64 * 1024
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_candidate_count_requires_identity_collection(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    payload = _scheduler_evidence_payload()
+    payload["candidates"] = []
+    payload["blocked_candidates"] = []
+    payload["skipped_candidates"] = []
+    payload["model_run_evidence"] = []
+    _write_scheduler_payload(scheduler_path, payload)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_file=scheduler_path)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    assert item["status"] == "blocked"
+    assert "missing_scheduler_candidate_identity" in item["details"]["acceptance_errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_candidate_and_model_run_identity_mismatch_blocks_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+    payload["candidates"] = [
+        {
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "source_id": "IFS",
+            "cycle_time_utc": "2026-05-21T06:00:00Z",
+            "model_id": "model_a",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "forcing_version_id": "forc_gfs_2026052106_model_a",
+        }
+    ]
+    payload["skipped_candidates"] = []
+    payload["model_run_evidence"] = [
+        {
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "source_id": "gfs",
+            "cycle_time_utc": "2026-05-21T06:00:00Z",
+            "model_id": "model_a",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "forcing_version_id": "forc_gfs_2026052106_model_a",
+            "hydro_run": {"run_id": "fcst_sibling"},
+            "forcing": {"forcing_version_id": "forc_sibling"},
+        }
+    ]
+    _write_scheduler_payload(scheduler_path, payload)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_file=scheduler_path)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    errors = item["details"]["acceptance_errors"]
+    assert item["status"] == "blocked"
+    assert "candidates_candidate_id_identity_mismatch" in errors
+    assert "model_run_evidence_source_id_identity_mismatch" in errors
+    assert "model_run_evidence_run_id_mismatch" in errors
+    assert "model_run_evidence_forcing_version_id_mismatch" in errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    "extra_payload",
+    [
+        {"node_overflow": [{"i": index} for index in range(1300)]},
+        {
+            "depth_overflow": {
+                "a": {
+                    "b": {
+                        "c": {
+                            "d": {
+                                "e": {
+                                    "f": {
+                                        "g": {
+                                            "h": {
+                                                "i": {
+                                                    "j": {
+                                                        "k": {
+                                                            "l": {
+                                                                "m": {
+                                                                    "n": {
+                                                                        "o": {
+                                                                            "p": {
+                                                                                "q": {
+                                                                                    "r": "too deep",
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    ],
+)
+def test_scheduler_json_traversal_over_limits_block_evidence(
+    tmp_path: Path,
+    extra_payload: dict[str, object],
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
+    payload = _scheduler_evidence_payload(**extra_payload)
+    _write_scheduler_payload(scheduler_path, payload)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_file=scheduler_path)
+    )
+
+    item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    rendered = json.dumps(item["details"]["acceptance_errors"])
+    assert item["status"] == "blocked"
+    assert "scheduler_evidence_json_" in rendered
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 

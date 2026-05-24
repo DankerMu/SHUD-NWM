@@ -145,6 +145,7 @@ SCHEDULER_REVIEW_EXECUTION_MODES = frozenset(
         "simulated",
     }
 )
+SCHEDULER_LIVE_PRODUCER_EXECUTION_MODES = frozenset({"production_orchestration"})
 SCHEDULER_REVIEW_PASSED_STATUSES = frozenset(
     {
         "planned",
@@ -308,6 +309,13 @@ class ProductionReadinessValidationError(RuntimeError):
         super().__init__(message)
         self.error_code = error_code
         self.message = message
+
+
+@dataclass(frozen=True)
+class BoundedPayloadResult:
+    payload: Any
+    node_truncated: bool = False
+    depth_truncated: bool = False
 
 
 @dataclass
@@ -908,20 +916,16 @@ def _read_scheduler_evidence_root_items(
                 error_code="PRODUCTION_READINESS_SCHEDULER_EVIDENCE_MISSING",
             )
         ]
-    items = [
-        _read_scheduler_evidence_item(path, config=config)
-        for path in evidence_files[:MAX_SCHEDULER_EVIDENCE_FILES]
-    ]
     if len(evidence_files) > MAX_SCHEDULER_EVIDENCE_FILES:
-        items.append(
+        return [
             _scheduler_evidence_blocked(
                 root,
                 config=config,
                 reason=f"Scheduler evidence root contains more than {MAX_SCHEDULER_EVIDENCE_FILES} JSON artifacts.",
                 error_code="PRODUCTION_READINESS_SCHEDULER_EVIDENCE_FILE_LIMIT",
             )
-        )
-    return items
+        ]
+    return [_read_scheduler_evidence_item(path, config=config) for path in evidence_files]
 
 
 def _read_scheduler_evidence_item(path: Path, *, config: ProductionReadinessConfig) -> dict[str, Any]:
@@ -945,7 +949,8 @@ def _read_scheduler_evidence_item(path: Path, *, config: ProductionReadinessConf
                 error_code="PRODUCTION_READINESS_SCHEDULER_EVIDENCE_JSON_INVALID",
                 raw_preview=_redacted_preview(raw, config=config),
             )
-        raw_payload = _bounded_payload(parsed)
+        bounded = _bounded_payload(parsed)
+        raw_payload = bounded.payload
         payload = _bounded_redacted_payload(parsed, config=config)
     except (
         FileNotFoundError,
@@ -964,6 +969,10 @@ def _read_scheduler_evidence_item(path: Path, *, config: ProductionReadinessConf
         )
 
     errors = _scheduler_evidence_errors(raw_payload)
+    if bounded.node_truncated:
+        errors.append("scheduler_evidence_json_node_limit_exceeded")
+    if bounded.depth_truncated:
+        errors.append("scheduler_evidence_json_depth_limit_exceeded")
     status = str(raw_payload.get("status") or "unknown").strip()
     execution_mode = _scheduler_evidence_mode(raw_payload)
     item_status = _scheduler_readiness_status(raw_payload, errors=errors)
@@ -1052,19 +1061,22 @@ def _scheduler_evidence_blocked(
     )
 
 
-def _scheduler_bindings(items: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
-    passed = [item for item in items if item.get("status") == "passed"]
-    if len(passed) != 1:
-        return None
-    details = passed[0].get("details")
-    return details if isinstance(details, Mapping) else None
+def _scheduler_bindings(items: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    bindings: list[Mapping[str, Any]] = []
+    for item in items:
+        if item.get("status") != "passed":
+            continue
+        details = item.get("details")
+        if isinstance(details, Mapping):
+            bindings.append(details)
+    return tuple(bindings)
 
 
 def _live_proof_items(
     config: ProductionReadinessConfig,
     receipts: Mapping[str, Mapping[str, Any]],
     dependency_bindings: Mapping[str, Mapping[str, Any]],
-    scheduler_binding: Mapping[str, Any] | None,
+    scheduler_binding: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     items = [
         _auth_live_item(config, receipts["auth"]),
@@ -1252,7 +1264,7 @@ def _surface_live_item(
     *,
     proof_key: str,
     dependency_bindings: Mapping[str, Mapping[str, Any]],
-    scheduler_binding: Mapping[str, Any] | None = None,
+    scheduler_binding: Sequence[Mapping[str, Any]] = (),
     item_id: str,
     surface: str,
     missing_risk: str,
@@ -1541,7 +1553,8 @@ def _load_proof(
             "raw_preview": _redacted_preview(raw, config=config),
         }
     try:
-        raw_payload = _bounded_payload(parsed)
+        bounded = _bounded_payload(parsed)
+        raw_payload = bounded.payload
         payload = _bounded_redacted_payload(parsed, config=config)
     except RecursionError as error:
         return {
@@ -1552,6 +1565,23 @@ def _load_proof(
             "error_code": "PRODUCTION_READINESS_PROOF_JSON_INVALID",
             "reason": redact_text(str(error)),
             "raw_preview": _redacted_preview(raw, config=config),
+        }
+    json_limit_errors = []
+    if bounded.node_truncated:
+        json_limit_errors.append("json_node_limit_exceeded")
+    if bounded.depth_truncated:
+        json_limit_errors.append("json_depth_limit_exceeded")
+    if json_limit_errors:
+        return {
+            "surface": surface,
+            "status": "invalid",
+            "parse_status": "json_limit_exceeded",
+            "source": source,
+            "source_ref": source_ref,
+            "error_code": "PRODUCTION_READINESS_PROOF_JSON_LIMIT_EXCEEDED",
+            "reason": "Live proof JSON exceeded bounded traversal limits.",
+            "json_limit_errors": json_limit_errors,
+            "payload": payload,
         }
     return {
         "surface": surface,
@@ -1668,7 +1698,7 @@ def _surface_live_receipt_errors(
     proof_key: str,
     config: ProductionReadinessConfig,
     dependency_bindings: Mapping[str, Mapping[str, Any]],
-    scheduler_binding: Mapping[str, Any] | None = None,
+    scheduler_binding: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
     errors = _common_live_receipt_errors(payload, proof_key=proof_key, config=config)
     if proof_key == "alert":
@@ -2071,7 +2101,7 @@ def _dependency_binding_summary_errors(
 def _scheduler_receipt_errors(
     payload: Mapping[str, Any],
     *,
-    scheduler_binding: Mapping[str, Any] | None,
+    scheduler_binding: Sequence[Mapping[str, Any]],
 ) -> list[str]:
     errors: list[str] = []
     provenance = payload.get("provenance") if isinstance(payload.get("provenance"), Mapping) else {}
@@ -2106,17 +2136,38 @@ def _scheduler_receipt_errors(
     elif _contains_placeholder_value(provenance):
         errors.append("placeholder_provenance")
 
-    if scheduler_binding is None:
+    producer_run_matches = [
+        binding for binding in scheduler_binding if producer_run_id == binding.get("scheduler_pass_id")
+    ]
+    artifact_matches = [
+        binding for binding in producer_run_matches if artifact_ref == binding.get("scheduler_artifact_ref")
+    ]
+    matches = [
+        binding
+        for binding in artifact_matches
+        if checksum_or_receipt == binding.get("scheduler_checksum")
+    ]
+    if not scheduler_binding:
         errors.append("missing_scheduler_evidence_binding")
-    else:
-        if producer_run_id != scheduler_binding.get("scheduler_pass_id"):
+    elif not matches:
+        errors.append("scheduler_evidence_binding_not_found")
+        if not producer_run_matches:
             errors.append("producer_run_id_mismatch")
-        if artifact_ref != scheduler_binding.get("scheduler_artifact_ref"):
+        elif not artifact_matches:
             errors.append("producer_artifact_ref_mismatch")
-        if checksum_or_receipt != scheduler_binding.get("scheduler_checksum"):
+        else:
             errors.append("producer_checksum_mismatch")
-        errors.extend(_scheduler_binding_summary_errors(top_level_binding, scheduler_binding, source="top_level"))
-        errors.extend(_scheduler_binding_summary_errors(provenance_binding, scheduler_binding, source="provenance"))
+    else:
+        if len(matches) > 1:
+            errors.append("ambiguous_scheduler_evidence_binding")
+        binding = matches[0]
+        if producer_schema != binding.get("scheduler_schema"):
+            errors.append("producer_schema_mismatch")
+        scheduler_mode = binding.get("scheduler_execution_mode")
+        if scheduler_mode not in SCHEDULER_LIVE_PRODUCER_EXECUTION_MODES:
+            errors.append("scheduler_execution_mode_not_live_eligible")
+        errors.extend(_scheduler_binding_summary_errors(top_level_binding, binding, source="top_level"))
+        errors.extend(_scheduler_binding_summary_errors(provenance_binding, binding, source="provenance"))
     return errors
 
 
@@ -2193,6 +2244,7 @@ def _scheduler_binding_summary_errors(
 ) -> list[str]:
     errors: list[str] = []
     for binding_field, summary_field, error_suffix in (
+        ("producer_schema", "scheduler_schema", "producer_schema_mismatch"),
         ("producer_run_id", "scheduler_pass_id", "producer_run_id_mismatch"),
         ("producer_artifact_ref", "scheduler_artifact_ref", "producer_artifact_ref_mismatch"),
         ("producer_checksum_or_receipt_id", "scheduler_checksum", "producer_checksum_mismatch"),
@@ -2280,8 +2332,15 @@ def _find_scheduler_evidence_files(root: Path) -> list[Path]:
         raise SafeFilesystemError(f"Failed to stat scheduler evidence root: {root}", kind="io") from error
     if not stat.S_ISDIR(root_stat.st_mode):
         raise SafeFilesystemError(f"Scheduler evidence root must be a directory: {root}")
-    candidates = sorted(root.glob("*.json"), key=lambda path: path.name)
-    return [_safe_scheduler_evidence_file(candidate) for candidate in candidates]
+    candidates: list[Path] = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if not entry.name.endswith(".json"):
+                continue
+            candidates.append(root / entry.name)
+            if len(candidates) > MAX_SCHEDULER_EVIDENCE_FILES:
+                return candidates
+    return [_safe_scheduler_evidence_file(candidate) for candidate in sorted(candidates, key=lambda path: path.name)]
 
 
 def _safe_scheduler_evidence_file(path: Path) -> Path:
@@ -2301,7 +2360,7 @@ def _safe_scheduler_evidence_file(path: Path) -> Path:
 def _scheduler_evidence_errors(payload: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
     schema = payload.get("schema") or payload.get("schema_version")
-    if schema is not None and schema != SCHEDULER_EVIDENCE_SCHEMA:
+    if schema != SCHEDULER_EVIDENCE_SCHEMA:
         errors.append("schema_mismatch")
     if not _non_empty_string(payload.get("pass_id")):
         errors.append("missing_pass_id")
@@ -2331,6 +2390,7 @@ def _scheduler_evidence_errors(payload: Mapping[str, Any]) -> list[str]:
         errors.append("dry_run_no_mutation_proof_missing")
     if _has_unsafe_scheduler_identity(payload):
         errors.append("unsafe_scheduler_identity")
+    errors.extend(_scheduler_identity_errors(payload))
     return errors
 
 
@@ -2420,6 +2480,180 @@ def _has_unsafe_scheduler_identity(payload: Mapping[str, Any]) -> bool:
     return any(isinstance(value, str) and _identity_value_looks_unsafe(value) for value in identities)
 
 
+def _scheduler_identity_errors(payload: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    candidate_count = _count_value(payload, "candidate_count")
+    identities = _scheduler_identity_records(payload)
+    if candidate_count is not None and candidate_count > 0 and not identities:
+        return ["missing_scheduler_candidate_identity"]
+
+    identity_by_candidate_id: dict[str, Mapping[str, Any]] = {}
+    for collection_name, record in identities:
+        record_errors = _scheduler_identity_record_errors(record, collection_name=collection_name)
+        errors.extend(error for error in record_errors if error not in errors)
+        candidate_id = _identity_string(record.get("candidate_id"))
+        if candidate_id:
+            identity_by_candidate_id.setdefault(candidate_id, record)
+
+    for record in _scheduler_model_run_identity_records(payload):
+        errors.extend(
+            error
+            for error in _scheduler_model_run_identity_errors(record, identity_by_candidate_id=identity_by_candidate_id)
+            if error not in errors
+        )
+    return errors
+
+
+def _scheduler_identity_records(payload: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    records: list[tuple[str, Mapping[str, Any]]] = []
+    for collection_name in ("candidates", "blocked_candidates", "skipped_candidates"):
+        records.extend(
+            (collection_name, record)
+            for record in _mapping_sequence(payload.get(collection_name))
+        )
+    records.extend(
+        ("model_run_evidence", record)
+        for record in _scheduler_model_run_identity_records(payload)
+    )
+    return records
+
+
+def _scheduler_model_run_identity_records(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    records: list[Mapping[str, Any]] = []
+    for record in _mapping_sequence(payload.get("model_run_evidence")):
+        records.append(record)
+        nested = record.get("candidate_identity")
+        if isinstance(nested, Mapping):
+            records.append(nested)
+        nested = record.get("identity")
+        if isinstance(nested, Mapping):
+            records.append(nested)
+    return records
+
+
+def _scheduler_identity_record_errors(record: Mapping[str, Any], *, collection_name: str) -> list[str]:
+    errors: list[str] = []
+    if not _identity_string(record.get("candidate_id")):
+        errors.append(f"{collection_name}_missing_candidate_id")
+    if not _identity_string(record.get("source_id")):
+        errors.append(f"{collection_name}_missing_source_id")
+    if not _identity_string(record.get("cycle_time_utc")) and not _identity_string(record.get("cycle_id")):
+        errors.append(f"{collection_name}_missing_cycle_identity")
+    if not _identity_string(record.get("model_id")):
+        errors.append(f"{collection_name}_missing_model_id")
+    if collection_name in {"candidates", "model_run_evidence"}:
+        if not _identity_string(record.get("run_id")):
+            errors.append(f"{collection_name}_missing_run_id")
+        if not _identity_string(record.get("forcing_version_id")):
+            errors.append(f"{collection_name}_missing_forcing_version_id")
+    if _scheduler_candidate_id_components_mismatch(record):
+        errors.append(f"{collection_name}_candidate_id_identity_mismatch")
+    return errors
+
+
+def _scheduler_model_run_identity_errors(
+    record: Mapping[str, Any],
+    *,
+    identity_by_candidate_id: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    errors = _scheduler_identity_record_errors(record, collection_name="model_run_evidence")
+    candidate_id = _identity_string(record.get("candidate_id"))
+    if not candidate_id:
+        return errors
+    candidate_record = identity_by_candidate_id.get(candidate_id)
+    if candidate_record is not None:
+        for field in ("source_id", "cycle_time_utc", "cycle_id", "model_id", "run_id", "forcing_version_id"):
+            record_value = _identity_string(record.get(field))
+            candidate_value = _identity_string(candidate_record.get(field))
+            if record_value and candidate_value and record_value != candidate_value:
+                errors.append(f"model_run_evidence_{field}_identity_mismatch")
+    nested_run_id = _model_run_nested_value(record, "run_id")
+    if nested_run_id and _identity_string(record.get("run_id")) != nested_run_id:
+        errors.append("model_run_evidence_run_id_mismatch")
+    nested_forcing_version_id = _model_run_nested_value(record, "forcing_version_id")
+    if nested_forcing_version_id and _identity_string(record.get("forcing_version_id")) != nested_forcing_version_id:
+        errors.append("model_run_evidence_forcing_version_id_mismatch")
+    return errors
+
+
+def _model_run_nested_value(record: Mapping[str, Any], field: str) -> str:
+    values: list[str] = []
+    if field == "forcing_version_id":
+        nested = record.get("forcing")
+        if isinstance(nested, Mapping):
+            values.append(_identity_string(nested.get("forcing_version_id") or nested.get("id")))
+        nested = record.get("forcing_version")
+        if isinstance(nested, Mapping):
+            values.append(_identity_string(nested.get("forcing_version_id") or nested.get("id")))
+    elif field == "run_id":
+        nested = record.get("hydro_run")
+        if isinstance(nested, Mapping):
+            values.append(_identity_string(nested.get("run_id") or nested.get("id")))
+        nested = record.get("run")
+        if isinstance(nested, Mapping):
+            values.append(_identity_string(nested.get("run_id") or nested.get("id")))
+    meaningful = [value for value in values if value]
+    if not meaningful:
+        return ""
+    if any(value != meaningful[0] for value in meaningful[1:]):
+        return ""
+    return meaningful[0]
+
+
+def _scheduler_candidate_id_components_mismatch(record: Mapping[str, Any]) -> bool:
+    candidate_id = _identity_string(record.get("candidate_id"))
+    if not candidate_id:
+        return False
+    parts = candidate_id.split(":")
+    if len(parts) < 4:
+        return False
+    source_id = parts[0]
+    cycle_identity = ":".join(parts[1:-2])
+    model_id = parts[-2]
+    explicit_source = _identity_string(record.get("source_id"))
+    if explicit_source and source_id != explicit_source:
+        return True
+    explicit_model = _identity_string(record.get("model_id"))
+    if explicit_model and model_id != explicit_model:
+        return True
+    explicit_cycle_time = _identity_string(record.get("cycle_time_utc"))
+    explicit_cycle_id = _identity_string(record.get("cycle_id"))
+    explicit_cycles: set[str] = set()
+    explicit_cycles.update(_cycle_identity_aliases(explicit_cycle_time))
+    explicit_cycles.update(_cycle_identity_aliases(explicit_cycle_id))
+    if explicit_cycles and cycle_identity not in explicit_cycles:
+        return True
+    return False
+
+
+def _cycle_identity_aliases(value: str) -> set[str]:
+    if not value:
+        return set()
+    aliases = {value}
+    aliases.add(_compact_cycle_id_suffix(value))
+    parsed = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        aliases.add(datetime.fromisoformat(parsed).astimezone(UTC).strftime("%Y%m%d%H"))
+    except ValueError:
+        pass
+    return aliases
+
+
+def _compact_cycle_id_suffix(cycle_id: str) -> str:
+    parts = cycle_id.rsplit("_", 1)
+    return parts[-1] if len(parts) == 2 and parts[-1].isdigit() else cycle_id
+
+
+def _mapping_sequence(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [item for item in value[:MAX_JSON_NODES] if isinstance(item, Mapping)]
+
+
+def _identity_string(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _identity_value_looks_unsafe(value: str) -> bool:
     stripped = value.strip()
     return (
@@ -2451,8 +2685,10 @@ def _scheduler_item_suffix(payload: Mapping[str, Any], path: Path) -> str:
     return digest
 
 
-def _bounded_payload(value: Any) -> Any:
+def _bounded_payload(value: Any) -> BoundedPayloadResult:
     nodes = 0
+    node_truncated = False
+    depth_truncated = False
 
     def bounded_key(key: Any) -> str:
         current = str(key)
@@ -2462,10 +2698,13 @@ def _bounded_payload(value: Any) -> Any:
 
     def walk(current: Any, depth: int) -> Any:
         nonlocal nodes
+        nonlocal node_truncated, depth_truncated
         nodes += 1
         if nodes > MAX_JSON_NODES:
+            node_truncated = True
             return "[truncated:max-nodes]"
         if depth > MAX_JSON_DEPTH:
+            depth_truncated = True
             return "[truncated:max-depth]"
         if isinstance(current, Mapping):
             return {bounded_key(key): walk(nested, depth + 1) for key, nested in current.items()}
@@ -2479,7 +2718,11 @@ def _bounded_payload(value: Any) -> Any:
             return current
         return current
 
-    return walk(value, 0)
+    return BoundedPayloadResult(
+        payload=walk(value, 0),
+        node_truncated=node_truncated,
+        depth_truncated=depth_truncated,
+    )
 
 
 def _bounded_redacted_payload(value: Any, *, config: ProductionReadinessConfig) -> Any:

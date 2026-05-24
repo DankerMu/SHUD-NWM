@@ -978,6 +978,7 @@ one scheduler evidence artifact, and exits without runtime side effects:
 
 ```bash
 export DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
+export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$PWD}"
 uv run nhms-pipeline plan-production \
   --dry-run \
   --source gfs \
@@ -985,7 +986,7 @@ uv run nhms-pipeline plan-production \
   --lookback-hours 24 \
   --cycle-lag-hours 6 \
   --max-cycles-per-source 1 \
-  --workspace-root .nhms-workspace
+  --workspace-root "$WORKSPACE_ROOT/.nhms-workspace"
 ```
 
 The JSON response includes `status`, `pass_id`, `artifact_path`, `counts`,
@@ -1066,20 +1067,26 @@ alongside scheduler evidence:
 NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
   --evidence-root artifacts/production-closure \
   --run-id local-m20-scheduler-readiness \
+  --scheduler-evidence-root "$WORKSPACE_ROOT/.nhms-workspace/scheduler/evidence" \
   --force
 ```
 
 This report writes `readiness/summary.json`,
 `readiness/readiness_items.json`, `readiness/release_blockers.json`, and
-`readiness/live_proof_receipts.json`. Deterministic scheduler evidence is useful
-for release review and can be referenced from live-proof receipt provenance, but
-fast evidence alone remains non-final. The final readiness live-proof boundary
-is unchanged: `final_production_readiness_claimed=true` requires accepted target
-environment live receipts for the required M19 surfaces, with matching schema,
-run id, target environment, producer artifact/ref/checksum, and live execution
-mode. Malformed, oversized, stale, identity-mismatched, or deterministic-only
-scheduler evidence is interpreted as blocked or release-blocked review evidence,
-not final production readiness.
+`readiness/live_proof_receipts.json`. `--scheduler-evidence-root` ingests the
+scheduler artifacts produced under the local fast workspace;
+`--scheduler-evidence-file` can be used instead when review is pinned to one
+artifact path. Omitting both scheduler evidence options intentionally produces an
+M19-only readiness report.
+Deterministic scheduler evidence is useful for release review and can be
+referenced from live-proof receipt provenance, but fast evidence alone remains
+non-final. The final readiness live-proof boundary is unchanged:
+`final_production_readiness_claimed=true` requires accepted target environment
+live receipts for the required M19 surfaces, with matching schema, run id, target
+environment, producer artifact/ref/checksum, and live execution mode. Malformed,
+oversized, stale, identity-mismatched, or deterministic-only scheduler evidence
+is interpreted as blocked or release-blocked review evidence, not final
+production readiness.
 
 Focused fast commands for #196 documentation and evidence review:
 
@@ -1090,6 +1097,7 @@ openspec validate m20-production-multibasin-continuous-automation --strict --no-
 NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
   --evidence-root artifacts/production-closure \
   --run-id local-m20-scheduler-readiness \
+  --scheduler-evidence-root "$WORKSPACE_ROOT/.nhms-workspace/scheduler/evidence" \
   --force
 ```
 
