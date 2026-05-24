@@ -161,8 +161,10 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
         "blocked",
         "failed",
         "lock_contended",
+        "permanently_failed",
         "preflight_blocked",
         "resource_limit_blocked",
+        "submission_failed",
         "submitted_partial",
         "partial",
         "partially_failed",
@@ -3058,7 +3060,35 @@ def _scheduler_model_run_status_values(record: Mapping[str, Any]) -> set[str]:
     for key in ("status", "outcome", "result", "state", "candidate_outcome"):
         value = record.get(key)
         values.update(_nested_scheduler_status_values(value, is_status_value=True))
+    for key in ("stage_statuses", "stage_evidence", "task_results"):
+        values.update(_nested_scheduler_status_values(record.get(key)))
+    task_results_summary = record.get("task_results_summary")
+    if isinstance(task_results_summary, Mapping):
+        values.update(_scheduler_status_count_values(task_results_summary.get("status_counts")))
     return values
+
+
+def _scheduler_status_count_values(value: Any) -> set[str]:
+    if not isinstance(value, Mapping):
+        return set()
+    return {
+        str(status).strip().lower()
+        for status, count in value.items()
+        if str(status).strip() and _positive_scheduler_status_count(count)
+    }
+
+
+def _positive_scheduler_status_count(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, int | float):
+        return value > 0
+    if isinstance(value, str):
+        try:
+            return float(value.strip()) > 0
+        except ValueError:
+            return False
+    return False
 
 
 def _nested_scheduler_status_values(value: Any, *, is_status_value: bool = False) -> set[str]:
@@ -3077,7 +3107,10 @@ def _nested_scheduler_status_values(value: Any, *, is_status_value: bool = False
                 continue
             seen_containers.add(current_id)
             for key, nested in current.items():
-                stack.append((nested, str(key) in SCHEDULER_MODEL_RUN_STATUS_KEYS))
+                if str(key) == "status_counts":
+                    values.update(_scheduler_status_count_values(nested))
+                else:
+                    stack.append((nested, str(key) in SCHEDULER_MODEL_RUN_STATUS_KEYS))
         elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
             current_id = id(current)
             if current_id in seen_containers:

@@ -1945,6 +1945,73 @@ def test_scheduler_hidden_sequence_failed_or_partial_aliases_block_live_binding(
 
 
 @pytest.mark.parametrize(
+    ("container", "embedded_status"),
+    [
+        ("stage_statuses", [{"stage": "forcing", "status": "submission_failed"}]),
+        ("stage_evidence", [{"stage": "forcing", "state": "permanently_failed"}]),
+        ("task_results", [{"task_id": "forcing-0", "status": "cancelled"}]),
+        ("task_results_summary.status_counts", {"failed": 1, "succeeded": 0}),
+        ("stage_statuses.task_results_summary.status_counts", {"unavailable": 1, "succeeded": 0}),
+    ],
+)
+def test_scheduler_live_submitted_embedded_stage_task_failure_status_blocks_live_receipt(
+    tmp_path: Path,
+    container: str,
+    embedded_status: object,
+) -> None:
+    payload = _submitted_scheduler_payload()
+    row = payload["model_run_evidence"][0]
+    if container == "task_results_summary.status_counts":
+        row["task_results_summary"] = {"status_counts": embedded_status}
+    elif container == "stage_statuses.task_results_summary.status_counts":
+        row["stage_statuses"] = [{"stage": "forcing", "task_results_summary": {"status_counts": embedded_status}}]
+    else:
+        row[container] = embedded_status
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert scheduler_item["status"] == "blocked"
+    assert "live_status_model_run_blocked_outcome" in errors
+    assert "submitted_status_model_run_status_mismatch" in errors
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_live_submitted_embedded_successful_stage_task_statuses_keep_live_receipt_compatible(
+    tmp_path: Path,
+) -> None:
+    payload = _submitted_scheduler_payload()
+    payload["model_run_evidence"][0] |= {
+        "stage_statuses": [{"stage": "forcing", "status": "succeeded"}],
+        "stage_evidence": [{"stage": "forecast", "result": "successful"}],
+        "task_results": [
+            {"task_id": "forcing-0", "status": "succeeded"},
+            {"task_id": "forecast-0", "state": "successful"},
+        ],
+        "task_results_summary": {
+            "status_counts": {
+                "succeeded": 2,
+                "failed": 0,
+                "submission_failed": 0,
+                "cancelled": 0,
+                "unavailable": 0,
+            }
+        },
+    }
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "passed"
+    assert scheduler_item["details"]["acceptance_errors"] == []
+    assert live_item["status"] == "passed"
+    assert live_item["execution_mode"] == "live_proof"
+    assert live_item["live_proof_accepted"] is True
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
     ("count_field", "expected_error"),
     [
         ("failed_count", "live_status_failed_count_nonzero"),
@@ -2018,6 +2085,27 @@ def test_scheduler_failed_count_accepts_failed_status_aliases(tmp_path: Path, ro
     assert "failed_count_status_cardinality_mismatch" not in errors
     assert errors == []
     assert scheduler_item["details"]["failed_count"] == 1
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize("pass_status", ["submission_failed", "permanently_failed"])
+def test_scheduler_pass_level_failed_aliases_are_stable_blocked_evidence(
+    tmp_path: Path,
+    pass_status: str,
+) -> None:
+    payload = _failed_scheduler_payload(status=pass_status)
+    payload["status"] = pass_status
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert scheduler_item["status"] == "blocked"
+    assert "status_not_allowed" not in errors
+    assert errors == []
+    assert scheduler_item["details"]["failed_count"] == 1
+    assert scheduler_item["required_for_final"] is False
     assert live_item["status"] == "release_blocked"
     assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
     assert summary["final_production_readiness_claimed"] is False
