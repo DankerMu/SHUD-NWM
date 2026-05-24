@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+from services.orchestrator.chain import PipelineResult, StageRunResult
 from services.orchestrator.scheduler import ProductionScheduler
 from services.production_closure import slurm_validation
 from services.production_closure.readiness_validation import (
@@ -31,6 +33,7 @@ from tests.test_production_scheduler import (
 from tests.test_production_scheduler import (
     _model as _scheduler_model,
 )
+from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 LIVE_SCHEMA = "nhms.production_readiness.live_proof.v1"
 SCHEDULER_SCHEMA = "nhms.production_scheduler.pass_evidence.v1"
@@ -1574,6 +1577,75 @@ def _scheduler_failed_alias_sibling_artifact(tmp_path: Path, *, outcome_status: 
     return Path(result.artifact_path)
 
 
+class NoSubmissionFailedOrchestrator(FakeProductionOrchestrator):
+    def orchestrate_cycle(
+        self,
+        source: str,
+        cycle_time: datetime,
+        basins: list[dict[str, object]],
+    ) -> PipelineResult:
+        self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        candidate_outcomes = tuple(
+            {
+                "candidate_id": basin["candidate_id"],
+                "run_id": basin["run_id"],
+                "model_id": basin["model_id"],
+                "status": "failed",
+                "stage": "forcing",
+                "reason": "submission_failed",
+                "accounting": {},
+            }
+            for basin in basins
+        )
+        return PipelineResult(
+            run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+            cycle_id=cycle_id_for(source, cycle_time),
+            status="failed",
+            stages=(
+                StageRunResult(
+                    stage="forcing",
+                    job_type="produce_forcing_array",
+                    pipeline_job_id="job_forcing",
+                    slurm_job_id="",
+                    status="submission_failed",
+                    error_code="SBATCH_SUBMISSION_FAILED",
+                    error_message="sbatch submission failed before a Slurm job id was assigned",
+                ),
+            ),
+            candidate_outcomes=candidate_outcomes,
+        )
+
+
+def _scheduler_no_submission_failed_artifact(tmp_path: Path) -> Path:
+    orchestrator = NoSubmissionFailedOrchestrator()
+    scheduler = ProductionScheduler(
+        _scheduler_config(
+            tmp_path / "scheduler-workspace-no-submission-failed",
+            now=_scheduler_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+        ),
+        registry=FakeRegistry([_scheduler_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert len(orchestrator.calls) == 1
+    assert result.status == "preflight_blocked"
+    assert result.evidence["status"] == "preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["counts"]["failed_count"] == 1
+    assert result.evidence["counts"]["partial_count"] == 1
+    model_run = result.evidence["model_run_evidence"][0]
+    assert model_run["status"] == "failed"
+    assert model_run["submitted"] is False
+    assert model_run["execution_attempted"] is True
+    assert model_run["stage_statuses"][0]["status"] == "submission_failed"
+    assert result.artifact_path is not None
+    return Path(result.artifact_path)
+
+
 @pytest.mark.parametrize(
     ("mutator", "expected_error"),
     [
@@ -2174,6 +2246,49 @@ def test_scheduler_submitted_partial_count_accepts_produced_failed_alias_sibling
     assert "partial_count_status_cardinality_mismatch" not in errors
     assert errors == []
     assert scheduler_item["details"]["submitted_count"] == 2
+    assert scheduler_item["details"]["failed_count"] == 1
+    assert scheduler_item["details"]["partial_count"] == 1
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_no_submission_failed_artifact_counts_as_stable_blocked_evidence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "artifacts"
+    scheduler_path = _scheduler_no_submission_failed_artifact(tmp_path)
+    payload = json.loads(scheduler_path.read_text(encoding="utf-8"))
+    receipt = _scheduler_proof_bound_to_evidence(
+        scheduler_path,
+        producer_artifact_ref=f"scheduler:{scheduler_path.name}",
+        producer_run_id=str(payload["pass_id"]),
+    )
+
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["counts"]["failed_count"] == 1
+    assert payload["counts"]["partial_count"] == 1
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert scheduler_item["status"] == "blocked"
+    assert scheduler_item["required_for_final"] is False
+    assert "failed_count_exceeds_model_run_evidence" not in errors
+    assert "failed_count_status_cardinality_mismatch" not in errors
+    assert "partial_count_exceeds_model_run_evidence" not in errors
+    assert "partial_count_status_cardinality_mismatch" not in errors
+    assert errors == []
+    assert scheduler_item["details"]["submitted_count"] == 0
     assert scheduler_item["details"]["failed_count"] == 1
     assert scheduler_item["details"]["partial_count"] == 1
     assert live_item["status"] == "release_blocked"

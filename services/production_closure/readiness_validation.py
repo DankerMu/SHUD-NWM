@@ -2844,6 +2844,10 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
     model_run_rows = _mapping_sequence(payload.get("model_run_evidence"))
     model_run_outcomes = [_scheduler_model_run_outcome(record) for record in model_run_rows]
     has_submitted_or_attempted_work = _scheduler_has_submitted_or_attempted_model_run(model_run_rows)
+    has_attempted_or_terminal_work = _scheduler_has_attempted_or_terminal_model_run(
+        model_run_rows,
+        model_run_outcomes,
+    )
 
     candidate_count = _count_value(payload, "candidate_count")
     if candidate_count is not None:
@@ -2875,6 +2879,7 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
         "partial_count": _scheduler_partial_count_model_run_rows(
             model_run_outcomes,
             pass_status=status,
+            submitted_count=submitted_count,
             has_submitted_or_attempted_work=has_submitted_or_attempted_work,
         ),
     }
@@ -2891,6 +2896,7 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
             model_run_capacity=model_run_capacity,
             model_run_row_count=len(model_run_rows),
             has_submitted_or_attempted_work=has_submitted_or_attempted_work,
+            has_attempted_or_terminal_work=has_attempted_or_terminal_work,
         )
         if value > count_capacity or value > len(model_run_rows):
             errors.append(f"{error_prefix}_exceeds_model_run_evidence")
@@ -2918,6 +2924,16 @@ def _scheduler_has_submitted_or_attempted_model_run(model_run_rows: Sequence[Map
     )
 
 
+def _scheduler_has_attempted_or_terminal_model_run(
+    model_run_rows: Sequence[Mapping[str, Any]],
+    model_run_outcomes: Sequence[_SchedulerModelRunOutcome],
+) -> bool:
+    return any(
+        record.get("execution_attempted") is True or outcome.failed or outcome.blocked
+        for record, outcome in zip(model_run_rows, model_run_outcomes, strict=True)
+    )
+
+
 def _scheduler_count_model_run_capacity(
     count_field: str,
     *,
@@ -2925,19 +2941,31 @@ def _scheduler_count_model_run_capacity(
     model_run_capacity: int,
     model_run_row_count: int,
     has_submitted_or_attempted_work: bool,
+    has_attempted_or_terminal_work: bool,
 ) -> int:
+    if (
+        count_field in {"failed_count", "partial_count"}
+        and _scheduler_pass_uses_model_run_count_capacity(pass_status)
+        and has_attempted_or_terminal_work
+    ):
+        return model_run_row_count
     if count_field == "partial_count" and pass_status == "submitted_partial" and has_submitted_or_attempted_work:
         return model_run_row_count
     return model_run_capacity
+
+
+def _scheduler_pass_uses_model_run_count_capacity(pass_status: str) -> bool:
+    return pass_status in SCHEDULER_REVIEW_BLOCKED_STATUSES or pass_status.endswith(("_blocked", "_failed"))
 
 
 def _scheduler_partial_count_model_run_rows(
     model_run_outcomes: Sequence[_SchedulerModelRunOutcome],
     *,
     pass_status: str,
+    submitted_count: int | None,
     has_submitted_or_attempted_work: bool,
 ) -> int:
-    if pass_status == "submitted_partial":
+    if _scheduler_pass_uses_producer_partial_count(pass_status, submitted_count=submitted_count):
         if not has_submitted_or_attempted_work:
             return 0
         return sum(1 for outcome in model_run_outcomes if outcome.producer_partial)
@@ -2946,6 +2974,14 @@ def _scheduler_partial_count_model_run_rows(
         for outcome in model_run_outcomes
         if outcome.partial
     )
+
+
+def _scheduler_pass_uses_producer_partial_count(pass_status: str, *, submitted_count: int | None) -> bool:
+    if pass_status == "submitted_partial":
+        return True
+    if submitted_count != 0:
+        return False
+    return pass_status in SCHEDULER_REVIEW_BLOCKED_STATUSES or pass_status.endswith(("_blocked", "_failed"))
 
 
 def _scheduler_live_status_count_errors(
