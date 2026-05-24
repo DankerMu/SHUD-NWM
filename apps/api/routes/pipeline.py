@@ -236,20 +236,21 @@ def job_logs(
             details={"job_id": job_id},
         )
 
+    safe_log_uri = _safe_redacted_text(job.log_uri)
     log_path = _local_log_path(job.log_uri)
     if log_path is None or not log_path.is_file():
         raise ApiError(
             status_code=404,
             code="JOB_LOG_NOT_FOUND",
             message="Job log file was not found.",
-            details={"job_id": job_id, "log_uri": job.log_uri},
+            details={"job_id": job_id, "log_uri": safe_log_uri},
         )
 
     return _ok(
         request,
         {
             "job_id": job.job_id,
-            "log_uri": job.log_uri,
+            "log_uri": safe_log_uri,
             "content": _read_log_tail(log_path),
         },
     )
@@ -1130,7 +1131,7 @@ def _basin_result(job: PipelineJob) -> dict[str, Any]:
         "basin_id": None,
         "status": job.status,
         "error_code": job.error_code,
-        "error_message": job.error_message,
+        "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
     }
 
 
@@ -1153,8 +1154,8 @@ def _job_payload(job: PipelineJob, run_metadata: dict[str, str | None] | None = 
         "exit_code": job.exit_code,
         "retry_count": job.retry_count,
         "error_code": job.error_code,
-        "error_message": job.error_message,
-        "log_uri": job.log_uri,
+        "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
+        "log_uri": _safe_redacted_text(job.log_uri) if job.log_uri is not None else None,
         "duration_seconds": _duration_seconds(job.started_at, job.finished_at),
     }
 
@@ -1206,7 +1207,7 @@ def _raise_log_path_forbidden(log_uri: str, log_root: Path) -> None:
         status_code=403,
         code="FORBIDDEN",
         message="Job log path is outside the configured log root.",
-        details={"log_uri": log_uri, "log_root": str(log_root)},
+        details={"log_uri": _safe_redacted_text(log_uri), "log_root": str(log_root)},
     )
 
 

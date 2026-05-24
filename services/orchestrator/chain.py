@@ -697,23 +697,31 @@ class ForecastOrchestrator:
         parsed_cycle_time = parse_cycle_time(cycle_time)
         cycle_id = cycle_id_for(source, parsed_cycle_time)
         _validate_safe_id("cycle_id", cycle_id)
-        if self.repository.has_active_orchestration(source_id=source, cycle_time=parsed_cycle_time):
-            raise OrchestratorError(
-                "PIPELINE_ALREADY_ACTIVE",
-                f"An active orchestration already exists for {source} {format_cycle_time(parsed_cycle_time)}.",
-                {"source_id": source, "cycle_time": _format_time(parsed_cycle_time), "cycle_id": cycle_id},
-            )
-        if cycle_id in self._active_cycles:
-            raise OrchestratorError(
-                "PIPELINE_ALREADY_ACTIVE",
-                f"An active orchestration already exists for {source} {format_cycle_time(parsed_cycle_time)}.",
-                {"source_id": source, "cycle_time": _format_time(parsed_cycle_time), "cycle_id": cycle_id},
-            )
 
         normalized_basins = self._normalize_cycle_basins(basins, source, parsed_cycle_time)
         if not normalized_basins:
             raise OrchestratorError("EMPTY_BASIN_LIST", "orchestrate_cycle requires at least one basin.")
         self._validate_cycle_basin_identities(normalized_basins, source, parsed_cycle_time, cycle_id)
+        context_run_id = _cycle_orchestration_run_id(source, parsed_cycle_time, normalized_basins)
+        if _active_orchestration_conflicts(
+            self.repository,
+            source_id=source,
+            cycle_time=parsed_cycle_time,
+            cycle_id=cycle_id,
+            run_id=context_run_id,
+            basins=normalized_basins,
+        ):
+            raise OrchestratorError(
+                "PIPELINE_ALREADY_ACTIVE",
+                f"An active orchestration already exists for {source} {format_cycle_time(parsed_cycle_time)}.",
+                {"source_id": source, "cycle_time": _format_time(parsed_cycle_time), "cycle_id": cycle_id},
+            )
+        if _in_memory_active_cycle_conflicts(cycle_id, self._active_cycles, normalized_basins):
+            raise OrchestratorError(
+                "PIPELINE_ALREADY_ACTIVE",
+                f"An active orchestration already exists for {source} {format_cycle_time(parsed_cycle_time)}.",
+                {"source_id": source, "cycle_time": _format_time(parsed_cycle_time), "cycle_id": cycle_id},
+            )
 
         self._active_cycles.add(cycle_id)
         try:
@@ -722,7 +730,7 @@ class ForecastOrchestrator:
                 source_id=source,
                 cycle_time=parsed_cycle_time,
                 cycle_id=cycle_id,
-                run_id=f"cycle_{source.lower()}_{format_cycle_time(parsed_cycle_time)}",
+                run_id=context_run_id,
                 all_basins=normalized_basins,
                 active_basins=list(normalized_basins),
                 restart_stage=_restart_stage_from_basins(normalized_basins),
@@ -895,11 +903,11 @@ class ForecastOrchestrator:
     def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult:
         stage_results: list[StageRunResult] = []
         start_stage_index = _restart_stage_index(context.restart_stage, self.stages)
-        existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
+        existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
         for stage_index, stage in enumerate(self.stages):
             if stage_index < start_stage_index:
                 continue
-            existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
+            existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
             had_partial_before_stage = context.had_partial
             last_partial_before_stage = context.last_partial_status
             retry_attempts = 0
@@ -922,7 +930,7 @@ class ForecastOrchestrator:
                         pipeline_job_id=pipeline_job_id,
                     )
                     retry_pipeline_job_id = None
-                    existing_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
+                    existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
 
                 if stage_results and len(stage_results) > stage_index:
                     stage_results[stage_index] = result
@@ -937,6 +945,8 @@ class ForecastOrchestrator:
                     if retry_pipeline_job_id is not None:
                         existing_jobs = [job for job in existing_jobs if not self._job_matches_stage(job, stage)]
                         continue
+                    if stage.is_array and aggregation is not None:
+                        _record_array_task_outcomes(context, stage=stage.stage, aggregation=aggregation)
                     return PipelineResult(
                         context.run_id,
                         context.cycle_id,
@@ -1280,7 +1290,7 @@ class ForecastOrchestrator:
                 "cycle_id": context.cycle_id,
                 "job_type": stage.job_type,
                 "slurm_job_id": slurm_job_id,
-                "model_id": None,
+                "model_id": _cycle_pipeline_job_model_id(context),
                 "status": submitted_status,
                 "stage": stage.stage,
                 "submitted_at": _parse_gateway_time(submitted.get("submitted_at")) or _utcnow(),
@@ -1914,7 +1924,7 @@ class ForecastOrchestrator:
                 "cycle_id": context.cycle_id,
                 "job_type": stage.job_type,
                 "slurm_job_id": None,
-                "model_id": None if not stage.is_array else _cycle_payload_model_id(context),
+                "model_id": _cycle_pipeline_job_model_id(context),
                 "status": "submission_failed",
                 "stage": stage.stage,
                 "submitted_at": now,
@@ -2502,6 +2512,20 @@ class ForecastOrchestrator:
         if callable(query):
             return [dict(job) for job in query(cycle_id)]
         return []
+
+    def _query_pipeline_jobs_for_cycle_context(self, context: CycleOrchestrationContext) -> list[dict[str, Any]]:
+        if _candidate_scoped_cycle_execution(context.all_basins):
+            query = getattr(self.repository, "query_pipeline_jobs_by_run", None)
+            if callable(query):
+                return [dict(job) for job in query(context.run_id)]
+            candidate_model_id = _cycle_pipeline_job_model_id(context)
+            return [
+                job
+                for job in self._query_pipeline_jobs_by_cycle(context.cycle_id)
+                if str(job.get("run_id") or "") == context.run_id
+                or (candidate_model_id is not None and str(job.get("model_id") or "") == candidate_model_id)
+            ]
+        return self._query_pipeline_jobs_by_cycle(context.cycle_id)
 
     @staticmethod
     def _find_existing_stage_job(jobs: Sequence[Mapping[str, Any]], stage: StageDefinition) -> dict[str, Any] | None:
@@ -3842,6 +3866,11 @@ class PsycopgOrchestratorRepository:
         failed_task = _candidate_failed_task_from_events(events, model_id=model_id)
         relevant_jobs = candidate_jobs or ([failed_task["job"]] if failed_task and failed_task.get("job") else [])
         latest_job = (relevant_jobs or jobs)[-1] if (relevant_jobs or jobs) else {}
+        latest_shared_cycle_aggregate = bool(
+            not candidate_jobs
+            and latest_job.get("run_id") == cycle_run_id
+            and latest_job.get("model_id") in (None, "")
+        )
         latest_status = str(latest_job.get("status") or "")
         latest_failed_job = (
             latest_job
@@ -3849,19 +3878,25 @@ class PsycopgOrchestratorRepository:
             else {}
         )
         latest_shared_cycle_success = bool(
-            not candidate_jobs
-            and latest_job.get("run_id") == cycle_run_id
-            and latest_job.get("model_id") in (None, "")
+            latest_shared_cycle_aggregate
             and latest_status in TERMINAL_PIPELINE_SUCCESS_STATUSES
         )
+        latest_shared_cycle_failure = bool(
+            latest_shared_cycle_aggregate
+            and latest_status in {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+            and failed_task is None
+        )
+        exposed_latest_job = {} if latest_shared_cycle_success or latest_shared_cycle_failure else latest_job
         pipeline_status = latest_job.get("status")
         if failed_task is not None and (
             not latest_job or latest_status in {"", "partially_failed"} or latest_shared_cycle_success
         ):
             latest_failed_job = failed_task["job"] if failed_task.get("job") else latest_failed_job
             pipeline_status = latest_failed_job.get("status")
-        elif latest_shared_cycle_success:
+            exposed_latest_job = latest_failed_job
+        elif latest_shared_cycle_success or latest_shared_cycle_failure:
             pipeline_status = None
+            latest_failed_job = {}
         successful_siblings = _successful_sibling_task_count(events, model_id=model_id)
         return {
             "candidate_id": candidate_id,
@@ -3881,24 +3916,27 @@ class PsycopgOrchestratorRepository:
             "pipeline_jobs": jobs,
             "pipeline_events": events,
             "pipeline_status": pipeline_status,
-            "stage": (failed_task or {}).get("stage") or latest_failed_job.get("stage") or latest_job.get("stage"),
+            "stage": (
+                (failed_task or {}).get("stage")
+                or latest_failed_job.get("stage")
+                or exposed_latest_job.get("stage")
+            ),
             "failed_stage": (failed_task or {}).get("stage") or latest_failed_job.get("stage"),
             "array_task_id": (failed_task or {}).get("array_task_id"),
             "original_task_id": (failed_task or {}).get("original_task_id"),
+            "hydro_truth_timestamp": hydro_run.get("updated_at") if hydro_run else None,
+            "pipeline_truth_timestamp": _first_pipeline_truth_timestamp(latest_failed_job or exposed_latest_job or {}),
             "error_code": (failed_task or {}).get("error_code")
             or latest_failed_job.get("error_code")
-            or latest_job.get("error_code"),
+            or exposed_latest_job.get("error_code"),
             "error_message": (failed_task or {}).get("error_message")
             or latest_failed_job.get("error_message")
-            or latest_job.get("error_message"),
+            or exposed_latest_job.get("error_message"),
             "retry_count": max((int(job.get("retry_count") or 0) for job in relevant_jobs), default=0),
             "successful_sibling_outputs_reused": successful_siblings > 0,
             "successful_sibling_task_count": successful_siblings,
-            "shared_cycle_aggregate": bool(
-                not candidate_jobs
-                and latest_job.get("run_id") == cycle_run_id
-                and latest_job.get("model_id") in (None, "")
-            ),
+            "shared_cycle_aggregate": latest_shared_cycle_aggregate,
+            "shared_cycle_ambiguous_failure": latest_shared_cycle_failure,
         }
 
     def active_slurm_jobs(
@@ -4588,6 +4626,14 @@ def _job_belongs_to_candidate(job: Mapping[str, Any], *, run_id: str, model_id: 
     return str(job.get("model_id") or "") == model_id
 
 
+def _first_pipeline_truth_timestamp(job: Mapping[str, Any]) -> Any:
+    for key in ("updated_at", "finished_at", "submitted_at", "started_at", "created_at"):
+        value = job.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _datetime_sort_key(value: Any) -> datetime:
     parsed = _parse_gateway_time(value)
     if parsed is None:
@@ -4607,44 +4653,98 @@ def _task_model_id(task: Mapping[str, Any]) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
+def _task_candidate_id(task: Mapping[str, Any]) -> str | None:
+    value = task.get("candidate_id")
+    return str(value) if value not in (None, "") else None
+
+
+def _task_identity_key(task: Mapping[str, Any], *, model_id: str) -> tuple[str, str, str] | None:
+    candidate_id = _task_candidate_id(task)
+    task_model_id = _task_model_id(task)
+    if candidate_id is None and task_model_id != model_id:
+        return None
+    task_id = task.get("original_task_id", task.get("array_task_id", task.get("task_id")))
+    if task_id in (None, ""):
+        return None
+    return (candidate_id or task_model_id or model_id, str(task_id), str(task.get("stage") or ""))
+
+
+def _event_task_truth_sort_key(
+    event: Mapping[str, Any],
+    task: Mapping[str, Any],
+    *,
+    order: int,
+    task_order: int,
+) -> tuple[datetime, int, int, int]:
+    timestamp = _parse_gateway_time(
+        task.get("updated_at")
+        or task.get("finished_at")
+        or task.get("created_at")
+        or event.get("created_at")
+        or event.get("updated_at")
+    ) or datetime.min.replace(tzinfo=UTC)
+    return (
+        timestamp,
+        _numeric_sort_key(event.get("event_id")),
+        order,
+        task_order,
+    )
+
+
 def _candidate_failed_task_from_events(
     events: Sequence[Mapping[str, Any]],
     *,
     model_id: str,
 ) -> dict[str, Any] | None:
-    for event in reversed(events):
+    latest_by_identity: dict[
+        tuple[str, str, str],
+        tuple[tuple[datetime, int, int, int], Mapping[str, Any], Mapping[str, Any]],
+    ] = {}
+    for order, event in enumerate(events):
         details = event.get("details")
         if not isinstance(details, Mapping):
             continue
         task_results = details.get("task_results")
         if not isinstance(task_results, Sequence) or isinstance(task_results, str | bytes | bytearray):
             continue
-        for task in task_results:
+        for task_order, task in enumerate(task_results):
             if not isinstance(task, Mapping):
                 continue
-            task_model_id = _task_model_id(task)
-            if task_model_id != model_id:
+            key = _task_identity_key(task, model_id=model_id)
+            if key is None:
                 continue
-            status = str(task.get("status") or task.get("state") or "")
-            if status in {"", "succeeded"}:
-                continue
-            return {
-                "job": {
-                    "job_id": event.get("entity_id"),
-                    "status": event.get("status_to") or status,
-                    "stage": details.get("stage"),
-                    "job_type": details.get("job_type"),
-                    "error_code": task.get("error_code") or details.get("error_code") or "NODE_FAILURE",
-                    "error_message": task.get("error_message") or details.get("error_message"),
-                    "retry_count": details.get("retry_count"),
-                },
-                "stage": details.get("stage"),
-                "array_task_id": task.get("array_task_id", task.get("task_id")),
-                "original_task_id": task.get("original_task_id", task.get("array_task_id", task.get("task_id"))),
-                "error_code": task.get("error_code") or details.get("error_code") or "NODE_FAILURE",
-                "error_message": task.get("error_message") or details.get("error_message"),
-            }
-    return None
+            truth_key = _event_task_truth_sort_key(event, task, order=order, task_order=task_order)
+            previous = latest_by_identity.get(key)
+            if previous is None or truth_key > previous[0]:
+                latest_by_identity[key] = (truth_key, event, task)
+    latest_failures: list[tuple[tuple[datetime, int, int, int], Mapping[str, Any], Mapping[str, Any]]] = []
+    for truth_key, event, task in latest_by_identity.values():
+        status = str(task.get("status") or task.get("state") or "")
+        if status in {"", "succeeded"}:
+            continue
+        latest_failures.append((truth_key, event, task))
+    if not latest_failures:
+        return None
+    _truth_key, event, task = max(latest_failures, key=lambda item: item[0])
+    details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
+    stage = task.get("stage") or details.get("stage")
+    return {
+        "job": {
+            "job_id": event.get("entity_id"),
+            "status": event.get("status_to") or task.get("status") or task.get("state"),
+            "stage": stage,
+            "job_type": details.get("job_type"),
+            "error_code": task.get("error_code") or details.get("error_code") or "NODE_FAILURE",
+            "error_message": task.get("error_message") or details.get("error_message"),
+            "retry_count": task.get("retry_count") or details.get("retry_count"),
+            "created_at": event.get("created_at"),
+        },
+        "stage": stage,
+        "array_task_id": task.get("array_task_id", task.get("task_id")),
+        "original_task_id": task.get("original_task_id", task.get("array_task_id", task.get("task_id"))),
+        "error_code": task.get("error_code") or details.get("error_code") or "NODE_FAILURE",
+        "error_message": task.get("error_message") or details.get("error_message"),
+    }
 
 
 def _successful_sibling_task_count(events: Sequence[Mapping[str, Any]], *, model_id: str) -> int:
@@ -4672,6 +4772,62 @@ def _cycle_payload_model_id(context: CycleOrchestrationContext) -> str:
     if context.active_basins:
         return str(context.active_basins[0].get("model_id") or "cycle")
     return "cycle"
+
+
+def _cycle_pipeline_job_model_id(context: CycleOrchestrationContext) -> str | None:
+    if len(context.all_basins) != 1:
+        return None
+    return str(context.all_basins[0].get("model_id") or "") or None
+
+
+def _cycle_orchestration_run_id(
+    source_id: str,
+    cycle_time: datetime,
+    basins: Sequence[Mapping[str, Any]],
+) -> str:
+    run_ids = {
+        str(basin.get("orchestration_run_id"))
+        for basin in basins
+        if basin.get("orchestration_run_id") not in (None, "")
+    }
+    if len(run_ids) == 1:
+        return run_ids.pop()
+    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+
+
+def _active_orchestration_conflicts(
+    repository: OrchestratorRepository,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+    run_id: str,
+    basins: Sequence[Mapping[str, Any]],
+) -> bool:
+    if _candidate_scoped_cycle_execution(basins):
+        for job in repository.query_pipeline_jobs_by_run(run_id):
+            if _is_active_pipeline_job(job):
+                return True
+        return False
+    if repository.has_active_orchestration(source_id=source_id, cycle_time=cycle_time):
+        return True
+    return any(_is_active_pipeline_job(job) for job in repository.query_pipeline_jobs_by_cycle(cycle_id))
+
+
+def _in_memory_active_cycle_conflicts(
+    cycle_id: str,
+    active_cycles: set[str],
+    basins: Sequence[Mapping[str, Any]],
+) -> bool:
+    return cycle_id in active_cycles and not _candidate_scoped_cycle_execution(basins)
+
+
+def _candidate_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bool:
+    return len(basins) == 1 and _restart_stage_from_basins(basins) is not None
+
+
+def _is_active_pipeline_job(job: Mapping[str, Any]) -> bool:
+    return str(job.get("status") or "") not in TERMINAL_JOB_STATUSES
 
 
 def _restart_stage_from_basins(basins: Sequence[Mapping[str, Any]]) -> str | None:
@@ -4749,28 +4905,32 @@ def _record_array_task_outcomes(
         if task.status == "succeeded":
             previous = context.task_outcomes.get(original_task_id)
             if previous is None or previous.get("status") == "active":
-                context.task_outcomes[original_task_id] = {
-                    "status": "active",
-                    "stage": stage,
-                    "task_id": task.task_id,
-                    "original_task_id": original_task_id,
-                    "slurm_job_id": task.slurm_job_id,
-                    "exit_code": task.exit_code,
-                    "log_uri": task.log_uri,
-                    "accounting": dict(task.accounting),
-                }
+                context.task_outcomes[original_task_id] = _safe_candidate_outcome_payload(
+                    {
+                        "status": "active",
+                        "stage": stage,
+                        "task_id": task.task_id,
+                        "original_task_id": original_task_id,
+                        "slurm_job_id": task.slurm_job_id,
+                        "exit_code": task.exit_code,
+                        "log_uri": task.log_uri,
+                        "accounting": dict(task.accounting),
+                    }
+                )
             continue
-        context.task_outcomes[original_task_id] = {
-            "status": task.status if task.status in {"failed", "cancelled"} else "unavailable",
-            "stage": stage,
-            "task_id": task.task_id,
-            "original_task_id": original_task_id,
-            "slurm_job_id": task.slurm_job_id,
-            "exit_code": task.exit_code,
-            "log_uri": task.log_uri,
-            "accounting": dict(task.accounting),
-            "reason": f"{stage}_task_{task.status}",
-        }
+        context.task_outcomes[original_task_id] = _safe_candidate_outcome_payload(
+            {
+                "status": task.status if task.status in {"failed", "cancelled"} else "unavailable",
+                "stage": stage,
+                "task_id": task.task_id,
+                "original_task_id": original_task_id,
+                "slurm_job_id": task.slurm_job_id,
+                "exit_code": task.exit_code,
+                "log_uri": task.log_uri,
+                "accounting": dict(task.accounting),
+                "reason": f"{stage}_task_{task.status}",
+            }
+        )
 
 
 def _candidate_outcomes(context: CycleOrchestrationContext, *, final_status: str) -> tuple[dict[str, Any], ...]:
@@ -4787,25 +4947,34 @@ def _candidate_outcomes(context: CycleOrchestrationContext, *, final_status: str
         if reason is None and not is_active:
             reason = str(task_outcome.get("stage") or "array_stage") + "_task_excluded"
         outcomes.append(
-            {
-                "candidate_id": basin.get("candidate_id"),
-                "run_id": basin.get("run_id"),
-                "model_id": basin.get("model_id"),
-                "basin_id": basin.get("basin_id"),
-                "basin_version_id": basin.get("basin_version_id"),
-                "river_network_version_id": basin.get("river_network_version_id"),
-                "task_id": int(basin.get("task_id", index)),
-                "original_task_id": original_task_id,
-                "status": status,
-                "reason": reason,
-                "failed_stage": task_outcome.get("stage") if status in {"failed", "cancelled", "unavailable"} else None,
-                "slurm_job_id": task_outcome.get("slurm_job_id"),
-                "exit_code": task_outcome.get("exit_code"),
-                "log_uri": task_outcome.get("log_uri"),
-                "accounting": task_outcome.get("accounting") or {},
-            }
+            _safe_candidate_outcome_payload(
+                {
+                    "candidate_id": basin.get("candidate_id"),
+                    "run_id": basin.get("run_id"),
+                    "model_id": basin.get("model_id"),
+                    "basin_id": basin.get("basin_id"),
+                    "basin_version_id": basin.get("basin_version_id"),
+                    "river_network_version_id": basin.get("river_network_version_id"),
+                    "task_id": int(basin.get("task_id", index)),
+                    "original_task_id": original_task_id,
+                    "status": status,
+                    "reason": reason,
+                    "failed_stage": (
+                        task_outcome.get("stage") if status in {"failed", "cancelled", "unavailable"} else None
+                    ),
+                    "slurm_job_id": task_outcome.get("slurm_job_id"),
+                    "exit_code": task_outcome.get("exit_code"),
+                    "log_uri": task_outcome.get("log_uri"),
+                    "accounting": task_outcome.get("accounting") or {},
+                }
+            )
         )
     return tuple(outcomes)
+
+
+def _safe_candidate_outcome_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    redacted = redact_payload(_json_safe_pipeline_event_value(payload))
+    return dict(redacted) if isinstance(redacted, Mapping) else {}
 
 
 def build_reindexed_manifest(

@@ -406,6 +406,80 @@ def test_cancel_event_records_slurm_context() -> None:
         assert event.details["previous_status"] == "submitted"
 
 
+def test_cancel_success_projection_redacts_persisted_log_uri_and_error_message() -> None:
+    secret_uri = "s3://bucket/logs/job.out?token=supersecret"
+    secret_message = "old error https://user:pass@example.test/log?signature=abc token=rawsecret"
+    with _store() as store:
+        _insert_hydro_run(store, "run_cancel_success_secret", status="running")
+        _insert_forecast_cycle(store, "cycle_cancel_success_secret", status="forecast_running")
+        job = _create_job(
+            store,
+            job_id="job_cancel_success_secret",
+            run_id="run_cancel_success_secret",
+            cycle_id="cycle_cancel_success_secret",
+            status="running",
+            slurm_job_id=None,
+        )
+        job.log_uri = secret_uri
+        job.error_message = secret_message
+        store.session.add(job)
+        store.session.commit()
+
+        with _client(store) as client:
+            response = client.post("/api/v1/runs/run_cancel_success_secret/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        cancelled = data["cancelled_jobs"][0]
+        response_text = json.dumps(data)
+        assert cancelled["job_id"] == "job_cancel_success_secret"
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["log_uri"] == "s3://bucket/logs/job.out"
+        assert "supersecret" not in response_text
+        assert "rawsecret" not in response_text
+        assert "user:pass" not in response_text
+        assert "signature=abc" not in response_text
+
+
+def test_job_log_forbidden_response_redacts_secret_file_uri(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    log_root = tmp_path / "logs"
+    outside_root = tmp_path / "outside"
+    log_root.mkdir()
+    outside_root.mkdir()
+    secret_log_uri = (
+        f"file://{outside_root}/job.log?"
+        "token=rawsecret&password=hunter2&X-Amz-Signature=signedsecret"
+    )
+    monkeypatch.setenv("LOG_ROOT", str(log_root))
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_forbidden_secret_log",
+            run_id="run_forbidden_secret_log",
+            status="failed",
+            error_code="NODE_FAILURE",
+        )
+        job.log_uri = secret_log_uri
+        store.session.add(job)
+        store.session.commit()
+
+        with _client(store) as client:
+            response = client.get("/api/v1/jobs/job_forbidden_secret_log/logs", headers=_operator_headers())
+
+    response_text = json.dumps(response.json())
+    error = response.json()["error"]
+    assert response.status_code == 403
+    assert error["code"] == "FORBIDDEN"
+    assert error["details"]["log_uri"] == f"file://{outside_root}/job.log"
+    assert error["details"]["log_root"] == str(log_root.resolve())
+    assert "job_forbidden_secret_log" not in response_text
+    assert "rawsecret" not in response_text
+    assert "hunter2" not in response_text
+    assert "signedsecret" not in response_text
+    assert "password=" not in response_text
+    assert "X-Amz-Signature" not in response_text
+
+
 def test_cancelled_run_does_not_block_active_guard() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_guard", status="running", source_id="gfs", cycle_time=_cycle_time())

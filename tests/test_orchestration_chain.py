@@ -292,6 +292,12 @@ class FakeCycleRepository:
             key=lambda job: str(job["submitted_at"]),
         )
 
+    def query_pipeline_jobs_by_run(self, run_id: str) -> list[dict[str, Any]]:
+        return sorted(
+            [dict(job) for job in self.jobs.values() if job["run_id"] == run_id],
+            key=lambda job: str(job["submitted_at"]),
+        )
+
     def create_hydro_run_from_basin(self, basin: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
         run_id = str(manifest["run_id"])
         existing = self.hydro_runs.get(run_id)
@@ -428,6 +434,12 @@ class StoreBackedCycleRepository(FakeCycleRepository):
             for job in self.store.query_jobs_by_cycle(cycle_id)
         ]
         return jobs or super().query_pipeline_jobs_by_cycle(cycle_id)
+
+    def query_pipeline_jobs_by_run(self, run_id: str) -> list[dict[str, Any]]:
+        return [
+            self._job_to_dict(job)
+            for job in self.store.query_jobs_by_run(run_id)
+        ] or super().query_pipeline_jobs_by_run(run_id)
 
     @staticmethod
     def _job_to_dict(job: PipelineJob) -> dict[str, Any]:
@@ -573,6 +585,99 @@ def test_array_pipeline_jobs_are_persisted_as_cycle_level_rows(tmp_path: Path) -
         job = repository.jobs[f"job_cycle_gfs_2026050100_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100"
         assert job["model_id"] is None
+
+
+def test_single_candidate_downstream_restart_jobs_are_candidate_scoped(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/",
+        "orchestration_run_id": "cycle_gfs_2026050100_parse",
+        "restart_stage": "parse",
+        "durable_shud_output_reused": True,
+        "native_shud_resubmitted": False,
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    assert result.status == "complete"
+    for stage in ("parse", "frequency", "publish"):
+        job = repository.jobs[f"job_cycle_gfs_2026050100_parse_{stage}"]
+        assert job["run_id"] == "cycle_gfs_2026050100_parse"
+        assert job["model_id"] == "model_0"
+
+
+def test_candidate_scoped_parse_restarts_do_not_reuse_sibling_stage_jobs(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    def restart_basin(model_index: int) -> dict[str, Any]:
+        model_id = f"model_{model_index}"
+        return {
+            **_basins(model_index + 1)[model_index],
+            "run_id": f"fcst_gfs_2026050100_{model_id}",
+            "candidate_id": f"gfs:2026-05-01T00:00:00Z:{model_id}:forecast_gfs_deterministic",
+            "model_package_uri": f"s3://nhms/models/{model_id}/v1/package/",
+            "output_uri": f"s3://nhms/runs/fcst_gfs_2026050100_{model_id}/output/",
+            "station_count": 2,
+            "frequency_capabilities": {"return_periods": True},
+            "display_capabilities": {"tiles": True},
+            "orchestration_run_id": f"cycle_gfs_2026050100_parse_{model_id}",
+            "restart_stage": "parse",
+            "durable_shud_output_reused": True,
+            "native_shud_resubmitted": False,
+        }
+
+    first_result = orchestrator.orchestrate_cycle("gfs", "2026050100", [restart_basin(0)])
+
+    assert first_result.status == "complete"
+    assert [submission["stage"] for submission in client.submissions] == ["parse", "frequency", "publish"]
+    for stage in ("parse", "frequency", "publish"):
+        job = repository.jobs[f"job_cycle_gfs_2026050100_parse_model_0_{stage}"]
+        assert job["run_id"] == "cycle_gfs_2026050100_parse_model_0"
+        assert job["model_id"] == "model_0"
+
+    repository.jobs["job_cycle_gfs_2026050100_parse_model_0_parse_active_sibling"] = {
+        "job_id": "job_cycle_gfs_2026050100_parse_model_0_parse_active_sibling",
+        "run_id": "cycle_gfs_2026050100_parse_model_0",
+        "cycle_id": "gfs_2026050100",
+        "job_type": "parse_output_array",
+        "slurm_job_id": "unrelated-active-sibling",
+        "model_id": "model_0",
+        "status": "running",
+        "stage": "parse",
+        "submitted_at": _fmt(_dt("2026-05-01T01:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T01:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": "s3://nhms/runs/cycle_gfs_2026050100_parse_model_0/logs/parse-active.log",
+    }
+    first_submission_count = len(client.submissions)
+
+    second_result = orchestrator.orchestrate_cycle("gfs", "2026050100", [restart_basin(1)])
+
+    assert second_result.status == "complete"
+    assert [submission["stage"] for submission in client.submissions[first_submission_count:]] == [
+        "parse",
+        "frequency",
+        "publish",
+    ]
+    assert [stage.pipeline_job_id for stage in second_result.stages] == [
+        "job_cycle_gfs_2026050100_parse_model_1_parse",
+        "job_cycle_gfs_2026050100_parse_model_1_frequency",
+        "job_cycle_gfs_2026050100_parse_model_1_publish",
+    ]
+    for stage in ("parse", "frequency", "publish"):
+        job = repository.jobs[f"job_cycle_gfs_2026050100_parse_model_1_{stage}"]
+        assert job["run_id"] == "cycle_gfs_2026050100_parse_model_1"
+        assert job["model_id"] == "model_1"
+    assert repository.jobs["job_cycle_gfs_2026050100_parse_model_0_parse_active_sibling"]["status"] == "running"
 
 
 def test_forecast_stage_writes_runtime_manifests_and_manifest_index_paths(tmp_path: Path) -> None:
@@ -1465,6 +1570,43 @@ def test_restart_stage_parse_skips_durable_upstream_stages_without_existing_upst
     assert "job_cycle_gfs_2026050100_forecast" not in repository.jobs
 
 
+@pytest.mark.parametrize(
+    ("restart_stage", "expected_stages"),
+    [
+        ("frequency", ["frequency", "publish"]),
+        ("publish", ["publish"]),
+    ],
+)
+def test_restart_stage_frequency_and_publish_skip_durable_upstream_stages(
+    tmp_path: Path,
+    restart_stage: str,
+    expected_stages: list[str],
+) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_0/output/",
+        "station_count": 2,
+        "frequency_capabilities": {"return_periods": True},
+        "display_capabilities": {"tiles": True},
+        "restart_stage": restart_stage,
+        "durable_shud_output_reused": True,
+        "native_shud_resubmitted": False,
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    assert result.status == "complete"
+    assert [submission["stage"] for submission in client.submissions] == expected_stages
+    assert "job_cycle_gfs_2026050100_forecast" not in repository.jobs
+    assert "job_cycle_gfs_2026050100_parse" not in repository.jobs
+
+
 def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     cycle_id = "gfs_2026050100"
@@ -1623,6 +1765,26 @@ def test_array_task_result_events_redact_signed_log_uri_and_secret_error_text(tm
     assert "X-Amz-Signature" not in event_record_text
     assert "token=" not in event_record_text
     assert "No error message provided" not in event_text
+
+
+def test_pipeline_result_candidate_outcomes_redact_signed_task_log_uri(tmp_path: Path) -> None:
+    secret_log_uri = "s3://nhms/runs/cycle/logs/2003_0.out?X-Amz-Signature=supersecret"
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": ["failed"]})
+    client.task_log_uri_by_stage["forcing"] = [secret_log_uri]
+    client.task_error_message_by_stage["forcing"] = [
+        "failed token=rawsecret url=https://user:pass@example.test/log?signature=abc"
+    ]
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    outcome = result.candidate_outcomes[0]
+    result_text = json.dumps(result.candidate_outcomes)
+    assert outcome["log_uri"] == "s3://nhms/runs/cycle/logs/2003_0.out"
+    assert "supersecret" not in result_text
+    assert "rawsecret" not in result_text
+    assert "user:pass" not in result_text
 
 
 def test_slurm_accounting_available_is_recorded_in_pipeline_event_details(tmp_path: Path) -> None:
@@ -2088,6 +2250,96 @@ def test_psycopg_candidate_state_rejects_ambiguous_array_task_identity() -> None
     assert state["original_task_id"] is None
     assert state["successful_sibling_outputs_reused"] is False
     assert state["successful_sibling_task_count"] == 0
+
+
+def test_psycopg_candidate_state_later_retry_success_supersedes_older_failed_task() -> None:
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            del statement, parameters
+            return {
+                "run_id": "fcst_gfs_2026050100_model_b",
+                "status": "failed",
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026050100_model_b/output/",
+            }
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            del parameters
+            if "FROM ops.pipeline_job" in statement:
+                return [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_forcing",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "partially_failed",
+                        "stage": "forcing",
+                        "error_code": "NODE_FAILURE",
+                        "retry_count": 1,
+                    }
+                ]
+            if "FROM ops.pipeline_event" in statement:
+                return [
+                    {
+                        "event_id": 1,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forcing",
+                        "event_type": "status_change",
+                        "status_to": "partially_failed",
+                        "created_at": "2026-05-01T00:01:00Z",
+                        "details": {
+                            "stage": "forcing",
+                            "task_results": [
+                                {
+                                    "task_id": 1,
+                                    "original_task_id": 1,
+                                    "model_id": "model_b",
+                                    "status": "failed",
+                                    "error_code": "NODE_FAILURE",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "event_id": 2,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forcing_retry_1",
+                        "event_type": "status_change",
+                        "status_to": "succeeded",
+                        "created_at": "2026-05-01T00:05:00Z",
+                        "details": {
+                            "stage": "forcing",
+                            "task_results": [
+                                {
+                                    "task_id": 0,
+                                    "original_task_id": 1,
+                                    "model_id": "model_b",
+                                    "status": "succeeded",
+                                }
+                            ],
+                        },
+                    },
+                ]
+            return []
+
+    repository = CapturingRepository("postgresql://example")
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_b",
+        run_id="fcst_gfs_2026050100_model_b",
+        forcing_version_id="forc_gfs_2026050100_model_b",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=10,
+        event_limit=10,
+    )
+
+    assert state is not None
+    assert state["pipeline_status"] is None
+    assert state["failed_stage"] is None
+    assert state["array_task_id"] is None
+    assert state["original_task_id"] is None
 
 
 def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Path) -> None:

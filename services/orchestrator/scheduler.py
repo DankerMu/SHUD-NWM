@@ -653,108 +653,140 @@ class ProductionScheduler:
             key=lambda item: (item[0][0], item[0][1], [candidate.model_id for candidate in item[1]]),
         ):
             cycle_id = cycle_id_for(source_id, cycle_time)
-            orchestrator = self._orchestrator_for(source_id)
-            basins: list[dict[str, Any]] = []
-            submitted_candidates: list[SchedulerCandidate] = []
-            candidate_output_uris: dict[str, str] = {}
-            for candidate in cycle_candidates:
-                output_uri = _candidate_output_uri(candidate, getattr(orchestrator, "object_store", None))
-                if output_uri is None:
-                    evidence.append(
-                        {
-                            **_candidate_identity_evidence(candidate),
-                            "status": "blocked",
-                            "submitted": False,
-                            "mutation_occurred": False,
-                            "cycle_id": cycle_id,
-                            "error_code": "OUTPUT_URI_UNAVAILABLE",
-                            "error_message": (
-                                "Production orchestration requires an absolute deterministic output_uri "
-                                "before runtime handoff."
-                            ),
-                            "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
-                            "qhh_script_invoked": False,
-                        }
-                    )
-                    continue
-                candidate_output_uris[candidate.candidate_id] = output_uri
-                submitted_candidates.append(candidate)
-                basin_manifest = _candidate_basin_manifest(candidate, output_uri=output_uri)
-                if self.config.slurm_execution_enabled and self.config.slurm_env:
-                    basin_manifest["slurm_env"] = dict(self.config.slurm_env)
-                basins.append(basin_manifest)
-            if not basins:
-                continue
-            if self.config.slurm_execution_enabled:
-                safe_pairs: list[tuple[SchedulerCandidate, dict[str, Any]]] = []
-                for candidate, basin_manifest in zip(submitted_candidates, basins, strict=True):
-                    env_value = basin_manifest.get("slurm_env") or {}
-                    if env_value:
-                        env_check, env_blockers = _slurm_env_check(env_value)
-                        if env_blockers:
-                            evidence.append(
-                                _candidate_slurm_preflight_blocked_evidence(
-                                    candidate,
-                                    {
-                                        "status": "blocked",
-                                        "enabled": True,
-                                        "blockers": env_blockers,
-                                        "checks": {"environment": env_check},
-                                    },
-                                )
-                            )
-                            continue
-                    findings = iter_secret_manifest_findings(basin_manifest, "manifest")
-                    if findings:
-                        evidence.append(
-                            _candidate_secret_manifest_blocked_evidence(candidate, findings=findings)
+            for cohort_key, cohort_candidates in _restart_compatible_candidate_cohorts(cycle_candidates):
+                for execution_candidates, cohort_run_id in _candidate_execution_cohorts(
+                    source_id,
+                    cycle_time,
+                    cohort_key,
+                    cohort_candidates,
+                ):
+                    evidence.extend(
+                        self._execute_candidate_cohort(
+                            source_id,
+                            cycle_time,
+                            cycle_id,
+                            execution_candidates,
+                            orchestration_run_id=cohort_run_id,
                         )
-                        continue
-                    resource_profile_blockers = _slurm_resource_profile_blockers(candidate.resource_profile)
-                    if resource_profile_blockers:
+                    )
+        return evidence
+
+    def _execute_candidate_cohort(
+        self,
+        source_id: str,
+        cycle_time: datetime,
+        cycle_id: str,
+        cycle_candidates: Sequence[SchedulerCandidate],
+        *,
+        orchestration_run_id: str | None,
+    ) -> list[dict[str, Any]]:
+        evidence: list[dict[str, Any]] = []
+        orchestrator = self._orchestrator_for(source_id)
+        basins: list[dict[str, Any]] = []
+        submitted_candidates: list[SchedulerCandidate] = []
+        candidate_output_uris: dict[str, str] = {}
+        for candidate in cycle_candidates:
+            output_uri = _candidate_output_uri(candidate, getattr(orchestrator, "object_store", None))
+            if output_uri is None:
+                evidence.append(
+                    {
+                        **_candidate_identity_evidence(candidate),
+                        "status": "blocked",
+                        "submitted": False,
+                        "mutation_occurred": False,
+                        "cycle_id": cycle_id,
+                        "error_code": "OUTPUT_URI_UNAVAILABLE",
+                        "error_message": (
+                            "Production orchestration requires an absolute deterministic output_uri "
+                            "before runtime handoff."
+                        ),
+                        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+                        "qhh_script_invoked": False,
+                    }
+                )
+                continue
+            candidate_output_uris[candidate.candidate_id] = output_uri
+            submitted_candidates.append(candidate)
+            basin_manifest = _candidate_basin_manifest(
+                candidate,
+                output_uri=output_uri,
+                orchestration_run_id=orchestration_run_id,
+            )
+            if self.config.slurm_execution_enabled and self.config.slurm_env:
+                basin_manifest["slurm_env"] = dict(self.config.slurm_env)
+            basins.append(basin_manifest)
+        if not basins:
+            return evidence
+        if self.config.slurm_execution_enabled:
+            safe_pairs: list[tuple[SchedulerCandidate, dict[str, Any]]] = []
+            for candidate, basin_manifest in zip(submitted_candidates, basins, strict=True):
+                env_value = basin_manifest.get("slurm_env") or {}
+                if env_value:
+                    env_check, env_blockers = _slurm_env_check(env_value)
+                    if env_blockers:
                         evidence.append(
                             _candidate_slurm_preflight_blocked_evidence(
                                 candidate,
                                 {
                                     "status": "blocked",
                                     "enabled": True,
-                                    "blockers": resource_profile_blockers,
-                                    "checks": {"resource_profile": {"valid": False}},
+                                    "blockers": env_blockers,
+                                    "checks": {"environment": env_check},
                                 },
                             )
                         )
                         continue
-                    safe_pairs.append((candidate, basin_manifest))
-                submitted_candidates = [candidate for candidate, _basin_manifest in safe_pairs]
-                basins = [basin_manifest for _candidate, basin_manifest in safe_pairs]
-                if not basins:
-                    continue
-            try:
-                result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
-            except Exception as error:
-                for candidate in submitted_candidates:
-                    output_uri = candidate_output_uris.get(candidate.candidate_id)
+                findings = iter_secret_manifest_findings(basin_manifest, "manifest")
+                if findings:
                     evidence.append(
-                        {
-                            **_candidate_identity_evidence(candidate, output_uri=output_uri),
-                            "status": "blocked",
-                            "submitted": False,
-                            "mutation_occurred": False,
-                            "cycle_id": cycle_id,
-                            "error_code": getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"),
-                            "error_message": getattr(error, "message", str(error)),
-                            "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
-                            "qhh_script_invoked": False,
-                        }
+                        _candidate_secret_manifest_blocked_evidence(candidate, findings=findings)
                     )
-                continue
-            evidence.extend(
-                _candidate_execution_evidence(
-                    result,
-                    submitted_candidates,
-                    output_uris=candidate_output_uris,
+                    continue
+                resource_profile_blockers = _slurm_resource_profile_blockers(candidate.resource_profile)
+                if resource_profile_blockers:
+                    evidence.append(
+                        _candidate_slurm_preflight_blocked_evidence(
+                            candidate,
+                            {
+                                "status": "blocked",
+                                "enabled": True,
+                                "blockers": resource_profile_blockers,
+                                "checks": {"resource_profile": {"valid": False}},
+                            },
+                        )
+                    )
+                    continue
+                safe_pairs.append((candidate, basin_manifest))
+            submitted_candidates = [candidate for candidate, _basin_manifest in safe_pairs]
+            basins = [basin_manifest for _candidate, basin_manifest in safe_pairs]
+            if not basins:
+                return evidence
+        try:
+            result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
+        except Exception as error:
+            for candidate in submitted_candidates:
+                output_uri = candidate_output_uris.get(candidate.candidate_id)
+                evidence.append(
+                    {
+                        **_candidate_identity_evidence(candidate, output_uri=output_uri),
+                        "status": "blocked",
+                        "submitted": False,
+                        "mutation_occurred": False,
+                        "cycle_id": cycle_id,
+                        "error_code": getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"),
+                        "error_message": getattr(error, "message", str(error)),
+                        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+                        "qhh_script_invoked": False,
+                    }
                 )
+            return evidence
+        evidence.extend(
+            _candidate_execution_evidence(
+                result,
+                submitted_candidates,
+                output_uris=candidate_output_uris,
             )
+        )
         return evidence
 
     def _cancel_requested_active_slurm(self, skipped_candidates: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1690,6 +1722,46 @@ def _candidate_state_decision(
         return None
     state = dict(raw_state)
     evidence = _candidate_state_evidence(candidate, state)
+    active_jobs = _state_active_jobs(state)
+    if active_jobs:
+        return CandidateStateDecision(
+            "skip",
+            "active_slurm_job",
+            {
+                **evidence,
+                "decision": "skip_active",
+                "active_slurm_jobs": active_jobs,
+                "replacement_submitted": False,
+            },
+        )
+
+    hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
+    pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
+    if hydro_status in ACTIVE_HYDRO_STATUSES or pipeline_status in ACTIVE_PIPELINE_STATUSES:
+        return CandidateStateDecision(
+            "skip",
+            "active_duplicate_pipeline",
+            {
+                **evidence,
+                "decision": "skip_active",
+                "active_status": hydro_status or pipeline_status,
+                "replacement_submitted": False,
+            },
+        )
+    active_truth = _latest_manual_retry_blocker(state)
+    if active_truth is not None and active_truth.get("active") is True:
+        return CandidateStateDecision(
+            "skip",
+            "active_duplicate_pipeline",
+            {
+                **evidence,
+                "decision": "skip_active",
+                "active_status": active_truth.get("status"),
+                "active_truth": _evidence_safe(active_truth),
+                "replacement_submitted": False,
+            },
+        )
+
     if _manual_retry_requested(state):
         return CandidateStateDecision(
             "retry",
@@ -1697,28 +1769,7 @@ def _candidate_state_decision(
             _manual_retry_state_evidence(candidate, state, evidence),
         )
 
-    permanent = _permanent_failure_evidence(candidate, state, evidence)
-    if permanent is not None:
-        return CandidateStateDecision(
-            "blocked",
-            str(permanent.get("reason") or "permanent_failure_guard"),
-            permanent,
-        )
-
-    cancelled = _cancelled_state_evidence(candidate, state, evidence)
-    if cancelled is not None:
-        return CandidateStateDecision(
-            "blocked",
-            str(cancelled.get("reason") or "manual_retry_required_after_cancelled"),
-            cancelled,
-        )
-
-    downstream_retry = _downstream_retry_evidence(candidate, state, evidence)
-    if downstream_retry is not None:
-        return CandidateStateDecision("retry", "resume_downstream_after_durable_shud", downstream_retry)
-
-    hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
-    if hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES:
+    if hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES and _terminal_hydro_truth_supersedes_failure(state):
         return CandidateStateDecision(
             "skip",
             "terminal_hydro_success",
@@ -1736,7 +1787,26 @@ def _candidate_state_decision(
             },
         )
 
-    pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
+    downstream_retry = _downstream_retry_evidence(candidate, state, evidence)
+    if downstream_retry is not None:
+        return CandidateStateDecision("retry", "resume_downstream_after_durable_shud", downstream_retry)
+
+    permanent = _permanent_failure_evidence(candidate, state, evidence)
+    if permanent is not None:
+        return CandidateStateDecision(
+            "blocked",
+            str(permanent.get("reason") or "permanent_failure_guard"),
+            permanent,
+        )
+
+    cancelled = _cancelled_state_evidence(candidate, state, evidence)
+    if cancelled is not None:
+        return CandidateStateDecision(
+            "blocked",
+            str(cancelled.get("reason") or "manual_retry_required_after_cancelled"),
+            cancelled,
+        )
+
     if pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES and _pipeline_terminal_success_is_candidate_scoped(
         candidate,
         state,
@@ -1750,31 +1820,6 @@ def _candidate_state_decision(
                 "terminal_source": "pipeline_job",
                 "terminal_status": pipeline_status,
                 "native_shud_resubmitted": False,
-            },
-        )
-
-    active_jobs = _state_active_jobs(state)
-    if active_jobs:
-        return CandidateStateDecision(
-            "skip",
-            "active_slurm_job",
-            {
-                **evidence,
-                "decision": "skip_active",
-                "active_slurm_jobs": active_jobs,
-                "replacement_submitted": False,
-            },
-        )
-
-    if hydro_status in ACTIVE_HYDRO_STATUSES or pipeline_status in ACTIVE_PIPELINE_STATUSES:
-        return CandidateStateDecision(
-            "skip",
-            "active_duplicate_pipeline",
-            {
-                **evidence,
-                "decision": "skip_active",
-                "active_status": hydro_status or pipeline_status,
-                "replacement_submitted": False,
             },
         )
 
@@ -1874,6 +1919,47 @@ def _pipeline_terminal_success_is_candidate_scoped(
         if run_id.startswith("cycle_") and model_id in (None, ""):
             return False
     return False
+
+
+def _terminal_hydro_truth_supersedes_failure(state: Mapping[str, Any]) -> bool:
+    hydro_run = state.get("hydro_run")
+    if isinstance(hydro_run, Mapping):
+        hydro_truth_time = _first_state_datetime(hydro_run, "updated_at", "finished_at", "created_at")
+    else:
+        hydro_truth_time = None
+    if hydro_truth_time is None:
+        return not _state_has_failure_signal(state)
+    failure_truth_time = _latest_failure_truth_timestamp(state)
+    return failure_truth_time is None or hydro_truth_time >= failure_truth_time
+
+
+def _latest_failure_truth_timestamp(state: Mapping[str, Any]) -> datetime | None:
+    timestamps: list[datetime] = []
+    for job in _state_jobs(state):
+        status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+        if status not in FAILED_PIPELINE_STATUSES and not job.get("error_code"):
+            continue
+        timestamp = _first_state_datetime(job, "updated_at", "finished_at", "submitted_at", "created_at")
+        if timestamp is not None:
+            timestamps.append(timestamp)
+    for event in _state_events(state):
+        if _event_is_manual_retry_marker(event):
+            continue
+        details = event.get("details")
+        details_mapping = details if isinstance(details, Mapping) else {}
+        status = str(
+            event.get("status_to")
+            or details_mapping.get("status_to")
+            or details_mapping.get("status")
+            or details_mapping.get("state")
+            or ""
+        )
+        if status not in FAILED_PIPELINE_STATUSES and not details_mapping.get("error_code"):
+            continue
+        timestamp = _first_state_datetime(event, "created_at", "updated_at", "finished_at", "submitted_at")
+        if timestamp is not None:
+            timestamps.append(timestamp)
+    return max(timestamps) if timestamps else None
 
 
 def _has_candidate_task_failure(state: Mapping[str, Any]) -> bool:
@@ -2307,6 +2393,8 @@ def _manual_retry_blocker_record(
 
 
 def _manual_retry_marker_overrides_blocker(marker: Mapping[str, Any], blocker: Mapping[str, Any]) -> bool:
+    if blocker.get("active") is True:
+        return False
     marker_timestamp = marker.get("timestamp")
     blocker_timestamp = blocker.get("timestamp")
     if isinstance(marker_timestamp, datetime) and isinstance(blocker_timestamp, datetime):
@@ -2317,8 +2405,6 @@ def _manual_retry_marker_overrides_blocker(marker: Mapping[str, Any], blocker: M
         return False
     if _manual_retry_marker_bound_to_blocker(marker, blocker):
         return True
-    if blocker.get("active") is True:
-        return False
     if isinstance(marker_timestamp, datetime) and blocker_timestamp is None:
         return True
     if marker_timestamp is None and blocker_timestamp is None:
@@ -2538,6 +2624,12 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
         value = state.get(key)
         if value not in (None, ""):
             return str(value)
+    hydro_run = state.get("hydro_run")
+    if isinstance(hydro_run, Mapping):
+        for key in ("error_code", "reason_code", "failure_reason", "last_error", "previous_error"):
+            value = hydro_run.get(key)
+            if value not in (None, ""):
+                return str(value)
     for job in reversed(_state_jobs(state)):
         value = job.get("error_code") or job.get("reason_code")
         if value not in (None, ""):
@@ -2556,6 +2648,12 @@ def _state_error_message(state: Mapping[str, Any]) -> str | None:
         value = state.get(key)
         if value not in (None, ""):
             return str(_evidence_safe(str(value)))
+    hydro_run = state.get("hydro_run")
+    if isinstance(hydro_run, Mapping):
+        for key in ("error_message", "message"):
+            value = hydro_run.get(key)
+            if value not in (None, ""):
+                return str(_evidence_safe(str(value)))
     for job in reversed(_state_jobs(state)):
         value = job.get("error_message")
         if value not in (None, ""):
@@ -2642,6 +2740,66 @@ def _coerce_int(value: Any, *, default: int) -> int:
         return default
 
 
+def _restart_compatible_candidate_cohorts(
+    candidates: Sequence[SchedulerCandidate],
+) -> list[tuple[tuple[int, str], list[SchedulerCandidate]]]:
+    cohorts: dict[tuple[int, str], list[SchedulerCandidate]] = {}
+    for candidate in candidates:
+        restart_stage = _candidate_restart_stage(candidate)
+        key = _candidate_restart_cohort_key(restart_stage)
+        cohorts.setdefault(key, []).append(candidate)
+    return sorted(
+        cohorts.items(),
+        key=lambda item: (item[0][0], item[0][1], [candidate.model_id for candidate in item[1]]),
+    )
+
+
+def _candidate_restart_stage(candidate: SchedulerCandidate) -> str | None:
+    state_evidence = candidate.state_evidence
+    if not isinstance(state_evidence, Mapping):
+        return None
+    return _canonical_downstream_stage(
+        str(state_evidence.get("restart_stage") or state_evidence.get("restart_from_stage") or "")
+    )
+
+
+def _candidate_restart_cohort_key(restart_stage: str | None) -> tuple[int, str]:
+    if restart_stage is None:
+        return (0, "full")
+    stage_order = {stage: index for index, stage in enumerate(DOWNSTREAM_RESTART_STAGES, start=1)}
+    return (stage_order.get(restart_stage, len(stage_order) + 1), restart_stage)
+
+
+def _candidate_execution_cohort_run_id(source_id: str, cycle_time: datetime, cohort_key: tuple[int, str]) -> str:
+    stage = re.sub(r"[^A-Za-z0-9_.-]+", "_", cohort_key[1]).strip("._-") or "full"
+    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}_{stage}"
+
+
+def _candidate_execution_cohorts(
+    source_id: str,
+    cycle_time: datetime,
+    cohort_key: tuple[int, str],
+    candidates: Sequence[SchedulerCandidate],
+) -> list[tuple[list[SchedulerCandidate], str | None]]:
+    if cohort_key[1] == "full":
+        return [(list(candidates), None)]
+    return [
+        ([candidate], _candidate_execution_cohort_run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))
+        for candidate in candidates
+    ]
+
+
+def _candidate_execution_cohort_run_id_for_candidate(
+    source_id: str,
+    cycle_time: datetime,
+    cohort_key: tuple[int, str],
+    candidate: SchedulerCandidate,
+) -> str:
+    stage = re.sub(r"[^A-Za-z0-9_.-]+", "_", cohort_key[1]).strip("._-") or "full"
+    model_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate.model_id).strip("._-") or "candidate"
+    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}_{stage}_{model_id}"
+
+
 def _downstream_retry_evidence(
     candidate: SchedulerCandidate,
     state: Mapping[str, Any],
@@ -2655,6 +2813,13 @@ def _downstream_retry_evidence(
     if _force_native_shud_rerun(state):
         return None
     failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
+    if _downstream_failure_restartable(failure):
+        failure = {
+            **failure,
+            "retryable": True,
+            "permanent": False,
+            "limit_exhausted": False,
+        }
     if failure["permanent"]:
         return None
     return {
@@ -2675,6 +2840,17 @@ def _downstream_retry_evidence(
             "retry_limit": failure["retry_limit"],
         },
     }
+
+
+def _downstream_failure_restartable(failure: Mapping[str, Any]) -> bool:
+    if failure.get("limit_exhausted") is True:
+        return False
+    if str(failure.get("classifier") or "") in {"malformed_input", "policy_blocked"}:
+        return False
+    reason_code = str(failure.get("reason_code") or "").upper()
+    if reason_code in {"INVALID_MANIFEST", "MANIFEST_SCHEMA_INVALID", "MALFORMED_INPUT", "POLICY_BLOCKED"}:
+        return False
+    return True
 
 
 def _retry_failure_evidence(
@@ -2913,7 +3089,12 @@ def _merge_state_evidence(
     return _evidence_safe(merged)
 
 
-def _candidate_basin_manifest(candidate: SchedulerCandidate, *, output_uri: str) -> dict[str, Any]:
+def _candidate_basin_manifest(
+    candidate: SchedulerCandidate,
+    *,
+    output_uri: str,
+    orchestration_run_id: str | None = None,
+) -> dict[str, Any]:
     resource_profile = dict(candidate.resource_profile)
     manifest = {
         "candidate_id": candidate.candidate_id,
@@ -2948,6 +3129,8 @@ def _candidate_basin_manifest(candidate: SchedulerCandidate, *, output_uri: str)
         "output_key": _candidate_output_key(candidate),
         "output_uri": output_uri,
     }
+    if orchestration_run_id not in (None, ""):
+        manifest["orchestration_run_id"] = orchestration_run_id
     if candidate.state_evidence:
         state_evidence = _evidence_safe(candidate.state_evidence)
         manifest["state_evidence"] = state_evidence
@@ -3250,6 +3433,7 @@ def _candidate_execution_evidence_item(
         "qhh_script_invoked": False,
     }
     if candidate_outcome is not None:
+        candidate_outcome = _evidence_safe(candidate_outcome)
         item["candidate_outcome"] = candidate_outcome
         if _is_partial_candidate_evidence(item):
             item["error_code"] = str(candidate_outcome.get("reason") or f"CANDIDATE_{status}").upper()
