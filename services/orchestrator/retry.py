@@ -44,6 +44,7 @@ ACTIVE_RETRY_STATUSES = {"pending", "submitted", "running"}
 FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
 TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
+DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published"}
 
 
 def is_transient_error(error_code: str | None) -> bool:
@@ -334,6 +335,9 @@ class RetryService:
             if not locked_jobs:
                 raise RetryNotFoundError(run_id)
 
+            if has_hydro_run_table and _hydro_run_status(self.store, run_id) in DURABLE_HYDRO_SUCCESS_STATUSES:
+                raise RetryNotFoundError(run_id)
+
             jobs = _jobs_by_truth_time(self.store.query_jobs_by_run(run_id))
             active_job = next((job for job in jobs if job.status in ACTIVE_RETRY_STATUSES), None)
             if active_job is not None:
@@ -597,6 +601,19 @@ def _model_id_from_hydro_run(store: PipelineStore, run_id: str | None) -> str | 
             return None
         value = store.session.execute(
             text("SELECT model_id FROM hydro.hydro_run WHERE run_id = :run_id LIMIT 1"),
+            {"run_id": run_id},
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        return None
+    return str(value) if value else None
+
+
+def _hydro_run_status(store: PipelineStore, run_id: str | None) -> str | None:
+    if not run_id:
+        return None
+    try:
+        value = store.session.execute(
+            text("SELECT status FROM hydro.hydro_run WHERE run_id = :run_id LIMIT 1"),
             {"run_id": run_id},
         ).scalar_one_or_none()
     except SQLAlchemyError:

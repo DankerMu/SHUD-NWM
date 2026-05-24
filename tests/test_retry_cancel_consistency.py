@@ -585,24 +585,59 @@ def test_cancel_status_is_valid_hydro_enum() -> None:
         assert _hydro_status(store, "run_cancel_valid_hydro") in HYDRO_RUN_STATUS_ENUM
 
 
-def test_retry_preserves_terminal_hydro_status() -> None:
+@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "frequency_done", "published"])
+def test_retry_preserves_terminal_hydro_status(hydro_status: str) -> None:
     with _store() as store:
-        _insert_hydro_run(store, "run_retry_terminal", status="published")
+        run_id = f"run_retry_terminal_{hydro_status}"
+        _insert_hydro_run(store, run_id, status=hydro_status)
+        failed = _create_job(
+            store,
+            job_id=f"job_retry_terminal_{hydro_status}",
+            run_id=run_id,
+            status="failed",
+            error_code="NODE_FAILURE",
+        )
+        failed.updated_at = datetime(2026, 5, 1, 6, 20, tzinfo=UTC)
+        store.session.add(failed)
+        store.session.commit()
+        gateway = _MockGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with pytest.raises(RetryNotFoundError):
+            service.attempt_manual_retry(run_id, gateway=gateway, trusted_internal=True)
+
+        assert gateway.submissions == []
+        assert _hydro_status(store, run_id) == hydro_status
+        assert _hydro_status(store, run_id) in HYDRO_RUN_STATUS_ENUM
+        assert [job.job_id for job in store.query_jobs_by_run(run_id)] == [failed.job_id]
+        assert _events(store) == []
+
+
+def test_retry_api_rejects_terminal_hydro_status_without_mutation() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_retry_terminal_api", status="published")
         _create_job(
             store,
-            job_id="job_retry_terminal",
-            run_id="run_retry_terminal",
+            job_id="job_retry_terminal_api",
+            run_id="run_retry_terminal_api",
             status="failed",
             error_code="NODE_FAILURE",
         )
         gateway = _MockGateway()
         service = RetryService(store, RetryConfig(max_retries=3))
 
-        retry = service.attempt_manual_retry("run_retry_terminal", gateway=gateway, trusted_internal=True)
+        with _client(store, gateway=gateway, retry_service=service) as client:
+            response = client.post("/api/v1/runs/run_retry_terminal_api/retry", headers=_operator_headers())
 
-        assert retry.status == "submitted"
-        assert _hydro_status(store, "run_retry_terminal") == "published"
-        assert _hydro_status(store, "run_retry_terminal") in HYDRO_RUN_STATUS_ENUM
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "RETRY_NOT_FOUND"
+        assert response.json()["error"]["details"]["run_id"] == "run_retry_terminal_api"
+        assert gateway.submissions == []
+        assert _hydro_status(store, "run_retry_terminal_api") == "published"
+        assert [job.job_id for job in store.query_jobs_by_run("run_retry_terminal_api")] == [
+            "job_retry_terminal_api"
+        ]
+        assert _events(store) == []
 
 
 def test_cancel_preserves_terminal_hydro_run() -> None:
