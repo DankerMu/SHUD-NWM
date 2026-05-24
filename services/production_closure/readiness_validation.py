@@ -186,6 +186,7 @@ SCHEDULER_BLOCKED_MODEL_RUN_STATUSES = frozenset(
         "unavailable",
     }
 )
+SCHEDULER_MODEL_RUN_STATUS_KEYS = frozenset({"status", "outcome", "result", "state"})
 SCHEDULER_REQUIRED_COUNT_FIELDS = (
     "candidate_count",
     "blocked_candidate_count",
@@ -597,6 +598,7 @@ class _SchedulerModelRunOutcome:
     failed: bool
     partial: bool
     blocked: bool
+    producer_partial: bool
 
 
 def validate_readiness(config: ProductionReadinessConfig) -> dict[str, Any]:
@@ -1020,8 +1022,7 @@ def _read_scheduler_evidence_item(path: Path, *, config: ProductionReadinessConf
                 error_code="PRODUCTION_READINESS_SCHEDULER_EVIDENCE_JSON_INVALID",
                 raw_preview=_redacted_preview(raw, config=config),
             )
-        bounded = _bounded_payload(parsed)
-        raw_payload = bounded.payload
+        raw_payload = parsed
         payload = _bounded_redacted_payload(parsed, config=config)
     except (
         FileNotFoundError,
@@ -1040,10 +1041,6 @@ def _read_scheduler_evidence_item(path: Path, *, config: ProductionReadinessConf
         )
 
     errors = _scheduler_evidence_errors(raw_payload)
-    if bounded.node_truncated:
-        errors.append("scheduler_evidence_json_node_limit_exceeded")
-    if bounded.depth_truncated:
-        errors.append("scheduler_evidence_json_depth_limit_exceeded")
     status = str(raw_payload.get("status") or "unknown").strip()
     execution_mode = _scheduler_evidence_mode(raw_payload)
     item_status = _scheduler_readiness_status(raw_payload, errors=errors)
@@ -2542,7 +2539,7 @@ def _has_unsafe_scheduler_identity(payload: Mapping[str, Any]) -> bool:
     for collection_key in ("candidates", "blocked_candidates", "skipped_candidates", "model_run_evidence"):
         collection = payload.get(collection_key)
         if isinstance(collection, Sequence) and not isinstance(collection, (str, bytes, bytearray)):
-            for item in collection[:MAX_JSON_NODES]:
+            for item in collection:
                 if isinstance(item, Mapping):
                     identities.extend(
                         item.get(key)
@@ -2871,9 +2868,14 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
 
     submitted_count = _count_value(payload, "submitted_count")
     model_run_capacity = submitted_count if submitted_count is not None else len(model_run_rows)
-    for count_field, statuses, error_prefix in (
-        ("failed_count", SCHEDULER_FAILED_MODEL_RUN_STATUSES, "failed_count"),
-        ("partial_count", SCHEDULER_PARTIAL_MODEL_RUN_STATUSES, "partial_count"),
+    status = str(payload.get("status") or "").strip().lower()
+    count_expectations_by_field = {
+        "failed_count": _scheduler_failed_count_model_run_rows(model_run_outcomes),
+        "partial_count": _scheduler_partial_count_model_run_rows(model_run_outcomes, pass_status=status),
+    }
+    for count_field, error_prefix in (
+        ("failed_count", "failed_count"),
+        ("partial_count", "partial_count"),
     ):
         value = _count_value(payload, count_field)
         if value is None:
@@ -2881,7 +2883,7 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
         if value > model_run_capacity or value > len(model_run_rows):
             errors.append(f"{error_prefix}_exceeds_model_run_evidence")
             continue
-        matching_rows = _scheduler_model_run_rows_with_status(model_run_outcomes, statuses)
+        matching_rows = count_expectations_by_field[count_field]
         if value != matching_rows:
             errors.append(f"{error_prefix}_status_cardinality_mismatch")
     errors.extend(
@@ -2894,11 +2896,22 @@ def _scheduler_count_cardinality_errors(payload: Mapping[str, Any]) -> list[str]
     return errors
 
 
-def _scheduler_model_run_rows_with_status(
+def _scheduler_failed_count_model_run_rows(model_run_outcomes: Sequence[_SchedulerModelRunOutcome]) -> int:
+    return sum(1 for outcome in model_run_outcomes if outcome.failed)
+
+
+def _scheduler_partial_count_model_run_rows(
     model_run_outcomes: Sequence[_SchedulerModelRunOutcome],
-    statuses: frozenset[str],
+    *,
+    pass_status: str,
 ) -> int:
-    return sum(1 for outcome in model_run_outcomes if outcome.status_values & statuses)
+    if pass_status == "submitted_partial":
+        return sum(1 for outcome in model_run_outcomes if outcome.producer_partial)
+    return sum(
+        1
+        for outcome in model_run_outcomes
+        if outcome.partial
+    )
 
 
 def _scheduler_live_status_count_errors(
@@ -2954,9 +2967,12 @@ def _scheduler_model_run_outcome(record: Mapping[str, Any]) -> _SchedulerModelRu
     submitted = record.get("submitted") is True or bool(status_values & SCHEDULER_LIVE_COMPATIBLE_MODEL_RUN_STATUSES)
     if submitted_explicitly_false:
         submitted = False
-    failed = bool(status_values & SCHEDULER_FAILED_MODEL_RUN_STATUSES)
-    partial = bool(status_values & SCHEDULER_PARTIAL_MODEL_RUN_STATUSES)
-    blocked = bool(status_values & SCHEDULER_BLOCKED_MODEL_RUN_STATUSES)
+    failed = any(_scheduler_model_run_failed_status(status) for status in status_values)
+    partial = any(_scheduler_model_run_partial_status(status) for status in status_values)
+    blocked = any(_scheduler_model_run_blocked_status(status) for status in status_values)
+    producer_partial = submitted and any(
+        _scheduler_model_run_producer_partial_status(status) for status in status_values
+    )
     return _SchedulerModelRunOutcome(
         status_values=status_values,
         has_status_evidence=bool(status_values),
@@ -2965,6 +2981,7 @@ def _scheduler_model_run_outcome(record: Mapping[str, Any]) -> _SchedulerModelRu
         failed=failed,
         partial=partial,
         blocked=blocked,
+        producer_partial=producer_partial,
     )
 
 
@@ -2975,10 +2992,49 @@ def _scheduler_model_run_status_values(record: Mapping[str, Any]) -> set[str]:
         if isinstance(value, str) and value.strip():
             values.add(value.strip().lower())
         elif isinstance(value, Mapping):
-            nested_status = value.get("status") or value.get("outcome") or value.get("result") or value.get("state")
-            if isinstance(nested_status, str) and nested_status.strip():
-                values.add(nested_status.strip().lower())
+            values.update(_nested_scheduler_status_values(value))
     return values
+
+
+def _nested_scheduler_status_values(value: Mapping[str, Any]) -> set[str]:
+    values: set[str] = set()
+    stack: list[Any] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            for key, nested in current.items():
+                if str(key) in SCHEDULER_MODEL_RUN_STATUS_KEYS and isinstance(nested, str) and nested.strip():
+                    values.add(nested.strip().lower())
+                elif isinstance(nested, Mapping) or (
+                    isinstance(nested, Sequence) and not isinstance(nested, (str, bytes, bytearray))
+                ):
+                    stack.append(nested)
+        elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
+            stack.extend(current)
+    return values
+
+
+def _scheduler_model_run_failed_status(status: str) -> bool:
+    return status in SCHEDULER_FAILED_MODEL_RUN_STATUSES or status.endswith("_failed")
+
+
+def _scheduler_model_run_partial_status(status: str) -> bool:
+    return status in SCHEDULER_PARTIAL_MODEL_RUN_STATUSES or status.endswith("_partial")
+
+
+def _scheduler_model_run_blocked_status(status: str) -> bool:
+    return status in SCHEDULER_BLOCKED_MODEL_RUN_STATUSES or status.endswith(
+        ("_blocked", "_cancelled", "_unavailable")
+    )
+
+
+def _scheduler_model_run_producer_partial_status(status: str) -> bool:
+    return (
+        status in SCHEDULER_PARTIAL_MODEL_RUN_STATUSES
+        or status in SCHEDULER_FAILED_MODEL_RUN_STATUSES
+        or status in SCHEDULER_BLOCKED_MODEL_RUN_STATUSES
+        or status.endswith(("_blocked", "_cancelled", "_failed", "_unavailable"))
+    )
 
 
 def _dedupe_errors(errors: Sequence[str]) -> list[str]:
@@ -3010,7 +3066,7 @@ def _compact_cycle_id_suffix(cycle_id: str) -> str:
 def _mapping_sequence(value: Any) -> list[Mapping[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [item for item in value[:MAX_JSON_NODES] if isinstance(item, Mapping)]
+    return [item for item in value if isinstance(item, Mapping)]
 
 
 def _identity_string(value: Any) -> str:
