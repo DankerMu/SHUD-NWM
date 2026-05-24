@@ -982,7 +982,7 @@ def test_scheduler_dry_run_evidence_ingests_as_deterministic_non_final_review_ev
 def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
     scheduler_path = tmp_path / "scheduler" / "scheduler_20260521120000_fixed.json"
-    _write_scheduler_evidence(scheduler_path, status="submitted", execution_mode="production_orchestration")
+    _write_scheduler_payload(scheduler_path, _submitted_scheduler_payload())
 
     validate_readiness(
         ProductionReadinessConfig.from_env(
@@ -997,11 +997,55 @@ def test_scheduler_live_receipt_accepts_only_when_bound_to_consumed_evidence(tmp
     live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
     assert scheduler_review["status"] == "passed"
     assert scheduler_review["live_proof_accepted"] is False
+    assert scheduler_review["details"]["submitted_count"] == 1
     assert live_item["status"] == "passed"
     assert live_item["execution_mode"] == "live_proof"
     assert live_item["live_proof_accepted"] is True
     assert live_item["details"]["payload"]["producer_artifact_ref"] == "scheduler:scheduler_20260521120000_fixed.json"
     assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_submitted_noop_production_evidence_blocks_live_binding(tmp_path: Path) -> None:
+    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert "submitted_status_without_model_run_evidence" in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize("status", ["planned", "ready"])
+def test_scheduler_planned_or_ready_production_evidence_cannot_accept_live_binding(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    payload = _scheduler_evidence_payload(status=status, execution_mode="production_orchestration")
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "passed"
+    assert live_item["status"] == "release_blocked"
+    assert "scheduler_status_not_live_eligible" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize("status", ["completed", "succeeded"])
+def test_scheduler_completed_or_succeeded_noop_production_evidence_blocks_live_binding(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    payload = _scheduler_evidence_payload(status=status, execution_mode="production_orchestration")
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert "submitted_status_without_model_run_evidence" in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
 
 
 def test_schemaless_scheduler_evidence_blocks_live_scheduler_proof(tmp_path: Path) -> None:
@@ -1096,18 +1140,8 @@ def test_scheduler_root_binds_receipt_to_exact_matching_passed_artifact(tmp_path
     scheduler_root = tmp_path / "scheduler"
     first = scheduler_root / "first.json"
     second = scheduler_root / "second.json"
-    _write_scheduler_evidence(
-        first,
-        pass_id="scheduler_20260521120000_first",
-        status="submitted",
-        execution_mode="production_orchestration",
-    )
-    _write_scheduler_evidence(
-        second,
-        pass_id="scheduler_20260521120000_second",
-        status="submitted",
-        execution_mode="production_orchestration",
-    )
+    _write_scheduler_payload(first, _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_first"))
+    _write_scheduler_payload(second, _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_second"))
     receipt = _scheduler_proof_bound_to_evidence(
         second,
         producer_artifact_ref="scheduler:second.json",
@@ -1135,11 +1169,9 @@ def test_scheduler_root_same_pass_and_checksum_with_distinct_artifact_ref_is_not
     scheduler_root = tmp_path / "scheduler"
     first = scheduler_root / "first.json"
     second = scheduler_root / "second.json"
-    checksum = _write_scheduler_evidence(
+    checksum = _write_scheduler_payload(
         first,
-        pass_id="scheduler_20260521120000_same",
-        status="submitted",
-        execution_mode="production_orchestration",
+        _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_same"),
     )
     second.parent.mkdir(parents=True, exist_ok=True)
     second.write_bytes(first.read_bytes())
@@ -1179,11 +1211,9 @@ def test_scheduler_root_duplicate_exact_match_blocks_ambiguous_binding(
         "services.production_closure.readiness_validation._scheduler_evidence_artifact_ref",
         lambda path, *, config: "scheduler:same.json",
     )
-    checksum = _write_scheduler_evidence(
+    checksum = _write_scheduler_payload(
         first,
-        pass_id="scheduler_20260521120000_same",
-        status="submitted",
-        execution_mode="production_orchestration",
+        _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_same"),
     )
     duplicate.parent.mkdir(parents=True, exist_ok=True)
     duplicate.write_bytes(first.read_bytes())
@@ -1367,9 +1397,16 @@ def _submitted_scheduler_payload() -> dict[str, object]:
     return payload
 
 
+def _submitted_scheduler_payload_with_pass_id(pass_id: str) -> dict[str, object]:
+    payload = _submitted_scheduler_payload()
+    payload["pass_id"] = pass_id
+    return payload
+
+
 def _partial_scheduler_payload() -> dict[str, object]:
     payload = _submitted_scheduler_payload()
     payload["status"] = "submitted_partial"
+    payload["counts"]["failed_count"] = 1
     payload["counts"]["partial_count"] = 1
     payload["model_run_evidence"][0]["status"] = "failed"
     payload["model_run_evidence"][0]["candidate_outcome"] = {"status": "failed"}
@@ -1577,6 +1614,158 @@ def test_scheduler_count_list_cardinality_mismatch_blocks_evidence_and_matching_
 
     assert scheduler_item["status"] == "blocked"
     assert expected_error in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_error"),
+    [
+        (lambda payload: payload["counts"].pop("failed_count"), "missing_failed_count"),
+        (lambda payload: payload["counts"].__setitem__("failed_count", 0), "failed_count_status_cardinality_mismatch"),
+    ],
+)
+def test_scheduler_failed_model_run_status_requires_matching_failed_count(
+    tmp_path: Path,
+    mutator: object,
+    expected_error: str,
+) -> None:
+    payload = _partial_scheduler_payload()
+    mutator(payload)
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert expected_error in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize("model_run_status", ["partial", "unavailable", "blocked"])
+@pytest.mark.parametrize(
+    ("mutator", "expected_error"),
+    [
+        (lambda payload: payload["counts"].pop("partial_count"), "missing_partial_count"),
+        (
+            lambda payload: payload["counts"].__setitem__("partial_count", 0),
+            "partial_count_status_cardinality_mismatch",
+        ),
+    ],
+)
+def test_scheduler_partial_model_run_status_requires_matching_partial_count(
+    tmp_path: Path,
+    model_run_status: str,
+    mutator: object,
+    expected_error: str,
+) -> None:
+    payload = _submitted_scheduler_payload()
+    payload["status"] = "submitted_partial"
+    payload["model_run_evidence"][0]["status"] = model_run_status
+    payload["model_run_evidence"][0]["candidate_outcome"] = {"status": model_run_status}
+    mutator(payload)
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert expected_error in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_model_run_evidence_absent_candidate_id_blocks_evidence_and_live_binding(tmp_path: Path) -> None:
+    payload = _submitted_scheduler_payload()
+    payload["model_run_evidence"][0] |= {
+        "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+        "model_id": "model_b",
+        "run_id": "fcst_gfs_2026052106_model_b",
+        "forcing_version_id": "forc_gfs_2026052106_model_b",
+    }
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert "model_run_evidence_candidate_not_selected" in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_model_run_evidence_skipped_candidate_id_blocks_evidence_and_live_binding(tmp_path: Path) -> None:
+    payload = _scheduler_evidence_payload(status="submitted", execution_mode="production_orchestration")
+    skipped = payload["skipped_candidates"][0]
+    payload["counts"]["submitted_count"] = 1
+    payload["model_run_evidence"] = [
+        {
+            "candidate_id": skipped["candidate_id"],
+            "source_id": skipped["source_id"],
+            "cycle_time_utc": skipped["cycle_time_utc"],
+            "model_id": skipped["model_id"],
+            "scenario_id": skipped["scenario_id"],
+            "run_id": "fcst_ifs_2026052106_model_a",
+            "forcing_version_id": "forc_ifs_2026052106_model_a",
+            "status": "submitted",
+            "submitted": True,
+        }
+    ]
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert "model_run_evidence_candidate_not_selected" in scheduler_item["details"]["acceptance_errors"]
+    assert "model_run_evidence_candidate_skipped" in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_model_run_evidence_blocked_candidate_id_blocks_evidence_and_live_binding(tmp_path: Path) -> None:
+    payload = _submitted_scheduler_payload()
+    blocked = {
+        **payload["candidates"][0],
+        "reason": "operator_blocked",
+    }
+    payload["blocked_candidates"] = [blocked]
+    payload["candidates"] = []
+    payload["counts"]["blocked_candidate_count"] = 1
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert "model_run_evidence_candidate_not_selected" in scheduler_item["details"]["acceptance_errors"]
+    assert "model_run_evidence_candidate_blocked" in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda payload: payload["candidates"].append(_submitted_scheduler_payload()["candidates"][0]),
+        lambda payload: payload["model_run_evidence"].append(_submitted_scheduler_payload()["model_run_evidence"][0]),
+    ],
+)
+def test_scheduler_candidate_count_zero_with_candidate_or_model_run_rows_blocks_evidence(
+    tmp_path: Path,
+    mutator: object,
+) -> None:
+    payload = _scheduler_evidence_payload(status="planned", execution_mode="dry_run")
+    payload["counts"]["candidate_count"] = 0
+    payload["counts"]["skipped_candidate_count"] = 0
+    payload["candidates"] = []
+    payload["skipped_candidates"] = []
+    payload["model_run_evidence"] = []
+    mutator(payload)
+    if payload["model_run_evidence"]:
+        payload["counts"]["submitted_count"] = 1
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert "candidate_count_identity_cardinality_mismatch" in scheduler_item["details"]["acceptance_errors"]
     assert live_item["status"] == "release_blocked"
     assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
     assert summary["final_production_readiness_claimed"] is False
