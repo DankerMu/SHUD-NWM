@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '@/App'
 import { client } from '@/api/client'
 import { contextHandoff } from '@/pages/OverviewPage'
+import { ReadyHydroMetContent } from '@/pages/hydroMet/HydroMetPage'
 import { useAuthStore } from '@/stores/auth'
 import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
@@ -735,12 +736,14 @@ const hydroMetRiverSegments = {
 
 function mockHydroMetRouteClient(options: {
   product?: Record<string, unknown>
-  stationResponse?: unknown
+  stationResponse?: unknown | (() => unknown)
   stationError?: string
   riverResponse?: unknown
   riverError?: string
   stationSeriesResponse?: unknown | ((stationId: string) => unknown)
+  stationSeriesData?: unknown
   stationSeriesError?: string
+  stationSeriesThrow?: unknown
   stationSeriesDelayMs?: number
 } = {}) {
   vi.mocked(client.GET).mockImplementation(async (path: string, requestOptions?: unknown) => {
@@ -749,7 +752,9 @@ function mockHydroMetRouteClient(options: {
       if (options.stationSeriesDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, options.stationSeriesDelayMs))
       }
+      if (options.stationSeriesThrow) throw options.stationSeriesThrow
       if (options.stationSeriesError) return { data: undefined, error: { error: { message: options.stationSeriesError } } } as never
+      if (options.stationSeriesData) return { data: options.stationSeriesData, error: undefined } as never
       const response = typeof options.stationSeriesResponse === 'function'
         ? options.stationSeriesResponse(stationId)
         : options.stationSeriesResponse ?? hydroMetStationSeriesResponse(stationId)
@@ -762,7 +767,8 @@ function mockHydroMetRouteClient(options: {
     }
     if (path === '/api/v1/met/stations') {
       if (options.stationError) return { data: undefined, error: { error: { message: options.stationError } } } as never
-      return { data: success(options.stationResponse ?? hydroMetStationPage), error: undefined } as never
+      const response = typeof options.stationResponse === 'function' ? options.stationResponse() : options.stationResponse ?? hydroMetStationPage
+      return { data: success(response), error: undefined } as never
     }
     if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') {
       if (options.riverError) return { data: undefined, error: { error: { message: options.riverError } } } as never
@@ -1224,6 +1230,61 @@ describe('App route state', () => {
     expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_001')
   })
 
+  it('renders selected-station-absent state without requesting station-series or drawing charts', async () => {
+    const user = userEvent.setup()
+    vi.mocked(client.GET).mockImplementation(async (path: string, requestOptions?: unknown) => {
+      if (path === '/api/v1/met/stations/{station_id}/series') {
+        const stationId = (requestOptions as { params?: { path?: { station_id?: string } } })?.params?.path?.station_id ?? 'qhh_forc_001'
+        return { data: success(hydroMetStationSeriesResponse(stationId)), error: undefined } as never
+      }
+      return { data: success({}), error: undefined } as never
+    })
+    const baseResult = {
+      status: 'ready' as const,
+      source: 'GFS' as const,
+      cycle: null,
+      product: hydroMetLatestProduct(),
+      stations: hydroMetInteractiveStationPage.items,
+      riverSegments: hydroMetRiverSegments.features,
+      stationPage: hydroMetInteractiveStationPage,
+      riverSegmentCollection: hydroMetRiverSegments,
+      latestReasons: [],
+      stationError: null,
+      riverError: null,
+    }
+    const { rerender } = render(<ReadyHydroMetContent result={baseResult} product={baseResult.product} />)
+
+    expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_001')
+    await user.click(screen.getByRole('button', { name: '选择站点 qhh_forc_002' }))
+    expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_002')
+
+    const nextStationPage = {
+      ...hydroMetInteractiveStationPage,
+      items: hydroMetInteractiveStationPage.items.filter((station) => station.station_id !== 'qhh_forc_002'),
+      total_count: hydroMetInteractiveStationPage.total_count - 1,
+    }
+    rerender(
+      <ReadyHydroMetContent
+        result={{
+          ...baseResult,
+          stations: nextStationPage.items,
+          stationPage: nextStationPage,
+        }}
+        product={baseResult.product}
+      />,
+    )
+
+    const unavailable = await screen.findByTestId('hydro-met-station-series-unavailable')
+    expect(unavailable).toHaveTextContent('选中站点不在 inventory 中')
+    expect(unavailable).toHaveTextContent('已停止 station-series 请求')
+    expect(screen.queryByTestId('hydro-met-station-series-panel')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('mock-echarts-option')).not.toBeInTheDocument()
+    const stationSeriesStationIds = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => path === '/api/v1/met/stations/{station_id}/series')
+      .map(([, options]) => (options as { params?: { path?: { station_id?: string } } })?.params?.path?.station_id)
+    expect(stationSeriesStationIds).toEqual(['qhh_forc_001', 'qhh_forc_002'])
+  })
+
   it('renders six station forcing charts with metadata, QC, truncation, missing variable, and missing unit states', async () => {
     const response = hydroMetStationSeriesResponse('qhh_forc_001')
     response.series = response.series
@@ -1607,6 +1668,38 @@ describe('App route state', () => {
     expect(screen.getByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('TEMP.source_id=IFS')
     expect(screen.getByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('TEMP.cycle_time=2026-05-21T12:00:00.000Z')
     expect(screen.queryByTestId('hydro-met-variable-PRCP-chart')).not.toBeInTheDocument()
+  })
+
+  it('bounds overlong station-series API and envelope errors before status rendering', async () => {
+    const attackToken = `station-series-error-${'x'.repeat(512)}-end`
+    const scenarios = [
+      () => mockHydroMetRouteClient({ stationSeriesError: `station-series upstream ${attackToken}` }),
+      () => mockHydroMetRouteClient({
+        stationSeriesData: {
+          status: 'error',
+          error: { message: `station-series envelope ${attackToken}` },
+        },
+      }),
+      () => mockHydroMetRouteClient({ stationSeriesThrow: `station-series thrown ${attackToken}` }),
+    ]
+
+    for (const [index, setup] of scenarios.entries()) {
+      if (index > 0) {
+        cleanup()
+        vi.clearAllMocks()
+      }
+      setup()
+      window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+      render(<App />)
+
+      const error = await screen.findByTestId('hydro-met-station-series-error')
+      expect(error).toHaveTextContent('station-series')
+      expect(error).toHaveTextContent('过长内容已截断')
+      expect((error.textContent ?? '').length).toBeLessThan(260)
+      expect(document.body.textContent ?? '').not.toContain(attackToken)
+      expect(screen.queryByTestId('mock-echarts-option')).not.toBeInTheDocument()
+    }
   })
 
   it('prevents stale station-series responses from overwriting the current selected station chart', async () => {

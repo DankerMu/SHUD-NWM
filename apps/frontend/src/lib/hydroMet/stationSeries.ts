@@ -10,6 +10,8 @@ export const HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT = 96
 export const HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT = 180
 
 const HYDRO_MET_STATION_SERIES_TRUNCATION_MARKER = '...'
+const HYDRO_MET_STATION_SERIES_MESSAGE_TOKEN_LIMIT = 72
+const HYDRO_MET_STATION_SERIES_OVERSIZED_TOKEN = '过长内容已截断'
 
 export type HydroMetStationSeriesVariable = (typeof HYDRO_MET_STATION_VARIABLES)[number]
 export type HydroMetStationSeriesResponse = components['schemas']['StationSeriesResponse']
@@ -69,6 +71,23 @@ export function formatHydroMetStationSeriesUiString(
   return `${normalized.slice(0, limit - HYDRO_MET_STATION_SERIES_TRUNCATION_MARKER.length)}${HYDRO_MET_STATION_SERIES_TRUNCATION_MARKER}`
 }
 
+function capHydroMetStationSeriesMessageTokens(value: string) {
+  return value.replace(/\S+/g, (token) => {
+    if (token.length <= HYDRO_MET_STATION_SERIES_MESSAGE_TOKEN_LIMIT) return token
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) return token
+    const assignment = /^([^\s=]{1,48}=)/.exec(token)
+    return assignment ? `${assignment[1]}${HYDRO_MET_STATION_SERIES_OVERSIZED_TOKEN}` : HYDRO_MET_STATION_SERIES_OVERSIZED_TOKEN
+  })
+}
+
+export function formatHydroMetStationSeriesMessage(value: unknown, fallback = 'station-series 不可用') {
+  const message = sanitizeHydroMetMessage(getApiErrorMessage(value, fallback), fallback)
+  return formatHydroMetStationSeriesUiString(capHydroMetStationSeriesMessageTokens(message), {
+    limit: HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
+    fallback,
+  })
+}
+
 export function formatHydroMetStationSeriesContractValue(
   value: unknown,
   options: HydroMetStationSeriesUiStringOptions = {},
@@ -94,23 +113,27 @@ export async function loadHydroMetStationSeries({
   station,
   limit,
 }: HydroMetStationSeriesRequest): Promise<HydroMetStationSeriesResponse> {
-  const stationId = station.station_id
-  const boundedLimit = boundedHydroMetStationSeriesLimit(limit)
-  const { data, error } = await client.GET('/api/v1/met/stations/{station_id}/series', {
-    params: {
-      path: { station_id: stationId },
-      query: {
-        forcing_version_id: product.forcing_version_id,
-        variables: [...HYDRO_MET_STATION_VARIABLES],
-        limit: boundedLimit,
+  try {
+    const stationId = station.station_id
+    const boundedLimit = boundedHydroMetStationSeriesLimit(limit)
+    const { data, error } = await client.GET('/api/v1/met/stations/{station_id}/series', {
+      params: {
+        path: { station_id: stationId },
+        query: {
+          forcing_version_id: product.forcing_version_id,
+          variables: [...HYDRO_MET_STATION_VARIABLES],
+          limit: boundedLimit,
+        },
       },
-    },
-  })
+    })
 
-  if (error) throw new Error(sanitizeHydroMetMessage(getApiErrorMessage(error, 'station-series 不可用'), 'station-series 不可用'))
-  const response = unwrapApiData<HydroMetStationSeriesResponse>(data, 'station-series 不可用')
-  if (!isRecord(response) || !Array.isArray(response.series)) throw new Error('station-series 响应不完整')
-  return response
+    if (error) throw new Error(formatHydroMetStationSeriesMessage(error, 'station-series 不可用'))
+    const response = unwrapApiData<HydroMetStationSeriesResponse>(data, 'station-series 不可用')
+    if (!isRecord(response) || !Array.isArray(response.series)) throw new Error('station-series 响应不完整')
+    return response
+  } catch (error) {
+    throw new Error(formatHydroMetStationSeriesMessage(error, 'station-series 不可用'))
+  }
 }
 
 export function validateHydroMetStationSeriesIdentity(

@@ -20,6 +20,7 @@ import {
   HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
   HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT,
   HYDRO_MET_STATION_VARIABLES,
+  formatHydroMetStationSeriesMessage,
   formatHydroMetStationSeriesContractValue,
   formatHydroMetStationSeriesUiString,
   isHydroMetStationSeriesUiStringCapped,
@@ -112,7 +113,7 @@ export function HydroMetPage() {
         if (!cancelled) setLoadState({ kind: 'loaded', result })
       },
       (error) => {
-        if (!cancelled) setLoadState({ kind: 'error', message: error instanceof Error ? error.message : '水文气象启动失败' })
+        if (!cancelled) setLoadState({ kind: 'error', message: formatHydroMetStatusMessage(error, '水文气象启动失败') })
       },
     )
     return () => {
@@ -238,7 +239,7 @@ function HydroMetContent({ result }: { result: HydroMetBootstrapResult }) {
   return <ReadyHydroMetContent result={result} product={product} />
 }
 
-function ReadyHydroMetContent({ result, product }: { result: HydroMetBootstrapResult; product: QhhLatestProduct }) {
+export function ReadyHydroMetContent({ result, product }: { result: HydroMetBootstrapResult; product: QhhLatestProduct }) {
   const [stationQuery, setStationQuery] = useState('')
   const [selectedStationId, setSelectedStationId] = useState<string | null>(null)
   const [seriesState, setSeriesState] = useState<StationSeriesLoadState>({ kind: 'idle' })
@@ -277,7 +278,7 @@ function ReadyHydroMetContent({ result, product }: { result: HydroMetBootstrapRe
           setSeriesState({
             kind: 'error',
             requestKey,
-            message: error instanceof Error ? error.message : sanitizeHydroMetMessage(String(error), 'station-series 不可用'),
+            message: formatHydroMetStationSeriesMessage(error, 'station-series 不可用'),
           })
         }
       },
@@ -1270,7 +1271,7 @@ function StatusPanel({
     warning: 'border-warning/40 bg-warning/10 text-neutral-900',
     danger: 'border-danger/30 bg-danger/10 text-danger',
   }[tone]
-  const safeMessages = messages.map((message) => sanitizeHydroMetMessage(message))
+  const safeMessages = messages.map((message) => formatHydroMetStatusMessage(message))
 
   return (
     <section className={cn('rounded-md border p-4', toneClass)} role={tone === 'danger' ? 'alert' : 'status'} data-testid={testId}>
@@ -1290,6 +1291,10 @@ function StatusPanel({
       ) : null}
     </section>
   )
+}
+
+function formatHydroMetStatusMessage(value: unknown, fallback = '状态详情不可用') {
+  return formatHydroMetStationSeriesMessage(value, fallback)
 }
 
 function ControlField({ label, children }: { label: string; children: ReactNode }) {
