@@ -712,6 +712,26 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert "quality_flag" in schemas["StationSeriesPoint"]["properties"]
     assert "native_resolution" in schemas["StationSeries"]["properties"]
     assert "returned_points" in schemas["StationSeriesMetadata"]["properties"]
+    assert schemas["ErrorResponse"]["properties"]["error"]["properties"]["details"] == {
+        "oneOf": [
+            {"type": "object", "additionalProperties": True},
+            {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/ValidationErrorDetail"},
+            },
+            {"type": "null"},
+        ]
+    }
+    assert schemas["ValidationErrorDetail"] == {
+        "type": "object",
+        "required": ["field", "reason"],
+        "properties": {
+            "field": {"type": "string"},
+            "rejected_value": {"nullable": True},
+            "reason": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
 
     generated_types = (
         Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
@@ -732,6 +752,8 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert "StationSeriesPoint:" in generated_types
     assert "quality_flag: string | null;" in generated_types
     assert "native_resolution: string | null;" in generated_types
+    assert 'components["schemas"]["ValidationErrorDetail"][] | null;' in generated_types
+    assert "ValidationErrorDetail:" in generated_types
 
 
 def test_flood_product_quality_contract_is_in_static_openapi_and_types() -> None:

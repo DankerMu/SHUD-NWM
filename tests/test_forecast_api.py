@@ -1755,6 +1755,25 @@ async def test_met_station_series_fastapi_validation_uses_typed_error(
     assert fake_store.station_series_calls == []
 
 
+@pytest.mark.asyncio
+async def test_met_station_series_invalid_limit_returns_documented_validation_detail_array(
+    fake_store: FakeForecastStore,
+) -> None:
+    response = await _get("/api/v1/met/stations/qhh_stn_001/series?forcing_version_id=forc&limit=0")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["message"] == "Request validation failed."
+    details = body["error"]["details"]
+    assert isinstance(details, list)
+    assert details[0]["field"] == "query.limit"
+    assert details[0]["rejected_value"] == "0"
+    assert isinstance(details[0]["reason"], str)
+    assert fake_store.station_series_calls == []
+
+
 async def _get(path: str) -> Any:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

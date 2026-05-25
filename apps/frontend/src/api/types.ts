@@ -745,8 +745,15 @@ export interface components {
                 message: string;
                 details?: {
                     [key: string]: unknown;
-                } | null;
+                } | components["schemas"]["ValidationErrorDetail"][] | null;
             };
+        };
+        ValidationErrorDetail: {
+            field: string;
+            rejected_value?: unknown;
+            reason: string;
+        } & {
+            [key: string]: unknown;
         };
         Basin: {
             basin_id: string;

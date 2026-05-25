@@ -151,14 +151,11 @@ def test_station_series_runtime_openapi_matches_static_parameters_and_schema() -
         "to",
         "limit",
     }
-    assert {
-        _resolve_ref(parameter["$ref"], static_spec).get("name") if "$ref" in parameter else parameter.get("name")
-        for parameter in static_operation["parameters"]
-    } == expected_params
-    assert {
-        _resolve_ref(parameter["$ref"], fastapi_spec).get("name") if "$ref" in parameter else parameter.get("name")
-        for parameter in runtime_operation["parameters"]
-    } == expected_params
+    static_parameters = _operation_parameters_by_name(static_operation, static_spec)
+    runtime_parameters = _operation_parameters_by_name(runtime_operation, fastapi_spec)
+    assert set(static_parameters) == expected_params
+    assert set(runtime_parameters) == expected_params
+    assert runtime_parameters == static_parameters
 
     static_response = static_operation["responses"]["200"]["content"]["application/json"]["schema"]
     runtime_response = runtime_operation["responses"]["200"]["content"]["application/json"]["schema"]
@@ -167,21 +164,19 @@ def test_station_series_runtime_openapi_matches_static_parameters_and_schema() -
     assert runtime_operation["responses"]["5XX"] == static_operation["responses"]["5XX"]
     assert static_response["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/StationSeriesResponse"
 
-    for spec in (static_spec, fastapi_spec):
-        variables = _operation_parameter(spec, path, "get", "query", "variables")
-        assert _schema_accepts_string(variables["schema"])
-        assert _schema_accepts_array(variables["schema"])
-        for name in ("forcing_version_id", "model_id", "source_id"):
-            assert _schema_bound(_operation_parameter(spec, path, "get", "query", name)["schema"], "minLength") == 1
-        limit = _operation_parameter(spec, path, "get", "query", "limit")
-        assert _schema_bound(limit["schema"], "minimum") == 1
-        assert _schema_bound(limit["schema"], "maximum") == 10000
-        for name in ("cycle_time", "from", "to"):
-            assert _schema_accepts_datetime(_operation_parameter(spec, path, "get", "query", name)["schema"])
+    assert static_parameters["variables"]["schema"] == {
+        "oneOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}},
+        ]
+    }
+    assert static_parameters["limit"]["schema"] == {"type": "integer", "minimum": 1, "maximum": 10000}
+    assert static_parameters["cycle_time"]["schema"] == {"type": "string", "format": "date-time"}
 
     for schema_name in (
         "SuccessEnvelope",
         "ErrorResponse",
+        "ValidationErrorDetail",
         "StationSeriesPoint",
         "StationSeriesStation",
         "StationSeriesMetadata",
@@ -741,41 +736,19 @@ def _parameter_by_name(parameters: list[dict[str, Any]], spec: dict[str, Any], n
     raise AssertionError(f"parameter not found: {name}")
 
 
+def _operation_parameters_by_name(operation: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    for parameter in operation["parameters"]:
+        resolved = _resolve_ref(parameter["$ref"], spec) if "$ref" in parameter else parameter
+        parameters[resolved["name"]] = resolved
+    return parameters
+
+
 def _resolve_ref(ref: str, spec: dict[str, Any]) -> dict[str, Any]:
     node: Any = spec
     for part in ref.removeprefix("#/").split("/"):
         node = node[part]
     return node
-
-
-def _schema_options(schema: dict[str, Any]) -> list[dict[str, Any]]:
-    options = schema.get("oneOf") or schema.get("anyOf")
-    if isinstance(options, list):
-        return [option for option in options if isinstance(option, dict)]
-    return [schema]
-
-
-def _schema_accepts_array(schema: dict[str, Any]) -> bool:
-    return any(option.get("type") == "array" for option in _schema_options(schema))
-
-
-def _schema_accepts_string(schema: dict[str, Any]) -> bool:
-    return any(option.get("type") == "string" for option in _schema_options(schema))
-
-
-def _schema_accepts_datetime(schema: dict[str, Any]) -> bool:
-    return any(
-        option.get("type") == "string" and option.get("format") == "date-time"
-        for option in _schema_options(schema)
-    )
-
-
-def _schema_bound(schema: dict[str, Any], bound: str) -> int | None:
-    for option in _schema_options(schema):
-        if bound in option:
-            value = option[bound]
-            return int(value) if value is not None else None
-    return None
 
 
 def _operation_parameter(

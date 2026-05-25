@@ -1920,9 +1920,24 @@ components:
               type: string
               example: Requested resource was not found.
             details:
-              type: object
-              nullable: true
-              additionalProperties: true
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items:
+                    $ref: "#/components/schemas/ValidationErrorDetail"
+                - type: "null"
+    ValidationErrorDetail:
+      type: object
+      required: [field, reason]
+      properties:
+        field:
+          type: string
+        rejected_value:
+          nullable: true
+        reason:
+          type: string
+      additionalProperties: true
     Basin:
       type: object
       required: [basin_id, basin_name, created_at]

@@ -20,6 +20,7 @@ from apps.api.routes.hindcast import router as hindcast_router
 from apps.api.routes.models import router as models_router
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
+from packages.common.forecast_store import MAX_STATION_SERIES_LIMIT
 from services.slurm_gateway.routes import router as slurm_router
 from services.tiles.mvt import (
     DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
@@ -440,6 +441,7 @@ def _patch_station_series_openapi(schema: dict) -> None:
     schemas = components.setdefault("schemas", {})
     schemas["SuccessEnvelope"] = _success_envelope_schema()
     schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
     schemas["StationSeriesPoint"] = _station_series_point_schema()
     schemas["StationSeriesStation"] = _station_series_station_schema()
     schemas["StationSeriesMetadata"] = _station_series_metadata_schema()
@@ -457,6 +459,7 @@ def _patch_station_series_openapi(schema: dict) -> None:
         return
     operation["summary"] = "Get station forcing time series"
     operation["tags"] = ["met"]
+    operation["parameters"] = _station_series_parameters()
     operation["responses"] = {
         "200": {
             "description": "Station time series",
@@ -469,6 +472,76 @@ def _patch_station_series_openapi(schema: dict) -> None:
         "4XX": {"$ref": "#/components/responses/Error"},
         "5XX": {"$ref": "#/components/responses/Error"},
     }
+
+
+def _station_series_parameters() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "station_id",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string"},
+        },
+        {
+            "name": "forcing_version_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+        },
+        {
+            "name": "model_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+        },
+        {
+            "name": "source_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+        },
+        {
+            "name": "cycle_time",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "variables",
+            "in": "query",
+            "required": False,
+            "style": "form",
+            "explode": True,
+            "schema": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ]
+            },
+            "description": (
+                "Station forcing variables. Repeat the parameter or provide comma-separated values. "
+                "Allowed values are PRCP, TEMP, RH, wind, Rn, and Press."
+            ),
+        },
+        {
+            "name": "from",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "to",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "limit",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "integer", "minimum": 1, "maximum": MAX_STATION_SERIES_LIMIT},
+        },
+    ]
 
 
 def _operation_parameter(schema: dict, path: str, *, name: str, location: str) -> dict | None:
@@ -526,10 +599,36 @@ def _error_response_schema() -> dict:
                 "properties": {
                     "code": {"type": "string", "example": "NOT_FOUND"},
                     "message": {"type": "string", "example": "Requested resource was not found."},
-                    "details": {"type": "object", "nullable": True, "additionalProperties": True},
+                    "details": _error_details_schema(),
                 },
             },
         },
+    }
+
+
+def _error_details_schema() -> dict:
+    return {
+        "oneOf": [
+            {"type": "object", "additionalProperties": True},
+            {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/ValidationErrorDetail"},
+            },
+            {"type": "null"},
+        ]
+    }
+
+
+def _validation_error_detail_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["field", "reason"],
+        "properties": {
+            "field": {"type": "string"},
+            "rejected_value": {"nullable": True},
+            "reason": {"type": "string"},
+        },
+        "additionalProperties": True,
     }
 
 
