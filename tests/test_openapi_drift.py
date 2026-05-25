@@ -34,9 +34,6 @@ DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
         "GET",
         "/api/v1/basin-versions/{basin_version_id}/river-network-versions",
     ): "issue-123 future registry read surface; backing read store is out of scope",
-    ("GET", "/api/v1/met/stations/{station_id}/series"): (
-        "issue-123 future station time-series read; data-source migration is out of scope"
-    ),
     (
         "GET",
         "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png",
@@ -133,6 +130,46 @@ def test_forecast_series_river_network_query_parameter_matches_fastapi_openapi()
         assert param["required"] is True
         assert param["schema"]["type"] == "string"
         assert param["schema"]["minLength"] == 1
+
+
+def test_station_series_runtime_openapi_matches_static_parameters_and_schema() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/met/stations/{station_id}/series"
+
+    expected_params = {
+        "station_id",
+        "forcing_version_id",
+        "model_id",
+        "source_id",
+        "cycle_time",
+        "variables",
+        "from",
+        "to",
+        "limit",
+    }
+    assert {
+        _resolve_ref(parameter["$ref"], static_spec).get("name") if "$ref" in parameter else parameter.get("name")
+        for parameter in static_spec["paths"][path]["get"]["parameters"]
+    } == expected_params
+    assert {
+        _resolve_ref(parameter["$ref"], fastapi_spec).get("name") if "$ref" in parameter else parameter.get("name")
+        for parameter in fastapi_spec["paths"][path]["get"]["parameters"]
+    } == expected_params
+
+    static_response = static_spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert static_response["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/StationSeriesResponse"
+
+    for spec in (static_spec, fastapi_spec):
+        variables = _operation_parameter(spec, path, "get", "query", "variables")
+        assert _schema_accepts_string(variables["schema"])
+        assert _schema_accepts_array(variables["schema"])
+        limit = _operation_parameter(spec, path, "get", "query", "limit")
+        assert _schema_bound(limit["schema"], "minimum") == 1
+        assert _schema_bound(limit["schema"], "maximum") == 10000
+        for name in ("cycle_time", "from", "to"):
+            assert _schema_accepts_datetime(_operation_parameter(spec, path, "get", "query", name)["schema"])
 
 
 def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_openapi() -> None:
@@ -689,6 +726,36 @@ def _resolve_ref(ref: str, spec: dict[str, Any]) -> dict[str, Any]:
     for part in ref.removeprefix("#/").split("/"):
         node = node[part]
     return node
+
+
+def _schema_options(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    options = schema.get("oneOf") or schema.get("anyOf")
+    if isinstance(options, list):
+        return [option for option in options if isinstance(option, dict)]
+    return [schema]
+
+
+def _schema_accepts_array(schema: dict[str, Any]) -> bool:
+    return any(option.get("type") == "array" for option in _schema_options(schema))
+
+
+def _schema_accepts_string(schema: dict[str, Any]) -> bool:
+    return any(option.get("type") == "string" for option in _schema_options(schema))
+
+
+def _schema_accepts_datetime(schema: dict[str, Any]) -> bool:
+    return any(
+        option.get("type") == "string" and option.get("format") == "date-time"
+        for option in _schema_options(schema)
+    )
+
+
+def _schema_bound(schema: dict[str, Any], bound: str) -> int | None:
+    for option in _schema_options(schema):
+        if bound in option:
+            value = option[bound]
+            return int(value) if value is not None else None
+    return None
 
 
 def _operation_parameter(

@@ -936,6 +936,74 @@ export interface components {
             limit: number;
             offset: number;
         };
+        StationSeriesPoint: {
+            /** Format: date-time */
+            valid_time: string;
+            value: number;
+            quality_flag: string | null;
+            source_id?: string | null;
+        };
+        StationSeriesStation: {
+            station_id: string;
+            basin_version_id: string;
+            station_name?: string | null;
+            name?: string | null;
+            longitude?: number | null;
+            latitude?: number | null;
+            elevation_m?: number | null;
+            elevation?: number | null;
+            station_role?: string | null;
+            active_flag?: boolean | null;
+            properties_json?: {
+                [key: string]: unknown;
+            } | null;
+            /** Format: date-time */
+            created_at?: string | null;
+        };
+        StationSeriesMetadata: {
+            limit: number;
+            returned_points: number;
+            /** Format: date-time */
+            requested_from: string | null;
+            /** Format: date-time */
+            requested_to: string | null;
+            /** Format: date-time */
+            returned_from: string | null;
+            /** Format: date-time */
+            returned_to: string | null;
+            truncated: boolean;
+        };
+        StationSeries: {
+            /** @enum {string} */
+            variable: "PRCP" | "TEMP" | "RH" | "wind" | "Rn" | "Press";
+            unit: string | null;
+            native_resolution: string | null;
+            source_id?: string | null;
+            /** Format: date-time */
+            cycle_time?: string | null;
+            points: components["schemas"]["StationSeriesPoint"][];
+            truncated: boolean;
+            metadata: components["schemas"]["StationSeriesMetadata"];
+        };
+        StationSeriesResponse: {
+            station_id: string;
+            station: components["schemas"]["StationSeriesStation"];
+            forcing_version_id: string;
+            model_id?: string | null;
+            source_id: string;
+            /** Format: date-time */
+            cycle_time?: string | null;
+            /** Format: date-time */
+            valid_time_start?: string | null;
+            /** Format: date-time */
+            valid_time_end?: string | null;
+            limit: number;
+            /** Format: date-time */
+            requested_from?: string | null;
+            /** Format: date-time */
+            requested_to?: string | null;
+            series: components["schemas"]["StationSeries"][];
+        };
         DataSource: {
             source_id: string;
             source_name: string;
@@ -2067,8 +2135,14 @@ export interface operations {
         parameters: {
             query?: {
                 forcing_version_id?: string;
-                /** @description Comma-separated meteorological variables. */
-                variables?: string;
+                model_id?: string;
+                source_id?: string;
+                cycle_time?: string;
+                /** @description Station forcing variables. Repeat the parameter or provide comma-separated values. Allowed values are PRCP, TEMP, RH, wind, Rn, and Press. */
+                variables?: string | string[];
+                from?: string;
+                to?: string;
+                limit?: number;
             };
             header?: never;
             path: {
@@ -2085,7 +2159,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["TimeseriesResponse"];
+                        data: components["schemas"]["StationSeriesResponse"];
                     };
                 };
             };

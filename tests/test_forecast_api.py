@@ -25,6 +25,7 @@ class FakeForecastStore:
     def __init__(self) -> None:
         self.forecast_calls: list[dict[str, Any]] = []
         self.run_calls: list[dict[str, Any]] = []
+        self.station_series_calls: list[dict[str, Any]] = []
         issue_time = _dt("2026-05-07T00:00:00Z")
         self.response = {
             "segment_id": "seg_001",
@@ -72,6 +73,82 @@ class FakeForecastStore:
             "river_segment_id": "analysis_only",
             "variable": "discharge",
             "unit": "m3/s",
+        }
+        self.station_series_response = {
+            "station_id": "qhh_stn_001",
+            "station": {
+                "station_id": "qhh_stn_001",
+                "basin_version_id": "qhh_v2026",
+                "station_name": "QHH Station 001",
+                "name": "QHH Station 001",
+                "longitude": 101.0,
+                "latitude": 36.0,
+                "elevation_m": 3200.0,
+                "elevation": 3200.0,
+                "station_role": "forcing_proxy",
+                "active_flag": True,
+                "properties_json": {"source": "fixture"},
+            },
+            "forcing_version_id": "forc_qhh_gfs_2026050700",
+            "model_id": "qhh_shud_v1",
+            "source_id": "GFS",
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "valid_time_start": "2026-05-07T00:00:00Z",
+            "valid_time_end": "2026-05-14T00:00:00Z",
+            "limit": 2,
+            "requested_from": "2026-05-07T00:00:00Z",
+            "requested_to": "2026-05-07T03:00:00Z",
+            "series": [
+                {
+                    "variable": "PRCP",
+                    "unit": "mm/h",
+                    "native_resolution": "1h",
+                    "source_id": "GFS",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "points": [
+                        {
+                            "valid_time": "2026-05-07T00:00:00Z",
+                            "value": 1.0,
+                            "quality_flag": "ok",
+                            "source_id": "GFS",
+                        },
+                        {
+                            "valid_time": "2026-05-07T01:00:00Z",
+                            "value": 2.0,
+                            "quality_flag": "warn",
+                            "source_id": "GFS",
+                        },
+                    ],
+                    "truncated": True,
+                    "metadata": {
+                        "limit": 2,
+                        "returned_points": 2,
+                        "requested_from": "2026-05-07T00:00:00Z",
+                        "requested_to": "2026-05-07T03:00:00Z",
+                        "returned_from": "2026-05-07T00:00:00Z",
+                        "returned_to": "2026-05-07T01:00:00Z",
+                        "truncated": True,
+                    },
+                },
+                {
+                    "variable": "TEMP",
+                    "unit": "degC",
+                    "native_resolution": "1h",
+                    "source_id": "GFS",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "points": [],
+                    "truncated": False,
+                    "metadata": {
+                        "limit": 2,
+                        "returned_points": 0,
+                        "requested_from": "2026-05-07T00:00:00Z",
+                        "requested_to": "2026-05-07T03:00:00Z",
+                        "returned_from": None,
+                        "returned_to": None,
+                        "truncated": False,
+                    },
+                },
+            ],
         }
 
     def forecast_series(self, **kwargs: Any) -> dict[str, Any]:
@@ -145,6 +222,80 @@ class FakeForecastStore:
             "limit": kwargs["limit"],
             "offset": kwargs["offset"],
         }
+
+    def station_series(self, **kwargs: Any) -> dict[str, Any]:
+        self.station_series_calls.append(kwargs)
+        if kwargs["station_id"] == "missing":
+            raise ForecastStoreError(
+                status_code=404,
+                code="STATION_NOT_FOUND",
+                message="Station not found: missing",
+                details={"station_id": "missing"},
+            )
+        if kwargs.get("forcing_version_id") == "missing":
+            raise ForecastStoreError(
+                status_code=404,
+                code="FORCING_VERSION_NOT_FOUND",
+                message="Forcing version not found: missing",
+                details={"forcing_version_id": "missing"},
+            )
+        if kwargs.get("forcing_version_id") == "not_finalized":
+            raise ForecastStoreError(
+                status_code=409,
+                code="FORCING_VERSION_NOT_FINALIZED",
+                message="Forcing version is not finalized and cannot be used for station forcing reads.",
+                details={"forcing_version_id": "not_finalized", "checksum_state": "pending"},
+            )
+        if kwargs.get("forcing_version_id") == "station_absent":
+            raise ForecastStoreError(
+                status_code=404,
+                code="STATION_NOT_IN_FORCING_VERSION",
+                message="Station has no finalized forcing samples for the selected forcing version.",
+                details={"station_id": kwargs["station_id"], "forcing_version_id": "station_absent"},
+            )
+        if kwargs.get("forcing_version_id") and kwargs.get("source_id") == "IFS":
+            raise ForecastStoreError(
+                status_code=409,
+                code="FORCING_VERSION_FILTER_CONFLICT",
+                message="forcing_version_id conflicts with supplied model_id, source_id, or cycle_time.",
+                details={
+                    "forcing_version_id": kwargs["forcing_version_id"],
+                    "conflicts": [{"field": "source_id", "supplied": "ifs", "selected": "gfs"}],
+                },
+            )
+        if kwargs.get("model_id") == "ambiguous":
+            raise ForecastStoreError(
+                status_code=409,
+                code="FORCING_VERSION_AMBIGUOUS",
+                message="Multiple forcing versions match model_id, source_id, and cycle_time.",
+                details={"candidates": [{"forcing_version_id": "forc_a"}, {"forcing_version_id": "forc_b"}]},
+            )
+        if kwargs.get("variables") and "unknown" in ",".join(str(value) for value in kwargs["variables"]):
+            raise ForecastStoreError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Invalid station forcing variable.",
+                details={"field": "variables", "rejected_values": ["unknown"]},
+            )
+        if kwargs.get("from_time") and kwargs.get("to_time") and kwargs["from_time"] > kwargs["to_time"]:
+            raise ForecastStoreError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="from must be earlier than or equal to to.",
+                details={
+                    "from": kwargs["from_time"].isoformat().replace("+00:00", "Z"),
+                    "to": kwargs["to_time"].isoformat().replace("+00:00", "Z"),
+                },
+            )
+        response = dict(self.station_series_response)
+        if kwargs.get("model_id") and not kwargs.get("forcing_version_id"):
+            response["forcing_version_id"] = "forc_resolved_from_tuple"
+        if kwargs.get("variables") is None:
+            response["series"] = [
+                {"variable": variable, "unit": None, "native_resolution": None, "points": [], "truncated": False}
+                for variable in ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
+            ]
+        return response
 
 
 class InMemoryForecastSeriesStore(PsycopgForecastStore):
@@ -1407,6 +1558,153 @@ async def test_met_stations_requires_basin_or_model_filter(fake_store: FakeForec
     assert fake_store is not None
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "MISSING_REQUIRED_FILTER"
+
+
+@pytest.mark.asyncio
+async def test_met_station_series_explicit_forcing_version_uses_success_envelope_and_store_payload(
+    fake_store: FakeForecastStore,
+) -> None:
+    response = await _get(
+        "/api/v1/met/stations/qhh_stn_001/series"
+        "?forcing_version_id=forc_qhh_gfs_2026050700&variables=PRCP,TEMP"
+        "&from=2026-05-07T00:00:00Z&to=2026-05-07T03:00:00Z&limit=2"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["request_id"]
+    data = body["data"]
+    assert data["station_id"] == "qhh_stn_001"
+    assert data["station"]["longitude"] == 101.0
+    assert data["forcing_version_id"] == "forc_qhh_gfs_2026050700"
+    assert data["model_id"] == "qhh_shud_v1"
+    assert data["source_id"] == "GFS"
+    assert data["cycle_time"] == "2026-05-07T00:00:00Z"
+    assert data["limit"] == 2
+    series_by_variable = {series["variable"]: series for series in data["series"]}
+    assert list(series_by_variable) == ["PRCP", "TEMP"]
+    assert series_by_variable["PRCP"]["unit"] == "mm/h"
+    assert series_by_variable["PRCP"]["native_resolution"] == "1h"
+    assert series_by_variable["PRCP"]["truncated"] is True
+    assert series_by_variable["PRCP"]["metadata"] == {
+        "limit": 2,
+        "returned_points": 2,
+        "requested_from": "2026-05-07T00:00:00Z",
+        "requested_to": "2026-05-07T03:00:00Z",
+        "returned_from": "2026-05-07T00:00:00Z",
+        "returned_to": "2026-05-07T01:00:00Z",
+        "truncated": True,
+    }
+    assert series_by_variable["PRCP"]["points"][0] == {
+        "valid_time": "2026-05-07T00:00:00Z",
+        "value": 1.0,
+        "quality_flag": "ok",
+        "source_id": "GFS",
+    }
+    assert fake_store.station_series_calls[-1] == {
+        "station_id": "qhh_stn_001",
+        "forcing_version_id": "forc_qhh_gfs_2026050700",
+        "model_id": None,
+        "source_id": None,
+        "cycle_time": None,
+        "variables": ["PRCP,TEMP"],
+        "from_time": _dt("2026-05-07T00:00:00Z"),
+        "to_time": _dt("2026-05-07T03:00:00Z"),
+        "limit": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_met_station_series_tuple_resolution_and_repeated_variables_delegate_to_store(
+    fake_store: FakeForecastStore,
+) -> None:
+    response = await _get(
+        "/api/v1/met/stations/qhh_stn_001/series"
+        "?model_id=qhh_shud_v1&source_id=GFS&cycle_time=2026-05-07T00:00:00Z"
+        "&variables=PRCP&variables=TEMP"
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["forcing_version_id"] == "forc_resolved_from_tuple"
+    assert fake_store.station_series_calls[-1]["forcing_version_id"] is None
+    assert fake_store.station_series_calls[-1]["model_id"] == "qhh_shud_v1"
+    assert fake_store.station_series_calls[-1]["source_id"] == "GFS"
+    assert fake_store.station_series_calls[-1]["cycle_time"] == _dt("2026-05-07T00:00:00Z")
+    assert fake_store.station_series_calls[-1]["variables"] == ["PRCP", "TEMP"]
+
+
+@pytest.mark.asyncio
+async def test_met_station_series_without_variables_defaults_through_store(
+    fake_store: FakeForecastStore,
+) -> None:
+    response = await _get("/api/v1/met/stations/qhh_stn_001/series?forcing_version_id=forc_qhh_gfs_2026050700")
+
+    assert response.status_code == 200
+    assert fake_store.station_series_calls[-1]["variables"] is None
+    assert [series["variable"] for series in response.json()["data"]["series"]] == [
+        "PRCP",
+        "TEMP",
+        "RH",
+        "wind",
+        "Rn",
+        "Press",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected_status", "expected_code"),
+    [
+        ("forcing_version_id=missing", 404, "FORCING_VERSION_NOT_FOUND"),
+        ("forcing_version_id=not_finalized", 409, "FORCING_VERSION_NOT_FINALIZED"),
+        ("forcing_version_id=station_absent", 404, "STATION_NOT_IN_FORCING_VERSION"),
+        ("forcing_version_id=forc_qhh_gfs_2026050700&source_id=IFS", 409, "FORCING_VERSION_FILTER_CONFLICT"),
+        ("model_id=ambiguous&source_id=GFS&cycle_time=2026-05-07T00:00:00Z", 409, "FORCING_VERSION_AMBIGUOUS"),
+        ("forcing_version_id=forc_qhh_gfs_2026050700&variables=unknown", 422, "VALIDATION_ERROR"),
+        (
+            "forcing_version_id=forc_qhh_gfs_2026050700&from=2026-05-08T00:00:00Z&to=2026-05-07T00:00:00Z",
+            422,
+            "VALIDATION_ERROR",
+        ),
+    ],
+)
+async def test_met_station_series_preserves_store_error_envelope(
+    fake_store: FakeForecastStore,
+    query: str,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    response = await _get(f"/api/v1/met/stations/qhh_stn_001/series?{query}")
+
+    assert response.status_code == expected_status
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["request_id"]
+    assert body["error"]["code"] == expected_code
+    assert body["error"]["details"] is not None
+
+
+@pytest.mark.asyncio
+async def test_met_station_series_missing_station_preserves_store_error(fake_store: FakeForecastStore) -> None:
+    response = await _get("/api/v1/met/stations/missing/series?forcing_version_id=forc_qhh_gfs_2026050700")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "STATION_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["limit=0", "limit=10001", "cycle_time=not-a-time"])
+async def test_met_station_series_fastapi_validation_uses_typed_error(
+    fake_store: FakeForecastStore,
+    query: str,
+) -> None:
+    response = await _get(f"/api/v1/met/stations/qhh_stn_001/series?forcing_version_id=forc&{query}")
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert fake_store.station_series_calls == []
 
 
 async def _get(path: str) -> Any:
