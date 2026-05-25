@@ -120,8 +120,8 @@ Risk packs considered:
 - Documentation / migration notes: selected - tests/evidence must record that forcing writes are existing and not rebuilt.
 
 Required evidence:
-- Store tests: explicit forcing version, model/source/cycle resolution, variable filtering, time filtering, limit/truncated, missing station, missing forcing version, invalid variable/limit/time range, unit/native_resolution/quality_flag preservation.
-- Readiness tests/evidence: selected QHH-like forcing version reports station count, six-variable coverage, missing-data reasons, and query/index outcome without requiring live QHH data in fast CI.
+- Store tests: explicit forcing version, model/source/cycle resolution, redundant-filter conflict, finalized-checksum gate, station membership, forcing-window filtering, variable filtering, time filtering, limit/truncated, missing station, missing forcing version, invalid variable/limit/time range, unit/native_resolution/quality_flag preservation.
+- Readiness tests/evidence: selected QHH-like forcing version reports declared/effective station count, six-variable coverage, missing-data reasons, missing unit and quality flags, forcing-window filtering, and query/index outcome without requiring live QHH data in fast CI.
 - Regression command: `uv run pytest -q tests/test_forecast_api.py tests/test_migrations.py` plus any new focused tests.
 - Validation command: `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`.
 
@@ -135,15 +135,17 @@ Surfaces:
 - Storage/cache/query: SQL in `packages/common/forecast_store.py`; optional additive index migration if proven required.
 - Public routes/entrypoints: none in #204; #205 will expose the HTTP route.
 - Frontend/downstream consumers: unchanged in #204; future #205/#208 consume the store contract.
-- Failure paths/rollback/stale state: missing station, missing forcing version, ambiguous model/source/cycle, empty filtered range, over-limit results, missing unit/quality flag evidence.
+- Failure paths/rollback/stale state: missing station, missing forcing version, not-finalized forcing version, redundant filter conflict, station absent from selected forcing version, ambiguous model/source/cycle, empty filtered range, over-limit results, missing unit/quality flag evidence.
 - Evidence/audit/readiness: focused tests or deterministic readiness helper output; no final production readiness claim.
 Regression rows:
 - explicit valid `forcing_version_id + station_id + variables + time range` -> grouped series from only that forcing version with units, quality flags, native resolution, returned range, and truncation metadata.
 - valid `model_id + source_id + cycle_time + station_id` -> same resolved forcing version as explicit query; no ad hoc ID guessing in callers.
-- `model_id + source_id + cycle_time` resolves to multiple forcing versions or inconsistent identities -> stable ambiguous/unavailable failure with details, not silent arbitrary selection.
-- missing station or forcing version -> stable not-found/unavailable result at store boundary, not a misleading empty success.
+- explicit `forcing_version_id` with conflicting supplied `model_id`, `source_id`, or `cycle_time` -> stable conflict, not silent precedence.
+- `model_id + source_id + cycle_time` resolves to multiple forcing versions or inconsistent identities -> bounded stable ambiguous/unavailable failure with details, not silent arbitrary selection or unbounded candidate materialization.
+- missing station, missing forcing version, not-finalized forcing version, or station absent from selected forcing version -> stable not-found/unavailable result at store boundary, not a misleading empty success.
+- out-of-window samples for the selected forcing version -> excluded from station-series points, truncation, and readiness counts.
 - over-limit query -> deterministic truncation per variable without unbounded row materialization.
-- QHH-like readiness fixture -> expected/actual station counts, six-variable coverage, missing unit, missing quality flag, missing-data reasons, and query/index outcome are reported without re-running forcing producer.
+- QHH-like readiness fixture -> effective expected station count falls back to declared `forcing_version.station_count`, six-variable coverage, missing unit, missing quality flag, missing-data reasons, and query/index outcome are reported without re-running forcing producer.
 - existing `forecast_series` and `list_met_stations` tests -> unchanged behavior.
 
 Boundary-surface checklist:
