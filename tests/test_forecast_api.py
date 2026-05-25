@@ -1654,6 +1654,54 @@ async def test_met_station_series_without_variables_defaults_through_store(
 
 
 @pytest.mark.asyncio
+async def test_met_station_series_empty_valid_filtered_range_returns_no_synthetic_points(
+    fake_store: FakeForecastStore,
+) -> None:
+    fake_store.station_series_response["requested_from"] = "2026-05-15T00:00:00Z"
+    fake_store.station_series_response["requested_to"] = "2026-05-15T01:00:00Z"
+    fake_store.station_series_response["series"] = [
+        {
+            "variable": "PRCP",
+            "unit": "mm/h",
+            "native_resolution": "1h",
+            "source_id": "GFS",
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "points": [],
+            "truncated": False,
+            "metadata": {
+                "limit": 2,
+                "returned_points": 0,
+                "requested_from": "2026-05-15T00:00:00Z",
+                "requested_to": "2026-05-15T01:00:00Z",
+                "returned_from": None,
+                "returned_to": None,
+                "truncated": False,
+            },
+        }
+    ]
+
+    response = await _get(
+        "/api/v1/met/stations/qhh_stn_001/series"
+        "?forcing_version_id=forc_qhh_gfs_2026050700&variables=PRCP"
+        "&from=2026-05-15T00:00:00Z&to=2026-05-15T01:00:00Z&limit=2"
+    )
+
+    assert response.status_code == 200
+    series = response.json()["data"]["series"][0]
+    assert series["points"] == []
+    assert series["metadata"] == {
+        "limit": 2,
+        "returned_points": 0,
+        "requested_from": "2026-05-15T00:00:00Z",
+        "requested_to": "2026-05-15T01:00:00Z",
+        "returned_from": None,
+        "returned_to": None,
+        "truncated": False,
+    }
+    assert all("value" not in point for point in series["points"])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("query", "expected_status", "expected_code"),
     [

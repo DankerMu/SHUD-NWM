@@ -137,6 +137,8 @@ def test_station_series_runtime_openapi_matches_static_parameters_and_schema() -
     app.openapi_schema = None
     fastapi_spec: dict[str, Any] = app.openapi()
     path = "/api/v1/met/stations/{station_id}/series"
+    static_operation = static_spec["paths"][path]["get"]
+    runtime_operation = fastapi_spec["paths"][path]["get"]
 
     expected_params = {
         "station_id",
@@ -151,25 +153,43 @@ def test_station_series_runtime_openapi_matches_static_parameters_and_schema() -
     }
     assert {
         _resolve_ref(parameter["$ref"], static_spec).get("name") if "$ref" in parameter else parameter.get("name")
-        for parameter in static_spec["paths"][path]["get"]["parameters"]
+        for parameter in static_operation["parameters"]
     } == expected_params
     assert {
         _resolve_ref(parameter["$ref"], fastapi_spec).get("name") if "$ref" in parameter else parameter.get("name")
-        for parameter in fastapi_spec["paths"][path]["get"]["parameters"]
+        for parameter in runtime_operation["parameters"]
     } == expected_params
 
-    static_response = static_spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    static_response = static_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    runtime_response = runtime_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert runtime_response == static_response
+    assert runtime_operation["responses"]["4XX"] == static_operation["responses"]["4XX"]
+    assert runtime_operation["responses"]["5XX"] == static_operation["responses"]["5XX"]
     assert static_response["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/StationSeriesResponse"
 
     for spec in (static_spec, fastapi_spec):
         variables = _operation_parameter(spec, path, "get", "query", "variables")
         assert _schema_accepts_string(variables["schema"])
         assert _schema_accepts_array(variables["schema"])
+        for name in ("forcing_version_id", "model_id", "source_id"):
+            assert _schema_bound(_operation_parameter(spec, path, "get", "query", name)["schema"], "minLength") == 1
         limit = _operation_parameter(spec, path, "get", "query", "limit")
         assert _schema_bound(limit["schema"], "minimum") == 1
         assert _schema_bound(limit["schema"], "maximum") == 10000
         for name in ("cycle_time", "from", "to"):
             assert _schema_accepts_datetime(_operation_parameter(spec, path, "get", "query", name)["schema"])
+
+    for schema_name in (
+        "SuccessEnvelope",
+        "ErrorResponse",
+        "StationSeriesPoint",
+        "StationSeriesStation",
+        "StationSeriesMetadata",
+        "StationSeries",
+        "StationSeriesResponse",
+    ):
+        assert fastapi_spec["components"]["schemas"][schema_name] == static_spec["components"]["schemas"][schema_name]
+    assert fastapi_spec["components"]["responses"]["Error"] == static_spec["components"]["responses"]["Error"]
 
 
 def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_openapi() -> None:

@@ -689,6 +689,8 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
             {"type": "array", "items": {"type": "string"}},
         ]
     }
+    for name in ("forcing_version_id", "model_id", "source_id"):
+        assert parameters[name]["schema"] == {"type": "string", "minLength": 1}
     assert parameters["limit"]["schema"] == {
         "type": "integer",
         "minimum": 1,
