@@ -1324,6 +1324,95 @@ describe('App route state', () => {
     expect(screen.queryByTestId('hydro-met-variable-TEMP-truncated')).not.toBeInTheDocument()
   })
 
+  it('bounds overlong station-series chart strings before DOM and ECharts options', async () => {
+    const attackToken = `station-series-attacker-${'x'.repeat(512)}-end`
+    const response = hydroMetStationSeriesResponse('qhh_forc_001')
+    response.series = response.series.map((series: Record<string, unknown>) => {
+      if (series.variable === 'PRCP') {
+        return {
+          ...series,
+          points: [
+            hydroMetStationSeriesPoint(0, { quality_flag: attackToken }),
+            hydroMetStationSeriesPoint(1),
+          ],
+        }
+      }
+      if (series.variable === 'TEMP') return { ...series, unit: attackToken }
+      if (series.variable === 'RH') {
+        return {
+          ...series,
+          points: [
+            hydroMetStationSeriesPoint(0),
+            hydroMetStationSeriesPoint(1, { valid_time: attackToken }),
+          ],
+        }
+      }
+      return series
+    })
+    mockHydroMetRouteClient({ stationSeriesResponse: response })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-variable-PRCP-chart')).toBeInTheDocument()
+    expect(screen.getByTestId('hydro-met-variable-PRCP-qc')).toHaveTextContent('flag capped')
+    expect(screen.getByTestId('hydro-met-variable-TEMP-invalid')).toHaveTextContent('unit 过长')
+    expect(screen.getByTestId('hydro-met-variable-RH-invalid')).toHaveTextContent('valid_time=')
+    expect(document.body.textContent ?? '').not.toContain(attackToken)
+
+    const optionText = screen.getAllByTestId('mock-echarts-option').map((node) => node.textContent ?? '').join('\n')
+    expect(optionText).not.toContain(attackToken)
+    const prcpData = findHydroMetChartOption('PRCP')?.series?.[0]?.data
+    const firstPoint = Array.isArray(prcpData) ? prcpData[0] : null
+    expect(Array.isArray(firstPoint) ? firstPoint : []).toHaveLength(2)
+  })
+
+  it('bounds overlong station-series top-level metadata before rendering warnings and rows', async () => {
+    const attackToken = `station-series-metadata-${'y'.repeat(512)}-end`
+    const response = hydroMetStationSeriesResponse('qhh_forc_001', {
+      station_id: attackToken,
+      forcing_version_id: attackToken,
+      source_id: attackToken,
+      cycle_time: attackToken,
+      valid_time_start: attackToken,
+      valid_time_end: attackToken,
+    })
+    mockHydroMetRouteClient({ stationSeriesResponse: response })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    const warning = await screen.findByTestId('hydro-met-station-series-identity-warning')
+    expect(warning).toHaveTextContent('station_id=')
+    expect(warning).toHaveTextContent('forcing_version_id=')
+    expect(warning).toHaveTextContent('source_id=')
+    expect(warning).toHaveTextContent('cycle_time=')
+    expect(screen.getByTestId('hydro-met-station-series-loaded')).toHaveTextContent('invalid time')
+    expect(document.body.textContent ?? '').not.toContain(attackToken)
+    expect(screen.queryByTestId('hydro-met-variable-PRCP-chart')).not.toBeInTheDocument()
+  })
+
+  it('bounds overlong station-series contract warning scalars before rendering', async () => {
+    const attackToken = `station-series-contract-${'z'.repeat(512)}-end`
+    const response = hydroMetStationSeriesResponse('qhh_forc_001')
+    response.series = [
+      { ...response.series[0], source_id: attackToken, cycle_time: attackToken },
+      { variable: attackToken, points: [] },
+      ...response.series.slice(1),
+    ]
+    mockHydroMetRouteClient({ stationSeriesResponse: response })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    const warning = await screen.findByTestId('hydro-met-station-series-identity-warning')
+    expect(warning).toHaveTextContent('PRCP.source_id=')
+    expect(warning).toHaveTextContent('PRCP.cycle_time=')
+    expect(warning).toHaveTextContent('variable=')
+    expect(document.body.textContent ?? '').not.toContain(attackToken)
+    expect(screen.queryByTestId('hydro-met-variable-PRCP-chart')).not.toBeInTheDocument()
+  })
+
   it('caps oversized station-series render data and exposes rendered count metadata', async () => {
     const response = hydroMetStationSeriesResponse('qhh_forc_001')
     const oversizedPoints = Array.from({ length: HYDRO_MET_STATION_SERIES_LIMIT + 7 }, (_, index) => hydroMetStationSeriesPoint(index))

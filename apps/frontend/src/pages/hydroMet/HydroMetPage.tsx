@@ -17,7 +17,12 @@ import {
 import { HYDRO_MET_COORDINATES_UNAVAILABLE, getHydroMetStationCoordinates, sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 import {
   HYDRO_MET_STATION_SERIES_LIMIT,
+  HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
+  HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT,
   HYDRO_MET_STATION_VARIABLES,
+  formatHydroMetStationSeriesContractValue,
+  formatHydroMetStationSeriesUiString,
+  isHydroMetStationSeriesUiStringCapped,
   loadHydroMetStationSeries,
   stationSeriesRequestKey,
   validateHydroMetStationSeriesIdentity,
@@ -80,6 +85,7 @@ const HYDRO_MET_STATION_SERIES_POINT_INSPECTION_LIMIT = HYDRO_MET_STATION_SERIES
 const HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT = 6
 const HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT = 6
 const HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT = 32
+const HYDRO_MET_STATION_SERIES_UNIT_LIMIT = 32
 const HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT = HYDRO_MET_STATION_VARIABLES.length * 2
 
 export function HydroMetPage() {
@@ -756,14 +762,14 @@ function validateHydroMetStationSeriesContract(
 
     const variable = series.variable
     if (!isHydroMetStationSeriesVariable(variable)) {
-      messages.push(`series[${index}] variable=${formatContractValue(variable)} 不属于 station-series MVP 变量`)
+      messages.push(`series[${index}] variable=${formatHydroMetStationSeriesContractValue(variable)} 不属于 station-series MVP 变量`)
       return
     }
     counts.set(variable, (counts.get(variable) ?? 0) + 1)
 
     const sourceId = series.source_id
     if (typeof sourceId === 'string' && sourceId !== product.source_id) {
-      messages.push(`${variable}.source_id=${sourceId} 与 latest-product ${product.source_id} 不一致`)
+      messages.push(`${variable}.source_id=${formatHydroMetStationSeriesContractValue(sourceId)} 与 latest-product ${formatHydroMetStationSeriesContractValue(product.source_id)} 不一致`)
     } else if (sourceId !== undefined && sourceId !== null && typeof sourceId !== 'string') {
       messages.push(`${variable}.source_id 元数据格式无效`)
     }
@@ -775,11 +781,22 @@ function validateHydroMetStationSeriesContract(
       } else {
         const seriesCycle = normalizeHydroMetCycle(cycleTime)
         if (!seriesCycle) {
-          messages.push(`${variable}.cycle_time=${cycleTime} 不是有效 RFC3339 时间`)
+          messages.push(`${variable}.cycle_time=${formatHydroMetStationSeriesContractValue(cycleTime)} 不是有效 RFC3339 时间`)
         } else if (productCycle && seriesCycle !== productCycle) {
-          messages.push(`${variable}.cycle_time=${seriesCycle} 与 latest-product ${productCycle} 不一致`)
+          messages.push(`${variable}.cycle_time=${formatHydroMetStationSeriesContractValue(seriesCycle)} 与 latest-product ${formatHydroMetStationSeriesContractValue(productCycle)} 不一致`)
         }
       }
+    }
+  })
+
+  ;(['valid_time_start', 'valid_time_end'] as const).forEach((field) => {
+    if (!(field in response)) {
+      messages.push(`station-series ${field} 元数据缺失`)
+      return
+    }
+    const value = response[field]
+    if (typeof value !== 'string' || !normalizeHydroMetCycle(value)) {
+      messages.push(`station-series ${field}=${formatHydroMetStationSeriesContractValue(value)} 不是有效 RFC3339 时间`)
     }
   })
 
@@ -801,7 +818,11 @@ function validateHydroMetStationSeriesForChart(series: HydroMetStationSeriesReco
   if (unitValue === undefined || unitValue === null) {
     unit = null
   } else if (typeof unitValue === 'string') {
-    unit = unitValue
+    if (isHydroMetStationSeriesUiStringCapped(unitValue, { limit: HYDRO_MET_STATION_SERIES_UNIT_LIMIT, fallback: '' })) {
+      messages.push(`变量 ${series.variable} unit 过长，停止绘图`)
+    } else {
+      unit = formatHydroMetStationSeriesUiString(unitValue, { limit: HYDRO_MET_STATION_SERIES_UNIT_LIMIT, fallback: '' }) || null
+    }
   } else {
     messages.push(`变量 ${series.variable} unit 格式无效`)
   }
@@ -861,8 +882,8 @@ function validateHydroMetStationSeriesForChart(series: HydroMetStationSeriesReco
     ok: true,
     metadata,
     unit,
-    sourceId: typeof series.source_id === 'string' ? series.source_id : null,
-    cycleTime: typeof series.cycle_time === 'string' ? series.cycle_time : null,
+    sourceId: typeof series.source_id === 'string' ? formatHydroMetStationSeriesUiString(series.source_id) : null,
+    cycleTime: typeof series.cycle_time === 'string' ? normalizeHydroMetCycle(series.cycle_time) : null,
     seriesTruncated,
     reportedPointCount,
     inspectedPointCount,
@@ -907,10 +928,16 @@ function validateStationSeriesMetadata(metadata: Record<string, unknown>, variab
 }
 
 function capHydroMetStationSeriesMessages(messages: string[]) {
-  if (messages.length <= HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT) return messages
+  const safeMessages = messages.map((message) => (
+    formatHydroMetStationSeriesUiString(message, {
+      limit: HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
+      fallback: 'station-series contract 问题已截断',
+    })
+  ))
+  if (safeMessages.length <= HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT) return safeMessages
   return [
-    ...messages.slice(0, HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT),
-    `另有 ${messages.length - HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT} 条 station-series contract 问题已截断`,
+    ...safeMessages.slice(0, HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT),
+    `另有 ${safeMessages.length - HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT} 条 station-series contract 问题已截断`,
   ]
 }
 
@@ -935,20 +962,13 @@ function capInvalidPointMessages(
   return cappedMessages
 }
 
-function formatContractValue(value: unknown) {
-  if (value === null) return 'null'
-  if (value === undefined) return 'undefined'
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
-  return Array.isArray(value) ? 'array' : typeof value
-}
-
 function parseChartableStationSeriesPoint(point: unknown): ChartableStationSeriesPoint | string {
   if (!isRecord(point)) return '不是对象'
 
   const validTimeValue = point.valid_time
   if (typeof validTimeValue !== 'string') return '缺少有效 valid_time'
   const validTime = normalizeHydroMetCycle(validTimeValue)
-  if (!validTime) return `valid_time=${validTimeValue} 不是有效 RFC3339 时间`
+  if (!validTime) return `valid_time=${formatHydroMetStationSeriesContractValue(validTimeValue)} 不是有效 RFC3339 时间`
 
   const value = point.value
   if (typeof value !== 'number' || !Number.isFinite(value)) return 'value 不是有限数值'
@@ -961,14 +981,22 @@ function parseChartableStationSeriesPoint(point: unknown): ChartableStationSerie
   return {
     timestamp: Date.parse(validTime),
     value,
-    qualityFlag: qualityFlagValue ?? null,
+    qualityFlag: qualityFlagValue
+      ? formatHydroMetStationSeriesUiString(qualityFlagValue, {
+          limit: HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT,
+          fallback: 'missing',
+          oversizeReplacement: 'flag capped',
+        })
+      : null,
   }
 }
 
 function qualityFlagLabel(value: string) {
-  return value.length > HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT
-    ? `${value.slice(0, HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT)}...`
-    : value
+  return formatHydroMetStationSeriesUiString(value, {
+    limit: HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT,
+    fallback: 'missing',
+    oversizeReplacement: 'flag capped',
+  })
 }
 
 function qualityFlagSummary(
@@ -1017,20 +1045,20 @@ function StationSeriesCharts({
 }) {
   const seriesList = hydroMetStationSeriesItems(response)
   const responseRecord = isRecord(response) ? response : {}
-  const identityMessages = [
+  const identityMessages = capHydroMetStationSeriesMessages([
     ...validateHydroMetStationSeriesIdentity(response, product, stationId),
     ...validateHydroMetStationSeriesContract(response, product),
-  ]
+  ])
   const seriesByVariable = mapUniqueHydroMetStationSeries(seriesList)
 
   return (
     <div className="mt-3 space-y-3" data-testid="hydro-met-station-series-loaded">
       <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-        <MetaRow label="station" value={formatHydroMetScalar(responseRecord.station_id)} mono />
-        <MetaRow label="source" value={formatHydroMetScalar(responseRecord.source_id)} />
-        <MetaRow label="cycle" value={formatDateTime(responseRecord.cycle_time)} mono />
-        <MetaRow label="forcing_version" value={formatHydroMetScalar(responseRecord.forcing_version_id)} mono />
-        <MetaRow label="valid range" value={`${formatDateTime(responseRecord.valid_time_start)} - ${formatDateTime(responseRecord.valid_time_end)}`} mono />
+        <MetaRow label="station" value={formatStationSeriesScalar(responseRecord.station_id)} mono />
+        <MetaRow label="source" value={formatStationSeriesScalar(responseRecord.source_id)} />
+        <MetaRow label="cycle" value={formatStationSeriesDateTime(responseRecord.cycle_time)} mono />
+        <MetaRow label="forcing_version" value={formatStationSeriesScalar(responseRecord.forcing_version_id)} mono />
+        <MetaRow label="valid range" value={`${formatStationSeriesDateTime(responseRecord.valid_time_start)} - ${formatStationSeriesDateTime(responseRecord.valid_time_end)}`} mono />
       </dl>
 
       {identityMessages.length > 0 ? (
@@ -1183,7 +1211,7 @@ function StationSeriesChart({
           name: variable,
           showSymbol: points.length <= 48,
           symbolSize: 5,
-          data: points.map((point) => [point.timestamp, point.value, point.qualityFlag]),
+          data: points.map((point) => [point.timestamp, point.value]),
         },
       ],
     }),
@@ -1288,8 +1316,23 @@ function formatDateTime(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? value : date.toISOString()
 }
 
-function formatHydroMetScalar(value: unknown) {
-  return typeof value === 'string' && value ? value : '-'
+function formatStationSeriesScalar(value: unknown) {
+  if (typeof value !== 'string' || !value) return '-'
+  return formatHydroMetStationSeriesUiString(value, {
+    limit: HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT,
+    fallback: '-',
+  })
+}
+
+function formatStationSeriesDateTime(value: unknown) {
+  if (typeof value !== 'string' || !value) return '-'
+  const normalized = normalizeHydroMetCycle(value)
+  if (normalized) return normalized
+  return formatHydroMetStationSeriesUiString(value, {
+    limit: HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT,
+    fallback: 'invalid time',
+    oversizeReplacement: 'invalid time (capped)',
+  })
 }
 
 function formatCoordinate(value: number | undefined) {
