@@ -327,3 +327,86 @@ Non-goals:
 - Building `/hydro-met`, station charts, river charts, `/ops`, retry controls, or browser smoke.
 - Adding or changing forcing producer writes, SHUD runtime, parse behavior, scheduler state, or live QHH/IFS smoke.
 - Claiming nationwide readiness, water level `stage`, CLDAS, ERA5 near-real-time, final production readiness, or real flood-frequency readiness.
+
+## Issue #207 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM React frontend route, navigation, API bootstrap adapter, and frontend tests
+Repair intensity: medium
+
+Change surface:
+- `apps/frontend` route registration, app navigation, `/hydro-met` page shell, query-state handling, and bootstrap data adapter.
+- Frontend API client usage for latest-product, station inventory, and river segment list.
+- Frontend tests for route/nav, latest-product bootstrap, no-manual-ID behavior, loading/unavailable states, and existing route compatibility.
+
+Must preserve:
+- Existing `/meteorology`, `/forecast`, `/segments/:segmentId`, `/monitoring`, `/flood-alerts`, basin, overview, and system routes remain reachable and keep their current deep-link/query behavior.
+- Existing meteorology fixture UI remains available at `/meteorology`; #207 must not silently repurpose it into a fake live chart page.
+- Existing generated API types and response-envelope helpers remain the source of truth; #207 must not hand-roll backend response shapes when generated contracts exist.
+- #208 owns station forcing charts and #209 owns river `q_down` charts; #207 may show bootstrap inventory/list summaries and explicit placeholders but must not draw fake charts.
+
+Must add/change:
+- Add `/hydro-met` route or route alias and a visible MVP navigation entry for the hydrology/meteorology workflow.
+- Implement a bootstrap adapter that requests the latest QHH display product for `source=GFS|IFS`, then uses the returned `model_id`, `basin_version_id`, `river_network_version_id`, and `forcing_version_id` to request station inventory and QHH river segment candidates without user-entered IDs.
+- Preserve selected source/cycle query state where supported and reflect sanitized/corrected query state in the URL.
+- Render explicit loading, unavailable, incomplete-product, and partial-bootstrap states without substituting fake station/river data.
+- Use river discharge / river-segment flow wording for `q_down` scope and avoid water-level/stage language.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - #207 adds a public frontend route and visible navigation entry.
+- Config / project setup: not selected - no new build tool, env var, or deployment flag expected.
+- File IO / path safety / overwrite: not selected - frontend route performs network reads only and writes no files at runtime.
+- Schema / columns / units / field names: selected - the bootstrap adapter consumes generated API response fields for latest product, stations, river segments, source/cycle, and version IDs.
+- Geospatial / CRS / shapefile sidecars: selected - the page may render or list station/river geographic candidates, but it must treat backend geometry/coordinates as display data and not reinterpret CRS.
+- Time series / forcing / temporal boundaries: selected - source/cycle/latest-product horizon metadata must be preserved for downstream chart issues and shorter IFS horizons must be visible as metadata, not padded.
+- Numerical stability / conservation / NaN: not selected - #207 does not render numeric station/river series values.
+- Solver runtime / performance / threading: not selected - no SHUD runtime behavior.
+- Resource limits / large input / discovery: selected - station and river candidate loading must be bounded/paginated or explicitly capped, and unavailable/partial states must not trigger unbounded client fetch loops.
+- Legacy compatibility / examples: selected - existing frontend routes, nav tests, meteorology page, forecast page, monitoring RBAC, and generated type consumers must remain compatible.
+- Error handling / rollback / partial outputs: selected - latest-product unavailable, station inventory failure, river segment failure, and partial bootstrap must render typed states without fake data.
+- Release / packaging / dependency compatibility: selected - frontend tests/build must pass without adding dependencies unless justified.
+- Documentation / migration notes: selected - UI labels and test evidence must keep #207 within route/bootstrap scope and not claim station/river chart completion.
+
+Required evidence:
+- Route/nav tests: `/hydro-met` is reachable, visible in navigation, and existing `/meteorology`, `/forecast`, `/segments/:segmentId`, and `/monitoring` routes remain available.
+- Bootstrap adapter tests: selected source defaults to `GFS` or preserved `source=IFS`; latest-product is requested; returned IDs are used for station inventory and river segment list calls; no user-entered IDs are required.
+- Query-state tests: supported `source` and `cycle` query values are preserved or normalized; unsupported source/cycle values render validation/unavailable state without backend calls that mix products.
+- Loading/incomplete tests: initial bootstrap renders a loading state, and latest-product unavailable or identity-incomplete responses render explicit incomplete-product state without unsafe station/river follow-up calls.
+- Unavailable/partial tests: no usable latest product, station inventory failure, river segment failure, empty station list, and empty river list render explicit states and do not draw charts or fixture curves.
+- Scope/wording tests: MVP-facing labels use hydrology/meteorology, station inventory, river segment flow/discharge, and bootstrap wording; no water-level/stage wording for `q_down`.
+- Compatibility evidence: existing frontend route/store tests remain green; frontend type check and build/test commands pass.
+- Regression commands: `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm build`, `cd apps/frontend && corepack pnpm check:api-types`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: `/hydro-met` bootstrap must derive every displayed QHH source/cycle/version/station/river candidate identity from the latest-product API response and subsequent API-backed inventory/list calls, without requiring manual IDs, mixing products across source/cycle, breaking existing routes, or rendering fake chart data.
+Source-of-truth identity/contract: generated API types for `GET /api/v1/mvp/qhh/latest-product`, `GET /api/v1/met/stations`, and `GET /api/v1/basin-versions/{basin_version_id}/river-segments`, plus URL query state for `source` and optional `cycle`.
+Surfaces:
+- Producers: #206 latest-product API, #205 station inventory/series APIs, existing river segment API; unchanged in #207.
+- Validators/preflight: frontend source/cycle query parser, response-envelope guards, bootstrap adapter identity checks, and empty/unavailable state builders.
+- Storage/cache/query: frontend request/cache state only; no persistent browser storage required.
+- Public routes/entrypoints: `/hydro-met` route/nav entry; existing routes remain unchanged.
+- Frontend/downstream consumers: #208 station chart issue and #209 river chart issue consume the bootstrap adapter/page shell; existing meteorology/forecast/segment/monitoring routes remain sibling consumers.
+- Failure paths/rollback/stale state: latest-product unavailable, stale URL source/cycle, station request failure, river request failure, partial results, empty results, component unmount/reload; no rollback.
+- Evidence/audit/readiness: frontend unit/component tests, route tests, optional browser smoke in #214; #207 does not claim live smoke.
+Regression rows:
+- `/hydro-met` with no query -> requests latest QHH product for default source, uses returned IDs for inventory/list calls, and renders source/cycle/version summaries plus station/river candidate counts.
+- `/hydro-met?source=IFS` -> requests IFS latest product and preserves source query state without falling back to GFS unless the latest-product API says unavailable.
+- `/hydro-met` latest-product unavailable -> renders explicit unavailable state with reason and no station/river fake data.
+- `/hydro-met` latest-product response is incomplete or lacks bootstrap-safe IDs -> renders explicit incomplete-product state, skips unsafe station/river calls, and does not synthesize data.
+- Latest-product success + station inventory failure -> renders product summary and station unavailable state while still showing river list result if available.
+- Latest-product success + river list failure -> renders product summary and river unavailable state while still showing station inventory result if available.
+- Empty station or river result -> renders empty state and does not synthesize rows.
+- Unsupported source or malformed cycle query -> corrected URL or validation state, no mixed-source/cycle bootstrap.
+- Existing `/meteorology`, `/forecast`, `/segments/:segmentId`, `/monitoring` deep links -> remain routable and tests still pass.
+- Navigation visible links -> include hydro-met MVP entry while respecting existing RBAC for monitoring/system links.
+
+Non-goals:
+- Rendering six-variable station forcing charts; #208 owns station chart UI and station series calls on selection.
+- Rendering river `q_down` forecast-series curves or IFS line padding labels; #209 owns river chart UI.
+- Adding ops route, log modal, retry controls, or RBAC changes.
+- Adding backend endpoints, changing latest-product semantics, or modifying station/river producer writes.
+- Claiming live QHH/IFS smoke or browser smoke completion.
+
+Issue ownership note:
+- `hydro-met-mvp-ui` is the full M21 capability spec. For #207 acceptance, only the Hydro-met MVP entry, latest-product bootstrap, route/nav compatibility, query-state, loading/unavailable/incomplete-product states, and no-fake-data shell apply. Station chart scenarios are #208, river chart scenarios are #209, and browser smoke is #214.

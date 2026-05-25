@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { forwardRef, useEffect, useImperativeHandle, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -479,6 +479,169 @@ function modelAssetRouteFixture(overrides: Partial<ModelAsset> = {}): ModelAsset
   }
 }
 
+function hydroMetLatestProduct(overrides: Record<string, unknown> = {}) {
+  return {
+    basin_id: 'basins_qhh',
+    model_id: 'basins_qhh_shud',
+    basin_version_id: 'basins_qhh_vbasins',
+    river_network_version_id: 'basins_qhh_rivnet_vbasins',
+    source_id: 'GFS',
+    cycle_time: '2026-05-21T00:00:00Z',
+    run_id: 'qhh_gfs_2026052100_smoke',
+    forcing_version_id: 'forc_gfs_2026052100_basins_qhh_shud',
+    station_count: 386,
+    expected_station_count: 386,
+    segment_count: 1633,
+    expected_segment_count: 1633,
+    status: 'ready',
+    run_status: 'frequency_done',
+    valid_time_start: '2026-05-21T00:00:00Z',
+    valid_time_end: '2026-05-28T00:00:00Z',
+    river_valid_time_start: '2026-05-21T00:00:00Z',
+    river_valid_time_end: '2026-05-28T00:00:00Z',
+    forcing_valid_time_start: '2026-05-21T00:00:00Z',
+    forcing_valid_time_end: '2026-05-28T00:00:00Z',
+    available_horizon_hours: 168,
+    expected_horizon_hours: 168,
+    shorter_horizon: false,
+    availability: {
+      ready: true,
+      unavailable_reasons: [],
+      quality_flags: [],
+      quality_notes: [],
+    },
+    quality: {
+      station_sample_count: 120,
+      river_sample_count: 360,
+      required_station_variables: ['PRCP', 'TEMP', 'RH', 'wind', 'Rn', 'Press'],
+      station_variable_coverage: [
+        {
+          variable: 'PRCP',
+          station_count: 386,
+          sample_count: 3860,
+          unit_count: 3860,
+          quality_flag_count: 3860,
+          missing_unit_samples: 0,
+          missing_quality_flag_samples: 0,
+          valid_time_start: '2026-05-21T00:00:00Z',
+          valid_time_end: '2026-05-28T00:00:00Z',
+        },
+      ],
+      candidate_limit: 20,
+      search_limit: 20,
+      context_limit: 20,
+      query_indexes: [],
+    },
+    ...overrides,
+  }
+}
+
+const hydroMetStationPage = {
+  items: [
+    {
+      station_id: 'qhh_forc_001',
+      basin_version_id: 'basins_qhh_vbasins',
+      station_name: 'QHH forcing 001',
+      geom: { type: 'Point', coordinates: [104.1, 31.2] },
+      elevation_m: 320,
+      station_role: 'forcing',
+      active_flag: true,
+      properties_json: null,
+      created_at: '2026-05-21T00:00:00Z',
+    },
+  ],
+  total_count: 386,
+  limit: 500,
+  offset: 0,
+}
+
+const hydroMetRuntimeStationPage = {
+  ...hydroMetStationPage,
+  items: [
+    {
+      station_id: 'qhh_forc_runtime_001',
+      basin_version_id: 'basins_qhh_vbasins',
+      station_name: 'QHH runtime station 001',
+      longitude: 104.25,
+      latitude: 31.5,
+      elevation_m: 320,
+      station_role: 'forcing',
+      active_flag: true,
+      properties_json: null,
+      created_at: '2026-05-21T00:00:00Z',
+    },
+    {
+      station_id: 'qhh_forc_no_coord',
+      basin_version_id: 'basins_qhh_vbasins',
+      station_name: 'QHH station without coordinates',
+      elevation_m: 318,
+      station_role: 'forcing',
+      active_flag: true,
+      properties_json: null,
+      created_at: '2026-05-21T00:00:00Z',
+    },
+  ],
+}
+
+const unsafeHydroMetMessage =
+  'ERR_QHH failed opening s3://key:secret@bucket/private?token=abc#frag from file:///volume/data/nwm/Basins/qhh?sig=x#frag and /volume/data/nwm/Basins/qhh plus C:\\nwm\\Basins\\qhh'
+const unsafeHydroMetTokens = ['key:secret', 'token=abc', '#frag', 'file://', '/volume/data/nwm/Basins/qhh', 'C:\\nwm\\Basins\\qhh'] as const
+
+function expectNoUnsafeHydroMetText() {
+  const bodyText = document.body.textContent ?? ''
+  for (const token of unsafeHydroMetTokens) {
+    expect(bodyText).not.toContain(token)
+  }
+}
+
+const hydroMetRiverSegments = {
+  type: 'FeatureCollection',
+  features: [
+    {
+      type: 'Feature',
+      properties: {
+        segment_id: 'seg-001',
+        river_segment_id: 'seg-001',
+        basin_version_id: 'basins_qhh_vbasins',
+        river_network_version_id: 'basins_qhh_rivnet_vbasins',
+        name: 'QHH Segment 001',
+        stream_order: 3,
+        length_m: 1200,
+      },
+      geometry: { type: 'LineString', coordinates: [[104, 31], [105, 32]] },
+    },
+  ],
+  total: 1633,
+  feature_total: 1633,
+  limit: 250,
+  offset: 0,
+}
+
+function mockHydroMetRouteClient(options: {
+  product?: Record<string, unknown>
+  stationResponse?: unknown
+  stationError?: string
+  riverResponse?: unknown
+  riverError?: string
+} = {}) {
+  vi.mocked(client.GET).mockImplementation(async (path: string, requestOptions?: unknown) => {
+    if (path === '/api/v1/mvp/qhh/latest-product') {
+      const source = (requestOptions as { params?: { query?: { source?: string } } })?.params?.query?.source ?? 'GFS'
+      const sourceOverrides = source === 'IFS' ? { source_id: 'IFS', run_id: 'qhh_ifs_2026052100_smoke', forcing_version_id: 'forc_ifs_2026052100_basins_qhh_shud' } : {}
+      return { data: success(hydroMetLatestProduct({ ...sourceOverrides, ...options.product })), error: undefined } as never
+    }
+    if (path === '/api/v1/met/stations') {
+      if (options.stationError) return { data: undefined, error: { error: { message: options.stationError } } } as never
+      return { data: success(options.stationResponse ?? hydroMetStationPage), error: undefined } as never
+    }
+    if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') {
+      if (options.riverError) return { data: undefined, error: { error: { message: options.riverError } } } as never
+      return { data: success(options.riverResponse ?? hydroMetRiverSegments), error: undefined } as never
+    }
+    return { data: success({}), error: undefined } as never
+  })
+}
+
 const unsafeModelAssetError =
   'failed to inspect /volume/data/nwm/Basins/qhh and C:\\nwm\\Basins\\qhh from file:///volume/data/nwm/Basins/qhh?token=abc#frag via https://user:pass@assets.example.test/pkg?token=abc#frag'
 const unsafeModelAssetErrorTokens = [
@@ -806,6 +969,219 @@ describe('App route state', () => {
     expect(screen.getByLabelText('流域', { selector: 'select' })).toHaveValue('yangtze')
     expect(screen.getByTestId('station-inventory')).toHaveTextContent('HMT-Y2-0236')
     expect(screen.getByTestId('station-popup')).toHaveTextContent('HMT-Y2-0237')
+  })
+
+  it('routes /hydro-met with navigation and bootstraps station and river candidates from latest-product IDs', async () => {
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '水文气象展示' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /水文气象/ })).toHaveClass('border-accent')
+    expect(await screen.findByTestId('hydro-met-product-panel')).toHaveTextContent('qhh_gfs_2026052100_smoke')
+    expect(screen.getByTestId('hydro-met-product-panel')).toHaveTextContent('forc_gfs_2026052100_basins_qhh_shud')
+    expect(screen.getByTestId('hydro-met-station-list')).toHaveTextContent('qhh_forc_001')
+    expect(screen.getByTestId('hydro-met-river-list')).toHaveTextContent('seg-001')
+    expect(screen.getByTestId('hydro-met-no-fake-data')).toHaveTextContent('不绘制假曲线')
+    expect(screen.getByText(/站点 forcing 图表属于 #208/)).toBeInTheDocument()
+    expect(screen.getByText(/河段 q_down 流量图表属于 #209/)).toBeInTheDocument()
+
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
+      params: { query: { source: 'GFS' } },
+    })
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/met/stations', {
+      params: { query: { model_id: 'basins_qhh_shud', limit: 500, offset: 0 } },
+    })
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/basin-versions/{basin_version_id}/river-segments', {
+      params: {
+        path: { basin_version_id: 'basins_qhh_vbasins' },
+        query: { river_network_version_id: 'basins_qhh_rivnet_vbasins', limit: 250, offset: 0 },
+      },
+    })
+    expect(JSON.stringify(vi.mocked(client.GET).mock.calls)).not.toContain('manual')
+  })
+
+  it('shows /hydro-met loading state while bootstrap is pending', async () => {
+    vi.mocked(client.GET).mockImplementation((path: string) => {
+      if (path === '/api/v1/mvp/qhh/latest-product') return new Promise(() => undefined) as never
+      return Promise.resolve({ data: success({}), error: undefined }) as never
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-loading')).toHaveTextContent('正在加载 latest-product')
+  })
+
+  it('renders runtime-shaped /hydro-met station inventory and keeps river candidates visible', async () => {
+    mockHydroMetRouteClient({ stationResponse: hydroMetRuntimeStationPage })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    const stationList = await screen.findByTestId('hydro-met-station-list')
+    expect(stationList).toHaveTextContent('qhh_forc_runtime_001')
+    expect(stationList).toHaveTextContent('104.2500, 31.5000')
+    expect(stationList).toHaveTextContent('qhh_forc_no_coord')
+    expect(stationList).toHaveTextContent('坐标不可用')
+    expect(screen.getByTestId('hydro-met-river-list')).toHaveTextContent('seg-001')
+  })
+
+  it('redacts /hydro-met backend status and quality messages before rendering', async () => {
+    mockHydroMetRouteClient({
+      product: {
+        availability: {
+          ready: true,
+          unavailable_reasons: [],
+          quality_flags: [],
+          quality_notes: [{ code: 'QHH_SOURCE_WARNING', message: unsafeHydroMetMessage }],
+        },
+      },
+      stationError: unsafeHydroMetMessage,
+      riverError: unsafeHydroMetMessage,
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-quality-notes')).toHaveTextContent('QHH_SOURCE_WARNING')
+    expect(screen.getByTestId('hydro-met-quality-notes')).toHaveTextContent('ERR_QHH')
+    expect(screen.getByTestId('hydro-met-quality-notes')).toHaveTextContent('s3://bucket/private')
+    expect(screen.getByTestId('hydro-met-station-partial-failure')).toHaveTextContent('ERR_QHH')
+    expect(screen.getByTestId('hydro-met-river-partial-failure')).toHaveTextContent('ERR_QHH')
+    expectNoUnsafeHydroMetText()
+
+    cleanup()
+    vi.clearAllMocks()
+    mockHydroMetRouteClient({
+      product: {
+        status: 'unavailable',
+        availability: {
+          ready: false,
+          unavailable_reasons: [{ code: 'NO_READY_PRODUCT', message: unsafeHydroMetMessage }],
+          quality_flags: [],
+          quality_notes: [],
+        },
+      },
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-latest-unavailable')).toHaveTextContent('NO_READY_PRODUCT')
+    expect(screen.getByTestId('hydro-met-latest-unavailable')).toHaveTextContent('ERR_QHH')
+    expectNoUnsafeHydroMetText()
+  })
+
+  it('normalizes /hydro-met query state and preserves supported source and cycle values', async () => {
+    mockHydroMetRouteClient({
+      product: {
+        source_id: 'IFS',
+        cycle_time: '2026-05-21T00:00:00Z',
+        run_id: 'qhh_ifs_2026052100_smoke',
+        forcing_version_id: 'forc_ifs_2026052100_basins_qhh_shud',
+      },
+    })
+    window.history.pushState({}, '', '/hydro-met?source=ifs&cycle=2026-05-21T08:00:00%2B08:00')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '水文气象展示' })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.search).toBe('?source=IFS&cycle=2026-05-21T00%3A00%3A00.000Z'))
+    expect(await screen.findByTestId('hydro-met-product-panel')).toHaveTextContent('qhh_ifs_2026052100_smoke')
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
+      params: { query: { source: 'IFS' } },
+    })
+  })
+
+  it('corrects malformed /hydro-met source and cycle values before bootstrap', async () => {
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/hydro-met?source=ERA5&cycle=2026-02-30T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-query-validation')).toHaveTextContent('source=ERA5')
+    expect(screen.getByTestId('hydro-met-query-validation')).toHaveTextContent('cycle=2026-02-30T00:00:00Z')
+    await waitFor(() => expect(window.location.search).toBe('?source=GFS'))
+    expect(await screen.findByTestId('hydro-met-product-panel')).toBeInTheDocument()
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
+      params: { query: { source: 'GFS' } },
+    })
+  })
+
+  it('renders /hydro-met unavailable and incomplete latest-product states without downstream calls', async () => {
+    mockHydroMetRouteClient({
+      product: {
+        status: 'unavailable',
+        availability: {
+          ready: false,
+          unavailable_reasons: [{ code: 'NO_READY_PRODUCT', message: 'No usable QHH product' }],
+          quality_flags: [],
+          quality_notes: [],
+        },
+      },
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-latest-unavailable')).toHaveTextContent('NO_READY_PRODUCT')
+    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+
+    cleanup()
+    vi.clearAllMocks()
+    mockHydroMetRouteClient({
+      product: {
+        river_network_version_id: '',
+        segment_count: 0,
+      },
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-latest-incomplete')).toHaveTextContent('river_network_version_id 缺失')
+    expect(screen.getByTestId('hydro-met-latest-incomplete')).toHaveTextContent('segment_count 不可展示')
+    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+  })
+
+  it('renders /hydro-met partial failures and empty inventory states explicitly', async () => {
+    mockHydroMetRouteClient({
+      stationError: 'station inventory timeout',
+      riverError: 'river segment timeout',
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-station-partial-failure')).toHaveTextContent('station inventory timeout')
+    expect(screen.getByTestId('hydro-met-river-partial-failure')).toHaveTextContent('river segment timeout')
+    expect(screen.getByTestId('hydro-met-empty-stations')).toHaveTextContent('不会自动切换到其他产品')
+    expect(screen.getByTestId('hydro-met-empty-rivers')).toHaveTextContent('不会填充假河段')
+
+    cleanup()
+    vi.clearAllMocks()
+    mockHydroMetRouteClient({
+      stationResponse: { ...hydroMetStationPage, items: [], total_count: 0 },
+      riverResponse: { ...hydroMetRiverSegments, features: [], total: 0, feature_total: 0 },
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-empty-stations')).toHaveTextContent('站点列表为空')
+    expect(screen.getByTestId('hydro-met-empty-rivers')).toHaveTextContent('河段列表为空')
+  })
+
+  it('stops /hydro-met downstream bootstrap when URL cycle would mix products', async () => {
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/hydro-met?source=GFS&cycle=2026-05-20T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-cycle-unavailable')).toHaveTextContent('避免混用产品')
+    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
   it('renders overview shared controls and drives URL/query reload state', async () => {

@@ -7,6 +7,7 @@ import { type AuthRole, useAuthStore } from '@/stores/auth'
 
 const links = [
   { to: '/overview', label: '全国总览', icon: Map },
+  { to: '/hydro-met', label: '水文气象', icon: CloudRain },
   { to: '/meteorology', label: '气象数据', icon: CloudRain },
   { to: '/forecast', label: '水文预报', icon: Waves },
   { to: '/flood-alerts', label: '洪水预警', icon: Bell },
