@@ -1,138 +1,302 @@
-# 全国水文模拟系统
+# SHUD-NWM · 全国水文模拟系统
 
-> 多流域、多资料源、多模型版本的业务化水文模拟与预报平台
+> 基于 SHUD 的多流域、多资料源、多模型版本水文模拟、预报、展示与生产运维平台。
 
----
+SHUD-NWM（National Hydrological Modeling System, NHMS）把气象资料接入、标准化产品生产、SHUD 模型运行、结果解析、洪水频率/重现期计算、地图发布、前端展示和生产运维证据链串成一套可重复运行的工程系统。项目当前以 QHH/有限流域 MVP 和 production-like 验证闭环为主线推进，真实生产就绪仍以目标环境 live proof 为准。
+
+## 当前状态
+
+- 后端主入口为 `apps/api`，基于 FastAPI 提供模型资产、预报、历史分析、洪水预警、best-available、状态快照、流水线和 Slurm 网关等 API。
+- 前端主入口为 `apps/frontend`，基于 Vite、React、TypeScript、MapLibre、ECharts、Zustand 和 OpenAPI-generated types。
+- 业务链路已覆盖 GFS、IFS、ERA5 等资料适配，canonical 气象产品、forcing 生产、SHUD runtime、output parser、洪水频率计算、tile/产品发布和 pipeline 编排。
+- M10 production closure、M11 全国总览与流域钻取、M20 production scheduler automation 已形成 deterministic / production-like evidence lane。
+- MVP 最短路径聚焦 QHH/有限流域水文气象展示与运维监控：GFS 主源、IFS 并行源、河段流量 `q_down`、forcing 代站变量 `PRCP/TEMP/RH/wind/Rn/Press` 和 pipeline 运维闭环。
+- 默认 fast 验证不伪装最终生产就绪；live backend auth、live alert sink、live rollback、accepted live dependency proofs、真实对象存储与目标环境 Slurm/外部资料源证据仍是生产上线前边界。
+
+## 系统能力
+
+### 数据与模型链路
+
+1. **资料源接入**：GFS、IFS、ERA5 已有适配路径；CLDAS 等授权资料源按预留接口接入。
+2. **标准化产品**：把 raw met data 转换为统一时空语义下的 canonical product，并保留 source、cycle、valid time、scenario 和 lineage。
+3. **Forcing 生产**：面向 SHUD 站点/网格生成 `PRCP`、`TEMP`、`RH`、`wind`、`Rn`、`Press` 等 forcing timeseries。
+4. **模型资产管理**：支持 Basins discovery、package publication、registry import、model version lineage、active/inactive 生命周期和只读前端资产页。
+5. **运行编排**：`services/orchestrator` 与 `services/slurm_gateway` 负责任务计划、依赖链、Slurm job/array、retry、cancel、partial success 和 evidence。
+6. **结果产品**：支持 SHUD output parse、hydro/flood result 入库、洪水频率/重现期计算、tile/layer metadata 和 API/frontend 消费。
+7. **生产证据链**：`services/production_closure` 提供 Slurm、对象存储、气象/QC、staging E2E、全国规模性能、ops/security/readiness 等 opt-in validation lane。
+
+### 前端产品面
+
+当前有效前端在 `apps/frontend`：
+
+| 路由 | 用途 |
+|---|---|
+| `/`、`/overview` | 全国总览，流域/图层/source 控制、地图、运行态势、valid-time timeline |
+| `/basins/:basinId` | 流域钻取，河段列表、搜索/预警筛选、河网地图、segment handoff |
+| `/segments/:segmentId` | 河段预报详情，多源曲线、阈值、KPI、partial panels、时间线 |
+| `/forecast` | 预报河网地图与河段预报侧栏 |
+| `/flood-alerts` | 洪水预警统计、排名、地图、时间轴和详情 |
+| `/monitoring` | pipeline 运维监控、阶段、作业、队列、日志和趋势 |
+| `/meteorology` | 气象空间栅格与代站查询合同页，真实服务未全部生产化 |
+| `/system/model-assets` | 模型资产只读管理页，按角色 gate |
+
+## 技术栈
+
+| 层 | 主要技术 |
+|---|---|
+| API | Python 3.11+、FastAPI、Pydantic、SQLAlchemy、Alembic |
+| 数据库 | PostgreSQL、TimescaleDB、PostGIS |
+| 对象存储 | S3-compatible object store，开发环境使用 MinIO |
+| 计算调度 | Slurm、sbatch、sacct、job array |
+| 数据处理 | xarray、netCDF4、cfgrib、ecCodes、SciPy、pyproj、pyshp |
+| 前端 | Vite、React 18、TypeScript、MapLibre、ECharts、Zustand、Radix UI |
+| 测试与质量 | pytest、ruff、Vitest、Playwright、OpenAPI contract checks、OpenSpec |
 
 ## 目录结构
 
 ```text
 SHUD-NWM/
-├── README.md                      ← 本文件，项目入口
-│
-├── docs/                          ← 全部文档
-│   ├── spec/                      ← 核心设计规格（开发主入口）
-│   │   ├── README.md              ← Spec 导航与阅读顺序
-│   │   ├── 00_overall_design.md   ← 总体设计
-│   │   ├── 01_architecture_and_flow.md
-│   │   ├── 02_data_product_and_time_semantics.md
-│   │   ├── 03_database_design.md
-│   │   ├── 04_api_design.md
-│   │   ├── 05_slurm_hpc_design.md
-│   │   ├── 06_frontend_gis_design.md      ← 前端功能规格（859行）
-│   │   ├── 06B_frontend_ui_design_spec.md ← 前端 UI 设计规范（676行）
-│   │   ├── 07_devops_ops_security.md
-│   │   ├── 08_roadmap_acceptance.md
-│   │   └── 09_sources.md
-│   │
-│   ├── modules/                   ← 16 个模块的设计与开发规格
-│   │   ├── 00_module_index.md     ← 模块索引
-│   │   ├── 01 ~ 16 _design.md    ← 模块架构设计
-│   │   └── 01 ~ 16 _spec.md      ← 模块开发规格
-│   │
-│   ├── appendices/                ← 附录（命名规范、Schema、模板、清单）
-│   ├── report/                    ← 汇报材料（面向甲方）
-│   │   └── 建设汇报稿.md
-│   └── research/                  ← 调研与决策跟踪
-│       ├── 气象数据梳理与决策跟踪.md
-│       └── 数据下载账号与稳定性策略.md
-│
-└── design/                        ← 全部设计图
-    ├── architecture/              ← 架构与数据设计图
-    │   ├── 系统架构图.png
-    │   ├── 业务运转数据流转图.png
-    │   └── 数据关系图.png
-    └── ui/                        ← 前端效果图
-        └── 前端效果图1.png ~ 前端效果图8.png
+├── apps/
+│   ├── api/                         # FastAPI 后端
+│   └── frontend/                    # Vite React 前端
+├── db/
+│   ├── migrations/                  # 数据库迁移
+│   └── seeds/                       # 开发/演示数据
+├── design/                          # 架构图、数据流图、UI 效果图
+├── docs/
+│   ├── spec/                        # 总体设计、架构、API、DB、前端、运维等核心规格
+│   ├── modules/                     # 16 个模块的设计与开发规格
+│   ├── appendices/                  # Schema、OpenAPI 草案、sbatch 模板、验收清单
+│   ├── plans/                       # MVP / release plan
+│   ├── research/                    # 数据源调研与决策记录
+│   ├── report/                      # 汇报材料
+│   └── VALIDATION.md                # 验证矩阵
+├── infra/
+│   ├── docker-compose.dev.yml       # 本地 PostgreSQL/TimescaleDB/PostGIS + MinIO
+│   └── sbatch/                      # canonical Slurm 模板
+├── openapi/                         # OpenAPI 契约
+├── openspec/                        # 按里程碑/issue 管理的变更规格
+├── packages/common/                 # 通用状态、配置、迁移等基础能力
+├── scripts/                         # 诊断、复现、QHH chain 脚本
+├── services/
+│   ├── orchestrator/                # pipeline 编排
+│   ├── production_closure/          # production-like / opt-in 证据链
+│   ├── slurm_gateway/               # Slurm 网关
+│   ├── tile_publisher/              # 产品/瓦片发布
+│   └── tiles/                       # MVT / layer metadata 相关能力
+├── tests/                           # 后端、契约、生产证据与静态测试
+└── workers/
+    ├── data_adapters/               # GFS / ERA5 / IFS 等资料源适配
+    ├── canonical_converter/         # canonical met product
+    ├── forcing_producer/            # SHUD forcing
+    ├── shud_runtime/                # SHUD runtime adapter
+    ├── output_parser/               # SHUD 输出解析
+    ├── flood_frequency/             # 洪水频率与重现期
+    └── model_registry/              # 模型/Basins 资产注册
 ```
 
-## 快速导航
+## 快速开始
 
-| 我想…… | 看这里 |
+### 1. 准备环境
+
+推荐使用仓库托管虚拟环境和 `uv`：
+
+```bash
+uv sync --all-extras --dev
+```
+
+前端使用 Corepack + pnpm：
+
+```bash
+corepack prepare pnpm@10.11.0 --activate
+cd apps/frontend
+CI=true corepack pnpm install --frozen-lockfile
+```
+
+Linux/生产环境迁移时不要复用 macOS `.venv` 或 `node_modules`，应删除后重新安装。
+
+### 2. 配置环境变量
+
+```bash
+cp .env.example .env
+```
+
+开发默认配置包括：
+
+| 变量 | 默认/用途 |
 |---|---|
-| 快速了解系统全貌 | [`docs/report/建设汇报稿.md`](docs/report/建设汇报稿.md) |
-| 开始开发，了解架构 | [`docs/spec/README.md`](docs/spec/README.md) → 阅读顺序 |
-| 查看某个模块的开发规格 | [`docs/modules/00_module_index.md`](docs/modules/00_module_index.md) |
-| 查看数据库表定义 | [`docs/spec/03_database_design.md`](docs/spec/03_database_design.md) |
-| 查看 API 接口 | [`docs/spec/04_api_design.md`](docs/spec/04_api_design.md) |
-| 查看前端页面规格 | [`docs/spec/06_frontend_gis_design.md`](docs/spec/06_frontend_gis_design.md) |
-| 查看前端 UI 样式/组件/图表 | [`docs/spec/06B_frontend_ui_design_spec.md`](docs/spec/06B_frontend_ui_design_spec.md) |
-| 查看气象数据源详情 | [`docs/research/气象数据梳理与决策跟踪.md`](docs/research/气象数据梳理与决策跟踪.md) |
-| 查看开发路线图 | [`docs/spec/08_roadmap_acceptance.md`](docs/spec/08_roadmap_acceptance.md) |
-| 查看实施计划与阅读清单 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) |
-| 查看设计图 | [`design/`](design/) |
+| `DATABASE_URL` | `postgresql://nhms:nhms_dev@localhost:5432/nhms` |
+| `S3_ENDPOINT_URL` | 本地 MinIO API，默认 `http://localhost:9000` |
+| `S3_BUCKET_NAME` | 默认 `nhms` |
+| `OBJECT_STORE_PREFIX` | 对象存储 URI 前缀，默认 `s3://nhms` |
+| `OBJECT_STORE_ROOT` | 本地/生产对象存储根路径 |
+| `WORKSPACE_ROOT` | 本地或 HPC 工作目录 |
+| `SLURM_GATEWAY_BACKEND` | `mock` 或 `slurm` |
+| `SHUD_EXECUTABLE` | SHUD 可执行文件名或路径 |
+| `API_PORT` | FastAPI 端口，默认 `8000` |
 
-## Frontend Development
+### 3. 启动本地基础设施与 API
 
-Frontend source lives in `apps/frontend/` and uses Vite, React, TypeScript, Vitest, and Playwright.
+```bash
+make dev
+```
+
+`make dev` 会启动开发依赖并以 reload 模式运行 FastAPI。默认服务：
+
+| 服务 | 地址 |
+|---|---|
+| PostgreSQL / TimescaleDB / PostGIS | `localhost:5432` |
+| MinIO API | `localhost:9000` |
+| MinIO Console | `localhost:9001` |
+| FastAPI Swagger UI | `http://localhost:8000/docs` |
+
+常用数据库命令：
+
+```bash
+make migrate
+make seed-demo
+make reset-db
+```
+
+也可以手动启动 API：
+
+```bash
+uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 4. 启动前端
 
 ```bash
 cd apps/frontend
-pnpm install
-pnpm dev
+corepack pnpm dev
 ```
 
-Use `pnpm build` for the production bundle, `pnpm test` for unit tests, and `pnpm test:e2e` for Playwright E2E tests. The Vite dev server proxies `/api` and `/health` to `http://localhost:8000`; production builds are served by FastAPI from `apps/frontend/dist/`. The default frontend API base is empty (same-origin); set `VITE_API_BASE_URL` in `.env` only for cross-origin deployments.
-
-## Validation
-
-Fast backend checks do not require external services:
+开发环境下 Vite 会把 `/api` 和 `/health` 代理到 `http://localhost:8000`。生产构建由 FastAPI 服务 `apps/frontend/dist/`。
 
 ```bash
-uv run pytest -q
-uv run ruff check .
+cd apps/frontend
+corepack pnpm build
 ```
 
-Real PostgreSQL/PostGIS/TimescaleDB coverage is opt-in:
+## 常用验证命令
+
+### 后端 fast checks
+
+```bash
+uv run ruff check .
+uv run pytest -q
+```
+
+### 后端集成测试
+
+真实 PostgreSQL/PostGIS/TimescaleDB 集成测试为 opt-in：
 
 ```bash
 docker compose -f infra/docker-compose.dev.yml up -d db
-NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms uv run pytest -q -m integration
+
+NHMS_RUN_INTEGRATION=1 \
+NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms \
+uv run pytest -q -m integration
 ```
 
-See [`docs/VALIDATION.md`](docs/VALIDATION.md) for the full backend, integration, frontend, E2E, and OpenSpec matrix.
+### 前端测试
 
-## Runtime Source Layout
-
-Active source paths use the package names below:
-
-```text
-apps/api/                       FastAPI backend
-apps/frontend/                  Vite React frontend
-services/orchestrator/          pipeline orchestration
-services/slurm_gateway/         Slurm gateway
-workers/data_adapters/          GFS, ERA5, IFS adapters
-workers/canonical_converter/    canonical meteorological products
-workers/forcing_producer/       SHUD forcing production
-workers/shud_runtime/           SHUD execution adapter
-workers/output_parser/          SHUD output parsing
-workers/flood_frequency/        hindcast, frequency, return-period workers
-infra/sbatch/                   canonical real Slurm templates
+```bash
+cd apps/frontend
+corepack pnpm test
+corepack pnpm exec tsc --noEmit
+corepack pnpm run check:api-types
+corepack pnpm build
+corepack pnpm check:bundle
+corepack pnpm exec playwright test
+corepack pnpm run test:e2e:preview
 ```
 
-`workers/sbatch_templates/` and hyphenated placeholder directories are legacy/non-canonical unless their local README says otherwise. Durable artifacts use `OBJECT_STORE_ROOT` plus `OBJECT_STORE_PREFIX`; `WORKSPACE_ROOT` is reserved for local/HPC execution workspace files.
+### OpenSpec / 生产证据 lane
 
-## Milestones
+```bash
+openspec validate m10-production-closure --strict --no-interactive
+openspec validate m11-overview-basin-drilldown --strict --no-interactive
+openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive
+```
 
-| Milestone | Status | Evidence |
-|---|---|---|
-| M3 Slurm nationalization | Implemented | `openspec/changes/m3-slurm-nationalization/tasks.md` |
-| M4 IFS multi-source | Implemented | `openspec/changes/m4-ifs-multi-source/tasks.md` |
-| M5 flood frequency warning | Implemented | `openspec/changes/m5-flood-frequency-warning/tasks.md` |
-| M6 system hardening alignment | Completed | `openspec/changes/m6-system-hardening-alignment/tasks.md` |
+M20 scheduler dry-run evidence：
 
-## 设计图与文档对照
+```bash
+export DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
 
-| 设计图 | 对应规格文档 |
+uv run nhms-pipeline plan-production \
+  --dry-run \
+  --source gfs \
+  --source IFS \
+  --lookback-hours 24 \
+  --cycle-lag-hours 6 \
+  --max-cycles-per-source 1 \
+  --workspace-root .nhms-workspace
+```
+
+Production readiness 汇总 lane 示例：
+
+```bash
+NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
+  --evidence-root artifacts/production-closure \
+  --run-id local-scheduler-readiness \
+  --scheduler-evidence-root .nhms-workspace/scheduler/evidence \
+  --force
+```
+
+完整矩阵见 [`docs/VALIDATION.md`](docs/VALIDATION.md)。
+
+## CLI 入口
+
+`pyproject.toml` 暴露了以下常用命令：
+
+| 命令 | 用途 |
 |---|---|
-| [`architecture/系统架构图.png`](design/architecture/系统架构图.png) | `docs/spec/01` §1.1 六层→四平面映射 |
-| [`architecture/业务运转数据流转图.png`](design/architecture/业务运转数据流转图.png) | `docs/spec/01` §3 Forecast 流程 |
-| [`architecture/数据关系图.png`](design/architecture/数据关系图.png) | `docs/spec/03` 数据库设计 |
-| [`ui/前端效果图1.png`](design/ui/前端效果图1.png) | `docs/spec/06` §2 全国总览 |
-| [`ui/前端效果图2.png`](design/ui/前端效果图2.png) | `docs/spec/06` §7.2 流域详情 |
-| [`ui/前端效果图3.png`](design/ui/前端效果图3.png) | `docs/spec/06` §7.6 预报曲线详情 |
-| [`ui/前端效果图4.png`](design/ui/前端效果图4.png) | `docs/spec/06` §13 洪水预警 |
-| [`ui/前端效果图5.png`](design/ui/前端效果图5.png) | `docs/spec/06` §8B 气象空间展示 |
-| [`ui/前端效果图6.png`](design/ui/前端效果图6.png) | `docs/spec/06` §8 气象代站查询 |
-| [`ui/前端效果图7.png`](design/ui/前端效果图7.png) | `docs/spec/06` §14 资产管理 |
-| [`ui/前端效果图8.png`](design/ui/前端效果图8.png) | `docs/spec/06` §15 产品监控 |
+| `nhms-gfs` | GFS 资料适配 |
+| `nhms-era5` | ERA5 资料适配 |
+| `nhms-ifs` | IFS 资料适配 |
+| `nhms-canonical` | canonical met product 转换 |
+| `nhms-forcing` | SHUD forcing 生产 |
+| `nhms-model` | Basins / 模型资产 discovery、publish、registry import |
+| `nhms-shud-runtime` | SHUD runtime adapter |
+| `nhms-parse` | SHUD output parse |
+| `nhms-pipeline` | pipeline / production scheduler 编排 |
+| `nhms-production` | production closure / readiness 证据链 |
+| `nhms-state` | 状态管理工具 |
+| `nhms-flood` | hindcast、洪水频率、重现期相关工具 |
+
+## 数据与生产边界
+
+- `data/Basins` 在开发环境通常是指向真实 Basins 数据目录的软链接；生产迁移必须复制实际数据，不应只迁移 symlink。
+- production-like lanes 默认使用 deterministic / fake / fixture 证据，不能等价为最终生产就绪声明。
+- 真实生产上线前需要在目标环境补齐 live backend identity provider、live alert sink、live rollback、真实 Slurm/SHUD workload、真实对象存储、live GFS/IFS/ERA5 下载稳定性、CLDAS 授权接入、全国规模 PostGIS/MVT 压测等证据。
+- Canonical `.pbf` MVT 路径是 live-PostGIS-only；当 live PostGIS MVT 不可用时应显式返回不可用错误，不应伪造成功。
+
+## 文档导航
+
+| 我想了解 | 入口 |
+|---|---|
+| 系统总体设计 | [`docs/spec/00_overall_design.md`](docs/spec/00_overall_design.md) |
+| 架构与端到端流程 | [`docs/spec/01_architecture_and_flow.md`](docs/spec/01_architecture_and_flow.md) |
+| 数据产品与时间语义 | [`docs/spec/02_data_product_and_time_semantics.md`](docs/spec/02_data_product_and_time_semantics.md) |
+| 数据库设计 | [`docs/spec/03_database_design.md`](docs/spec/03_database_design.md) |
+| API 设计 | [`docs/spec/04_api_design.md`](docs/spec/04_api_design.md) |
+| Slurm / HPC 设计 | [`docs/spec/05_slurm_hpc_design.md`](docs/spec/05_slurm_hpc_design.md) |
+| 前端功能规格 | [`docs/spec/06_frontend_gis_design.md`](docs/spec/06_frontend_gis_design.md) |
+| 前端 UI 规范 | [`docs/spec/06B_frontend_ui_design_spec.md`](docs/spec/06B_frontend_ui_design_spec.md) |
+| 运维、安全、QC | [`docs/spec/07_devops_ops_security.md`](docs/spec/07_devops_ops_security.md) |
+| 路线图与验收 | [`docs/spec/08_roadmap_acceptance.md`](docs/spec/08_roadmap_acceptance.md) |
+| 模块索引 | [`docs/modules/00_module_index.md`](docs/modules/00_module_index.md) |
+| 验证矩阵 | [`docs/VALIDATION.md`](docs/VALIDATION.md) |
+| 当前进度 | [`progress.md`](progress.md) |
+| MVP 上线计划 | [`docs/plans/2026-05-25-mvp-launch-plan.md`](docs/plans/2026-05-25-mvp-launch-plan.md) |
+
+## 开发约定
+
+- Python 命令优先使用 `uv run ...`，不要直接依赖系统 Python。
+- 前端命令在 `apps/frontend/` 下通过 `corepack pnpm ...` 执行。
+- OpenAPI 合同变更后同步更新 `openapi/nhms.v1.yaml` 和前端 generated types。
+- 涉及生产状态、模型生命周期、对象存储、Slurm 和外部资料源的变更必须带 deterministic 测试或明确的 opt-in evidence lane。
+- 不要把 fast/deterministic evidence 写成最终生产证明；README、文档和 UI 状态都应保留 unavailable、restricted、not_executed、release_blocked 等边界表达。
+- 不要恢复已废弃的 legacy 路径；有效代码入口以本 README 的目录结构为准。
