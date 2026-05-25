@@ -62,7 +62,7 @@ export async function loadHydroMetStationSeries({
 
   if (error) throw new Error(sanitizeHydroMetMessage(getApiErrorMessage(error, 'station-series 不可用'), 'station-series 不可用'))
   const response = unwrapApiData<HydroMetStationSeriesResponse>(data, 'station-series 不可用')
-  if (!response || !Array.isArray(response.series)) throw new Error('station-series 响应不完整')
+  if (!isRecord(response) || !Array.isArray(response.series)) throw new Error('station-series 响应不完整')
   return response
 }
 
@@ -72,21 +72,40 @@ export function validateHydroMetStationSeriesIdentity(
   stationId: string,
 ) {
   const messages: string[] = []
-  if (response.station_id !== stationId) {
-    messages.push(`station_id=${response.station_id} 与当前选择 ${stationId} 不一致`)
+  const responseRecord = isRecord(response) ? response : {}
+  const responseStationId = responseRecord.station_id
+  const responseForcingVersionId = responseRecord.forcing_version_id
+  const responseSourceId = responseRecord.source_id
+  const responseCycleTime = responseRecord.cycle_time
+
+  if (typeof responseStationId !== 'string') {
+    messages.push('station_id 元数据格式无效')
+  } else if (responseStationId !== stationId) {
+    messages.push(`station_id=${responseStationId} 与当前选择 ${stationId} 不一致`)
   }
-  if (response.forcing_version_id !== product.forcing_version_id) {
-    messages.push(`forcing_version_id=${response.forcing_version_id} 与 latest-product ${product.forcing_version_id} 不一致`)
+  if (typeof responseForcingVersionId !== 'string') {
+    messages.push('forcing_version_id 元数据格式无效')
+  } else if (responseForcingVersionId !== product.forcing_version_id) {
+    messages.push(`forcing_version_id=${responseForcingVersionId} 与 latest-product ${product.forcing_version_id} 不一致`)
   }
-  if (response.source_id !== product.source_id) {
-    messages.push(`source_id=${response.source_id} 与 latest-product ${product.source_id} 不一致`)
+  if (typeof responseSourceId !== 'string') {
+    messages.push('source_id 元数据格式无效')
+  } else if (responseSourceId !== product.source_id) {
+    messages.push(`source_id=${responseSourceId} 与 latest-product ${product.source_id} 不一致`)
+  }
+  if (responseCycleTime !== undefined && responseCycleTime !== null && typeof responseCycleTime !== 'string') {
+    messages.push('cycle_time 元数据格式无效')
   }
 
-  const responseCycle = normalizeHydroMetCycle(response.cycle_time)
+  const responseCycle = typeof responseCycleTime === 'string' ? normalizeHydroMetCycle(responseCycleTime) : null
   const productCycle = normalizeHydroMetCycle(product.cycle_time)
   if (responseCycle && productCycle && responseCycle !== productCycle) {
     messages.push(`cycle_time=${responseCycle} 与 latest-product ${productCycle} 不一致`)
   }
 
   return messages
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

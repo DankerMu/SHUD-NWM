@@ -52,16 +52,35 @@ type ChartableStationSeriesPoint = {
   qualityFlag: string | null
 }
 
+type HydroMetStationSeriesRecord = Record<string, unknown> & {
+  variable: HydroMetStationSeriesVariable
+}
+
 type StationSeriesValidation =
   | {
       ok: true
       metadata: HydroMetStationSeries['metadata']
-      rawPoints: HydroMetStationSeries['points']
-      chartPointCount: number
+      unit: string | null
+      sourceId: string | null
+      cycleTime: string | null
+      seriesTruncated: boolean
+      reportedPointCount: number
+      inspectedPointCount: number
       renderedPoints: ChartableStationSeriesPoint[]
       capped: boolean
+      inspectionCapped: boolean
+      nonOkFlags: string[]
+      nonOkFlagsCapped: boolean
+      qualitySummary: string
     }
   | { ok: false; messages: string[] }
+
+const HYDRO_MET_STATION_SERIES_POINT_SENTINEL = 16
+const HYDRO_MET_STATION_SERIES_POINT_INSPECTION_LIMIT = HYDRO_MET_STATION_SERIES_LIMIT + HYDRO_MET_STATION_SERIES_POINT_SENTINEL
+const HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT = 6
+const HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT = 6
+const HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT = 32
+const HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT = HYDRO_MET_STATION_VARIABLES.length * 2
 
 export function HydroMetPage() {
   const location = useLocation()
@@ -689,13 +708,21 @@ function isHydroMetStationSeriesVariable(value: unknown): value is HydroMetStati
   return typeof value === 'string' && (HYDRO_MET_STATION_VARIABLES as readonly string[]).includes(value)
 }
 
-function mapUniqueHydroMetStationSeries(seriesList: HydroMetStationSeries[]) {
-  const seriesByVariable = new Map<HydroMetStationSeriesVariable, HydroMetStationSeries>()
-  seriesList.forEach((series) => {
-    const variable = (series as { variable?: unknown }).variable
-    if (isHydroMetStationSeriesVariable(variable) && !seriesByVariable.has(variable)) {
-      seriesByVariable.set(variable, series)
-    }
+function isHydroMetStationSeriesRecord(value: unknown): value is HydroMetStationSeriesRecord {
+  return isRecord(value) && isHydroMetStationSeriesVariable(value.variable)
+}
+
+function hydroMetStationSeriesItems(response: unknown) {
+  if (!isRecord(response)) return []
+  const series = response.series
+  return Array.isArray(series) ? series : []
+}
+
+function mapUniqueHydroMetStationSeries(seriesList: unknown[]) {
+  const seriesByVariable = new Map<HydroMetStationSeriesVariable, HydroMetStationSeriesRecord>()
+  seriesList.slice(0, HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT).forEach((series) => {
+    if (!isHydroMetStationSeriesRecord(series)) return
+    if (!seriesByVariable.has(series.variable)) seriesByVariable.set(series.variable, series)
   })
   return seriesByVariable
 }
@@ -707,23 +734,41 @@ function validateHydroMetStationSeriesContract(
   const messages: string[] = []
   const counts = new Map<HydroMetStationSeriesVariable, number>()
   const productCycle = normalizeHydroMetCycle(product.cycle_time)
+  const seriesList = hydroMetStationSeriesItems(response)
 
-  response.series.forEach((series, index) => {
-    const variable = (series as { variable?: unknown }).variable
+  if (!isRecord(response)) {
+    return ['station-series 响应格式无效']
+  }
+
+  if (!Array.isArray(response.series)) {
+    return ['station-series series 缺失或格式无效']
+  }
+
+  if (seriesList.length > HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT) {
+    messages.push(`station-series series 数量 ${seriesList.length} 超过前端检查上限 ${HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT}，已停止绘图。`)
+  }
+
+  seriesList.slice(0, HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT).forEach((series, index) => {
+    if (!isRecord(series)) {
+      messages.push(`series[${index}] 不是对象，station-series contract 无效`)
+      return
+    }
+
+    const variable = series.variable
     if (!isHydroMetStationSeriesVariable(variable)) {
-      messages.push(`series[${index}] variable=${String(variable)} 不属于 station-series MVP 变量`)
+      messages.push(`series[${index}] variable=${formatContractValue(variable)} 不属于 station-series MVP 变量`)
       return
     }
     counts.set(variable, (counts.get(variable) ?? 0) + 1)
 
-    const sourceId = (series as { source_id?: unknown }).source_id
+    const sourceId = series.source_id
     if (typeof sourceId === 'string' && sourceId !== product.source_id) {
       messages.push(`${variable}.source_id=${sourceId} 与 latest-product ${product.source_id} 不一致`)
     } else if (sourceId !== undefined && sourceId !== null && typeof sourceId !== 'string') {
       messages.push(`${variable}.source_id 元数据格式无效`)
     }
 
-    const cycleTime = (series as { cycle_time?: unknown }).cycle_time
+    const cycleTime = series.cycle_time
     if (cycleTime !== undefined && cycleTime !== null) {
       if (typeof cycleTime !== 'string') {
         messages.push(`${variable}.cycle_time 元数据格式无效`)
@@ -742,13 +787,33 @@ function validateHydroMetStationSeriesContract(
     if (count > 1) messages.push(`${variable} 在 station-series 响应中重复 ${count} 次`)
   })
 
-  return messages
+  return capHydroMetStationSeriesMessages(messages)
 }
 
-function validateHydroMetStationSeriesForChart(series: HydroMetStationSeries): StationSeriesValidation {
+function validateHydroMetStationSeriesForChart(series: HydroMetStationSeriesRecord): StationSeriesValidation {
   const messages: string[] = []
-  const metadataValue = (series as { metadata?: unknown }).metadata
-  const pointsValue = (series as { points?: unknown }).points
+  const metadataValue = series.metadata
+  const pointsValue = series.points
+  const unitValue = series.unit
+  const truncatedValue = series.truncated
+
+  let unit: string | null = null
+  if (unitValue === undefined || unitValue === null) {
+    unit = null
+  } else if (typeof unitValue === 'string') {
+    unit = unitValue
+  } else {
+    messages.push(`变量 ${series.variable} unit 格式无效`)
+  }
+
+  let seriesTruncated = false
+  if (truncatedValue === undefined || truncatedValue === null) {
+    seriesTruncated = false
+  } else if (typeof truncatedValue === 'boolean') {
+    seriesTruncated = truncatedValue
+  } else {
+    messages.push(`变量 ${series.variable} truncated 格式无效`)
+  }
 
   if (!isRecord(metadataValue)) {
     messages.push(`变量 ${series.variable} metadata 缺失或格式无效`)
@@ -756,33 +821,57 @@ function validateHydroMetStationSeriesForChart(series: HydroMetStationSeries): S
   if (!Array.isArray(pointsValue)) {
     messages.push(`变量 ${series.variable} points 缺失或格式无效`)
   }
-  if (messages.length > 0) return { ok: false, messages }
+  if (messages.length > 0) return { ok: false, messages: capHydroMetStationSeriesMessages(messages) }
 
   messages.push(...validateStationSeriesMetadata(metadataValue, series.variable))
-
-  let chartPointCount = 0
-  const renderedPoints: ChartableStationSeriesPoint[] = []
-  pointsValue.forEach((point, index) => {
-    const parsed = parseChartableStationSeriesPoint(point)
-    if (typeof parsed === 'string') {
-      messages.push(`变量 ${series.variable} 第 ${index + 1} 个点${parsed}`)
-    } else {
-      chartPointCount += 1
-      if (renderedPoints.length < HYDRO_MET_STATION_SERIES_LIMIT) renderedPoints.push(parsed)
-    }
-  })
-
-  if (messages.length > 0) return { ok: false, messages }
+  if (messages.length > 0) return { ok: false, messages: capHydroMetStationSeriesMessages(messages) }
 
   const metadata = metadataValue as unknown as HydroMetStationSeries['metadata']
-  const rawPoints = pointsValue as HydroMetStationSeries['points']
+  const reportedPointCount = Math.max(metadata.returned_points, pointsValue.length)
+  const inspectedPointCount = Math.min(pointsValue.length, HYDRO_MET_STATION_SERIES_POINT_INSPECTION_LIMIT)
+  const inspectionCapped = pointsValue.length > inspectedPointCount
+
+  const renderedPoints: ChartableStationSeriesPoint[] = []
+  const invalidPointMessages: string[] = []
+  let invalidPointCount = 0
+  const qualityFlagCounts = new Map<string, number>()
+
+  for (let index = 0; index < inspectedPointCount; index += 1) {
+    const point = pointsValue[index]
+    const parsed = parseChartableStationSeriesPoint(point)
+    if (typeof parsed === 'string') {
+      invalidPointCount += 1
+      if (invalidPointMessages.length < HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT) {
+        invalidPointMessages.push(`变量 ${series.variable} 第 ${index + 1} 个点${parsed}`)
+      }
+    } else {
+      if (renderedPoints.length < HYDRO_MET_STATION_SERIES_LIMIT) renderedPoints.push(parsed)
+      const flag = parsed.qualityFlag ?? 'missing'
+      qualityFlagCounts.set(flag, (qualityFlagCounts.get(flag) ?? 0) + 1)
+    }
+  }
+
+  if (invalidPointCount > 0) {
+    messages.push(...capInvalidPointMessages(series.variable, invalidPointMessages, invalidPointCount, inspectedPointCount, reportedPointCount, inspectionCapped))
+  }
+  if (messages.length > 0) return { ok: false, messages: capHydroMetStationSeriesMessages(messages) }
+
+  const { nonOkFlags, nonOkFlagsCapped, qualitySummary } = qualityFlagSummary(qualityFlagCounts, inspectedPointCount, reportedPointCount, inspectionCapped)
   return {
     ok: true,
     metadata,
-    rawPoints,
-    chartPointCount,
+    unit,
+    sourceId: typeof series.source_id === 'string' ? series.source_id : null,
+    cycleTime: typeof series.cycle_time === 'string' ? series.cycle_time : null,
+    seriesTruncated,
+    reportedPointCount,
+    inspectedPointCount,
     renderedPoints,
-    capped: chartPointCount > HYDRO_MET_STATION_SERIES_LIMIT || metadata.returned_points > HYDRO_MET_STATION_SERIES_LIMIT,
+    capped: reportedPointCount > HYDRO_MET_STATION_SERIES_LIMIT,
+    inspectionCapped,
+    nonOkFlags,
+    nonOkFlagsCapped,
+    qualitySummary,
   }
 }
 
@@ -817,6 +906,42 @@ function validateStationSeriesMetadata(metadata: Record<string, unknown>, variab
   return messages
 }
 
+function capHydroMetStationSeriesMessages(messages: string[]) {
+  if (messages.length <= HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT) return messages
+  return [
+    ...messages.slice(0, HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT),
+    `另有 ${messages.length - HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT} 条 station-series contract 问题已截断`,
+  ]
+}
+
+function capInvalidPointMessages(
+  variable: HydroMetStationSeriesVariable,
+  messages: string[],
+  invalidPointCount: number,
+  inspectedPointCount: number,
+  reportedPointCount: number,
+  inspectionCapped: boolean,
+) {
+  const reservedSummarySlots = (invalidPointCount > messages.length ? 1 : 0) + (inspectionCapped ? 1 : 0)
+  const detailLimit = Math.max(1, HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT - reservedSummarySlots)
+  const cappedMessages = messages.slice(0, detailLimit)
+  const hiddenByMessageCap = Math.max(0, invalidPointCount - cappedMessages.length)
+  if (hiddenByMessageCap > 0) {
+    cappedMessages.push(`变量 ${variable} 另有 ${hiddenByMessageCap} 个已检查点无效，错误详情已截断`)
+  }
+  if (inspectionCapped) {
+    cappedMessages.push(`变量 ${variable} capped 仅检查前 ${inspectedPointCount}/${reportedPointCount} 个点，响应过大，已停止继续校验`)
+  }
+  return cappedMessages
+}
+
+function formatContractValue(value: unknown) {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return Array.isArray(value) ? 'array' : typeof value
+}
+
 function parseChartableStationSeriesPoint(point: unknown): ChartableStationSeriesPoint | string {
   if (!isRecord(point)) return '不是对象'
 
@@ -840,6 +965,47 @@ function parseChartableStationSeriesPoint(point: unknown): ChartableStationSerie
   }
 }
 
+function qualityFlagLabel(value: string) {
+  return value.length > HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT
+    ? `${value.slice(0, HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT)}...`
+    : value
+}
+
+function qualityFlagSummary(
+  counts: Map<string, number>,
+  inspectedPointCount: number,
+  reportedPointCount: number,
+  inspectionCapped: boolean,
+) {
+  const entries = Array.from(counts.entries()).sort(([left], [right]) => left.localeCompare(right))
+  const nonOkFlagEntries = entries.filter(([flag]) => flag !== 'missing' && flag.trim() !== '' && flag.toLowerCase() !== 'ok')
+  const nonOkFlags = nonOkFlagEntries.slice(0, HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT).map(([flag]) => qualityFlagLabel(flag))
+  const nonOkFlagsCapped = nonOkFlagEntries.length > nonOkFlags.length
+
+  if (counts.size === 0) {
+    return {
+      nonOkFlags,
+      nonOkFlagsCapped,
+      qualitySummary: inspectionCapped
+        ? `none; inspected ${inspectedPointCount}/${reportedPointCount}, capped`
+        : 'none',
+    }
+  }
+
+  const visibleEntries = entries.slice(0, HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT)
+  const summary = visibleEntries.map(([flag, count]) => `${qualityFlagLabel(flag || 'empty')}:${count}`).join(', ')
+  const hidden = entries.length - visibleEntries.length
+  const suffixes: string[] = []
+  if (hidden > 0) suffixes.push(`+${hidden} flags capped`)
+  if (inspectionCapped) suffixes.push(`inspected ${inspectedPointCount}/${reportedPointCount}, capped`)
+
+  return {
+    nonOkFlags,
+    nonOkFlagsCapped,
+    qualitySummary: [summary, ...suffixes].join('; '),
+  }
+}
+
 function StationSeriesCharts({
   response,
   product,
@@ -849,20 +1015,22 @@ function StationSeriesCharts({
   product: QhhLatestProduct
   stationId: string
 }) {
+  const seriesList = hydroMetStationSeriesItems(response)
+  const responseRecord = isRecord(response) ? response : {}
   const identityMessages = [
     ...validateHydroMetStationSeriesIdentity(response, product, stationId),
     ...validateHydroMetStationSeriesContract(response, product),
   ]
-  const seriesByVariable = mapUniqueHydroMetStationSeries(response.series)
+  const seriesByVariable = mapUniqueHydroMetStationSeries(seriesList)
 
   return (
     <div className="mt-3 space-y-3" data-testid="hydro-met-station-series-loaded">
       <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-        <MetaRow label="station" value={response.station_id} mono />
-        <MetaRow label="source" value={response.source_id} />
-        <MetaRow label="cycle" value={formatDateTime(response.cycle_time)} mono />
-        <MetaRow label="forcing_version" value={response.forcing_version_id} mono />
-        <MetaRow label="valid range" value={`${formatDateTime(response.valid_time_start)} - ${formatDateTime(response.valid_time_end)}`} mono />
+        <MetaRow label="station" value={formatHydroMetScalar(responseRecord.station_id)} mono />
+        <MetaRow label="source" value={formatHydroMetScalar(responseRecord.source_id)} />
+        <MetaRow label="cycle" value={formatDateTime(responseRecord.cycle_time)} mono />
+        <MetaRow label="forcing_version" value={formatHydroMetScalar(responseRecord.forcing_version_id)} mono />
+        <MetaRow label="valid range" value={`${formatDateTime(responseRecord.valid_time_start)} - ${formatDateTime(responseRecord.valid_time_end)}`} mono />
       </dl>
 
       {identityMessages.length > 0 ? (
@@ -888,7 +1056,7 @@ function StationVariableChart({
   series,
 }: {
   variable: HydroMetStationSeriesVariable
-  series: HydroMetStationSeries | null
+  series: HydroMetStationSeriesRecord | null
 }) {
   if (!series) {
     return (
@@ -907,10 +1075,9 @@ function StationVariableChart({
     )
   }
 
-  const unitMissing = !series.unit
-  const nonOkFlags = Array.from(new Set(validation.rawPoints.map((point) => point.quality_flag).filter((flag): flag is string => Boolean(flag && flag.toLowerCase() !== 'ok'))))
-  const truncated = series.truncated || validation.metadata.truncated
-  const capped = validation.capped || validation.chartPointCount > HYDRO_MET_STATION_SERIES_LIMIT
+  const unitMissing = !validation.unit
+  const truncated = validation.seriesTruncated || validation.metadata.truncated
+  const capped = validation.capped
 
   if (unitMissing) {
     return (
@@ -934,16 +1101,16 @@ function StationVariableChart({
         <div>
           <h3 className="text-sm font-semibold text-neutral-900">{variable}</h3>
           <div className="mt-1 text-xs text-neutral-700">
-            {series.unit} · {series.source_id ?? 'source unknown'} · cycle {formatDateTime(series.cycle_time)}
+            {validation.unit} · {validation.sourceId ?? 'source unknown'} · cycle {formatDateTime(validation.cycleTime)}
           </div>
           <div className="mt-1 font-mono text-[11px] text-neutral-500">
             {formatDateTime(validation.metadata.returned_from)} - {formatDateTime(validation.metadata.returned_to)}
           </div>
         </div>
         <div className="flex flex-wrap gap-1 text-xs">
-          {nonOkFlags.length > 0 ? (
+          {validation.nonOkFlags.length > 0 ? (
             <span className="rounded border border-warning/50 bg-warning/10 px-2 py-1 text-neutral-900" data-testid={`hydro-met-variable-${variable}-qc`}>
-              QC {nonOkFlags.join(', ')}
+              QC {validation.nonOkFlags.join(', ')}{validation.nonOkFlagsCapped ? ', ...' : ''}
             </span>
           ) : null}
           {truncated ? (
@@ -953,14 +1120,14 @@ function StationVariableChart({
           ) : null}
           {capped ? (
             <span className="rounded border border-warning/50 bg-warning/10 px-2 py-1 text-neutral-900" data-testid={`hydro-met-variable-${variable}-capped`}>
-              capped {validation.renderedPoints.length}/{validation.chartPointCount}
+              capped {validation.renderedPoints.length}/{validation.reportedPointCount}
             </span>
           ) : null}
         </div>
       </div>
-      <StationSeriesChart series={series} points={validation.renderedPoints} />
+      <StationSeriesChart variable={variable} unit={validation.unit} points={validation.renderedPoints} />
       <div className="mt-2 text-xs text-neutral-700" data-testid={`hydro-met-variable-${variable}-metadata`}>
-        returned {validation.metadata.returned_points} / limit {validation.metadata.limit}; rendered {validation.renderedPoints.length}; quality_flag {qualityFlagSummary(validation.rawPoints)}
+        returned {validation.metadata.returned_points} / limit {validation.metadata.limit}; rendered {validation.renderedPoints.length}; inspected {validation.inspectedPointCount}/{validation.reportedPointCount}; quality_flag {validation.qualitySummary}
       </div>
     </div>
   )
@@ -983,7 +1150,15 @@ function VariableStatePanel({
   )
 }
 
-function StationSeriesChart({ series, points }: { series: HydroMetStationSeries; points: ChartableStationSeriesPoint[] }) {
+function StationSeriesChart({
+  variable,
+  unit,
+  points,
+}: {
+  variable: HydroMetStationSeriesVariable
+  unit: string
+  points: ChartableStationSeriesPoint[]
+}) {
   const option = useMemo(
     () => ({
       color: ['#0f8fbf'],
@@ -991,7 +1166,7 @@ function StationSeriesChart({ series, points }: { series: HydroMetStationSeries;
       tooltip: {
         trigger: 'axis',
         renderMode: 'richText',
-        valueFormatter: (value: number) => `${Number(value).toFixed(3)} ${series.unit ?? ''}`,
+        valueFormatter: (value: number) => `${Number(value).toFixed(3)} ${unit}`,
       },
       xAxis: {
         type: 'time',
@@ -999,20 +1174,20 @@ function StationSeriesChart({ series, points }: { series: HydroMetStationSeries;
       },
       yAxis: {
         type: 'value',
-        name: series.unit ?? '',
+        name: unit,
         axisLabel: { color: '#64748b' },
       },
       series: [
         {
           type: 'line',
-          name: series.variable,
+          name: variable,
           showSymbol: points.length <= 48,
           symbolSize: 5,
           data: points.map((point) => [point.timestamp, point.value, point.qualityFlag]),
         },
       ],
     }),
-    [points, series],
+    [points, unit, variable],
   )
 
   return (
@@ -1108,9 +1283,13 @@ function MetaRow({ label, value, mono = false }: { label: string; value: string;
 }
 
 function formatDateTime(value: string | null | undefined) {
-  if (!value) return '-'
+  if (typeof value !== 'string' || !value) return '-'
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toISOString()
+}
+
+function formatHydroMetScalar(value: unknown) {
+  return typeof value === 'string' && value ? value : '-'
 }
 
 function formatCoordinate(value: number | undefined) {
@@ -1128,12 +1307,4 @@ function markerPosition(
     x: 8 + ((lon - bounds.minLon) / lonSpan) * 84,
     y: 92 - ((lat - bounds.minLat) / latSpan) * 84,
   }
-}
-
-function qualityFlagSummary(points: HydroMetStationSeries['points']) {
-  const counts = new Map<string, number>()
-  points.forEach((point) => {
-    counts.set(point.quality_flag ?? 'missing', (counts.get(point.quality_flag ?? 'missing') ?? 0) + 1)
-  })
-  return Array.from(counts.entries()).map(([flag, count]) => `${flag}:${count}`).join(', ') || 'none'
 }
