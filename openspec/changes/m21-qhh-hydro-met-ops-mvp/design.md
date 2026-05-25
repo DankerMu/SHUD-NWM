@@ -410,3 +410,85 @@ Non-goals:
 
 Issue ownership note:
 - `hydro-met-mvp-ui` is the full M21 capability spec. For #207 acceptance, only the Hydro-met MVP entry, latest-product bootstrap, route/nav compatibility, query-state, loading/unavailable/incomplete-product states, and no-fake-data shell apply. Station chart scenarios are #208, river chart scenarios are #209, and browser smoke is #214.
+
+## Issue #208 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM React frontend station selection, station-series API consumption, chart rendering, and tests
+Repair intensity: medium
+
+Change surface:
+- `apps/frontend` `/hydro-met` station list/marker/detail selection behavior, station-series data adapter, station forcing chart components, and route/component tests.
+- Frontend API client usage for `GET /api/v1/met/stations/{station_id}/series`.
+- Reuse of #207 latest-product bootstrap identity, station inventory, query state, no-fake-data shell, coordinate compatibility, and message redaction helpers.
+
+Must preserve:
+- #207 `/hydro-met` route/nav/bootstrap behavior, source/cycle query normalization, latest-product unavailable/incomplete states, partial station/river candidate loading, runtime station coordinate fallback, and redacted UI error messages.
+- Existing `/meteorology`, `/forecast`, `/segments/:segmentId`, `/monitoring`, basin, overview, flood-alert, and system routes remain reachable and keep current deep-link/query behavior.
+- Station series response fields come from generated API types and response-envelope helpers; #208 must not hand-roll backend payloads or change OpenAPI/generated types.
+- #209 owns river `q_down` forecast-series charts and IFS river-horizon chart labeling; #208 may keep the river area as candidate list/placeholder and must not add forecast-series calls.
+- #211/#212 own `/ops`, log, retry, and RBAC controls; #208 must not change those surfaces.
+
+Must add/change:
+- Add visible station markers derived from real station inventory coordinates, plus station list selection and station search/filtering; stations without usable coordinates must remain searchable/selectable from the list without rendering fake marker positions.
+- On selected station change, call `GET /api/v1/met/stations/{station_id}/series` with `forcing_version_id` from latest-product and variables `PRCP`, `TEMP`, `RH`, `wind`, `Rn`, and `Press`; source/cycle/model metadata should be displayed from the response/product, not guessed by convention.
+- Render six variable chart panels from real station-series points with unit, valid-time range, source, cycle, forcing version, point `quality_flag`, variable-level truncation metadata, and explicit empty/unavailable/error states.
+- Preserve no-synthetic-data behavior: missing variables, empty points, API errors, invalid station selection, or station/forcing mismatch must render explicit states and must not silently switch station, source, cycle, forcing version, or draw fake curves.
+- Keep station discovery and station-series samples bounded by existing API limits and avoid unbounded client fetch loops.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - #208 expands the visible `/hydro-met` route with station selection and chart behavior.
+- Config / project setup: not selected - no new build tool, environment variable, or deployment flag expected.
+- File IO / path safety / overwrite: not selected - frontend route performs network reads only and writes no files at runtime.
+- Schema / columns / units / field names: selected - station charts consume generated station-series fields, units, variables, provenance IDs, `quality_flag`, and truncation metadata.
+- Geospatial / CRS / shapefile sidecars: selected - station markers/list positions use backend-provided station coordinates as display data only; no CRS reinterpretation or tile/schema change.
+- Time series / forcing / temporal boundaries: selected - selected station/source/cycle/forcing version, valid-time range, requested variables, truncation, and point ordering are central.
+- Numerical stability / conservation / NaN: selected - chart data must not fabricate values or hide non-finite/missing samples; unsupported points must render unavailable/empty states.
+- Solver runtime / performance / threading: not selected - no SHUD runtime behavior.
+- Resource limits / large input / discovery: selected - station inventory display and station-series point rendering must stay capped and not request unbounded points.
+- Legacy compatibility / examples: selected - existing route tests, meteorology fixture UI, forecast pages, and generated API type consumers must keep working.
+- Error handling / rollback / partial outputs: selected - station-series API failures, missing station/forcing version, empty variables, partial variables, truncation, and selection changes must render stable states without stale charts.
+- Release / packaging / dependency compatibility: selected - frontend tests/build must pass without adding dependencies unless strongly justified by existing chart stack reuse.
+- Documentation / migration notes: selected - UI/test evidence must keep #208 within station forcing chart scope and not claim river/ops/browser-smoke completion.
+
+Required evidence:
+- Data-adapter tests: selected station id + latest-product forcing version + six variables -> one bounded station-series request using the generated path and response envelope; no manual run/source/forcing IDs are entered by the user.
+- Marker/list/search tests: real-inventory stations with usable coordinates render visible markers; stations without coordinates remain in the list but do not get fake marker positions; search filters by station id/name, shows an explicit no-results state, and never fabricates stations.
+- Selection tests: station row/marker/search-result selection updates selected station, station metadata, and six-variable chart area; selecting another station clears stale series/loading/error state and requests the new station.
+- Chart tests: real points render through the chart option/data model with units, source, cycle, forcing version, valid-time range, and one panel per MVP variable.
+- Quality/truncation tests: non-ok `quality_flag`, empty variable points, missing unit, and `truncated=true` render explicit indicators near the affected variable chart.
+- Error/unavailable tests: station-series HTTP error, missing/empty station series, selected station absent from inventory, and latest-product unavailable/incomplete states do not draw fake charts and do not silently switch station.
+- Resource and compatibility tests: station-series `limit` stays bounded, no forecast-series calls are made, existing `/hydro-met` bootstrap tests and sibling route tests remain green.
+- Regression commands: `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm build`, `cd apps/frontend && corepack pnpm check:api-types`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: the selected `/hydro-met` station chart must bind one user-selected station, one latest-product forcing version, one source/cycle, and the six MVP forcing variables from the station-series API response without mixing stale station/source/cycle data or synthesizing chart points.
+Source-of-truth identity/contract: generated API types for `GET /api/v1/met/stations/{station_id}/series`, #207 latest-product bootstrap result, selected `station_id`, `forcing_version_id`, `source_id`, `cycle_time`, and `series[].variable`.
+Surfaces:
+- Producers: #205 station-series API and #206 latest-product API; unchanged in #208.
+- Validators/preflight: frontend selected-station state, bootstrap readiness, station id membership checks, station-series response-envelope guards, and no-data state builders.
+- Storage/cache/query: in-memory React request state only; no persistent browser storage required.
+- Public routes/entrypoints: `/hydro-met` station selection and chart area; existing route/nav entry remains unchanged.
+- Frontend/downstream consumers: #209 river chart issue and #214 browser smoke consume the same route shell; existing meteorology and segment detail pages remain sibling consumers.
+- Failure paths/rollback/stale state: station-series loading/error/empty/truncated states, selected station changes while a request is in flight, latest-product source/cycle changes, component unmount/reload, and redacted UI errors.
+- Evidence/audit/readiness: frontend adapter/component tests; full MVP browser smoke and live QHH evidence remain #214.
+Regression rows:
+- default ready `/hydro-met` + first station selected -> station-series request uses that `station_id`, latest-product `forcing_version_id`, six MVP variables, bounded limit, and renders six chart panels from returned points.
+- selected station changes before a previous station-series request resolves -> stale result is ignored and the UI reflects only the currently selected station.
+- station search filters visible inventory -> list and markers reflect only matching real stations where marker coordinates exist; empty search renders an explicit no-results state and does not clear a valid selected station unless the user selects a different result.
+- station-series response contains missing/empty variable, non-ok `quality_flag`, missing unit, or `truncated=true` -> affected variable renders explicit quality/truncation/unavailable state, not a fake line.
+- station-series route returns not-found/unavailable/error or redacted unsafe message -> station chart area shows stable sanitized error, product/river candidate shell remains usable, and no stale chart remains visible.
+- latest-product unavailable/incomplete/cycle mismatch -> station chart calls are skipped, matching #207 bootstrap safety behavior.
+- station inventory has runtime `longitude`/`latitude`, GeoJSON `geom`, or missing coordinates -> selection/list/search rendering remains stable; only coordinate-backed stations render markers, and series calls still use station identity, not coordinate-derived IDs.
+- `/hydro-met` river placeholder/list -> no forecast-series calls in #208.
+- existing `/meteorology`, `/forecast`, `/segments/:segmentId`, and `/monitoring` tests -> unchanged behavior.
+
+Non-goals:
+- Rendering river `q_down` forecast-series curves, river segment selection chart updates, or IFS river shorter-horizon chart labels; #209 owns them.
+- Adding `/ops`, log modal, retry controls, RBAC changes, controlled failure evidence, or scheduler persistence; #210-#213 own them.
+- Modifying backend station-series route, latest-product semantics, OpenAPI, generated API types, database schema, forcing producer writes, or SHUD runtime.
+- Full MVP browser smoke or live QHH/GFS/IFS evidence; #214 owns release smoke. #208 may add focused component or existing-test browser-like coverage, but must not claim final smoke readiness.
+
+Issue ownership note:
+- `hydro-met-mvp-ui` is the full M21 capability spec. For #208 acceptance, only station inventory markers/list, station selection, station-series API consumption, six-variable forcing chart rendering, QC/truncation/unavailable states, and no-fake-data behavior apply. River chart scenarios are #209, ops scenarios are #211/#212, controlled retry evidence is #213, and full browser/live smoke is #214.
