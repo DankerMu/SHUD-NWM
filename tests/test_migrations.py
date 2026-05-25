@@ -455,6 +455,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "run_id DESC",
     )
     assert "WHERE cycle_time IS NOT NULL" in migration
+    assert "AND status IN ('frequency_done', 'published')" in migration
     assert _index_columns_by_name(migration, "basin_version_qhh_latest_lookup_idx") == (
         "basin_id",
         "basin_version_id",
@@ -465,6 +466,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "LOWER(source_id)",
         "variable",
         "valid_time DESC",
+        "station_id",
     )
     assert _index_columns_by_name(migration, "interp_weight_qhh_latest_membership_idx") == (
         "model_id",
@@ -478,6 +480,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "river_network_version_id",
         "variable",
         "valid_time DESC",
+        "river_segment_id",
     )
     for index_name in (
         "hydro_run_qhh_latest_candidate_idx",
@@ -490,12 +493,38 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
 
     assert "LOWER(h.source_id) = LOWER(%s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
+    assert "h.status IN ('frequency_done', 'published')" in query_source
+    assert "h.status NOT IN ('frequency_done', 'published')" in query_source
     assert "h.cycle_time IS NOT NULL" in query_source
     assert "fst.basin_version_id = cr.basin_version_id" in query_source
     assert "LOWER(fst.source_id) = LOWER(cr.source_id)" in query_source
     assert "FROM met.interp_weight iw" in query_source
     assert "iw.model_id = cr.model_id" in query_source
     assert "iw.station_id = fst.station_id" in query_source
+    assert "station_identity_coverage AS" in query_source
+    assert "station_time_coverage AS" in query_source
+    assert "station_variable_complete_times AS" in query_source
+    assert "station_variable_common_times AS" in query_source
+    assert "station_all_variable_complete_times AS" in query_source
+    assert "variable,\n                    station_id" in query_source
+    assert "cr.expected_station_count" in query_source
+    assert "station_count = expected_station_count" in query_source
+    assert "COUNT(DISTINCT variable) AS complete_variable_count" in query_source
+    assert "HAVING COUNT(DISTINCT variable) = %s" in query_source
+    assert "MIN(valid_time) AS valid_time_start" in query_source
+    assert "MAX(valid_time) AS valid_time_end" in query_source
+    assert "MIN(valid_time) AS station_valid_time_start" in query_source
+    assert "MAX(valid_time) AS station_valid_time_end" in query_source
+    assert "MAX(valid_time_start) AS station_valid_time_start" not in query_source
+    assert "MIN(valid_time_end) AS station_valid_time_end" not in query_source
+    assert "river_identity_coverage AS" in query_source
+    assert "river_time_coverage AS" in query_source
+    assert "river_common_window AS" in query_source
+    assert "river_segment_id" in query_source
+    assert "cr.expected_segment_count" in query_source
+    assert "segment_count = expected_segment_count" in query_source
+    assert "MIN(valid_time) AS river_valid_time_start" in query_source
+    assert "MAX(valid_time) AS river_valid_time_end" in query_source
     assert "GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time" in query_source
     assert "LEAST(h.end_time, fv.end_time) AS display_end_time" in query_source
     assert "fst.valid_time >= cr.display_start_time" in query_source

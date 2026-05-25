@@ -341,11 +341,14 @@ class FakeForecastStore:
     def latest_qhh_display_product(self, source: str) -> dict[str, Any]:
         self.latest_qhh_calls.append(source)
         if str(source).strip().upper() not in {"GFS", "IFS"}:
+            reflected_source = str(source)
+            if len(reflected_source) > 64:
+                reflected_source = f"{reflected_source[:61]}..."
             raise ForecastStoreError(
                 status_code=422,
                 code="VALIDATION_ERROR",
                 message="source must be GFS or IFS.",
-                details={"field": "source", "rejected_value": source, "allowed_values": ["GFS", "IFS"]},
+                details={"field": "source", "rejected_value": reflected_source, "allowed_values": ["GFS", "IFS"]},
             )
         if self.latest_qhh_unavailable:
             raise ForecastStoreError(
@@ -1733,6 +1736,19 @@ def test_latest_qhh_display_product_rejects_unsupported_source_before_sql() -> N
     assert store.cursor.executions == []
 
 
+def test_latest_qhh_display_product_bounds_reflected_unsupported_source() -> None:
+    store = SqlCaptureForecastStore()
+    source = "ECMWF-" + ("x" * 200)
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product(source)
+
+    reflected = error.value.details["rejected_value"]
+    assert reflected == f"{source[:61]}..."
+    assert len(reflected) == 64
+    assert store.cursor.executions == []
+
+
 @pytest.mark.parametrize("status", ["failed", "cancelled", "pending", "created", "running", "parsed"])
 def test_latest_qhh_display_product_rejects_failed_cancelled_pending_and_incomplete_runs(status: str) -> None:
     store = SqlCaptureForecastStore([[_qhh_candidate_row(status=status)]])
@@ -1895,6 +1911,28 @@ def test_latest_qhh_display_product_rejects_sparse_station_one_timestep_coverage
     assert {"STATION_VARIABLE_SINGLE_TIMESTEP", "DISPLAYABLE_WINDOW_NONPOSITIVE"} <= reason_codes
 
 
+def test_latest_qhh_display_product_rejects_ragged_station_common_horizon() -> None:
+    valid_time = _dt("2026-05-07T03:00:00Z")
+    row = _qhh_candidate_row(
+        forcing_start_time=valid_time,
+        station_valid_time_start=valid_time,
+        station_valid_time_end=valid_time,
+        station_variable_coverage=_qhh_variable_coverage(
+            valid_time_start=valid_time,
+            valid_time_end=valid_time,
+            sample_count=387,
+        ),
+        river_valid_time_start=valid_time,
+    )
+    store = SqlCaptureForecastStore([[row]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    reason_codes = {reason["code"] for reason in error.value.details["unavailable_reasons"]}
+    assert {"STATION_VARIABLE_COMMON_HORIZON_NONPOSITIVE", "DISPLAYABLE_WINDOW_NONPOSITIVE"} <= reason_codes
+
+
 def test_latest_qhh_display_product_rejects_river_rows_outside_display_window() -> None:
     row = _qhh_candidate_row(
         segment_count=0,
@@ -1928,6 +1966,25 @@ def test_latest_qhh_display_product_rejects_sparse_river_one_timestep_coverage()
 
     reason_codes = {reason["code"] for reason in error.value.details["unavailable_reasons"]}
     assert {"Q_DOWN_SINGLE_TIMESTEP", "DISPLAYABLE_WINDOW_NONPOSITIVE"} <= reason_codes
+
+
+def test_latest_qhh_display_product_rejects_ragged_river_common_horizon() -> None:
+    valid_time = _dt("2026-05-07T03:00:00Z")
+    row = _qhh_candidate_row(
+        forcing_start_time=valid_time,
+        station_valid_time_start=valid_time,
+        station_variable_coverage=_qhh_variable_coverage(valid_time_start=valid_time),
+        river_valid_time_start=valid_time,
+        river_valid_time_end=valid_time,
+        river_sample_count=1634,
+    )
+    store = SqlCaptureForecastStore([[row]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    reason_codes = {reason["code"] for reason in error.value.details["unavailable_reasons"]}
+    assert {"Q_DOWN_COMMON_HORIZON_NONPOSITIVE", "DISPLAYABLE_WINDOW_NONPOSITIVE"} <= reason_codes
 
 
 @pytest.mark.parametrize(
@@ -1979,18 +2036,18 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     response = store.latest_qhh_display_product("GFS")
 
     statement, parameters = store.cursor.executions[0]
-    candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_coverage AS")]
+    candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_sample_rows AS")]
     assert "bv.basin_id = %s" in candidate_cte
     assert "LOWER(h.source_id) = LOWER(%s)" in candidate_cte
-    assert "h.status IN ('frequency_done', 'published')" not in candidate_cte
+    assert "h.status IN ('frequency_done', 'published')" in candidate_cte
     assert "h.run_type = 'forecast'" in candidate_cte
     assert "h.cycle_time IS NOT NULL" in candidate_cte
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in candidate_cte
     assert "LIMIT %s" in candidate_cte
     assert "FROM met.forcing_station_timeseries" not in candidate_cte
     assert "FROM hydro.river_timeseries" not in candidate_cte
-    station_cte = statement[statement.index("station_coverage AS") : statement.index("hydro_coverage AS")]
-    hydro_cte = statement[statement.index("hydro_coverage AS") : statement.index("SELECT\n                cr.*")]
+    station_cte = statement[statement.index("station_sample_rows AS") : statement.index("river_sample_rows AS")]
+    hydro_cte = statement[statement.index("river_sample_rows AS") : statement.index("SELECT\n                cr.*")]
     assert "JOIN candidate_runs cr" in statement
     assert "fst.basin_version_id = cr.basin_version_id" in station_cte
     assert "LOWER(fst.source_id) = LOWER(cr.source_id)" in station_cte
@@ -2001,17 +2058,79 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time" in candidate_cte
     assert "fst.valid_time >= cr.display_start_time" in station_cte
     assert "fst.valid_time <= cr.display_end_time" in station_cte
+    assert "station_identity_coverage AS" in station_cte
+    assert "station_time_coverage AS" in station_cte
+    assert "station_variable_complete_times AS" in station_cte
+    assert "station_variable_common_times AS" in station_cte
+    assert "station_all_variable_complete_times AS" in station_cte
+    assert "GROUP BY\n                    forcing_version_id" in station_cte
+    assert "variable,\n                    station_id" in station_cte
+    assert "cr.expected_station_count" in station_cte
+    assert "station_count = expected_station_count" in station_cte
+    assert "COUNT(DISTINCT variable) AS complete_variable_count" in station_cte
+    assert "HAVING COUNT(DISTINCT variable) = %s" in station_cte
+    assert "MIN(valid_time) AS valid_time_start" in station_cte
+    assert "MAX(valid_time) AS valid_time_end" in station_cte
+    assert "MIN(valid_time) AS station_valid_time_start" in station_cte
+    assert "MAX(valid_time) AS station_valid_time_end" in station_cte
+    assert "MAX(valid_time_start) AS station_valid_time_start" not in station_cte
+    assert "MIN(valid_time_end) AS station_valid_time_end" not in station_cte
     assert "cr.run_id = rt.run_id" in statement
     assert "rt.valid_time >= cr.display_start_time" in hydro_cte
     assert "rt.valid_time <= cr.display_end_time" in hydro_cte
+    assert "river_identity_coverage AS" in hydro_cte
+    assert "river_time_coverage AS" in hydro_cte
+    assert "river_common_window AS" in hydro_cte
+    assert "river_segment_id" in hydro_cte
+    assert "cr.expected_segment_count" in hydro_cte
+    assert "segment_count = expected_segment_count" in hydro_cte
+    assert "MIN(valid_time) AS river_valid_time_start" in hydro_cte
+    assert "MAX(valid_time) AS river_valid_time_end" in hydro_cte
     assert parameters == (
         "basins_qhh",
         "GFS",
         100,
         ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
-        ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
+        6,
     )
     assert response["quality"]["candidate_limit"] == 100
+
+
+def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_ready_candidate_window() -> None:
+    nonready_context = _qhh_candidate_row(
+        run_id="qhh_gfs_2026050800",
+        cycle_time=_dt("2026-05-08T00:00:00Z"),
+        status="pending",
+        segment_count=0,
+        river_sample_count=0,
+        river_valid_time_start=None,
+        river_valid_time_end=None,
+    )
+    store = SqlCaptureForecastStore([[], [nonready_context]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    ready_statement, ready_parameters = store.cursor.executions[0]
+    context_statement, context_parameters = store.cursor.executions[1]
+    assert "h.status IN ('frequency_done', 'published')" in ready_statement
+    assert "FROM met.forcing_station_timeseries" in ready_statement
+    assert "FROM hydro.river_timeseries" in ready_statement
+    assert "h.status NOT IN ('frequency_done', 'published')" in context_statement
+    assert "FROM met.forcing_station_timeseries" not in context_statement
+    assert "FROM hydro.river_timeseries" not in context_statement
+    assert ready_parameters == (
+        "basins_qhh",
+        "GFS",
+        100,
+        ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
+        6,
+    )
+    assert context_parameters == ("basins_qhh", "GFS", 10)
+    assert error.value.details["candidate_count"] == 1
+    assert "RUN_STATUS_NOT_READY" in {
+        reason["code"] for reason in error.value.details["unavailable_reasons"]
+    }
 
 
 @pytest.mark.asyncio
@@ -2074,6 +2193,18 @@ async def test_qhh_latest_product_unsupported_source_validation_error(fake_store
     assert body["status"] == "error"
     assert body["error"]["code"] == "VALIDATION_ERROR"
     assert body["error"]["details"]["field"] == "source"
+
+
+@pytest.mark.asyncio
+async def test_qhh_latest_product_bounds_long_unsupported_source_detail(fake_store: FakeForecastStore) -> None:
+    source = "ECMWF-" + ("x" * 200)
+
+    response = await _get(f"/api/v1/mvp/qhh/latest-product?source={source}")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["details"]["rejected_value"] == f"{source[:61]}..."
 
 
 @pytest.mark.asyncio

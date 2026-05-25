@@ -16,6 +16,7 @@ QHH_LATEST_CONTEXT_LIMIT = 10
 QHH_LATEST_EXPECTED_HORIZON_HOURS = 168
 QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
 QHH_LATEST_READY_RUN_STATUSES = ("frequency_done", "published")
+QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
 
 
 class ForecastStoreError(RuntimeError):
@@ -956,6 +957,8 @@ class PsycopgForecastStore:
         source_id = _qhh_latest_source_id(source)
         with self._transaction() as cursor:
             rows = self._fetch_latest_qhh_display_candidates(cursor, source_id=source_id)
+            if not rows:
+                rows = self._fetch_latest_qhh_display_unavailable_context(cursor, source_id=source_id)
 
         evaluations = [_qhh_latest_candidate_response(row) for row in rows]
         for evaluation in evaluations:
@@ -1035,20 +1038,23 @@ class PsycopgForecastStore:
                   ON fv.forcing_version_id = h.forcing_version_id
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
+                  AND h.status IN ('frequency_done', 'published')
                   AND LOWER(h.source_id) = LOWER(%s)
                   AND h.cycle_time IS NOT NULL
                 ORDER BY h.cycle_time DESC, h.run_id DESC
                 LIMIT %s
             ),
-            station_coverage AS (
+            station_sample_rows AS (
                 SELECT
                     fst.forcing_version_id,
                     fst.basin_version_id,
                     LOWER(fst.source_id) AS station_source_id,
-                    COUNT(DISTINCT fst.station_id) AS station_count,
-                    COUNT(*) AS station_sample_count,
-                    MIN(fst.valid_time) AS station_valid_time_start,
-                    MAX(fst.valid_time) AS station_valid_time_end
+                    fst.station_id,
+                    fst.variable,
+                    cr.expected_station_count,
+                    fst.valid_time,
+                    fst.unit,
+                    fst.quality_flag
                 FROM met.forcing_station_timeseries fst
                 JOIN candidate_runs cr
                   ON cr.forcing_version_id = fst.forcing_version_id
@@ -1065,77 +1071,181 @@ class PsycopgForecastStore:
                         AND iw.variable = fst.variable
                         AND LOWER(iw.source_id) = LOWER(cr.source_id)
                   )
-                GROUP BY fst.forcing_version_id, fst.basin_version_id, LOWER(fst.source_id)
+            ),
+            station_identity_coverage AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable,
+                    station_id,
+                    COUNT(*) AS sample_count,
+                    MIN(valid_time) AS valid_time_start,
+                    MAX(valid_time) AS valid_time_end
+                FROM station_sample_rows
+                GROUP BY
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable,
+                    station_id
+            ),
+            station_time_coverage AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable,
+                    expected_station_count,
+                    valid_time,
+                    COUNT(DISTINCT station_id) AS station_count
+                FROM station_sample_rows
+                GROUP BY
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable,
+                    expected_station_count,
+                    valid_time
+            ),
+            station_variable_complete_times AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable,
+                    valid_time
+                FROM station_time_coverage
+                WHERE expected_station_count IS NOT NULL
+                  AND station_count = expected_station_count
+            ),
+            station_variable_common_times AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable,
+                    MIN(valid_time) AS valid_time_start,
+                    MAX(valid_time) AS valid_time_end
+                FROM station_variable_complete_times
+                GROUP BY forcing_version_id, basin_version_id, station_source_id, variable
+            ),
+            station_all_variable_complete_times AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    valid_time,
+                    COUNT(DISTINCT variable) AS complete_variable_count
+                FROM station_variable_complete_times
+                GROUP BY forcing_version_id, basin_version_id, station_source_id, valid_time
+                HAVING COUNT(DISTINCT variable) = %s
+            ),
+            station_identity_rollup AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    COUNT(DISTINCT station_id) AS station_count,
+                    SUM(sample_count) AS station_sample_count
+                FROM station_identity_coverage
+                GROUP BY forcing_version_id, basin_version_id, station_source_id
+            ),
+            station_common_window AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    MIN(valid_time) AS station_valid_time_start,
+                    MAX(valid_time) AS station_valid_time_end
+                FROM station_all_variable_complete_times
+                GROUP BY forcing_version_id, basin_version_id, station_source_id
+            ),
+            station_coverage AS (
+                SELECT
+                    rollup.forcing_version_id,
+                    rollup.basin_version_id,
+                    rollup.station_source_id,
+                    rollup.station_count,
+                    rollup.station_sample_count,
+                    common_window.station_valid_time_start,
+                    common_window.station_valid_time_end
+                FROM station_identity_rollup rollup
+                LEFT JOIN station_common_window common_window
+                  ON common_window.forcing_version_id = rollup.forcing_version_id
+                 AND common_window.basin_version_id = rollup.basin_version_id
+                 AND common_window.station_source_id = rollup.station_source_id
+            ),
+            station_variable_sample_stats AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable,
+                    COUNT(*) AS sample_count,
+                    COUNT(DISTINCT NULLIF(BTRIM(unit), '')) AS unit_count,
+                    COUNT(DISTINCT NULLIF(BTRIM(quality_flag), '')) AS quality_flag_count,
+                    SUM(CASE WHEN unit IS NULL OR BTRIM(unit) = '' THEN 1 ELSE 0 END)
+                        AS missing_unit_samples,
+                    SUM(CASE WHEN quality_flag IS NULL OR BTRIM(quality_flag) = '' THEN 1 ELSE 0 END)
+                        AS missing_quality_flag_samples
+                FROM station_sample_rows
+                GROUP BY forcing_version_id, basin_version_id, station_source_id, variable
+            ),
+            station_variable_identity_stats AS (
+                SELECT
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable,
+                    COUNT(DISTINCT station_id) AS station_count
+                FROM station_identity_coverage
+                GROUP BY forcing_version_id, basin_version_id, station_source_id, variable
             ),
             station_variable_coverage AS (
                 SELECT
-                    variable_stats.forcing_version_id,
-                    variable_stats.basin_version_id,
-                    variable_stats.station_source_id,
+                    identity_stats.forcing_version_id,
+                    identity_stats.basin_version_id,
+                    identity_stats.station_source_id,
                     jsonb_agg(
                         jsonb_build_object(
-                            'variable', variable_stats.variable,
-                            'station_count', variable_stats.station_count,
-                            'sample_count', variable_stats.sample_count,
-                            'unit_count', variable_stats.unit_count,
-                            'quality_flag_count', variable_stats.quality_flag_count,
-                            'missing_unit_samples', variable_stats.missing_unit_samples,
-                            'missing_quality_flag_samples', variable_stats.missing_quality_flag_samples,
-                            'valid_time_start', variable_stats.valid_time_start,
-                            'valid_time_end', variable_stats.valid_time_end
+                            'variable', identity_stats.variable,
+                            'station_count', identity_stats.station_count,
+                            'sample_count', sample_stats.sample_count,
+                            'unit_count', sample_stats.unit_count,
+                            'quality_flag_count', sample_stats.quality_flag_count,
+                            'missing_unit_samples', sample_stats.missing_unit_samples,
+                            'missing_quality_flag_samples', sample_stats.missing_quality_flag_samples,
+                            'valid_time_start', common_times.valid_time_start,
+                            'valid_time_end', common_times.valid_time_end
                         )
-                        ORDER BY variable_stats.variable
+                        ORDER BY identity_stats.variable
                     ) AS station_variable_coverage
-                FROM (
-                    SELECT
-                        fst.forcing_version_id,
-                        fst.basin_version_id,
-                        LOWER(fst.source_id) AS station_source_id,
-                        fst.variable,
-                        COUNT(DISTINCT fst.station_id) AS station_count,
-                        COUNT(*) AS sample_count,
-                        COUNT(DISTINCT NULLIF(BTRIM(fst.unit), '')) AS unit_count,
-                        COUNT(DISTINCT NULLIF(BTRIM(fst.quality_flag), '')) AS quality_flag_count,
-                        SUM(CASE WHEN fst.unit IS NULL OR BTRIM(fst.unit) = '' THEN 1 ELSE 0 END)
-                            AS missing_unit_samples,
-                        SUM(CASE WHEN fst.quality_flag IS NULL OR BTRIM(fst.quality_flag) = '' THEN 1 ELSE 0 END)
-                            AS missing_quality_flag_samples,
-                        MIN(fst.valid_time) AS valid_time_start,
-                        MAX(fst.valid_time) AS valid_time_end
-                    FROM met.forcing_station_timeseries fst
-                    JOIN candidate_runs cr
-                      ON cr.forcing_version_id = fst.forcing_version_id
-                     AND fst.basin_version_id = cr.basin_version_id
-                     AND LOWER(fst.source_id) = LOWER(cr.source_id)
-                    WHERE fst.variable = ANY(%s)
-                      AND fst.valid_time >= cr.display_start_time
-                      AND fst.valid_time <= cr.display_end_time
-                      AND EXISTS (
-                          SELECT 1
-                          FROM met.interp_weight iw
-                          WHERE iw.model_id = cr.model_id
-                            AND iw.station_id = fst.station_id
-                            AND iw.variable = fst.variable
-                            AND LOWER(iw.source_id) = LOWER(cr.source_id)
-                      )
-                    GROUP BY fst.forcing_version_id, fst.basin_version_id, LOWER(fst.source_id), fst.variable
-                ) variable_stats
+                FROM station_variable_identity_stats identity_stats
+                JOIN station_variable_sample_stats sample_stats
+                  ON sample_stats.forcing_version_id = identity_stats.forcing_version_id
+                 AND sample_stats.basin_version_id = identity_stats.basin_version_id
+                 AND sample_stats.station_source_id = identity_stats.station_source_id
+                 AND sample_stats.variable = identity_stats.variable
+                LEFT JOIN station_variable_common_times common_times
+                  ON common_times.forcing_version_id = identity_stats.forcing_version_id
+                 AND common_times.basin_version_id = identity_stats.basin_version_id
+                 AND common_times.station_source_id = identity_stats.station_source_id
+                 AND common_times.variable = identity_stats.variable
                 GROUP BY
-                    variable_stats.forcing_version_id,
-                    variable_stats.basin_version_id,
-                    variable_stats.station_source_id
+                    identity_stats.forcing_version_id,
+                    identity_stats.basin_version_id,
+                    identity_stats.station_source_id
             ),
-            hydro_coverage AS (
+            river_sample_rows AS (
                 SELECT
                     rt.run_id,
                     rt.basin_version_id,
                     rt.river_network_version_id,
-                    COUNT(DISTINCT rt.river_segment_id) AS segment_count,
-                    COUNT(*) AS river_sample_count,
-                    MIN(rt.valid_time) AS river_valid_time_start,
-                    MAX(rt.valid_time) AS river_valid_time_end,
-                    MIN(rt.lead_time_hours) AS min_lead_time_hours,
-                    MAX(rt.lead_time_hours) AS max_lead_time_hours
+                    rt.river_segment_id,
+                    cr.expected_segment_count,
+                    rt.valid_time,
+                    rt.lead_time_hours
                 FROM hydro.river_timeseries rt
                 JOIN candidate_runs cr
                   ON cr.run_id = rt.run_id
@@ -1144,7 +1254,72 @@ class PsycopgForecastStore:
                 WHERE rt.variable = 'q_down'
                   AND rt.valid_time >= cr.display_start_time
                   AND rt.valid_time <= cr.display_end_time
-                GROUP BY rt.run_id, rt.basin_version_id, rt.river_network_version_id
+            ),
+            river_identity_coverage AS (
+                SELECT
+                    run_id,
+                    basin_version_id,
+                    river_network_version_id,
+                    river_segment_id,
+                    COUNT(*) AS sample_count,
+                    MIN(valid_time) AS valid_time_start,
+                    MAX(valid_time) AS valid_time_end,
+                    MIN(lead_time_hours) AS min_lead_time_hours,
+                    MAX(lead_time_hours) AS max_lead_time_hours
+                FROM river_sample_rows
+                GROUP BY run_id, basin_version_id, river_network_version_id, river_segment_id
+            ),
+            river_time_coverage AS (
+                SELECT
+                    run_id,
+                    basin_version_id,
+                    river_network_version_id,
+                    expected_segment_count,
+                    valid_time,
+                    COUNT(DISTINCT river_segment_id) AS segment_count
+                FROM river_sample_rows
+                GROUP BY run_id, basin_version_id, river_network_version_id, expected_segment_count, valid_time
+            ),
+            river_common_window AS (
+                SELECT
+                    run_id,
+                    basin_version_id,
+                    river_network_version_id,
+                    MIN(valid_time) AS river_valid_time_start,
+                    MAX(valid_time) AS river_valid_time_end
+                FROM river_time_coverage
+                WHERE expected_segment_count IS NOT NULL
+                  AND segment_count = expected_segment_count
+                GROUP BY run_id, basin_version_id, river_network_version_id
+            ),
+            river_identity_rollup AS (
+                SELECT
+                    run_id,
+                    basin_version_id,
+                    river_network_version_id,
+                    COUNT(DISTINCT river_segment_id) AS segment_count,
+                    SUM(sample_count) AS river_sample_count,
+                    MAX(min_lead_time_hours) AS min_lead_time_hours,
+                    MIN(max_lead_time_hours) AS max_lead_time_hours
+                FROM river_identity_coverage
+                GROUP BY run_id, basin_version_id, river_network_version_id
+            ),
+            hydro_coverage AS (
+                SELECT
+                    rollup.run_id,
+                    rollup.basin_version_id,
+                    rollup.river_network_version_id,
+                    rollup.segment_count,
+                    rollup.river_sample_count,
+                    common_window.river_valid_time_start,
+                    common_window.river_valid_time_end,
+                    rollup.min_lead_time_hours,
+                    rollup.max_lead_time_hours
+                FROM river_identity_rollup rollup
+                LEFT JOIN river_common_window common_window
+                  ON common_window.run_id = rollup.run_id
+                 AND common_window.basin_version_id = rollup.basin_version_id
+                 AND common_window.river_network_version_id = rollup.river_network_version_id
             )
             SELECT
                 cr.*,
@@ -1181,8 +1356,80 @@ class PsycopgForecastStore:
                 source_id,
                 QHH_LATEST_CANDIDATE_LIMIT,
                 list(MVP_STATION_VARIABLES),
-                list(MVP_STATION_VARIABLES),
+                len(MVP_STATION_VARIABLES),
             ),
+        )
+
+    def _fetch_latest_qhh_display_unavailable_context(
+        self,
+        cursor: Any,
+        *,
+        source_id: str,
+    ) -> list[dict[str, Any]]:
+        return self._fetch_all(
+            cursor,
+            """
+            SELECT
+                h.run_id,
+                h.run_type,
+                h.scenario_id,
+                h.model_id,
+                h.basin_version_id,
+                h.forcing_version_id,
+                h.source_id,
+                h.cycle_time,
+                h.start_time AS run_start_time,
+                h.end_time AS run_end_time,
+                h.status,
+                h.created_at AS run_created_at,
+                h.updated_at AS run_updated_at,
+                mi.river_network_version_id,
+                mi.basin_version_id AS model_basin_version_id,
+                bv.basin_id,
+                rnv.basin_version_id AS river_network_basin_version_id,
+                rnv.segment_count AS expected_segment_count,
+                fv.forcing_version_id AS fv_forcing_version_id,
+                fv.model_id AS forcing_model_id,
+                fv.source_id AS forcing_source_id,
+                fv.cycle_time AS forcing_cycle_time,
+                fv.start_time AS forcing_start_time,
+                fv.end_time AS forcing_end_time,
+                fv.station_count AS expected_station_count,
+                fv.checksum AS forcing_checksum,
+                fv.lineage_json AS forcing_lineage_json,
+                GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
+                LEAST(h.end_time, fv.end_time) AS display_end_time,
+                0 AS station_count,
+                0 AS station_sample_count,
+                NULL AS station_basin_version_id,
+                NULL AS station_source_id,
+                NULL AS station_valid_time_start,
+                NULL AS station_valid_time_end,
+                '[]'::jsonb AS station_variable_coverage,
+                0 AS segment_count,
+                0 AS river_sample_count,
+                NULL AS river_valid_time_start,
+                NULL AS river_valid_time_end,
+                NULL AS min_lead_time_hours,
+                NULL AS max_lead_time_hours
+            FROM hydro.hydro_run h
+            JOIN core.basin_version bv
+              ON bv.basin_version_id = h.basin_version_id
+            LEFT JOIN core.model_instance mi
+              ON mi.model_id = h.model_id
+            LEFT JOIN core.river_network_version rnv
+              ON rnv.river_network_version_id = mi.river_network_version_id
+            LEFT JOIN met.forcing_version fv
+              ON fv.forcing_version_id = h.forcing_version_id
+            WHERE bv.basin_id = %s
+              AND h.run_type = 'forecast'
+              AND h.status NOT IN ('frequency_done', 'published')
+              AND LOWER(h.source_id) = LOWER(%s)
+              AND h.cycle_time IS NOT NULL
+            ORDER BY h.cycle_time DESC, h.run_id DESC
+            LIMIT %s
+            """,
+            (QHH_BASIN_ID, source_id, QHH_LATEST_CONTEXT_LIMIT),
         )
 
     def _fetch_station_for_series(self, cursor: Any, *, station_id: str) -> dict[str, Any]:
@@ -1752,7 +1999,7 @@ def _qhh_latest_source_id(source: str) -> str:
             message="source must be GFS or IFS.",
             details={
                 "field": "source",
-                "rejected_value": source,
+                "rejected_value": _bounded_reflected_value(source),
                 "allowed_values": list(QHH_LATEST_SUPPORTED_SOURCES),
             },
         )
@@ -2052,6 +2299,14 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
                 "Station forcing variable valid-time range is invalid.",
                 variable=variable,
             )
+        elif variable_end == variable_start:
+            add(
+                "STATION_VARIABLE_COMMON_HORIZON_NONPOSITIVE",
+                "Station forcing variable does not provide a positive common station horizon.",
+                variable=variable,
+                valid_time_start=_format_time(variable_start),
+                valid_time_end=_format_time(variable_end),
+            )
         if display_start_time is not None and variable_start is not None and variable_start < display_start_time:
             add(
                 "STATION_VARIABLE_WINDOW_UNDERFLOW",
@@ -2093,6 +2348,13 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         add("Q_DOWN_VALID_TIME_MISSING", "River q_down valid-time metadata is missing.")
     elif river_end < river_start:
         add("Q_DOWN_INVALID_VALID_TIME_RANGE", "River q_down valid-time range is invalid.")
+    elif river_end == river_start:
+        add(
+            "Q_DOWN_COMMON_HORIZON_NONPOSITIVE",
+            "River q_down coverage does not provide a positive common segment horizon.",
+            river_valid_time_start=_format_time(river_start),
+            river_valid_time_end=_format_time(river_end),
+        )
     if display_start_time is not None and river_start is not None and river_start < display_start_time:
         add(
             "Q_DOWN_WINDOW_UNDERFLOW",
@@ -2200,6 +2462,13 @@ def _qhh_latest_available_window(row: Mapping[str, Any]) -> tuple[datetime | Non
     )
 
 
+def _bounded_reflected_value(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= QHH_LATEST_REFLECTED_VALUE_LIMIT:
+        return text
+    return f"{text[:QHH_LATEST_REFLECTED_VALUE_LIMIT - 3]}..."
+
+
 def _latest_datetime(*values: datetime | None) -> datetime | None:
     present = [_ensure_utc(value) for value in values if value is not None]
     return max(present) if present else None
@@ -2259,7 +2528,7 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "index": "hydro_run_qhh_latest_candidate_idx",
             "status": "covered_by_latest_product_candidate_index",
             "columns": ["LOWER(source_id)", "run_type", "basin_version_id", "cycle_time DESC", "run_id DESC"],
-            "predicate": "cycle_time IS NOT NULL",
+            "predicate": "cycle_time IS NOT NULL AND status IN ('frequency_done', 'published')",
         },
         {
             "table": "core.basin_version",
@@ -2271,13 +2540,27 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "table": "hydro.river_timeseries",
             "index": "river_timeseries_qhh_latest_window_idx",
             "status": "covered_by_latest_product_window_index",
-            "columns": ["run_id", "basin_version_id", "river_network_version_id", "variable", "valid_time DESC"],
+            "columns": [
+                "run_id",
+                "basin_version_id",
+                "river_network_version_id",
+                "variable",
+                "valid_time DESC",
+                "river_segment_id",
+            ],
         },
         {
             "table": "met.forcing_station_timeseries",
             "index": "forcing_station_timeseries_qhh_latest_window_idx",
             "status": "covered_by_latest_product_station_window_index",
-            "columns": ["forcing_version_id", "basin_version_id", "LOWER(source_id)", "variable", "valid_time DESC"],
+            "columns": [
+                "forcing_version_id",
+                "basin_version_id",
+                "LOWER(source_id)",
+                "variable",
+                "valid_time DESC",
+                "station_id",
+            ],
         },
         {
             "table": "met.interp_weight",
