@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -13,6 +15,7 @@ from packages.common.forecast_store import (
     ForecastStoreError,
     PsycopgForecastStore,
     _forecast_response_from_rows,
+    _PsycopgTransaction,
     _spliced_response_from_rows,
     analysis_window_for_issue_time,
 )
@@ -278,6 +281,68 @@ class _NullTransaction:
 
     def __exit__(self, *_args: Any) -> bool:
         return False
+
+
+def test_psycopg_transaction_uses_readonly_repeatable_read_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    class FakeDatabaseError(Exception):
+        pass
+
+    class FakeRealDictCursor:
+        pass
+
+    class FakeConnection:
+        def set_session(self, *, isolation_level: str, readonly: bool, autocommit: bool) -> None:
+            calls.append(("set_session", isolation_level, readonly, autocommit))
+
+        def cursor(self, *, cursor_factory: type[FakeRealDictCursor]) -> str:
+            calls.append(("cursor", cursor_factory))
+            return "fake-cursor"
+
+        def commit(self) -> None:
+            calls.append(("commit",))
+
+        def rollback(self) -> None:
+            calls.append(("rollback",))
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+    fake_connection = FakeConnection()
+    fake_psycopg2 = ModuleType("psycopg2")
+    fake_extras = ModuleType("psycopg2.extras")
+
+    def connect(database_url: str) -> FakeConnection:
+        calls.append(("connect", database_url))
+        return fake_connection
+
+    def register_default_json(*, conn_or_curs: FakeConnection) -> None:
+        calls.append(("register_default_json", conn_or_curs))
+
+    def register_default_jsonb(*, conn_or_curs: FakeConnection) -> None:
+        calls.append(("register_default_jsonb", conn_or_curs))
+
+    fake_psycopg2.connect = connect
+    fake_psycopg2.Error = FakeDatabaseError
+    fake_psycopg2.extras = fake_extras
+    fake_extras.RealDictCursor = FakeRealDictCursor
+    fake_extras.register_default_json = register_default_json
+    fake_extras.register_default_jsonb = register_default_jsonb
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_extras)
+
+    with _PsycopgTransaction("postgresql://unit-test") as cursor:
+        assert cursor == "fake-cursor"
+        assert calls == [
+            ("connect", "postgresql://unit-test"),
+            ("set_session", "REPEATABLE READ", True, False),
+            ("register_default_json", fake_connection),
+            ("register_default_jsonb", fake_connection),
+            ("cursor", FakeRealDictCursor),
+        ]
+
+    assert calls[-2:] == [("commit",), ("close",)]
 
 
 @pytest.fixture
@@ -688,6 +753,562 @@ def test_forecast_series_duplicate_segment_filters_hindcast_latest_and_rows_by_s
     assert all("rnv_selected" in parameters for _statement, parameters in store.cursor.executions[1:4])
 
 
+def test_station_series_explicit_forcing_version_groups_rows_and_truncates_per_variable() -> None:
+    from_time = _dt("2026-05-07T00:00:00Z")
+    to_time = _dt("2026-05-07T03:00:00Z")
+    store = SqlCaptureForecastStore(
+        [
+            [_station_row()],
+            [_forcing_version_row()],
+            [{"present": 1}],
+            [
+                _station_series_row("PRCP", from_time, 1.0, row_number=1, quality_flag="ok"),
+                _station_series_row("PRCP", from_time + timedelta(hours=1), 2.0, row_number=2, quality_flag="warn"),
+                _station_series_row("PRCP", from_time + timedelta(hours=2), 3.0, row_number=3),
+                _station_series_row("TEMP", from_time, 11.0, row_number=1, unit="degC", native_resolution="3h"),
+            ],
+        ]
+    )
+
+    response = store.station_series(
+        station_id="qhh_stn_001",
+        forcing_version_id="forc_qhh_gfs_2026050700",
+        variables=["PRCP,TEMP"],
+        from_time=from_time,
+        to_time=to_time,
+        limit=2,
+    )
+
+    series_by_variable = {series["variable"]: series for series in response["series"]}
+    assert response["station_id"] == "qhh_stn_001"
+    assert response["forcing_version_id"] == "forc_qhh_gfs_2026050700"
+    assert response["source_id"] == "GFS"
+    assert response["cycle_time"] == "2026-05-07T00:00:00Z"
+    assert list(series_by_variable) == ["PRCP", "TEMP"]
+    assert series_by_variable["PRCP"]["unit"] == "mm/h"
+    assert series_by_variable["PRCP"]["native_resolution"] == "1h"
+    assert series_by_variable["PRCP"]["truncated"] is True
+    assert series_by_variable["PRCP"]["points"] == [
+        {"valid_time": "2026-05-07T00:00:00Z", "value": 1.0, "quality_flag": "ok", "source_id": "GFS"},
+        {"valid_time": "2026-05-07T01:00:00Z", "value": 2.0, "quality_flag": "warn", "source_id": "GFS"},
+    ]
+    assert series_by_variable["PRCP"]["metadata"] == {
+        "limit": 2,
+        "returned_points": 2,
+        "requested_from": "2026-05-07T00:00:00Z",
+        "requested_to": "2026-05-07T03:00:00Z",
+        "returned_from": "2026-05-07T00:00:00Z",
+        "returned_to": "2026-05-07T01:00:00Z",
+        "truncated": True,
+    }
+    assert series_by_variable["TEMP"]["unit"] == "degC"
+    assert series_by_variable["TEMP"]["native_resolution"] == "3h"
+    assert series_by_variable["TEMP"]["truncated"] is False
+    membership_statement, membership_parameters = store.cursor.executions[2]
+    assert "FROM met.forcing_station_timeseries" in membership_statement
+    assert "LIMIT 1" in membership_statement
+    assert membership_parameters == (
+        "forc_qhh_gfs_2026050700",
+        "qhh_stn_001",
+        from_time,
+        _dt("2026-05-14T00:00:00Z"),
+    )
+    statement, parameters = store.cursor.executions[3]
+    assert "fst.forcing_version_id = %s" in statement
+    assert "fst.station_id = %s" in statement
+    assert "fst.variable = requested.variable" in statement
+    assert "fst.valid_time >= %s" in statement
+    assert "fst.valid_time <= %s" in statement
+    assert parameters == (
+        ["PRCP", "TEMP"],
+        "forc_qhh_gfs_2026050700",
+        "qhh_stn_001",
+        from_time,
+        _dt("2026-05-14T00:00:00Z"),
+        from_time,
+        to_time,
+        3,
+    )
+
+
+def test_station_series_resolves_model_source_cycle_to_selected_forcing_version() -> None:
+    cycle_time = _dt("2026-05-07T00:00:00Z")
+    store = SqlCaptureForecastStore(
+        [
+            [_station_row()],
+            [_forcing_version_row()],
+            [{"present": 1}],
+            [_station_series_row("RH", cycle_time, 78.0, row_number=1, unit="%")],
+        ]
+    )
+
+    response = store.station_series(
+        station_id="qhh_stn_001",
+        model_id="qhh_shud_v1",
+        source_id="gfs",
+        cycle_time="2026-05-07T00:00:00Z",
+        variables=["RH"],
+        limit=10,
+    )
+
+    assert response["forcing_version_id"] == "forc_qhh_gfs_2026050700"
+    assert response["series"][0]["points"] == [
+        {"valid_time": "2026-05-07T00:00:00Z", "value": 78.0, "quality_flag": "ok", "source_id": "GFS"}
+    ]
+    statement, parameters = store.cursor.executions[1]
+    assert "LOWER(source_id) = %s" in statement
+    assert "LIMIT 2" in statement
+    assert parameters == ("qhh_shud_v1", "gfs", cycle_time)
+
+
+def test_station_series_accepts_string_variable_filter_without_character_splitting() -> None:
+    cycle_time = _dt("2026-05-07T00:00:00Z")
+    store = SqlCaptureForecastStore(
+        [
+            [_station_row()],
+            [_forcing_version_row()],
+            [{"present": 1}],
+            [_station_series_row("PRCP", cycle_time, 5.0, row_number=1)],
+        ]
+    )
+
+    response = store.station_series(
+        station_id="qhh_stn_001",
+        forcing_version_id="forc_qhh_gfs_2026050700",
+        variables="PRCP",
+    )
+
+    assert [series["variable"] for series in response["series"]] == ["PRCP"]
+    assert store.cursor.executions[3][1][:3] == (["PRCP"], "forc_qhh_gfs_2026050700", "qhh_stn_001")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "details_field"),
+    [
+        ({"variables": ["TEMP,unknown"]}, "variables"),
+        ({"limit": 0}, "limit"),
+        (
+            {
+                "from_time": "2026-05-08T00:00:00Z",
+                "to_time": "2026-05-07T00:00:00Z",
+            },
+            None,
+        ),
+    ],
+)
+def test_station_series_validates_variables_limit_and_time_range(
+    kwargs: dict[str, Any], details_field: str | None
+) -> None:
+    store = SqlCaptureForecastStore()
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.station_series(
+            station_id="qhh_stn_001",
+            forcing_version_id="forc_qhh_gfs_2026050700",
+            **kwargs,
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.code == "VALIDATION_ERROR"
+    if details_field is not None:
+        assert error.value.details["field"] == details_field
+    assert store.cursor.executions == []
+
+
+def test_station_series_raises_stable_errors_for_missing_station_and_forcing_version() -> None:
+    missing_station_store = SqlCaptureForecastStore([[]])
+    with pytest.raises(ForecastStoreError) as missing_station:
+        missing_station_store.station_series(station_id="missing", forcing_version_id="forc_qhh_gfs_2026050700")
+    assert missing_station.value.status_code == 404
+    assert missing_station.value.code == "STATION_NOT_FOUND"
+
+    missing_forcing_store = SqlCaptureForecastStore([[_station_row()], []])
+    with pytest.raises(ForecastStoreError) as missing_forcing:
+        missing_forcing_store.station_series(station_id="qhh_stn_001", forcing_version_id="missing")
+    assert missing_forcing.value.status_code == 404
+    assert missing_forcing.value.code == "FORCING_VERSION_NOT_FOUND"
+
+    missing_resolved_forcing_store = SqlCaptureForecastStore([[_station_row()], []])
+    with pytest.raises(ForecastStoreError) as missing_resolved_forcing:
+        missing_resolved_forcing_store.station_series(
+            station_id="qhh_stn_001",
+            model_id="qhh_shud_v1",
+            source_id="gfs",
+            cycle_time="2026-05-07T00:00:00Z",
+        )
+    assert missing_resolved_forcing.value.status_code == 404
+    assert missing_resolved_forcing.value.code == "FORCING_VERSION_NOT_FOUND"
+    assert missing_resolved_forcing.value.details == {
+        "model_id": "qhh_shud_v1",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-07T00:00:00Z",
+    }
+
+
+def test_station_series_raises_stable_error_for_ambiguous_model_source_cycle_resolution() -> None:
+    cycle_time = _dt("2026-05-07T00:00:00Z")
+    store = SqlCaptureForecastStore(
+        [
+            [_station_row()],
+            [
+                _forcing_version_row(forcing_version_id="forc_qhh_gfs_2026050700"),
+                _forcing_version_row(forcing_version_id="forc_qhh_gfs_2026050700_rebuild"),
+                _forcing_version_row(forcing_version_id="forc_qhh_gfs_2026050700_third"),
+            ],
+        ]
+    )
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.station_series(
+            station_id="qhh_stn_001",
+            model_id="qhh_shud_v1",
+            source_id="gfs",
+            cycle_time=cycle_time,
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.code == "FORCING_VERSION_AMBIGUOUS"
+    assert error.value.details["candidates"] == [
+        {"forcing_version_id": "forc_qhh_gfs_2026050700", "created_at": "2026-05-07T00:30:00Z"},
+        {"forcing_version_id": "forc_qhh_gfs_2026050700_rebuild", "created_at": "2026-05-07T00:30:00Z"},
+    ]
+    assert len(error.value.details["candidates"]) == 2
+    statement, _parameters = store.cursor.executions[1]
+    assert "LIMIT 2" in statement
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_conflict"),
+    [
+        ({"source_id": "ifs"}, {"field": "source_id", "supplied": "ifs", "selected": "gfs"}),
+        (
+            {"cycle_time": "2026-05-07T06:00:00+06:00"},
+            {
+                "field": "cycle_time",
+                "supplied": "2026-05-07T00:00:00Z",
+                "selected": "2026-05-07T00:00:00Z",
+            },
+        ),
+        (
+            {"cycle_time": "2026-05-07T06:00:00Z"},
+            {
+                "field": "cycle_time",
+                "supplied": "2026-05-07T06:00:00Z",
+                "selected": "2026-05-07T00:00:00Z",
+            },
+        ),
+    ],
+)
+def test_station_series_explicit_forcing_version_validates_redundant_tuple_filters(
+    kwargs: dict[str, Any], expected_conflict: dict[str, Any]
+) -> None:
+    store = SqlCaptureForecastStore([[_station_row()], [_forcing_version_row()]])
+
+    if expected_conflict["supplied"] == expected_conflict["selected"]:
+        store.cursor.rows_by_statement.append([{"present": 1}])
+        store.cursor.rows_by_statement.append([])
+        response = store.station_series(
+            station_id="qhh_stn_001",
+            forcing_version_id="forc_qhh_gfs_2026050700",
+            variables=["PRCP"],
+            **kwargs,
+        )
+        assert response["series"][0]["points"] == []
+        return
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.station_series(
+            station_id="qhh_stn_001",
+            forcing_version_id="forc_qhh_gfs_2026050700",
+            variables=["PRCP"],
+            **kwargs,
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.code == "FORCING_VERSION_FILTER_CONFLICT"
+    assert expected_conflict in error.value.details["conflicts"]
+    assert len(store.cursor.executions) == 2
+
+
+@pytest.mark.parametrize(
+    ("checksum", "kwargs"),
+    [
+        (None, {"forcing_version_id": "forc_qhh_gfs_2026050700"}),
+        (
+            "pending",
+            {
+                "model_id": "qhh_shud_v1",
+                "source_id": "GFS",
+                "cycle_time": "2026-05-07T08:00:00+08:00",
+            },
+        ),
+    ],
+)
+def test_station_series_rejects_not_finalized_forcing_versions(
+    checksum: str | None, kwargs: dict[str, Any]
+) -> None:
+    forcing_rows = [_forcing_version_row(checksum=checksum)]
+    store = SqlCaptureForecastStore([[_station_row()], forcing_rows])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.station_series(station_id="qhh_stn_001", variables=["PRCP"], **kwargs)
+
+    assert error.value.status_code == 409
+    assert error.value.code == "FORCING_VERSION_NOT_FINALIZED"
+    assert error.value.details["forcing_version_id"] == "forc_qhh_gfs_2026050700"
+    assert len(store.cursor.executions) == 2
+
+
+def test_station_series_rejects_station_absent_from_selected_forcing_version() -> None:
+    store = SqlCaptureForecastStore([[_station_row()], [_forcing_version_row()], []])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.station_series(
+            station_id="qhh_stn_001",
+            forcing_version_id="forc_qhh_gfs_2026050700",
+            variables=["PRCP"],
+        )
+
+    assert error.value.status_code == 404
+    assert error.value.code == "STATION_NOT_IN_FORCING_VERSION"
+    assert error.value.details == {
+        "station_id": "qhh_stn_001",
+        "forcing_version_id": "forc_qhh_gfs_2026050700",
+        "valid_time_start": "2026-05-07T00:00:00Z",
+        "valid_time_end": "2026-05-14T00:00:00Z",
+    }
+
+
+def test_station_series_valid_station_with_time_filter_outside_rows_returns_empty_series() -> None:
+    store = SqlCaptureForecastStore([[_station_row()], [_forcing_version_row()], [{"present": 1}], []])
+
+    response = store.station_series(
+        station_id="qhh_stn_001",
+        forcing_version_id="forc_qhh_gfs_2026050700",
+        variables=["PRCP"],
+        from_time="2026-05-15T00:00:00Z",
+        to_time="2026-05-15T01:00:00Z",
+    )
+
+    assert response["series"][0]["points"] == []
+    assert response["series"][0]["metadata"]["requested_from"] == "2026-05-15T00:00:00Z"
+    assert response["series"][0]["metadata"]["requested_to"] == "2026-05-15T01:00:00Z"
+
+
+def test_station_series_excludes_out_of_window_rows_before_points_and_truncation() -> None:
+    start_time = _dt("2026-05-07T00:00:00Z")
+    end_time = _dt("2026-05-14T00:00:00Z")
+    store = SqlCaptureForecastStore(
+        [
+            [_station_row()],
+            [_forcing_version_row()],
+            [{"present": 1}],
+            [
+                _station_series_row("PRCP", start_time - timedelta(hours=1), 99.0, row_number=1),
+                _station_series_row("PRCP", start_time, 1.0, row_number=2),
+                _station_series_row("PRCP", end_time + timedelta(hours=1), 100.0, row_number=3),
+            ],
+        ]
+    )
+
+    response = store.station_series(
+        station_id="qhh_stn_001",
+        forcing_version_id="forc_qhh_gfs_2026050700",
+        variables=["PRCP"],
+        limit=1,
+    )
+
+    series = response["series"][0]
+    assert series["points"] == [
+        {"valid_time": "2026-05-07T00:00:00Z", "value": 1.0, "quality_flag": "ok", "source_id": "GFS"}
+    ]
+    assert series["truncated"] is False
+    assert series["metadata"]["returned_points"] == 1
+
+
+def test_station_forcing_readiness_rejects_not_finalized_forcing_version() -> None:
+    store = SqlCaptureForecastStore([[_forcing_version_row(checksum="pending")]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.station_forcing_readiness(forcing_version_id="forc_qhh_gfs_2026050700")
+
+    assert error.value.status_code == 409
+    assert error.value.code == "FORCING_VERSION_NOT_FINALIZED"
+    assert len(store.cursor.executions) == 1
+
+
+def test_station_forcing_readiness_reports_qhh_like_coverage_and_index_outcome() -> None:
+    store = SqlCaptureForecastStore(
+        [
+            [_forcing_version_row(station_count=386)],
+            [
+                {
+                    "actual_station_count": 386,
+                    "sample_count": 1200,
+                    "valid_time_start": _dt("2026-05-07T00:00:00Z"),
+                    "valid_time_end": _dt("2026-05-08T00:00:00Z"),
+                }
+            ],
+            [
+                _readiness_row("PRCP", station_count=386),
+                _readiness_row("TEMP", station_count=386),
+                _readiness_row("RH", station_count=386),
+                _readiness_row("wind", station_count=386),
+                _readiness_row("Rn", station_count=386, unit_count=0, missing_unit_samples=4),
+            ],
+        ]
+    )
+
+    response = store.station_forcing_readiness(
+        forcing_version_id="forc_qhh_gfs_2026050700",
+        expected_station_count=386,
+    )
+
+    coverage_by_variable = {item["variable"]: item for item in response["six_variable_coverage"]}
+    reason_codes = {item["code"] for item in response["missing_data_reasons"]}
+    assert response["forcing_version_id"] == "forc_qhh_gfs_2026050700"
+    assert response["expected_station_count"] == 386
+    assert response["actual_station_count"] == 386
+    assert response["declared_station_count"] == 386
+    assert response["required_variables"] == ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]
+    assert coverage_by_variable["PRCP"]["ready"] is True
+    assert coverage_by_variable["Rn"]["missing_unit_samples"] == 4
+    assert coverage_by_variable["Press"]["sample_count"] == 0
+    assert {"UNIT_MISSING", "VARIABLE_MISSING"} <= reason_codes
+    assert response["query_index"] == {
+        "status": "covered_by_primary_key",
+        "table": "met.forcing_station_timeseries",
+        "index": "forcing_station_timeseries_pkey",
+        "columns": ["forcing_version_id", "station_id", "variable", "valid_time"],
+        "reason": (
+            "Station-series reads constrain forcing_version_id and station_id before variable and valid_time, "
+            "matching the source-of-truth primary key prefix; no additive index is required for #204."
+        ),
+    }
+    assert response["ready"] is False
+
+
+def test_station_forcing_readiness_without_expected_count_uses_declared_station_count() -> None:
+    store = SqlCaptureForecastStore(
+        [
+            [_forcing_version_row(station_count=386)],
+            [
+                {
+                    "actual_station_count": 385,
+                    "sample_count": 1200,
+                    "valid_time_start": _dt("2026-05-07T00:00:00Z"),
+                    "valid_time_end": _dt("2026-05-08T00:00:00Z"),
+                }
+            ],
+            [
+                _readiness_row("PRCP", station_count=385),
+                _readiness_row("TEMP", station_count=386),
+                _readiness_row("RH", station_count=386),
+                _readiness_row("wind", station_count=386),
+                _readiness_row("Rn", station_count=386),
+                _readiness_row("Press", station_count=386),
+            ],
+        ]
+    )
+
+    response = store.station_forcing_readiness(forcing_version_id="forc_qhh_gfs_2026050700")
+
+    coverage_by_variable = {item["variable"]: item for item in response["six_variable_coverage"]}
+    assert response["expected_station_count"] == 386
+    assert response["actual_station_count"] == 385
+    assert coverage_by_variable["PRCP"]["ready"] is False
+    assert response["ready"] is False
+    assert {
+        ("STATION_COUNT_MISMATCH", None, 386, 385),
+        ("VARIABLE_STATION_COUNT_MISMATCH", "PRCP", 386, 385),
+    } <= {
+        (reason["code"], reason.get("variable"), reason.get("expected"), reason.get("actual"))
+        for reason in response["missing_data_reasons"]
+    }
+
+
+def test_station_forcing_readiness_missing_quality_flags_make_ready_false() -> None:
+    store = SqlCaptureForecastStore(
+        [
+            [_forcing_version_row(station_count=386)],
+            [
+                {
+                    "actual_station_count": 386,
+                    "sample_count": 1200,
+                    "valid_time_start": _dt("2026-05-07T00:00:00Z"),
+                    "valid_time_end": _dt("2026-05-08T00:00:00Z"),
+                }
+            ],
+            [
+                _readiness_row("PRCP", station_count=386, quality_flag_count=1, missing_quality_flag_samples=3),
+                _readiness_row("TEMP", station_count=386),
+                _readiness_row("RH", station_count=386),
+                _readiness_row("wind", station_count=386),
+                _readiness_row("Rn", station_count=386),
+                _readiness_row("Press", station_count=386),
+            ],
+        ]
+    )
+
+    response = store.station_forcing_readiness(forcing_version_id="forc_qhh_gfs_2026050700")
+
+    coverage_by_variable = {item["variable"]: item for item in response["six_variable_coverage"]}
+    assert coverage_by_variable["PRCP"]["ready"] is False
+    assert response["ready"] is False
+    assert {
+        "code": "QUALITY_FLAG_MISSING",
+        "variable": "PRCP",
+        "missing_samples": 3,
+    } in response["missing_data_reasons"]
+
+
+def test_station_forcing_readiness_excludes_out_of_window_rows_from_sql_and_response() -> None:
+    store = SqlCaptureForecastStore(
+        [
+            [_forcing_version_row(station_count=386)],
+            [
+                {
+                    "actual_station_count": 386,
+                    "sample_count": 600,
+                    "valid_time_start": _dt("2026-05-07T00:00:00Z"),
+                    "valid_time_end": _dt("2026-05-14T00:00:00Z"),
+                }
+            ],
+            [
+                _readiness_row(
+                    "PRCP",
+                    station_count=386,
+                    valid_time_start=_dt("2026-05-07T00:00:00Z"),
+                    valid_time_end=_dt("2026-05-14T00:00:00Z"),
+                )
+            ],
+        ]
+    )
+
+    response = store.station_forcing_readiness(
+        forcing_version_id="forc_qhh_gfs_2026050700",
+        expected_station_count=386,
+        required_variables=["PRCP"],
+    )
+
+    overall_statement, overall_parameters = store.cursor.executions[1]
+    variable_statement, variable_parameters = store.cursor.executions[2]
+    assert "valid_time >= %s" in overall_statement
+    assert "valid_time <= %s" in overall_statement
+    assert "valid_time >= %s" in variable_statement
+    assert "valid_time <= %s" in variable_statement
+    assert overall_parameters == (
+        "forc_qhh_gfs_2026050700",
+        _dt("2026-05-07T00:00:00Z"),
+        _dt("2026-05-14T00:00:00Z"),
+        ["PRCP"],
+    )
+    assert variable_parameters == overall_parameters
+    assert response["valid_time_start"] == "2026-05-07T00:00:00Z"
+    assert response["valid_time_end"] == "2026-05-14T00:00:00Z"
+    assert response["ready"] is True
+
+
 @pytest.mark.asyncio
 async def test_run_list_uses_offset_limit_pagination_and_caps_limit(fake_store: FakeForecastStore) -> None:
     response = await _get("/api/v1/runs?basin_id=yangtze&source=gfs&status=parsed&limit=1000&offset=20")
@@ -800,3 +1421,87 @@ def _dt(value: str) -> datetime:
 
 def _timestamp_ms(value: datetime) -> int:
     return int(value.timestamp() * 1000)
+
+
+def _station_row(station_id: str = "qhh_stn_001") -> dict[str, Any]:
+    return {
+        "station_id": station_id,
+        "basin_version_id": "qhh_v2026",
+        "station_name": "QHH Station 001",
+        "longitude": 101.0,
+        "latitude": 36.0,
+        "elevation_m": 3200.0,
+        "station_role": "forcing_proxy",
+        "active_flag": True,
+        "properties_json": {"source": "fixture"},
+    }
+
+
+def _forcing_version_row(
+    forcing_version_id: str = "forc_qhh_gfs_2026050700",
+    *,
+    station_count: int = 386,
+    checksum: str | None = "sha256:fixture",
+) -> dict[str, Any]:
+    return {
+        "forcing_version_id": forcing_version_id,
+        "model_id": "qhh_shud_v1",
+        "source_id": "gfs",
+        "cycle_time": _dt("2026-05-07T00:00:00Z"),
+        "start_time": _dt("2026-05-07T00:00:00Z"),
+        "end_time": _dt("2026-05-14T00:00:00Z"),
+        "station_count": station_count,
+        "forcing_package_uri": "s3://nhms/qhh/forcing.tar.gz",
+        "checksum": checksum,
+        "lineage_json": {"fixture": True},
+        "created_at": _dt("2026-05-07T00:30:00Z"),
+    }
+
+
+def _station_series_row(
+    variable: str,
+    valid_time: datetime,
+    value: float,
+    *,
+    row_number: int,
+    unit: str = "mm/h",
+    native_resolution: str = "1h",
+    quality_flag: str = "ok",
+) -> dict[str, Any]:
+    return {
+        "forcing_version_id": "forc_qhh_gfs_2026050700",
+        "station_id": "qhh_stn_001",
+        "variable": variable,
+        "valid_time": valid_time,
+        "value": value,
+        "unit": unit,
+        "native_resolution": native_resolution,
+        "quality_flag": quality_flag,
+        "source_id": "gfs",
+        "row_number": row_number,
+    }
+
+
+def _readiness_row(
+    variable: str,
+    *,
+    station_count: int,
+    sample_count: int = 100,
+    unit_count: int = 1,
+    missing_unit_samples: int = 0,
+    quality_flag_count: int = 1,
+    missing_quality_flag_samples: int = 0,
+    valid_time_start: datetime | None = None,
+    valid_time_end: datetime | None = None,
+) -> dict[str, Any]:
+    return {
+        "variable": variable,
+        "station_count": station_count,
+        "sample_count": sample_count,
+        "unit_count": unit_count,
+        "missing_unit_samples": missing_unit_samples,
+        "quality_flag_count": quality_flag_count,
+        "missing_quality_flag_samples": missing_quality_flag_samples,
+        "valid_time_start": valid_time_start or _dt("2026-05-07T00:00:00Z"),
+        "valid_time_end": valid_time_end or _dt("2026-05-08T00:00:00Z"),
+    }

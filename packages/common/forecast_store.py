@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+MVP_STATION_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
+DEFAULT_STATION_SERIES_LIMIT = 500
+MAX_STATION_SERIES_LIMIT = 10000
+
 
 class ForecastStoreError(RuntimeError):
     def __init__(
@@ -833,6 +837,444 @@ class PsycopgForecastStore:
             "offset": offset,
         }
 
+    def station_series(
+        self,
+        *,
+        station_id: str,
+        forcing_version_id: str | None = None,
+        model_id: str | None = None,
+        source_id: str | None = None,
+        cycle_time: datetime | str | None = None,
+        variables: Sequence[str] | str | None = None,
+        from_time: datetime | str | None = None,
+        to_time: datetime | str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        station_id = _required_text(station_id, "station_id")
+        requested_variables = _station_variable_tokens(variables)
+        selected_limit = _station_series_limit(limit)
+        requested_from = _optional_datetime_filter(from_time, "from")
+        requested_to = _optional_datetime_filter(to_time, "to")
+        _validate_time_range(requested_from, requested_to)
+
+        with self._transaction() as cursor:
+            station = self._fetch_station_for_series(cursor, station_id=station_id)
+            forcing_version = self._select_forcing_version(
+                cursor,
+                forcing_version_id=forcing_version_id,
+                model_id=model_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            valid_time_start, valid_time_end = _forcing_version_time_window(forcing_version)
+            self._validate_station_forcing_membership(
+                cursor,
+                station_id=station_id,
+                forcing_version=forcing_version,
+                valid_time_start=valid_time_start,
+                valid_time_end=valid_time_end,
+            )
+            rows = self._fetch_station_series_rows(
+                cursor,
+                station_id=station_id,
+                forcing_version_id=str(forcing_version["forcing_version_id"]),
+                valid_time_start=valid_time_start,
+                valid_time_end=valid_time_end,
+                variables=requested_variables,
+                from_time=requested_from,
+                to_time=requested_to,
+                limit=selected_limit,
+            )
+            rows = _station_series_rows_within_window(
+                rows,
+                valid_time_start=valid_time_start,
+                valid_time_end=valid_time_end,
+            )
+
+        return _station_series_response(
+            station=station,
+            forcing_version=forcing_version,
+            requested_variables=requested_variables,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            limit=selected_limit,
+            rows=rows,
+        )
+
+    def station_forcing_readiness(
+        self,
+        *,
+        forcing_version_id: str | None = None,
+        model_id: str | None = None,
+        source_id: str | None = None,
+        cycle_time: datetime | str | None = None,
+        expected_station_count: int | None = None,
+        required_variables: Sequence[str] | str | None = None,
+    ) -> dict[str, Any]:
+        variables = _station_variable_tokens(required_variables)
+        expected_count = _optional_non_negative_int(expected_station_count, "expected_station_count")
+
+        with self._transaction() as cursor:
+            forcing_version = self._select_forcing_version(
+                cursor,
+                forcing_version_id=forcing_version_id,
+                model_id=model_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            valid_time_start, valid_time_end = _forcing_version_time_window(forcing_version)
+            overall = self._fetch_forcing_readiness_overall(
+                cursor,
+                forcing_version_id=str(forcing_version["forcing_version_id"]),
+                valid_time_start=valid_time_start,
+                valid_time_end=valid_time_end,
+                variables=variables,
+            )
+            coverage_rows = self._fetch_forcing_readiness_variable_rows(
+                cursor,
+                forcing_version_id=str(forcing_version["forcing_version_id"]),
+                valid_time_start=valid_time_start,
+                valid_time_end=valid_time_end,
+                variables=variables,
+            )
+
+        return _station_forcing_readiness_response(
+            forcing_version=forcing_version,
+            expected_station_count=expected_count,
+            required_variables=variables,
+            overall=overall,
+            coverage_rows=coverage_rows,
+        )
+
+    def _fetch_station_for_series(self, cursor: Any, *, station_id: str) -> dict[str, Any]:
+        station = self._fetch_optional(
+            cursor,
+            """
+            SELECT
+                station_id,
+                basin_version_id,
+                station_name,
+                ST_X(geom) AS longitude,
+                ST_Y(geom) AS latitude,
+                elevation_m,
+                station_role,
+                active_flag,
+                properties_json
+            FROM met.met_station
+            WHERE station_id = %s
+            """,
+            (station_id,),
+        )
+        if station is None:
+            raise ForecastStoreError(
+                status_code=404,
+                code="STATION_NOT_FOUND",
+                message=f"Station not found: {station_id}",
+                details={"station_id": station_id},
+            )
+        return station
+
+    def _select_forcing_version(
+        self,
+        cursor: Any,
+        *,
+        forcing_version_id: str | None,
+        model_id: str | None,
+        source_id: str | None,
+        cycle_time: datetime | str | None,
+    ) -> dict[str, Any]:
+        if forcing_version_id is not None:
+            row = self._fetch_forcing_version_by_id(
+                cursor,
+                forcing_version_id=_required_text(forcing_version_id, "forcing_version_id"),
+            )
+            _validate_forcing_version_filter_consistency(
+                row,
+                model_id=model_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            _ensure_forcing_version_finalized(row)
+            return row
+
+        model_token = str(model_id or "").strip()
+        source_token = _source_lookup_token(source_id)
+        if not model_token or not source_token or cycle_time is None:
+            raise ForecastStoreError(
+                status_code=422,
+                code="MISSING_REQUIRED_FILTER",
+                message=(
+                    "forcing_version_id or model_id, source_id, and cycle_time are required "
+                    "for station series queries."
+                ),
+                details={
+                    "required_alternatives": [
+                        ["forcing_version_id"],
+                        ["model_id", "source_id", "cycle_time"],
+                    ]
+                },
+            )
+
+        parsed_cycle_time = _required_datetime_filter(cycle_time, "cycle_time")
+        rows = self._fetch_all(
+            cursor,
+            """
+            SELECT
+                forcing_version_id,
+                model_id,
+                source_id,
+                cycle_time,
+                start_time,
+                end_time,
+                station_count,
+                forcing_package_uri,
+                checksum,
+                lineage_json,
+                created_at
+            FROM met.forcing_version
+            WHERE model_id = %s
+              AND LOWER(source_id) = %s
+              AND cycle_time = %s
+            ORDER BY created_at DESC, forcing_version_id
+            LIMIT 2
+            """,
+            (model_token, source_token, parsed_cycle_time),
+        )
+        if not rows:
+            raise ForecastStoreError(
+                status_code=404,
+                code="FORCING_VERSION_NOT_FOUND",
+                message="Forcing version not found for model_id, source_id, and cycle_time.",
+                details={
+                    "model_id": model_token,
+                    "source_id": source_token,
+                    "cycle_time": _format_time(parsed_cycle_time),
+                },
+            )
+        if len(rows) > 1:
+            raise ForecastStoreError(
+                status_code=409,
+                code="FORCING_VERSION_AMBIGUOUS",
+                message="Multiple forcing versions match model_id, source_id, and cycle_time.",
+                details={
+                    "model_id": model_token,
+                    "source_id": source_token,
+                    "cycle_time": _format_time(parsed_cycle_time),
+                    "candidates": [
+                        {
+                            "forcing_version_id": row.get("forcing_version_id"),
+                            "created_at": _format_time_value(row.get("created_at")),
+                        }
+                        for row in rows[:2]
+                    ],
+                },
+            )
+        _ensure_forcing_version_finalized(rows[0])
+        return rows[0]
+
+    def _fetch_forcing_version_by_id(self, cursor: Any, *, forcing_version_id: str) -> dict[str, Any]:
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT
+                forcing_version_id,
+                model_id,
+                source_id,
+                cycle_time,
+                start_time,
+                end_time,
+                station_count,
+                forcing_package_uri,
+                checksum,
+                lineage_json,
+                created_at
+            FROM met.forcing_version
+            WHERE forcing_version_id = %s
+            """,
+            (forcing_version_id,),
+        )
+        if row is None:
+            raise ForecastStoreError(
+                status_code=404,
+                code="FORCING_VERSION_NOT_FOUND",
+                message=f"Forcing version not found: {forcing_version_id}",
+                details={"forcing_version_id": forcing_version_id},
+            )
+        return row
+
+    def _validate_station_forcing_membership(
+        self,
+        cursor: Any,
+        *,
+        station_id: str,
+        forcing_version: Mapping[str, Any],
+        valid_time_start: datetime,
+        valid_time_end: datetime,
+    ) -> None:
+        forcing_version_id = str(forcing_version["forcing_version_id"])
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT 1 AS present
+            FROM met.forcing_station_timeseries
+            WHERE forcing_version_id = %s
+              AND station_id = %s
+              AND valid_time >= %s
+              AND valid_time <= %s
+            LIMIT 1
+            """,
+            (forcing_version_id, station_id, valid_time_start, valid_time_end),
+        )
+        if row is None:
+            raise ForecastStoreError(
+                status_code=404,
+                code="STATION_NOT_IN_FORCING_VERSION",
+                message="Station has no finalized forcing samples for the selected forcing version.",
+                details={
+                    "station_id": station_id,
+                    "forcing_version_id": forcing_version_id,
+                    "valid_time_start": _format_time(valid_time_start),
+                    "valid_time_end": _format_time(valid_time_end),
+                },
+            )
+
+    def _fetch_station_series_rows(
+        self,
+        cursor: Any,
+        *,
+        station_id: str,
+        forcing_version_id: str,
+        valid_time_start: datetime,
+        valid_time_end: datetime,
+        variables: Sequence[str],
+        from_time: datetime | None,
+        to_time: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        clauses = [
+            "fst.forcing_version_id = %s",
+            "fst.station_id = %s",
+            "fst.variable = requested.variable",
+            "fst.valid_time >= %s",
+            "fst.valid_time <= %s",
+        ]
+        params: list[Any] = [forcing_version_id, station_id, valid_time_start, valid_time_end]
+        if from_time is not None:
+            clauses.append("fst.valid_time >= %s")
+            params.append(from_time)
+        if to_time is not None:
+            clauses.append("fst.valid_time <= %s")
+            params.append(to_time)
+        where = " AND ".join(clauses)
+        return self._fetch_all(
+            cursor,
+            f"""
+            WITH requested(variable, ordinal) AS (
+                SELECT variable, ordinal
+                FROM unnest(%s::text[]) WITH ORDINALITY AS variables(variable, ordinal)
+            )
+            SELECT
+                limited.forcing_version_id,
+                limited.station_id,
+                limited.variable,
+                limited.valid_time,
+                limited.value,
+                limited.unit,
+                limited.native_resolution,
+                limited.quality_flag,
+                limited.source_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY limited.variable
+                    ORDER BY limited.valid_time
+                ) AS row_number
+            FROM requested
+            CROSS JOIN LATERAL (
+                SELECT
+                    fst.forcing_version_id,
+                    fst.station_id,
+                    fst.variable,
+                    fst.valid_time,
+                    fst.value,
+                    fst.unit,
+                    fst.native_resolution,
+                    fst.quality_flag,
+                    fst.source_id
+                FROM met.forcing_station_timeseries fst
+                WHERE {where}
+                ORDER BY fst.valid_time
+                LIMIT %s
+            ) limited
+            ORDER BY requested.ordinal, limited.valid_time
+            """,
+            (list(variables), *params, limit + 1),
+        )
+
+    def _fetch_forcing_readiness_overall(
+        self,
+        cursor: Any,
+        *,
+        forcing_version_id: str,
+        valid_time_start: datetime,
+        valid_time_end: datetime,
+        variables: Sequence[str],
+    ) -> dict[str, Any]:
+        row = self._fetch_optional(
+            cursor,
+            """
+            SELECT
+                COUNT(DISTINCT station_id) AS actual_station_count,
+                COUNT(*) AS sample_count,
+                MIN(valid_time) AS valid_time_start,
+                MAX(valid_time) AS valid_time_end
+            FROM met.forcing_station_timeseries
+            WHERE forcing_version_id = %s
+              AND valid_time >= %s
+              AND valid_time <= %s
+              AND variable = ANY(%s)
+            """,
+            (forcing_version_id, valid_time_start, valid_time_end, list(variables)),
+        )
+        return row or {
+            "actual_station_count": 0,
+            "sample_count": 0,
+            "valid_time_start": None,
+            "valid_time_end": None,
+        }
+
+    def _fetch_forcing_readiness_variable_rows(
+        self,
+        cursor: Any,
+        *,
+        forcing_version_id: str,
+        valid_time_start: datetime,
+        valid_time_end: datetime,
+        variables: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        return self._fetch_all(
+            cursor,
+            """
+            SELECT
+                variable,
+                COUNT(DISTINCT station_id) AS station_count,
+                COUNT(*) AS sample_count,
+                COUNT(DISTINCT NULLIF(BTRIM(unit), '')) AS unit_count,
+                SUM(CASE WHEN unit IS NULL OR BTRIM(unit) = '' THEN 1 ELSE 0 END) AS missing_unit_samples,
+                COUNT(DISTINCT NULLIF(BTRIM(quality_flag), '')) AS quality_flag_count,
+                SUM(CASE WHEN quality_flag IS NULL OR BTRIM(quality_flag) = '' THEN 1 ELSE 0 END)
+                    AS missing_quality_flag_samples,
+                MIN(valid_time) AS valid_time_start,
+                MAX(valid_time) AS valid_time_end
+            FROM met.forcing_station_timeseries
+            WHERE forcing_version_id = %s
+              AND valid_time >= %s
+              AND valid_time <= %s
+              AND variable = ANY(%s)
+            GROUP BY variable
+            ORDER BY variable
+            """,
+            (forcing_version_id, valid_time_start, valid_time_end, list(variables)),
+        )
+
     def _fetch_optional(self, cursor: Any, statement: str, parameters: Sequence[Any]) -> dict[str, Any] | None:
         rows = self._fetch_all(cursor, statement, parameters)
         return rows[0] if rows else None
@@ -870,7 +1312,7 @@ class _PsycopgTransaction:
 
         self.psycopg2 = psycopg2
         self.connection = psycopg2.connect(self.database_url)
-        self.connection.autocommit = False
+        self.connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
         register_default_json(conn_or_curs=self.connection)
         register_default_jsonb(conn_or_curs=self.connection)
         return self.connection.cursor(cursor_factory=RealDictCursor)
@@ -915,6 +1357,214 @@ def _run_type_tokens(run_types: Sequence[str] | None) -> list[str]:
     if not tokens:
         return ["forecast"]
     return tokens
+
+
+def _required_text(value: str | None, field: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message=f"{field} is required.",
+            details={"field": field},
+        )
+    return normalized
+
+
+def _station_variable_tokens(values: Sequence[str] | str | None) -> list[str]:
+    if not values:
+        return list(MVP_STATION_VARIABLES)
+
+    aliases = {variable.lower(): variable for variable in MVP_STATION_VARIABLES}
+    tokens: list[str] = []
+    rejected: list[str] = []
+    raw_values: Sequence[str]
+    if isinstance(values, str):
+        raw_values = [values]
+    else:
+        raw_values = values
+    for value in raw_values:
+        for token in str(value).split(","):
+            raw = token.strip()
+            if not raw:
+                continue
+            canonical = aliases.get(raw.lower())
+            if canonical is None:
+                rejected.append(raw)
+                continue
+            if canonical not in tokens:
+                tokens.append(canonical)
+    if rejected:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Invalid station forcing variable.",
+            details={"field": "variables", "rejected_values": rejected, "allowed_values": list(MVP_STATION_VARIABLES)},
+        )
+    return tokens or list(MVP_STATION_VARIABLES)
+
+
+def _station_series_limit(value: int | None) -> int:
+    if value is None:
+        return DEFAULT_STATION_SERIES_LIMIT
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as error:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="limit must be an integer.",
+            details={"field": "limit", "rejected_value": value},
+        ) from error
+    if limit < 1 or limit > MAX_STATION_SERIES_LIMIT:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message=f"limit must be between 1 and {MAX_STATION_SERIES_LIMIT}.",
+            details={"field": "limit", "rejected_value": value, "max": MAX_STATION_SERIES_LIMIT},
+        )
+    return limit
+
+
+def _optional_non_negative_int(value: int | None, field: str) -> int | None:
+    if value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as error:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message=f"{field} must be a non-negative integer.",
+            details={"field": field, "rejected_value": value},
+        ) from error
+    if normalized < 0:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message=f"{field} must be a non-negative integer.",
+            details={"field": field, "rejected_value": value},
+        )
+    return normalized
+
+
+def _optional_datetime_filter(value: datetime | str | None, field: str) -> datetime | None:
+    if value in (None, ""):
+        return None
+    return _required_datetime_filter(value, field)
+
+
+def _required_datetime_filter(value: datetime | str, field: str) -> datetime:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    try:
+        return _ensure_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError as error:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message=f"{field} must be an ISO 8601 timestamp.",
+            details={"field": field, "rejected_value": value},
+        ) from error
+
+
+def _source_lookup_token(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _forcing_version_time_window(forcing_version: Mapping[str, Any]) -> tuple[datetime, datetime]:
+    forcing_version_id = str(forcing_version.get("forcing_version_id") or "")
+    start_time = _datetime_value(forcing_version.get("start_time"))
+    end_time = _datetime_value(forcing_version.get("end_time"))
+    if start_time is None or end_time is None or start_time > end_time:
+        raise ForecastStoreError(
+            status_code=409,
+            code="FORCING_VERSION_INVALID_WINDOW",
+            message="Forcing version has an invalid valid-time window.",
+            details={
+                "forcing_version_id": forcing_version_id,
+                "valid_time_start": _format_time(start_time),
+                "valid_time_end": _format_time(end_time),
+            },
+        )
+    return start_time, end_time
+
+
+def _ensure_forcing_version_finalized(forcing_version: Mapping[str, Any]) -> None:
+    checksum = str(forcing_version.get("checksum") or "").strip()
+    if not checksum or checksum.lower() == "pending":
+        raise ForecastStoreError(
+            status_code=409,
+            code="FORCING_VERSION_NOT_FINALIZED",
+            message="Forcing version is not finalized and cannot be used for station forcing reads.",
+            details={
+                "forcing_version_id": forcing_version.get("forcing_version_id"),
+                "checksum_state": checksum or None,
+            },
+        )
+
+
+def _validate_forcing_version_filter_consistency(
+    forcing_version: Mapping[str, Any],
+    *,
+    model_id: str | None,
+    source_id: str | None,
+    cycle_time: datetime | str | None,
+) -> None:
+    conflicts: list[dict[str, Any]] = []
+    model_token = str(model_id or "").strip()
+    if model_token and model_token != str(forcing_version.get("model_id") or ""):
+        conflicts.append(
+            {
+                "field": "model_id",
+                "supplied": model_token,
+                "selected": forcing_version.get("model_id"),
+            }
+        )
+
+    source_token = _source_lookup_token(source_id)
+    selected_source_token = _source_lookup_token(str(forcing_version.get("source_id") or ""))
+    if source_token and source_token != selected_source_token:
+        conflicts.append(
+            {
+                "field": "source_id",
+                "supplied": source_token,
+                "selected": selected_source_token,
+            }
+        )
+
+    if cycle_time is not None:
+        supplied_cycle_time = _required_datetime_filter(cycle_time, "cycle_time")
+        selected_cycle_time = _datetime_value(forcing_version.get("cycle_time"))
+        if selected_cycle_time != supplied_cycle_time:
+            conflicts.append(
+                {
+                    "field": "cycle_time",
+                    "supplied": _format_time(supplied_cycle_time),
+                    "selected": _format_time(selected_cycle_time),
+                }
+            )
+
+    if conflicts:
+        raise ForecastStoreError(
+            status_code=409,
+            code="FORCING_VERSION_FILTER_CONFLICT",
+            message="forcing_version_id conflicts with supplied model_id, source_id, or cycle_time.",
+            details={
+                "forcing_version_id": forcing_version.get("forcing_version_id"),
+                "conflicts": conflicts,
+            },
+        )
+
+
+def _validate_time_range(from_time: datetime | None, to_time: datetime | None) -> None:
+    if from_time is not None and to_time is not None and from_time > to_time:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="from must be earlier than or equal to to.",
+            details={"from": _format_time(from_time), "to": _format_time(to_time)},
+        )
 
 
 def _normalized_tokens(values: Sequence[str]) -> list[str]:
@@ -1185,6 +1835,282 @@ def _forecast_response_from_rows(
         "unit": unit,
         "series": list(grouped.values()),
         "frequency_thresholds": frequency_thresholds,
+    }
+
+
+def _station_series_response(
+    *,
+    station: Mapping[str, Any],
+    forcing_version: Mapping[str, Any],
+    requested_variables: Sequence[str],
+    requested_from: datetime | None,
+    requested_to: datetime | None,
+    limit: int,
+    rows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    grouped: dict[str, dict[str, Any]] = {
+        variable: {
+            "variable": variable,
+            "unit": None,
+            "native_resolution": None,
+            "source_id": _display_source_id(str(forcing_version.get("source_id") or "")),
+            "cycle_time": _format_time_value(forcing_version.get("cycle_time")),
+            "points": [],
+            "truncated": False,
+            "metadata": _station_truncation_metadata(
+                limit=limit,
+                requested_from=requested_from,
+                requested_to=requested_to,
+                returned_points=0,
+                returned_from=None,
+                returned_to=None,
+            ),
+        }
+        for variable in requested_variables
+    }
+
+    for row in rows:
+        variable = str(row.get("variable"))
+        series = grouped.get(variable)
+        if series is None:
+            continue
+        row_number = int(row.get("row_number") or 0)
+        if row_number > limit:
+            series["truncated"] = True
+            series["metadata"]["truncated"] = True
+            continue
+        valid_time = _datetime_value(row.get("valid_time"))
+        if valid_time is None:
+            continue
+        if series["unit"] is None and row.get("unit") is not None:
+            series["unit"] = str(row["unit"])
+        if series["native_resolution"] is None and row.get("native_resolution") is not None:
+            series["native_resolution"] = str(row["native_resolution"])
+        point = {
+            "valid_time": _format_time(valid_time),
+            "value": float(row["value"]),
+            "quality_flag": row.get("quality_flag"),
+            "source_id": _display_source_id(str(row["source_id"])) if row.get("source_id") else None,
+        }
+        series["points"].append(point)
+
+    for series in grouped.values():
+        series["points"].sort(key=lambda point: str(point["valid_time"]))
+        returned_from = series["points"][0]["valid_time"] if series["points"] else None
+        returned_to = series["points"][-1]["valid_time"] if series["points"] else None
+        metadata = _station_truncation_metadata(
+            limit=limit,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            returned_points=len(series["points"]),
+            returned_from=returned_from,
+            returned_to=returned_to,
+        )
+        metadata["truncated"] = bool(series["truncated"])
+        series["metadata"] = metadata
+
+    return {
+        "station_id": str(station["station_id"]),
+        "station": _station_response(dict(station)),
+        "forcing_version_id": str(forcing_version["forcing_version_id"]),
+        "model_id": forcing_version.get("model_id"),
+        "source_id": _display_source_id(str(forcing_version.get("source_id") or "")),
+        "cycle_time": _format_time_value(forcing_version.get("cycle_time")),
+        "valid_time_start": _format_time_value(forcing_version.get("start_time")),
+        "valid_time_end": _format_time_value(forcing_version.get("end_time")),
+        "limit": limit,
+        "requested_from": _format_time(requested_from),
+        "requested_to": _format_time(requested_to),
+        "series": list(grouped.values()),
+    }
+
+
+def _station_series_rows_within_window(
+    rows: Sequence[dict[str, Any]],
+    *,
+    valid_time_start: datetime,
+    valid_time_end: datetime,
+) -> list[dict[str, Any]]:
+    by_variable: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        valid_time = _datetime_value(row.get("valid_time"))
+        if valid_time is None or valid_time < valid_time_start or valid_time > valid_time_end:
+            continue
+        normalized_row = dict(row)
+        normalized_row["valid_time"] = valid_time
+        by_variable.setdefault(str(row.get("variable")), []).append(normalized_row)
+
+    bounded: list[dict[str, Any]] = []
+    for variable_rows in by_variable.values():
+        variable_rows.sort(key=lambda item: item["valid_time"])
+        for row_number, row in enumerate(variable_rows, start=1):
+            row["row_number"] = row_number
+            bounded.append(row)
+    return bounded
+
+
+def _station_truncation_metadata(
+    *,
+    limit: int,
+    requested_from: datetime | None,
+    requested_to: datetime | None,
+    returned_points: int,
+    returned_from: str | None,
+    returned_to: str | None,
+) -> dict[str, Any]:
+    return {
+        "limit": limit,
+        "returned_points": returned_points,
+        "requested_from": _format_time(requested_from),
+        "requested_to": _format_time(requested_to),
+        "returned_from": returned_from,
+        "returned_to": returned_to,
+        "truncated": False,
+    }
+
+
+def _station_forcing_readiness_response(
+    *,
+    forcing_version: Mapping[str, Any],
+    expected_station_count: int | None,
+    required_variables: Sequence[str],
+    overall: Mapping[str, Any],
+    coverage_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    coverage_by_variable = {str(row.get("variable")): row for row in coverage_rows}
+    actual_station_count = int(overall.get("actual_station_count") or 0)
+    declared_station_count = int(forcing_version.get("station_count") or 0)
+    effective_expected_station_count = (
+        expected_station_count
+        if expected_station_count is not None
+        else declared_station_count if declared_station_count > 0 else None
+    )
+    missing_reasons: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
+
+    if effective_expected_station_count is not None and actual_station_count != effective_expected_station_count:
+        missing_reasons.append(
+            {
+                "code": "STATION_COUNT_MISMATCH",
+                "expected": effective_expected_station_count,
+                "actual": actual_station_count,
+            }
+        )
+
+    for variable in required_variables:
+        row = coverage_by_variable.get(variable)
+        if row is None:
+            coverage.append(
+                {
+                    "variable": variable,
+                    "station_count": 0,
+                    "sample_count": 0,
+                    "unit_count": 0,
+                    "quality_flag_count": 0,
+                    "missing_unit_samples": 0,
+                    "missing_quality_flag_samples": 0,
+                    "valid_time_start": None,
+                    "valid_time_end": None,
+                    "ready": False,
+                }
+            )
+            missing_reasons.append({"code": "VARIABLE_MISSING", "variable": variable})
+            if effective_expected_station_count is not None:
+                missing_reasons.append(
+                    {
+                        "code": "VARIABLE_STATION_COUNT_MISMATCH",
+                        "variable": variable,
+                        "expected": effective_expected_station_count,
+                        "actual": 0,
+                    }
+                )
+            continue
+
+        station_count = int(row.get("station_count") or 0)
+        sample_count = int(row.get("sample_count") or 0)
+        unit_count = int(row.get("unit_count") or 0)
+        missing_unit_samples = int(row.get("missing_unit_samples") or 0)
+        quality_flag_count = int(row.get("quality_flag_count") or 0)
+        missing_quality_flag_samples = int(row.get("missing_quality_flag_samples") or 0)
+        station_count_matches = (
+            effective_expected_station_count is None or station_count == effective_expected_station_count
+        )
+        variable_ready = (
+            station_count > 0
+            and sample_count > 0
+            and station_count_matches
+            and unit_count > 0
+            and missing_unit_samples == 0
+            and quality_flag_count > 0
+            and missing_quality_flag_samples == 0
+        )
+        coverage.append(
+            {
+                "variable": variable,
+                "station_count": station_count,
+                "sample_count": sample_count,
+                "unit_count": unit_count,
+                "quality_flag_count": quality_flag_count,
+                "missing_unit_samples": missing_unit_samples,
+                "missing_quality_flag_samples": missing_quality_flag_samples,
+                "valid_time_start": _format_time_value(row.get("valid_time_start")),
+                "valid_time_end": _format_time_value(row.get("valid_time_end")),
+                "ready": variable_ready,
+            }
+        )
+        if unit_count <= 0 or missing_unit_samples > 0:
+            missing_reasons.append(
+                {
+                    "code": "UNIT_MISSING",
+                    "variable": variable,
+                    "missing_samples": missing_unit_samples,
+                }
+            )
+        if quality_flag_count <= 0 or missing_quality_flag_samples > 0:
+            missing_reasons.append(
+                {
+                    "code": "QUALITY_FLAG_MISSING",
+                    "variable": variable,
+                    "missing_samples": missing_quality_flag_samples,
+                }
+            )
+        if effective_expected_station_count is not None and station_count != effective_expected_station_count:
+            missing_reasons.append(
+                {
+                    "code": "VARIABLE_STATION_COUNT_MISMATCH",
+                    "variable": variable,
+                    "expected": effective_expected_station_count,
+                    "actual": station_count,
+                }
+            )
+
+    query_index = {
+        "status": "covered_by_primary_key",
+        "table": "met.forcing_station_timeseries",
+        "index": "forcing_station_timeseries_pkey",
+        "columns": ["forcing_version_id", "station_id", "variable", "valid_time"],
+        "reason": (
+            "Station-series reads constrain forcing_version_id and station_id before variable and valid_time, "
+            "matching the source-of-truth primary key prefix; no additive index is required for #204."
+        ),
+    }
+    ready = not missing_reasons and all(item["ready"] for item in coverage)
+    return {
+        "forcing_version_id": str(forcing_version["forcing_version_id"]),
+        "model_id": forcing_version.get("model_id"),
+        "source_id": _display_source_id(str(forcing_version.get("source_id") or "")),
+        "cycle_time": _format_time_value(forcing_version.get("cycle_time")),
+        "expected_station_count": effective_expected_station_count,
+        "actual_station_count": actual_station_count,
+        "declared_station_count": declared_station_count,
+        "required_variables": list(required_variables),
+        "six_variable_coverage": coverage,
+        "sample_count": int(overall.get("sample_count") or 0),
+        "valid_time_start": _format_time_value(overall.get("valid_time_start")),
+        "valid_time_end": _format_time_value(overall.get("valid_time_end")),
+        "missing_data_reasons": missing_reasons,
+        "query_index": query_index,
+        "ready": ready,
     }
 
 
