@@ -492,3 +492,85 @@ Non-goals:
 
 Issue ownership note:
 - `hydro-met-mvp-ui` is the full M21 capability spec. For #208 acceptance, only station inventory markers/list, station selection, station-series API consumption, six-variable forcing chart rendering, QC/truncation/unavailable states, and no-fake-data behavior apply. River chart scenarios are #209, ops scenarios are #211/#212, controlled retry evidence is #213, and full browser/live smoke is #214.
+
+## Issue #209 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM React frontend river segment selection, forecast-series API consumption, chart rendering, and tests
+Repair intensity: medium
+
+Change surface:
+- `apps/frontend` `/hydro-met` river segment list/map-like selection behavior, forecast-series data adapter, `q_down` river discharge chart components, IFS shorter-horizon labeling, and route/component tests.
+- Frontend API client usage for the existing generated river forecast-series route `GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series`.
+- Reuse of #207 latest-product bootstrap identity, river segment candidates, query state, no-fake-data shell, and #208 station chart surfaces.
+
+Must preserve:
+- #207 `/hydro-met` route/nav/bootstrap behavior, source/cycle query normalization, latest-product unavailable/incomplete states, partial station/river candidate loading, and bounded/redacted status messages.
+- #208 station inventory markers/list/search/selection, station-series six-variable charts, station-series bounded render/error handling, and station chart tests.
+- Existing `/meteorology`, `/forecast`, `/segments/:segmentId`, `/monitoring`, basin, overview, flood-alert, and system routes remain reachable and keep current deep-link/query behavior.
+- `q_down` is the only MVP river chart variable. UI copy must use river discharge, river flow, or river-segment flow wording; it must not call `q_down` water level or stage.
+- #211/#212 own `/ops`, log, retry, and RBAC controls; #209 must not change those surfaces.
+
+Must add/change:
+- Add river segment selection from the existing QHH river candidate list and any map/list affordance available in the `/hydro-met` shell. Selection must bind to the selected candidate `river_segment_id` from latest-product `basin_version_id` and `river_network_version_id`.
+- On selected river segment change, call forecast-series with latest-product `basin_version_id`, `river_network_version_id`, selected `river_segment_id`, selected source/scenario, and variable `q_down`.
+- Render a real `q_down` discharge chart with unit metadata, source/scenario, cycle/valid-time range where available, explicit loading/error/empty/unavailable states, and no synthetic points.
+- Preserve GFS/IFS source selection through the existing `/hydro-met` source query state. IFS products whose available horizon is shorter than expected must display actual available horizon/end metadata and must not pad the line.
+- Keep forecast-series requests and rendered points bounded; malformed/oversized responses must fail closed with explicit state instead of unbounded ECharts options or misleading lines.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - #209 expands visible `/hydro-met` behavior with river segment selection and charting.
+- Config / project setup: not selected - no new build tool, environment variable, or deployment flag expected.
+- File IO / path safety / overwrite: not selected - frontend route performs network reads only and writes no files at runtime.
+- Schema / columns / units / field names: selected - river charts consume forecast-series fields, `q_down`, units, source/scenario labels, river network IDs, and valid times.
+- Geospatial / CRS / shapefile sidecars: selected - river candidate features may include geometry for display/selection, but #209 must not reinterpret CRS or fabricate geometry.
+- Time series / forcing / temporal boundaries: selected - selected source/cycle/product identity, forecast valid-time range, IFS shorter horizons, and no-padding behavior are central.
+- Numerical stability / conservation / NaN: selected - chart data must not fabricate values or hide non-finite/missing samples.
+- Solver runtime / performance / threading: not selected - no SHUD runtime behavior.
+- Resource limits / large input / discovery: selected - river candidate display, forecast-series request parameters, response validation, and rendered chart data must stay bounded.
+- Legacy compatibility / examples: selected - station charts, existing route tests, segment detail chart consumers, forecast pages, and generated API type consumers must keep working.
+- Error handling / rollback / partial outputs: selected - forecast-series API failures, empty q_down series, malformed responses, selection changes, source changes, and stale responses must render stable states without stale/fake charts.
+- Release / packaging / dependency compatibility: selected - frontend tests/build must pass without adding dependencies unless strongly justified by existing chart stack reuse.
+- Documentation / migration notes: selected - UI/test evidence must keep #209 within river `q_down` scope and not claim ops/browser/live smoke completion.
+
+Required evidence:
+- Data-adapter tests: selected river segment id + latest-product basin/rivnet/source/cycle + variable `q_down` -> one bounded forecast-series request using the generated path and response envelope; no user-entered IDs are required.
+- River list/selection tests: real QHH river candidates render as selectable rows/features; selecting a river updates selected river metadata and the chart request; empty river list renders explicit state and no fake segment.
+- Chart tests: real `q_down` points render through the chart option/data model with unit metadata, source/scenario label, valid-time range, and selected river segment identity.
+- IFS horizon tests: an IFS product or forecast response shorter than seven days displays actual available end/horizon metadata and does not pad synthetic values.
+- Error/unavailable tests: forecast-series HTTP error, missing/empty `q_down`, malformed/oversized points, selected river absent from candidates, and latest-product unavailable/incomplete states do not draw fake charts and do not silently switch river/source/cycle.
+- Wording tests: MVP-facing labels on `/hydro-met` use river discharge/flow terminology for `q_down` and do not label it as water level or stage.
+- Resource and compatibility tests: forecast-series request variables are fixed to `q_down`, rendered points are bounded, station-series behavior from #208 remains green, and existing `/forecast`/`/segments/:segmentId` consumers remain compatible.
+- Regression commands: `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm build`, `cd apps/frontend && corepack pnpm check:api-types`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: the selected `/hydro-met` river chart must bind one user-selected river segment, one latest-product basin version, one river network version, one selected source/scenario/cycle, and the `q_down` forecast-series response without mixing stale segment/source/cycle data, padding IFS horizons, or synthesizing chart points.
+Source-of-truth identity/contract: generated API types for forecast-series, #207 latest-product bootstrap result, selected `river_segment_id`, `basin_version_id`, `river_network_version_id`, selected source/scenario, `cycle_time`, and response variable `q_down`.
+Surfaces:
+- Producers: existing forecast-series API and #206 latest-product API; unchanged in #209.
+- Validators/preflight: frontend selected-river state, bootstrap readiness, river id membership checks, forecast-series response-envelope guards, `q_down` variable checks, time/value bounds, and no-data state builders.
+- Storage/cache/query: in-memory React request state only; no persistent browser storage required.
+- Public routes/entrypoints: `/hydro-met` river candidate selection and river chart area; existing route/nav entry remains unchanged.
+- Frontend/downstream consumers: #214 browser smoke consumes this route; existing forecast and segment detail pages remain sibling consumers.
+- Failure paths/rollback/stale state: forecast-series loading/error/empty/truncated states, selected river changes while a request is in flight, source/cycle/product changes, component unmount/reload, shorter IFS horizon disclosure, and bounded UI errors.
+- Evidence/audit/readiness: frontend adapter/component tests; full MVP browser smoke and live QHH evidence remain #214.
+Regression rows:
+- default ready `/hydro-met` + first river selected -> forecast-series request uses selected `river_segment_id`, latest-product `basin_version_id`, `river_network_version_id`, selected source/scenario, variable `q_down`, and renders a bounded real discharge chart.
+- selected river changes before a previous forecast-series request resolves -> stale result is ignored and the UI reflects only the currently selected river.
+- source changes to IFS -> latest-product/bootstrap reloads and forecast-series request uses IFS scenario/source identity without falling back to GFS unless the product is explicitly unavailable.
+- IFS product/series valid-time end is shorter than expected -> chart shows shorter-horizon/end metadata and contains only returned points; no padded synthetic values.
+- forecast-series response contains missing/empty `q_down`, non-finite values, malformed points, mismatched variable, or oversized point arrays -> explicit unavailable/error/capped state, not a fake line or unbounded ECharts payload.
+- selected river segment no longer exists in current candidate list -> explicit unavailable state, no forecast-series request for absent river, and no stale chart.
+- latest-product unavailable/incomplete/cycle mismatch -> river chart calls are skipped, matching #207 bootstrap safety behavior.
+- station chart panels from #208 -> unchanged and still render/respond to station selection.
+- existing `/forecast`, `/segments/:segmentId`, `/meteorology`, and `/monitoring` tests -> unchanged behavior.
+
+Non-goals:
+- Rendering station forcing charts or changing station-series behavior; #208 owns them and #209 must preserve them.
+- Adding `/ops`, log modal, retry controls, RBAC changes, controlled failure evidence, or scheduler persistence; #210-#213 own them.
+- Modifying backend forecast-series route, latest-product semantics, OpenAPI, generated API types, database schema, SHUD runtime, or parser output.
+- Full MVP browser smoke or live QHH/GFS/IFS evidence; #214 owns release smoke. #209 may add focused component/browser-like tests but must not claim final smoke readiness.
+
+Issue ownership note:
+- `hydro-met-mvp-ui` is the full M21 capability spec. For #209 acceptance, only river candidate selection, forecast-series API consumption, real `q_down` discharge chart rendering, IFS shorter-horizon labeling, no-water-level/stage wording, and no-synthetic-data behavior apply. Station chart scenarios are #208, ops scenarios are #211/#212, controlled retry evidence is #213, and full browser/live smoke is #214.
