@@ -21,6 +21,13 @@ import {
   serializeHydroMetQueryState,
 } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
+import {
+  HYDRO_MET_RIVER_FORECAST_VARIABLE,
+  hydroMetRiverScenarioForSource,
+  loadHydroMetRiverForecast,
+  riverForecastRequestKey,
+  validateHydroMetRiverForecastForChart,
+} from '@/lib/hydroMet/riverForecast'
 
 vi.mock('@/api/client', () => ({
   client: {
@@ -136,6 +143,33 @@ const riverSegments = {
   limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
   offset: 0,
 } as const
+
+function riverForecastResponse(
+  overrides: Record<string, unknown> = {},
+  seriesOverrides: Record<string, unknown> = {},
+) {
+  return {
+    segment_id: 'seg-001',
+    issue_time: '2026-05-21T00:00:00Z',
+    unit: 'm3/s',
+    frequency_thresholds: null,
+    series: [
+      {
+        scenario_id: 'forecast_gfs_deterministic',
+        source_id: 'GFS',
+        cycle_time: '2026-05-21T00:00:00Z',
+        available_lead_hours: 168,
+        segment_role: 'future_7_days',
+        points: [
+          [Date.parse('2026-05-21T00:00:00Z'), 11],
+          [Date.parse('2026-05-21T06:00:00Z'), 13],
+        ],
+        ...seriesOverrides,
+      },
+    ],
+    ...overrides,
+  }
+}
 
 function stationSeriesResponse(
   overrides: Partial<components['schemas']['StationSeriesResponse']> = {},
@@ -408,5 +442,201 @@ describe('loadHydroMetStationSeries', () => {
     expect(messages.join(' ')).toContain('forcing_version_id=other-forcing')
     expect(messages.join(' ')).toContain('source_id=IFS')
     expect(messages.join(' ')).toContain('cycle_time=2026-05-21T12:00:00.000Z')
+  })
+})
+
+describe('loadHydroMetRiverForecast', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('calls the generated forecast-series API with q_down, selected segment, product cycle, and matching GFS scenario', async () => {
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: success(riverForecastResponse()),
+      error: undefined,
+    } as never)
+
+    const product = latestProduct()
+    const response = await loadHydroMetRiverForecast({
+      product,
+      segment: {
+        river_segment_id: 'seg-001',
+        segment_id: 'seg-001',
+        basin_version_id: product.basin_version_id,
+        river_network_version_id: product.river_network_version_id,
+        name: 'QHH segment 001',
+      },
+    })
+
+    expect(response).toMatchObject({ segment_id: 'seg-001', unit: 'm3/s' })
+    expect(hydroMetRiverScenarioForSource('GFS')).toBe('forecast_gfs_deterministic')
+    expect(client.GET).toHaveBeenCalledWith(
+      '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
+      {
+        params: {
+          path: {
+            basin_version_id: product.basin_version_id,
+            segment_id: 'seg-001',
+          },
+          query: {
+            river_network_version_id: product.river_network_version_id,
+            issue_time: '2026-05-21T00:00:00.000Z',
+            variables: HYDRO_MET_RIVER_FORECAST_VARIABLE,
+            scenarios: 'forecast_gfs_deterministic',
+            include_analysis: false,
+          },
+        },
+      },
+    )
+    expect(JSON.stringify(vi.mocked(client.GET).mock.calls)).not.toContain('forcing_version_id')
+  })
+
+  it('preserves IFS source/scenario and validates shorter actual horizon without synthetic padding', async () => {
+    const product = latestProduct({
+      source_id: 'IFS',
+      cycle_time: '2026-05-21T06:00:00Z',
+      river_valid_time_end: '2026-05-27T06:00:00Z',
+      valid_time_end: '2026-05-27T06:00:00Z',
+      available_horizon_hours: 144,
+      expected_horizon_hours: 168,
+      shorter_horizon: true,
+    })
+    const payload = riverForecastResponse(
+      { issue_time: '2026-05-21T06:00:00Z' },
+      {
+        scenario_id: 'forecast_ifs_deterministic',
+        source_id: 'IFS',
+        cycle_time: '2026-05-21T06:00:00Z',
+        available_lead_hours: 144,
+        points: [
+          [Date.parse('2026-05-21T06:00:00Z'), 11],
+          [Date.parse('2026-05-27T06:00:00Z'), 13],
+        ],
+      },
+    )
+
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: success(payload),
+      error: undefined,
+    } as never)
+
+    const segment = {
+      river_segment_id: 'seg-001',
+      segment_id: 'seg-001',
+      basin_version_id: product.basin_version_id,
+      river_network_version_id: product.river_network_version_id,
+      name: 'QHH segment 001',
+    }
+    const response = await loadHydroMetRiverForecast({ product, segment })
+    const validation = validateHydroMetRiverForecastForChart(response, product, segment)
+
+    expect(hydroMetRiverScenarioForSource('IFS')).toBe('forecast_ifs_deterministic')
+    expect(client.GET).toHaveBeenCalledWith(
+      '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
+      expect.objectContaining({
+        params: expect.objectContaining({
+          query: expect.objectContaining({
+            scenarios: 'forecast_ifs_deterministic',
+            variables: 'q_down',
+          }),
+        }),
+      }),
+    )
+    expect(validation.ok).toBe(true)
+    if (validation.ok) {
+      expect(validation.horizonShorter).toBe(true)
+      expect(validation.horizonLabel).toContain('144h')
+      expect(validation.renderedPoints).toHaveLength(2)
+      expect(validation.validTimeEnd).toBe('2026-05-27T06:00:00.000Z')
+    }
+  })
+
+  it('returns explicit invalid states for empty, malformed, or mismatched q_down forecast responses', () => {
+    const product = latestProduct()
+    const segment = {
+      river_segment_id: 'seg-001',
+      segment_id: 'seg-001',
+      basin_version_id: product.basin_version_id,
+      river_network_version_id: product.river_network_version_id,
+      name: 'QHH segment 001',
+    }
+
+    expect(validateHydroMetRiverForecastForChart(riverForecastResponse({}, { points: [] }), product, segment)).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('没有可绘制点')]),
+    })
+    expect(validateHydroMetRiverForecastForChart({ segment_id: 'seg-001', unit: 'm3/s', series: [{ scenario_id: 'forecast_gfs_deterministic' }] } as never, product, segment)).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('points 缺失或格式无效')]),
+    })
+    expect(validateHydroMetRiverForecastForChart(riverForecastResponse({ variable: 'not_q_down' }), product, segment)).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('不是 q_down')]),
+    })
+  })
+
+  it('rejects q_down forecast responses with stale or missing cycle identity proof', () => {
+    const product = latestProduct()
+    const segment = {
+      river_segment_id: 'seg-001',
+      segment_id: 'seg-001',
+      basin_version_id: product.basin_version_id,
+      river_network_version_id: product.river_network_version_id,
+      name: 'QHH segment 001',
+    }
+
+    expect(validateHydroMetRiverForecastForChart(
+      riverForecastResponse({ issue_time: '2026-05-20T00:00:00Z' }, { cycle_time: undefined }),
+      product,
+      segment,
+    )).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('issue_time=2026-05-20T00:00:00.000Z')]),
+    })
+
+    expect(validateHydroMetRiverForecastForChart(
+      riverForecastResponse({ issue_time: undefined }, { cycle_time: undefined }),
+      product,
+      segment,
+    )).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('缺少与 latest-product 2026-05-21T00:00:00.000Z 匹配的 cycle identity')]),
+    })
+
+    expect(validateHydroMetRiverForecastForChart(
+      riverForecastResponse({}, { cycle_time: '2026-05-20T00:00:00Z' }),
+      product,
+      segment,
+    )).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('series[0].cycle_time=2026-05-20T00:00:00.000Z')]),
+    })
+  })
+
+  it('rejects finite q_down timestamps outside the JavaScript Date range', () => {
+    const product = latestProduct()
+    const segment = {
+      river_segment_id: 'seg-001',
+      segment_id: 'seg-001',
+      basin_version_id: product.basin_version_id,
+      river_network_version_id: product.river_network_version_id,
+      name: 'QHH segment 001',
+    }
+
+    expect(validateHydroMetRiverForecastForChart(
+      riverForecastResponse({}, { points: [[8640000000000001, 1]] }),
+      product,
+      segment,
+    )).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('超出 JavaScript Date 可表示范围')]),
+    })
+  })
+
+  it('builds request keys from product and segment identity', () => {
+    const product = latestProduct()
+    expect(riverForecastRequestKey(product, 'seg-001')).toBe(
+      'basins_qhh_vbasins|basins_qhh_rivnet_vbasins|GFS|2026-05-21T00:00:00.000Z|seg-001',
+    )
   })
 })

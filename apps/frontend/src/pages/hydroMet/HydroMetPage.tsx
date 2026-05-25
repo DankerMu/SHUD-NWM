@@ -16,6 +16,17 @@ import {
 } from '@/lib/hydroMet/queryState'
 import { HYDRO_MET_COORDINATES_UNAVAILABLE, getHydroMetStationCoordinates } from '@/lib/hydroMet/runtime'
 import {
+  HYDRO_MET_RIVER_FORECAST_LIMIT,
+  formatHydroMetRiverForecastMessage,
+  formatHydroMetRiverForecastUiString,
+  loadHydroMetRiverForecast,
+  riverForecastRequestKey,
+  validateHydroMetRiverForecastForChart,
+  type HydroMetRiverForecastPayload,
+  type HydroMetRiverForecastSegmentIdentity,
+  type HydroMetRiverForecastValidation,
+} from '@/lib/hydroMet/riverForecast'
+import {
   HYDRO_MET_STATION_SERIES_LIMIT,
   HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
   HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT,
@@ -50,6 +61,12 @@ type StationSeriesLoadState =
   | { kind: 'idle' }
   | { kind: 'loading'; requestKey: string }
   | { kind: 'loaded'; requestKey: string; response: HydroMetStationSeriesResponse }
+  | { kind: 'error'; requestKey: string; message: string }
+
+type RiverForecastLoadState =
+  | { kind: 'idle' }
+  | { kind: 'loading'; requestKey: string }
+  | { kind: 'loaded'; requestKey: string; response: HydroMetRiverForecastPayload }
   | { kind: 'error'; requestKey: string; message: string }
 
 type ChartableStationSeriesPoint = {
@@ -249,11 +266,15 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
   const [stationQuery, setStationQuery] = useState('')
   const [selectedStationId, setSelectedStationId] = useState<string | null>(null)
   const [seriesState, setSeriesState] = useState<StationSeriesLoadState>({ kind: 'idle' })
+  const [selectedRiverSegmentId, setSelectedRiverSegmentId] = useState<string | null>(null)
+  const [riverForecastState, setRiverForecastState] = useState<RiverForecastLoadState>({ kind: 'idle' })
 
   useEffect(() => {
     setStationQuery('')
     setSelectedStationId(null)
     setSeriesState({ kind: 'idle' })
+    setSelectedRiverSegmentId(null)
+    setRiverForecastState({ kind: 'idle' })
   }, [product.forcing_version_id, product.source_id, product.cycle_time])
 
   useEffect(() => {
@@ -261,9 +282,18 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
     setSelectedStationId(result.stations[0]?.station_id ?? null)
   }, [result.stations, selectedStationId])
 
+  useEffect(() => {
+    if (selectedRiverSegmentId !== null) return
+    setSelectedRiverSegmentId(firstRiverSegmentId(result.riverSegments))
+  }, [result.riverSegments, selectedRiverSegmentId])
+
   const selectedStation = useMemo(
     () => result.stations.find((station) => station.station_id === selectedStationId) ?? null,
     [result.stations, selectedStationId],
+  )
+  const selectedRiverSegment = useMemo(
+    () => result.riverSegments.find((feature) => riverSegmentId(feature) === selectedRiverSegmentId) ?? null,
+    [result.riverSegments, selectedRiverSegmentId],
   )
 
   useEffect(() => {
@@ -296,6 +326,37 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
   }, [product, selectedStation])
 
   const selectedStationAbsent = selectedStationId !== null && selectedStation === null
+  const selectedRiverSegmentAbsent = selectedRiverSegmentId !== null && selectedRiverSegment === null
+
+  useEffect(() => {
+    if (!selectedRiverSegment) {
+      setRiverForecastState({ kind: 'idle' })
+      return
+    }
+
+    const segmentIdentity = riverForecastSegmentIdentity(selectedRiverSegment)
+    const requestKey = riverForecastRequestKey(product, segmentIdentity.river_segment_id)
+    let cancelled = false
+    setRiverForecastState({ kind: 'loading', requestKey })
+    void loadHydroMetRiverForecast({ product, segment: segmentIdentity }).then(
+      (response) => {
+        if (!cancelled) setRiverForecastState({ kind: 'loaded', requestKey, response })
+      },
+      (error) => {
+        if (!cancelled) {
+          setRiverForecastState({
+            kind: 'error',
+            requestKey,
+            message: formatHydroMetRiverForecastMessage(error, 'river forecast-series 不可用'),
+          })
+        }
+      },
+    )
+
+    return () => {
+      cancelled = true
+    }
+  }, [product, selectedRiverSegment])
 
   return (
     <div className="grid gap-3 min-[1180px]:grid-cols-[minmax(19rem,0.76fr)_minmax(0,1.04fr)_minmax(23rem,1fr)]">
@@ -324,7 +385,14 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
           testId="hydro-met-river-list"
           emptyTestId="hydro-met-empty-rivers"
         >
-          {result.riverSegments.slice(0, 12).map((feature) => <RiverSegmentRow key={feature.properties.river_segment_id} feature={feature} />)}
+          {result.riverSegments.slice(0, 12).map((feature) => (
+            <RiverSegmentRow
+              key={riverSegmentId(feature)}
+              feature={feature}
+              selected={riverSegmentId(feature) === selectedRiverSegmentId}
+              onSelect={setSelectedRiverSegmentId}
+            />
+          ))}
         </InventoryPanel>
       </section>
 
@@ -335,13 +403,11 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
           selectedStationAbsent={selectedStationAbsent}
           state={seriesState}
         />
-        <PlaceholderPanel
-          icon={Waves}
-          title="河段 q_down 流量图表占位"
-          lines={[
-            '后续 #209 在选中河段后调用 forecast-series，变量固定为 q_down。',
-            '当前 shell 只以河段流量表述 q_down，也不会用合成值补线。',
-          ]}
+        <RiverForecastPanel
+          product={product}
+          segment={selectedRiverSegment}
+          selectedRiverSegmentAbsent={selectedRiverSegmentAbsent}
+          state={riverForecastState}
         />
       </aside>
     </div>
@@ -627,17 +693,35 @@ function StationRow({
   )
 }
 
-function RiverSegmentRow({ feature }: { feature: HydroMetRiverSegmentFeature }) {
+function RiverSegmentRow({
+  feature,
+  selected,
+  onSelect,
+}: {
+  feature: HydroMetRiverSegmentFeature
+  selected: boolean
+  onSelect: (riverSegmentId: string) => void
+}) {
   const properties = feature.properties
   return (
-    <div className="rounded border border-neutral-300 p-3 text-sm">
+    <button
+      type="button"
+      className={cn(
+        'w-full cursor-pointer rounded border p-3 text-left text-sm transition-colors',
+        selected ? 'border-primary-600 bg-primary-50' : 'border-neutral-300 hover:bg-neutral-50',
+      )}
+      onClick={() => onSelect(riverSegmentId(feature))}
+      data-testid="hydro-met-river-row"
+      data-river-segment-id={riverSegmentId(feature)}
+      aria-pressed={selected}
+    >
       <div className="flex items-center justify-between gap-3">
         <span className="font-mono font-semibold text-neutral-900">{properties.river_segment_id}</span>
         <span className="text-xs text-neutral-700">order {properties.stream_order}</span>
       </div>
       <div className="mt-1 text-neutral-700">{properties.name}</div>
       <div className="mt-1 font-mono text-xs text-neutral-500">{properties.river_network_version_id}</div>
-    </div>
+    </button>
   )
 }
 
@@ -1235,18 +1319,210 @@ function StationSeriesChart({
   )
 }
 
-function PlaceholderPanel({ icon: Icon, title, lines }: { icon: LucideIcon; title: string; lines: string[] }) {
+function RiverForecastPanel({
+  product,
+  segment,
+  selectedRiverSegmentAbsent,
+  state,
+}: {
+  product: QhhLatestProduct
+  segment: HydroMetRiverSegmentFeature | null
+  selectedRiverSegmentAbsent: boolean
+  state: RiverForecastLoadState
+}) {
+  if (selectedRiverSegmentAbsent) {
+    return (
+      <StatusPanel
+        tone="warning"
+        title="选中河段不在候选列表中"
+        messages={['当前选中河段不属于 latest-product 返回的真实 river segment candidates，已停止 forecast-series 请求。']}
+        testId="hydro-met-river-forecast-unavailable"
+      />
+    )
+  }
+
+  if (!segment) {
+    return (
+      <StatusPanel
+        tone="info"
+        title="河段流量不可用"
+        messages={['没有可选择的真实河段；不会使用手工 ID 或假河段请求 q_down forecast-series。']}
+        testId="hydro-met-river-forecast-unavailable"
+      />
+    )
+  }
+
+  const segmentIdentity = riverForecastSegmentIdentity(segment)
+  const currentRequestKey = riverForecastRequestKey(product, segmentIdentity.river_segment_id)
+  const stale = state.kind !== 'idle' && state.requestKey !== currentRequestKey
+
   return (
-    <section className="rounded-md border border-dashed border-neutral-300 bg-white p-4" data-testid="hydro-met-chart-placeholder">
-      <div className="flex items-center gap-2">
-        <Icon className="h-4 w-4 text-primary-600" aria-hidden="true" />
-        <h2 className="text-base font-semibold text-neutral-900">{title}</h2>
+    <section className="rounded-md border border-neutral-300 bg-white p-4" data-testid="hydro-met-river-forecast-panel">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <Waves className="h-4 w-4 text-primary-600" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-neutral-900">河段 q_down 流量图表</h2>
+          </div>
+          <div className="mt-1 font-mono text-xs text-neutral-600" data-testid="hydro-met-selected-river">
+            {segmentIdentity.river_segment_id} · {segmentIdentity.name}
+          </div>
+        </div>
+        <span className="rounded border border-neutral-300 px-2 py-1 font-mono text-xs text-neutral-700">
+          limit {HYDRO_MET_RIVER_FORECAST_LIMIT}
+        </span>
       </div>
-      <div className="mt-3 space-y-2 text-sm text-neutral-700">
-        {lines.map((line) => <p key={line}>{line}</p>)}
-      </div>
+
+      {state.kind === 'loading' || stale ? (
+        <div className="mt-3 flex items-center gap-2 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700" role="status" data-testid="hydro-met-river-forecast-loading">
+          <Loader2 className="h-4 w-4 animate-spin text-primary-600" aria-hidden="true" />
+          正在加载 {segmentIdentity.river_segment_id} 的 q_down forecast-series...
+        </div>
+      ) : null}
+
+      {state.kind === 'error' && !stale ? (
+        <StatusPanel tone="danger" title="river forecast-series 加载失败" messages={[state.message]} testId="hydro-met-river-forecast-error" />
+      ) : null}
+
+      {state.kind === 'loaded' && !stale ? (
+        <RiverForecastChartState response={state.response} product={product} segment={segmentIdentity} />
+      ) : null}
     </section>
   )
+}
+
+function RiverForecastChartState({
+  response,
+  product,
+  segment,
+}: {
+  response: HydroMetRiverForecastPayload
+  product: QhhLatestProduct
+  segment: HydroMetRiverForecastSegmentIdentity
+}) {
+  const validation = validateHydroMetRiverForecastForChart(response, product, segment)
+
+  if (!validation.ok) {
+    return (
+      <StatusPanel
+        tone="warning"
+        title="q_down river discharge 不可绘制"
+        messages={validation.messages}
+        testId="hydro-met-river-forecast-invalid"
+      />
+    )
+  }
+
+  return (
+    <div className="mt-3 space-y-3" data-testid="hydro-met-river-forecast-loaded">
+      <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+        <MetaRow label="river segment" value={`${segment.river_segment_id} · ${segment.name}`} mono />
+        <MetaRow label="variable" value={validation.variable} mono />
+        <MetaRow label="unit" value={validation.unit} />
+        <MetaRow label="source" value={`${validation.sourceId} / ${validation.scenarioId}`} />
+        <MetaRow label="cycle" value={formatDateTime(validation.cycleTime ?? product.cycle_time)} mono />
+        <MetaRow label="issue_time" value={formatDateTime(validation.issueTime)} mono />
+        <MetaRow label="valid range" value={`${formatDateTime(validation.validTimeStart)} - ${formatDateTime(validation.validTimeEnd)}`} mono />
+        <MetaRow label="points" value={`${validation.renderedPoints.length} rendered / ${validation.pointCount} returned`} />
+      </dl>
+
+      <RiverForecastHorizonBanner validation={validation} />
+      <RiverForecastChart validation={validation} segmentName={segment.name} />
+    </div>
+  )
+}
+
+function RiverForecastHorizonBanner({ validation }: { validation: Extract<HydroMetRiverForecastValidation, { ok: true }> }) {
+  return (
+    <div
+      className={cn(
+        'rounded border p-2 text-xs text-neutral-900',
+        validation.horizonShorter ? 'border-warning/40 bg-warning/10' : 'border-primary-100 bg-primary-50',
+      )}
+      data-testid="hydro-met-river-horizon"
+    >
+      {validation.horizonLabel}
+      {validation.capped ? `; capped ${validation.renderedPoints.length}/${validation.pointCount}` : ''}
+    </div>
+  )
+}
+
+function RiverForecastChart({
+  validation,
+  segmentName,
+}: {
+  validation: Extract<HydroMetRiverForecastValidation, { ok: true }>
+  segmentName: string
+}) {
+  const option = useMemo(
+    () => ({
+      color: [validation.sourceId === 'IFS' ? '#2ca02c' : '#0f8fbf'],
+      title: {
+        text: `${segmentName} q_down river discharge`,
+        subtext: `${validation.sourceId} / ${validation.scenarioId}\n${validation.validTimeStart} - ${validation.validTimeEnd}`,
+        left: 0,
+        textStyle: { fontSize: 15, fontWeight: 650, color: '#1f2937' },
+        subtextStyle: { color: '#64748b', lineHeight: 18 },
+      },
+      grid: { left: 52, right: 16, top: 86, bottom: 42 },
+      tooltip: {
+        trigger: 'axis',
+        renderMode: 'richText',
+        valueFormatter: (value: number) => `${Number(value).toFixed(3)} ${validation.unit}`,
+      },
+      xAxis: {
+        type: 'time',
+        axisLabel: { color: '#64748b' },
+      },
+      yAxis: {
+        type: 'value',
+        name: validation.unit,
+        scale: true,
+        axisLabel: { color: '#64748b' },
+      },
+      series: [
+        {
+          type: 'line',
+          name: 'q_down river discharge',
+          showSymbol: validation.renderedPoints.length <= 48,
+          symbolSize: 5,
+          data: validation.renderedPoints.map((point) => [point.timestamp, point.value]),
+          lineStyle: { width: 2.5, type: validation.sourceId === 'IFS' ? 'dashed' : 'solid' },
+        },
+      ],
+    }),
+    [segmentName, validation],
+  )
+
+  return (
+    <ReactEChartsCore
+      echarts={echarts}
+      option={option}
+      notMerge
+      lazyUpdate
+      style={{ height: 300, minHeight: 260, width: '100%' }}
+    />
+  )
+}
+
+function firstRiverSegmentId(features: HydroMetRiverSegmentFeature[]) {
+  return features[0] ? riverSegmentId(features[0]) : null
+}
+
+function riverSegmentId(feature: HydroMetRiverSegmentFeature) {
+  return feature.properties.river_segment_id || feature.properties.segment_id
+}
+
+function riverForecastSegmentIdentity(feature: HydroMetRiverSegmentFeature): HydroMetRiverForecastSegmentIdentity {
+  return {
+    river_segment_id: riverSegmentId(feature),
+    segment_id: feature.properties.segment_id,
+    river_network_version_id: feature.properties.river_network_version_id,
+    basin_version_id: feature.properties.basin_version_id,
+    name: formatHydroMetRiverForecastUiString(feature.properties.name || feature.properties.river_segment_id, {
+      fallback: feature.properties.river_segment_id,
+    }),
+  }
 }
 
 function LoadingPanel() {
