@@ -47,6 +47,36 @@ PIPELINE_JOB_KEYS = {
     "log_uri",
     "duration_seconds",
 }
+OPS_JOB_STATUS_ENUM = [
+    "pending",
+    "submitted",
+    "running",
+    "succeeded",
+    "partially_failed",
+    "failed",
+    "submission_failed",
+    "permanently_failed",
+    "cancelled",
+]
+STAGE_JOB_EVIDENCE_KEYS = {
+    "job_id",
+    "run_id",
+    "cycle_id",
+    "job_type",
+    "slurm_job_id",
+    "model_id",
+    "basin_id",
+    "status",
+    "stage",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "duration_seconds",
+    "retry_count",
+    "error_code",
+    "error_message",
+    "log_uri",
+}
 
 
 def test_runs_contract_uses_success_envelope_and_paginated_data() -> None:
@@ -132,6 +162,7 @@ def test_jobs_contract_uses_success_envelope_and_paginated_pipeline_jobs() -> No
     with _store() as store:
         cycle_time = _cycle_time()
         cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
         _seed_monitoring_jobs(store, cycle_id=cycle_id)
         with _client(store) as client:
             response = client.get(
@@ -169,6 +200,36 @@ def test_pipeline_status_contract_uses_success_envelope() -> None:
     assert data["cycle_id"] == cycle_id
     assert data["current_state"] == "forecast_running"
     assert data["job_counts"] == {"succeeded": 3, "failed": 1, "running": 1, "pending": 0}
+
+
+def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+
+    basin_result = schemas["BasinResult"]
+    assert set(basin_result["required"]) == STAGE_JOB_EVIDENCE_KEYS
+    assert basin_result["properties"]["status"]["enum"] == OPS_JOB_STATUS_ENUM
+    assert schemas["PipelineJob"]["properties"]["status"]["enum"] == OPS_JOB_STATUS_ENUM
+    assert schemas["RetryRunResult"]["properties"]["status"]["enum"] == ["submitted", "submission_failed"]
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    basin_result_start = generated_types.index("BasinResult:")
+    pipeline_job_start = generated_types.index("PipelineJob:")
+    basin_result_types = generated_types[basin_result_start:pipeline_job_start]
+    assert "job_id: string;" in basin_result_types
+    assert "run_id: string | null;" in basin_result_types
+    assert "slurm_job_id: string | null;" in basin_result_types
+    assert "submitted_at: string | null;" in basin_result_types
+    assert "duration_seconds: number | null;" in basin_result_types
+    assert "retry_count: number;" in basin_result_types
+    assert '"submission_failed"' in basin_result_types
+    assert '"permanently_failed"' in basin_result_types
+    retry_start = generated_types.index("RetryRunResult:")
+    cancel_start = generated_types.index("CancelRunResult:")
+    assert 'status: "submitted" | "submission_failed";' in generated_types[retry_start:cancel_start]
 
 
 def test_queue_depth_contract_uses_success_envelope() -> None:

@@ -1304,11 +1304,27 @@ export interface components {
             failed: number;
         };
         BasinResult: {
+            job_id: string;
+            run_id: string | null;
+            cycle_id: string | null;
+            job_type: string;
+            slurm_job_id: string | null;
             model_id: string | null;
             basin_id: string | null;
-            status: string;
+            /** @enum {string} */
+            status: "pending" | "submitted" | "running" | "succeeded" | "partially_failed" | "failed" | "submission_failed" | "permanently_failed" | "cancelled";
+            stage: string | null;
+            /** Format: date-time */
+            submitted_at: string | null;
+            /** Format: date-time */
+            started_at: string | null;
+            /** Format: date-time */
+            finished_at: string | null;
+            duration_seconds: number | null;
+            retry_count: number;
             error_code: string | null;
             error_message: string | null;
+            log_uri: string | null;
         };
         PipelineJob: {
             job_id: string;
@@ -1319,7 +1335,8 @@ export interface components {
             job_type: string;
             slurm_job_id: string | null;
             model_id: string | null;
-            status: string;
+            /** @enum {string} */
+            status: "pending" | "submitted" | "running" | "succeeded" | "partially_failed" | "failed" | "submission_failed" | "permanently_failed" | "cancelled";
             stage: string | null;
             /** Format: date-time */
             submitted_at: string | null;
@@ -1431,7 +1448,8 @@ export interface components {
             pipeline_job_id: string;
             run_id: string | null;
             retry_count: number;
-            status: string;
+            /** @enum {string} */
+            status: "submitted" | "submission_failed";
             slurm_job_id: string | null;
             /** @enum {string} */
             execution_status: "queued" | "submitted";

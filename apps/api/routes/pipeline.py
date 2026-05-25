@@ -47,6 +47,7 @@ _TERMINAL_CYCLE_STATUSES = {
 _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "frequency", "publish")
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024
+_MAX_PUBLIC_LOG_URI_LENGTH = 512
 LOG_ROOT = Path(os.getenv("LOG_ROOT", "workspace"))
 
 
@@ -118,16 +119,17 @@ def pipeline_status(
             details={"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id},
         )
 
+    resolved_cycle_id = str(cycle.get("cycle_id") or cycle_id)
     return _ok(
         request,
         {
-            "cycle_id": cycle.get("cycle_id") or cycle_id,
+            "cycle_id": resolved_cycle_id,
             "source": cycle.get("source") or source,
             "cycle_time": cycle.get("cycle_time") or parsed_cycle_time,
             "current_state": cycle["current_state"],
             "started_at": cycle.get("started_at"),
             "updated_at": cycle.get("updated_at"),
-            "job_counts": _job_count_summary(store, cycle_id),
+            "job_counts": _job_count_summary(store, resolved_cycle_id),
         },
     )
 
@@ -150,7 +152,7 @@ def pipeline_stages(
             details={"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id},
         )
 
-    jobs = store.query_jobs_by_cycle(cycle_id)
+    jobs = store.query_jobs_by_cycle(str(cycle.get("cycle_id") or cycle_id))
     return _ok(request, _stage_summaries(jobs))
 
 
@@ -175,7 +177,10 @@ def list_jobs(
     if cycle_time is not None:
         parsed_cycle_time = _parse_cycle_time(cycle_time)
         if source is not None:
-            statement = statement.where(PipelineJob.cycle_id == _cycle_id_for_source(source, parsed_cycle_time))
+            cycle = _fetch_forecast_cycle_or_404(store, source=source, cycle_time=parsed_cycle_time)
+            statement = statement.where(
+                PipelineJob.cycle_id == (cycle.get("cycle_id") or _cycle_id_for_source(source, parsed_cycle_time))
+            )
         else:
             statement = statement.where(PipelineJob.cycle_id.like(f"%_{format_cycle_time(parsed_cycle_time)}"))
     elif source is not None:
@@ -236,7 +241,7 @@ def job_logs(
             details={"job_id": job_id},
         )
 
-    safe_log_uri = _safe_redacted_text(job.log_uri)
+    safe_log_uri = _safe_public_log_uri(job.log_uri)
     log_path = _local_log_path(job.log_uri)
     if log_path is None or not log_path.is_file():
         raise ApiError(
@@ -694,6 +699,15 @@ def _safe_redacted_text(value: str) -> str:
     return redacted if isinstance(redacted, str) else str(redacted)
 
 
+def _safe_public_log_uri(value: str | None) -> str | None:
+    if value is None:
+        return None
+    redacted = _safe_redacted_text(value)
+    if len(redacted) <= _MAX_PUBLIC_LOG_URI_LENGTH:
+        return redacted
+    return f"{redacted[: _MAX_PUBLIC_LOG_URI_LENGTH - 14]}...[truncated]"
+
+
 def _cancellation_payload_proven(response: dict[str, Any]) -> bool:
     status = str(response.get("status") or "").lower()
     if response.get("error_code"):
@@ -881,11 +895,17 @@ def _fetch_forecast_cycle(
     updated_expression = "updated_at" if "updated_at" in column_names else started_expression
 
     filters: list[str] = []
+    parameters: dict[str, Any] = {"cycle_time": cycle_time, "cycle_id": cycle_id}
     if "cycle_id" in column_names:
         filters.append("cycle_id = :cycle_id")
-    if source_column in column_names and "cycle_time" in column_names:
-        filters.append(f"({source_column} = :source AND cycle_time = :cycle_time)")
-    if not filters or state_column not in column_names:
+    if source_column in column_names:
+        source_aliases = _source_aliases_for_query(source)
+        source_bind_names = [f"source_{index}" for index, _source in enumerate(source_aliases)]
+        parameters.update(dict(zip(source_bind_names, source_aliases, strict=True)))
+        filters.append(f"{source_column} IN ({', '.join(f':{name}' for name in source_bind_names)})")
+    if "cycle_time" in column_names:
+        filters.append("cycle_time = :cycle_time")
+    if not filters or state_column not in column_names or "cycle_time" not in column_names:
         raise ApiError(
             status_code=500,
             code="FORECAST_CYCLE_SCHEMA_UNSUPPORTED",
@@ -905,7 +925,7 @@ def _fetch_forecast_cycle(
             {started_expression} AS started_at,
             {updated_expression} AS updated_at
         FROM met.forecast_cycle
-        WHERE {" OR ".join(filters)}
+        WHERE {" AND ".join(filters)}
         LIMIT 1
         """
     )
@@ -913,7 +933,7 @@ def _fetch_forecast_cycle(
         row = (
             store.session.execute(
                 statement,
-                {"source": source, "cycle_time": cycle_time, "cycle_id": cycle_id},
+                parameters,
             )
             .mappings()
             .first()
@@ -926,6 +946,30 @@ def _fetch_forecast_cycle(
             details={"source": source, "cycle_time": cycle_time.isoformat(), "cycle_id": cycle_id},
         ) from error
     return dict(row) if row is not None else None
+
+
+def _fetch_forecast_cycle_or_404(
+    store: PipelineStore,
+    *,
+    source: str,
+    cycle_time: datetime,
+) -> dict[str, Any]:
+    cycle_id = _cycle_id_for_source(source, cycle_time)
+    cycle = _fetch_forecast_cycle(store, source=source, cycle_time=cycle_time, cycle_id=cycle_id)
+    if cycle is None:
+        raise ApiError(
+            status_code=404,
+            code="PIPELINE_CYCLE_NOT_FOUND",
+            message="No forecast cycle found for the requested source and cycle_time.",
+            details={"source": source, "cycle_time": cycle_time.isoformat(), "cycle_id": cycle_id},
+        )
+    return cycle
+
+
+def _source_aliases_for_query(source: str) -> list[str]:
+    normalized = _normalize_source_for_query(source)
+    aliases = {source, normalized, normalized.upper(), normalized.lower()}
+    return sorted(alias for alias in aliases if alias)
 
 
 def _run_ids_matching_filters(
@@ -1135,11 +1179,23 @@ def _basin_progress(jobs: list[PipelineJob]) -> dict[str, int]:
 
 def _basin_result(job: PipelineJob) -> dict[str, Any]:
     return {
+        "job_id": job.job_id,
+        "run_id": job.run_id,
+        "cycle_id": job.cycle_id,
+        "job_type": job.job_type,
+        "slurm_job_id": job.slurm_job_id,
         "model_id": job.model_id,
         "basin_id": None,
         "status": job.status,
+        "stage": job.stage,
+        "submitted_at": job.submitted_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "duration_seconds": _duration_seconds(job.started_at, job.finished_at),
+        "retry_count": job.retry_count,
         "error_code": job.error_code,
         "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
+        "log_uri": _safe_public_log_uri(job.log_uri),
     }
 
 
@@ -1163,7 +1219,7 @@ def _job_payload(job: PipelineJob, run_metadata: dict[str, str | None] | None = 
         "retry_count": job.retry_count,
         "error_code": job.error_code,
         "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
-        "log_uri": _safe_redacted_text(job.log_uri) if job.log_uri is not None else None,
+        "log_uri": _safe_public_log_uri(job.log_uri),
         "duration_seconds": _duration_seconds(job.started_at, job.finished_at),
     }
 
@@ -1211,11 +1267,12 @@ def _local_log_path(log_uri: str) -> Path | None:
 
 
 def _raise_log_path_forbidden(log_uri: str, log_root: Path) -> None:
+    del log_uri, log_root
     raise ApiError(
         status_code=403,
         code="FORBIDDEN",
         message="Job log path is outside the configured log root.",
-        details={"log_uri": _safe_redacted_text(log_uri), "log_root": str(log_root)},
+        details={"reason": "unsafe_log_path"},
     )
 
 
@@ -1227,6 +1284,6 @@ def _read_log_tail(log_path: Path) -> str:
             status_code=403,
             code="FORBIDDEN",
             message="Job log path is outside the configured log root.",
-            details={"log_path": str(log_path), "log_root": str(_log_root())},
+            details={"reason": "unsafe_log_path"},
         ) from exc
     return data.decode("utf-8", errors="replace")

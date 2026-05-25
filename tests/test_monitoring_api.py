@@ -73,6 +73,53 @@ def test_pipeline_stages_endpoint() -> None:
         assert convert["basin_progress"] == {"completed": 1, "total": 2, "failed": 1}
 
 
+def test_qhh_like_pipeline_stages_expose_formal_job_evidence_for_all_canonical_stages() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time, current_state="parsed_partial")
+        _seed_qhh_canonical_stage_jobs(store, cycle_id=cycle_id)
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 200
+        stages = response.json()["data"]
+        assert [stage["stage"] for stage in stages] == [
+            "download",
+            "convert",
+            "forcing",
+            "forecast",
+            "parse",
+            "frequency",
+            "publish",
+        ]
+        assert [stage["display_status"] for stage in stages] == [
+            "succeeded",
+            "succeeded",
+            "succeeded",
+            "succeeded",
+            "succeeded",
+            "partially_failed",
+            "succeeded",
+        ]
+        frequency_job = next(stage for stage in stages if stage["stage"] == "frequency")["basin_results"][0]
+        assert frequency_job["job_id"] == "qhh_frequency"
+        assert frequency_job["run_id"] == "cycle_gfs_qhh"
+        assert frequency_job["cycle_id"] == cycle_id
+        assert frequency_job["stage"] == "frequency"
+        assert frequency_job["status"] == "partially_failed"
+        assert frequency_job["slurm_job_id"] == "slurm_qhh_frequency"
+        assert frequency_job["submitted_at"] is not None
+        assert frequency_job["started_at"] is not None
+        assert frequency_job["finished_at"] is not None
+        assert frequency_job["duration_seconds"] == 180
+        assert frequency_job["retry_count"] == 2
+        assert frequency_job["log_uri"] == "qhh/frequency.log"
+
+
 def test_pipeline_stages_missing_cycle() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
@@ -126,6 +173,7 @@ def test_jobs_list_endpoint() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
         cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
         _seed_monitoring_jobs(store, cycle_id=cycle_id)
         with _client(store) as client:
             response = client.get(
@@ -162,10 +210,43 @@ def test_jobs_list_endpoint() -> None:
         }
 
 
+def test_jobs_list_source_cycle_requires_matching_forecast_cycle_and_excludes_sibling_records() -> None:
+    with _store() as store:
+        store.session.execute(text("PRAGMA case_sensitive_like = ON"))
+        cycle_time = _cycle_time()
+        target_cycle = cycle_id_for("GFS", cycle_time)
+        sibling_cycle = cycle_id_for("GFS", cycle_time + timedelta(hours=6))
+        ifs_same_time = cycle_id_for("IFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        _insert_cycle(store, cycle_time=cycle_time + timedelta(hours=6), source="GFS")
+        _insert_cycle(store, cycle_time=cycle_time, source="IFS")
+        _create_job(store, job_id="job_target", run_id="qhh_target", cycle_id=target_cycle, stage="download")
+        _create_job(store, job_id="job_sibling_cycle", run_id="qhh_target", cycle_id=sibling_cycle, stage="download")
+        _create_job(store, job_id="job_sibling_source", run_id="qhh_target", cycle_id=ifs_same_time, stage="download")
+        _create_job(store, job_id="job_legacy_upper", run_id="qhh_target", cycle_id=f"GFS_{cycle_time:%Y%m%d%H}")
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            missing_cycle = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": (cycle_time + timedelta(hours=12)).isoformat()},
+            )
+
+        assert response.status_code == 200
+        page = response.json()["data"]
+        assert page["total"] == 1
+        assert [job["job_id"] for job in page["items"]] == ["job_target"]
+        assert missing_cycle.status_code == 404
+        assert missing_cycle.json()["error"]["code"] == "PIPELINE_CYCLE_NOT_FOUND"
+
+
 def test_jobs_list_endpoint_server_side_sorting() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
         cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
         _seed_monitoring_jobs(store, cycle_id=cycle_id)
         with _client(store) as client:
             submitted_response = client.get(
@@ -245,6 +326,23 @@ def test_job_logs_tails_large_file(tmp_path: Path, monkeypatch) -> None:
         assert response.json()["data"]["content"] == "89abcdef"
 
 
+def test_job_logs_response_redacts_and_bounds_log_uri(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    monkeypatch.setattr(pipeline_routes, "_MAX_PUBLIC_LOG_URI_LENGTH", 24)
+    with _store() as store:
+        log_dir = tmp_path / "qhh"
+        log_dir.mkdir()
+        log_path = log_dir / "retry-token.log"
+        log_path.write_text("retry log", encoding="utf-8")
+        _create_job(store, job_id="job_redacted_log_uri", log_uri="qhh/retry-token.log?token=tok123")
+        with _client(store) as client:
+            response = client.get("/api/v1/jobs/job_redacted_log_uri/logs")
+
+        assert response.status_code == 404
+        assert "tok123" not in json.dumps(response.json(), sort_keys=True)
+        assert response.json()["error"]["details"]["log_uri"].endswith("...[truncated]")
+
+
 def test_job_logs_rejects_symlink_swap_between_path_check_and_open(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     with _store() as store:
@@ -286,6 +384,20 @@ def test_job_logs_path_traversal(tmp_path: Path, monkeypatch) -> None:
         assert response.json()["error"]["code"] == "FORBIDDEN"
 
 
+def test_job_logs_error_does_not_leak_configured_root_or_resolved_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    with _store() as store:
+        _create_job(store, job_id="job_root_leak", log_uri="../../../secret/job.log")
+        with _client(store) as client:
+            response = client.get("/api/v1/jobs/job_root_leak/logs")
+
+        body = json.dumps(response.json(), sort_keys=True)
+        assert response.status_code == 403
+        assert str(tmp_path) not in body
+        assert "secret/job.log" not in body
+        assert response.json()["error"]["details"] == {"reason": "unsafe_log_path"}
+
+
 def test_job_logs_not_found(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     with _store() as store:
@@ -314,6 +426,44 @@ def test_retry_rbac() -> None:
         assert denied.json()["error"]["code"] == "RBAC_FORBIDDEN"
         assert denied.json()["error"]["details"]["policy_decision"]["action_id"] == "pipeline.retry_run"
         assert denied.json()["error"]["details"]["policy_decision"]["roles"] == ["viewer"]
+
+
+def test_retry_accepts_ops_mvp_failed_source_states_and_records_metadata() -> None:
+    failed_statuses = ["failed", "submission_failed", "partially_failed", "permanently_failed"]
+    for status in failed_statuses:
+        with _store() as store:
+            failed_job = _create_job(
+                store,
+                job_id=f"job_retry_{status}",
+                run_id=f"run_retry_{status}",
+                status=status,
+                error_code="SBATCH_SUBMISSION_FAILED" if status == "submission_failed" else "NODE_FAILURE",
+            )
+            failed_job.retry_count = 1
+            store.session.add(failed_job)
+            store.session.commit()
+            with _client(store, allow_dev_role_header=True) as client:
+                response = client.post(f"/api/v1/runs/run_retry_{status}/retry", headers={"X-User-Role": "operator"})
+
+            assert response.status_code == 200
+            data = response.json()["data"]
+            assert data["run_id"] == f"run_retry_{status}"
+            assert data["retry_count"] == 2
+            assert data["status"] == "submitted"
+            assert data["execution_status"] == "submitted"
+            retry_jobs = [job for job in store.query_jobs_by_run(f"run_retry_{status}") if job.retry_count == 2]
+            assert len(retry_jobs) == 1
+            retry_job = retry_jobs[0]
+            assert retry_job.status == "submitted"
+            assert retry_job.stage == "download"
+            retry_event = next(event for event in _events(store) if event.event_type == "retry")
+            assert retry_event.entity_id == retry_job.job_id
+            assert retry_event.status_from == status
+            assert retry_event.details["trigger"] == "manual"
+            assert retry_event.details["manual_retry_marker"] is True
+            assert retry_event.details["retry_count"] == 2
+            assert retry_event.details["previous_job_id"] == f"job_retry_{status}"
+            assert retry_event.details["failure"]["manual_retry_marker"] is True
 
 
 def test_retry_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: Any) -> None:
@@ -1192,6 +1342,33 @@ def _seed_monitoring_jobs(store: PipelineStore, *, cycle_id: str) -> None:
         started_at=base_time + timedelta(minutes=13),
         finished_at=None,
     )
+
+
+def _seed_qhh_canonical_stage_jobs(store: PipelineStore, *, cycle_id: str) -> None:
+    base_time = _cycle_time()
+    for index, stage in enumerate(("download", "convert", "forcing", "forecast", "parse", "frequency", "publish")):
+        status = "partially_failed" if stage == "frequency" else "succeeded"
+        retry_count = 2 if stage == "frequency" else 0
+        job = _create_job(
+            store,
+            job_id=f"qhh_{stage}",
+            run_id="cycle_gfs_qhh",
+            cycle_id=cycle_id,
+            job_type=f"{stage}_qhh_stage",
+            slurm_job_id=f"slurm_qhh_{stage}",
+            model_id="basins_qhh_shud",
+            stage=stage,
+            status=status,
+            submitted_at=base_time + timedelta(minutes=index * 10),
+            started_at=base_time + timedelta(minutes=index * 10 + 1),
+            finished_at=base_time + timedelta(minutes=index * 10 + 4),
+            error_code="NO_FREQUENCY_CURVE" if stage == "frequency" else None,
+            error_message="Frequency curve unavailable for one basin." if stage == "frequency" else None,
+            log_uri=f"qhh/{stage}.log",
+        )
+        job.retry_count = retry_count
+        store.session.add(job)
+    store.session.commit()
 
 
 def _create_job(

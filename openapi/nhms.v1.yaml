@@ -3201,8 +3201,38 @@ components:
           type: integer
     BasinResult:
       type: object
-      required: [model_id, basin_id, status, error_code, error_message]
+      required:
+        - job_id
+        - run_id
+        - cycle_id
+        - job_type
+        - slurm_job_id
+        - model_id
+        - basin_id
+        - status
+        - stage
+        - submitted_at
+        - started_at
+        - finished_at
+        - duration_seconds
+        - retry_count
+        - error_code
+        - error_message
+        - log_uri
       properties:
+        job_id:
+          type: string
+        run_id:
+          type: string
+          nullable: true
+        cycle_id:
+          type: string
+          nullable: true
+        job_type:
+          type: string
+        slurm_job_id:
+          type: string
+          nullable: true
         model_id:
           type: string
           nullable: true
@@ -3211,10 +3241,34 @@ components:
           nullable: true
         status:
           type: string
+          enum: [pending, submitted, running, succeeded, partially_failed, failed, submission_failed, permanently_failed, cancelled]
+        stage:
+          type: string
+          nullable: true
+        submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_seconds:
+          type: integer
+          nullable: true
+        retry_count:
+          type: integer
         error_code:
           type: string
           nullable: true
         error_message:
+          type: string
+          nullable: true
+        log_uri:
           type: string
           nullable: true
     PipelineJob:
@@ -3264,6 +3318,7 @@ components:
           nullable: true
         status:
           type: string
+          enum: [pending, submitted, running, succeeded, partially_failed, failed, submission_failed, permanently_failed, cancelled]
         stage:
           type: string
           nullable: true
@@ -3532,6 +3587,7 @@ components:
           type: integer
         status:
           type: string
+          enum: [submitted, submission_failed]
         slurm_job_id:
           type: string
           nullable: true
