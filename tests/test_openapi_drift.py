@@ -34,9 +34,6 @@ DEFERRED_ROUTE_REASONS: dict[RouteKey, str] = {
         "GET",
         "/api/v1/basin-versions/{basin_version_id}/river-network-versions",
     ): "issue-123 future registry read surface; backing read store is out of scope",
-    ("GET", "/api/v1/met/stations/{station_id}/series"): (
-        "issue-123 future station time-series read; data-source migration is out of scope"
-    ),
     (
         "GET",
         "/api/v1/tiles/met/{product_id}/{variable}/{valid_time}/{z}/{x}/{y}.png",
@@ -133,6 +130,61 @@ def test_forecast_series_river_network_query_parameter_matches_fastapi_openapi()
         assert param["required"] is True
         assert param["schema"]["type"] == "string"
         assert param["schema"]["minLength"] == 1
+
+
+def test_station_series_runtime_openapi_matches_static_parameters_and_schema() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/met/stations/{station_id}/series"
+    static_operation = static_spec["paths"][path]["get"]
+    runtime_operation = fastapi_spec["paths"][path]["get"]
+
+    expected_params = {
+        "station_id",
+        "forcing_version_id",
+        "model_id",
+        "source_id",
+        "cycle_time",
+        "variables",
+        "from",
+        "to",
+        "limit",
+    }
+    static_parameters = _operation_parameters_by_name(static_operation, static_spec)
+    runtime_parameters = _operation_parameters_by_name(runtime_operation, fastapi_spec)
+    assert set(static_parameters) == expected_params
+    assert set(runtime_parameters) == expected_params
+    assert runtime_parameters == static_parameters
+
+    static_response = static_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    runtime_response = runtime_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert runtime_response == static_response
+    assert runtime_operation["responses"]["4XX"] == static_operation["responses"]["4XX"]
+    assert runtime_operation["responses"]["5XX"] == static_operation["responses"]["5XX"]
+    assert static_response["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/StationSeriesResponse"
+
+    assert static_parameters["variables"]["schema"] == {
+        "oneOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}},
+        ]
+    }
+    assert static_parameters["limit"]["schema"] == {"type": "integer", "minimum": 1, "maximum": 10000}
+    assert static_parameters["cycle_time"]["schema"] == {"type": "string", "format": "date-time"}
+
+    for schema_name in (
+        "SuccessEnvelope",
+        "ErrorResponse",
+        "ValidationErrorDetail",
+        "StationSeriesPoint",
+        "StationSeriesStation",
+        "StationSeriesMetadata",
+        "StationSeries",
+        "StationSeriesResponse",
+    ):
+        assert fastapi_spec["components"]["schemas"][schema_name] == static_spec["components"]["schemas"][schema_name]
+    assert fastapi_spec["components"]["responses"]["Error"] == static_spec["components"]["responses"]["Error"]
 
 
 def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_openapi() -> None:
@@ -682,6 +734,14 @@ def _parameter_by_name(parameters: list[dict[str, Any]], spec: dict[str, Any], n
         if parameter.get("name") == name:
             return parameter
     raise AssertionError(f"parameter not found: {name}")
+
+
+def _operation_parameters_by_name(operation: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    for parameter in operation["parameters"]:
+        resolved = _resolve_ref(parameter["$ref"], spec) if "$ref" in parameter else parameter
+        parameters[resolved["name"]] = resolved
+    return parameters
 
 
 def _resolve_ref(ref: str, spec: dict[str, Any]) -> dict[str, Any]:

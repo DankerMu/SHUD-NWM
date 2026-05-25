@@ -20,6 +20,7 @@ from apps.api.routes.hindcast import router as hindcast_router
 from apps.api.routes.models import router as models_router
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
+from packages.common.forecast_store import MAX_STATION_SERIES_LIMIT
 from services.slurm_gateway.routes import router as slurm_router
 from services.tiles.mvt import (
     DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
@@ -302,6 +303,7 @@ def custom_openapi():
     )
     _patch_mvt_tile_openapi(schema)
     _patch_flood_duration_openapi(schema)
+    _patch_station_series_openapi(schema)
     _patch_layer_metadata_openapi(schema)
     app.openapi_schema = schema
     return app.openapi_schema
@@ -434,6 +436,114 @@ def _patch_layer_metadata_openapi(schema: dict) -> None:
         _set_operation_response_schema(schema, "/api/v1/layers/{layer_id}/valid-times", layer_valid_times_response)
 
 
+def _patch_station_series_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
+    schemas["StationSeriesPoint"] = _station_series_point_schema()
+    schemas["StationSeriesStation"] = _station_series_station_schema()
+    schemas["StationSeriesMetadata"] = _station_series_metadata_schema()
+    schemas["StationSeries"] = _station_series_schema()
+    schemas["StationSeriesResponse"] = _station_series_response_schema()
+
+    responses = components.setdefault("responses", {})
+    responses["Error"] = {
+        "description": "Error response",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    }
+
+    operation = schema.get("paths", {}).get("/api/v1/met/stations/{station_id}/series", {}).get("get")
+    if not operation:
+        return
+    operation["summary"] = "Get station forcing time series"
+    operation["tags"] = ["met"]
+    operation["parameters"] = _station_series_parameters()
+    operation["responses"] = {
+        "200": {
+            "description": "Station time series",
+            "content": {
+                "application/json": {
+                    "schema": _success_response_schema({"$ref": "#/components/schemas/StationSeriesResponse"})
+                }
+            },
+        },
+        "4XX": {"$ref": "#/components/responses/Error"},
+        "5XX": {"$ref": "#/components/responses/Error"},
+    }
+
+
+def _station_series_parameters() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "station_id",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string"},
+        },
+        {
+            "name": "forcing_version_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+        },
+        {
+            "name": "model_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+        },
+        {
+            "name": "source_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+        },
+        {
+            "name": "cycle_time",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "variables",
+            "in": "query",
+            "required": False,
+            "style": "form",
+            "explode": True,
+            "schema": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ]
+            },
+            "description": (
+                "Station forcing variables. Repeat the parameter or provide comma-separated values. "
+                "Allowed values are PRCP, TEMP, RH, wind, Rn, and Press."
+            ),
+        },
+        {
+            "name": "from",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "to",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+        },
+        {
+            "name": "limit",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "integer", "minimum": 1, "maximum": MAX_STATION_SERIES_LIMIT},
+        },
+    ]
+
+
 def _operation_parameter(schema: dict, path: str, *, name: str, location: str) -> dict | None:
     operation = schema.get("paths", {}).get(path, {}).get("get", {})
     for parameter in operation.get("parameters", []):
@@ -464,6 +574,177 @@ def _set_operation_response_schema(schema: dict, path: str, response_schema: dic
     content["schema"] = response_schema
 
 
+def _success_envelope_schema() -> dict:
+    return {
+        "type": "object",
+        "description": "Standard success envelope returned by API endpoints using the `_ok()` response pattern.",
+        "required": ["request_id", "status"],
+        "properties": {
+            "request_id": {"type": "string", "example": "req_01J0NHMS"},
+            "status": {"type": "string", "enum": ["ok"], "example": "ok"},
+        },
+    }
+
+
+def _error_response_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["request_id", "status", "error"],
+        "properties": {
+            "request_id": {"type": "string", "example": "req_01J0NHMS"},
+            "status": {"type": "string", "enum": ["error"], "example": "error"},
+            "error": {
+                "type": "object",
+                "required": ["code", "message"],
+                "properties": {
+                    "code": {"type": "string", "example": "NOT_FOUND"},
+                    "message": {"type": "string", "example": "Requested resource was not found."},
+                    "details": _error_details_schema(),
+                },
+            },
+        },
+    }
+
+
+def _error_details_schema() -> dict:
+    return {
+        "oneOf": [
+            {"type": "object", "nullable": True, "additionalProperties": True},
+            {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/ValidationErrorDetail"},
+            },
+        ]
+    }
+
+
+def _validation_error_detail_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["field", "reason"],
+        "properties": {
+            "field": {"type": "string"},
+            "rejected_value": _json_value_schema(),
+            "reason": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _station_series_point_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["valid_time", "value", "quality_flag"],
+        "properties": {
+            "valid_time": {"type": "string", "format": "date-time"},
+            "value": {"type": "number"},
+            "quality_flag": {"type": "string", "nullable": True},
+            "source_id": {"type": "string", "nullable": True},
+        },
+    }
+
+
+def _json_value_schema() -> dict:
+    return {
+        "oneOf": [
+            {"type": "string", "nullable": True},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "object", "additionalProperties": True},
+            {"type": "array", "items": {}},
+        ]
+    }
+
+
+def _station_series_station_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["station_id", "basin_version_id"],
+        "properties": {
+            "station_id": {"type": "string"},
+            "basin_version_id": {"type": "string"},
+            "station_name": {"type": "string", "nullable": True},
+            "name": {"type": "string", "nullable": True},
+            "longitude": {"type": "number", "nullable": True},
+            "latitude": {"type": "number", "nullable": True},
+            "elevation_m": {"type": "number", "nullable": True},
+            "elevation": {"type": "number", "nullable": True},
+            "station_role": {"type": "string", "nullable": True},
+            "active_flag": {"type": "boolean", "nullable": True},
+            "properties_json": {"type": "object", "nullable": True, "additionalProperties": True},
+            "created_at": {"type": "string", "format": "date-time", "nullable": True},
+        },
+    }
+
+
+def _station_series_metadata_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "limit",
+            "returned_points",
+            "requested_from",
+            "requested_to",
+            "returned_from",
+            "returned_to",
+            "truncated",
+        ],
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1},
+            "returned_points": {"type": "integer", "minimum": 0},
+            "requested_from": {"type": "string", "format": "date-time", "nullable": True},
+            "requested_to": {"type": "string", "format": "date-time", "nullable": True},
+            "returned_from": {"type": "string", "format": "date-time", "nullable": True},
+            "returned_to": {"type": "string", "format": "date-time", "nullable": True},
+            "truncated": {"type": "boolean"},
+        },
+    }
+
+
+def _station_series_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["variable", "unit", "native_resolution", "points", "truncated", "metadata"],
+        "properties": {
+            "variable": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]},
+            "unit": {"type": "string", "nullable": True},
+            "native_resolution": {"type": "string", "nullable": True},
+            "source_id": {"type": "string", "nullable": True},
+            "cycle_time": {"type": "string", "format": "date-time", "nullable": True},
+            "points": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/StationSeriesPoint"},
+            },
+            "truncated": {"type": "boolean"},
+            "metadata": {"$ref": "#/components/schemas/StationSeriesMetadata"},
+        },
+    }
+
+
+def _station_series_response_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["station_id", "station", "forcing_version_id", "source_id", "limit", "series"],
+        "properties": {
+            "station_id": {"type": "string"},
+            "station": {"$ref": "#/components/schemas/StationSeriesStation"},
+            "forcing_version_id": {"type": "string"},
+            "model_id": {"type": "string", "nullable": True},
+            "source_id": {"type": "string"},
+            "cycle_time": {"type": "string", "format": "date-time", "nullable": True},
+            "valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+            "limit": {"type": "integer", "minimum": 1},
+            "requested_from": {"type": "string", "format": "date-time", "nullable": True},
+            "requested_to": {"type": "string", "format": "date-time", "nullable": True},
+            "series": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/StationSeries"},
+            },
+        },
+    }
+
+
 def _layer_schema() -> dict:
     return {
         "type": "object",
@@ -474,10 +755,9 @@ def _layer_schema() -> dict:
             "layer_type": {"type": "string"},
             "variables": {"type": "array", "items": {"type": "string"}},
             "metadata": {
-                "oneOf": [
-                    {"$ref": "#/components/schemas/LayerMetadata"},
-                    {"type": "null"},
-                ]
+                "type": "object",
+                "nullable": True,
+                "allOf": [{"$ref": "#/components/schemas/LayerMetadata"}],
             },
         },
     }

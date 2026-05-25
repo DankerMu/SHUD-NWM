@@ -14,6 +14,7 @@ from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
+from packages.common.forecast_store import ForecastStoreError
 from tests.test_monitoring_api import (
     _client,
     _create_job,
@@ -171,6 +172,58 @@ def test_met_stations_contract_uses_success_envelope() -> None:
     assert response.status_code == 200
     data = _assert_success_envelope(response.json())
     assert data["items"] == [{"station_id": "station_1", "basin_version_id": "basin_v1", "active_flag": True}]
+
+
+def test_met_station_series_contract_uses_success_envelope_and_store_payload() -> None:
+    store = _DataSourceStore()
+    app.dependency_overrides[get_data_source_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/met/stations/station_1/series",
+                params={
+                    "forcing_version_id": "forc_qhh_gfs_2026050700",
+                    "variables": "PRCP",
+                    "from": "2026-05-07T00:00:00Z",
+                    "to": "2026-05-07T03:00:00Z",
+                    "limit": 2,
+                },
+            )
+            missing = client.get(
+                "/api/v1/met/stations/station_1/series",
+                params={"forcing_version_id": "missing"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_data_source_store, None)
+
+    assert response.status_code == 200
+    data = _assert_success_envelope(response.json())
+    assert set(data) == {
+        "station_id",
+        "station",
+        "forcing_version_id",
+        "model_id",
+        "source_id",
+        "cycle_time",
+        "valid_time_start",
+        "valid_time_end",
+        "limit",
+        "requested_from",
+        "requested_to",
+        "series",
+    }
+    assert data["station"]["station_id"] == "station_1"
+    assert data["forcing_version_id"] == "forc_qhh_gfs_2026050700"
+    assert data["source_id"] == "GFS"
+    assert data["series"][0]["unit"] == "mm/h"
+    assert data["series"][0]["native_resolution"] == "1h"
+    assert data["series"][0]["points"][0]["quality_flag"] == "ok"
+    assert data["series"][0]["metadata"]["truncated"] is True
+    assert store.station_series_calls[0]["variables"] == ["PRCP"]
+    assert missing.status_code == 404
+    assert missing.json()["status"] == "error"
+    assert missing.json()["error"]["code"] == "FORCING_VERSION_NOT_FOUND"
+    assert missing.json()["error"]["details"] == {"forcing_version_id": "missing"}
 
 
 def test_model_active_contract_accepts_active_and_active_flag() -> None:
@@ -608,6 +661,133 @@ def test_generated_frontend_types_include_model_page_and_flood_threshold_shapes(
     assert "frequency_thresholds?: Record<string, never> | null;" not in generated_types
 
 
+def test_station_series_openapi_and_generated_types_include_store_contract() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    operation = spec["paths"]["/api/v1/met/stations/{station_id}/series"]["get"]
+    parameters: dict[str, dict[str, Any]] = {}
+    for parameter in operation["parameters"]:
+        if "$ref" in parameter:
+            parameter = spec["components"]["parameters"][parameter["$ref"].removeprefix("#/components/parameters/")]
+        parameters[parameter["name"]] = parameter
+
+    assert operation["operationId"] == "getMetStationSeries"
+    assert set(parameters) == {
+        "station_id",
+        "forcing_version_id",
+        "model_id",
+        "source_id",
+        "cycle_time",
+        "variables",
+        "from",
+        "to",
+        "limit",
+    }
+    assert parameters["variables"]["schema"] == {
+        "oneOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}},
+        ]
+    }
+    for name in ("forcing_version_id", "model_id", "source_id"):
+        assert parameters[name]["schema"] == {"type": "string", "minLength": 1}
+    assert parameters["limit"]["schema"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000,
+    }
+    response_data = operation["responses"]["200"]["content"]["application/json"]["schema"]["allOf"][1]["properties"][
+        "data"
+    ]
+    assert response_data["$ref"] == "#/components/schemas/StationSeriesResponse"
+    schemas = spec["components"]["schemas"]
+    assert schemas["StationSeriesResponse"]["required"] == [
+        "station_id",
+        "station",
+        "forcing_version_id",
+        "source_id",
+        "limit",
+        "series",
+    ]
+    assert "quality_flag" in schemas["StationSeriesPoint"]["properties"]
+    assert "native_resolution" in schemas["StationSeries"]["properties"]
+    assert "returned_points" in schemas["StationSeriesMetadata"]["properties"]
+    assert schemas["ErrorResponse"]["properties"]["error"]["properties"]["details"] == {
+        "oneOf": [
+            {"type": "object", "nullable": True, "additionalProperties": True},
+            {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/ValidationErrorDetail"},
+            },
+        ]
+    }
+    assert schemas["ValidationErrorDetail"] == {
+        "type": "object",
+        "required": ["field", "reason"],
+        "properties": {
+            "field": {"type": "string"},
+            "rejected_value": {
+                "oneOf": [
+                    {"type": "string", "nullable": True},
+                    {"type": "number"},
+                    {"type": "boolean"},
+                    {"type": "object", "additionalProperties": True},
+                    {"type": "array", "items": {}},
+                ]
+            },
+            "reason": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    operation_start = generated_types.index("getMetStationSeries:")
+    list_runs_start = generated_types.index("listRuns:")
+    operation_types = generated_types[operation_start:list_runs_start]
+    assert "forcing_version_id?: string;" in operation_types
+    assert "model_id?: string;" in operation_types
+    assert "source_id?: string;" in operation_types
+    assert "cycle_time?: string;" in operation_types
+    assert "variables?: string | string[];" in operation_types
+    assert "from?: string;" in operation_types
+    assert "to?: string;" in operation_types
+    assert "limit?: number;" in operation_types
+    assert 'data: components["schemas"]["StationSeriesResponse"];' in operation_types
+    assert "StationSeriesResponse:" in generated_types
+    assert "StationSeriesPoint:" in generated_types
+    assert "quality_flag: string | null;" in generated_types
+    assert "native_resolution: string | null;" in generated_types
+    error_start = generated_types.index("ErrorResponse:")
+    validation_detail_start = generated_types.index("ValidationErrorDetail:")
+    error_types = generated_types[error_start:validation_detail_start]
+    assert "details?: ({" in error_types
+    assert "} | null) | components[\"schemas\"][\"ValidationErrorDetail\"][];" in error_types
+    assert "rejected_value?: (string | null) | number | boolean | {" in generated_types
+    assert "ValidationErrorDetail:" in generated_types
+
+
+def test_layer_metadata_contract_preserves_nullable_generated_type() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+
+    assert spec["components"]["schemas"]["Layer"]["properties"]["metadata"] == {
+        "type": "object",
+        "nullable": True,
+        "allOf": [{"$ref": "#/components/schemas/LayerMetadata"}],
+    }
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    layer_start = generated_types.index("Layer:")
+    layer_metadata_start = generated_types.index("LayerMetadata:")
+    assert 'metadata?: components["schemas"]["LayerMetadata"] | null;' in generated_types[
+        layer_start:layer_metadata_start
+    ]
+
+
 def test_flood_product_quality_contract_is_in_static_openapi_and_types() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
@@ -838,6 +1018,9 @@ class _RunStore:
 
 
 class _DataSourceStore:
+    def __init__(self) -> None:
+        self.station_series_calls: list[dict[str, Any]] = []
+
     def list_data_sources(self, *, limit: int, offset: int) -> dict[str, Any]:
         return {
             "items": [{"source_id": "GFS", "provider": "NOAA/NCEP", "format": "GRIB2"}],
@@ -872,6 +1055,68 @@ class _DataSourceStore:
             "total_count": 1,
             "limit": kwargs["limit"],
             "offset": kwargs["offset"],
+        }
+
+    def station_series(self, **kwargs: Any) -> dict[str, Any]:
+        self.station_series_calls.append(kwargs)
+        if kwargs.get("forcing_version_id") == "missing":
+            raise ForecastStoreError(
+                status_code=404,
+                code="FORCING_VERSION_NOT_FOUND",
+                message="Forcing version not found: missing",
+                details={"forcing_version_id": "missing"},
+            )
+        return {
+            "station_id": kwargs["station_id"],
+            "station": {
+                "station_id": kwargs["station_id"],
+                "basin_version_id": "basin_v1",
+                "station_name": "Station 1",
+                "name": "Station 1",
+                "longitude": 101.0,
+                "latitude": 36.0,
+                "elevation_m": 3200.0,
+                "elevation": 3200.0,
+                "station_role": "forcing_proxy",
+                "active_flag": True,
+                "properties_json": {"source": "fixture"},
+            },
+            "forcing_version_id": kwargs.get("forcing_version_id") or "forc_qhh_gfs_2026050700",
+            "model_id": "qhh_shud_v1",
+            "source_id": "GFS",
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "valid_time_start": "2026-05-07T00:00:00Z",
+            "valid_time_end": "2026-05-14T00:00:00Z",
+            "limit": kwargs["limit"],
+            "requested_from": "2026-05-07T00:00:00Z",
+            "requested_to": "2026-05-07T03:00:00Z",
+            "series": [
+                {
+                    "variable": "PRCP",
+                    "unit": "mm/h",
+                    "native_resolution": "1h",
+                    "source_id": "GFS",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "points": [
+                        {
+                            "valid_time": "2026-05-07T00:00:00Z",
+                            "value": 1.0,
+                            "quality_flag": "ok",
+                            "source_id": "GFS",
+                        }
+                    ],
+                    "truncated": True,
+                    "metadata": {
+                        "limit": kwargs["limit"],
+                        "returned_points": 1,
+                        "requested_from": "2026-05-07T00:00:00Z",
+                        "requested_to": "2026-05-07T03:00:00Z",
+                        "returned_from": "2026-05-07T00:00:00Z",
+                        "returned_to": "2026-05-07T00:00:00Z",
+                        "truncated": True,
+                    },
+                }
+            ],
         }
 
 

@@ -7,7 +7,11 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.errors import ApiError
 from apps.api.routes.forecast import DEFAULT_LIMIT, MAX_LIMIT, _ok
-from packages.common.forecast_store import ForecastStoreError, PsycopgForecastStore
+from packages.common.forecast_store import (
+    MAX_STATION_SERIES_LIMIT,
+    ForecastStoreError,
+    PsycopgForecastStore,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["data-sources"])
 
@@ -76,6 +80,45 @@ def list_met_stations(
                 model_id=model_id,
                 limit=min(limit, MAX_LIMIT),
                 offset=offset,
+            ),
+        )
+    except ForecastStoreError as error:
+        raise _api_error(error) from error
+
+
+@router.get("/met/stations/{station_id}/series", operation_id="getMetStationSeries")
+def get_met_station_series(
+    request: Request,
+    station_id: str,
+    forcing_version_id: str | None = Query(default=None, min_length=1),
+    model_id: str | None = Query(default=None, min_length=1),
+    source_id: str | None = Query(default=None, min_length=1),
+    cycle_time: datetime | None = Query(default=None),
+    variables: str | list[str] | None = Query(
+        default=None,
+        description=(
+            "Station forcing variables. Repeat the parameter or provide comma-separated values. "
+            "Allowed values are validated by the forecast store."
+        ),
+    ),
+    from_time: datetime | None = Query(default=None, alias="from"),
+    to_time: datetime | None = Query(default=None, alias="to"),
+    limit: int | None = Query(default=None, ge=1, le=MAX_STATION_SERIES_LIMIT),
+    store: PsycopgForecastStore = Depends(get_data_source_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            request,
+            store.station_series(
+                station_id=station_id,
+                forcing_version_id=forcing_version_id,
+                model_id=model_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                variables=variables,
+                from_time=from_time,
+                to_time=to_time,
+                limit=limit,
             ),
         )
     except ForecastStoreError as error:

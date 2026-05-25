@@ -561,12 +561,56 @@ paths:
           required: false
           schema:
             type: string
-        - name: variables
+            minLength: 1
+        - name: model_id
           in: query
           required: false
           schema:
             type: string
-          description: Comma-separated meteorological variables.
+            minLength: 1
+        - name: source_id
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+        - name: cycle_time
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: variables
+          in: query
+          required: false
+          style: form
+          explode: true
+          schema:
+            oneOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+          description: Station forcing variables. Repeat the parameter or provide comma-separated values. Allowed values are PRCP, TEMP, RH, wind, Rn, and Press.
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
       responses:
         "200":
           description: Station time series
@@ -579,7 +623,7 @@ paths:
                     required: [data]
                     properties:
                       data:
-                        $ref: "#/components/schemas/TimeseriesResponse"
+                        $ref: "#/components/schemas/StationSeriesResponse"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1876,9 +1920,32 @@ components:
               type: string
               example: Requested resource was not found.
             details:
-              type: object
+              oneOf:
+                - type: object
+                  nullable: true
+                  additionalProperties: true
+                - type: array
+                  items:
+                    $ref: "#/components/schemas/ValidationErrorDetail"
+    ValidationErrorDetail:
+      type: object
+      required: [field, reason]
+      properties:
+        field:
+          type: string
+        rejected_value:
+          oneOf:
+            - type: string
               nullable: true
+            - type: number
+            - type: boolean
+            - type: object
               additionalProperties: true
+            - type: array
+              items: {}
+        reason:
+          type: string
+      additionalProperties: true
     Basin:
       type: object
       required: [basin_id, basin_name, created_at]
@@ -2284,6 +2351,166 @@ components:
           type: integer
         offset:
           type: integer
+    StationSeriesPoint:
+      type: object
+      required: [valid_time, value, quality_flag]
+      properties:
+        valid_time:
+          type: string
+          format: date-time
+        value:
+          type: number
+        quality_flag:
+          type: string
+          nullable: true
+        source_id:
+          type: string
+          nullable: true
+    StationSeriesStation:
+      type: object
+      required: [station_id, basin_version_id]
+      properties:
+        station_id:
+          type: string
+        basin_version_id:
+          type: string
+        station_name:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        longitude:
+          type: number
+          nullable: true
+        latitude:
+          type: number
+          nullable: true
+        elevation_m:
+          type: number
+          nullable: true
+        elevation:
+          type: number
+          nullable: true
+        station_role:
+          type: string
+          nullable: true
+        active_flag:
+          type: boolean
+          nullable: true
+        properties_json:
+          type: object
+          nullable: true
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+    StationSeriesMetadata:
+      type: object
+      required:
+        - limit
+        - returned_points
+        - requested_from
+        - requested_to
+        - returned_from
+        - returned_to
+        - truncated
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+        returned_points:
+          type: integer
+          minimum: 0
+        requested_from:
+          type: string
+          format: date-time
+          nullable: true
+        requested_to:
+          type: string
+          format: date-time
+          nullable: true
+        returned_from:
+          type: string
+          format: date-time
+          nullable: true
+        returned_to:
+          type: string
+          format: date-time
+          nullable: true
+        truncated:
+          type: boolean
+    StationSeries:
+      type: object
+      required: [variable, unit, native_resolution, points, truncated, metadata]
+      properties:
+        variable:
+          type: string
+          enum: [PRCP, TEMP, RH, wind, Rn, Press]
+        unit:
+          type: string
+          nullable: true
+        native_resolution:
+          type: string
+          nullable: true
+        source_id:
+          type: string
+          nullable: true
+        cycle_time:
+          type: string
+          format: date-time
+          nullable: true
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/StationSeriesPoint"
+        truncated:
+          type: boolean
+        metadata:
+          $ref: "#/components/schemas/StationSeriesMetadata"
+    StationSeriesResponse:
+      type: object
+      required: [station_id, station, forcing_version_id, source_id, limit, series]
+      properties:
+        station_id:
+          type: string
+        station:
+          $ref: "#/components/schemas/StationSeriesStation"
+        forcing_version_id:
+          type: string
+        model_id:
+          type: string
+          nullable: true
+        source_id:
+          type: string
+        cycle_time:
+          type: string
+          format: date-time
+          nullable: true
+        valid_time_start:
+          type: string
+          format: date-time
+          nullable: true
+        valid_time_end:
+          type: string
+          format: date-time
+          nullable: true
+        limit:
+          type: integer
+          minimum: 1
+        requested_from:
+          type: string
+          format: date-time
+          nullable: true
+        requested_to:
+          type: string
+          format: date-time
+          nullable: true
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/StationSeries"
     DataSource:
       type: object
       required: [source_id, source_name, source_type, status, adapter_name, config_json, created_at]
@@ -3536,9 +3763,10 @@ components:
           items:
             type: string
         metadata:
-          oneOf:
+          type: object
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/LayerMetadata"
-            - type: "null"
     LayerMetadata:
       type: object
       required:
