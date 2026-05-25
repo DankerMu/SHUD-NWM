@@ -498,11 +498,16 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "h.cycle_time IS NOT NULL" in query_source
     assert "QHH_LATEST_SEARCH_LIMIT" in query_source
     assert "QHH_LATEST_CONTEXT_LIMIT" in query_source
+    assert "QHH_LATEST_EXPECTED_HORIZON_HOURS" in query_source
     assert "fst.basin_version_id = cr.basin_version_id" in query_source
     assert "LOWER(fst.source_id) = LOWER(cr.source_id)" in query_source
     assert "FROM met.interp_weight iw" in query_source
     assert "iw.model_id = cr.model_id" in query_source
     assert "iw.station_id = fst.station_id" in query_source
+    assert "cr.run_id," in query_source
+    assert "cr.model_id," in query_source
+    assert "cr.display_start_time," in query_source
+    assert "cr.display_end_time," in query_source
     assert "station_identity_coverage AS" in query_source
     assert "station_time_coverage AS" in query_source
     assert "station_variable_complete_times AS" in query_source
@@ -519,6 +524,14 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "MAX(valid_time) AS station_valid_time_end" in query_source
     assert "MAX(valid_time_start) AS station_valid_time_start" not in query_source
     assert "MIN(valid_time_end) AS station_valid_time_end" not in query_source
+    assert "ON sc.run_id = cr.run_id" in query_source
+    assert "AND sc.model_id = cr.model_id" in query_source
+    assert "AND sc.display_start_time = cr.display_start_time" in query_source
+    assert "AND sc.display_end_time = cr.display_end_time" in query_source
+    assert "ON svc.run_id = cr.run_id" in query_source
+    assert "AND svc.model_id = cr.model_id" in query_source
+    assert "AND svc.display_start_time = cr.display_start_time" in query_source
+    assert "AND svc.display_end_time = cr.display_end_time" in query_source
     assert "river_identity_coverage AS" in query_source
     assert "river_time_coverage AS" in query_source
     assert "river_common_window AS" in query_source
@@ -528,7 +541,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "MIN(valid_time) AS river_valid_time_start" in query_source
     assert "MAX(valid_time) AS river_valid_time_end" in query_source
     assert "GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time" in query_source
-    assert "LEAST(h.end_time, fv.end_time) AS display_end_time" in query_source
+    assert "h.cycle_time + (%s * INTERVAL '1 hour')" in query_source
     assert "fst.valid_time >= cr.display_start_time" in query_source
     assert "fst.valid_time <= cr.display_end_time" in query_source
     assert "rt.valid_time >= cr.display_start_time" in query_source

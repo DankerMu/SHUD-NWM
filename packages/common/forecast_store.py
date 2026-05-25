@@ -1029,7 +1029,11 @@ class PsycopgForecastStore:
                     fv.checksum AS forcing_checksum,
                     fv.lineage_json AS forcing_lineage_json,
                     GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
-                    LEAST(h.end_time, fv.end_time) AS display_end_time
+                    LEAST(
+                        h.end_time,
+                        fv.end_time,
+                        h.cycle_time + (%s * INTERVAL '1 hour')
+                    ) AS display_end_time
                 FROM hydro.hydro_run h
                 JOIN core.basin_version bv
                   ON bv.basin_version_id = h.basin_version_id
@@ -1049,6 +1053,10 @@ class PsycopgForecastStore:
             ),
             station_sample_rows AS (
                 SELECT
+                    cr.run_id,
+                    cr.model_id,
+                    cr.display_start_time,
+                    cr.display_end_time,
                     fst.forcing_version_id,
                     fst.basin_version_id,
                     LOWER(fst.source_id) AS station_source_id,
@@ -1077,6 +1085,10 @@ class PsycopgForecastStore:
             ),
             station_identity_coverage AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
@@ -1087,6 +1099,10 @@ class PsycopgForecastStore:
                     MAX(valid_time) AS valid_time_end
                 FROM station_sample_rows
                 GROUP BY
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
@@ -1095,6 +1111,10 @@ class PsycopgForecastStore:
             ),
             station_time_coverage AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
@@ -1104,6 +1124,10 @@ class PsycopgForecastStore:
                     COUNT(DISTINCT station_id) AS station_count
                 FROM station_sample_rows
                 GROUP BY
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
@@ -1113,6 +1137,10 @@ class PsycopgForecastStore:
             ),
             station_variable_complete_times AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
@@ -1124,6 +1152,10 @@ class PsycopgForecastStore:
             ),
             station_variable_common_times AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
@@ -1131,41 +1163,87 @@ class PsycopgForecastStore:
                     MIN(valid_time) AS valid_time_start,
                     MAX(valid_time) AS valid_time_end
                 FROM station_variable_complete_times
-                GROUP BY forcing_version_id, basin_version_id, station_source_id, variable
+                GROUP BY
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable
             ),
             station_all_variable_complete_times AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
                     valid_time,
                     COUNT(DISTINCT variable) AS complete_variable_count
                 FROM station_variable_complete_times
-                GROUP BY forcing_version_id, basin_version_id, station_source_id, valid_time
+                GROUP BY
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    valid_time
                 HAVING COUNT(DISTINCT variable) = %s
             ),
             station_identity_rollup AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
                     COUNT(DISTINCT station_id) AS station_count,
                     SUM(sample_count) AS station_sample_count
                 FROM station_identity_coverage
-                GROUP BY forcing_version_id, basin_version_id, station_source_id
+                GROUP BY
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id
             ),
             station_common_window AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
                     MIN(valid_time) AS station_valid_time_start,
                     MAX(valid_time) AS station_valid_time_end
                 FROM station_all_variable_complete_times
-                GROUP BY forcing_version_id, basin_version_id, station_source_id
+                GROUP BY
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id
             ),
             station_coverage AS (
                 SELECT
+                    rollup.run_id,
+                    rollup.model_id,
+                    rollup.display_start_time,
+                    rollup.display_end_time,
                     rollup.forcing_version_id,
                     rollup.basin_version_id,
                     rollup.station_source_id,
@@ -1175,12 +1253,20 @@ class PsycopgForecastStore:
                     common_window.station_valid_time_end
                 FROM station_identity_rollup rollup
                 LEFT JOIN station_common_window common_window
-                  ON common_window.forcing_version_id = rollup.forcing_version_id
+                  ON common_window.run_id = rollup.run_id
+                 AND common_window.model_id = rollup.model_id
+                 AND common_window.display_start_time = rollup.display_start_time
+                 AND common_window.display_end_time = rollup.display_end_time
+                 AND common_window.forcing_version_id = rollup.forcing_version_id
                  AND common_window.basin_version_id = rollup.basin_version_id
                  AND common_window.station_source_id = rollup.station_source_id
             ),
             station_variable_sample_stats AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
@@ -1193,20 +1279,44 @@ class PsycopgForecastStore:
                     SUM(CASE WHEN quality_flag IS NULL OR BTRIM(quality_flag) = '' THEN 1 ELSE 0 END)
                         AS missing_quality_flag_samples
                 FROM station_sample_rows
-                GROUP BY forcing_version_id, basin_version_id, station_source_id, variable
+                GROUP BY
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable
             ),
             station_variable_identity_stats AS (
                 SELECT
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
                     forcing_version_id,
                     basin_version_id,
                     station_source_id,
                     variable,
                     COUNT(DISTINCT station_id) AS station_count
                 FROM station_identity_coverage
-                GROUP BY forcing_version_id, basin_version_id, station_source_id, variable
+                GROUP BY
+                    run_id,
+                    model_id,
+                    display_start_time,
+                    display_end_time,
+                    forcing_version_id,
+                    basin_version_id,
+                    station_source_id,
+                    variable
             ),
             station_variable_coverage AS (
                 SELECT
+                    identity_stats.run_id,
+                    identity_stats.model_id,
+                    identity_stats.display_start_time,
+                    identity_stats.display_end_time,
                     identity_stats.forcing_version_id,
                     identity_stats.basin_version_id,
                     identity_stats.station_source_id,
@@ -1226,16 +1336,28 @@ class PsycopgForecastStore:
                     ) AS station_variable_coverage
                 FROM station_variable_identity_stats identity_stats
                 JOIN station_variable_sample_stats sample_stats
-                  ON sample_stats.forcing_version_id = identity_stats.forcing_version_id
+                  ON sample_stats.run_id = identity_stats.run_id
+                 AND sample_stats.model_id = identity_stats.model_id
+                 AND sample_stats.display_start_time = identity_stats.display_start_time
+                 AND sample_stats.display_end_time = identity_stats.display_end_time
+                 AND sample_stats.forcing_version_id = identity_stats.forcing_version_id
                  AND sample_stats.basin_version_id = identity_stats.basin_version_id
                  AND sample_stats.station_source_id = identity_stats.station_source_id
                  AND sample_stats.variable = identity_stats.variable
                 LEFT JOIN station_variable_common_times common_times
-                  ON common_times.forcing_version_id = identity_stats.forcing_version_id
+                  ON common_times.run_id = identity_stats.run_id
+                 AND common_times.model_id = identity_stats.model_id
+                 AND common_times.display_start_time = identity_stats.display_start_time
+                 AND common_times.display_end_time = identity_stats.display_end_time
+                 AND common_times.forcing_version_id = identity_stats.forcing_version_id
                  AND common_times.basin_version_id = identity_stats.basin_version_id
                  AND common_times.station_source_id = identity_stats.station_source_id
                  AND common_times.variable = identity_stats.variable
                 GROUP BY
+                    identity_stats.run_id,
+                    identity_stats.model_id,
+                    identity_stats.display_start_time,
+                    identity_stats.display_end_time,
                     identity_stats.forcing_version_id,
                     identity_stats.basin_version_id,
                     identity_stats.station_source_id
@@ -1328,6 +1450,10 @@ class PsycopgForecastStore:
                 cr.*,
                 COALESCE(sc.station_count, 0) AS station_count,
                 COALESCE(sc.station_sample_count, 0) AS station_sample_count,
+                sc.run_id AS station_run_id,
+                sc.model_id AS station_model_id,
+                sc.display_start_time AS station_display_start_time,
+                sc.display_end_time AS station_display_end_time,
                 sc.basin_version_id AS station_basin_version_id,
                 sc.station_source_id,
                 sc.station_valid_time_start,
@@ -1341,11 +1467,19 @@ class PsycopgForecastStore:
                 hc.max_lead_time_hours
             FROM candidate_runs cr
             LEFT JOIN station_coverage sc
-              ON sc.forcing_version_id = cr.forcing_version_id
+              ON sc.run_id = cr.run_id
+             AND sc.model_id = cr.model_id
+             AND sc.display_start_time = cr.display_start_time
+             AND sc.display_end_time = cr.display_end_time
+             AND sc.forcing_version_id = cr.forcing_version_id
              AND sc.basin_version_id = cr.basin_version_id
              AND sc.station_source_id = LOWER(cr.source_id)
             LEFT JOIN station_variable_coverage svc
-              ON svc.forcing_version_id = cr.forcing_version_id
+              ON svc.run_id = cr.run_id
+             AND svc.model_id = cr.model_id
+             AND svc.display_start_time = cr.display_start_time
+             AND svc.display_end_time = cr.display_end_time
+             AND svc.forcing_version_id = cr.forcing_version_id
              AND svc.basin_version_id = cr.basin_version_id
              AND svc.station_source_id = LOWER(cr.source_id)
             LEFT JOIN hydro_coverage hc
@@ -1355,6 +1489,7 @@ class PsycopgForecastStore:
             ORDER BY cr.cycle_time DESC, cr.run_id DESC
             """,
             (
+                QHH_LATEST_EXPECTED_HORIZON_HOURS,
                 QHH_BASIN_ID,
                 source_id,
                 QHH_LATEST_SEARCH_LIMIT,
@@ -1401,9 +1536,17 @@ class PsycopgForecastStore:
                 fv.checksum AS forcing_checksum,
                 fv.lineage_json AS forcing_lineage_json,
                 GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
-                LEAST(h.end_time, fv.end_time) AS display_end_time,
+                LEAST(
+                    h.end_time,
+                    fv.end_time,
+                    h.cycle_time + (%s * INTERVAL '1 hour')
+                ) AS display_end_time,
                 0 AS station_count,
                 0 AS station_sample_count,
+                NULL AS station_run_id,
+                NULL AS station_model_id,
+                NULL AS station_display_start_time,
+                NULL AS station_display_end_time,
                 NULL AS station_basin_version_id,
                 NULL AS station_source_id,
                 NULL AS station_valid_time_start,
@@ -1432,7 +1575,7 @@ class PsycopgForecastStore:
             ORDER BY h.cycle_time DESC, h.run_id DESC
             LIMIT %s
             """,
-            (QHH_BASIN_ID, source_id, QHH_LATEST_CONTEXT_LIMIT),
+            (QHH_LATEST_EXPECTED_HORIZON_HOURS, QHH_BASIN_ID, source_id, QHH_LATEST_CONTEXT_LIMIT),
         )
 
     def _fetch_station_for_series(self, cursor: Any, *, station_id: str) -> dict[str, Any]:
@@ -2212,6 +2355,46 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
             actual=station_count,
         )
     station_basin_version_id = row.get("station_basin_version_id")
+    station_run_id = row.get("station_run_id")
+    if station_run_id and row.get("run_id") != station_run_id:
+        add(
+            "STATION_RUN_MISMATCH",
+            "Station forcing rows do not match the selected run_id.",
+            selected_run_id=row.get("run_id"),
+            station_run_id=station_run_id,
+        )
+    station_model_id = row.get("station_model_id")
+    if station_model_id and row.get("model_id") != station_model_id:
+        add(
+            "STATION_MODEL_MISMATCH",
+            "Station forcing rows do not match the selected model_id.",
+            run_model_id=row.get("model_id"),
+            station_model_id=station_model_id,
+        )
+    station_display_start_time = _datetime_value(row.get("station_display_start_time"))
+    if (
+        display_start_time is not None
+        and station_display_start_time is not None
+        and display_start_time != station_display_start_time
+    ):
+        add(
+            "STATION_DISPLAY_WINDOW_MISMATCH",
+            "Station forcing rows do not match the selected display window.",
+            display_start_time=_format_time(display_start_time),
+            station_display_start_time=_format_time(station_display_start_time),
+        )
+    station_display_end_time = _datetime_value(row.get("station_display_end_time"))
+    if (
+        display_end_time is not None
+        and station_display_end_time is not None
+        and display_end_time != station_display_end_time
+    ):
+        add(
+            "STATION_DISPLAY_WINDOW_MISMATCH",
+            "Station forcing rows do not match the selected display window.",
+            display_end_time=_format_time(display_end_time),
+            station_display_end_time=_format_time(station_display_end_time),
+        )
     if station_basin_version_id and row.get("basin_version_id") != station_basin_version_id:
         add(
             "STATION_BASIN_MISMATCH",

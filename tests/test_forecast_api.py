@@ -13,6 +13,7 @@ from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import (
     QHH_LATEST_CONTEXT_LIMIT,
+    QHH_LATEST_EXPECTED_HORIZON_HOURS,
     QHH_LATEST_SEARCH_LIMIT,
     ForecastStoreError,
     PsycopgForecastStore,
@@ -1668,7 +1669,7 @@ def test_latest_qhh_display_product_searches_past_100_terminal_incomplete_candid
     response = store.latest_qhh_display_product("GFS")
 
     _statement, parameters = store.cursor.executions[0]
-    assert parameters[2] == QHH_LATEST_SEARCH_LIMIT
+    assert parameters[3] == QHH_LATEST_SEARCH_LIMIT
     assert response["run_id"] == "qhh_gfs_older_ready_2026050700"
     assert response["cycle_time"] == "2026-05-07T00:00:00Z"
     assert response["status"] == "ready"
@@ -2066,6 +2067,88 @@ def test_latest_qhh_display_product_reports_station_and_segment_count_mismatches
     } <= reason_codes
 
 
+def test_latest_qhh_display_product_rejects_old_station_pollution_from_shared_forcing_sibling() -> None:
+    cycle_time = _dt("2026-05-07T00:00:00Z")
+    candidate_a = _qhh_candidate_row(
+        run_id="qhh_gfs_candidate_a",
+        model_id="model_a",
+        forcing_model_id="model_a",
+        forcing_version_id="shared_forcing_version",
+        station_count=386,
+        station_variable_coverage=_qhh_variable_coverage()[:-1],
+    )
+    candidate_b_pollution = _qhh_candidate_row(
+        run_id="qhh_gfs_candidate_b",
+        model_id="model_b",
+        forcing_model_id="model_a",
+        forcing_version_id="shared_forcing_version",
+        station_run_id="qhh_gfs_candidate_b",
+        station_model_id="model_b",
+        station_display_start_time=cycle_time,
+        station_display_end_time=cycle_time + timedelta(days=7),
+    )
+    store = SqlCaptureForecastStore([[candidate_a, candidate_b_pollution]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    by_run = {
+        candidate["run_id"]: candidate["unavailable_reason_codes"]
+        for candidate in error.value.details["candidates"]
+    }
+    assert "STATION_VARIABLE_MISSING" in by_run["qhh_gfs_candidate_a"]
+    assert "FORCING_MODEL_MISMATCH" in by_run["qhh_gfs_candidate_b"]
+
+
+def test_latest_qhh_display_product_rejects_typed_station_identity_mismatch_rows() -> None:
+    row = _qhh_candidate_row(
+        station_run_id="qhh_gfs_sibling",
+        station_model_id="sibling_model",
+        station_display_start_time=_dt("2026-05-07T03:00:00Z"),
+        station_display_end_time=_dt("2026-05-15T00:00:00Z"),
+    )
+    store = SqlCaptureForecastStore([[row]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    reason_codes = {reason["code"] for reason in error.value.details["unavailable_reasons"]}
+    assert {
+        "STATION_RUN_MISMATCH",
+        "STATION_MODEL_MISMATCH",
+        "STATION_DISPLAY_WINDOW_MISMATCH",
+    } <= reason_codes
+
+
+def test_latest_qhh_display_product_caps_long_display_window_to_expected_horizon() -> None:
+    cycle_time = _dt("2026-05-07T00:00:00Z")
+    capped_end = cycle_time + timedelta(hours=QHH_LATEST_EXPECTED_HORIZON_HOURS)
+    row = _qhh_candidate_row(
+        cycle_time=cycle_time,
+        run_end_time=cycle_time + timedelta(days=30),
+        forcing_end_time=cycle_time + timedelta(days=30),
+        station_valid_time_end=capped_end,
+        station_variable_coverage=_qhh_variable_coverage(valid_time_end=capped_end),
+        river_valid_time_end=capped_end,
+        max_lead_time_hours=720,
+    )
+    row["display_end_time"] = capped_end
+    store = SqlCaptureForecastStore([[row]])
+
+    response = store.latest_qhh_display_product("GFS")
+
+    statement, parameters = store.cursor.executions[0]
+    candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_sample_rows AS")]
+    assert "h.cycle_time + (%s * INTERVAL '1 hour')" in candidate_cte
+    assert "LEAST(\n                        h.end_time," in candidate_cte
+    assert "fst.valid_time <= cr.display_end_time" in statement
+    assert "rt.valid_time <= cr.display_end_time" in statement
+    assert parameters[0] == QHH_LATEST_EXPECTED_HORIZON_HOURS
+    assert response["valid_time_end"] == "2026-05-14T00:00:00Z"
+    assert response["available_horizon_hours"] == QHH_LATEST_EXPECTED_HORIZON_HOURS
+    assert response["shorter_horizon"] is False
+
+
 def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_timeseries_aggregation() -> None:
     store = SqlCaptureForecastStore([[_qhh_candidate_row()]])
 
@@ -2092,6 +2175,7 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "iw.station_id = fst.station_id" in station_cte
     assert "iw.variable = fst.variable" in station_cte
     assert "GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time" in candidate_cte
+    assert "h.cycle_time + (%s * INTERVAL '1 hour')" in candidate_cte
     assert "fst.valid_time >= cr.display_start_time" in station_cte
     assert "fst.valid_time <= cr.display_end_time" in station_cte
     assert "station_identity_coverage AS" in station_cte
@@ -2099,7 +2183,11 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "station_variable_complete_times AS" in station_cte
     assert "station_variable_common_times AS" in station_cte
     assert "station_all_variable_complete_times AS" in station_cte
-    assert "GROUP BY\n                    forcing_version_id" in station_cte
+    assert "cr.run_id," in station_cte
+    assert "cr.model_id," in station_cte
+    assert "cr.display_start_time," in station_cte
+    assert "cr.display_end_time," in station_cte
+    assert "GROUP BY\n                    run_id,\n                    model_id," in station_cte
     assert "variable,\n                    station_id" in station_cte
     assert "cr.expected_station_count" in station_cte
     assert "station_count = expected_station_count" in station_cte
@@ -2111,6 +2199,15 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "MAX(valid_time) AS station_valid_time_end" in station_cte
     assert "MAX(valid_time_start) AS station_valid_time_start" not in station_cte
     assert "MIN(valid_time_end) AS station_valid_time_end" not in station_cte
+    final_joins = statement[statement.index("FROM candidate_runs cr") :]
+    assert "ON sc.run_id = cr.run_id" in final_joins
+    assert "AND sc.model_id = cr.model_id" in final_joins
+    assert "AND sc.display_start_time = cr.display_start_time" in final_joins
+    assert "AND sc.display_end_time = cr.display_end_time" in final_joins
+    assert "ON svc.run_id = cr.run_id" in final_joins
+    assert "AND svc.model_id = cr.model_id" in final_joins
+    assert "AND svc.display_start_time = cr.display_start_time" in final_joins
+    assert "AND svc.display_end_time = cr.display_end_time" in final_joins
     assert "cr.run_id = rt.run_id" in statement
     assert "rt.valid_time >= cr.display_start_time" in hydro_cte
     assert "rt.valid_time <= cr.display_end_time" in hydro_cte
@@ -2123,6 +2220,7 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "MIN(valid_time) AS river_valid_time_start" in hydro_cte
     assert "MAX(valid_time) AS river_valid_time_end" in hydro_cte
     assert parameters == (
+        QHH_LATEST_EXPECTED_HORIZON_HOURS,
         "basins_qhh",
         "GFS",
         QHH_LATEST_SEARCH_LIMIT,
@@ -2158,13 +2256,19 @@ def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_r
     assert "FROM met.forcing_station_timeseries" not in context_statement
     assert "FROM hydro.river_timeseries" not in context_statement
     assert ready_parameters == (
+        QHH_LATEST_EXPECTED_HORIZON_HOURS,
         "basins_qhh",
         "GFS",
         QHH_LATEST_SEARCH_LIMIT,
         ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
         6,
     )
-    assert context_parameters == ("basins_qhh", "GFS", QHH_LATEST_CONTEXT_LIMIT)
+    assert context_parameters == (
+        QHH_LATEST_EXPECTED_HORIZON_HOURS,
+        "basins_qhh",
+        "GFS",
+        QHH_LATEST_CONTEXT_LIMIT,
+    )
     assert error.value.details["candidate_count"] == 1
     assert "RUN_STATUS_NOT_READY" in {
         reason["code"] for reason in error.value.details["unavailable_reasons"]
@@ -2700,6 +2804,10 @@ def _qhh_candidate_row(
     station_count: int = 386,
     expected_station_count: int = 386,
     station_sample_count: int = 12000,
+    station_run_id: str | None = None,
+    station_model_id: str | None = None,
+    station_display_start_time: datetime | None = None,
+    station_display_end_time: datetime | None = None,
     station_basin_version_id: str | None = "basins_qhh_vbasins",
     station_source_id: str | None = None,
     station_valid_time_start: datetime | None = None,
@@ -2721,6 +2829,25 @@ def _qhh_candidate_row(
     selected_station_start = station_valid_time_start or selected_forcing_start
     selected_station_end = station_valid_time_end or selected_forcing_end
     selected_station_source_id = station_source_id if station_source_id is not None else source_id
+    display_start_time = max(schedule_cycle_time, selected_run_start, selected_forcing_start)
+    display_end_time = min(
+        selected_run_end,
+        selected_forcing_end,
+        schedule_cycle_time + timedelta(hours=QHH_LATEST_EXPECTED_HORIZON_HOURS),
+    )
+    selected_station_run_id = station_run_id if station_run_id is not None else run_id
+    selected_station_model_id = station_model_id if station_model_id is not None else model_id
+    selected_station_display_start_time = (
+        station_display_start_time if station_display_start_time is not None else display_start_time
+    )
+    selected_station_display_end_time = (
+        station_display_end_time if station_display_end_time is not None else display_end_time
+    )
+    if station_count <= 0:
+        selected_station_run_id = None
+        selected_station_model_id = None
+        selected_station_display_start_time = None
+        selected_station_display_end_time = None
     return {
         "run_id": run_id,
         "run_type": run_type,
@@ -2749,10 +2876,14 @@ def _qhh_candidate_row(
         "expected_station_count": expected_station_count,
         "forcing_checksum": forcing_checksum,
         "forcing_lineage_json": {},
-        "display_start_time": max(schedule_cycle_time, selected_run_start, selected_forcing_start),
-        "display_end_time": min(selected_run_end, selected_forcing_end),
+        "display_start_time": display_start_time,
+        "display_end_time": display_end_time,
         "station_count": station_count,
         "station_sample_count": station_sample_count,
+        "station_run_id": selected_station_run_id,
+        "station_model_id": selected_station_model_id,
+        "station_display_start_time": selected_station_display_start_time,
+        "station_display_end_time": selected_station_display_end_time,
         "station_basin_version_id": station_basin_version_id,
         "station_source_id": selected_station_source_id,
         "station_valid_time_start": selected_station_start,
