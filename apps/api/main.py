@@ -894,6 +894,8 @@ def _qhh_latest_quality_schema() -> dict:
             "required_station_variables",
             "station_variable_coverage",
             "candidate_limit",
+            "search_limit",
+            "context_limit",
             "query_indexes",
         ],
         "properties": {
@@ -908,6 +910,8 @@ def _qhh_latest_quality_schema() -> dict:
                 "items": {"$ref": "#/components/schemas/QhhLatestStationVariableCoverage"},
             },
             "candidate_limit": {"type": "integer", "minimum": 1},
+            "search_limit": {"type": "integer", "minimum": 1},
+            "context_limit": {"type": "integer", "minimum": 1},
             "query_indexes": {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/QhhLatestQueryIndex"},

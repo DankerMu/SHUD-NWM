@@ -12,6 +12,8 @@ from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import (
+    QHH_LATEST_CONTEXT_LIMIT,
+    QHH_LATEST_SEARCH_LIMIT,
     ForecastStoreError,
     PsycopgForecastStore,
     _forecast_response_from_rows,
@@ -187,7 +189,9 @@ class FakeForecastStore:
                 "river_sample_count": 2000,
                 "required_station_variables": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
                 "station_variable_coverage": [],
-                "candidate_limit": 100,
+                "candidate_limit": QHH_LATEST_SEARCH_LIMIT,
+                "search_limit": QHH_LATEST_SEARCH_LIMIT,
+                "context_limit": QHH_LATEST_CONTEXT_LIMIT,
                 "query_indexes": [],
             },
         }
@@ -1635,7 +1639,39 @@ def test_latest_qhh_display_product_selects_ready_candidate_after_more_than_25_n
 
     assert response["run_id"] == "qhh_gfs_2026050700"
     assert response["status"] == "ready"
-    assert response["quality"]["candidate_limit"] == 100
+    assert response["quality"]["candidate_limit"] == QHH_LATEST_SEARCH_LIMIT
+    assert response["quality"]["search_limit"] == QHH_LATEST_SEARCH_LIMIT
+    assert response["quality"]["context_limit"] == QHH_LATEST_CONTEXT_LIMIT
+
+
+def test_latest_qhh_display_product_searches_past_100_terminal_incomplete_candidates() -> None:
+    assert QHH_LATEST_SEARCH_LIMIT > 100
+    incomplete_candidates = [
+        _qhh_candidate_row(
+            run_id=f"qhh_gfs_202606{index + 1:03d}00",
+            cycle_time=_dt("2026-06-01T00:00:00Z") - timedelta(hours=index),
+            status="frequency_done" if index % 2 == 0 else "published",
+            segment_count=0,
+            river_sample_count=0,
+            river_valid_time_start=None,
+            river_valid_time_end=None,
+        )
+        for index in range(100)
+    ]
+    older_ready = _qhh_candidate_row(
+        run_id="qhh_gfs_older_ready_2026050700",
+        cycle_time=_dt("2026-05-07T00:00:00Z"),
+        status="published",
+    )
+    store = SqlCaptureForecastStore([[*incomplete_candidates, older_ready]])
+
+    response = store.latest_qhh_display_product("GFS")
+
+    _statement, parameters = store.cursor.executions[0]
+    assert parameters[2] == QHH_LATEST_SEARCH_LIMIT
+    assert response["run_id"] == "qhh_gfs_older_ready_2026050700"
+    assert response["cycle_time"] == "2026-05-07T00:00:00Z"
+    assert response["status"] == "ready"
 
 
 def test_latest_qhh_display_product_normalizes_ifs_and_discloses_shorter_horizon() -> None:
@@ -2089,11 +2125,13 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert parameters == (
         "basins_qhh",
         "GFS",
-        100,
+        QHH_LATEST_SEARCH_LIMIT,
         ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
         6,
     )
-    assert response["quality"]["candidate_limit"] == 100
+    assert response["quality"]["candidate_limit"] == QHH_LATEST_SEARCH_LIMIT
+    assert response["quality"]["search_limit"] == QHH_LATEST_SEARCH_LIMIT
+    assert response["quality"]["context_limit"] == QHH_LATEST_CONTEXT_LIMIT
 
 
 def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_ready_candidate_window() -> None:
@@ -2122,15 +2160,43 @@ def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_r
     assert ready_parameters == (
         "basins_qhh",
         "GFS",
-        100,
+        QHH_LATEST_SEARCH_LIMIT,
         ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
         6,
     )
-    assert context_parameters == ("basins_qhh", "GFS", 10)
+    assert context_parameters == ("basins_qhh", "GFS", QHH_LATEST_CONTEXT_LIMIT)
     assert error.value.details["candidate_count"] == 1
     assert "RUN_STATUS_NOT_READY" in {
         reason["code"] for reason in error.value.details["unavailable_reasons"]
     }
+
+
+def test_latest_qhh_display_product_unavailable_details_keep_diagnostics_bounded() -> None:
+    incomplete_candidates = [
+        _qhh_candidate_row(
+            run_id=f"qhh_gfs_incomplete_{index:03d}",
+            cycle_time=_dt("2026-06-01T00:00:00Z") - timedelta(hours=index),
+            segment_count=0,
+            river_sample_count=0,
+            river_valid_time_start=None,
+            river_valid_time_end=None,
+        )
+        for index in range(QHH_LATEST_CONTEXT_LIMIT + 3)
+    ]
+    store = SqlCaptureForecastStore([incomplete_candidates])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    details = error.value.details
+    assert details["candidate_limit"] == QHH_LATEST_SEARCH_LIMIT
+    assert details["search_limit"] == QHH_LATEST_SEARCH_LIMIT
+    assert details["context_limit"] == QHH_LATEST_CONTEXT_LIMIT
+    assert details["candidate_count"] == QHH_LATEST_CONTEXT_LIMIT + 3
+    assert details["reported_candidate_count"] == QHH_LATEST_CONTEXT_LIMIT
+    assert len(details["candidates"]) == QHH_LATEST_CONTEXT_LIMIT
+    assert len(details["unavailable_reasons"]) == QHH_LATEST_CONTEXT_LIMIT
+    assert len({reason["run_id"] for reason in details["unavailable_reasons"]}) <= QHH_LATEST_CONTEXT_LIMIT
 
 
 @pytest.mark.asyncio

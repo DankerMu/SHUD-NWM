@@ -14,7 +14,7 @@ from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
-from packages.common.forecast_store import ForecastStoreError
+from packages.common.forecast_store import QHH_LATEST_CONTEXT_LIMIT, QHH_LATEST_SEARCH_LIMIT, ForecastStoreError
 from tests.test_monitoring_api import (
     _client,
     _create_job,
@@ -870,6 +870,16 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     assert schemas["QhhLatestQuality"]["properties"]["station_variable_coverage"]["items"]["$ref"] == (
         "#/components/schemas/QhhLatestStationVariableCoverage"
     )
+    assert schemas["QhhLatestQuality"]["required"] == [
+        "station_sample_count",
+        "river_sample_count",
+        "required_station_variables",
+        "station_variable_coverage",
+        "candidate_limit",
+        "search_limit",
+        "context_limit",
+        "query_indexes",
+    ]
     assert "display_end_station_count" not in schemas["QhhLatestStationVariableCoverage"]["required"]
     assert "display_end_station_count" not in schemas["QhhLatestStationVariableCoverage"]["properties"]
     assert schemas["QhhLatestUnavailableReason"]["additionalProperties"] is True
@@ -885,6 +895,8 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     assert "QhhLatestProduct:" in generated_types
     assert 'status: "ready" | "unavailable";' in generated_types
     assert "available_horizon_hours: number | null;" in generated_types
+    assert "search_limit: number;" in generated_types
+    assert "context_limit: number;" in generated_types
     assert "display_end_station_count: number;" not in generated_types
     assert "QhhLatestUnavailableReason:" in generated_types
 
@@ -1141,7 +1153,9 @@ class _RunStore:
                 "river_sample_count": 10000,
                 "required_station_variables": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
                 "station_variable_coverage": [],
-                "candidate_limit": 100,
+                "candidate_limit": QHH_LATEST_SEARCH_LIMIT,
+                "search_limit": QHH_LATEST_SEARCH_LIMIT,
+                "context_limit": QHH_LATEST_CONTEXT_LIMIT,
                 "query_indexes": [
                     {
                         "table": "hydro.hydro_run",

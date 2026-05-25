@@ -11,7 +11,8 @@ MVP_STATION_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 DEFAULT_STATION_SERIES_LIMIT = 500
 MAX_STATION_SERIES_LIMIT = 10000
 QHH_BASIN_ID = "basins_qhh"
-QHH_LATEST_CANDIDATE_LIMIT = 100
+QHH_LATEST_SEARCH_LIMIT = 500
+QHH_LATEST_CANDIDATE_LIMIT = QHH_LATEST_SEARCH_LIMIT
 QHH_LATEST_CONTEXT_LIMIT = 10
 QHH_LATEST_EXPECTED_HORIZON_HOURS = 168
 QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
@@ -965,9 +966,8 @@ class PsycopgForecastStore:
             if evaluation["ready"]:
                 return evaluation["product"]
 
-        reasons: list[dict[str, Any]] = []
-        for evaluation in evaluations[:QHH_LATEST_CONTEXT_LIMIT]:
-            reasons.extend(evaluation["unavailable_reasons"])
+        context_evaluations = evaluations[:QHH_LATEST_CONTEXT_LIMIT]
+        reasons = _qhh_latest_context_reasons(context_evaluations)
         if not reasons:
             reasons.append(
                 {
@@ -986,9 +986,12 @@ class PsycopgForecastStore:
                 "basin_id": QHH_BASIN_ID,
                 "status": "unavailable",
                 "candidate_limit": QHH_LATEST_CANDIDATE_LIMIT,
+                "search_limit": QHH_LATEST_SEARCH_LIMIT,
+                "context_limit": QHH_LATEST_CONTEXT_LIMIT,
                 "candidate_count": len(evaluations),
+                "reported_candidate_count": len(context_evaluations),
                 "unavailable_reasons": reasons,
-                "candidates": [_qhh_latest_candidate_summary(evaluation) for evaluation in evaluations],
+                "candidates": [_qhh_latest_candidate_summary(evaluation) for evaluation in context_evaluations],
             },
         )
 
@@ -1354,7 +1357,7 @@ class PsycopgForecastStore:
             (
                 QHH_BASIN_ID,
                 source_id,
-                QHH_LATEST_CANDIDATE_LIMIT,
+                QHH_LATEST_SEARCH_LIMIT,
                 list(MVP_STATION_VARIABLES),
                 len(MVP_STATION_VARIABLES),
             ),
@@ -2068,6 +2071,8 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any]) -> dict[str, Any]:
             "required_station_variables": list(MVP_STATION_VARIABLES),
             "station_variable_coverage": _qhh_station_variable_coverage(row.get("station_variable_coverage")),
             "candidate_limit": QHH_LATEST_CANDIDATE_LIMIT,
+            "search_limit": QHH_LATEST_SEARCH_LIMIT,
+            "context_limit": QHH_LATEST_CONTEXT_LIMIT,
             "query_indexes": _qhh_latest_query_indexes(),
         },
     }
@@ -2519,6 +2524,30 @@ def _qhh_latest_candidate_summary(evaluation: Mapping[str, Any]) -> dict[str, An
             reason["code"] for reason in evaluation.get("unavailable_reasons", []) if reason.get("code")
         ],
     }
+
+
+def _qhh_latest_context_reasons(evaluations: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    reasons: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    seen_codes: set[str] = set()
+    for evaluation in evaluations:
+        for reason in evaluation.get("unavailable_reasons", []):
+            if not isinstance(reason, Mapping):
+                continue
+            reason_dict = dict(reason)
+            code = str(reason_dict.get("code") or "")
+            if code and code not in seen_codes:
+                reasons.append(reason_dict)
+                seen_codes.add(code)
+            else:
+                deferred.append(reason_dict)
+            if len(reasons) >= QHH_LATEST_CONTEXT_LIMIT:
+                return reasons
+    for reason in deferred:
+        if len(reasons) >= QHH_LATEST_CONTEXT_LIMIT:
+            break
+        reasons.append(reason)
+    return reasons
 
 
 def _qhh_latest_query_indexes() -> list[dict[str, Any]]:

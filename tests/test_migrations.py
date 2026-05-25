@@ -496,6 +496,8 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "h.status IN ('frequency_done', 'published')" in query_source
     assert "h.status NOT IN ('frequency_done', 'published')" in query_source
     assert "h.cycle_time IS NOT NULL" in query_source
+    assert "QHH_LATEST_SEARCH_LIMIT" in query_source
+    assert "QHH_LATEST_CONTEXT_LIMIT" in query_source
     assert "fst.basin_version_id = cr.basin_version_id" in query_source
     assert "LOWER(fst.source_id) = LOWER(cr.source_id)" in query_source
     assert "FROM met.interp_weight iw" in query_source

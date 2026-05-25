@@ -1083,6 +1083,8 @@ export interface components {
             required_station_variables: ("PRCP" | "TEMP" | "RH" | "wind" | "Rn" | "Press")[];
             station_variable_coverage: components["schemas"]["QhhLatestStationVariableCoverage"][];
             candidate_limit: number;
+            search_limit: number;
+            context_limit: number;
             query_indexes: components["schemas"]["QhhLatestQueryIndex"][];
         };
         QhhLatestProduct: {
