@@ -162,3 +162,84 @@ Non-goals:
 - Implementing the FastAPI station-series route, OpenAPI schemas, or frontend generated types; those belong to #205.
 - Building `/hydro-met`, latest-product, `/ops`, or controlled retry UI.
 - Running live QHH/Slurm/GFS/IFS smoke in fast CI.
+
+## Issue #205 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM FastAPI, OpenAPI, and generated frontend type contract
+Repair intensity: high
+
+Change surface:
+- `apps/api/routes/data_sources.py` public `GET /api/v1/met/stations/{station_id}/series` entrypoint.
+- `openapi/nhms.v1.yaml` station-series parameters, response schema, and error documentation.
+- `apps/frontend/src/api/types.ts` generated contract freshness.
+- `tests/test_forecast_api.py`, `tests/test_api_contract.py`, and `tests/test_openapi_drift.py` route/contract/drift coverage.
+
+Must preserve:
+- #204 store invariants remain the source of truth; the route must delegate to `PsycopgForecastStore.station_series(...)` rather than re-querying `met.forcing_station_timeseries` or reshaping identity rules.
+- Existing `/api/v1/met/stations`, data-source cycle routes, forecast-series routes, and generated frontend client paths keep their current behavior.
+- Success responses keep the existing API success envelope shape from `_ok(request, data)`.
+
+Must add/change:
+- Implement the station-series HTTP route with validated query parameters for `forcing_version_id`, `model_id`, `source_id`, `cycle_time`, `variables`, `from`, `to`, and `limit`.
+- Map store `ForecastStoreError` failures to the existing typed API error envelope without swallowing not-found/unavailable/conflict/validation details.
+- Update OpenAPI so station-series documents all supported query parameters and a response schema matching the #204 store payload, including station metadata, provenance, `unit`, `native_resolution`, point-level `quality_flag`, truncation, and range metadata.
+- Regenerate frontend API types from the updated OpenAPI contract and remove the route from the OpenAPI drift deferred allowlist.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - this issue promotes a documented station-series route to a real FastAPI public endpoint.
+- Config / project setup: not selected - no new runtime configuration or deployment flags.
+- File IO / path safety / overwrite: not selected - route performs bounded database reads only.
+- Schema / columns / units / field names: selected - OpenAPI/frontend types must match the station-series payload fields, variable names, units, quality flags, and metadata.
+- Geospatial / CRS / shapefile sidecars: not selected - station geometry is serialized from existing station metadata only; no CRS parsing or map tile change.
+- Time series / forcing / temporal boundaries: selected - route must pass `from`, `to`, `cycle_time`, `variables`, `limit`, and forcing identity filters exactly to the store contract.
+- Numerical stability / conservation / NaN: selected - route must not coerce missing data into synthetic numeric samples or hide store value conversion failures.
+- Solver runtime / performance / threading: not selected - no SHUD runtime behavior.
+- Resource limits / large input / discovery: selected - `limit` and variable parsing must stay bounded at the HTTP boundary and OpenAPI must not imply unbounded downloads.
+- Legacy compatibility / examples: selected - existing API consumers and generated type paths must remain compatible.
+- Error handling / rollback / partial outputs: selected - missing station/version, invalid parameters, ambiguous/conflicting forcing identity, not-finalized versions, and station-not-in-version errors must surface as typed API errors.
+- Release / packaging / dependency compatibility: selected - generated frontend types must be refreshed with the repository's existing toolchain without adding dependencies.
+- Documentation / migration notes: selected - OpenAPI drift allowlist must be tightened so the implemented route cannot silently drift again.
+
+Required evidence:
+- HTTP tests: valid explicit `forcing_version_id`, valid `model_id + source_id + cycle_time`, comma-separated and repeated variable filters if supported by FastAPI parsing, time filters, `limit`/truncation metadata, default MVP variables, missing station, missing forcing version, station not in forcing version, conflicting identity filters, invalid variable, invalid time range, invalid limit, and no synthetic samples for empty valid ranges.
+- API contract tests: success envelope shape, station metadata/provenance fields, point-level `quality_flag`, variable-level `unit`/`native_resolution`, and stable API error envelope for at least one store error.
+- OpenAPI drift tests: `GET /api/v1/met/stations/{station_id}/series` is removed from `DEFERRED_ROUTES` and static OpenAPI matches implemented FastAPI route parameters.
+- Frontend type freshness: generated `apps/frontend/src/api/types.ts` includes the updated station-series operation, query parameters, and response schemas.
+- Regression commands: `uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`, `uv run ruff check apps/api/routes/data_sources.py tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, frontend type-generation/check command used by the repo, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: the public station-series route, static OpenAPI document, generated frontend types, and route tests must expose exactly the #204 store contract for one selected finalized forcing version without inventing samples, weakening identity/error semantics, or leaving route-documentation drift.
+Source-of-truth identity/contract: `PsycopgForecastStore.station_series(...)` response contract plus the documented OpenAPI operation `getMetStationSeries`.
+Surfaces:
+- Producers: none - #205 does not write forcing data or change `workers/forcing_producer`.
+- Validators/preflight: FastAPI query parsing in `apps/api/routes/data_sources.py` plus store validation for forcing identity, variables, time range, and limit.
+- Storage/cache/query: #204 `packages/common/forecast_store.py` store helpers; unchanged except compatibility fixes if tests reveal a contract gap.
+- Public routes/entrypoints: `GET /api/v1/met/stations/{station_id}/series`.
+- Frontend/downstream consumers: generated `apps/frontend/src/api/types.ts`; UI consumption remains #208.
+- Failure paths/rollback/stale state: API error envelope for store validation/not-found/conflict/unavailable errors; OpenAPI drift allowlist removal; no partial writes.
+- Evidence/audit/readiness: route tests, API contract tests, OpenAPI drift tests, generated type diff, and validation commands.
+Regression rows:
+- explicit valid `forcing_version_id + station_id` HTTP request -> success envelope with the same store payload, grouped variables, metadata, and point quality flags.
+- valid `model_id + source_id + cycle_time + station_id` HTTP request -> route delegates tuple resolution to store and returns resolved `forcing_version_id`.
+- request without variable filter -> defaults to MVP variables from the store contract without synthetic series beyond empty groups for requested variables.
+- comma-separated or repeated variable filter accepted by the route -> normalized variables passed to store once per requested variable; invalid variables fail with typed validation error.
+- `from`, `to`, and `limit` query parameters -> passed to store and reflected in truncation/range metadata; invalid ranges/limits fail before unbounded output.
+- missing station/version, not-finalized version, ambiguous tuple, conflicting redundant filters, or station absent from forcing version -> typed API error with store code/details preserved.
+- static OpenAPI and generated frontend types -> include the implemented parameters and response fields; route no longer appears in deferred drift allowlist.
+- existing `/api/v1/met/stations` and forecast-series tests -> unchanged behavior.
+
+Boundary-surface checklist:
+- Shared helper roots: `_ok`, `_api_error`, FastAPI `Query` parsing, OpenAPI parameter/schema definitions, frontend type generation.
+- Public entrypoints: station-series route only.
+- Read surfaces: route delegates to store; no direct SQL in route.
+- Write/delete/overwrite surfaces: generated frontend type file only; no runtime writes.
+- Producer/consumer evidence boundaries: no forcing producer changes; frontend types are contract consumers, not proof of UI readiness.
+- Stale-state/idempotency boundaries: repeated HTTP reads for the same identity are read-only and preserve #204 snapshot consistency.
+- Unchanged downstream consumers: existing data-source API contract tests, forecast API tests, frontend API type consumers.
+
+Non-goals:
+- Building `/hydro-met` station chart UI; #208 owns UI consumption.
+- Adding latest-product selection; #206 owns product discovery.
+- Adding new forcing producer writes, station readiness algorithms, or live QHH smoke.
