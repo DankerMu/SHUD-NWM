@@ -107,6 +107,18 @@ def list_runs(
         raise _api_error(error) from error
 
 
+@router.get("/mvp/qhh/latest-product", operation_id="getQhhLatestProduct")
+def get_qhh_latest_product(
+    request: Request,
+    source: str = Query(..., min_length=1, description="MVP forecast source. Accepted values: GFS or IFS."),
+    store: PsycopgForecastStore = Depends(get_forecast_store),
+) -> dict[str, Any]:
+    try:
+        return _ok(request, store.latest_qhh_display_product(source))
+    except ForecastStoreError as error:
+        raise _api_error(error) from error
+
+
 def _split_query_list(value: str) -> list[str]:
     return [token.strip() for token in value.split(",") if token.strip()]
 

@@ -276,6 +276,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mvp/qhh/latest-product": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get latest QHH display product */
+        get: operations["getQhhLatestProduct"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runs": {
         parameters: {
             query?: never;
@@ -1012,6 +1029,99 @@ export interface components {
             /** Format: date-time */
             requested_to?: string | null;
             series: components["schemas"]["StationSeries"][];
+        };
+        QhhLatestUnavailableReason: {
+            code: string;
+            message: string;
+            run_id?: string | null;
+            source_id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        QhhLatestQualityNote: {
+            code: string;
+            message: string;
+            expected_horizon_hours?: number | null;
+            available_horizon_hours?: number | null;
+            /** Format: date-time */
+            available_end_time?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        QhhLatestStationVariableCoverage: {
+            /** @enum {string} */
+            variable: "PRCP" | "TEMP" | "RH" | "wind" | "Rn" | "Press";
+            station_count: number;
+            sample_count: number;
+            unit_count: number;
+            quality_flag_count: number;
+            missing_unit_samples: number;
+            missing_quality_flag_samples: number;
+            /** Format: date-time */
+            valid_time_start: string | null;
+            /** Format: date-time */
+            valid_time_end: string | null;
+        };
+        QhhLatestQueryIndex: {
+            table: string;
+            index: string;
+            status: string;
+            columns: string[];
+            predicate?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        QhhLatestAvailability: {
+            ready: boolean;
+            unavailable_reasons: components["schemas"]["QhhLatestUnavailableReason"][];
+            quality_flags: string[];
+            quality_notes: components["schemas"]["QhhLatestQualityNote"][];
+        };
+        QhhLatestQuality: {
+            station_sample_count: number;
+            river_sample_count: number;
+            required_station_variables: ("PRCP" | "TEMP" | "RH" | "wind" | "Rn" | "Press")[];
+            station_variable_coverage: components["schemas"]["QhhLatestStationVariableCoverage"][];
+            candidate_limit: number;
+            search_limit: number;
+            context_limit: number;
+            query_indexes: components["schemas"]["QhhLatestQueryIndex"][];
+        };
+        QhhLatestProduct: {
+            basin_id: string;
+            model_id: string;
+            basin_version_id: string;
+            river_network_version_id: string;
+            /** @enum {string} */
+            source_id: "GFS" | "IFS";
+            /** Format: date-time */
+            cycle_time: string;
+            run_id: string;
+            forcing_version_id: string;
+            station_count: number;
+            expected_station_count: number | null;
+            segment_count: number;
+            expected_segment_count: number | null;
+            /** @enum {string} */
+            status: "ready" | "unavailable";
+            run_status: string;
+            /** Format: date-time */
+            valid_time_start: string | null;
+            /** Format: date-time */
+            valid_time_end: string | null;
+            /** Format: date-time */
+            river_valid_time_start: string | null;
+            /** Format: date-time */
+            river_valid_time_end: string | null;
+            /** Format: date-time */
+            forcing_valid_time_start: string | null;
+            /** Format: date-time */
+            forcing_valid_time_end: string | null;
+            available_horizon_hours: number | null;
+            expected_horizon_hours: number;
+            shorter_horizon: boolean;
+            availability: components["schemas"]["QhhLatestAvailability"];
+            quality: components["schemas"]["QhhLatestQuality"];
         };
         DataSource: {
             source_id: string;
@@ -2169,6 +2279,33 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["StationSeriesResponse"];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    getQhhLatestProduct: {
+        parameters: {
+            query: {
+                /** @description MVP forecast source. Accepted case-insensitively and normalized to GFS or IFS. */
+                source: "GFS" | "IFS";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest QHH display product */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["QhhLatestProduct"];
                     };
                 };
             };

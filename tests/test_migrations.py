@@ -27,6 +27,7 @@ EXPECTED_MIGRATIONS = [
     "000021_latest_ready_run_discovery_idx.sql",
     "000022_model_asset_lifecycle.sql",
     "000023_interp_weight_grid_signature.sql",
+    "000024_qhh_latest_display_product_indexes.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -432,6 +433,121 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
     )
 
 
+def test_qhh_latest_display_product_migration_matches_candidate_and_window_queries() -> None:
+    migration = dict(_migration_sql())["000024_qhh_latest_display_product_indexes.sql"]
+    store_source = (
+        Path(__file__).resolve().parents[1] / "packages" / "common" / "forecast_store.py"
+    ).read_text(encoding="utf-8")
+    query_source = store_source[
+        store_source.index("def _fetch_latest_qhh_display_candidates") : store_source.index(
+            "def _fetch_station_for_series"
+        )
+    ]
+    index_evidence_source = store_source[
+        store_source.index("def _qhh_latest_query_indexes") : store_source.index("def _non_negative_int")
+    ]
+
+    assert _index_columns_by_name(migration, "hydro_run_qhh_latest_candidate_idx") == (
+        "LOWER(source_id)",
+        "run_type",
+        "basin_version_id",
+        "cycle_time DESC",
+        "run_id DESC",
+    )
+    assert "WHERE cycle_time IS NOT NULL" in migration
+    assert "AND status IN ('frequency_done', 'published')" in migration
+    assert _index_columns_by_name(migration, "basin_version_qhh_latest_lookup_idx") == (
+        "basin_id",
+        "basin_version_id",
+    )
+    assert _index_columns_by_name(migration, "forcing_station_timeseries_qhh_latest_window_idx") == (
+        "forcing_version_id",
+        "basin_version_id",
+        "LOWER(source_id)",
+        "variable",
+        "valid_time DESC",
+        "station_id",
+    )
+    assert _index_columns_by_name(migration, "interp_weight_qhh_latest_membership_idx") == (
+        "model_id",
+        "station_id",
+        "variable",
+        "LOWER(source_id)",
+    )
+    assert _index_columns_by_name(migration, "river_timeseries_qhh_latest_window_idx") == (
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "variable",
+        "valid_time DESC",
+        "river_segment_id",
+    )
+    for index_name in (
+        "hydro_run_qhh_latest_candidate_idx",
+        "basin_version_qhh_latest_lookup_idx",
+        "forcing_station_timeseries_qhh_latest_window_idx",
+        "interp_weight_qhh_latest_membership_idx",
+        "river_timeseries_qhh_latest_window_idx",
+    ):
+        assert index_name in index_evidence_source
+
+    assert "LOWER(h.source_id) = LOWER(%s)" in query_source
+    assert "h.run_type = 'forecast'" in query_source
+    assert "h.status IN ('frequency_done', 'published')" in query_source
+    assert "h.status NOT IN ('frequency_done', 'published')" in query_source
+    assert "h.cycle_time IS NOT NULL" in query_source
+    assert "QHH_LATEST_SEARCH_LIMIT" in query_source
+    assert "QHH_LATEST_CONTEXT_LIMIT" in query_source
+    assert "QHH_LATEST_EXPECTED_HORIZON_HOURS" in query_source
+    assert "fst.basin_version_id = cr.basin_version_id" in query_source
+    assert "LOWER(fst.source_id) = LOWER(cr.source_id)" in query_source
+    assert "FROM met.interp_weight iw" in query_source
+    assert "iw.model_id = cr.model_id" in query_source
+    assert "iw.station_id = fst.station_id" in query_source
+    assert "cr.run_id," in query_source
+    assert "cr.model_id," in query_source
+    assert "cr.display_start_time," in query_source
+    assert "cr.display_end_time," in query_source
+    assert "station_identity_coverage AS" in query_source
+    assert "station_time_coverage AS" in query_source
+    assert "station_variable_complete_times AS" in query_source
+    assert "station_variable_common_times AS" in query_source
+    assert "station_all_variable_complete_times AS" in query_source
+    assert "variable,\n                    station_id" in query_source
+    assert "cr.expected_station_count" in query_source
+    assert "station_count = expected_station_count" in query_source
+    assert "COUNT(DISTINCT variable) AS complete_variable_count" in query_source
+    assert "HAVING COUNT(DISTINCT variable) = %s" in query_source
+    assert "MIN(valid_time) AS valid_time_start" in query_source
+    assert "MAX(valid_time) AS valid_time_end" in query_source
+    assert "MIN(valid_time) AS station_valid_time_start" in query_source
+    assert "MAX(valid_time) AS station_valid_time_end" in query_source
+    assert "MAX(valid_time_start) AS station_valid_time_start" not in query_source
+    assert "MIN(valid_time_end) AS station_valid_time_end" not in query_source
+    assert "ON sc.run_id = cr.run_id" in query_source
+    assert "AND sc.model_id = cr.model_id" in query_source
+    assert "AND sc.display_start_time = cr.display_start_time" in query_source
+    assert "AND sc.display_end_time = cr.display_end_time" in query_source
+    assert "ON svc.run_id = cr.run_id" in query_source
+    assert "AND svc.model_id = cr.model_id" in query_source
+    assert "AND svc.display_start_time = cr.display_start_time" in query_source
+    assert "AND svc.display_end_time = cr.display_end_time" in query_source
+    assert "river_identity_coverage AS" in query_source
+    assert "river_time_coverage AS" in query_source
+    assert "river_common_window AS" in query_source
+    assert "river_segment_id" in query_source
+    assert "cr.expected_segment_count" in query_source
+    assert "segment_count = expected_segment_count" in query_source
+    assert "MIN(valid_time) AS river_valid_time_start" in query_source
+    assert "MAX(valid_time) AS river_valid_time_end" in query_source
+    assert "GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time" in query_source
+    assert "h.cycle_time + (%s * INTERVAL '1 hour')" in query_source
+    assert "fst.valid_time >= cr.display_start_time" in query_source
+    assert "fst.valid_time <= cr.display_end_time" in query_source
+    assert "rt.valid_time >= cr.display_start_time" in query_source
+    assert "rt.valid_time <= cr.display_end_time" in query_source
+
+
 def test_fresh_tile_cache_schema_requires_non_null_cache_key_identity() -> None:
     migration = dict(_migration_sql())["000008_map.sql"]
     tile_cache = migration[migration.index("CREATE TABLE IF NOT EXISTS map.tile_cache") :]
@@ -448,9 +564,40 @@ def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:
 
 def _index_columns_by_name(migration: str, index_name: str) -> tuple[str, ...]:
     match = re.search(
-        rf"CREATE INDEX IF NOT EXISTS {index_name}\s+ON [^(]+ \((.*?)\);",
+        rf"CREATE INDEX IF NOT EXISTS {index_name}\s+ON\s+",
         migration,
-        re.DOTALL,
     )
     assert match is not None
-    return tuple(re.sub(r"\s+", " ", column).strip() for column in match.group(1).split(","))
+    start = migration.index("(", match.end())
+    depth = 0
+    end = start
+    for position in range(start, len(migration)):
+        character = migration[position]
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                end = position
+                break
+    assert end > start
+    return tuple(re.sub(r"\s+", " ", column).strip() for column in _split_index_columns(migration[start + 1 : end]))
+
+
+def _split_index_columns(columns_sql: str) -> list[str]:
+    columns: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for character in columns_sql:
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        if character == "," and depth == 0:
+            columns.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    if current:
+        columns.append("".join(current))
+    return columns

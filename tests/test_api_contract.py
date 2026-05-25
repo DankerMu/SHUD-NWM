@@ -14,7 +14,7 @@ from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
-from packages.common.forecast_store import ForecastStoreError
+from packages.common.forecast_store import QHH_LATEST_CONTEXT_LIMIT, QHH_LATEST_SEARCH_LIMIT, ForecastStoreError
 from tests.test_monitoring_api import (
     _client,
     _create_job,
@@ -72,6 +72,60 @@ def test_runs_contract_uses_success_envelope_and_paginated_data() -> None:
     assert run["product_quality"]["flood_return_period"]["quality_state"] == "ready"
     assert isinstance(run["start_time"], str)
     assert isinstance(run["end_time"], str)
+
+
+def test_qhh_latest_product_contract_uses_success_envelope_and_bootstrap_identity() -> None:
+    app.dependency_overrides[get_forecast_store] = lambda: _RunStore()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/mvp/qhh/latest-product", params={"source": "GFS"})
+            unavailable = client.get("/api/v1/mvp/qhh/latest-product", params={"source": "IFS"})
+    finally:
+        app.dependency_overrides.pop(get_forecast_store, None)
+
+    assert response.status_code == 200
+    data = _assert_success_envelope(response.json())
+    assert set(data) == {
+        "basin_id",
+        "model_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "source_id",
+        "cycle_time",
+        "run_id",
+        "forcing_version_id",
+        "station_count",
+        "expected_station_count",
+        "segment_count",
+        "expected_segment_count",
+        "status",
+        "run_status",
+        "valid_time_start",
+        "valid_time_end",
+        "river_valid_time_start",
+        "river_valid_time_end",
+        "forcing_valid_time_start",
+        "forcing_valid_time_end",
+        "available_horizon_hours",
+        "expected_horizon_hours",
+        "shorter_horizon",
+        "availability",
+        "quality",
+    }
+    assert data["basin_id"] == "basins_qhh"
+    assert data["model_id"] == "basins_qhh_shud"
+    assert data["river_network_version_id"] == "basins_qhh_rivnet_vbasins"
+    assert data["source_id"] == "GFS"
+    assert data["status"] == "ready"
+    assert data["availability"]["ready"] is True
+    assert data["availability"]["unavailable_reasons"] == []
+    assert data["quality"]["required_station_variables"] == ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]
+
+    assert unavailable.status_code == 404
+    unavailable_body = unavailable.json()
+    assert unavailable_body["status"] == "error"
+    assert unavailable_body["error"]["code"] == "QHH_LATEST_PRODUCT_UNAVAILABLE"
+    assert unavailable_body["error"]["details"]["unavailable_reasons"][0]["code"] == "NO_CANDIDATES"
 
 
 def test_jobs_contract_uses_success_envelope_and_paginated_pipeline_jobs() -> None:
@@ -768,6 +822,85 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert "ValidationErrorDetail:" in generated_types
 
 
+def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contract() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    operation = spec["paths"]["/api/v1/mvp/qhh/latest-product"]["get"]
+    parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+
+    assert operation["operationId"] == "getQhhLatestProduct"
+    assert set(parameters) == {"source"}
+    assert parameters["source"]["required"] is True
+    assert parameters["source"]["schema"] == {"type": "string", "enum": ["GFS", "IFS"]}
+    response_data = operation["responses"]["200"]["content"]["application/json"]["schema"]["allOf"][1]["properties"][
+        "data"
+    ]
+    assert response_data["$ref"] == "#/components/schemas/QhhLatestProduct"
+    schemas = spec["components"]["schemas"]
+    latest = schemas["QhhLatestProduct"]
+    assert {
+        "basin_id",
+        "model_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "source_id",
+        "cycle_time",
+        "run_id",
+        "forcing_version_id",
+        "station_count",
+        "expected_station_count",
+        "segment_count",
+        "expected_segment_count",
+        "status",
+        "valid_time_start",
+        "valid_time_end",
+        "available_horizon_hours",
+        "shorter_horizon",
+        "availability",
+        "quality",
+    } <= set(latest["required"])
+    assert latest["properties"]["source_id"]["enum"] == ["GFS", "IFS"]
+    assert latest["properties"]["status"]["enum"] == ["ready", "unavailable"]
+    assert schemas["QhhLatestAvailability"]["required"] == [
+        "ready",
+        "unavailable_reasons",
+        "quality_flags",
+        "quality_notes",
+    ]
+    assert schemas["QhhLatestQuality"]["properties"]["station_variable_coverage"]["items"]["$ref"] == (
+        "#/components/schemas/QhhLatestStationVariableCoverage"
+    )
+    assert schemas["QhhLatestQuality"]["required"] == [
+        "station_sample_count",
+        "river_sample_count",
+        "required_station_variables",
+        "station_variable_coverage",
+        "candidate_limit",
+        "search_limit",
+        "context_limit",
+        "query_indexes",
+    ]
+    assert "display_end_station_count" not in schemas["QhhLatestStationVariableCoverage"]["required"]
+    assert "display_end_station_count" not in schemas["QhhLatestStationVariableCoverage"]["properties"]
+    assert schemas["QhhLatestUnavailableReason"]["additionalProperties"] is True
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    operation_start = generated_types.index("getQhhLatestProduct:")
+    operation_end = generated_types.index("listRuns:")
+    operation_types = generated_types[operation_start:operation_end]
+    assert 'source: "GFS" | "IFS";' in operation_types
+    assert 'data: components["schemas"]["QhhLatestProduct"];' in operation_types
+    assert "QhhLatestProduct:" in generated_types
+    assert 'status: "ready" | "unavailable";' in generated_types
+    assert "available_horizon_hours: number | null;" in generated_types
+    assert "search_limit: number;" in generated_types
+    assert "context_limit: number;" in generated_types
+    assert "display_end_station_count: number;" not in generated_types
+    assert "QhhLatestUnavailableReason:" in generated_types
+
+
 def test_layer_metadata_contract_preserves_nullable_generated_type() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
@@ -972,6 +1105,74 @@ class _RetryGateway(_MockGateway):
 
 
 class _RunStore:
+    def latest_qhh_display_product(self, source: str) -> dict[str, Any]:
+        if source.upper() != "GFS":
+            raise ForecastStoreError(
+                status_code=404,
+                code="QHH_LATEST_PRODUCT_UNAVAILABLE",
+                message="No usable latest QHH display product is available for source IFS.",
+                details={
+                    "source_id": source.upper(),
+                    "basin_id": "basins_qhh",
+                    "status": "unavailable",
+                    "unavailable_reasons": [{"code": "NO_CANDIDATES", "message": "No candidates."}],
+                },
+            )
+        return {
+            "basin_id": "basins_qhh",
+            "model_id": "basins_qhh_shud",
+            "basin_version_id": "basins_qhh_vbasins",
+            "river_network_version_id": "basins_qhh_rivnet_vbasins",
+            "source_id": "GFS",
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "run_id": "qhh_gfs_2026050700",
+            "forcing_version_id": "forc_qhh_gfs_2026050700_basins_qhh_shud",
+            "station_count": 386,
+            "expected_station_count": 386,
+            "segment_count": 1633,
+            "expected_segment_count": 1633,
+            "status": "ready",
+            "run_status": "frequency_done",
+            "valid_time_start": "2026-05-07T00:00:00Z",
+            "valid_time_end": "2026-05-14T00:00:00Z",
+            "river_valid_time_start": "2026-05-07T00:00:00Z",
+            "river_valid_time_end": "2026-05-14T00:00:00Z",
+            "forcing_valid_time_start": "2026-05-07T00:00:00Z",
+            "forcing_valid_time_end": "2026-05-14T00:00:00Z",
+            "available_horizon_hours": 168,
+            "expected_horizon_hours": 168,
+            "shorter_horizon": False,
+            "availability": {
+                "ready": True,
+                "unavailable_reasons": [],
+                "quality_flags": [],
+                "quality_notes": [],
+            },
+            "quality": {
+                "station_sample_count": 12000,
+                "river_sample_count": 10000,
+                "required_station_variables": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
+                "station_variable_coverage": [],
+                "candidate_limit": QHH_LATEST_SEARCH_LIMIT,
+                "search_limit": QHH_LATEST_SEARCH_LIMIT,
+                "context_limit": QHH_LATEST_CONTEXT_LIMIT,
+                "query_indexes": [
+                    {
+                        "table": "hydro.hydro_run",
+                        "index": "hydro_run_qhh_latest_candidate_idx",
+                        "status": "covered_by_latest_product_candidate_index",
+                        "columns": [
+                            "LOWER(source_id)",
+                            "run_type",
+                            "basin_version_id",
+                            "cycle_time DESC",
+                            "run_id DESC",
+                        ],
+                    }
+                ],
+            },
+        }
+
     def list_runs(self, **kwargs: Any) -> dict[str, Any]:
         now = datetime(2026, 5, 3, tzinfo=UTC)
         return {

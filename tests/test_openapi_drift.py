@@ -187,6 +187,39 @@ def test_station_series_runtime_openapi_matches_static_parameters_and_schema() -
     assert fastapi_spec["components"]["responses"]["Error"] == static_spec["components"]["responses"]["Error"]
 
 
+def test_qhh_latest_product_runtime_openapi_matches_static_parameters_and_schema() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/mvp/qhh/latest-product"
+    static_operation = static_spec["paths"][path]["get"]
+    runtime_operation = fastapi_spec["paths"][path]["get"]
+
+    static_parameters = _operation_parameters_by_name(static_operation, static_spec)
+    runtime_parameters = _operation_parameters_by_name(runtime_operation, fastapi_spec)
+    assert set(static_parameters) == {"source"}
+    assert runtime_parameters == static_parameters
+
+    static_response = static_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    runtime_response = runtime_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert runtime_response == static_response
+    assert runtime_operation["responses"]["4XX"] == static_operation["responses"]["4XX"]
+    assert runtime_operation["responses"]["5XX"] == static_operation["responses"]["5XX"]
+    assert static_response["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/QhhLatestProduct"
+    assert static_parameters["source"]["schema"] == {"type": "string", "enum": ["GFS", "IFS"]}
+
+    for schema_name in (
+        "QhhLatestUnavailableReason",
+        "QhhLatestQualityNote",
+        "QhhLatestStationVariableCoverage",
+        "QhhLatestQueryIndex",
+        "QhhLatestAvailability",
+        "QhhLatestQuality",
+        "QhhLatestProduct",
+    ):
+        assert fastapi_spec["components"]["schemas"][schema_name] == static_spec["components"]["schemas"][schema_name]
+
+
 def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_openapi() -> None:
     static_spec = _openapi_spec()
     fastapi_spec: dict[str, Any] = app.openapi()

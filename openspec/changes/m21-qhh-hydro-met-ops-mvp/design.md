@@ -243,3 +243,87 @@ Non-goals:
 - Building `/hydro-met` station chart UI; #208 owns UI consumption.
 - Adding latest-product selection; #206 owns product discovery.
 - Adding new forcing producer writes, station readiness algorithms, or live QHH smoke.
+
+## Issue #206 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM FastAPI, forecast store aggregation, OpenAPI, and generated frontend type contract
+Repair intensity: high
+
+Change surface:
+- Backend read helper for selecting the latest usable QHH display product from `hydro.hydro_run`, `met.forcing_version`, `core.model_instance`, `core.basin_version`, `core.river_network_version`, `met.forcing_station_timeseries`, and `hydro.river_timeseries`.
+- Public `GET /api/v1/mvp/qhh/latest-product` route or equivalent stable API contract.
+- `openapi/nhms.v1.yaml`, generated `apps/frontend/src/api/types.ts`, and backend/API/OpenAPI drift tests.
+
+Must preserve:
+- Existing `/api/v1/runs`, station-series, forecast-series, data-source cycle, met-station, MVT/layer, and generated frontend paths keep their current response shapes.
+- #204/#205 station-series store and route contracts remain the source of truth for station forcing samples; #206 may use readiness/summary checks but must not duplicate forcing series payload logic or change producer writes.
+- The latest-product route is read-only and must not mutate run/model/forcing status or publish display products.
+
+Must add/change:
+- Select the newest usable QHH product for a requested `source=GFS|IFS` using formal persisted run/model/forcing/time-series identity, not run-id naming conventions or qhh diagnostic JSON files.
+- Return `basin_id`, `model_id`, `basin_version_id`, `river_network_version_id`, `source_id`, `cycle_time`, `run_id`, `forcing_version_id`, `station_count`, `expected_station_count`, `segment_count`, `expected_segment_count`, `status`, valid-time/horizon metadata, and availability reasons/quality metadata.
+- Reject failed, cancelled, pending, incomplete, identity-missing, not-finalized-forcing, station-forcing-incomplete, and missing-`q_down` products as ready; unavailable responses must be explicit and typed.
+- Represent IFS shorter-horizon metadata from available forcing/hydro valid-time end rather than padding to seven days.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - #206 promotes a new MVP bootstrap API.
+- Config / project setup: not selected - no new runtime configuration or deployment flags expected.
+- File IO / path safety / overwrite: not selected - the route reads persisted database state only and must not consume qhh diagnostic files.
+- Schema / columns / units / field names: selected - response fields, counts, statuses, horizon metadata, and OpenAPI/generated types are public contract.
+- Geospatial / CRS / shapefile sidecars: not selected - the API returns identifiers/counts only, not geometry.
+- Time series / forcing / temporal boundaries: selected - selection depends on cycle time, forcing window, hydro valid-time range, station variable coverage, and IFS horizon disclosure.
+- Numerical stability / conservation / NaN: selected - counts and ranges must come from persisted rows; missing values must not be converted into ready products.
+- Solver runtime / performance / threading: not selected - no SHUD execution behavior.
+- Resource limits / large input / discovery: selected - latest selection must be bounded to candidate rows and use existing/latest-ready indexes where possible.
+- Legacy compatibility / examples: selected - existing run/station/forecast APIs and generated consumers must remain compatible.
+- Error handling / rollback / partial outputs: selected - no usable product, incomplete candidates, missing identities, and unsupported source must surface stable unavailable/validation errors.
+- Release / packaging / dependency compatibility: selected - OpenAPI/frontend type generation must remain reproducible with existing tooling.
+- Documentation / migration notes: selected - API must not claim nationwide, stage, UI readiness, or final production readiness.
+
+Required evidence:
+- Store/helper tests: latest GFS selection, latest IFS selection, source normalization, newest-ready ordering, failed/cancelled/pending/incomplete rejection, missing `forcing_version_id`, missing `river_network_version_id`, not-finalized forcing, missing station variables, missing `q_down`, station/segment count metadata, valid-time/horizon metadata, and IFS shorter-horizon disclosure.
+- Resource-bound tests/evidence: candidate discovery must be bounded by source/status/basin filters and either an explicit candidate limit or a single indexed/aggregated readiness query; tests must assert the SQL shape does not perform unbounded station-series or river-timeseries materialization before selecting candidates, and must record whether `hydro_run_latest_ready_run_idx`, `river_timeseries_mvt_selected_identity_valid_time_discovery_idx`, and the `met.forcing_station_timeseries` primary key support the lookup.
+- API tests: success envelope for `source=GFS|IFS`, unsupported source validation, no usable product unavailable response with reasons, and no manual IDs required in response.
+- Contract tests: static OpenAPI and generated frontend types include latest-product route, response schema, availability/unavailable reason schema, and horizon/count fields.
+- Drift tests: runtime/static OpenAPI parameters/responses/components for latest-product match or are intentionally patched like station-series.
+- Compatibility tests/evidence: existing `/api/v1/runs`, data-source cycle, met-station, station-series, forecast-series, MVT/layer, and generated-type tests remain green.
+- Regression commands: `uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`, `uv run ruff check apps/api/routes apps/api/main.py packages/common/forecast_store.py tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`, `cd apps/frontend && corepack pnpm check:api-types`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: a latest-product response marked ready must bind one persisted QHH hydro run, finalized forcing version, model river network, basin version, station forcing coverage, river `q_down` coverage, and horizon/count metadata from a single consistent read without selecting failed, incomplete, identity-mismatched, stale, or diagnostic-file-only products.
+Source-of-truth identity/contract: `hydro.hydro_run.run_id` plus `hydro.hydro_run.forcing_version_id`, `core.model_instance(model_id, basin_version_id, river_network_version_id)`, `met.forcing_version(forcing_version_id, model_id, source_id, cycle_time)`, `met.forcing_station_timeseries(forcing_version_id, station_id, variable, valid_time)`, and `hydro.river_timeseries(run_id, river_network_version_id, river_segment_id, variable, valid_time)`.
+Surfaces:
+- Producers: existing scheduler/SHUD/parse/forcing producers write runs, forcing versions, station series, and river time series; unchanged in #206.
+- Validators/preflight: source query validation, candidate status filtering, finalized forcing gate, identity consistency checks, station variable coverage checks, `q_down` coverage checks, horizon calculations.
+- Storage/cache/query: `packages/common/forecast_store.py` latest-product helper and SQL over run/model/forcing/station/hydro rows.
+- Public routes/entrypoints: `GET /api/v1/mvp/qhh/latest-product` or equivalent stable route.
+- Frontend/downstream consumers: generated `apps/frontend/src/api/types.ts`; `/hydro-met` consumption remains #207/#208/#209.
+- Failure paths/rollback/stale state: unsupported source, no usable product, identity mismatch, incomplete counts, not-finalized forcing, missing station variables, missing `q_down`, shorter horizon; no writes or rollback.
+- Evidence/audit/readiness: backend tests, API contract tests, OpenAPI drift tests, generated type diff, and validation commands; no live QHH smoke claim.
+Regression rows:
+- latest valid GFS QHH product with finalized forcing and `q_down` rows -> ready success payload with all bootstrap IDs, counts, status, and horizon metadata.
+- latest valid IFS product with valid-time end shorter than 168h -> success payload exposes actual horizon/end time and a shorter-horizon reason/flag, without fabricated padding.
+- newer failed/cancelled/pending/incomplete candidate before an older ready candidate -> selects older ready product or returns explicit unavailable if none are ready, never the incomplete candidate.
+- candidate missing `forcing_version_id`, `river_network_version_id`, `basin_version_id`, `model_id`, or `cycle_time` -> rejected with unavailable reason, not a partial ready response.
+- candidate with forcing checksum missing/pending or source/cycle/model mismatch between run and forcing version -> rejected with stable reason.
+- candidate with fewer station variables/counts than required six MVP variables -> rejected or marked unavailable with station readiness reasons.
+- candidate with no `q_down` river timeseries or zero displayable segments -> rejected or unavailable with segment/hydro reasons.
+- many newer unusable candidates for one source -> discovery remains bounded by indexed source/status/cycle filters and candidate/readiness limits, then returns the newest usable product or an explicit unavailable reason without scanning arbitrary unrelated basins/sources.
+- unsupported `source` query -> stable validation error.
+- existing `/api/v1/runs`, data-source cycle, met-station, station-series, forecast-series, MVT/layer, and generated type tests -> unchanged behavior.
+
+Boundary-surface checklist:
+- Shared helper roots: `_ok`, `_api_error`, FastAPI query parsing, `_hydro_run_response`, station readiness helpers, candidate-query/readiness aggregation helpers, OpenAPI schema patch helpers, frontend type generation.
+- Public entrypoints: latest-product route only.
+- Read surfaces: formal DB tables above; no qhh diagnostic JSON or local file state.
+- Write/delete/overwrite surfaces: generated frontend type file only; no runtime writes.
+- Producer/consumer evidence boundaries: latest-product is bootstrap metadata, not live smoke or UI readiness proof.
+- Stale-state/idempotency boundaries: repeated query for same persisted state returns the same selected product and reasons without mutating state.
+- Unchanged downstream consumers: existing run list/get, station-series, forecast-series, data-source, MVT/layer, and frontend type consumers.
+
+Non-goals:
+- Building `/hydro-met`, station charts, river charts, `/ops`, retry controls, or browser smoke.
+- Adding or changing forcing producer writes, SHUD runtime, parse behavior, scheduler state, or live QHH/IFS smoke.
+- Claiming nationwide readiness, water level `stage`, CLDAS, ERA5 near-real-time, final production readiness, or real flood-frequency readiness.
