@@ -12,6 +12,7 @@ import {
   parseHydroMetQueryState,
   serializeHydroMetQueryState,
 } from '@/lib/hydroMet/queryState'
+import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 vi.mock('@/api/client', () => ({
   client: {
@@ -85,6 +86,24 @@ const stationPage = {
   total_count: 386,
   limit: HYDRO_MET_STATION_LIMIT,
   offset: 0,
+}
+
+const runtimeStationPage = {
+  ...stationPage,
+  items: [
+    {
+      station_id: 'qhh_forc_runtime_001',
+      basin_version_id: 'basins_qhh_vbasins',
+      station_name: 'QHH runtime forcing 001',
+      longitude: 104.25,
+      latitude: 31.5,
+      elevation_m: 320,
+      station_role: 'forcing',
+      active_flag: true,
+      properties_json: null,
+      created_at: '2026-05-21T00:00:00Z',
+    },
+  ],
 }
 
 const riverSegments = {
@@ -171,6 +190,24 @@ describe('loadHydroMetBootstrap', () => {
     expect(serializedCalls).not.toContain('forcing_version_id')
   })
 
+  it('normalizes runtime-shaped station inventory coordinates without losing river candidates', async () => {
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
+      if (path === '/api/v1/met/stations') return { data: success(runtimeStationPage), error: undefined } as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
+      return { data: success({}), error: undefined } as never
+    })
+
+    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: null })
+
+    expect(result.status).toBe('ready')
+    expect(result.stations[0]).toMatchObject({
+      station_id: 'qhh_forc_runtime_001',
+      geom: { type: 'Point', coordinates: [104.25, 31.5] },
+    })
+    expect(result.riverSegments).toHaveLength(1)
+  })
+
   it('does not load downstream candidates when requested cycle differs from latest product', async () => {
     vi.mocked(client.GET).mockResolvedValue({ data: success(latestProduct()), error: undefined } as never)
 
@@ -232,5 +269,37 @@ describe('loadHydroMetBootstrap', () => {
     expect(result.riverError).toBe('river db timeout')
     expect(result.stations).toEqual([])
     expect(result.riverSegments).toEqual([])
+  })
+
+  it('redacts hydro-met UI-bound backend messages while keeping error labels', async () => {
+    const unsafeMessage =
+      'ERR_QHH failed opening s3://key:secret@bucket/private?token=abc#frag from file:///volume/data/nwm/Basins/qhh?sig=x#frag and /volume/data/nwm/Basins/qhh plus C:\\nwm\\Basins\\qhh'
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: success(latestProduct({
+        status: 'unavailable',
+        availability: {
+          ready: false,
+          unavailable_reasons: [{ code: 'NO_READY_PRODUCT', message: unsafeMessage }],
+          quality_flags: [],
+          quality_notes: [],
+        },
+      })),
+      error: undefined,
+    } as never)
+
+    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: null })
+    const rendered = result.latestReasons.join(' ')
+
+    expect(rendered).toContain('NO_READY_PRODUCT')
+    expect(rendered).toContain('ERR_QHH')
+    expect(rendered).toContain('s3://bucket/private')
+    expect(rendered).not.toContain('key:secret')
+    expect(rendered).not.toContain('token=abc')
+    expect(rendered).not.toContain('#frag')
+    expect(rendered).not.toContain('file://')
+    expect(rendered).not.toContain('/volume/data/nwm/Basins/qhh')
+    expect(rendered).not.toContain('C:\\nwm\\Basins\\qhh')
+
+    expect(sanitizeHydroMetMessage(unsafeMessage)).toContain('s3://bucket/private')
   })
 })

@@ -2,6 +2,7 @@ import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
 import { normalizeHydroMetCycle, type HydroMetSource } from '@/lib/hydroMet/queryState'
+import { normalizeHydroMetStation, sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 export const HYDRO_MET_STATION_LIMIT = 500
 export const HYDRO_MET_RIVER_SEGMENT_LIMIT = 250
@@ -62,7 +63,7 @@ async function getStationInventory(product: QhhLatestProduct, limit: number) {
   if (error) throw new Error(getApiErrorMessage(error, '站点 inventory 加载失败'))
   const page = unwrapApiData<HydroMetStationPage>(data, '站点 inventory 加载失败')
   if (!page || !Array.isArray(page.items)) throw new Error('站点 inventory 响应不完整')
-  return page
+  return { ...page, items: page.items.map((station) => normalizeHydroMetStation(station)) }
 }
 
 async function getRiverSegments(product: QhhLatestProduct, limit: number) {
@@ -90,7 +91,7 @@ function isNonEmptyString(value: unknown): value is string {
 
 function productAvailabilityReasons(product: QhhLatestProduct) {
   const reasons = product.availability?.unavailable_reasons ?? []
-  return reasons.map((reason) => `${reason.code}: ${reason.message}`)
+  return reasons.map((reason) => `${reason.code}: ${sanitizeHydroMetMessage(reason.message)}`)
 }
 
 function validateLatestProduct(product: QhhLatestProduct, request: HydroMetBootstrapRequest): {
@@ -157,7 +158,7 @@ function baseResult(
 }
 
 function settledError(result: PromiseSettledResult<unknown>, fallback: string) {
-  return result.status === 'rejected' ? getApiErrorMessage(result.reason, fallback) : null
+  return result.status === 'rejected' ? sanitizeHydroMetMessage(getApiErrorMessage(result.reason, fallback), fallback) : null
 }
 
 export async function loadHydroMetBootstrap(request: HydroMetBootstrapRequest): Promise<HydroMetBootstrapResult> {
@@ -168,7 +169,9 @@ export async function loadHydroMetBootstrap(request: HydroMetBootstrapRequest): 
   try {
     product = await getLatestProduct(request.source)
   } catch (error) {
-    return baseResult(request, null, 'latest-unavailable', [getApiErrorMessage(error, 'latest-product 不可用')])
+    return baseResult(request, null, 'latest-unavailable', [
+      sanitizeHydroMetMessage(getApiErrorMessage(error, 'latest-product 不可用'), 'latest-product 不可用'),
+    ])
   }
 
   const validation = validateLatestProduct(product, request)

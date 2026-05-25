@@ -11,6 +11,7 @@ import {
   serializeHydroMetQueryState,
   type HydroMetQueryPatch,
 } from '@/lib/hydroMet/queryState'
+import { HYDRO_MET_COORDINATES_UNAVAILABLE, getHydroMetStationCoordinates, sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 import {
   HYDRO_MET_RIVER_SEGMENT_LIMIT,
   HYDRO_MET_STATION_LIMIT,
@@ -228,7 +229,10 @@ function HydroMetContent({ result }: { result: HydroMetBootstrapResult }) {
 }
 
 function ProductPanel({ product }: { product: QhhLatestProduct }) {
-  const qualityNotes = product.availability.quality_notes
+  const qualityNotes = product.availability.quality_notes.map((note) => ({
+    ...note,
+    message: sanitizeHydroMetMessage(note.message),
+  }))
   const coverage = product.quality.station_variable_coverage
 
   return (
@@ -320,7 +324,7 @@ function InventoryPanel({
 }
 
 function StationRow({ station }: { station: HydroMetStation }) {
-  const [lon, lat] = station.geom.coordinates
+  const coordinates = getHydroMetStationCoordinates(station)
   return (
     <div className="rounded border border-neutral-300 p-3 text-sm">
       <div className="flex items-center justify-between gap-3">
@@ -329,7 +333,7 @@ function StationRow({ station }: { station: HydroMetStation }) {
       </div>
       <div className="mt-1 text-neutral-700">{station.station_name ?? '未命名站点'}</div>
       <div className="mt-1 font-mono text-xs text-neutral-500">
-        {formatCoordinate(lon)}, {formatCoordinate(lat)}
+        {coordinates ? `${formatCoordinate(coordinates.lon)}, ${formatCoordinate(coordinates.lat)}` : HYDRO_MET_COORDINATES_UNAVAILABLE}
       </div>
     </div>
   )
@@ -390,6 +394,7 @@ function StatusPanel({
     warning: 'border-warning/40 bg-warning/10 text-neutral-900',
     danger: 'border-danger/30 bg-danger/10 text-danger',
   }[tone]
+  const safeMessages = messages.map((message) => sanitizeHydroMetMessage(message))
 
   return (
     <section className={cn('rounded-md border p-4', toneClass)} role={tone === 'danger' ? 'alert' : 'status'} data-testid={testId}>
@@ -398,7 +403,7 @@ function StatusPanel({
         {title}
       </div>
       <ul className="mt-2 space-y-1 text-sm">
-        {messages.map((message) => <li key={message}>{message}</li>)}
+        {safeMessages.map((message) => <li key={message}>{message}</li>)}
       </ul>
       {product ? (
         <dl className="mt-3 grid grid-cols-[8rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs text-neutral-700">

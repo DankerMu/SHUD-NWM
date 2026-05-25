@@ -555,6 +555,45 @@ const hydroMetStationPage = {
   offset: 0,
 }
 
+const hydroMetRuntimeStationPage = {
+  ...hydroMetStationPage,
+  items: [
+    {
+      station_id: 'qhh_forc_runtime_001',
+      basin_version_id: 'basins_qhh_vbasins',
+      station_name: 'QHH runtime station 001',
+      longitude: 104.25,
+      latitude: 31.5,
+      elevation_m: 320,
+      station_role: 'forcing',
+      active_flag: true,
+      properties_json: null,
+      created_at: '2026-05-21T00:00:00Z',
+    },
+    {
+      station_id: 'qhh_forc_no_coord',
+      basin_version_id: 'basins_qhh_vbasins',
+      station_name: 'QHH station without coordinates',
+      elevation_m: 318,
+      station_role: 'forcing',
+      active_flag: true,
+      properties_json: null,
+      created_at: '2026-05-21T00:00:00Z',
+    },
+  ],
+}
+
+const unsafeHydroMetMessage =
+  'ERR_QHH failed opening s3://key:secret@bucket/private?token=abc#frag from file:///volume/data/nwm/Basins/qhh?sig=x#frag and /volume/data/nwm/Basins/qhh plus C:\\nwm\\Basins\\qhh'
+const unsafeHydroMetTokens = ['key:secret', 'token=abc', '#frag', 'file://', '/volume/data/nwm/Basins/qhh', 'C:\\nwm\\Basins\\qhh'] as const
+
+function expectNoUnsafeHydroMetText() {
+  const bodyText = document.body.textContent ?? ''
+  for (const token of unsafeHydroMetTokens) {
+    expect(bodyText).not.toContain(token)
+  }
+}
+
 const hydroMetRiverSegments = {
   type: 'FeatureCollection',
   features: [
@@ -961,6 +1000,78 @@ describe('App route state', () => {
       },
     })
     expect(JSON.stringify(vi.mocked(client.GET).mock.calls)).not.toContain('manual')
+  })
+
+  it('shows /hydro-met loading state while bootstrap is pending', async () => {
+    vi.mocked(client.GET).mockImplementation((path: string) => {
+      if (path === '/api/v1/mvp/qhh/latest-product') return new Promise(() => undefined) as never
+      return Promise.resolve({ data: success({}), error: undefined }) as never
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-loading')).toHaveTextContent('正在加载 latest-product')
+  })
+
+  it('renders runtime-shaped /hydro-met station inventory and keeps river candidates visible', async () => {
+    mockHydroMetRouteClient({ stationResponse: hydroMetRuntimeStationPage })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    const stationList = await screen.findByTestId('hydro-met-station-list')
+    expect(stationList).toHaveTextContent('qhh_forc_runtime_001')
+    expect(stationList).toHaveTextContent('104.2500, 31.5000')
+    expect(stationList).toHaveTextContent('qhh_forc_no_coord')
+    expect(stationList).toHaveTextContent('坐标不可用')
+    expect(screen.getByTestId('hydro-met-river-list')).toHaveTextContent('seg-001')
+  })
+
+  it('redacts /hydro-met backend status and quality messages before rendering', async () => {
+    mockHydroMetRouteClient({
+      product: {
+        availability: {
+          ready: true,
+          unavailable_reasons: [],
+          quality_flags: [],
+          quality_notes: [{ code: 'QHH_SOURCE_WARNING', message: unsafeHydroMetMessage }],
+        },
+      },
+      stationError: unsafeHydroMetMessage,
+      riverError: unsafeHydroMetMessage,
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-quality-notes')).toHaveTextContent('QHH_SOURCE_WARNING')
+    expect(screen.getByTestId('hydro-met-quality-notes')).toHaveTextContent('ERR_QHH')
+    expect(screen.getByTestId('hydro-met-quality-notes')).toHaveTextContent('s3://bucket/private')
+    expect(screen.getByTestId('hydro-met-station-partial-failure')).toHaveTextContent('ERR_QHH')
+    expect(screen.getByTestId('hydro-met-river-partial-failure')).toHaveTextContent('ERR_QHH')
+    expectNoUnsafeHydroMetText()
+
+    cleanup()
+    vi.clearAllMocks()
+    mockHydroMetRouteClient({
+      product: {
+        status: 'unavailable',
+        availability: {
+          ready: false,
+          unavailable_reasons: [{ code: 'NO_READY_PRODUCT', message: unsafeHydroMetMessage }],
+          quality_flags: [],
+          quality_notes: [],
+        },
+      },
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-latest-unavailable')).toHaveTextContent('NO_READY_PRODUCT')
+    expect(screen.getByTestId('hydro-met-latest-unavailable')).toHaveTextContent('ERR_QHH')
+    expectNoUnsafeHydroMetText()
   })
 
   it('normalizes /hydro-met query state and preserves supported source and cycle values', async () => {
