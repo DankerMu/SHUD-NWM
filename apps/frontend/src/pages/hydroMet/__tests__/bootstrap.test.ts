@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
+import type { components } from '@/api/types'
+import {
+  HYDRO_MET_STATION_SERIES_LIMIT,
+  HYDRO_MET_STATION_VARIABLES,
+  boundedHydroMetStationSeriesLimit,
+  loadHydroMetStationSeries,
+  validateHydroMetStationSeriesIdentity,
+} from '@/lib/hydroMet/stationSeries'
 import {
   HYDRO_MET_RIVER_SEGMENT_LIMIT,
   HYDRO_MET_STATION_LIMIT,
@@ -128,6 +136,37 @@ const riverSegments = {
   limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
   offset: 0,
 } as const
+
+function stationSeriesResponse(
+  overrides: Partial<components['schemas']['StationSeriesResponse']> = {},
+): components['schemas']['StationSeriesResponse'] {
+  return {
+    station_id: 'qhh_forc_001',
+    station: {
+      station_id: 'qhh_forc_001',
+      basin_version_id: 'basins_qhh_vbasins',
+      station_name: 'QHH forcing 001',
+      longitude: 104,
+      latitude: 31,
+      elevation_m: 320,
+      station_role: 'forcing',
+      active_flag: true,
+      properties_json: null,
+      created_at: '2026-05-21T00:00:00Z',
+    },
+    forcing_version_id: 'forc_gfs_2026052100_basins_qhh_shud',
+    model_id: 'basins_qhh_shud',
+    source_id: 'GFS',
+    cycle_time: '2026-05-21T00:00:00Z',
+    valid_time_start: '2026-05-21T00:00:00Z',
+    valid_time_end: '2026-05-21T02:00:00Z',
+    limit: HYDRO_MET_STATION_SERIES_LIMIT,
+    requested_from: null,
+    requested_to: null,
+    series: [],
+    ...overrides,
+  }
+}
 
 describe('hydro-met query state', () => {
   it('normalizes supported source and RFC3339 cycle', () => {
@@ -301,5 +340,73 @@ describe('loadHydroMetBootstrap', () => {
     expect(rendered).not.toContain('C:\\nwm\\Basins\\qhh')
 
     expect(sanitizeHydroMetMessage(unsafeMessage)).toContain('s3://bucket/private')
+  })
+})
+
+describe('loadHydroMetStationSeries', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('calls the generated station-series API with latest-product forcing version, six variables, and bounded limit', async () => {
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: success(stationSeriesResponse()),
+      error: undefined,
+    } as never)
+
+    const product = latestProduct()
+    const response = await loadHydroMetStationSeries({
+      product,
+      station: { station_id: 'qhh_forc_001' },
+      limit: 9999,
+    })
+
+    expect(response.station_id).toBe('qhh_forc_001')
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations/{station_id}/series', {
+      params: {
+        path: { station_id: 'qhh_forc_001' },
+        query: {
+          forcing_version_id: product.forcing_version_id,
+          variables: [...HYDRO_MET_STATION_VARIABLES],
+          limit: HYDRO_MET_STATION_SERIES_LIMIT,
+        },
+      },
+    })
+    expect(JSON.stringify(vi.mocked(client.GET).mock.calls)).not.toContain('/api/v1/forecast')
+  })
+
+  it('keeps station-series limit bounded and preserves typed API error messages', async () => {
+    expect(boundedHydroMetStationSeriesLimit(0)).toBe(1)
+    expect(boundedHydroMetStationSeriesLimit(12.7)).toBe(12)
+    expect(boundedHydroMetStationSeriesLimit(5000)).toBe(HYDRO_MET_STATION_SERIES_LIMIT)
+    expect(boundedHydroMetStationSeriesLimit(undefined)).toBe(HYDRO_MET_STATION_SERIES_LIMIT)
+
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: undefined,
+      error: { error: { message: 'station unavailable' } },
+    } as never)
+
+    await expect(loadHydroMetStationSeries({
+      product: latestProduct(),
+      station: { station_id: 'qhh_forc_001' },
+    })).rejects.toThrow('station unavailable')
+  })
+
+  it('reports station-series identity mismatches without silently switching product identity', () => {
+    const messages = validateHydroMetStationSeriesIdentity(
+      stationSeriesResponse({
+        station_id: 'qhh_forc_002',
+        forcing_version_id: 'other-forcing',
+        source_id: 'IFS',
+        cycle_time: '2026-05-21T12:00:00Z',
+      }),
+      latestProduct(),
+      'qhh_forc_001',
+    )
+
+    expect(messages.join(' ')).toContain('station_id=qhh_forc_002')
+    expect(messages.join(' ')).toContain('forcing_version_id=other-forcing')
+    expect(messages.join(' ')).toContain('source_id=IFS')
+    expect(messages.join(' ')).toContain('cycle_time=2026-05-21T12:00:00.000Z')
   })
 })
