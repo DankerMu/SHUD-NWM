@@ -1786,6 +1786,74 @@ describe('App route state', () => {
     expectNoUnsafeHydroMetText()
   })
 
+  it('caps /hydro-met unavailable reason lists and bounds overlong reason tokens before rendering', async () => {
+    const attackToken = `latest-reason-${'x'.repeat(512)}-end`
+    const unavailableReasons = Array.from({ length: 12 }, (_, index) => ({
+      code: `NO_READY_${index}`,
+      message: index === 3 ? `upstream returned ${attackToken}` : `reason ${index}`,
+    }))
+    mockHydroMetRouteClient({
+      product: {
+        status: 'unavailable',
+        availability: {
+          ready: false,
+          unavailable_reasons: unavailableReasons,
+          quality_flags: [],
+          quality_notes: [],
+        },
+      },
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    const unavailable = await screen.findByTestId('hydro-met-latest-unavailable')
+    const items = within(unavailable).getAllByRole('listitem')
+    expect(items).toHaveLength(7)
+    expect(unavailable).toHaveTextContent('NO_READY_0')
+    expect(unavailable).toHaveTextContent('NO_READY_5')
+    expect(unavailable).not.toHaveTextContent('NO_READY_6')
+    expect(unavailable).toHaveTextContent('另有 6 条状态详情已截断')
+    expect(unavailable).toHaveTextContent('过长内容已截断')
+    expect(document.body.textContent ?? '').not.toContain(attackToken)
+    expect(screen.queryByTestId('mock-echarts-option')).not.toBeInTheDocument()
+    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+  })
+
+  it('caps /hydro-met quality note lists and bounds overlong note code and message tokens before rendering', async () => {
+    const attackCode = `quality-code-${'c'.repeat(512)}-end`
+    const attackMessage = `quality-message-${'m'.repeat(512)}-end`
+    const qualityNotes = Array.from({ length: 11 }, (_, index) => ({
+      code: index === 2 ? attackCode : `QHH_NOTE_${index}`,
+      message: index === 4 ? `quality degraded ${attackMessage}` : `normal note ${index}`,
+    }))
+    mockHydroMetRouteClient({
+      product: {
+        availability: {
+          ready: true,
+          unavailable_reasons: [],
+          quality_flags: [],
+          quality_notes: qualityNotes,
+        },
+      },
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    const notes = await screen.findByTestId('hydro-met-quality-notes')
+    const visibleNotes = within(notes).getAllByText(/质量备注已截断|:/)
+    expect(visibleNotes).toHaveLength(7)
+    expect(notes).toHaveTextContent('QHH_NOTE_0: normal note 0')
+    expect(notes).toHaveTextContent('QHH_NOTE_5: normal note 5')
+    expect(notes).not.toHaveTextContent('QHH_NOTE_6')
+    expect(notes).toHaveTextContent('另有 5 条质量备注已截断')
+    expect(notes).toHaveTextContent('过长内容已截断')
+    expect(document.body.textContent ?? '').not.toContain(attackCode)
+    expect(document.body.textContent ?? '').not.toContain(attackMessage)
+    expect(await screen.findByTestId('hydro-met-variable-PRCP-chart')).toBeInTheDocument()
+  })
+
   it('normalizes /hydro-met query state and preserves supported source and cycle values', async () => {
     mockHydroMetRouteClient({
       product: {

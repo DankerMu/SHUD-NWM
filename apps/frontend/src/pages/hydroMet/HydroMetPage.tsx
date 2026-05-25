@@ -14,7 +14,7 @@ import {
   serializeHydroMetQueryState,
   type HydroMetQueryPatch,
 } from '@/lib/hydroMet/queryState'
-import { HYDRO_MET_COORDINATES_UNAVAILABLE, getHydroMetStationCoordinates, sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
+import { HYDRO_MET_COORDINATES_UNAVAILABLE, getHydroMetStationCoordinates } from '@/lib/hydroMet/runtime'
 import {
   HYDRO_MET_STATION_SERIES_LIMIT,
   HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
@@ -88,6 +88,12 @@ const HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT = 6
 const HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT = 32
 const HYDRO_MET_STATION_SERIES_UNIT_LIMIT = 32
 const HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT = HYDRO_MET_STATION_VARIABLES.length * 2
+const HYDRO_MET_PAGE_MESSAGE_LIST_LIMIT = 6
+
+type BoundedHydroMetMessage = {
+  kind: 'message' | 'summary'
+  text: string
+}
 
 export function HydroMetPage() {
   const location = useLocation()
@@ -343,10 +349,9 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
 }
 
 function ProductPanel({ product }: { product: QhhLatestProduct }) {
-  const qualityNotes = product.availability.quality_notes.map((note) => ({
-    ...note,
-    message: sanitizeHydroMetMessage(note.message),
-  }))
+  const qualityNotes = boundedHydroMetMessageList(getHydroMetQualityNotes(product), formatHydroMetQualityNote, {
+    summaryLabel: '质量备注',
+  })
   const coverage = product.quality.station_variable_coverage
 
   return (
@@ -375,9 +380,9 @@ function ProductPanel({ product }: { product: QhhLatestProduct }) {
       ) : null}
       {qualityNotes.length > 0 ? (
         <div className="mt-3 space-y-1 text-xs text-neutral-700" data-testid="hydro-met-quality-notes">
-          {qualityNotes.map((note) => (
-            <p key={`${note.code}-${note.message}`}>
-              {note.code}: {note.message}
+          {qualityNotes.map((note, index) => (
+            <p key={`${note.kind}-${index}-${note.text}`} data-kind={note.kind}>
+              {note.text}
             </p>
           ))}
         </div>
@@ -1271,7 +1276,9 @@ function StatusPanel({
     warning: 'border-warning/40 bg-warning/10 text-neutral-900',
     danger: 'border-danger/30 bg-danger/10 text-danger',
   }[tone]
-  const safeMessages = messages.map((message) => formatHydroMetStatusMessage(message))
+  const safeMessages = boundedHydroMetMessageList(messages, (message) => formatHydroMetStatusMessage(message), {
+    summaryLabel: '状态详情',
+  })
 
   return (
     <section className={cn('rounded-md border p-4', toneClass)} role={tone === 'danger' ? 'alert' : 'status'} data-testid={testId}>
@@ -1280,7 +1287,7 @@ function StatusPanel({
         {title}
       </div>
       <ul className="mt-2 space-y-1 text-sm">
-        {safeMessages.map((message) => <li key={message}>{message}</li>)}
+        {safeMessages.map((message, index) => <li key={`${message.kind}-${index}-${message.text}`} data-kind={message.kind}>{message.text}</li>)}
       </ul>
       {product ? (
         <dl className="mt-3 grid grid-cols-[8rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs text-neutral-700">
@@ -1295,6 +1302,42 @@ function StatusPanel({
 
 function formatHydroMetStatusMessage(value: unknown, fallback = '状态详情不可用') {
   return formatHydroMetStationSeriesMessage(value, fallback)
+}
+
+function boundedHydroMetMessageList<T>(
+  items: readonly T[],
+  formatItem: (item: T) => string,
+  options: {
+    limit?: number
+    summaryLabel: string
+  },
+): BoundedHydroMetMessage[] {
+  const limit = Math.max(1, Math.trunc(options.limit ?? HYDRO_MET_PAGE_MESSAGE_LIST_LIMIT))
+  const visibleItems = items.slice(0, limit).map((item) => ({
+    kind: 'message' as const,
+    text: formatItem(item),
+  }))
+  const hiddenCount = Math.max(0, items.length - visibleItems.length)
+  if (hiddenCount <= 0) return visibleItems
+  return [
+    ...visibleItems,
+    {
+      kind: 'summary',
+      text: formatHydroMetStatusMessage(`另有 ${hiddenCount} 条${options.summaryLabel}已截断`, `${options.summaryLabel}已截断`),
+    },
+  ]
+}
+
+function getHydroMetQualityNotes(product: QhhLatestProduct): unknown[] {
+  const notes = product.availability?.quality_notes
+  return Array.isArray(notes) ? notes : []
+}
+
+function formatHydroMetQualityNote(note: unknown) {
+  if (!isRecord(note)) return formatHydroMetStatusMessage(note, '质量备注不可用')
+  const code = formatHydroMetStatusMessage(note.code, '质量备注代码不可用')
+  const message = formatHydroMetStatusMessage(note.message, '质量备注不可用')
+  return `${code}: ${message}`
 }
 
 function ControlField({ label, children }: { label: string; children: ReactNode }) {
