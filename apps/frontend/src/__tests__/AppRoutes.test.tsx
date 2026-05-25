@@ -14,6 +14,7 @@ import { useModelAssetsStore, type ModelAsset, type ModelAssetPage } from '@/sto
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
 import { FORECAST_CHART_POINT_BUDGET } from '@/lib/forecastRenderingBudget'
+import { HYDRO_MET_RIVER_FORECAST_LIMIT } from '@/lib/hydroMet/riverForecast'
 import { HYDRO_MET_STATION_SERIES_LIMIT } from '@/lib/hydroMet/stationSeries'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
 import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
@@ -700,6 +701,12 @@ function findHydroMetChartOption(variable: string) {
     .find((option) => option.series?.[0]?.name === variable)
 }
 
+function findHydroMetRiverChartOption() {
+  return screen.getAllByTestId('mock-echarts-option')
+    .map((node) => JSON.parse(node.textContent ?? '{}') as { series?: Array<{ name?: string; data?: unknown[] }> })
+    .find((option) => option.series?.[0]?.name === 'q_down river discharge')
+}
+
 const unsafeHydroMetMessage =
   'ERR_QHH failed opening s3://key:secret@bucket/private?token=abc#frag from file:///volume/data/nwm/Basins/qhh?sig=x#frag and /volume/data/nwm/Basins/qhh plus C:\\nwm\\Basins\\qhh'
 const unsafeHydroMetTokens = ['key:secret', 'token=abc', '#frag', 'file://', '/volume/data/nwm/Basins/qhh', 'C:\\nwm\\Basins\\qhh'] as const
@@ -727,11 +734,55 @@ const hydroMetRiverSegments = {
       },
       geometry: { type: 'LineString', coordinates: [[104, 31], [105, 32]] },
     },
+    {
+      type: 'Feature',
+      properties: {
+        segment_id: 'seg-002',
+        river_segment_id: 'seg-002',
+        basin_version_id: 'basins_qhh_vbasins',
+        river_network_version_id: 'basins_qhh_rivnet_vbasins',
+        name: 'QHH Segment 002',
+        stream_order: 4,
+        length_m: 1800,
+      },
+      geometry: { type: 'LineString', coordinates: [[105, 32], [106, 33]] },
+    },
   ],
   total: 1633,
   feature_total: 1633,
   limit: 250,
   offset: 0,
+}
+
+function hydroMetRiverForecastResponse(
+  segmentId = 'seg-001',
+  overrides: Record<string, unknown> = {},
+  seriesOverrides: Record<string, unknown> = {},
+) {
+  const sourceId = String(seriesOverrides.source_id ?? overrides.source_id ?? 'GFS')
+  const scenarioId = String(seriesOverrides.scenario_id ?? (sourceId === 'IFS' ? 'forecast_ifs_deterministic' : 'forecast_gfs_deterministic'))
+  const cycleTime = String(seriesOverrides.cycle_time ?? overrides.issue_time ?? '2026-05-21T00:00:00Z')
+  return {
+    segment_id: segmentId,
+    issue_time: cycleTime,
+    unit: 'm3/s',
+    frequency_thresholds: null,
+    series: [
+      {
+        scenario_id: scenarioId,
+        source_id: sourceId,
+        cycle_time: cycleTime,
+        available_lead_hours: sourceId === 'IFS' ? 144 : 168,
+        segment_role: 'future_7_days',
+        points: [
+          [Date.parse(cycleTime), segmentId === 'seg-002' ? 21 : 11],
+          [Date.parse('2026-05-21T06:00:00Z'), segmentId === 'seg-002' ? 24 : 13],
+        ],
+        ...seriesOverrides,
+      },
+    ],
+    ...overrides,
+  }
 }
 
 function mockHydroMetRouteClient(options: {
@@ -745,8 +796,22 @@ function mockHydroMetRouteClient(options: {
   stationSeriesError?: string
   stationSeriesThrow?: unknown
   stationSeriesDelayMs?: number
+  riverForecastResponse?: unknown | ((segmentId: string) => unknown)
+  riverForecastData?: unknown
+  riverForecastError?: string
+  riverForecastThrow?: unknown
 } = {}) {
   vi.mocked(client.GET).mockImplementation(async (path: string, requestOptions?: unknown) => {
+    if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+      const segmentId = (requestOptions as { params?: { path?: { segment_id?: string } } })?.params?.path?.segment_id ?? 'seg-001'
+      if (options.riverForecastThrow) throw options.riverForecastThrow
+      if (options.riverForecastError) return { data: undefined, error: { error: { message: options.riverForecastError } } } as never
+      if (options.riverForecastData) return { data: options.riverForecastData, error: undefined } as never
+      const response = typeof options.riverForecastResponse === 'function'
+        ? options.riverForecastResponse(segmentId)
+        : options.riverForecastResponse ?? hydroMetRiverForecastResponse(segmentId)
+      return { data: success(response), error: undefined } as never
+    }
     if (path === '/api/v1/met/stations/{station_id}/series') {
       const stationId = (requestOptions as { params?: { path?: { station_id?: string } } })?.params?.path?.station_id ?? 'qhh_forc_001'
       if (options.stationSeriesDelayMs) {
@@ -1107,7 +1172,7 @@ describe('App route state', () => {
     expect(screen.getByTestId('station-popup')).toHaveTextContent('HMT-Y2-0237')
   })
 
-  it('routes /hydro-met with navigation and bootstraps station and river candidates from latest-product IDs', async () => {
+  it('routes /hydro-met with navigation and bootstraps station, river candidates, and q_down forecast from latest-product IDs', async () => {
     mockHydroMetRouteClient()
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
@@ -1120,8 +1185,11 @@ describe('App route state', () => {
     expect(screen.getByTestId('hydro-met-station-list')).toHaveTextContent('qhh_forc_001')
     expect(screen.getByTestId('hydro-met-river-list')).toHaveTextContent('seg-001')
     expect(screen.getByTestId('hydro-met-no-fake-data')).toHaveTextContent('不绘制假曲线')
-    expect(screen.getByText(/河段 q_down 流量图表属于 #209/)).toBeInTheDocument()
     expect(await screen.findByTestId('hydro-met-variable-PRCP-chart')).toHaveTextContent('PRCP')
+    expect(await screen.findByTestId('hydro-met-selected-river')).toHaveTextContent('seg-001')
+    expect(await screen.findByTestId('hydro-met-river-forecast-loaded')).toHaveTextContent('q_down')
+    expect(screen.getByTestId('hydro-met-river-forecast-loaded')).toHaveTextContent('GFS / forecast_gfs_deterministic')
+    expect(screen.getByTestId('hydro-met-river-horizon')).toHaveTextContent('actual available horizon')
 
     expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
       params: { query: { source: 'GFS' } },
@@ -1135,6 +1203,24 @@ describe('App route state', () => {
         query: { river_network_version_id: 'basins_qhh_rivnet_vbasins', limit: 250, offset: 0 },
       },
     })
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith(
+      '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
+      {
+        params: {
+          path: {
+            basin_version_id: 'basins_qhh_vbasins',
+            segment_id: 'seg-001',
+          },
+          query: {
+            river_network_version_id: 'basins_qhh_rivnet_vbasins',
+            issue_time: '2026-05-21T00:00:00.000Z',
+            variables: 'q_down',
+            scenarios: 'forecast_gfs_deterministic',
+            include_analysis: false,
+          },
+        },
+      },
+    )
     expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/met/stations/{station_id}/series', {
       params: {
         path: { station_id: 'qhh_forc_001' },
@@ -1146,7 +1232,7 @@ describe('App route state', () => {
       },
     })
     expect(JSON.stringify(vi.mocked(client.GET).mock.calls)).not.toContain('manual')
-    expect(vi.mocked(client.GET).mock.calls.some(([path]) => String(path).endsWith('/forecast-series'))).toBe(false)
+    expect(findHydroMetRiverChartOption()?.series?.[0]?.data).toHaveLength(2)
   })
 
   it('shows /hydro-met loading state while bootstrap is pending', async () => {
@@ -1173,6 +1259,103 @@ describe('App route state', () => {
     expect(stationList).toHaveTextContent('qhh_forc_no_coord')
     expect(stationList).toHaveTextContent('坐标不可用')
     expect(screen.getByTestId('hydro-met-river-list')).toHaveTextContent('seg-001')
+  })
+
+  it('updates selected river row and prevents stale river forecast responses from overwriting the current q_down chart', async () => {
+    const user = userEvent.setup()
+    const forecastResolvers = new Map<string, (value: unknown) => void>()
+    vi.mocked(client.GET).mockImplementation((path: string, requestOptions?: unknown) => {
+      if (path === '/api/v1/mvp/qhh/latest-product') return Promise.resolve({ data: success(hydroMetLatestProduct()), error: undefined }) as never
+      if (path === '/api/v1/met/stations') return Promise.resolve({ data: success(hydroMetStationPage), error: undefined }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return Promise.resolve({ data: success(hydroMetRiverSegments), error: undefined }) as never
+      if (path === '/api/v1/met/stations/{station_id}/series') {
+        const stationId = (requestOptions as { params?: { path?: { station_id?: string } } })?.params?.path?.station_id ?? 'qhh_forc_001'
+        return Promise.resolve({ data: success(hydroMetStationSeriesResponse(stationId)), error: undefined }) as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        const segmentId = (requestOptions as { params?: { path?: { segment_id?: string } } })?.params?.path?.segment_id ?? 'seg-001'
+        return new Promise((resolve) => {
+          forecastResolvers.set(segmentId, resolve)
+        }) as never
+      }
+      return Promise.resolve({ data: success({}), error: undefined }) as never
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-selected-river')).toHaveTextContent('seg-001')
+    await waitFor(() => expect(forecastResolvers.has('seg-001')).toBe(true))
+    await user.click(screen.getAllByTestId('hydro-met-river-row')[1])
+    expect(await screen.findByTestId('hydro-met-selected-river')).toHaveTextContent('seg-002')
+    await waitFor(() => expect(forecastResolvers.has('seg-002')).toBe(true))
+
+    await act(async () => {
+      forecastResolvers.get('seg-002')?.({ data: success(hydroMetRiverForecastResponse('seg-002')), error: undefined })
+    })
+    expect(screen.getByTestId('hydro-met-river-forecast-loaded')).toHaveTextContent('seg-002')
+    expect(screen.getByTestId('hydro-met-river-forecast-loaded')).not.toHaveTextContent('seg-001 · QHH Segment 001')
+
+    await act(async () => {
+      forecastResolvers.get('seg-001')?.({ data: success(hydroMetRiverForecastResponse('seg-001')), error: undefined })
+    })
+    expect(screen.getByTestId('hydro-met-selected-river')).toHaveTextContent('seg-002')
+    expect(screen.getByTestId('hydro-met-river-forecast-loaded')).toHaveTextContent('seg-002')
+    expect(screen.getByTestId('hydro-met-river-forecast-loaded')).not.toHaveTextContent('seg-001 · QHH Segment 001')
+
+    const forecastCalls = vi.mocked(client.GET).mock.calls.filter(([path]) => String(path).endsWith('/forecast-series'))
+    expect(forecastCalls.map(([, options]) => (options as { params?: { path?: { segment_id?: string } } })?.params?.path?.segment_id)).toEqual(['seg-001', 'seg-002'])
+  })
+
+  it('uses matching IFS source/scenario and labels shorter actual river horizon without padded q_down values', async () => {
+    mockHydroMetRouteClient({
+      product: {
+        source_id: 'IFS',
+        cycle_time: '2026-05-21T06:00:00Z',
+        run_id: 'qhh_ifs_2026052106_smoke',
+        forcing_version_id: 'forc_ifs_2026052106_basins_qhh_shud',
+        river_valid_time_end: '2026-05-27T06:00:00Z',
+        valid_time_end: '2026-05-27T06:00:00Z',
+        available_horizon_hours: 144,
+        expected_horizon_hours: 168,
+        shorter_horizon: true,
+      },
+      riverForecastResponse: (segmentId) => hydroMetRiverForecastResponse(
+        segmentId,
+        { issue_time: '2026-05-21T06:00:00Z', unit: 'm3/s' },
+        {
+          scenario_id: 'forecast_ifs_deterministic',
+          source_id: 'IFS',
+          cycle_time: '2026-05-21T06:00:00Z',
+          available_lead_hours: 144,
+          points: [
+            [Date.parse('2026-05-21T06:00:00Z'), 31],
+            [Date.parse('2026-05-27T06:00:00Z'), 42],
+          ],
+        },
+      ),
+    })
+    window.history.pushState({}, '', '/hydro-met?source=IFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-river-forecast-loaded')).toHaveTextContent('IFS / forecast_ifs_deterministic')
+    expect(screen.getByTestId('hydro-met-river-horizon')).toHaveTextContent('144h')
+    expect(screen.getByTestId('hydro-met-river-horizon')).toHaveTextContent('expected 168h')
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith(
+      '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
+      expect.objectContaining({
+        params: expect.objectContaining({
+          query: expect.objectContaining({
+            scenarios: 'forecast_ifs_deterministic',
+            variables: 'q_down',
+          }),
+        }),
+      }),
+    )
+    const riverData = findHydroMetRiverChartOption()?.series?.[0]?.data
+    expect(riverData).toHaveLength(2)
+    expect(JSON.stringify(riverData)).not.toContain('2026-05-28')
   })
 
   it('shows station markers only for real coordinates and filters station search without fabricated results', async () => {
@@ -1233,6 +1416,10 @@ describe('App route state', () => {
   it('renders selected-station-absent state without requesting station-series or drawing charts', async () => {
     const user = userEvent.setup()
     vi.mocked(client.GET).mockImplementation(async (path: string, requestOptions?: unknown) => {
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        const segmentId = (requestOptions as { params?: { path?: { segment_id?: string } } })?.params?.path?.segment_id ?? 'seg-001'
+        return { data: success(hydroMetRiverForecastResponse(segmentId)), error: undefined } as never
+      }
       if (path === '/api/v1/met/stations/{station_id}/series') {
         const stationId = (requestOptions as { params?: { path?: { station_id?: string } } })?.params?.path?.station_id ?? 'qhh_forc_001'
         return { data: success(hydroMetStationSeriesResponse(stationId)), error: undefined } as never
@@ -1278,7 +1465,7 @@ describe('App route state', () => {
     expect(unavailable).toHaveTextContent('选中站点不在 inventory 中')
     expect(unavailable).toHaveTextContent('已停止 station-series 请求')
     expect(screen.queryByTestId('hydro-met-station-series-panel')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('mock-echarts-option')).not.toBeInTheDocument()
+    expect(findHydroMetChartOption('PRCP')).toBeUndefined()
     const stationSeriesStationIds = vi.mocked(client.GET).mock.calls
       .filter(([path]) => path === '/api/v1/met/stations/{station_id}/series')
       .map(([, options]) => (options as { params?: { path?: { station_id?: string } } })?.params?.path?.station_id)
@@ -1698,7 +1885,7 @@ describe('App route state', () => {
       expect(error).toHaveTextContent('过长内容已截断')
       expect((error.textContent ?? '').length).toBeLessThan(260)
       expect(document.body.textContent ?? '').not.toContain(attackToken)
-      expect(screen.queryByTestId('mock-echarts-option')).not.toBeInTheDocument()
+      expect(findHydroMetChartOption('PRCP')).toBeUndefined()
     }
   })
 
@@ -1952,6 +2139,142 @@ describe('App route state', () => {
 
     expect(await screen.findByTestId('hydro-met-empty-stations')).toHaveTextContent('站点列表为空')
     expect(screen.getByTestId('hydro-met-empty-rivers')).toHaveTextContent('河段列表为空')
+  })
+
+  it('renders river forecast empty, error, malformed, and missing q_down responses without fake charts', async () => {
+    const scenarios = [
+      {
+        setup: () => mockHydroMetRouteClient({
+          riverForecastResponse: hydroMetRiverForecastResponse('seg-001', {}, { points: [] }),
+        }),
+        testId: 'hydro-met-river-forecast-invalid',
+        text: '没有可绘制点',
+      },
+      {
+        setup: () => mockHydroMetRouteClient({ riverForecastError: 'river forecast timeout' }),
+        testId: 'hydro-met-river-forecast-error',
+        text: 'river forecast timeout',
+      },
+      {
+        setup: () => mockHydroMetRouteClient({
+          riverForecastData: { status: 'success', data: { segment_id: 'seg-001', unit: 'm3/s', series: [{ scenario_id: 'forecast_gfs_deterministic' }] } },
+        }),
+        testId: 'hydro-met-river-forecast-invalid',
+        text: 'points 缺失或格式无效',
+      },
+      {
+        setup: () => mockHydroMetRouteClient({
+          riverForecastResponse: hydroMetRiverForecastResponse(
+            'seg-001',
+            { variable: 'not_q_down' },
+            { scenario_id: 'forecast_gfs_deterministic', source_id: 'GFS' },
+          ),
+        }),
+        testId: 'hydro-met-river-forecast-invalid',
+        text: '不是 q_down',
+      },
+    ]
+
+    for (const [index, scenario] of scenarios.entries()) {
+      if (index > 0) {
+        cleanup()
+        vi.clearAllMocks()
+      }
+      scenario.setup()
+      window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+      render(<App />)
+
+      expect(await screen.findByTestId(scenario.testId)).toHaveTextContent(scenario.text)
+      expect(findHydroMetRiverChartOption()).toBeUndefined()
+    }
+  })
+
+  it('shows selected river unavailable after candidates change and does not request the absent segment again', async () => {
+    const user = userEvent.setup()
+    vi.mocked(client.GET).mockImplementation(async (path: string, requestOptions?: unknown) => {
+      if (path === '/api/v1/met/stations/{station_id}/series') {
+        const stationId = (requestOptions as { params?: { path?: { station_id?: string } } })?.params?.path?.station_id ?? 'qhh_forc_001'
+        return { data: success(hydroMetStationSeriesResponse(stationId)), error: undefined } as never
+      }
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
+        const segmentId = (requestOptions as { params?: { path?: { segment_id?: string } } })?.params?.path?.segment_id ?? 'seg-001'
+        return { data: success(hydroMetRiverForecastResponse(segmentId)), error: undefined } as never
+      }
+      return { data: success({}), error: undefined } as never
+    })
+    const baseResult = {
+      status: 'ready' as const,
+      source: 'GFS' as const,
+      cycle: null,
+      product: hydroMetLatestProduct(),
+      stations: hydroMetStationPage.items,
+      riverSegments: hydroMetRiverSegments.features,
+      stationPage: hydroMetStationPage,
+      riverSegmentCollection: hydroMetRiverSegments,
+      latestReasons: [],
+      stationError: null,
+      riverError: null,
+    }
+    const { rerender } = render(<ReadyHydroMetContent result={baseResult} product={baseResult.product} />)
+
+    expect(await screen.findByTestId('hydro-met-selected-river')).toHaveTextContent('seg-001')
+    await user.click(screen.getAllByTestId('hydro-met-river-row')[1])
+    expect(await screen.findByTestId('hydro-met-selected-river')).toHaveTextContent('seg-002')
+
+    const nextRiverCollection = {
+      ...hydroMetRiverSegments,
+      features: hydroMetRiverSegments.features.filter((feature) => feature.properties.river_segment_id !== 'seg-002'),
+      total: hydroMetRiverSegments.total - 1,
+      feature_total: hydroMetRiverSegments.feature_total - 1,
+    }
+    rerender(
+      <ReadyHydroMetContent
+        result={{
+          ...baseResult,
+          riverSegments: nextRiverCollection.features,
+          riverSegmentCollection: nextRiverCollection,
+        }}
+        product={baseResult.product}
+      />,
+    )
+
+    const unavailable = await screen.findByTestId('hydro-met-river-forecast-unavailable')
+    expect(unavailable).toHaveTextContent('选中河段不在候选列表中')
+    expect(unavailable).toHaveTextContent('已停止 forecast-series 请求')
+    const forecastSegmentIds = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => String(path).endsWith('/forecast-series'))
+      .map(([, options]) => (options as { params?: { path?: { segment_id?: string } } })?.params?.path?.segment_id)
+    expect(forecastSegmentIds).toEqual(['seg-001', 'seg-002'])
+  })
+
+  it('bounds oversized river q_down responses before ECharts options', async () => {
+    const oversizedPoints = Array.from({ length: HYDRO_MET_RIVER_FORECAST_LIMIT + 300 }, (_, index) => [
+      Date.parse('2026-05-21T00:00:00Z') + index * 60 * 60 * 1000,
+      index + 1,
+    ])
+    mockHydroMetRouteClient({
+      riverForecastResponse: hydroMetRiverForecastResponse('seg-001', {}, { points: oversizedPoints }),
+    })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    const horizon = await screen.findByTestId('hydro-met-river-horizon')
+    expect(horizon).toHaveTextContent(`capped ${HYDRO_MET_RIVER_FORECAST_LIMIT}/${oversizedPoints.length}`)
+    expect(findHydroMetRiverChartOption()?.series?.[0]?.data).toHaveLength(HYDRO_MET_RIVER_FORECAST_LIMIT)
+  })
+
+  it('does not use water level or stage wording for /hydro-met q_down UI', async () => {
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-river-forecast-loaded')).toHaveTextContent('river discharge')
+    const hydroMetText = screen.getByTestId('hydro-met-page').textContent ?? ''
+    expect(hydroMetText.toLowerCase()).not.toMatch(/water level|stage/)
+    expect(hydroMetText).not.toMatch(/水位/)
   })
 
   it('stops /hydro-met downstream bootstrap when URL cycle would mix products', async () => {
