@@ -9,6 +9,7 @@ import {
   hydroMetSources,
   mergeHydroMetQueryState,
   needsHydroMetQueryReplacement,
+  normalizeHydroMetCycle,
   parseHydroMetQueryState,
   serializeHydroMetQueryState,
   type HydroMetQueryPatch,
@@ -44,6 +45,23 @@ type StationSeriesLoadState =
   | { kind: 'loading'; requestKey: string }
   | { kind: 'loaded'; requestKey: string; response: HydroMetStationSeriesResponse }
   | { kind: 'error'; requestKey: string; message: string }
+
+type ChartableStationSeriesPoint = {
+  timestamp: number
+  value: number
+  qualityFlag: string | null
+}
+
+type StationSeriesValidation =
+  | {
+      ok: true
+      metadata: HydroMetStationSeries['metadata']
+      rawPoints: HydroMetStationSeries['points']
+      chartPointCount: number
+      renderedPoints: ChartableStationSeriesPoint[]
+      capped: boolean
+    }
+  | { ok: false; messages: string[] }
 
 export function HydroMetPage() {
   const location = useLocation()
@@ -418,7 +436,7 @@ function StationInventoryPanel({
       return label.includes(normalizedQuery)
     })
   }, [normalizedQuery, stations])
-  const markerStations = stations.filter((station) => getHydroMetStationCoordinates(station))
+  const markerStations = filteredStations.filter((station) => getHydroMetStationCoordinates(station))
 
   return (
     <section className="rounded-md border border-neutral-300 bg-white p-4" data-testid="hydro-met-station-panel">
@@ -663,6 +681,165 @@ function StationSeriesPanel({
   )
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isHydroMetStationSeriesVariable(value: unknown): value is HydroMetStationSeriesVariable {
+  return typeof value === 'string' && (HYDRO_MET_STATION_VARIABLES as readonly string[]).includes(value)
+}
+
+function mapUniqueHydroMetStationSeries(seriesList: HydroMetStationSeries[]) {
+  const seriesByVariable = new Map<HydroMetStationSeriesVariable, HydroMetStationSeries>()
+  seriesList.forEach((series) => {
+    const variable = (series as { variable?: unknown }).variable
+    if (isHydroMetStationSeriesVariable(variable) && !seriesByVariable.has(variable)) {
+      seriesByVariable.set(variable, series)
+    }
+  })
+  return seriesByVariable
+}
+
+function validateHydroMetStationSeriesContract(
+  response: HydroMetStationSeriesResponse,
+  product: QhhLatestProduct,
+) {
+  const messages: string[] = []
+  const counts = new Map<HydroMetStationSeriesVariable, number>()
+  const productCycle = normalizeHydroMetCycle(product.cycle_time)
+
+  response.series.forEach((series, index) => {
+    const variable = (series as { variable?: unknown }).variable
+    if (!isHydroMetStationSeriesVariable(variable)) {
+      messages.push(`series[${index}] variable=${String(variable)} 不属于 station-series MVP 变量`)
+      return
+    }
+    counts.set(variable, (counts.get(variable) ?? 0) + 1)
+
+    const sourceId = (series as { source_id?: unknown }).source_id
+    if (typeof sourceId === 'string' && sourceId !== product.source_id) {
+      messages.push(`${variable}.source_id=${sourceId} 与 latest-product ${product.source_id} 不一致`)
+    } else if (sourceId !== undefined && sourceId !== null && typeof sourceId !== 'string') {
+      messages.push(`${variable}.source_id 元数据格式无效`)
+    }
+
+    const cycleTime = (series as { cycle_time?: unknown }).cycle_time
+    if (cycleTime !== undefined && cycleTime !== null) {
+      if (typeof cycleTime !== 'string') {
+        messages.push(`${variable}.cycle_time 元数据格式无效`)
+      } else {
+        const seriesCycle = normalizeHydroMetCycle(cycleTime)
+        if (!seriesCycle) {
+          messages.push(`${variable}.cycle_time=${cycleTime} 不是有效 RFC3339 时间`)
+        } else if (productCycle && seriesCycle !== productCycle) {
+          messages.push(`${variable}.cycle_time=${seriesCycle} 与 latest-product ${productCycle} 不一致`)
+        }
+      }
+    }
+  })
+
+  counts.forEach((count, variable) => {
+    if (count > 1) messages.push(`${variable} 在 station-series 响应中重复 ${count} 次`)
+  })
+
+  return messages
+}
+
+function validateHydroMetStationSeriesForChart(series: HydroMetStationSeries): StationSeriesValidation {
+  const messages: string[] = []
+  const metadataValue = (series as { metadata?: unknown }).metadata
+  const pointsValue = (series as { points?: unknown }).points
+
+  if (!isRecord(metadataValue)) {
+    messages.push(`变量 ${series.variable} metadata 缺失或格式无效`)
+  }
+  if (!Array.isArray(pointsValue)) {
+    messages.push(`变量 ${series.variable} points 缺失或格式无效`)
+  }
+  if (messages.length > 0) return { ok: false, messages }
+
+  messages.push(...validateStationSeriesMetadata(metadataValue, series.variable))
+
+  let chartPointCount = 0
+  const renderedPoints: ChartableStationSeriesPoint[] = []
+  pointsValue.forEach((point, index) => {
+    const parsed = parseChartableStationSeriesPoint(point)
+    if (typeof parsed === 'string') {
+      messages.push(`变量 ${series.variable} 第 ${index + 1} 个点${parsed}`)
+    } else {
+      chartPointCount += 1
+      if (renderedPoints.length < HYDRO_MET_STATION_SERIES_LIMIT) renderedPoints.push(parsed)
+    }
+  })
+
+  if (messages.length > 0) return { ok: false, messages }
+
+  const metadata = metadataValue as unknown as HydroMetStationSeries['metadata']
+  const rawPoints = pointsValue as HydroMetStationSeries['points']
+  return {
+    ok: true,
+    metadata,
+    rawPoints,
+    chartPointCount,
+    renderedPoints,
+    capped: chartPointCount > HYDRO_MET_STATION_SERIES_LIMIT || metadata.returned_points > HYDRO_MET_STATION_SERIES_LIMIT,
+  }
+}
+
+function validateStationSeriesMetadata(metadata: Record<string, unknown>, variable: HydroMetStationSeriesVariable) {
+  const messages: string[] = []
+  const limit = metadata.limit
+  const returnedPoints = metadata.returned_points
+  const truncated = metadata.truncated
+
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
+    messages.push(`变量 ${variable} metadata.limit 缺失或格式无效`)
+  }
+  if (typeof returnedPoints !== 'number' || !Number.isInteger(returnedPoints) || returnedPoints < 0) {
+    messages.push(`变量 ${variable} metadata.returned_points 缺失或格式无效`)
+  }
+  if (typeof truncated !== 'boolean') {
+    messages.push(`变量 ${variable} metadata.truncated 缺失或格式无效`)
+  }
+
+  const metadataTimeFields = ['requested_from', 'requested_to', 'returned_from', 'returned_to'] as const
+  metadataTimeFields.forEach((field) => {
+    if (!(field in metadata)) {
+      messages.push(`变量 ${variable} metadata.${field} 缺失`)
+      return
+    }
+    const value = metadata[field]
+    if (value !== null && (typeof value !== 'string' || !normalizeHydroMetCycle(value))) {
+      messages.push(`变量 ${variable} metadata.${field} 不是有效 RFC3339 时间`)
+    }
+  })
+
+  return messages
+}
+
+function parseChartableStationSeriesPoint(point: unknown): ChartableStationSeriesPoint | string {
+  if (!isRecord(point)) return '不是对象'
+
+  const validTimeValue = point.valid_time
+  if (typeof validTimeValue !== 'string') return '缺少有效 valid_time'
+  const validTime = normalizeHydroMetCycle(validTimeValue)
+  if (!validTime) return `valid_time=${validTimeValue} 不是有效 RFC3339 时间`
+
+  const value = point.value
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'value 不是有限数值'
+
+  const qualityFlagValue = point.quality_flag
+  if (qualityFlagValue !== undefined && qualityFlagValue !== null && typeof qualityFlagValue !== 'string') {
+    return 'quality_flag 格式无效'
+  }
+
+  return {
+    timestamp: Date.parse(validTime),
+    value,
+    qualityFlag: qualityFlagValue ?? null,
+  }
+}
+
 function StationSeriesCharts({
   response,
   product,
@@ -672,11 +849,11 @@ function StationSeriesCharts({
   product: QhhLatestProduct
   stationId: string
 }) {
-  const identityMessages = validateHydroMetStationSeriesIdentity(response, product, stationId)
-  const seriesByVariable = new Map<HydroMetStationSeriesVariable, HydroMetStationSeries>()
-  response.series.forEach((series) => {
-    seriesByVariable.set(series.variable, series)
-  })
+  const identityMessages = [
+    ...validateHydroMetStationSeriesIdentity(response, product, stationId),
+    ...validateHydroMetStationSeriesContract(response, product),
+  ]
+  const seriesByVariable = mapUniqueHydroMetStationSeries(response.series)
 
   return (
     <div className="mt-3 space-y-3" data-testid="hydro-met-station-series-loaded">
@@ -721,10 +898,19 @@ function StationVariableChart({
     )
   }
 
-  const points = series.points.filter((point) => Number.isFinite(point.value) && Number.isFinite(Date.parse(point.valid_time)))
+  const validation = validateHydroMetStationSeriesForChart(series)
+  if (!validation.ok) {
+    return (
+      <VariableStatePanel variable={variable} testId={`hydro-met-variable-${variable}-invalid`}>
+        {validation.messages.join('；')}
+      </VariableStatePanel>
+    )
+  }
+
   const unitMissing = !series.unit
-  const nonOkFlags = Array.from(new Set(series.points.map((point) => point.quality_flag).filter((flag): flag is string => Boolean(flag && flag.toLowerCase() !== 'ok'))))
-  const truncated = series.truncated || series.metadata.truncated
+  const nonOkFlags = Array.from(new Set(validation.rawPoints.map((point) => point.quality_flag).filter((flag): flag is string => Boolean(flag && flag.toLowerCase() !== 'ok'))))
+  const truncated = series.truncated || validation.metadata.truncated
+  const capped = validation.capped || validation.chartPointCount > HYDRO_MET_STATION_SERIES_LIMIT
 
   if (unitMissing) {
     return (
@@ -734,7 +920,7 @@ function StationVariableChart({
     )
   }
 
-  if (points.length === 0) {
+  if (validation.renderedPoints.length === 0) {
     return (
       <VariableStatePanel variable={variable} testId={`hydro-met-variable-${variable}-empty`}>
         变量 {variable} 没有可绘制点。
@@ -751,7 +937,7 @@ function StationVariableChart({
             {series.unit} · {series.source_id ?? 'source unknown'} · cycle {formatDateTime(series.cycle_time)}
           </div>
           <div className="mt-1 font-mono text-[11px] text-neutral-500">
-            {formatDateTime(series.metadata.returned_from)} - {formatDateTime(series.metadata.returned_to)}
+            {formatDateTime(validation.metadata.returned_from)} - {formatDateTime(validation.metadata.returned_to)}
           </div>
         </div>
         <div className="flex flex-wrap gap-1 text-xs">
@@ -765,11 +951,16 @@ function StationVariableChart({
               truncated
             </span>
           ) : null}
+          {capped ? (
+            <span className="rounded border border-warning/50 bg-warning/10 px-2 py-1 text-neutral-900" data-testid={`hydro-met-variable-${variable}-capped`}>
+              capped {validation.renderedPoints.length}/{validation.chartPointCount}
+            </span>
+          ) : null}
         </div>
       </div>
-      <StationSeriesChart series={series} points={points} />
+      <StationSeriesChart series={series} points={validation.renderedPoints} />
       <div className="mt-2 text-xs text-neutral-700" data-testid={`hydro-met-variable-${variable}-metadata`}>
-        returned {series.metadata.returned_points} / limit {series.metadata.limit}; quality_flag {qualityFlagSummary(series.points)}
+        returned {validation.metadata.returned_points} / limit {validation.metadata.limit}; rendered {validation.renderedPoints.length}; quality_flag {qualityFlagSummary(validation.rawPoints)}
       </div>
     </div>
   )
@@ -792,7 +983,7 @@ function VariableStatePanel({
   )
 }
 
-function StationSeriesChart({ series, points }: { series: HydroMetStationSeries; points: HydroMetStationSeries['points'] }) {
+function StationSeriesChart({ series, points }: { series: HydroMetStationSeries; points: ChartableStationSeriesPoint[] }) {
   const option = useMemo(
     () => ({
       color: ['#0f8fbf'],
@@ -817,7 +1008,7 @@ function StationSeriesChart({ series, points }: { series: HydroMetStationSeries;
           name: series.variable,
           showSymbol: points.length <= 48,
           symbolSize: 5,
-          data: points.map((point) => [Date.parse(point.valid_time), point.value, point.quality_flag]),
+          data: points.map((point) => [point.timestamp, point.value, point.qualityFlag]),
         },
       ],
     }),

@@ -13,6 +13,7 @@ import { useModelAssetsStore, type ModelAsset, type ModelAssetPage } from '@/sto
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useOverviewDataStore } from '@/stores/overviewData'
 import { FORECAST_CHART_POINT_BUDGET } from '@/lib/forecastRenderingBudget'
+import { HYDRO_MET_STATION_SERIES_LIMIT } from '@/lib/hydroMet/stationSeries'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
 import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
 
@@ -681,6 +682,17 @@ function hydroMetStationSeriesResponse(stationId = 'qhh_forc_001', overrides: Re
   }
 }
 
+function hydroMetStationSeriesPoint(index: number, overrides: Record<string, unknown> = {}) {
+  const validTime = new Date(Date.UTC(2026, 4, 21, index, 0, 0)).toISOString()
+  return {
+    valid_time: validTime,
+    value: index + 1,
+    quality_flag: 'ok',
+    source_id: 'GFS',
+    ...overrides,
+  }
+}
+
 const unsafeHydroMetMessage =
   'ERR_QHH failed opening s3://key:secret@bucket/private?token=abc#frag from file:///volume/data/nwm/Basins/qhh?sig=x#frag and /volume/data/nwm/Basins/qhh plus C:\\nwm\\Basins\\qhh'
 const unsafeHydroMetTokens = ['key:secret', 'token=abc', '#frag', 'file://', '/volume/data/nwm/Basins/qhh', 'C:\\nwm\\Basins\\qhh'] as const
@@ -1166,10 +1178,16 @@ describe('App route state', () => {
     await user.type(screen.getByLabelText('搜索气象站点'), 'North')
     expect(screen.getByTestId('hydro-met-station-list')).toHaveTextContent('qhh_forc_002')
     expect(screen.getByTestId('hydro-met-station-list')).not.toHaveTextContent('qhh_forc_001')
+    expect(screen.getByTestId('hydro-met-station-marker-count')).toHaveTextContent('markers 1')
+    expect(screen.getByTestId('hydro-met-station-marker')).toHaveAttribute('data-station-id', 'qhh_forc_002')
+    expect(screen.queryByRole('button', { name: '选择站点 qhh_forc_001' })).not.toBeInTheDocument()
 
     await user.clear(screen.getByLabelText('搜索气象站点'))
     await user.type(screen.getByLabelText('搜索气象站点'), 'not-a-real-station')
     expect(screen.getByTestId('hydro-met-station-no-results')).toHaveTextContent('没有匹配的真实站点')
+    expect(screen.getByTestId('hydro-met-station-marker-count')).toHaveTextContent('markers 0')
+    expect(screen.queryAllByTestId('hydro-met-station-marker')).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: '选择站点 qhh_forc_002' })).not.toBeInTheDocument()
   })
 
   it('updates selected station and charts from row, marker, and search-result selection', async () => {
@@ -1240,6 +1258,99 @@ describe('App route state', () => {
     expect(screen.getByTestId('hydro-met-variable-Press-missing')).toHaveTextContent('响应中缺失')
   })
 
+  it('renders malformed station-series metadata and points as variable-level invalid states without charts', async () => {
+    const response = hydroMetStationSeriesResponse('qhh_forc_001')
+    response.series = response.series.map((series: Record<string, unknown>) => {
+      if (series.variable === 'PRCP') {
+        const { metadata, ...withoutMetadata } = series
+        void metadata
+        return withoutMetadata
+      }
+      if (series.variable === 'TEMP') return { ...series, metadata: null }
+      if (series.variable === 'RH') return { ...series, points: null }
+      if (series.variable === 'wind') return { ...series, metadata: { truncated: false } }
+      return series
+    })
+    mockHydroMetRouteClient({ stationSeriesResponse: response })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-variable-PRCP-invalid')).toHaveTextContent('metadata 缺失或格式无效')
+    expect(screen.getByTestId('hydro-met-variable-TEMP-invalid')).toHaveTextContent('metadata 缺失或格式无效')
+    expect(screen.getByTestId('hydro-met-variable-RH-invalid')).toHaveTextContent('points 缺失或格式无效')
+    expect(screen.getByTestId('hydro-met-variable-wind-invalid')).toHaveTextContent('metadata.limit 缺失')
+    expect(screen.queryByTestId('hydro-met-variable-PRCP-chart')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('hydro-met-variable-TEMP-chart')).not.toBeInTheDocument()
+  })
+
+  it('caps oversized station-series render data and exposes rendered count metadata', async () => {
+    const response = hydroMetStationSeriesResponse('qhh_forc_001')
+    const oversizedPoints = Array.from({ length: HYDRO_MET_STATION_SERIES_LIMIT + 7 }, (_, index) => hydroMetStationSeriesPoint(index))
+    response.series = response.series.map((series: Record<string, unknown>) => {
+      if (series.variable !== 'PRCP') return series
+      return {
+        ...series,
+        points: oversizedPoints,
+        metadata: {
+          limit: HYDRO_MET_STATION_SERIES_LIMIT,
+          returned_points: oversizedPoints.length,
+          requested_from: null,
+          requested_to: null,
+          returned_from: oversizedPoints[0].valid_time,
+          returned_to: oversizedPoints[oversizedPoints.length - 1].valid_time,
+          truncated: true,
+        },
+        truncated: true,
+      }
+    })
+    mockHydroMetRouteClient({ stationSeriesResponse: response })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-variable-PRCP-capped')).toHaveTextContent(`capped ${HYDRO_MET_STATION_SERIES_LIMIT}/${oversizedPoints.length}`)
+    expect(screen.getByTestId('hydro-met-variable-PRCP-metadata')).toHaveTextContent(`rendered ${HYDRO_MET_STATION_SERIES_LIMIT}`)
+    const prcpOption = screen.getAllByTestId('mock-echarts-option')
+      .map((node) => JSON.parse(node.textContent ?? '{}') as { series?: Array<{ name?: string; data?: unknown[] }> })
+      .find((option) => option.series?.[0]?.name === 'PRCP')
+    expect(prcpOption?.series?.[0]?.data).toHaveLength(HYDRO_MET_STATION_SERIES_LIMIT)
+  })
+
+  it('rejects impossible station-series dates and non-finite values instead of drawing partial clean lines', async () => {
+    const response = hydroMetStationSeriesResponse('qhh_forc_001')
+    response.series = response.series.map((series: Record<string, unknown>) => {
+      if (series.variable === 'PRCP') {
+        return {
+          ...series,
+          points: [
+            hydroMetStationSeriesPoint(0),
+            hydroMetStationSeriesPoint(1, { valid_time: '2026-02-30T00:00:00Z' }),
+          ],
+        }
+      }
+      if (series.variable === 'TEMP') {
+        return {
+          ...series,
+          points: [
+            hydroMetStationSeriesPoint(0),
+            hydroMetStationSeriesPoint(1, { value: Number.POSITIVE_INFINITY }),
+          ],
+        }
+      }
+      return series
+    })
+    mockHydroMetRouteClient({ stationSeriesResponse: response })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-variable-PRCP-invalid')).toHaveTextContent('valid_time=2026-02-30T00:00:00Z')
+    expect(screen.getByTestId('hydro-met-variable-TEMP-invalid')).toHaveTextContent('value 不是有限数值')
+    expect(screen.queryByTestId('hydro-met-variable-PRCP-chart')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('hydro-met-variable-TEMP-chart')).not.toBeInTheDocument()
+  })
+
   it('shows station-series API errors and identity mismatch as explicit unavailable states', async () => {
     mockHydroMetRouteClient({ stationSeriesError: 'station not found for forcing version' })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
@@ -1263,6 +1374,28 @@ describe('App route state', () => {
 
     expect(await screen.findByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('station_id=qhh_forc_999')
     expect(screen.getByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('wrong-forcing')
+
+    cleanup()
+    vi.clearAllMocks()
+    const response = hydroMetStationSeriesResponse('qhh_forc_001')
+    response.series = [
+      response.series[0],
+      { ...response.series[0], points: [hydroMetStationSeriesPoint(2)] },
+      ...response.series.slice(1).map((series: Record<string, unknown>) => (
+        series.variable === 'TEMP'
+          ? { ...series, source_id: 'IFS', cycle_time: '2026-05-21T12:00:00Z' }
+          : series
+      )),
+    ]
+    mockHydroMetRouteClient({ stationSeriesResponse: response })
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('PRCP 在 station-series 响应中重复 2 次')
+    expect(screen.getByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('TEMP.source_id=IFS')
+    expect(screen.getByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('TEMP.cycle_time=2026-05-21T12:00:00.000Z')
+    expect(screen.queryByTestId('hydro-met-variable-PRCP-chart')).not.toBeInTheDocument()
   })
 
   it('prevents stale station-series responses from overwriting the current selected station chart', async () => {
