@@ -870,6 +870,8 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     assert schemas["QhhLatestQuality"]["properties"]["station_variable_coverage"]["items"]["$ref"] == (
         "#/components/schemas/QhhLatestStationVariableCoverage"
     )
+    assert "display_end_station_count" not in schemas["QhhLatestStationVariableCoverage"]["required"]
+    assert "display_end_station_count" not in schemas["QhhLatestStationVariableCoverage"]["properties"]
     assert schemas["QhhLatestUnavailableReason"]["additionalProperties"] is True
 
     generated_types = (
@@ -883,6 +885,7 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     assert "QhhLatestProduct:" in generated_types
     assert 'status: "ready" | "unavailable";' in generated_types
     assert "available_horizon_hours: number | null;" in generated_types
+    assert "display_end_station_count: number;" not in generated_types
     assert "QhhLatestUnavailableReason:" in generated_types
 
 
@@ -1138,13 +1141,19 @@ class _RunStore:
                 "river_sample_count": 10000,
                 "required_station_variables": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
                 "station_variable_coverage": [],
-                "candidate_limit": 25,
+                "candidate_limit": 100,
                 "query_indexes": [
                     {
                         "table": "hydro.hydro_run",
-                        "index": "hydro_run_latest_ready_run_idx",
-                        "status": "covered_by_partial_index",
-                        "columns": ["cycle_time DESC", "run_id DESC"],
+                        "index": "hydro_run_qhh_latest_candidate_idx",
+                        "status": "covered_by_latest_product_candidate_index",
+                        "columns": [
+                            "LOWER(source_id)",
+                            "run_type",
+                            "basin_version_id",
+                            "cycle_time DESC",
+                            "run_id DESC",
+                        ],
                     }
                 ],
             },

@@ -11,7 +11,7 @@ MVP_STATION_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 DEFAULT_STATION_SERIES_LIMIT = 500
 MAX_STATION_SERIES_LIMIT = 10000
 QHH_BASIN_ID = "basins_qhh"
-QHH_LATEST_CANDIDATE_LIMIT = 25
+QHH_LATEST_CANDIDATE_LIMIT = 100
 QHH_LATEST_CONTEXT_LIMIT = 10
 QHH_LATEST_EXPECTED_HORIZON_HOURS = 168
 QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
@@ -1021,7 +1021,9 @@ class PsycopgForecastStore:
                     fv.end_time AS forcing_end_time,
                     fv.station_count AS expected_station_count,
                     fv.checksum AS forcing_checksum,
-                    fv.lineage_json AS forcing_lineage_json
+                    fv.lineage_json AS forcing_lineage_json,
+                    GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
+                    LEAST(h.end_time, fv.end_time) AS display_end_time
                 FROM hydro.hydro_run h
                 JOIN core.basin_version bv
                   ON bv.basin_version_id = h.basin_version_id
@@ -1034,7 +1036,6 @@ class PsycopgForecastStore:
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
                   AND LOWER(h.source_id) = LOWER(%s)
-                  AND h.status IN ('frequency_done', 'published')
                   AND h.cycle_time IS NOT NULL
                 ORDER BY h.cycle_time DESC, h.run_id DESC
                 LIMIT %s
@@ -1042,6 +1043,8 @@ class PsycopgForecastStore:
             station_coverage AS (
                 SELECT
                     fst.forcing_version_id,
+                    fst.basin_version_id,
+                    LOWER(fst.source_id) AS station_source_id,
                     COUNT(DISTINCT fst.station_id) AS station_count,
                     COUNT(*) AS station_sample_count,
                     MIN(fst.valid_time) AS station_valid_time_start,
@@ -1049,14 +1052,26 @@ class PsycopgForecastStore:
                 FROM met.forcing_station_timeseries fst
                 JOIN candidate_runs cr
                   ON cr.forcing_version_id = fst.forcing_version_id
+                 AND fst.basin_version_id = cr.basin_version_id
+                 AND LOWER(fst.source_id) = LOWER(cr.source_id)
                 WHERE fst.variable = ANY(%s)
-                  AND fst.valid_time >= cr.forcing_start_time
-                  AND fst.valid_time <= cr.forcing_end_time
-                GROUP BY fst.forcing_version_id
+                  AND fst.valid_time >= cr.display_start_time
+                  AND fst.valid_time <= cr.display_end_time
+                  AND EXISTS (
+                      SELECT 1
+                      FROM met.interp_weight iw
+                      WHERE iw.model_id = cr.model_id
+                        AND iw.station_id = fst.station_id
+                        AND iw.variable = fst.variable
+                        AND LOWER(iw.source_id) = LOWER(cr.source_id)
+                  )
+                GROUP BY fst.forcing_version_id, fst.basin_version_id, LOWER(fst.source_id)
             ),
             station_variable_coverage AS (
                 SELECT
                     variable_stats.forcing_version_id,
+                    variable_stats.basin_version_id,
+                    variable_stats.station_source_id,
                     jsonb_agg(
                         jsonb_build_object(
                             'variable', variable_stats.variable,
@@ -1074,6 +1089,8 @@ class PsycopgForecastStore:
                 FROM (
                     SELECT
                         fst.forcing_version_id,
+                        fst.basin_version_id,
+                        LOWER(fst.source_id) AS station_source_id,
                         fst.variable,
                         COUNT(DISTINCT fst.station_id) AS station_count,
                         COUNT(*) AS sample_count,
@@ -1088,12 +1105,25 @@ class PsycopgForecastStore:
                     FROM met.forcing_station_timeseries fst
                     JOIN candidate_runs cr
                       ON cr.forcing_version_id = fst.forcing_version_id
+                     AND fst.basin_version_id = cr.basin_version_id
+                     AND LOWER(fst.source_id) = LOWER(cr.source_id)
                     WHERE fst.variable = ANY(%s)
-                      AND fst.valid_time >= cr.forcing_start_time
-                      AND fst.valid_time <= cr.forcing_end_time
-                    GROUP BY fst.forcing_version_id, fst.variable
+                      AND fst.valid_time >= cr.display_start_time
+                      AND fst.valid_time <= cr.display_end_time
+                      AND EXISTS (
+                          SELECT 1
+                          FROM met.interp_weight iw
+                          WHERE iw.model_id = cr.model_id
+                            AND iw.station_id = fst.station_id
+                            AND iw.variable = fst.variable
+                            AND LOWER(iw.source_id) = LOWER(cr.source_id)
+                      )
+                    GROUP BY fst.forcing_version_id, fst.basin_version_id, LOWER(fst.source_id), fst.variable
                 ) variable_stats
-                GROUP BY variable_stats.forcing_version_id
+                GROUP BY
+                    variable_stats.forcing_version_id,
+                    variable_stats.basin_version_id,
+                    variable_stats.station_source_id
             ),
             hydro_coverage AS (
                 SELECT
@@ -1112,12 +1142,16 @@ class PsycopgForecastStore:
                  AND cr.basin_version_id = rt.basin_version_id
                  AND cr.river_network_version_id = rt.river_network_version_id
                 WHERE rt.variable = 'q_down'
+                  AND rt.valid_time >= cr.display_start_time
+                  AND rt.valid_time <= cr.display_end_time
                 GROUP BY rt.run_id, rt.basin_version_id, rt.river_network_version_id
             )
             SELECT
                 cr.*,
                 COALESCE(sc.station_count, 0) AS station_count,
                 COALESCE(sc.station_sample_count, 0) AS station_sample_count,
+                sc.basin_version_id AS station_basin_version_id,
+                sc.station_source_id,
                 sc.station_valid_time_start,
                 sc.station_valid_time_end,
                 COALESCE(svc.station_variable_coverage, '[]'::jsonb) AS station_variable_coverage,
@@ -1130,8 +1164,12 @@ class PsycopgForecastStore:
             FROM candidate_runs cr
             LEFT JOIN station_coverage sc
               ON sc.forcing_version_id = cr.forcing_version_id
+             AND sc.basin_version_id = cr.basin_version_id
+             AND sc.station_source_id = LOWER(cr.source_id)
             LEFT JOIN station_variable_coverage svc
               ON svc.forcing_version_id = cr.forcing_version_id
+             AND svc.basin_version_id = cr.basin_version_id
+             AND svc.station_source_id = LOWER(cr.source_id)
             LEFT JOIN hydro_coverage hc
               ON hc.run_id = cr.run_id
              AND hc.basin_version_id = cr.basin_version_id
@@ -1725,14 +1763,11 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any]) -> dict[str, Any]:
     reasons = _qhh_latest_unavailable_reasons(row)
     source_id = _display_source_id(str(row.get("source_id") or ""))
     cycle_time = _datetime_value(row.get("cycle_time"))
-    forcing_end_time = _datetime_value(row.get("forcing_end_time"))
-    river_end_time = _datetime_value(row.get("river_valid_time_end"))
-    available_end_time = _earliest_datetime(forcing_end_time, river_end_time)
+    available_start_time, available_end_time = _qhh_latest_available_window(row)
     horizon_hours = _qhh_latest_horizon_hours(
         row,
         cycle_time=cycle_time,
-        forcing_end_time=forcing_end_time,
-        river_end_time=river_end_time,
+        available_end_time=available_end_time,
     )
     expected_horizon_hours = QHH_LATEST_EXPECTED_HORIZON_HOURS
     shorter_horizon = horizon_hours is not None and horizon_hours < expected_horizon_hours
@@ -1765,7 +1800,7 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any]) -> dict[str, Any]:
         "expected_segment_count": _optional_non_negative_response_int(row.get("expected_segment_count")),
         "status": "ready" if not reasons else "unavailable",
         "run_status": str(row.get("status") or ""),
-        "valid_time_start": _format_time_value(row.get("river_valid_time_start")),
+        "valid_time_start": _format_time(available_start_time),
         "valid_time_end": _format_time(available_end_time),
         "river_valid_time_start": _format_time_value(row.get("river_valid_time_start")),
         "river_valid_time_end": _format_time_value(row.get("river_valid_time_end")),
@@ -1877,7 +1912,13 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         )
     cycle_time = _datetime_value(row.get("cycle_time"))
     forcing_cycle_time = _datetime_value(row.get("forcing_cycle_time"))
-    if cycle_time is not None and forcing_cycle_time is not None and cycle_time != forcing_cycle_time:
+    if row.get("fv_forcing_version_id") is not None and forcing_cycle_time is None:
+        add(
+            "FORCING_CYCLE_MISSING",
+            "Forcing version cycle_time is required for a ready latest-product response.",
+            forcing_version_id=row.get("forcing_version_id"),
+        )
+    elif cycle_time is not None and forcing_cycle_time is not None and cycle_time != forcing_cycle_time:
         add(
             "FORCING_CYCLE_MISMATCH",
             "Hydro run cycle_time does not match forcing version cycle_time.",
@@ -1885,10 +1926,32 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
             forcing_cycle_time=_format_time(forcing_cycle_time),
         )
 
+    display_start_time = _datetime_value(row.get("display_start_time"))
+    display_end_time = _datetime_value(row.get("display_end_time"))
+    if row.get("fv_forcing_version_id") is not None and (display_start_time is None or display_end_time is None):
+        add(
+            "DISPLAY_WINDOW_MISSING",
+            "A selected display window from hydro run and forcing windows is required.",
+            run_start_time=_format_time_value(row.get("run_start_time")),
+            run_end_time=_format_time_value(row.get("run_end_time")),
+            forcing_start_time=_format_time_value(row.get("forcing_start_time")),
+            forcing_end_time=_format_time_value(row.get("forcing_end_time")),
+        )
+    elif display_start_time is not None and display_end_time is not None and display_end_time <= display_start_time:
+        add(
+            "DISPLAY_WINDOW_NONPOSITIVE",
+            "Selected display window must have positive duration.",
+            display_start_time=_format_time(display_start_time),
+            display_end_time=_format_time(display_end_time),
+        )
+
     station_count = _non_negative_int(row.get("station_count"))
     expected_station_count = _optional_non_negative_response_int(row.get("expected_station_count"))
     if station_count <= 0:
-        add("STATION_FORCING_MISSING", "No station forcing samples were found for the selected forcing version.")
+        add(
+            "STATION_FORCING_MISSING",
+            "No station forcing samples were found for the selected basin/source/model station identity.",
+        )
     if expected_station_count is not None and station_count != expected_station_count:
         add(
             "STATION_COUNT_MISMATCH",
@@ -1896,6 +1959,43 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
             expected=expected_station_count,
             actual=station_count,
         )
+    station_basin_version_id = row.get("station_basin_version_id")
+    if station_basin_version_id and row.get("basin_version_id") != station_basin_version_id:
+        add(
+            "STATION_BASIN_MISMATCH",
+            "Station forcing rows do not match the selected basin_version_id.",
+            run_basin_version_id=row.get("basin_version_id"),
+            station_basin_version_id=station_basin_version_id,
+        )
+    station_source_id = _display_source_id(str(row.get("station_source_id") or ""))
+    if row.get("station_source_id") and station_source_id != source_id:
+        add(
+            "STATION_SOURCE_MISMATCH",
+            "Station forcing rows do not match the selected source_id.",
+            run_source_id=source_id,
+            station_source_id=station_source_id,
+        )
+    station_start = _datetime_value(row.get("station_valid_time_start"))
+    station_end = _datetime_value(row.get("station_valid_time_end"))
+    if station_count > 0:
+        if station_start is None or station_end is None:
+            add("STATION_VALID_TIME_MISSING", "Station forcing valid-time metadata is missing.")
+        elif station_end < station_start:
+            add("STATION_INVALID_VALID_TIME_RANGE", "Station forcing valid-time range is invalid.")
+        if display_start_time is not None and station_start is not None and station_start < display_start_time:
+            add(
+                "STATION_WINDOW_UNDERFLOW",
+                "Station forcing coverage includes samples before the selected display window.",
+                display_start_time=_format_time(display_start_time),
+                station_valid_time_start=_format_time(station_start),
+            )
+        if display_end_time is not None and station_end is not None and station_end > display_end_time:
+            add(
+                "STATION_WINDOW_OVERFLOW",
+                "Station forcing coverage includes samples after the selected display window.",
+                display_end_time=_format_time(display_end_time),
+                station_valid_time_end=_format_time(station_end),
+            )
 
     station_coverage = _qhh_station_variable_coverage(row.get("station_variable_coverage"))
     coverage_by_variable = {item["variable"]: item for item in station_coverage}
@@ -1912,6 +2012,14 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
                 variable=variable,
                 expected=expected_station_count,
                 actual=variable_station_count,
+            )
+        if variable_station_count > 0 and int(coverage.get("sample_count") or 0) <= variable_station_count:
+            add(
+                "STATION_VARIABLE_SINGLE_TIMESTEP",
+                "Station forcing variable coverage must include more than one timestep.",
+                variable=variable,
+                station_count=variable_station_count,
+                sample_count=int(coverage.get("sample_count") or 0),
             )
         if int(coverage.get("unit_count") or 0) <= 0 or int(coverage.get("missing_unit_samples") or 0) > 0:
             add(
@@ -1930,11 +2038,41 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
                 variable=variable,
                 missing_samples=int(coverage.get("missing_quality_flag_samples") or 0),
             )
+        variable_start = _datetime_value(coverage.get("valid_time_start"))
+        variable_end = _datetime_value(coverage.get("valid_time_end"))
+        if variable_start is None or variable_end is None:
+            add(
+                "STATION_VARIABLE_VALID_TIME_MISSING",
+                "Station forcing variable valid-time metadata is missing.",
+                variable=variable,
+            )
+        elif variable_end < variable_start:
+            add(
+                "STATION_VARIABLE_INVALID_VALID_TIME_RANGE",
+                "Station forcing variable valid-time range is invalid.",
+                variable=variable,
+            )
+        if display_start_time is not None and variable_start is not None and variable_start < display_start_time:
+            add(
+                "STATION_VARIABLE_WINDOW_UNDERFLOW",
+                "Station forcing variable coverage includes samples before the selected display window.",
+                variable=variable,
+                display_start_time=_format_time(display_start_time),
+                valid_time_start=_format_time(variable_start),
+            )
+        if display_end_time is not None and variable_end is not None and variable_end > display_end_time:
+            add(
+                "STATION_VARIABLE_WINDOW_OVERFLOW",
+                "Station forcing variable coverage includes samples after the selected display window.",
+                variable=variable,
+                display_end_time=_format_time(display_end_time),
+                valid_time_end=_format_time(variable_end),
+            )
 
     segment_count = _non_negative_int(row.get("segment_count"))
     expected_segment_count = _optional_non_negative_response_int(row.get("expected_segment_count"))
     if segment_count <= 0 or _non_negative_int(row.get("river_sample_count")) <= 0:
-        add("Q_DOWN_MISSING", "No river q_down samples were found for the selected run identity.")
+        add("Q_DOWN_MISSING", "No river q_down samples were found inside the selected display window.")
     if expected_segment_count is not None and segment_count != expected_segment_count:
         add(
             "SEGMENT_COUNT_MISMATCH",
@@ -1942,13 +2080,78 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
             expected=expected_segment_count,
             actual=segment_count,
         )
-
+    if segment_count > 0 and _non_negative_int(row.get("river_sample_count")) <= segment_count:
+        add(
+            "Q_DOWN_SINGLE_TIMESTEP",
+            "River q_down coverage must include more than one timestep.",
+            segment_count=segment_count,
+            sample_count=_non_negative_int(row.get("river_sample_count")),
+        )
     river_start = _datetime_value(row.get("river_valid_time_start"))
     river_end = _datetime_value(row.get("river_valid_time_end"))
     if river_start is None or river_end is None:
         add("Q_DOWN_VALID_TIME_MISSING", "River q_down valid-time metadata is missing.")
     elif river_end < river_start:
         add("Q_DOWN_INVALID_VALID_TIME_RANGE", "River q_down valid-time range is invalid.")
+    if display_start_time is not None and river_start is not None and river_start < display_start_time:
+        add(
+            "Q_DOWN_WINDOW_UNDERFLOW",
+            "River q_down coverage includes samples before the selected display window.",
+            display_start_time=_format_time(display_start_time),
+            river_valid_time_start=_format_time(river_start),
+        )
+    if display_end_time is not None and river_end is not None and river_end > display_end_time:
+        add(
+            "Q_DOWN_WINDOW_OVERFLOW",
+            "River q_down coverage includes samples after the selected display window.",
+            display_end_time=_format_time(display_end_time),
+            river_valid_time_end=_format_time(river_end),
+        )
+    if cycle_time is not None and river_end is not None and _elapsed_lead_hours(cycle_time, river_end) is None:
+        add(
+            "Q_DOWN_HORIZON_NONPOSITIVE",
+            "River q_down coverage must extend beyond the selected cycle_time.",
+            cycle_time=_format_time(cycle_time),
+            river_valid_time_end=_format_time(river_end),
+        )
+    max_lead_time_hours = _optional_int(row.get("max_lead_time_hours"))
+    if max_lead_time_hours is not None and max_lead_time_hours <= 0:
+        add(
+            "Q_DOWN_LEAD_TIME_NONPOSITIVE",
+            "River q_down max lead time must be positive for a ready latest-product response.",
+            max_lead_time_hours=max_lead_time_hours,
+        )
+
+    available_start_time, available_end_time = _qhh_latest_available_window(row)
+    if available_start_time is None or available_end_time is None:
+        add(
+            "DISPLAYABLE_WINDOW_MISSING",
+            "Station forcing and river q_down coverage do not provide a common displayable window.",
+            display_start_time=_format_time(display_start_time),
+            display_end_time=_format_time(display_end_time),
+            station_valid_time_start=_format_time(station_start),
+            station_valid_time_end=_format_time(station_end),
+            river_valid_time_start=_format_time(river_start),
+            river_valid_time_end=_format_time(river_end),
+        )
+    elif available_end_time <= available_start_time:
+        add(
+            "DISPLAYABLE_WINDOW_NONPOSITIVE",
+            "Station forcing and river q_down coverage do not overlap for a positive displayable window.",
+            available_start_time=_format_time(available_start_time),
+            available_end_time=_format_time(available_end_time),
+        )
+    if (
+        cycle_time is not None
+        and available_end_time is not None
+        and _elapsed_lead_hours(cycle_time, available_end_time) is None
+    ):
+        add(
+            "DISPLAYABLE_HORIZON_NONPOSITIVE",
+            "The common displayable window must extend beyond the hydro cycle_time.",
+            cycle_time=_format_time(cycle_time),
+            available_end_time=_format_time(available_end_time),
+        )
 
     return reasons
 
@@ -1957,16 +2160,49 @@ def _qhh_latest_horizon_hours(
     row: Mapping[str, Any],
     *,
     cycle_time: datetime | None,
-    forcing_end_time: datetime | None,
-    river_end_time: datetime | None,
+    available_end_time: datetime | None,
 ) -> int | None:
     explicit_lead = _optional_int(row.get("max_lead_time_hours"))
-    elapsed_lead = _elapsed_lead_hours(cycle_time, _earliest_datetime(forcing_end_time, river_end_time))
+    elapsed_lead = _elapsed_lead_hours(cycle_time, available_end_time)
     if explicit_lead is not None and elapsed_lead is not None:
         return min(explicit_lead, elapsed_lead)
     if explicit_lead is not None:
         return explicit_lead
     return elapsed_lead
+
+
+def _qhh_latest_available_window(row: Mapping[str, Any]) -> tuple[datetime | None, datetime | None]:
+    station_coverage = _qhh_station_variable_coverage(row.get("station_variable_coverage"))
+    coverage_by_variable = {item["variable"]: item for item in station_coverage}
+    variable_starts = [
+        _datetime_value(coverage_by_variable[variable].get("valid_time_start"))
+        for variable in MVP_STATION_VARIABLES
+        if variable in coverage_by_variable
+    ]
+    variable_ends = [
+        _datetime_value(coverage_by_variable[variable].get("valid_time_end"))
+        for variable in MVP_STATION_VARIABLES
+        if variable in coverage_by_variable
+    ]
+    return (
+        _latest_datetime(
+            _datetime_value(row.get("display_start_time")),
+            _datetime_value(row.get("station_valid_time_start")),
+            _datetime_value(row.get("river_valid_time_start")),
+            *variable_starts,
+        ),
+        _earliest_datetime(
+            _datetime_value(row.get("display_end_time")),
+            _datetime_value(row.get("station_valid_time_end")),
+            _datetime_value(row.get("river_valid_time_end")),
+            *variable_ends,
+        ),
+    )
+
+
+def _latest_datetime(*values: datetime | None) -> datetime | None:
+    present = [_ensure_utc(value) for value in values if value is not None]
+    return max(present) if present else None
 
 
 def _earliest_datetime(*values: datetime | None) -> datetime | None:
@@ -2020,22 +2256,34 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
     return [
         {
             "table": "hydro.hydro_run",
-            "index": "hydro_run_latest_ready_run_idx",
-            "status": "covered_by_partial_index",
-            "columns": ["cycle_time DESC", "run_id DESC"],
-            "predicate": "status IN ('frequency_done', 'published')",
+            "index": "hydro_run_qhh_latest_candidate_idx",
+            "status": "covered_by_latest_product_candidate_index",
+            "columns": ["LOWER(source_id)", "run_type", "basin_version_id", "cycle_time DESC", "run_id DESC"],
+            "predicate": "cycle_time IS NOT NULL",
+        },
+        {
+            "table": "core.basin_version",
+            "index": "basin_version_qhh_latest_lookup_idx",
+            "status": "covered_by_latest_product_basin_lookup_index",
+            "columns": ["basin_id", "basin_version_id"],
         },
         {
             "table": "hydro.river_timeseries",
-            "index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
-            "status": "covered_by_selected_identity_index",
+            "index": "river_timeseries_qhh_latest_window_idx",
+            "status": "covered_by_latest_product_window_index",
             "columns": ["run_id", "basin_version_id", "river_network_version_id", "variable", "valid_time DESC"],
         },
         {
             "table": "met.forcing_station_timeseries",
-            "index": "forcing_station_timeseries_pkey",
-            "status": "covered_by_primary_key",
-            "columns": ["forcing_version_id", "station_id", "variable", "valid_time"],
+            "index": "forcing_station_timeseries_qhh_latest_window_idx",
+            "status": "covered_by_latest_product_station_window_index",
+            "columns": ["forcing_version_id", "basin_version_id", "LOWER(source_id)", "variable", "valid_time DESC"],
+        },
+        {
+            "table": "met.interp_weight",
+            "index": "interp_weight_qhh_latest_membership_idx",
+            "status": "covered_by_latest_product_station_membership_index",
+            "columns": ["model_id", "station_id", "variable", "LOWER(source_id)"],
         },
     ]
 
