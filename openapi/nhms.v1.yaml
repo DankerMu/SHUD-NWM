@@ -43,6 +43,8 @@ tags:
     description: Meteorological station and forcing time series access.
   - name: runs
     description: Hydrological run query and lifecycle operations.
+  - name: mvp
+    description: MVP bootstrap APIs for QHH hydro-met display.
   - name: tiles
     description: Raw vector and raster map tile delivery.
   - name: pipeline
@@ -624,6 +626,36 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/StationSeriesResponse"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/mvp/qhh/latest-product:
+    get:
+      operationId: getQhhLatestProduct
+      summary: Get latest QHH display product
+      tags: [runs]
+      parameters:
+        - name: source
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [GFS, IFS]
+          description: MVP forecast source. Accepted case-insensitively and normalized to GFS or IFS.
+      responses:
+        "200":
+          description: Latest QHH display product
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/QhhLatestProduct"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -2511,6 +2543,251 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/StationSeries"
+    QhhLatestUnavailableReason:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        run_id:
+          type: string
+          nullable: true
+        source_id:
+          type: string
+          nullable: true
+      additionalProperties: true
+    QhhLatestQualityNote:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        expected_horizon_hours:
+          type: integer
+          nullable: true
+        available_horizon_hours:
+          type: integer
+          nullable: true
+        available_end_time:
+          type: string
+          format: date-time
+          nullable: true
+      additionalProperties: true
+    QhhLatestStationVariableCoverage:
+      type: object
+      required:
+        - variable
+        - station_count
+        - sample_count
+        - unit_count
+        - quality_flag_count
+        - missing_unit_samples
+        - missing_quality_flag_samples
+        - valid_time_start
+        - valid_time_end
+      properties:
+        variable:
+          type: string
+          enum: [PRCP, TEMP, RH, wind, Rn, Press]
+        station_count:
+          type: integer
+          minimum: 0
+        sample_count:
+          type: integer
+          minimum: 0
+        unit_count:
+          type: integer
+          minimum: 0
+        quality_flag_count:
+          type: integer
+          minimum: 0
+        missing_unit_samples:
+          type: integer
+          minimum: 0
+        missing_quality_flag_samples:
+          type: integer
+          minimum: 0
+        valid_time_start:
+          type: string
+          format: date-time
+          nullable: true
+        valid_time_end:
+          type: string
+          format: date-time
+          nullable: true
+    QhhLatestQueryIndex:
+      type: object
+      required: [table, index, status, columns]
+      properties:
+        table:
+          type: string
+        index:
+          type: string
+        status:
+          type: string
+        columns:
+          type: array
+          items:
+            type: string
+        predicate:
+          type: string
+          nullable: true
+      additionalProperties: true
+    QhhLatestAvailability:
+      type: object
+      required: [ready, unavailable_reasons, quality_flags, quality_notes]
+      properties:
+        ready:
+          type: boolean
+        unavailable_reasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/QhhLatestUnavailableReason"
+        quality_flags:
+          type: array
+          items:
+            type: string
+        quality_notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/QhhLatestQualityNote"
+    QhhLatestQuality:
+      type: object
+      required:
+        - station_sample_count
+        - river_sample_count
+        - required_station_variables
+        - station_variable_coverage
+        - candidate_limit
+        - query_indexes
+      properties:
+        station_sample_count:
+          type: integer
+          minimum: 0
+        river_sample_count:
+          type: integer
+          minimum: 0
+        required_station_variables:
+          type: array
+          items:
+            type: string
+            enum: [PRCP, TEMP, RH, wind, Rn, Press]
+        station_variable_coverage:
+          type: array
+          items:
+            $ref: "#/components/schemas/QhhLatestStationVariableCoverage"
+        candidate_limit:
+          type: integer
+          minimum: 1
+        query_indexes:
+          type: array
+          items:
+            $ref: "#/components/schemas/QhhLatestQueryIndex"
+    QhhLatestProduct:
+      type: object
+      required:
+        - basin_id
+        - model_id
+        - basin_version_id
+        - river_network_version_id
+        - source_id
+        - cycle_time
+        - run_id
+        - forcing_version_id
+        - station_count
+        - expected_station_count
+        - segment_count
+        - expected_segment_count
+        - status
+        - run_status
+        - valid_time_start
+        - valid_time_end
+        - river_valid_time_start
+        - river_valid_time_end
+        - forcing_valid_time_start
+        - forcing_valid_time_end
+        - available_horizon_hours
+        - expected_horizon_hours
+        - shorter_horizon
+        - availability
+        - quality
+      properties:
+        basin_id:
+          type: string
+        model_id:
+          type: string
+        basin_version_id:
+          type: string
+        river_network_version_id:
+          type: string
+        source_id:
+          type: string
+          enum: [GFS, IFS]
+        cycle_time:
+          type: string
+          format: date-time
+        run_id:
+          type: string
+        forcing_version_id:
+          type: string
+        station_count:
+          type: integer
+          minimum: 0
+        expected_station_count:
+          type: integer
+          minimum: 0
+          nullable: true
+        segment_count:
+          type: integer
+          minimum: 0
+        expected_segment_count:
+          type: integer
+          minimum: 0
+          nullable: true
+        status:
+          type: string
+          enum: [ready, unavailable]
+        run_status:
+          type: string
+        valid_time_start:
+          type: string
+          format: date-time
+          nullable: true
+        valid_time_end:
+          type: string
+          format: date-time
+          nullable: true
+        river_valid_time_start:
+          type: string
+          format: date-time
+          nullable: true
+        river_valid_time_end:
+          type: string
+          format: date-time
+          nullable: true
+        forcing_valid_time_start:
+          type: string
+          format: date-time
+          nullable: true
+        forcing_valid_time_end:
+          type: string
+          format: date-time
+          nullable: true
+        available_horizon_hours:
+          type: integer
+          nullable: true
+        expected_horizon_hours:
+          type: integer
+        shorter_horizon:
+          type: boolean
+        availability:
+          $ref: "#/components/schemas/QhhLatestAvailability"
+        quality:
+          $ref: "#/components/schemas/QhhLatestQuality"
     DataSource:
       type: object
       required: [source_id, source_name, source_type, status, adapter_name, config_json, created_at]

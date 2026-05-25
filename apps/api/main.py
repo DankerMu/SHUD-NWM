@@ -304,6 +304,7 @@ def custom_openapi():
     _patch_mvt_tile_openapi(schema)
     _patch_flood_duration_openapi(schema)
     _patch_station_series_openapi(schema)
+    _patch_qhh_latest_product_openapi(schema)
     _patch_layer_metadata_openapi(schema)
     app.openapi_schema = schema
     return app.openapi_schema
@@ -466,6 +467,54 @@ def _patch_station_series_openapi(schema: dict) -> None:
             "content": {
                 "application/json": {
                     "schema": _success_response_schema({"$ref": "#/components/schemas/StationSeriesResponse"})
+                }
+            },
+        },
+        "4XX": {"$ref": "#/components/responses/Error"},
+        "5XX": {"$ref": "#/components/responses/Error"},
+    }
+
+
+def _patch_qhh_latest_product_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
+    schemas["QhhLatestUnavailableReason"] = _qhh_latest_unavailable_reason_schema()
+    schemas["QhhLatestQualityNote"] = _qhh_latest_quality_note_schema()
+    schemas["QhhLatestStationVariableCoverage"] = _qhh_latest_station_variable_coverage_schema()
+    schemas["QhhLatestQueryIndex"] = _qhh_latest_query_index_schema()
+    schemas["QhhLatestAvailability"] = _qhh_latest_availability_schema()
+    schemas["QhhLatestQuality"] = _qhh_latest_quality_schema()
+    schemas["QhhLatestProduct"] = _qhh_latest_product_schema()
+
+    responses = components.setdefault("responses", {})
+    responses["Error"] = {
+        "description": "Error response",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    }
+
+    operation = schema.get("paths", {}).get("/api/v1/mvp/qhh/latest-product", {}).get("get")
+    if not operation:
+        return
+    operation["summary"] = "Get latest QHH display product"
+    operation["tags"] = ["runs"]
+    operation["parameters"] = [
+        {
+            "name": "source",
+            "in": "query",
+            "required": True,
+            "schema": {"type": "string", "enum": ["GFS", "IFS"]},
+            "description": "MVP forecast source. Accepted case-insensitively and normalized to GFS or IFS.",
+        }
+    ]
+    operation["responses"] = {
+        "200": {
+            "description": "Latest QHH display product",
+            "content": {
+                "application/json": {
+                    "schema": _success_response_schema({"$ref": "#/components/schemas/QhhLatestProduct"})
                 }
             },
         },
@@ -741,6 +790,188 @@ def _station_series_response_schema() -> dict:
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/StationSeries"},
             },
+        },
+    }
+
+
+def _qhh_latest_unavailable_reason_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+            "run_id": {"type": "string", "nullable": True},
+            "source_id": {"type": "string", "nullable": True},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _qhh_latest_quality_note_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+            "expected_horizon_hours": {"type": "integer", "nullable": True},
+            "available_horizon_hours": {"type": "integer", "nullable": True},
+            "available_end_time": {"type": "string", "format": "date-time", "nullable": True},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _qhh_latest_station_variable_coverage_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "variable",
+            "station_count",
+            "sample_count",
+            "unit_count",
+            "quality_flag_count",
+            "missing_unit_samples",
+            "missing_quality_flag_samples",
+            "valid_time_start",
+            "valid_time_end",
+        ],
+        "properties": {
+            "variable": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]},
+            "station_count": {"type": "integer", "minimum": 0},
+            "sample_count": {"type": "integer", "minimum": 0},
+            "unit_count": {"type": "integer", "minimum": 0},
+            "quality_flag_count": {"type": "integer", "minimum": 0},
+            "missing_unit_samples": {"type": "integer", "minimum": 0},
+            "missing_quality_flag_samples": {"type": "integer", "minimum": 0},
+            "valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+        },
+    }
+
+
+def _qhh_latest_query_index_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["table", "index", "status", "columns"],
+        "properties": {
+            "table": {"type": "string"},
+            "index": {"type": "string"},
+            "status": {"type": "string"},
+            "columns": {"type": "array", "items": {"type": "string"}},
+            "predicate": {"type": "string", "nullable": True},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _qhh_latest_availability_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["ready", "unavailable_reasons", "quality_flags", "quality_notes"],
+        "properties": {
+            "ready": {"type": "boolean"},
+            "unavailable_reasons": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/QhhLatestUnavailableReason"},
+            },
+            "quality_flags": {"type": "array", "items": {"type": "string"}},
+            "quality_notes": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/QhhLatestQualityNote"},
+            },
+        },
+    }
+
+
+def _qhh_latest_quality_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "station_sample_count",
+            "river_sample_count",
+            "required_station_variables",
+            "station_variable_coverage",
+            "candidate_limit",
+            "query_indexes",
+        ],
+        "properties": {
+            "station_sample_count": {"type": "integer", "minimum": 0},
+            "river_sample_count": {"type": "integer", "minimum": 0},
+            "required_station_variables": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]},
+            },
+            "station_variable_coverage": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/QhhLatestStationVariableCoverage"},
+            },
+            "candidate_limit": {"type": "integer", "minimum": 1},
+            "query_indexes": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/QhhLatestQueryIndex"},
+            },
+        },
+    }
+
+
+def _qhh_latest_product_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "basin_id",
+            "model_id",
+            "basin_version_id",
+            "river_network_version_id",
+            "source_id",
+            "cycle_time",
+            "run_id",
+            "forcing_version_id",
+            "station_count",
+            "expected_station_count",
+            "segment_count",
+            "expected_segment_count",
+            "status",
+            "run_status",
+            "valid_time_start",
+            "valid_time_end",
+            "river_valid_time_start",
+            "river_valid_time_end",
+            "forcing_valid_time_start",
+            "forcing_valid_time_end",
+            "available_horizon_hours",
+            "expected_horizon_hours",
+            "shorter_horizon",
+            "availability",
+            "quality",
+        ],
+        "properties": {
+            "basin_id": {"type": "string"},
+            "model_id": {"type": "string"},
+            "basin_version_id": {"type": "string"},
+            "river_network_version_id": {"type": "string"},
+            "source_id": {"type": "string", "enum": ["GFS", "IFS"]},
+            "cycle_time": {"type": "string", "format": "date-time"},
+            "run_id": {"type": "string"},
+            "forcing_version_id": {"type": "string"},
+            "station_count": {"type": "integer", "minimum": 0},
+            "expected_station_count": {"type": "integer", "minimum": 0, "nullable": True},
+            "segment_count": {"type": "integer", "minimum": 0},
+            "expected_segment_count": {"type": "integer", "minimum": 0, "nullable": True},
+            "status": {"type": "string", "enum": ["ready", "unavailable"]},
+            "run_status": {"type": "string"},
+            "valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+            "river_valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "river_valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+            "forcing_valid_time_start": {"type": "string", "format": "date-time", "nullable": True},
+            "forcing_valid_time_end": {"type": "string", "format": "date-time", "nullable": True},
+            "available_horizon_hours": {"type": "integer", "nullable": True},
+            "expected_horizon_hours": {"type": "integer"},
+            "shorter_horizon": {"type": "boolean"},
+            "availability": {"$ref": "#/components/schemas/QhhLatestAvailability"},
+            "quality": {"$ref": "#/components/schemas/QhhLatestQuality"},
         },
     }
 

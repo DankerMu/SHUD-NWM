@@ -26,6 +26,8 @@ class FakeForecastStore:
         self.forecast_calls: list[dict[str, Any]] = []
         self.run_calls: list[dict[str, Any]] = []
         self.station_series_calls: list[dict[str, Any]] = []
+        self.latest_qhh_calls: list[str] = []
+        self.latest_qhh_unavailable = False
         issue_time = _dt("2026-05-07T00:00:00Z")
         self.response = {
             "segment_id": "seg_001",
@@ -149,6 +151,45 @@ class FakeForecastStore:
                     },
                 },
             ],
+        }
+        self.latest_qhh_response = {
+            "basin_id": "basins_qhh",
+            "model_id": "basins_qhh_shud",
+            "basin_version_id": "basins_qhh_vbasins",
+            "river_network_version_id": "basins_qhh_rivnet_vbasins",
+            "source_id": "GFS",
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "run_id": "qhh_gfs_2026050700",
+            "forcing_version_id": "forc_qhh_gfs_2026050700_basins_qhh_shud",
+            "station_count": 386,
+            "expected_station_count": 386,
+            "segment_count": 1633,
+            "expected_segment_count": 1633,
+            "status": "ready",
+            "run_status": "frequency_done",
+            "valid_time_start": "2026-05-07T00:00:00Z",
+            "valid_time_end": "2026-05-14T00:00:00Z",
+            "river_valid_time_start": "2026-05-07T00:00:00Z",
+            "river_valid_time_end": "2026-05-14T00:00:00Z",
+            "forcing_valid_time_start": "2026-05-07T00:00:00Z",
+            "forcing_valid_time_end": "2026-05-14T00:00:00Z",
+            "available_horizon_hours": 168,
+            "expected_horizon_hours": 168,
+            "shorter_horizon": False,
+            "availability": {
+                "ready": True,
+                "unavailable_reasons": [],
+                "quality_flags": [],
+                "quality_notes": [],
+            },
+            "quality": {
+                "station_sample_count": 1000,
+                "river_sample_count": 2000,
+                "required_station_variables": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
+                "station_variable_coverage": [],
+                "candidate_limit": 25,
+                "query_indexes": [],
+            },
         }
 
     def forecast_series(self, **kwargs: Any) -> dict[str, Any]:
@@ -295,6 +336,51 @@ class FakeForecastStore:
                 {"variable": variable, "unit": None, "native_resolution": None, "points": [], "truncated": False}
                 for variable in ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
             ]
+        return response
+
+    def latest_qhh_display_product(self, source: str) -> dict[str, Any]:
+        self.latest_qhh_calls.append(source)
+        if str(source).strip().upper() not in {"GFS", "IFS"}:
+            raise ForecastStoreError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="source must be GFS or IFS.",
+                details={"field": "source", "rejected_value": source, "allowed_values": ["GFS", "IFS"]},
+            )
+        if self.latest_qhh_unavailable:
+            raise ForecastStoreError(
+                status_code=404,
+                code="QHH_LATEST_PRODUCT_UNAVAILABLE",
+                message="No usable latest QHH display product is available for source GFS.",
+                details={
+                    "source_id": str(source).strip().upper(),
+                    "basin_id": "basins_qhh",
+                    "status": "unavailable",
+                    "unavailable_reasons": [{"code": "Q_DOWN_MISSING", "message": "No river q_down samples."}],
+                },
+            )
+        response = dict(self.latest_qhh_response)
+        response["source_id"] = str(source).strip().upper()
+        if response["source_id"] == "IFS":
+            response["available_horizon_hours"] = 144
+            response["valid_time_end"] = "2026-05-13T00:00:00Z"
+            response["river_valid_time_end"] = "2026-05-13T00:00:00Z"
+            response["forcing_valid_time_end"] = "2026-05-13T00:00:00Z"
+            response["shorter_horizon"] = True
+            response["availability"] = {
+                "ready": True,
+                "unavailable_reasons": [],
+                "quality_flags": ["shorter_horizon"],
+                "quality_notes": [
+                    {
+                        "code": "SHORTER_HORIZON",
+                        "message": "Available horizon is shorter than the default seven-day display window.",
+                        "expected_horizon_hours": 168,
+                        "available_horizon_hours": 144,
+                        "available_end_time": "2026-05-13T00:00:00Z",
+                    }
+                ],
+            }
         return response
 
 
@@ -1460,6 +1546,244 @@ def test_station_forcing_readiness_excludes_out_of_window_rows_from_sql_and_resp
     assert response["ready"] is True
 
 
+def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identity_counts() -> None:
+    store = SqlCaptureForecastStore(
+        [[_qhh_candidate_row(cycle_time=_dt("2026-05-07T00:00:00Z"), source_id="gfs")]]
+    )
+
+    response = store.latest_qhh_display_product("gfs")
+
+    assert {
+        "basin_id": "basins_qhh",
+        "model_id": "basins_qhh_shud",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "source_id": "GFS",
+        "cycle_time": "2026-05-07T00:00:00Z",
+        "run_id": "qhh_gfs_2026050700",
+        "forcing_version_id": "forc_qhh_gfs_2026050700_basins_qhh_shud",
+        "station_count": 386,
+        "expected_station_count": 386,
+        "segment_count": 1633,
+        "expected_segment_count": 1633,
+        "status": "ready",
+        "run_status": "frequency_done",
+        "available_horizon_hours": 168,
+        "expected_horizon_hours": 168,
+        "shorter_horizon": False,
+    }.items() <= response.items()
+    assert response["availability"] == {
+        "ready": True,
+        "unavailable_reasons": [],
+        "quality_flags": [],
+        "quality_notes": [],
+    }
+    assert response["quality"]["required_station_variables"] == ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]
+    assert {item["index"] for item in response["quality"]["query_indexes"]} == {
+        "hydro_run_latest_ready_run_idx",
+        "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+        "forcing_station_timeseries_pkey",
+    }
+
+
+def test_latest_qhh_display_product_selects_newest_ready_candidate_after_newer_unusable() -> None:
+    newer_unusable = _qhh_candidate_row(
+        run_id="qhh_gfs_2026050800",
+        cycle_time=_dt("2026-05-08T00:00:00Z"),
+        segment_count=0,
+        river_sample_count=0,
+        river_valid_time_start=None,
+        river_valid_time_end=None,
+    )
+    older_ready = _qhh_candidate_row(
+        run_id="qhh_gfs_2026050700",
+        cycle_time=_dt("2026-05-07T00:00:00Z"),
+    )
+    store = SqlCaptureForecastStore([[newer_unusable, older_ready]])
+
+    response = store.latest_qhh_display_product("GFS")
+
+    assert response["run_id"] == "qhh_gfs_2026050700"
+    assert response["cycle_time"] == "2026-05-07T00:00:00Z"
+    assert response["status"] == "ready"
+
+
+def test_latest_qhh_display_product_normalizes_ifs_and_discloses_shorter_horizon() -> None:
+    row = _qhh_candidate_row(
+        run_id="qhh_ifs_2026050718",
+        source_id="IFS",
+        forcing_source_id="IFS",
+        cycle_time=_dt("2026-05-07T18:00:00Z"),
+        forcing_cycle_time=_dt("2026-05-07T18:00:00Z"),
+        forcing_version_id="forc_qhh_ifs_2026050718_basins_qhh_shud",
+        river_valid_time_end=_dt("2026-05-13T18:00:00Z"),
+        forcing_end_time=_dt("2026-05-13T18:00:00Z"),
+        max_lead_time_hours=144,
+    )
+    store = SqlCaptureForecastStore([[row]])
+
+    response = store.latest_qhh_display_product("ifs")
+
+    assert response["source_id"] == "IFS"
+    assert response["available_horizon_hours"] == 144
+    assert response["expected_horizon_hours"] == 168
+    assert response["shorter_horizon"] is True
+    assert response["valid_time_end"] == "2026-05-13T18:00:00Z"
+    assert response["availability"]["quality_flags"] == ["shorter_horizon"]
+    assert response["availability"]["quality_notes"][0]["code"] == "SHORTER_HORIZON"
+
+
+def test_latest_qhh_display_product_rejects_unsupported_source_before_sql() -> None:
+    store = SqlCaptureForecastStore()
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("ECMWF")
+
+    assert error.value.status_code == 422
+    assert error.value.code == "VALIDATION_ERROR"
+    assert error.value.details == {
+        "field": "source",
+        "rejected_value": "ECMWF",
+        "allowed_values": ["GFS", "IFS"],
+    }
+    assert store.cursor.executions == []
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "pending", "created", "running", "parsed"])
+def test_latest_qhh_display_product_rejects_failed_cancelled_pending_and_incomplete_runs(status: str) -> None:
+    store = SqlCaptureForecastStore([[_qhh_candidate_row(status=status)]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    assert error.value.status_code == 404
+    assert error.value.code == "QHH_LATEST_PRODUCT_UNAVAILABLE"
+    reason_codes = {reason["code"] for reason in error.value.details["unavailable_reasons"]}
+    assert "RUN_STATUS_NOT_READY" in reason_codes
+
+
+@pytest.mark.parametrize(
+    ("field", "reason_code"),
+    [
+        ("model_id", "MODEL_ID_MISSING"),
+        ("basin_version_id", "BASIN_VERSION_ID_MISSING"),
+        ("river_network_version_id", "RIVER_NETWORK_VERSION_ID_MISSING"),
+        ("forcing_version_id", "FORCING_VERSION_ID_MISSING"),
+        ("cycle_time", "CYCLE_TIME_MISSING"),
+    ],
+)
+def test_latest_qhh_display_product_rejects_missing_identity_fields(field: str, reason_code: str) -> None:
+    row = _qhh_candidate_row(**{field: None})
+    store = SqlCaptureForecastStore([[row]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    assert reason_code in {reason["code"] for reason in error.value.details["unavailable_reasons"]}
+
+
+@pytest.mark.parametrize("checksum", [None, "pending"])
+def test_latest_qhh_display_product_rejects_not_finalized_forcing(checksum: str | None) -> None:
+    store = SqlCaptureForecastStore([[_qhh_candidate_row(forcing_checksum=checksum)]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    assert "FORCING_VERSION_NOT_FINALIZED" in {
+        reason["code"] for reason in error.value.details["unavailable_reasons"]
+    }
+
+
+def test_latest_qhh_display_product_rejects_forcing_and_model_identity_mismatches() -> None:
+    store = SqlCaptureForecastStore(
+        [
+            [
+                _qhh_candidate_row(
+                    forcing_model_id="different_model",
+                    forcing_source_id="IFS",
+                    forcing_cycle_time=_dt("2026-05-07T06:00:00Z"),
+                    model_basin_version_id="other_basin_version",
+                    river_network_basin_version_id="other_basin_version",
+                )
+            ]
+        ]
+    )
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    reason_codes = {reason["code"] for reason in error.value.details["unavailable_reasons"]}
+    assert {
+        "FORCING_MODEL_MISMATCH",
+        "FORCING_SOURCE_MISMATCH",
+        "FORCING_CYCLE_MISMATCH",
+        "MODEL_BASIN_MISMATCH",
+        "RIVER_NETWORK_BASIN_MISMATCH",
+    } <= reason_codes
+
+
+def test_latest_qhh_display_product_rejects_missing_station_variable_and_q_down_coverage() -> None:
+    row = _qhh_candidate_row(
+        station_variable_coverage=_qhh_variable_coverage()[:-1],
+        segment_count=0,
+        river_sample_count=0,
+        river_valid_time_start=None,
+        river_valid_time_end=None,
+    )
+    store = SqlCaptureForecastStore([[row]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    reason_codes = {reason["code"] for reason in error.value.details["unavailable_reasons"]}
+    assert {"STATION_VARIABLE_MISSING", "Q_DOWN_MISSING", "Q_DOWN_VALID_TIME_MISSING"} <= reason_codes
+
+
+def test_latest_qhh_display_product_reports_station_and_segment_count_mismatches() -> None:
+    row = _qhh_candidate_row(
+        station_count=385,
+        station_variable_coverage=_qhh_variable_coverage(station_count=385),
+        segment_count=1600,
+    )
+    store = SqlCaptureForecastStore([[row]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
+
+    reason_codes = {reason["code"] for reason in error.value.details["unavailable_reasons"]}
+    assert {
+        "STATION_COUNT_MISMATCH",
+        "STATION_VARIABLE_COUNT_MISMATCH",
+        "SEGMENT_COUNT_MISMATCH",
+    } <= reason_codes
+
+
+def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_timeseries_aggregation() -> None:
+    store = SqlCaptureForecastStore([[_qhh_candidate_row()]])
+
+    response = store.latest_qhh_display_product("GFS")
+
+    statement, parameters = store.cursor.executions[0]
+    candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_coverage AS")]
+    assert "bv.basin_id = %s" in candidate_cte
+    assert "LOWER(h.source_id) = LOWER(%s)" in candidate_cte
+    assert "h.status IN ('frequency_done', 'published')" in candidate_cte
+    assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in candidate_cte
+    assert "LIMIT %s" in candidate_cte
+    assert "FROM met.forcing_station_timeseries" not in candidate_cte
+    assert "FROM hydro.river_timeseries" not in candidate_cte
+    assert "JOIN candidate_runs cr" in statement
+    assert "cr.run_id = rt.run_id" in statement
+    assert parameters == (
+        "basins_qhh",
+        "GFS",
+        25,
+        ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
+        ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
+    )
+    assert response["quality"]["candidate_limit"] == 25
+
+
 @pytest.mark.asyncio
 async def test_run_list_uses_offset_limit_pagination_and_caps_limit(fake_store: FakeForecastStore) -> None:
     response = await _get("/api/v1/runs?basin_id=yangtze&source=gfs&status=parsed&limit=1000&offset=20")
@@ -1484,6 +1808,58 @@ async def test_run_list_forwards_flood_product_ready_filter(fake_store: FakeFore
 
     assert response.status_code == 200
     assert fake_store.run_calls[-1]["flood_product_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_qhh_latest_product_success_envelope_accepts_source_case_and_needs_no_manual_ids(
+    fake_store: FakeForecastStore,
+) -> None:
+    response = await _get("/api/v1/mvp/qhh/latest-product?source=ifs")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["request_id"]
+    data = body["data"]
+    assert data["source_id"] == "IFS"
+    assert data["basin_id"] == "basins_qhh"
+    assert data["model_id"] == "basins_qhh_shud"
+    assert data["basin_version_id"] == "basins_qhh_vbasins"
+    assert data["river_network_version_id"] == "basins_qhh_rivnet_vbasins"
+    assert data["run_id"] == "qhh_gfs_2026050700"
+    assert data["forcing_version_id"] == "forc_qhh_gfs_2026050700_basins_qhh_shud"
+    assert data["station_count"] == 386
+    assert data["segment_count"] == 1633
+    assert data["status"] == "ready"
+    assert data["shorter_horizon"] is True
+    assert fake_store.latest_qhh_calls == ["ifs"]
+
+
+@pytest.mark.asyncio
+async def test_qhh_latest_product_unsupported_source_validation_error(fake_store: FakeForecastStore) -> None:
+    response = await _get("/api/v1/mvp/qhh/latest-product?source=ecmwf")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["details"]["field"] == "source"
+
+
+@pytest.mark.asyncio
+async def test_qhh_latest_product_no_usable_product_returns_typed_unavailable_reasons(
+    fake_store: FakeForecastStore,
+) -> None:
+    fake_store.latest_qhh_unavailable = True
+
+    response = await _get("/api/v1/mvp/qhh/latest-product?source=GFS")
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "QHH_LATEST_PRODUCT_UNAVAILABLE"
+    assert body["error"]["details"]["status"] == "unavailable"
+    assert body["error"]["details"]["unavailable_reasons"][0]["code"] == "Q_DOWN_MISSING"
 
 
 def test_list_runs_marks_and_filters_flood_product_readiness() -> None:
@@ -1870,3 +2246,97 @@ def _readiness_row(
         "valid_time_start": valid_time_start or _dt("2026-05-07T00:00:00Z"),
         "valid_time_end": valid_time_end or _dt("2026-05-08T00:00:00Z"),
     }
+
+
+def _qhh_candidate_row(
+    *,
+    run_id: str = "qhh_gfs_2026050700",
+    run_type: str = "forecast",
+    scenario_id: str = "forecast_gfs_deterministic",
+    model_id: str | None = "basins_qhh_shud",
+    basin_version_id: str | None = "basins_qhh_vbasins",
+    forcing_version_id: str | None = "forc_qhh_gfs_2026050700_basins_qhh_shud",
+    source_id: str = "gfs",
+    cycle_time: datetime | None = _dt("2026-05-07T00:00:00Z"),
+    status: str = "frequency_done",
+    river_network_version_id: str | None = "basins_qhh_rivnet_vbasins",
+    model_basin_version_id: str | None = "basins_qhh_vbasins",
+    river_network_basin_version_id: str | None = "basins_qhh_vbasins",
+    forcing_model_id: str | None = "basins_qhh_shud",
+    forcing_source_id: str | None = "gfs",
+    forcing_cycle_time: datetime | None = None,
+    forcing_start_time: datetime | None = None,
+    forcing_end_time: datetime | None = None,
+    forcing_checksum: str | None = "sha256:qhh-forcing",
+    station_count: int = 386,
+    expected_station_count: int = 386,
+    station_sample_count: int = 12000,
+    station_variable_coverage: list[dict[str, Any]] | None = None,
+    segment_count: int = 1633,
+    expected_segment_count: int = 1633,
+    river_sample_count: int = 10000,
+    river_valid_time_start: datetime | None = _dt("2026-05-07T00:00:00Z"),
+    river_valid_time_end: datetime | None = _dt("2026-05-14T00:00:00Z"),
+    max_lead_time_hours: int | None = 168,
+) -> dict[str, Any]:
+    default_cycle_time = _dt("2026-05-07T00:00:00Z")
+    schedule_cycle_time = cycle_time or default_cycle_time
+    selected_forcing_start = forcing_start_time or schedule_cycle_time
+    selected_forcing_end = forcing_end_time or schedule_cycle_time + timedelta(days=7)
+    return {
+        "run_id": run_id,
+        "run_type": run_type,
+        "scenario_id": scenario_id,
+        "model_id": model_id,
+        "basin_version_id": basin_version_id,
+        "forcing_version_id": forcing_version_id,
+        "source_id": source_id,
+        "cycle_time": cycle_time,
+        "run_start_time": schedule_cycle_time,
+        "run_end_time": schedule_cycle_time + timedelta(days=7),
+        "status": status,
+        "run_created_at": schedule_cycle_time,
+        "run_updated_at": schedule_cycle_time,
+        "river_network_version_id": river_network_version_id,
+        "model_basin_version_id": model_basin_version_id,
+        "basin_id": "basins_qhh",
+        "river_network_basin_version_id": river_network_basin_version_id,
+        "expected_segment_count": expected_segment_count,
+        "fv_forcing_version_id": forcing_version_id,
+        "forcing_model_id": forcing_model_id,
+        "forcing_source_id": forcing_source_id,
+        "forcing_cycle_time": forcing_cycle_time or schedule_cycle_time,
+        "forcing_start_time": selected_forcing_start,
+        "forcing_end_time": selected_forcing_end,
+        "expected_station_count": expected_station_count,
+        "forcing_checksum": forcing_checksum,
+        "forcing_lineage_json": {},
+        "station_count": station_count,
+        "station_sample_count": station_sample_count,
+        "station_valid_time_start": selected_forcing_start,
+        "station_valid_time_end": selected_forcing_end,
+        "station_variable_coverage": station_variable_coverage or _qhh_variable_coverage(station_count=station_count),
+        "segment_count": segment_count,
+        "river_sample_count": river_sample_count,
+        "river_valid_time_start": river_valid_time_start,
+        "river_valid_time_end": river_valid_time_end,
+        "min_lead_time_hours": 0,
+        "max_lead_time_hours": max_lead_time_hours,
+    }
+
+
+def _qhh_variable_coverage(station_count: int = 386) -> list[dict[str, Any]]:
+    return [
+        {
+            "variable": variable,
+            "station_count": station_count,
+            "sample_count": 100,
+            "unit_count": 1,
+            "quality_flag_count": 1,
+            "missing_unit_samples": 0,
+            "missing_quality_flag_samples": 0,
+            "valid_time_start": _dt("2026-05-07T00:00:00Z"),
+            "valid_time_end": _dt("2026-05-14T00:00:00Z"),
+        }
+        for variable in ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
+    ]
