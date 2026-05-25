@@ -743,16 +743,16 @@ export interface components {
                 code: string;
                 /** @example Requested resource was not found. */
                 message: string;
-                details?: {
+                details?: ({
                     [key: string]: unknown;
-                } | components["schemas"]["ValidationErrorDetail"][] | null;
+                } | null) | components["schemas"]["ValidationErrorDetail"][];
             };
         };
         ValidationErrorDetail: {
             field: string;
-            rejected_value?: string | number | boolean | {
+            rejected_value?: (string | null) | number | boolean | {
                 [key: string]: unknown;
-            } | unknown[] | null;
+            } | unknown[];
             reason: string;
         } & {
             [key: string]: unknown;

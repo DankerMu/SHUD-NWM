@@ -609,12 +609,11 @@ def _error_response_schema() -> dict:
 def _error_details_schema() -> dict:
     return {
         "oneOf": [
-            {"type": "object", "additionalProperties": True},
+            {"type": "object", "nullable": True, "additionalProperties": True},
             {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/ValidationErrorDetail"},
             },
-            {"type": "null"},
         ]
     }
 
@@ -648,12 +647,11 @@ def _station_series_point_schema() -> dict:
 def _json_value_schema() -> dict:
     return {
         "oneOf": [
-            {"type": "string"},
+            {"type": "string", "nullable": True},
             {"type": "number"},
             {"type": "boolean"},
             {"type": "object", "additionalProperties": True},
             {"type": "array", "items": {}},
-            {"type": "null"},
         ]
     }
 
@@ -757,10 +755,9 @@ def _layer_schema() -> dict:
             "layer_type": {"type": "string"},
             "variables": {"type": "array", "items": {"type": "string"}},
             "metadata": {
-                "oneOf": [
-                    {"$ref": "#/components/schemas/LayerMetadata"},
-                    {"type": "null"},
-                ]
+                "type": "object",
+                "nullable": True,
+                "allOf": [{"$ref": "#/components/schemas/LayerMetadata"}],
             },
         },
     }

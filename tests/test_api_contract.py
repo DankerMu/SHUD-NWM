@@ -714,12 +714,11 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert "returned_points" in schemas["StationSeriesMetadata"]["properties"]
     assert schemas["ErrorResponse"]["properties"]["error"]["properties"]["details"] == {
         "oneOf": [
-            {"type": "object", "additionalProperties": True},
+            {"type": "object", "nullable": True, "additionalProperties": True},
             {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/ValidationErrorDetail"},
             },
-            {"type": "null"},
         ]
     }
     assert schemas["ValidationErrorDetail"] == {
@@ -729,12 +728,11 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
             "field": {"type": "string"},
             "rejected_value": {
                 "oneOf": [
-                    {"type": "string"},
+                    {"type": "string", "nullable": True},
                     {"type": "number"},
                     {"type": "boolean"},
                     {"type": "object", "additionalProperties": True},
                     {"type": "array", "items": {}},
-                    {"type": "null"},
                 ]
             },
             "reason": {"type": "string"},
@@ -761,8 +759,33 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert "StationSeriesPoint:" in generated_types
     assert "quality_flag: string | null;" in generated_types
     assert "native_resolution: string | null;" in generated_types
-    assert 'components["schemas"]["ValidationErrorDetail"][] | null;' in generated_types
+    error_start = generated_types.index("ErrorResponse:")
+    validation_detail_start = generated_types.index("ValidationErrorDetail:")
+    error_types = generated_types[error_start:validation_detail_start]
+    assert "details?: ({" in error_types
+    assert "} | null) | components[\"schemas\"][\"ValidationErrorDetail\"][];" in error_types
+    assert "rejected_value?: (string | null) | number | boolean | {" in generated_types
     assert "ValidationErrorDetail:" in generated_types
+
+
+def test_layer_metadata_contract_preserves_nullable_generated_type() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+
+    assert spec["components"]["schemas"]["Layer"]["properties"]["metadata"] == {
+        "type": "object",
+        "nullable": True,
+        "allOf": [{"$ref": "#/components/schemas/LayerMetadata"}],
+    }
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    layer_start = generated_types.index("Layer:")
+    layer_metadata_start = generated_types.index("LayerMetadata:")
+    assert 'metadata?: components["schemas"]["LayerMetadata"] | null;' in generated_types[
+        layer_start:layer_metadata_start
+    ]
 
 
 def test_flood_product_quality_contract_is_in_static_openapi_and_types() -> None:

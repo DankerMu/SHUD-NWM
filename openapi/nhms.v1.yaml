@@ -1922,11 +1922,11 @@ components:
             details:
               oneOf:
                 - type: object
+                  nullable: true
                   additionalProperties: true
                 - type: array
                   items:
                     $ref: "#/components/schemas/ValidationErrorDetail"
-                - type: "null"
     ValidationErrorDetail:
       type: object
       required: [field, reason]
@@ -1936,13 +1936,13 @@ components:
         rejected_value:
           oneOf:
             - type: string
+              nullable: true
             - type: number
             - type: boolean
             - type: object
               additionalProperties: true
             - type: array
               items: {}
-            - type: "null"
         reason:
           type: string
       additionalProperties: true
@@ -3763,9 +3763,10 @@ components:
           items:
             type: string
         metadata:
-          oneOf:
+          type: object
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/LayerMetadata"
-            - type: "null"
     LayerMetadata:
       type: object
       required:
