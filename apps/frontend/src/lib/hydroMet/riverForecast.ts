@@ -156,6 +156,10 @@ export function validateHydroMetRiverForecastForChart(
   if (!isRecord(response)) return { ok: false, messages: ['river forecast-series 响应格式无效'] }
 
   const messages: string[] = []
+  const productCycleTime = normalizeHydroMetCycle(product.cycle_time)
+  if (!productCycleTime) {
+    messages.push(`latest-product cycle_time=${formatHydroMetRiverForecastContractValue(product.cycle_time)} 不是有效 RFC3339 时间`)
+  }
   const expectedSegmentId = segment.river_segment_id || segment.segment_id
   const responseSegmentId = responseSegmentIdentity(response)
   if (typeof responseSegmentId !== 'string') {
@@ -171,6 +175,9 @@ export function validateHydroMetRiverForecastForChart(
 
   const unit = parseRiverForecastUnit(response.unit, messages)
   const issueTime = parseOptionalRiverForecastTime(response.issue_time, 'issue_time', messages)
+  if (issueTime && productCycleTime && issueTime !== productCycleTime) {
+    messages.push(`issue_time=${formatHydroMetRiverForecastContractValue(issueTime)} 与 latest-product ${formatHydroMetRiverForecastContractValue(productCycleTime)} 不一致`)
+  }
   const seriesItems = responseSeriesItems(response, messages)
   if (seriesItems.length > HYDRO_MET_RIVER_FORECAST_SERIES_INSPECTION_LIMIT) {
     messages.push(`river forecast-series series 数量 ${seriesItems.length} 超过前端检查上限 ${HYDRO_MET_RIVER_FORECAST_SERIES_INSPECTION_LIMIT}，已停止绘图。`)
@@ -179,7 +186,7 @@ export function validateHydroMetRiverForecastForChart(
   const expectedScenario = hydroMetRiverScenarioForSource(product.source_id)
   const normalizedSeries = seriesItems
     .slice(0, HYDRO_MET_RIVER_FORECAST_SERIES_INSPECTION_LIMIT)
-    .map((series, index) => normalizeRiverForecastSeries(series, index, product, expectedScenario, messages))
+    .map((series, index) => normalizeRiverForecastSeries(series, index, product, productCycleTime, expectedScenario, messages))
     .filter((series): series is HydroMetRiverForecastSeries => Boolean(series))
 
   if (messages.length > 0) return { ok: false, messages: capHydroMetRiverForecastMessages(messages) }
@@ -194,6 +201,15 @@ export function validateHydroMetRiverForecastForChart(
 
   if (!unit) {
     return { ok: false, messages: ['q_down river discharge 缺少 unit 元数据，停止绘图。'] }
+  }
+
+  const selectedSeriesMatchesProductCycle = selectedSeries.cycleTime !== null && productCycleTime !== null && selectedSeries.cycleTime === productCycleTime
+  const responseMatchesProductCycle = issueTime !== null && productCycleTime !== null && issueTime === productCycleTime
+  if (!selectedSeriesMatchesProductCycle && !responseMatchesProductCycle) {
+    return {
+      ok: false,
+      messages: [`q_down river discharge 缺少与 latest-product ${formatHydroMetRiverForecastContractValue(productCycleTime)} 匹配的 cycle identity，停止绘图。`],
+    }
   }
 
   if (selectedSeries.points.length === 0) {
@@ -269,6 +285,7 @@ function normalizeRiverForecastSeries(
   series: unknown,
   index: number,
   product: HydroMetRiverForecastProductIdentity,
+  productCycleTime: string | null,
   expectedScenario: string,
   messages: string[],
 ): HydroMetRiverForecastSeries | null {
@@ -290,8 +307,8 @@ function normalizeRiverForecastSeries(
   if (sourceId && sourceId !== product.source_id) {
     messages.push(`series[${index}].source_id=${formatHydroMetRiverForecastContractValue(sourceId)} 与 latest-product ${product.source_id} 不一致`)
   }
-  if (cycleTime && normalizeHydroMetCycle(product.cycle_time) && cycleTime !== normalizeHydroMetCycle(product.cycle_time)) {
-    messages.push(`series[${index}].cycle_time=${formatHydroMetRiverForecastContractValue(cycleTime)} 与 latest-product ${formatHydroMetRiverForecastContractValue(normalizeHydroMetCycle(product.cycle_time))} 不一致`)
+  if (cycleTime && productCycleTime && cycleTime !== productCycleTime) {
+    messages.push(`series[${index}].cycle_time=${formatHydroMetRiverForecastContractValue(cycleTime)} 与 latest-product ${formatHydroMetRiverForecastContractValue(productCycleTime)} 不一致`)
   }
   if (!Array.isArray(pointsValue)) {
     messages.push(`series[${index}].points 缺失或格式无效`)
@@ -352,6 +369,9 @@ function parseRiverForecastTimeValue(timeValue: unknown, value: unknown): HydroM
   if (!Number.isFinite(timestamp)) {
     return `valid_time=${formatHydroMetRiverForecastContractValue(timeValue)} 不是有效 RFC3339 时间`
   }
+  if (!isDateRepresentableTimestamp(timestamp)) {
+    return `valid_time=${formatHydroMetRiverForecastContractValue(timeValue)} 超出 JavaScript Date 可表示范围`
+  }
   if (typeof value !== 'number' || !Number.isFinite(value)) return 'value 不是有限数值'
   return { timestamp, value }
 }
@@ -363,6 +383,10 @@ function timestampValue(value: unknown) {
   if (Number.isFinite(numeric) && value.trim() !== '') return numeric
   const normalized = normalizeHydroMetCycle(value)
   return normalized ? Date.parse(normalized) : NaN
+}
+
+function isDateRepresentableTimestamp(value: number) {
+  return Number.isFinite(new Date(value).getTime())
 }
 
 function selectRiverForecastSeries(

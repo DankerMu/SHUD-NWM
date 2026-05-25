@@ -575,6 +575,64 @@ describe('loadHydroMetRiverForecast', () => {
     })
   })
 
+  it('rejects q_down forecast responses with stale or missing cycle identity proof', () => {
+    const product = latestProduct()
+    const segment = {
+      river_segment_id: 'seg-001',
+      segment_id: 'seg-001',
+      basin_version_id: product.basin_version_id,
+      river_network_version_id: product.river_network_version_id,
+      name: 'QHH segment 001',
+    }
+
+    expect(validateHydroMetRiverForecastForChart(
+      riverForecastResponse({ issue_time: '2026-05-20T00:00:00Z' }, { cycle_time: undefined }),
+      product,
+      segment,
+    )).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('issue_time=2026-05-20T00:00:00.000Z')]),
+    })
+
+    expect(validateHydroMetRiverForecastForChart(
+      riverForecastResponse({ issue_time: undefined }, { cycle_time: undefined }),
+      product,
+      segment,
+    )).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('缺少与 latest-product 2026-05-21T00:00:00.000Z 匹配的 cycle identity')]),
+    })
+
+    expect(validateHydroMetRiverForecastForChart(
+      riverForecastResponse({}, { cycle_time: '2026-05-20T00:00:00Z' }),
+      product,
+      segment,
+    )).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('series[0].cycle_time=2026-05-20T00:00:00.000Z')]),
+    })
+  })
+
+  it('rejects finite q_down timestamps outside the JavaScript Date range', () => {
+    const product = latestProduct()
+    const segment = {
+      river_segment_id: 'seg-001',
+      segment_id: 'seg-001',
+      basin_version_id: product.basin_version_id,
+      river_network_version_id: product.river_network_version_id,
+      name: 'QHH segment 001',
+    }
+
+    expect(validateHydroMetRiverForecastForChart(
+      riverForecastResponse({}, { points: [[8640000000000001, 1]] }),
+      product,
+      segment,
+    )).toMatchObject({
+      ok: false,
+      messages: expect.arrayContaining([expect.stringContaining('超出 JavaScript Date 可表示范围')]),
+    })
+  })
+
   it('builds request keys from product and segment identity', () => {
     const product = latestProduct()
     expect(riverForecastRequestKey(product, 'seg-001')).toBe(

@@ -2173,6 +2173,39 @@ describe('App route state', () => {
         testId: 'hydro-met-river-forecast-invalid',
         text: '不是 q_down',
       },
+      {
+        setup: () => mockHydroMetRouteClient({
+          riverForecastResponse: hydroMetRiverForecastResponse(
+            'seg-001',
+            { issue_time: '2026-05-20T00:00:00Z' },
+            { cycle_time: undefined },
+          ),
+        }),
+        testId: 'hydro-met-river-forecast-invalid',
+        text: 'issue_time=2026-05-20T00:00:00.000Z',
+      },
+      {
+        setup: () => mockHydroMetRouteClient({
+          riverForecastResponse: hydroMetRiverForecastResponse(
+            'seg-001',
+            {},
+            { cycle_time: '2026-05-20T00:00:00Z' },
+          ),
+        }),
+        testId: 'hydro-met-river-forecast-invalid',
+        text: 'series[0].cycle_time=2026-05-20T00:00:00.000Z',
+      },
+      {
+        setup: () => mockHydroMetRouteClient({
+          riverForecastResponse: hydroMetRiverForecastResponse(
+            'seg-001',
+            {},
+            { points: [[8640000000000001, 1]] },
+          ),
+        }),
+        testId: 'hydro-met-river-forecast-invalid',
+        text: '超出 JavaScript Date 可表示范围',
+      },
     ]
 
     for (const [index, scenario] of scenarios.entries()) {
