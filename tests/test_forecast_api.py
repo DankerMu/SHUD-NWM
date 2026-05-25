@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -13,6 +15,7 @@ from packages.common.forecast_store import (
     ForecastStoreError,
     PsycopgForecastStore,
     _forecast_response_from_rows,
+    _PsycopgTransaction,
     _spliced_response_from_rows,
     analysis_window_for_issue_time,
 )
@@ -278,6 +281,68 @@ class _NullTransaction:
 
     def __exit__(self, *_args: Any) -> bool:
         return False
+
+
+def test_psycopg_transaction_uses_readonly_repeatable_read_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    class FakeDatabaseError(Exception):
+        pass
+
+    class FakeRealDictCursor:
+        pass
+
+    class FakeConnection:
+        def set_session(self, *, isolation_level: str, readonly: bool, autocommit: bool) -> None:
+            calls.append(("set_session", isolation_level, readonly, autocommit))
+
+        def cursor(self, *, cursor_factory: type[FakeRealDictCursor]) -> str:
+            calls.append(("cursor", cursor_factory))
+            return "fake-cursor"
+
+        def commit(self) -> None:
+            calls.append(("commit",))
+
+        def rollback(self) -> None:
+            calls.append(("rollback",))
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+    fake_connection = FakeConnection()
+    fake_psycopg2 = ModuleType("psycopg2")
+    fake_extras = ModuleType("psycopg2.extras")
+
+    def connect(database_url: str) -> FakeConnection:
+        calls.append(("connect", database_url))
+        return fake_connection
+
+    def register_default_json(*, conn_or_curs: FakeConnection) -> None:
+        calls.append(("register_default_json", conn_or_curs))
+
+    def register_default_jsonb(*, conn_or_curs: FakeConnection) -> None:
+        calls.append(("register_default_jsonb", conn_or_curs))
+
+    fake_psycopg2.connect = connect
+    fake_psycopg2.Error = FakeDatabaseError
+    fake_psycopg2.extras = fake_extras
+    fake_extras.RealDictCursor = FakeRealDictCursor
+    fake_extras.register_default_json = register_default_json
+    fake_extras.register_default_jsonb = register_default_jsonb
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_extras)
+
+    with _PsycopgTransaction("postgresql://unit-test") as cursor:
+        assert cursor == "fake-cursor"
+        assert calls == [
+            ("connect", "postgresql://unit-test"),
+            ("set_session", "REPEATABLE READ", True, False),
+            ("register_default_json", fake_connection),
+            ("register_default_jsonb", fake_connection),
+            ("cursor", FakeRealDictCursor),
+        ]
+
+    assert calls[-2:] == [("commit",), ("close",)]
 
 
 @pytest.fixture

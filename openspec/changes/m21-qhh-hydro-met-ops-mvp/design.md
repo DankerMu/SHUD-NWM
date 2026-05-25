@@ -127,7 +127,7 @@ Required evidence:
 
 Invariant Matrix
 
-Governing invariant: one selected forcing version identity must bind every returned station-series sample, metadata field, truncation decision, and readiness count without mixing samples from another model, source, cycle, station, variable, or time window.
+Governing invariant: one selected finalized forcing version identity must bind every returned station-series sample, metadata field, truncation decision, and readiness count from one stable database snapshot without mixing samples from another model, source, cycle, station, variable, time window, or concurrent same-ID producer rewrite/pending state.
 Source-of-truth identity/contract: `met.forcing_version.forcing_version_id` plus `met.forcing_station_timeseries(forcing_version_id, station_id, variable, valid_time)`.
 Surfaces:
 - Producers: existing `workers/forcing_producer/store.py` writes `met.forcing_station_timeseries`; unchanged except tests may assert compatibility.
@@ -146,6 +146,7 @@ Regression rows:
 - out-of-window samples for the selected forcing version -> excluded from station-series points, truncation, and readiness counts.
 - over-limit query -> deterministic truncation per variable without unbounded row materialization.
 - QHH-like readiness fixture -> effective expected station count falls back to declared `forcing_version.station_count`, six-variable coverage, missing unit, missing quality flag, missing-data reasons, and query/index outcome are reported without re-running forcing producer.
+- concurrent same-ID forcing producer rewrite around a station-series/readiness read -> `PsycopgForecastStore` opens a read-only `REPEATABLE READ` transaction before selecting `met.forcing_version`, so finalized metadata and dependent `met.forcing_station_timeseries` rows come from one stable snapshot instead of mixing old finalized identity with newly replaced or pending rows.
 - existing `forecast_series` and `list_met_stations` tests -> unchanged behavior.
 
 Boundary-surface checklist:

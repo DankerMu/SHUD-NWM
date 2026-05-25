@@ -1312,7 +1312,7 @@ class _PsycopgTransaction:
 
         self.psycopg2 = psycopg2
         self.connection = psycopg2.connect(self.database_url)
-        self.connection.autocommit = False
+        self.connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
         register_default_json(conn_or_curs=self.connection)
         register_default_jsonb(conn_or_curs=self.connection)
         return self.connection.cursor(cursor_factory=RealDictCursor)
